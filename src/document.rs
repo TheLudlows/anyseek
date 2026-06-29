@@ -16,19 +16,6 @@ use crate::schema::{Compression, FieldType, IndexConfig, SchemaField, SchemaMap}
 use crate::tokenizer::tokenize_index;
 
 // ---------------------------------------------------------------------------
-// Pending document storage
-// ---------------------------------------------------------------------------
-
-/// Buffer for documents indexed but not yet committed.
-#[derive(Default)]
-pub struct PendingDocuments {
-    /// (doc_id, compressed document bytes)
-    pub docs: Vec<(u64, Vec<u8>)>,
-    /// (doc_id, facet row bytes)
-    pub facets: Vec<(u64, Vec<u8>)>,
-}
-
-// ---------------------------------------------------------------------------
 // Document compression helpers
 // ---------------------------------------------------------------------------
 
@@ -357,17 +344,22 @@ mod tests {
             db,
             schema,
             config,
+            stats: RwLock::new(crate::index::IndexStats::default()),
+            segments_index: RwLock::new(Vec::new()),
             segments_level0: RwLock::new(SegmentLevel0 {
                 segment: AHashMap::new(),
             }),
+            vector_levels: RwLock::new(Vec::new()),
             vector_buffer: RwLock::new(Vec::new()),
             delete_set: RwLock::new(AHashSet::new()),
             indexed_doc_count: RwLock::new(0),
+            indexed_vector_count: RwLock::new(0),
             facet_row_size: 1, // U8 facet field = 1 byte
             facet_dict: RwLock::new(IndexMap::new()),
             embedding_model: EmbeddingModel::None,
             level_doc_counts: RwLock::new(Vec::new()),
             pending_docs: RwLock::new(PendingDocuments::default()),
+            next_doc_id: RwLock::new(0),
         }
     }
 

@@ -286,16 +286,6 @@ pub async fn get_document(
 /// Commit pending writes to the index.
 ///
 /// POST /commit
-#[utoipa::path(
-    post,
-    path = "/commit",
-    tag = "Index",
-    responses(
-        (status = 200, description = "Committed successfully"),
-        (status = 400, description = "Bad request"),
-        (status = 500, description = "Internal server error"),
-    )
-)]
 pub async fn commit(
     State(state): State<SharedIndex>,
 ) -> Result<(StatusCode, &'static str), (StatusCode, String)> {

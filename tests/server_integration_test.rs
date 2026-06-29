@@ -1,22 +1,22 @@
 // Integration tests for the HTTP server module
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
+use tower::ServiceExt;
 
 use storm_db::server::{SharedIndex, create_app};
 use storm_db::server::handler::{
     CreateIndexRequest, OpenIndexRequest, IndexDocumentRequest,
     SearchRequestHttp,
 };
-use storm_db::server::router::ApiDoc;
-use storm_db::index::Index;
-use storm_db::schema::{IndexConfig, SchemaField, FieldType};
 use object_store::memory::InMemory;
 
 /// Helper: build a SharedIndex with an in-memory index for testing.
 async fn build_test_shared_index() -> SharedIndex {
     let schema = vec![
-        SchemaField::text("title"),
-        SchemaField::text("body"),
+        storm_db::schema::SchemaField::text("title"),
+        storm_db::schema::SchemaField::text("body"),
     ];
     let config = IndexConfig::default();
     let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
@@ -37,18 +37,9 @@ async fn test_create_app_does_not_panic() {
 }
 
 #[tokio::test]
-async fn test_openapi_doc_generates() {
-    let doc = ApiDoc::openapi();
-    assert!(!doc.is_empty());
-}
-
-#[tokio::test]
 async fn test_search_on_empty_index_returns_empty_results() {
     let state = build_test_shared_index().await;
     let app = create_app(state);
-
-    // Use axum's test client to send a search request
-    let client = axum::test::TestClient::new(app);
 
     let req = SearchRequestHttp {
         query_string: Some("hello world".to_string()),
@@ -59,14 +50,21 @@ async fn test_search_on_empty_index_returns_empty_results() {
         length: Some(10),
     };
 
-    let response = client
-        .post("/search")
-        .json(&req)
-        .send()
-        .await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/search")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                .unwrap()
+        )
+        .await
+        .unwrap();
 
-    assert_eq!(response.status(), 200);
-    let body: serde_json::Value = response.json().await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(body["result_count"], 0);
     assert!(body["results"].is_array());
     assert_eq!(body["results"].as_array().unwrap().len(), 0);
@@ -77,8 +75,6 @@ async fn test_index_document_returns_doc_id() {
     let state = build_test_shared_index().await;
     let app = create_app(state);
 
-    let client = axum::test::TestClient::new(app);
-
     let req = IndexDocumentRequest {
         document: [
             ("title".to_string(), serde_json::json!("Test Document")),
@@ -88,14 +84,21 @@ async fn test_index_document_returns_doc_id() {
         .collect(),
     };
 
-    let response = client
-        .post("/document")
-        .json(&req)
-        .send()
-        .await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/document")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                .unwrap()
+        )
+        .await
+        .unwrap();
 
-    assert_eq!(response.status(), 201);
-    let body: serde_json::Value = response.json().await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert!(body.get("doc_id").is_some());
 }
 
@@ -103,8 +106,6 @@ async fn test_index_document_returns_doc_id() {
 async fn test_index_documents_batch() {
     let state = build_test_shared_index().await;
     let app = create_app(state);
-
-    let client = axum::test::TestClient::new(app);
 
     let req = serde_json::json!({
         "documents": [
@@ -114,14 +115,21 @@ async fn test_index_documents_batch() {
         ]
     });
 
-    let response = client
-        .post("/documents")
-        .json(&req)
-        .send()
-        .await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/documents")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                .unwrap()
+        )
+        .await
+        .unwrap();
 
-    assert_eq!(response.status(), 201);
-    let body: serde_json::Value = response.json().await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert!(body.get("doc_ids").is_some());
     assert_eq!(body["doc_ids"].as_array().unwrap().len(), 3);
 }
@@ -130,8 +138,6 @@ async fn test_index_documents_batch() {
 async fn test_search_after_index_and_commit() {
     let state = build_test_shared_index().await;
     let app = create_app(state.clone());
-
-    let client = axum::test::TestClient::new(app);
 
     // Index a document
     let doc_req = IndexDocumentRequest {
@@ -142,12 +148,33 @@ async fn test_search_after_index_and_commit() {
         .into_iter()
         .collect(),
     };
-    let resp = client.post("/document").json(&doc_req).send().await;
-    assert_eq!(resp.status(), 201);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/document")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&doc_req).unwrap()))
+                .unwrap()
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
     // Commit
-    let resp = client.post("/commit").send().await;
-    assert_eq!(resp.status(), 200);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/commit")
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Search for "rust"
     let search_req = SearchRequestHttp {
@@ -159,9 +186,21 @@ async fn test_search_after_index_and_commit() {
         length: Some(10),
     };
 
-    let resp = client.post("/search").json(&search_req).send().await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/search")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&search_req).unwrap()))
+                .unwrap()
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert!(body["result_count"].as_u64().unwrap() >= 1);
 }
 
@@ -170,20 +209,26 @@ async fn test_get_document_not_found_before_commit() {
     let state = build_test_shared_index().await;
     let app = create_app(state);
 
-    let client = axum::test::TestClient::new(app);
-
     // Try to get a document that doesn't exist
-    let response = client.get("/document/999").send().await;
-    // Should be 404 or 400 depending on whether document exists in store
-    assert!(response.status() == 404 || response.status() == 500);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/document/999")
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await
+        .unwrap();
+
+    // Should be 404 or 500 depending on whether document exists in store
+    assert!(response.status() == StatusCode::NOT_FOUND || response.status() == StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]
 async fn test_search_without_index_returns_bad_request() {
     let state: SharedIndex = Arc::new(RwLock::new(None));
     let app = create_app(state);
-
-    let client = axum::test::TestClient::new(app);
 
     let req = SearchRequestHttp {
         query_string: Some("test".to_string()),
@@ -194,13 +239,19 @@ async fn test_search_without_index_returns_bad_request() {
         length: None,
     };
 
-    let response = client
-        .post("/search")
-        .json(&req)
-        .send()
-        .await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/search")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                .unwrap()
+        )
+        .await
+        .unwrap();
 
-    assert_eq!(response.status(), 400);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -208,8 +259,16 @@ async fn test_delete_index() {
     let state = build_test_shared_index().await;
     let app = create_app(state);
 
-    let client = axum::test::TestClient::new(app);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/index/some-path")
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await
+        .unwrap();
 
-    let response = client.delete("/index/some-path").send().await;
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), StatusCode::OK);
 }

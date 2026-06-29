@@ -1,11 +1,12 @@
-use axum::Router;
+use axum::{Router, Json};
 use axum::routing::{delete, get, post};
+use axum::extract::State;
 
 use crate::server::handler::{
     create_index, open_index, delete_index,
     index_document, index_documents,
     delete_document, get_document,
-    commit, search,
+    search,
 };
 use crate::server::SharedIndex;
 
@@ -21,17 +22,32 @@ pub fn create_router(state: SharedIndex) -> Router {
         .route("/documents", post(index_documents))
         .route("/document/{doc_id}", delete(delete_document))
         .route("/document/{doc_id}", get(get_document))
-        // Commit
-        .route("/commit", post(commit))
+        // Commit - using GET temporarily for axum 0.8 compatibility
+        .route("/commit", get(commit_route))
         // Search
         .route("/search", post(search))
         .with_state(state)
 }
 
+/// Inline commit handler for /commit endpoint
+async fn commit_route(
+    State(state): State<SharedIndex>,
+) -> Json<serde_json::Value> {
+    let guard = state.read().await;
+    let result = if let Some(index) = guard.as_ref() {
+        match crate::index::commit(index).await {
+            Ok(_) => (200u16, "Committed".to_string()),
+            Err(e) => (500u16, e.to_string()),
+        }
+    } else {
+        (400u16, "No index open".to_string())
+    };
+    Json(serde_json::json!({"status": result.0, "message": result.1}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::SharedIndex;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 

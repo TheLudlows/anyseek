@@ -61,7 +61,7 @@ pub struct Index {
     /// Pending documents buffer (indexed but not yet committed).
     pub pending_docs: RwLock<crate::facet::PendingDocuments>,
     /// Next available local doc_id in the current level-0 segment.
-    next_doc_id: RwLock<u16>,
+    pub(crate) next_doc_id: RwLock<u16>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

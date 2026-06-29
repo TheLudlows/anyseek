@@ -14,7 +14,7 @@ pub mod facet;
 pub mod hybrid;
 pub mod index;
 pub mod document;
-// pub mod server;
+pub mod server;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ROARING_BLOCK_SIZE: usize = 65_536;
