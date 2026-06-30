@@ -47,25 +47,72 @@ pub fn make_key(parts: &[&[u8]]) -> Vec<u8> {
     key
 }
 
-/// KV store wrapper around SlateDB
+/// KV store wrapper around SlateDB.
+///
+/// A `KvStore` is either a "raw" view over a freshly opened `slatedb::Db`, or
+/// a derived view with a path prefix. Derived views share the underlying
+/// `slatedb::Db` via `Arc` — cloning a derived view is cheap.
 pub struct KvStore {
+    inner: Arc<KvStoreInner>,
+}
+
+struct KvStoreInner {
     db: slatedb::Db,
+    prefix: Vec<u8>,
+}
+
+impl Clone for KvStore {
+    fn clone(&self) -> Self {
+        Self { inner: self.inner.clone() }
+    }
+}
+
+fn join_prefix(prefix: &[u8], key: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prefix.len() + key.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(key);
+    out
 }
 
 impl KvStore {
-    /// Open or create a SlateDB database at the given path
+    /// Open or create a SlateDB database at the given path. The returned
+    /// `KvStore` is the "raw" view with no prefix.
     pub async fn open(path: &str, object_store: Arc<dyn ObjectStore>) -> Result<Self> {
         let db = slatedb::Db::open(path, object_store)
             .await
             .map_err(|e| SeekPowerError::StorageError(format!("Failed to open database: {}", e)))?;
+        Ok(Self {
+            inner: Arc::new(KvStoreInner { db, prefix: Vec::new() }),
+        })
+    }
 
-        Ok(Self { db })
+    /// Derive a new view that auto-prepends `path:` to every key, sharing
+    /// the same underlying `slatedb::Db` as `self`. Panics if `path` is not
+    /// a valid index name (see `validate_path`).
+    pub fn for_index(&self, path: &str) -> Self {
+        validate_path(path).expect("invalid index name");
+        let mut prefix = Vec::with_capacity(path.len() + 1);
+        prefix.extend_from_slice(path.as_bytes());
+        prefix.push(b':');
+        Self {
+            inner: Arc::new(KvStoreInner {
+                db: self.inner.db.clone(),
+                prefix,
+            }),
+        }
+    }
+
+    /// Returns true if this view has no prefix (the original opened view).
+    pub fn is_raw(&self) -> bool {
+        self.inner.prefix.is_empty()
     }
 
     /// Put a key-value pair
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.db
-            .put(key, value)
+        let full = join_prefix(&self.inner.prefix, key);
+        self.inner
+            .db
+            .put(&full, value)
             .await
             .map_err(|e| SeekPowerError::StorageError(format!("Put failed: {}", e)))?;
         Ok(())
@@ -73,9 +120,11 @@ impl KvStore {
 
     /// Get a value by key
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let full = join_prefix(&self.inner.prefix, key);
         let result = self
+            .inner
             .db
-            .get(key)
+            .get(&full)
             .await
             .map_err(|e| SeekPowerError::StorageError(format!("Get failed: {}", e)))?;
         Ok(result.map(|b| b.to_vec()))
@@ -83,31 +132,48 @@ impl KvStore {
 
     /// Delete a key
     pub async fn delete(&self, key: &[u8]) -> Result<()> {
-        self.db
-            .delete(key)
+        let full = join_prefix(&self.inner.prefix, key);
+        self.inner
+            .db
+            .delete(&full)
             .await
             .map_err(|e| SeekPowerError::StorageError(format!("Delete failed: {}", e)))?;
         Ok(())
     }
 
-    /// Scan all entries with the given prefix
+    /// Scan all entries with the given prefix. The returned keys have the
+    /// view's own prefix stripped, so callers see the same logical keys
+    /// regardless of which view they used.
     pub async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let mut results = Vec::new();
+        let full_prefix = join_prefix(&self.inner.prefix, prefix);
         let mut iter = self
+            .inner
             .db
-            .scan_prefix(prefix)
+            .scan_prefix(&full_prefix)
             .await
             .map_err(|e| SeekPowerError::StorageError(format!("Scan failed: {}", e)))?;
 
+        let strip_len = self.inner.prefix.len();
+        let mut results = Vec::new();
         while let Some(entry) = iter
             .next()
             .await
             .map_err(|e| SeekPowerError::StorageError(format!("Iterator failed: {}", e)))?
         {
-            results.push((entry.key.to_vec(), entry.value.to_vec()));
+            let raw_key = entry.key.to_vec();
+            let stripped = if strip_len <= raw_key.len() {
+                raw_key[strip_len..].to_vec()
+            } else {
+                raw_key
+            };
+            results.push((stripped, entry.value.to_vec()));
         }
-
         Ok(results)
+    }
+
+    /// List all entries under this view (equivalent to `scan_prefix(b"")`).
+    pub async fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.scan_prefix(b"").await
     }
 
     /// Put a serialized value
@@ -130,9 +196,16 @@ impl KvStore {
         }
     }
 
-    /// Close the database
+    /// Close the database. Only the raw (un-prefixed) view may close the
+    /// underlying SlateDB instance.
     pub async fn close(&self) -> Result<()> {
-        self.db
+        if !self.inner.prefix.is_empty() {
+            return Err(SeekPowerError::StorageError(
+                "close() must be called on the raw KvStore".into(),
+            ));
+        }
+        self.inner
+            .db
             .close()
             .await
             .map_err(|e| SeekPowerError::StorageError(format!("Close failed: {}", e)))
