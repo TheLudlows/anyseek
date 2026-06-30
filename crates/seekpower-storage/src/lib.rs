@@ -533,4 +533,75 @@ mod tests {
         assert!(validate_path("foo@bar").is_err());
         assert!(validate_path("föo").is_err());
     }
+
+    #[tokio::test]
+    async fn test_kvstore_for_index_isolates_keys() {
+        let object_store = Arc::new(InMemory::new());
+        let db = KvStore::open("test_db", object_store).await.unwrap();
+        let a = db.for_index("a");
+        let b = db.for_index("b");
+
+        a.put(b"m:schema", b"schema-a").await.unwrap();
+        b.put(b"m:schema", b"schema-b").await.unwrap();
+
+        assert_eq!(a.get(b"m:schema").await.unwrap(), Some(b"schema-a".to_vec()));
+        assert_eq!(b.get(b"m:schema").await.unwrap(), Some(b"schema-b".to_vec()));
+        // raw view sees neither
+        assert!(db.get(b"m:schema").await.unwrap().is_none());
+
+        a.close().await.unwrap_err(); // derived view cannot close
+    }
+
+    #[tokio::test]
+    async fn test_kvstore_scan_prefix_strips_view_prefix() {
+        let object_store = Arc::new(InMemory::new());
+        let db = KvStore::open("test_db", object_store).await.unwrap();
+        let view = db.for_index("blog");
+        view.put(b"m:schema", b"s").await.unwrap();
+        view.put(b"m:config", b"c").await.unwrap();
+        view.put(b"i:1", b"posting").await.unwrap();
+
+        let mut results = view.scan_prefix(b"m:").await.unwrap();
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(results, vec![
+            (b"m:config".to_vec(), b"c".to_vec()),
+            (b"m:schema".to_vec(), b"s".to_vec()),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn test_kvstore_scan_all_lists_index_data() {
+        let object_store = Arc::new(InMemory::new());
+        let db = KvStore::open("test_db", object_store).await.unwrap();
+        let view = db.for_index("blog");
+        view.put(b"m:schema", b"s").await.unwrap();
+        view.put(b"i:1", b"posting").await.unwrap();
+
+        let all = view.scan_all().await.unwrap();
+        assert_eq!(all.len(), 2);
+        let keys: Vec<&Vec<u8>> = all.iter().map(|(k, _)| k).collect();
+        assert!(keys.contains(&&b"m:schema".to_vec()));
+        assert!(keys.contains(&&b"i:1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_kvstore_clone_shares_underlying() {
+        let object_store = Arc::new(InMemory::new());
+        let db = KvStore::open("test_db", object_store).await.unwrap();
+        let a = db.for_index("a");
+        let a_clone = a.clone();
+        a.put(b"x", b"1").await.unwrap();
+        assert_eq!(a_clone.get(b"x").await.unwrap(), Some(b"1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_kvstore_close_only_on_raw() {
+        let object_store = Arc::new(InMemory::new());
+        let db = KvStore::open("test_db", object_store).await.unwrap();
+        let view = db.for_index("a");
+        assert!(!view.is_raw());
+        assert!(db.is_raw());
+        assert!(view.close().await.is_err());
+        db.close().await.unwrap();
+    }
 }
