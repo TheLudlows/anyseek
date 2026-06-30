@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use seekpower_error::{Result, SeekPowerError};
-use seekpower_schema::FieldType;
-use seekpower_storage::{make_key, PREFIX_DOC};
+use seekpower_schema::{make_key, PREFIX_DOC, FieldType};
 use seekpower_vector::VectorIndex;
 
 use crate::index::Index;
@@ -86,7 +85,8 @@ pub async fn get_document(index: &Index, doc_id: u64) -> Result<Option<HashMap<S
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::create_index;
+use super::*;
     use object_store::memory::InMemory;
     use seekpower_schema::{IndexConfig, SchemaField};
     use seekpower_storage::KvStore;
@@ -108,7 +108,7 @@ mod tests {
     async fn test_index_document_returns_doc_id() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-index-doc", store).await.unwrap();
-        let idx = crate::lifecycle::create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("hello world"));
@@ -122,7 +122,7 @@ mod tests {
     async fn test_get_document_after_commit() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-get-doc", store).await.unwrap();
-        let idx = crate::lifecycle::create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("test title"));
@@ -144,7 +144,7 @@ mod tests {
     async fn test_delete_document() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-delete", store).await.unwrap();
-        let idx = crate::lifecycle::create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
 
         delete_document(&idx, 42).await.unwrap();
         let delete_set = idx.lexical_index.delete_set().await;

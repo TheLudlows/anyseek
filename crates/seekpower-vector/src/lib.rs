@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::sync::RwLock;
 
-pub use seekpower_schema::{QuantType, Similarity};
+pub use seekpower_schema::{make_key, PREFIX_VEC, QuantType, Similarity};
 use seekpower_clustering::Clusterer;
 use seekpower_quantize::Quantizer;
 
@@ -80,7 +80,7 @@ pub struct IvfIndex {
     meta: RwLock<Option<IvfMeta>>,
     medoids: RwLock<Vec<MedoidData>>,
     buffer: tokio::sync::RwLock<Vec<seekpower_clustering::ClusterVector>>,
-    cache: seekpower_storage::ReadCache,
+    cache: seekpower_storage::Cache,
 }
 
 // Key helpers ---------------------------------------------------------------
@@ -90,23 +90,23 @@ fn meta_key() -> Vec<u8> {
 }
 
 fn medoid_key(id: u32) -> Vec<u8> {
-    seekpower_storage::make_key(&[
-        seekpower_storage::PREFIX_VEC,
+    make_key(&[
+        PREFIX_VEC,
         b":medoid:",
         &id.to_le_bytes(),
     ])
 }
 
 fn medoid_prefix() -> Vec<u8> {
-    seekpower_storage::make_key(&[
-        seekpower_storage::PREFIX_VEC,
+    make_key(&[
+        PREFIX_VEC,
         b":medoid:",
     ])
 }
 
 fn cluster_key(id: u32) -> Vec<u8> {
-    seekpower_storage::make_key(&[
-        seekpower_storage::PREFIX_VEC,
+    make_key(&[
+        PREFIX_VEC,
         b":cluster:",
         &id.to_le_bytes(),
     ])
@@ -326,7 +326,7 @@ impl VectorIndex for IvfIndex {
         if is_flat {
             // Also search cluster 0 (where flat data is stored after flush).
             let key = cluster_key(0u32);
-            if let Some(data) = self.cache.get_cluster(&key) {
+            if let Some(data) = self.cache.get(&key) {
                 if let Some((_hdr, vecs)) = deserialize_cluster(&data) {
                     for (qvh, qdata) in vecs {
                         if delete_set.contains(&qvh.doc_id) {
@@ -364,7 +364,7 @@ impl VectorIndex for IvfIndex {
             let key = cluster_key(cid as u32);
             let cluster_data = self
                 .cache
-                .get_cluster(&key)
+                .get(&key)
                 .or_else(|| {
                     // Synchronous cache-miss path: we cannot `.await` inside a
                     // sync trait method, so we only use what the cache already
@@ -487,7 +487,7 @@ impl IvfIndex {
         config: seekpower_schema::IndexConfig,
     ) -> Self {
         let cache =
-            seekpower_storage::ReadCache::new(config.posting_cache_size_mb, config.cluster_cache_size_mb);
+            seekpower_storage::Cache::new(config.posting_cache_size_mb * 1024 * 1024);
         Self {
             kv,
             config,
@@ -533,7 +533,7 @@ impl IvfIndex {
     pub async fn load_cluster(&self, cluster_id: u32) -> seekpower_error::Result<Vec<u8>> {
         let key = cluster_key(cluster_id);
 
-        if let Some(data) = self.cache.get_cluster(&key) {
+        if let Some(data) = self.cache.get(&key) {
             return Ok(data);
         }
 
@@ -548,7 +548,7 @@ impl IvfIndex {
                 ))
             })?;
 
-        self.cache.insert_cluster(&key, data.clone());
+        self.cache.insert(&key, data.clone());
         Ok(data)
     }
 
@@ -572,7 +572,7 @@ impl IvfIndex {
     pub async fn store_cluster(&self, id: u32, data: &[u8]) -> seekpower_error::Result<()> {
         let key = cluster_key(id);
         self.kv.put(&key, data).await?;
-        self.cache.insert_cluster(&key, data.to_vec());
+        self.cache.insert(&key, data.to_vec());
         Ok(())
     }
 
@@ -1190,7 +1190,7 @@ mod tests {
         for cid in 0..index.n_clusters() as u32 {
             let data = index.load_cluster(cid).await.unwrap();
             let key = cluster_key(cid);
-            index.cache.insert_cluster(&key, data);
+            index.cache.insert(&key, data);
         }
 
         let results = index.search(

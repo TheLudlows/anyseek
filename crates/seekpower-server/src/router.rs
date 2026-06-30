@@ -33,7 +33,12 @@ mod tests {
     use tower::ServiceExt;
 
     fn empty_shared_index() -> SharedState {
-        Arc::new(Mutex::new(HashMap::new()))
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let db = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(seekpower_storage::KvStore::open("test", store))
+            .unwrap();
+        Arc::new(crate::state::State::new(db))
     }
 
     #[tokio::test]

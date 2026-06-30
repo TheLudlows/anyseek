@@ -1,8 +1,10 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use object_store::memory::InMemory;
 use seekpower_server::create_app;
+use seekpower_storage::KvStore;
 
 #[derive(Debug, serde::Deserialize)]
 struct Config {
@@ -105,7 +107,9 @@ async fn main() {
         .parse()
         .unwrap_or_else(|e| panic!("invalid listen address '{}': {}", config.server.addr, e));
 
-    let state = Arc::new(Mutex::new(None));
+    let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+    let db = KvStore::open(&config.storage.path, store).await.unwrap();
+    let state = Arc::new(seekpower_server::state::State::new(db));
     let app = create_app(state);
 
     tracing::info!("SeekPower server listening on {}", addr);

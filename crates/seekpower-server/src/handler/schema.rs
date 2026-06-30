@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use seekpower_core::{create_index, create_index_with_db, open_index, open_index_with_db};
+use seekpower_core::{create_index, open_index};
 use seekpower_error::SeekPowerError;
 use seekpower_schema::SchemaField;
 
@@ -15,8 +15,8 @@ pub async fn handle_create_index(
     State(state): State<SharedState>,
     Json(req): Json<CreateIndexRequest>,
 ) -> impl IntoResponse {
-    let store = match build_object_store(&req.object_store_kind, &req.name) {
-        Ok(s) => s,
+    match build_object_store(&req.object_store_kind, &req.name) {
+        Ok(_) => {}
         Err(e) => return map_error(e).into_response(),
     };
     let schema: Vec<SchemaField> = req.schema.into_iter().map(|s| s.into_schema_field()).collect();
@@ -24,10 +24,7 @@ pub async fn handle_create_index(
     let field_count = schema.len();
     let name = req.name.clone();
 
-    // Create a KvStore view for this index
-    let db = state.db.for_index(&name);
-
-    let res = create_index_with_db(db, &name, config, schema).await;
+    let res = create_index(&state.db, &name, config, schema).await;
 
     match res {
         Ok(idx) => {
@@ -56,9 +53,7 @@ pub async fn handle_open_index(
     Json(req): Json<OpenIndexRequest>,
 ) -> impl IntoResponse {
     let name = req.name.clone();
-    let db = state.db.for_index(&name);
-
-    let res = open_index_with_db(db, &name).await;
+    let res = open_index(&state.db, &name).await;
 
     match res {
         Ok(idx) => {

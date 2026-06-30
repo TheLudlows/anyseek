@@ -2,16 +2,14 @@ pub mod commit;
 pub mod document;
 pub mod index;
 pub mod lexical_index;
-pub mod lifecycle;
 pub mod search;
 pub mod write_buffer;
 
 // Re-exports for backward compatibility
 pub use commit::commit;
 pub use document::{delete_document, get_document, index_document};
-pub use index::Index;
+pub use index::{Index, close_index, create_index, create_index_with_db, delete_index, open_index, open_index_with_db};
 pub use lexical_index::LexicalIndex;
-pub use lifecycle::{close_index, create_index, create_index_with_db, delete_index, open_index, open_index_with_db};
 pub use search::search;
 pub use write_buffer::WriteBuffer;
 

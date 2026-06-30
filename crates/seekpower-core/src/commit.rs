@@ -1,5 +1,5 @@
 use seekpower_error::Result;
-use seekpower_storage::{make_key, PREFIX_DOC};
+use seekpower_schema::{make_key, PREFIX_DOC};
 use seekpower_vector::VectorIndex;
 
 use crate::index::Index;
@@ -31,7 +31,8 @@ pub async fn commit(index: &Index) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::create_index;
+use super::*;
     use object_store::memory::InMemory;
     use seekpower_schema::{IndexConfig, SchemaField};
     use seekpower_storage::KvStore;
@@ -54,7 +55,7 @@ mod tests {
     async fn test_commit_persists_data() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-commit", store).await.unwrap();
-        let idx = crate::lifecycle::create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("rust programming"));

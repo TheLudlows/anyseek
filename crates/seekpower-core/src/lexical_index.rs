@@ -2,14 +2,16 @@ use ahash::{AHashMap, AHashSet};
 use seekpower_error::Result;
 use seekpower_posting::{PostingCodec, PostingEntry, PostingListBlock};
 use seekpower_ranking::{compute_idf, Bm25fScorer, ResultType, SearchResult};
-use seekpower_schema::{FieldType, IndexConfig, IndexStats, SchemaMap};
-use seekpower_storage::{make_key, KvStore, ReadCache, PREFIX_DELL, PREFIX_IDX, PREFIX_LEN};
+use seekpower_schema::{make_key, PREFIX_DELL, PREFIX_IDX, PREFIX_LEN, FieldType, IndexConfig, IndexStats, SchemaMap};
+use seekpower_storage::Cache;
 use seekpower_tokenizer::{TermObject, TokenizerRegistry};
 
 use crate::write_buffer::WriteBuffer;
 
+type ReadCache = Cache;
+
 pub struct LexicalIndex {
-    db: KvStore,
+    db: crate::index::PrefixedKvStore,
     config: IndexConfig,
     schema: SchemaMap,
     field_names: Vec<String>,
@@ -20,7 +22,7 @@ pub struct LexicalIndex {
 
 impl LexicalIndex {
     pub fn new(
-        db: KvStore,
+        db: crate::index::PrefixedKvStore,
         config: IndexConfig,
         schema: SchemaMap,
         field_names: Vec<String>,
@@ -126,12 +128,12 @@ impl LexicalIndex {
         for (&term_hash, new_entries) in &old_buffer.postings {
             let key = make_key(&[PREFIX_IDX, b":", &term_hash.to_le_bytes()]);
 
-            let existing_block = match self.cache.get_posting(&key) {
+            let existing_block = match self.cache.get(&key) {
                 Some(data) => Some(PostingCodec::deserialize(&data)?),
                 None => match self.db.get(&key).await? {
                     Some(data) => {
                         let block = PostingCodec::deserialize(&data)?;
-                        self.cache.insert_posting(&key, data);
+                        self.cache.insert(&key, data);
                         Some(block)
                     }
                     None => None,
@@ -144,7 +146,7 @@ impl LexicalIndex {
             };
 
             let serialized = PostingCodec::serialize(&block);
-            self.cache.insert_posting(&key, serialized.clone());
+            self.cache.insert(&key, serialized.clone());
             self.db.put(&key, &serialized).await?;
         }
 
@@ -173,12 +175,12 @@ impl LexicalIndex {
 
     /// Load a posting list from cache or KV store.
     pub async fn load_posting(&self, key: &[u8]) -> Result<Option<PostingListBlock>> {
-        if let Some(data) = self.cache.get_posting(key) {
+        if let Some(data) = self.cache.get(key) {
             return Ok(Some(PostingCodec::deserialize(&data)?));
         }
         if let Some(data) = self.db.get(key).await? {
             let block = PostingCodec::deserialize(&data)?;
-            self.cache.insert_posting(key, data);
+            self.cache.insert(key, data);
             return Ok(Some(block));
         }
         Ok(None)
