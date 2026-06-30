@@ -44,7 +44,7 @@ impl SchemaField {
 }
 
 /// Field type enumeration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FieldType {
     U8,
     U16,
