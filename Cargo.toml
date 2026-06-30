@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/seekpower-error",
+    "crates/seekpower-schema",
+    "crates/seekpower-storage",
+    "crates/seekpower-tokenizer",
+    "crates/seekpower-posting",
+    "crates/seekpower-ranking",
+    "crates/seekpower-quantize",
+    "crates/seekpower-clustering",
+    "crates/seekpower-vector",
+    "crates/seekpower-search",
+    "crates/seekpower-core",
+    "crates/seekpower-server",
+]
+
+[workspace.dependencies]
+seekpower-error  = { path = "crates/seekpower-error" }
+seekpower-schema = { path = "crates/seekpower-schema" }
+seekpower-storage = { path = "crates/seekpower-storage" }
+seekpower-tokenizer = { path = "crates/seekpower-tokenizer" }
+seekpower-posting = { path = "crates/seekpower-posting" }
+seekpower-ranking = { path = "crates/seekpower-ranking" }
+seekpower-quantize = { path = "crates/seekpower-quantize" }
+seekpower-clustering = { path = "crates/seekpower-clustering" }
+seekpower-vector = { path = "crates/seekpower-vector" }
+seekpower-search = { path = "crates/seekpower-search" }
+seekpower-core   = { path = "crates/seekpower-core" }
+
+# External dependencies (shared versions)
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+slatedb = "0.13"
+object_store = "0.12"
+ahash = { version = "0.8", features = ["serde"] }
+indexmap = { version = "2", features = ["serde"] }
+smallvec = "1"
+rayon = "1"
+itertools = "0.14"
+snap = "1"
+lz4_flex = "0.13"
+zstd = "0.13"
+bytemuck = "1"
