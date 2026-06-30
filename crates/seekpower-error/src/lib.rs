@@ -20,6 +20,15 @@ pub enum SeekPowerError {
 
     #[error("index corrupted: {0}")]
     Corrupted(String),
+
+    #[error("invalid index name: {0}")]
+    InvalidIndexName(String),
+
+    #[error("index already exists: {0}")]
+    IndexAlreadyExists(String),
+
+    #[error("index not loaded: {0}")]
+    IndexNotLoaded(String),
 }
 
 pub type Result<T> = std::result::Result<T, SeekPowerError>;
