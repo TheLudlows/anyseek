@@ -882,7 +882,7 @@ mod tests {
     async fn make_test_index() -> IvfIndex {
         let os = Arc::new(InMemory::new());
         let kv = seekpower_storage::KvStore::open("test_vec", os).await.unwrap();
-        IvfIndex::new(kv, "test_idx", default_config())
+        IvfIndex::new(kv, default_config())
     }
 
     // -- serialization round-trips -----------------------------------------

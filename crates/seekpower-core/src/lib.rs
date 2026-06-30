@@ -537,28 +537,31 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_close_index() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let idx = create_index("/test", store, test_config(), test_schema()).await.unwrap();
+        let shared_db = KvStore::open("test-create-close", store).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
         assert_eq!(idx.schema.len(), 3);
-        close_index(&idx).await.unwrap();
+        shared_db.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_index_document_returns_doc_id() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let idx = create_index("/test", store, test_config(), test_schema()).await.unwrap();
+        let shared_db = KvStore::open("test-index-doc", store).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("hello world"));
         let doc_id = index_document(&idx, doc).await.unwrap();
         assert_eq!(doc_id, 0);
 
-        close_index(&idx).await.unwrap();
+        shared_db.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_commit_persists_data() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let idx = create_index("/test", store, test_config(), test_schema()).await.unwrap();
+        let shared_db = KvStore::open("test-commit", store).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("rust programming"));
@@ -570,13 +573,14 @@ mod tests {
         let stats = idx.stats.read().await;
         assert!(stats.doc_count >= 1);
 
-        close_index(&idx).await.unwrap();
+        shared_db.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_get_document_after_commit() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let idx = create_index("/test", store, test_config(), test_schema()).await.unwrap();
+        let shared_db = KvStore::open("test-get-doc", store).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("test title"));
@@ -591,24 +595,26 @@ mod tests {
         let retrieved = get_document(&idx, doc_id).await.unwrap();
         assert!(retrieved.is_some());
 
-        close_index(&idx).await.unwrap();
+        shared_db.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_delete_document() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let idx = create_index("/test", store, test_config(), test_schema()).await.unwrap();
+        let shared_db = KvStore::open("test-delete", store).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
 
         delete_document(&idx, 42).await.unwrap();
         assert!(idx.delete_set.read().await.contains(&42));
 
-        close_index(&idx).await.unwrap();
+        shared_db.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_search_empty_index() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let idx = create_index("/test", store, test_config(), test_schema()).await.unwrap();
+        let shared_db = KvStore::open("test-search", store).await.unwrap();
+        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
 
         let request = SearchRequest {
             query_string: Some("hello".to_string()),
@@ -619,16 +625,69 @@ mod tests {
         let response = search(&idx, request).await.unwrap();
         assert_eq!(response.result_count, 0);
 
-        close_index(&idx).await.unwrap();
+        shared_db.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_compress_decompress_roundtrip() {
         let json = br#"{"title":"hello","body":"world"}"#;
         for compression in &[DocCompression::None, DocCompression::Snappy, DocCompression::Lz4, DocCompression::Zstd] {
-            let compressed = compress_document(json, *compression);
-            let decompressed = decompress_document(&compressed, *compression);
+            let compressed = compress_document(json, compression);
+            let decompressed = decompress_document(&compressed, compression);
             assert_eq!(decompressed, json.to_vec(), "roundtrip failed for {:?}", compression);
         }
+    }
+
+    #[tokio::test]
+    async fn test_two_indexes_share_db() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let shared_db = KvStore::open("test-two-idx", store).await.unwrap();
+
+        let a = create_index(&shared_db, "a", test_config(), test_schema()).await.unwrap();
+        let b = create_index(&shared_db, "b", test_config(), test_schema()).await.unwrap();
+
+        let mut doc = HashMap::new();
+        doc.insert("title".to_string(), serde_json::json!("hello"));
+        index_document(&a, doc.clone()).await.unwrap();
+        index_document(&b, doc).await.unwrap();
+        commit(&a).await.unwrap();
+        commit(&b).await.unwrap();
+
+        let raw_a = shared_db.for_index("a").scan_prefix(b"m:").await.unwrap();
+        let raw_b = shared_db.for_index("b").scan_prefix(b"m:").await.unwrap();
+        assert!(!raw_a.is_empty());
+        assert!(!raw_b.is_empty());
+
+        shared_db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_index_removes_all_keys() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let shared_db = KvStore::open("test-delete-idx", store).await.unwrap();
+        let idx = create_index(&shared_db, "doomed", test_config(), test_schema()).await.unwrap();
+        let mut doc = HashMap::new();
+        doc.insert("title".to_string(), serde_json::json!("x"));
+        index_document(&idx, doc).await.unwrap();
+        commit(&idx).await.unwrap();
+
+        assert!(!shared_db.for_index("doomed").scan_all().await.unwrap().is_empty());
+        delete_index(&shared_db, "doomed").await.unwrap();
+        assert!(shared_db.for_index("doomed").scan_all().await.unwrap().is_empty());
+        shared_db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_open_index_fails_for_missing() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let shared_db = KvStore::open("test-missing", store).await.unwrap();
+        let res = open_index(&shared_db, "nope").await;
+        assert!(res.is_err());
+        match res {
+            Err(SeekPowerError::IndexNotFound(_)) => {}
+            Err(_) => panic!("expected IndexNotFound"),
+            Ok(_) => panic!("expected error"),
+        }
+        shared_db.close().await.unwrap();
     }
 }
