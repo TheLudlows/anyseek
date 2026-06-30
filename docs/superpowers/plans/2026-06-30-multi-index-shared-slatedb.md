@@ -575,10 +575,9 @@ pub async fn open_index_with_db(db: KvStore, path: &str) -> Result<Index> {
     for (key_bytes, _) in dell_entries {
         // key format after strip: "l:" + doc_id_le_bytes
         let suffix = &key_bytes[2..];
-        if let Ok(id_str) = std::str::from_utf8(suffix) {
-            if let Ok(id) = id_str.parse::<u64>() {
-                delete_set.insert(id);
-            }
+        if suffix.len() == 8 {
+            let bytes: [u8; 8] = suffix.try_into().unwrap();
+            delete_set.insert(u64::from_le_bytes(bytes));
         }
     }
 
@@ -602,17 +601,7 @@ pub async fn open_index_with_db(db: KvStore, path: &str) -> Result<Index> {
 }
 ```
 
-> **Note on doc_id parsing:** the original code parsed UTF-8 from raw bytes after the delimiter. The new format `b"l:" + doc_id_le_bytes` is the same shape but `doc_id_le_bytes` is **not** valid UTF-8 (it's raw little-endian bytes). The original code already had a latent bug here. Replace with a proper u64 parse. Update the inner loop to:
-
-```rust
-        let suffix = &key_bytes[2..];
-        if suffix.len() == 8 {
-            let bytes: [u8; 8] = suffix.try_into().unwrap();
-            delete_set.insert(u64::from_le_bytes(bytes));
-        }
-```
-
-(Replace just the body of the `for` loop in `open_index_with_db` with this.)
+> **Note on doc_id parsing:** the inner loop in `open_index_with_db` above parses the doc_id as raw little-endian bytes (8 bytes), which is what `commit` actually writes. The original code attempted to parse raw bytes as UTF-8 — that was a latent bug now fixed.
 
 - [ ] **Step 3: Update `IvfIndex::new` call site**
 
@@ -1165,21 +1154,21 @@ pub async fn handle_create_index(
     let schema: Vec<SchemaField> = req.schema.into_iter().map(|s| s.into_schema_field()).collect();
     let config = req.config.unwrap_or_default();
 
-    let res = tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| SeekPowerError::StorageError(e.to_string()))?;
-        rt.block_on(create_index(&state_clone, &name, config, schema))
+    let res = tokio::task::spawn_blocking({
+        let state = state.clone();
+        let name = name.clone();
+        move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| SeekPowerError::StorageError(e.to_string()))?;
+            rt.block_on(create_index(&state.db, &name, config, schema))
+        }
     })
     .await;
 
-    // Re-bind state into spawn_blocking - simpler to just await directly.
-    drop(res);
-    let res2 = create_index(&state.db, &name, config.clone(), schema).await;
-
-    match res2 {
-        Ok(idx) => {
+    match res {
+        Ok(Ok(idx)) => {
             {
                 let mut guard = match state.indexes.lock() {
                     Ok(g) => g,
@@ -1193,11 +1182,11 @@ pub async fn handle_create_index(
             )
                 .into_response()
         }
-        Err(e) => {
-            // Roll back the __indexes__ entry
+        Ok(Err(e)) => {
             let _ = state.db.for_index("__indexes__").delete(name.as_bytes()).await;
             map_error(e).into_response()
         }
+        Err(e) => map_join_err(e).into_response(),
     }
 }
 
@@ -1304,76 +1293,7 @@ pub async fn handle_delete_index(
 }
 ```
 
-> **Note on the awkward spawn_blocking:** the first `spawn_blocking` block at the top of `handle_create_index` is left as a vestige but **immediately dropped** — it's leftover from the original code. Delete that block. The final version should be:
-
-```rust
-pub async fn handle_create_index(
-    State(state): State<SharedState>,
-    Json(req): Json<CreateIndexRequest>,
-) -> impl IntoResponse {
-    let name = req.name.clone();
-    if let Err(e) = validate_path(&name) {
-        return map_error(e).into_response();
-    }
-
-    {
-        let guard = match state.indexes.lock() {
-            Ok(g) => g,
-            Err(e) => return map_io_err(e).into_response(),
-        };
-        if guard.contains_key(&name) {
-            return map_error(SeekPowerError::IndexAlreadyExists(name.clone())).into_response();
-        }
-    }
-
-    if let Err(e) = state
-        .db
-        .for_index("__indexes__")
-        .put(name.as_bytes(), b"1")
-        .await
-    {
-        return map_error(e).into_response();
-    }
-
-    let schema: Vec<SchemaField> = req.schema.into_iter().map(|s| s.into_schema_field()).collect();
-    let config = req.config.unwrap_or_default();
-
-    let res = tokio::task::spawn_blocking({
-        let state = state.clone();
-        let name = name.clone();
-        move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| SeekPowerError::StorageError(e.to_string()))?;
-            rt.block_on(create_index(&state.db, &name, config, schema))
-        }
-    })
-    .await;
-
-    match res {
-        Ok(Ok(idx)) => {
-            {
-                let mut guard = match state.indexes.lock() {
-                    Ok(g) => g,
-                    Err(e) => return map_io_err(e).into_response(),
-                };
-                guard.insert(name.clone(), Arc::new(idx));
-            }
-            (
-                StatusCode::CREATED,
-                Json(CreateIndexResponse { name, field_count: req.schema.len() }),
-            )
-                .into_response()
-        }
-        Ok(Err(e)) => {
-            let _ = state.db.for_index("__indexes__").delete(name.as_bytes()).await;
-            map_error(e).into_response()
-        }
-        Err(e) => map_join_err(e).into_response(),
-    }
-}
-```
+> **Note on doc_id parsing:** the original code parsed UTF-8 from raw bytes after the delimiter. The new format `b"l:" + doc_id_le_bytes` is the same shape but `doc_id_le_bytes` is **not** valid UTF-8 (it's raw little-endian bytes). The original code already had a latent bug here. Replace with a proper u64 parse. Update the inner loop to:
 
 - [ ] **Step 4: Add a `Query` extractor helper for index selection**
 
