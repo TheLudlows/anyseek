@@ -1,5 +1,4 @@
 pub mod commit;
-pub mod compression;
 pub mod document;
 pub mod index;
 pub mod lexical_index;
@@ -9,7 +8,6 @@ pub mod write_buffer;
 
 // Re-exports for backward compatibility
 pub use commit::commit;
-pub use compression::{compress_document, decompress_document};
 pub use document::{delete_document, get_document, index_document};
 pub use index::Index;
 pub use lexical_index::LexicalIndex;
@@ -22,7 +20,7 @@ pub use seekpower_error::Result as SeekResult;
 pub use seekpower_posting::{PostingEntry, PostingListBlock};
 pub use seekpower_ranking::{compress_doc_length, decompress_doc_length};
 pub use seekpower_schema::{
-    ClusteringConfig, DocCompression, FieldType, IndexConfig, IndexStats, QuantType,
+    ClusteringConfig, FieldType, IndexConfig, IndexStats, QuantType,
     SchemaField, SchemaMap, Similarity, TokenizerType,
 };
 pub use seekpower_search::*;

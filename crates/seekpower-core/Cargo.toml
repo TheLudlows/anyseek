@@ -19,6 +19,3 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 object_store = "0.12"
 ahash = { workspace = true }
-snap = { workspace = true }
-lz4_flex = { workspace = true }
-zstd = { workspace = true }

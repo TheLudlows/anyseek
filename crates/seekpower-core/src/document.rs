@@ -5,7 +5,6 @@ use seekpower_schema::FieldType;
 use seekpower_storage::{make_key, PREFIX_DOC};
 use seekpower_vector::VectorIndex;
 
-use crate::compression::{compress_document, decompress_document};
 use crate::index::Index;
 
 pub async fn index_document(
@@ -49,8 +48,7 @@ pub async fn index_document(
     let should_store = index.schema.values().any(|f| f.store);
     if should_store {
         let json = serde_json::to_vec(&document).map_err(|e| SeekPowerError::EncodingError(e.to_string()))?;
-        let compressed = compress_document(&json, &index.config.doc_compression);
-        buffer.documents.insert(doc_id, compressed);
+        buffer.documents.insert(doc_id, json);
     }
 
     if !field_lengths.is_empty() {
@@ -69,9 +67,8 @@ pub async fn get_document(index: &Index, doc_id: u64) -> Result<Option<HashMap<S
     {
         let buffer = index.lexical_index.buffer_postings().await;
         if let Some(data) = buffer.documents.get(&doc_id) {
-            let json = decompress_document(data, &index.config.doc_compression);
             let doc: HashMap<String, serde_json::Value> =
-                serde_json::from_slice(&json).map_err(|e| SeekPowerError::EncodingError(e.to_string()))?;
+                serde_json::from_slice(data).map_err(|e| SeekPowerError::EncodingError(e.to_string()))?;
             return Ok(Some(doc));
         }
     }
@@ -79,9 +76,8 @@ pub async fn get_document(index: &Index, doc_id: u64) -> Result<Option<HashMap<S
     let key = make_key(&[PREFIX_DOC, b":", &doc_id.to_le_bytes()]);
     match index.db.get(&key).await? {
         Some(data) => {
-            let json = decompress_document(&data, &index.config.doc_compression);
             let doc: HashMap<String, serde_json::Value> =
-                serde_json::from_slice(&json).map_err(|e| SeekPowerError::EncodingError(e.to_string()))?;
+                serde_json::from_slice(&data).map_err(|e| SeekPowerError::EncodingError(e.to_string()))?;
             Ok(Some(doc))
         }
         None => Ok(None),

@@ -85,7 +85,7 @@ pub struct IndexConfig {
     pub quantization: QuantType,
 
     // Compression
-    pub doc_compression: DocCompression,
+    // (removed: SlateDB handles compression transparently)
 
     // Cache
     pub posting_cache_size_mb: usize,
@@ -103,7 +103,6 @@ impl Default for IndexConfig {
             vector_similarity: Similarity::Cosine,
             clustering: ClusteringConfig::Auto,
             quantization: QuantType::SqI8,
-            doc_compression: DocCompression::Snappy,
             posting_cache_size_mb: 256,
             cluster_cache_size_mb: 512,
         }
@@ -136,14 +135,6 @@ pub enum ClusteringConfig {
 pub enum QuantType {
     None,
     SqI8,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum DocCompression {
-    None,
-    Snappy,
-    Lz4,
-    Zstd,
 }
 
 /// Index statistics (persisted in m:{path}:stats).
@@ -204,7 +195,6 @@ mod tests {
         assert!(matches!(config.vector_similarity, Similarity::Cosine));
         assert!(matches!(config.clustering, ClusteringConfig::Auto));
         assert!(matches!(config.quantization, QuantType::SqI8));
-        assert!(matches!(config.doc_compression, DocCompression::Snappy));
         assert_eq!(config.posting_cache_size_mb, 256);
         assert_eq!(config.cluster_cache_size_mb, 512);
     }
