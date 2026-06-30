@@ -1,0 +1,24 @@
+[package]
+name = "seekpower-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+seekpower-error = { workspace = true }
+seekpower-schema = { workspace = true }
+seekpower-storage = { workspace = true }
+seekpower-tokenizer = { workspace = true }
+seekpower-posting = { workspace = true }
+seekpower-ranking = { workspace = true }
+seekpower-quantize = { workspace = true }
+seekpower-clustering = { workspace = true }
+seekpower-vector = { workspace = true }
+seekpower-search = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+object_store = "0.12"
+ahash = { workspace = true }
+snap = { workspace = true }
+lz4_flex = { workspace = true }
+zstd = { workspace = true }
