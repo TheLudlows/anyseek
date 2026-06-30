@@ -1,0 +1,18 @@
+[package]
+name = "seekpower-tokenizer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+seekpower-error = { workspace = true }
+seekpower-schema = { workspace = true }
+serde = { workspace = true }
+ahash = { workspace = true }
+
+[features]
+default = ["jieba"]
+jieba = ["dep:jieba-rs"]
+
+[dependencies.jieba-rs]
+version = "0.7"
+optional = true

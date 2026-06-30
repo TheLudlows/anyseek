@@ -1,0 +1,10 @@
+[package]
+name = "seekpower-clustering"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+seekpower-error = { workspace = true }
+seekpower-quantize = { workspace = true }
+seekpower-schema = { workspace = true }
+serde = { workspace = true }

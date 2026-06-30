@@ -118,7 +118,7 @@ pub enum TokenizerType {
     Custom(String),
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Similarity {
     Dot,
     Cosine,

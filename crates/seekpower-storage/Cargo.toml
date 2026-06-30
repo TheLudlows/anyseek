@@ -1,0 +1,12 @@
+[package]
+name = "seekpower-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+seekpower-error = { workspace = true }
+slatedb = { workspace = true }
+object_store = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
