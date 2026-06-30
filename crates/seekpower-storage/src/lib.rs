@@ -14,6 +14,30 @@ pub const PREFIX_DOC: &[u8] = b"d:";
 pub const PREFIX_DELL: &[u8] = b"l:";
 pub const PREFIX_LEN: &[u8] = b"s:";
 
+const PATH_MAX_LEN: usize = 128;
+
+pub fn validate_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        return Err(SeekPowerError::InvalidIndexName(
+            "index name must not be empty".into(),
+        ));
+    }
+    if path.len() > PATH_MAX_LEN {
+        return Err(SeekPowerError::InvalidIndexName(format!(
+            "index name too long: {} > {} chars",
+            path.len(),
+            PATH_MAX_LEN
+        )));
+    }
+    if !path.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err(SeekPowerError::InvalidIndexName(format!(
+            "index name must match [a-zA-Z0-9_-]+: {:?}",
+            path
+        )));
+    }
+    Ok(())
+}
+
 /// Construct a key from multiple parts
 pub fn make_key(parts: &[&[u8]]) -> Vec<u8> {
     let mut key = Vec::new();
@@ -405,5 +429,35 @@ mod tests {
 
         let key = make_key(&[PREFIX_VEC, b"123"]);
         assert_eq!(key, b"v:123");
+    }
+
+    #[test]
+    fn test_validate_path_accepts_valid() {
+        assert!(validate_path("blog").is_ok());
+        assert!(validate_path("shop").is_ok());
+        assert!(validate_path("a").is_ok());
+        assert!(validate_path("foo_bar-baz123").is_ok());
+        assert!(validate_path("__indexes__").is_ok());
+        assert!(validate_path(&"a".repeat(128)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_rejects_empty() {
+        assert!(validate_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_path_rejects_too_long() {
+        assert!(validate_path(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn test_validate_path_rejects_bad_chars() {
+        assert!(validate_path("foo/bar").is_err());
+        assert!(validate_path("foo:bar").is_err());
+        assert!(validate_path("foo bar").is_err());
+        assert!(validate_path("foo.bar").is_err());
+        assert!(validate_path("foo@bar").is_err());
+        assert!(validate_path("föo").is_err());
     }
 }
