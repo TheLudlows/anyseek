@@ -76,7 +76,6 @@ pub struct QuantizedVectorHeader {
 /// IVF (Inverted File) vector index backed by a KV store.
 pub struct IvfIndex {
     kv: seekpower_storage::KvStore,
-    path: String,
     config: seekpower_schema::IndexConfig,
     meta: RwLock<Option<IvfMeta>>,
     medoids: RwLock<Vec<MedoidData>>,
@@ -86,35 +85,28 @@ pub struct IvfIndex {
 
 // Key helpers ---------------------------------------------------------------
 
-fn meta_key(path: &str) -> Vec<u8> {
-    seekpower_storage::make_key(&[
-        seekpower_storage::PREFIX_VEC,
-        path.as_bytes(),
-        b":meta",
-    ])
+fn meta_key() -> Vec<u8> {
+    b"v:meta".to_vec()
 }
 
-fn medoid_key(path: &str, id: u32) -> Vec<u8> {
+fn medoid_key(id: u32) -> Vec<u8> {
     seekpower_storage::make_key(&[
         seekpower_storage::PREFIX_VEC,
-        path.as_bytes(),
         b":medoid:",
         &id.to_le_bytes(),
     ])
 }
 
-fn medoid_prefix(path: &str) -> Vec<u8> {
+fn medoid_prefix() -> Vec<u8> {
     seekpower_storage::make_key(&[
         seekpower_storage::PREFIX_VEC,
-        path.as_bytes(),
         b":medoid:",
     ])
 }
 
-fn cluster_key(path: &str, id: u32) -> Vec<u8> {
+fn cluster_key(id: u32) -> Vec<u8> {
     seekpower_storage::make_key(&[
         seekpower_storage::PREFIX_VEC,
-        path.as_bytes(),
         b":cluster:",
         &id.to_le_bytes(),
     ])
@@ -333,7 +325,7 @@ impl VectorIndex for IvfIndex {
         let is_flat = meta.as_ref().map(|m| m.n_clusters).unwrap_or(0) == 0;
         if is_flat {
             // Also search cluster 0 (where flat data is stored after flush).
-            let key = cluster_key(&self.path, 0u32);
+            let key = cluster_key(0u32);
             if let Some(data) = self.cache.get_cluster(&key) {
                 if let Some((_hdr, vecs)) = deserialize_cluster(&data) {
                     for (qvh, qdata) in vecs {
@@ -369,7 +361,7 @@ impl VectorIndex for IvfIndex {
             select_clusters(query, &medoids, ann_mode, &meta.similarity);
 
         for &cid in &selected {
-            let key = cluster_key(&self.path, cid as u32);
+            let key = cluster_key(cid as u32);
             let cluster_data = self
                 .cache
                 .get_cluster(&key)
@@ -492,14 +484,12 @@ impl IvfIndex {
     /// Create a new, empty `IvfIndex`.
     pub fn new(
         kv: seekpower_storage::KvStore,
-        path: &str,
         config: seekpower_schema::IndexConfig,
     ) -> Self {
         let cache =
             seekpower_storage::ReadCache::new(config.posting_cache_size_mb, config.cluster_cache_size_mb);
         Self {
             kv,
-            path: path.to_string(),
             config,
             meta: RwLock::new(None),
             medoids: RwLock::new(Vec::new()),
@@ -510,7 +500,7 @@ impl IvfIndex {
 
     /// Read `IvfMeta` from the KV store (key `v:{path}:meta`).
     pub async fn load_meta(&self) -> seekpower_error::Result<Option<IvfMeta>> {
-        let key = meta_key(&self.path);
+        let key = meta_key();
         let result: Option<IvfMeta> = self.kv.get_deserialized(&key).await?;
         if let Some(ref meta) = result {
             if let Ok(mut m) = self.meta.write() {
@@ -522,7 +512,7 @@ impl IvfIndex {
 
     /// Read all medoids whose keys match `v:{path}:medoid:*`.
     pub async fn load_medoids(&self) -> seekpower_error::Result<Vec<MedoidData>> {
-        let prefix = medoid_prefix(&self.path);
+        let prefix = medoid_prefix();
         let entries = self.kv.scan_prefix(&prefix).await?;
 
         let mut medoids = Vec::new();
@@ -541,7 +531,7 @@ impl IvfIndex {
 
     /// Load raw cluster blob from cache or KV store.
     pub async fn load_cluster(&self, cluster_id: u32) -> seekpower_error::Result<Vec<u8>> {
-        let key = cluster_key(&self.path, cluster_id);
+        let key = cluster_key(cluster_id);
 
         if let Some(data) = self.cache.get_cluster(&key) {
             return Ok(data);
@@ -564,7 +554,7 @@ impl IvfIndex {
 
     /// Persist `IvfMeta`.
     pub async fn store_meta(&self, meta: &IvfMeta) -> seekpower_error::Result<()> {
-        let key = meta_key(&self.path);
+        let key = meta_key();
         self.kv.put_serialized(&key, meta).await?;
         if let Ok(mut m) = self.meta.write() {
             *m = Some(meta.clone());
@@ -574,13 +564,13 @@ impl IvfIndex {
 
     /// Persist a single medoid.
     pub async fn store_medoid(&self, id: u32, medoid: &MedoidData) -> seekpower_error::Result<()> {
-        let key = medoid_key(&self.path, id);
+        let key = medoid_key(id);
         self.kv.put_serialized(&key, medoid).await
     }
 
     /// Persist a cluster blob.
     pub async fn store_cluster(&self, id: u32, data: &[u8]) -> seekpower_error::Result<()> {
-        let key = cluster_key(&self.path, id);
+        let key = cluster_key(id);
         self.kv.put(&key, data).await?;
         self.cache.insert_cluster(&key, data.to_vec());
         Ok(())
@@ -1199,7 +1189,7 @@ mod tests {
         // Pre-warm the cache for the sync search path.
         for cid in 0..index.n_clusters() as u32 {
             let data = index.load_cluster(cid).await.unwrap();
-            let key = cluster_key(&index.path, cid);
+            let key = cluster_key(cid);
             index.cache.insert_cluster(&key, data);
         }
 

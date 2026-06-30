@@ -118,7 +118,7 @@ pub async fn create_index_with_db(
     db.put_serialized(b"m:stats", &IndexStats::default()).await?;
 
     let cache = ReadCache::new(config.posting_cache_size_mb, config.cluster_cache_size_mb);
-    let vector_index = IvfIndex::new(db.clone(), path, config.clone());
+    let vector_index = IvfIndex::new(db.clone(), config.clone());
 
     Ok(Index {
         db,
@@ -171,7 +171,7 @@ pub async fn open_index_with_db(db: KvStore, path: &str) -> Result<Index> {
     }
 
     let cache = ReadCache::new(config.posting_cache_size_mb, config.cluster_cache_size_mb);
-    let vector_index = IvfIndex::new(db.clone(), path, config.clone());
+    let vector_index = IvfIndex::new(db.clone(), config.clone());
     let next_doc_id = stats.doc_count;
 
     Ok(Index {
