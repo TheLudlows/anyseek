@@ -59,10 +59,6 @@ pub enum FieldType {
     Bool,
     Timestamp,
     Text,
-    String16,
-    String32,
-    StringSet16,
-    StringSet32,
     Vector,
 }
 
