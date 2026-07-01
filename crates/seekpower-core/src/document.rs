@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use seekpower_error::{Result, SeekPowerError};
-use seekpower_schema::{make_key, PREFIX_DOC, FieldType};
+use seekpower_schema::{FieldType, TYPE_DOC};
 use seekpower_vector::VectorIndex;
 
 use crate::index::Index;
@@ -72,8 +72,7 @@ pub async fn get_document(index: &Index, doc_id: u64) -> Result<Option<HashMap<S
         }
     }
 
-    let key = make_key(&[PREFIX_DOC, b":", &doc_id.to_le_bytes()]);
-    match index.db.get(&key).await? {
+    match index.db().prefixed_get(index.index_id, TYPE_DOC, &doc_id.to_le_bytes()).await? {
         Some(data) => {
             let doc: HashMap<String, serde_json::Value> =
                 serde_json::from_slice(&data).map_err(|e| SeekPowerError::EncodingError(e.to_string()))?;

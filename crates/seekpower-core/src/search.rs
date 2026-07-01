@@ -32,7 +32,7 @@ pub async fn search(index: &Index, request: SearchRequest) -> Result<SearchRespo
         SearchMode::Vector { ann_mode } => {
             let query_vector = request.query_vector.as_ref()
                 .ok_or_else(|| SeekPowerError::InvalidQuery("query_vector required for vector search".into()))?;
-            index.vector_index.search(query_vector, request.length.max(10), ann_mode, &delete_std)
+            index.vector_index.search(query_vector, request.length.max(10), ann_mode, &delete_std).await
                 .into_iter()
                 .map(|r| SearchResult { doc_id: r.doc_id, score: r.score, result_type: ResultType::Vector })
                 .collect()
@@ -55,7 +55,7 @@ pub async fn search(index: &Index, request: SearchRequest) -> Result<SearchRespo
             }
 
             if let Some(ref query_vector) = request.query_vector {
-                vector_results = index.vector_index.search(query_vector, request.length.max(10), ann_mode, &delete_std)
+                vector_results = index.vector_index.search(query_vector, request.length.max(10), ann_mode, &delete_std).await
                     .into_iter()
                     .map(|r| SearchResult { doc_id: r.doc_id, score: r.score, result_type: ResultType::Vector })
                     .collect();
@@ -84,7 +84,7 @@ mod tests {
 use crate::create_index;
 use super::*;
     use object_store::memory::InMemory;
-    use seekpower_schema::{IndexConfig, SchemaField};
+    use seekpower_schema::{IndexConfig, SchemaField, TokenizerType};
     use seekpower_storage::KvStore;
     use std::sync::Arc;
     use std::collections::HashMap;
@@ -187,7 +187,12 @@ use super::*;
     async fn test_lexical_search_phrase() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-lexical-phrase", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let config = IndexConfig {
+            vector_dimensions: 4,
+            tokenizer: TokenizerType::Unicode,
+            ..IndexConfig::default()
+        };
+        let idx = create_index(&shared_db, "test", config, test_schema()).await.unwrap();
 
         let mut doc1 = HashMap::new();
         doc1.insert("title".to_string(), serde_json::json!("the quick brown fox"));

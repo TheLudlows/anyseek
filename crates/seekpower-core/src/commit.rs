@@ -1,5 +1,5 @@
 use seekpower_error::Result;
-use seekpower_schema::{make_key, PREFIX_DOC};
+use seekpower_schema::{TYPE_META, TYPE_DOC};
 use seekpower_vector::VectorIndex;
 
 use crate::index::Index;
@@ -14,13 +14,12 @@ pub async fn commit(index: &Index) -> Result<()> {
 
         index.lexical_index.flush(&old_buffer, &mut stats).await?;
 
-        index.db.put_serialized(b"m:stats".as_slice(), &*stats).await?;
+        index.db().prefixed_put_serialized(index.index_id, TYPE_META, b"stats", &*stats).await?;
     }
 
     // Write documents (stored outside lexical index since they're raw data, not postings).
     for (&doc_id, data) in &old_buffer.documents {
-        let key = make_key(&[PREFIX_DOC, b":", &doc_id.to_le_bytes()]);
-        index.db.put(&key, data).await?;
+        index.db().prefixed_put(index.index_id, TYPE_DOC, &doc_id.to_le_bytes(), data).await?;
     }
 
     // Flush vector index.

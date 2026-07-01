@@ -7,7 +7,6 @@ edition = "2021"
 seekpower-error = { workspace = true }
 seekpower-schema = { workspace = true }
 seekpower-storage = { workspace = true }
-seekpower-clustering = { workspace = true }
 seekpower-quantize = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -8,6 +8,7 @@ seekpower-error = { workspace = true }
 seekpower-schema = { workspace = true }
 serde = { workspace = true }
 ahash = { workspace = true }
+stop-words = { workspace = true }
 
 [features]
 default = ["jieba"]

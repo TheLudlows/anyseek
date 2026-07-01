@@ -8,7 +8,6 @@ members = [
     "crates/seekpower-posting",
     "crates/seekpower-ranking",
     "crates/seekpower-quantize",
-    "crates/seekpower-clustering",
     "crates/seekpower-vector",
     "crates/seekpower-search",
     "crates/seekpower-core",
@@ -23,7 +22,6 @@ seekpower-tokenizer = { path = "crates/seekpower-tokenizer" }
 seekpower-posting = { path = "crates/seekpower-posting" }
 seekpower-ranking = { path = "crates/seekpower-ranking" }
 seekpower-quantize = { path = "crates/seekpower-quantize" }
-seekpower-clustering = { path = "crates/seekpower-clustering" }
 seekpower-vector = { path = "crates/seekpower-vector" }
 seekpower-search = { path = "crates/seekpower-search" }
 seekpower-core   = { path = "crates/seekpower-core" }
@@ -33,8 +31,8 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-slatedb = "0.13"
-object_store = "0.12"
+slatedb = "0.14"
+object_store = "0.14"
 ahash = { version = "0.8", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
 smallvec = "1"
@@ -44,3 +42,4 @@ snap = "1"
 lz4_flex = "0.13"
 zstd = "0.13"
 bytemuck = "1"
+stop-words = "0.8"

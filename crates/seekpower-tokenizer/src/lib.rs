@@ -1,5 +1,6 @@
 use seekpower_schema::TokenizerType;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::{OnceLock, RwLock};
 
 // ---------------------------------------------------------------------------
@@ -151,14 +152,17 @@ impl Tokenizer for UnicodeTokenizer {
 /// Chinese-aware tokenizer backed by [jieba-rs](https://crates.io/crates/jieba-rs).
 ///
 /// Uses jieba's **search mode** cutting, which produces the finest-grained
-/// segmentation suitable for full-text search.
+/// segmentation suitable for full-text search.  The `Jieba` instance is
+/// lazily initialised once and reused across all calls.
 #[cfg(feature = "jieba")]
 pub struct JiebaTokenizer;
 
 #[cfg(feature = "jieba")]
 impl Tokenizer for JiebaTokenizer {
     fn tokenize(&self, text: &str) -> Vec<Token> {
-        let jieba = jieba_rs::Jieba::new();
+        static JIEBA: OnceLock<jieba_rs::Jieba> = OnceLock::new();
+        let jieba = JIEBA.get_or_init(jieba_rs::Jieba::new);
+
         let tokens_raw = jieba.cut_for_search(text, true);
 
         let mut tokens = Vec::new();
@@ -270,6 +274,46 @@ fn compute_key_hash(field_id: u16, term: &str) -> u64 {
     hasher.finish()
 }
 
+/// Resolve the stop-word set from the config.
+///
+/// 1. If `stop_words_preset` is `Auto`, pick a language based on the tokenizer
+///    type (Jieba → `"zh"`, Simple/Unicode → `"en"`).
+/// 2. If `stop_words_preset` is `Language(code)`, use that code.
+/// 3. If `stop_words_preset` is `None`, start with an empty set.
+/// 4. Merge any user-supplied `stop_words` on top.
+fn build_stop_words(config: &seekpower_schema::IndexConfig) -> HashSet<String> {
+    use seekpower_schema::StopWordsPreset;
+
+    let lang_code = match &config.stop_words_preset {
+        StopWordsPreset::Auto => match &config.tokenizer {
+            TokenizerType::Jieba => Some("zh"),
+            _ => Some("en"),
+        },
+        StopWordsPreset::Language(code) => Some(code.as_str()),
+        StopWordsPreset::None => None,
+    };
+
+    let mut set: HashSet<String> = HashSet::new();
+
+    if let Some(code) = lang_code {
+        // stop_words::get panics on unknown language codes; catch that.
+        let result = std::panic::catch_unwind(|| stop_words::get(code));
+        if let Ok(words) = result {
+            for word in words {
+                set.insert(word);
+            }
+        }
+    }
+
+    if let Some(ref custom) = config.stop_words {
+        for word in custom {
+            set.insert(word.clone());
+        }
+    }
+
+    set
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline functions
 // ---------------------------------------------------------------------------
@@ -297,11 +341,7 @@ pub fn tokenize_index(
     };
 
     let raw_tokens = tokenizer.tokenize(text);
-
-    let stop_words: Option<std::collections::HashSet<&str>> =
-        config.stop_words.as_ref().map(|sw| {
-            sw.iter().map(|s| s.as_str()).collect()
-        });
+    let stop_words = build_stop_words(config);
 
     let mut result = Vec::new();
     for token in raw_tokens {
@@ -310,10 +350,8 @@ pub fn tokenize_index(
             term = term.to_lowercase();
         }
 
-        if let Some(ref sw) = stop_words {
-            if sw.contains(term.as_str()) {
-                continue;
-            }
+        if stop_words.contains(&term) {
+            continue;
         }
 
         let key_hash = compute_key_hash(field_id, &term);
@@ -344,11 +382,7 @@ pub fn tokenize_query(
     };
 
     let raw_tokens = tokenizer.tokenize(query);
-
-    let stop_words: Option<std::collections::HashSet<&str>> =
-        config.stop_words.as_ref().map(|sw| {
-            sw.iter().map(|s| s.as_str()).collect()
-        });
+    let stop_words = build_stop_words(config);
 
     let mut seen: HashMap<u64, TermObject> = HashMap::new();
     let mut order: Vec<u64> = Vec::new();
@@ -359,10 +393,8 @@ pub fn tokenize_query(
             term = term.to_lowercase();
         }
 
-        if let Some(ref sw) = stop_words {
-            if sw.contains(term.as_str()) {
-                continue;
-            }
+        if stop_words.contains(&term) {
+            continue;
         }
 
         // Use field_id = 0 for query-side tokenization (no specific field).
@@ -554,6 +586,7 @@ mod tests {
     fn test_tokenize_index_basic() {
         let mut config = seekpower_schema::IndexConfig::default();
         config.tokenizer = TokenizerType::Simple;
+        config.stop_words_preset = seekpower_schema::StopWordsPreset::None;
         config.lowercase = false;
 
         let registry = TokenizerRegistry::global().read().unwrap();
@@ -576,6 +609,7 @@ mod tests {
     fn test_tokenize_index_lowercase() {
         let mut config = seekpower_schema::IndexConfig::default();
         config.tokenizer = TokenizerType::Simple;
+        config.stop_words_preset = seekpower_schema::StopWordsPreset::None;
         config.lowercase = true;
 
         let registry = TokenizerRegistry::global().read().unwrap();
@@ -590,6 +624,7 @@ mod tests {
     fn test_tokenize_index_stop_words() {
         let mut config = seekpower_schema::IndexConfig::default();
         config.tokenizer = TokenizerType::Simple;
+        config.stop_words_preset = seekpower_schema::StopWordsPreset::None;
         config.lowercase = true;
         config.stop_words = Some(vec!["the".to_string(), "a".to_string()]);
 
@@ -617,6 +652,7 @@ mod tests {
     fn test_tokenize_query_dedup() {
         let mut config = seekpower_schema::IndexConfig::default();
         config.tokenizer = TokenizerType::Simple;
+        config.stop_words_preset = seekpower_schema::StopWordsPreset::None;
         config.lowercase = true;
 
         let registry = TokenizerRegistry::global().read().unwrap();
@@ -634,6 +670,7 @@ mod tests {
     fn test_tokenize_query_stop_words() {
         let mut config = seekpower_schema::IndexConfig::default();
         config.tokenizer = TokenizerType::Simple;
+        config.stop_words_preset = seekpower_schema::StopWordsPreset::None;
         config.lowercase = true;
         config.stop_words = Some(vec!["the".to_string()]);
 
@@ -665,5 +702,48 @@ mod tests {
         let h1 = compute_key_hash(0, "hello");
         let h2 = compute_key_hash(0, "world");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_stop_words_preset_en() {
+        let mut config = seekpower_schema::IndexConfig::default();
+        config.tokenizer = TokenizerType::Simple;
+        let sw = build_stop_words(&config);
+        assert!(sw.contains("the"));
+        assert!(!sw.contains("search"));
+    }
+
+    #[test]
+    fn test_stop_words_preset_zh() {
+        let config = seekpower_schema::IndexConfig::default();
+        let sw = build_stop_words(&config);
+        assert!(sw.contains("的"));
+    }
+
+    #[test]
+    fn test_stop_words_preset_merge_custom() {
+        let mut config = seekpower_schema::IndexConfig::default();
+        config.tokenizer = TokenizerType::Simple;
+        config.stop_words = Some(vec!["myword".to_string()]);
+        let sw = build_stop_words(&config);
+        assert!(sw.contains("the"));    // from preset
+        assert!(sw.contains("myword")); // from custom
+    }
+
+    #[test]
+    fn test_stop_words_preset_none() {
+        let mut config = seekpower_schema::IndexConfig::default();
+        config.tokenizer = TokenizerType::Simple;
+        config.stop_words_preset = seekpower_schema::StopWordsPreset::None;
+        let sw = build_stop_words(&config);
+        assert!(sw.is_empty());
+    }
+
+    #[test]
+    fn test_stop_words_preset_language() {
+        let mut config = seekpower_schema::IndexConfig::default();
+        config.stop_words_preset = seekpower_schema::StopWordsPreset::Language("de".to_string());
+        let sw = build_stop_words(&config);
+        assert!(sw.contains("und")); // German "and"
     }
 }

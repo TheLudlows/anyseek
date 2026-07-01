@@ -1,162 +1,90 @@
 # seekpower-storage
 
-Wraps [SlateDB](https://github.com/slatedb/slatedb) (an LSM-tree embedded KV
-store) and provides a thread-safe in-memory cache for hot posting lists and
-IVF cluster blobs. Every higher crate (`seekpower-core`, `seekpower-vector`,
-`seekpower-search`, ...) routes all persistent IO through this layer.
+SlateDB KV 封装，内建定长前缀索引隔离与数据类型标签。
 
-The design rationale is laid out in the project spec at
-`docs/superpowers/specs/2026-06-30-hybrid-search-design.md` (section 3 in
-particular). Read that first if you need the big picture.
+## 核心设计
 
-## Public surface at a glance
+所有索引共享同一个 SlateDB 实例，通过 `index_id`（u32 大端序，4 字节）+ `data_type`（u8，1 字节）实现键空间隔离与数据类型区分。
 
-| Item | Kind | Purpose |
-|---|---|---|
-| `PREFIX_META` / `PREFIX_IDX` / `PREFIX_VEC` / `PREFIX_DOC` / `PREFIX_DELL` / `PREFIX_LEN` | constants | SlateDB key namespaces |
-| `make_key(&[&[u8]]) -> Vec<u8>` | fn | Concatenate byte slices into a SlateDB key |
-| `KvStore` | struct | Thin async wrapper around `slatedb::Db` |
-| `ReadCache` | struct | Size-budgeted, in-memory cache for postings and clusters |
+**物理键格式**: `index_id (u32 BE, 4B) ‖ data_type (u8, 1B) ‖ business_key`
 
-## Key prefix constants
+`data_type` 由 `seekpower_schema` 定义：
 
-Per the spec (section 3.1), SlateDB is partitioned by single-character byte
-prefixes so that ordered prefix scans can enumerate a namespace in one pass.
+| 常量 | 值 | 用途 |
+|------|-----|------|
+| `TYPE_META` | 0 | 元数据 (schema, config, stats, fields) |
+| `TYPE_DOC` | 1 | 文档原文 |
+| `TYPE_IDX` | 2 | 倒排索引 (posting list) |
+| `TYPE_VEC` | 3 | 向量索引 (meta, medoid, cluster) |
+| `TYPE_DELL` | 4 | 删除标记 (tombstone) |
+| `TYPE_LEN` | 5 | 文档长度 |
 
-| Constant | Bytes | Namespace |
-|---|---|---|
-| `PREFIX_META` | `b"m:"` | Schema, IndexConfig, stats JSON |
-| `PREFIX_IDX` | `b"i:"` | Inverted-index posting list blocks |
-| `PREFIX_VEC` | `b"v:"` | IVF meta, medoid vectors, cluster blobs |
-| `PREFIX_DOC` | `b"d:"` | Compressed stored document bodies |
-| `PREFIX_DELL` | `b"l:"` | Deletion tombstones (lower-case L) |
-| `PREFIX_LEN` | `b"s:"` | Compressed document lengths |
+## KvStore
 
-## `make_key`
+`KvStore` 是 SlateDB 的薄封装，提供两类方法：
+
+- **裸操作** (`put`/`get`/`delete`/`scan_prefix`): 直接操作物理键，用于索引注册表等全局数据
+- **带前缀操作** (`prefixed_put`/`prefixed_get`/`prefixed_delete`/`prefixed_scan_prefix`/`prefixed_scan_all`/`prefixed_put_serialized`/`prefixed_get_deserialized`/`prefixed_delete_all`): 自动附加/剥离 `index_id` + `data_type` 前缀，用于索引内数据
+
+### 用法示例
 
 ```rust
-pub fn make_key(parts: &[&[u8]]) -> Vec<u8>
+use seekpower_storage::{KvStore, name_to_id};
+use seekpower_schema::{TYPE_META, TYPE_IDX, TYPE_DOC, TYPE_VEC};
+
+// 打开共享数据库
+let db = KvStore::open("my_db", object_store).await?;
+
+// 全局数据（不带前缀）
+db.put(b"__indexes__:articles", b"1").await?;
+
+// 索引内数据（带 index_id + data_type 前缀）
+let index_id = name_to_id("articles");
+db.prefixed_put(index_id, TYPE_META, b"schema", &schema_bytes).await?;
+db.prefixed_put(index_id, TYPE_IDX, &term_hash.to_le_bytes(), &posting_bytes).await?;
+
+// 读取时自动剥离前缀
+let schema = db.prefixed_get(index_id, TYPE_META, b"schema").await?;
+
+// 扫描索引内所有 posting list
+let postings = db.prefixed_scan_all(index_id, TYPE_IDX).await?;
+
+// 删除整个索引
+db.prefixed_delete_all(index_id).await?;
 ```
 
-Concatenates byte slices in order. The only place this lives is the storage
-crate so every consumer builds keys identically.
+## 键编解码工具
 
 ```rust
-use seekpower_storage::{make_key, PREFIX_VEC};
+use seekpower_storage::{encode_key, encode_prefix, encode_index_prefix, name_to_id};
 
-let key = make_key(&[PREFIX_VEC, b"index-a:medoid:7"]);
-// -> b"v:index-a:medoid:7"
+// 将索引名称映射为定长 u32 ID
+let id = name_to_id("articles");
+
+// 编码带前缀的键: [index_id BE 4B] [data_type 1B] [business_key]
+let key = encode_key(id, TYPE_META, b"schema");
+
+// 编码前缀扫描键: [index_id BE 4B] [data_type 1B]
+let prefix = encode_prefix(id, TYPE_IDX);
+
+// 编码仅 index_id 的前缀（用于 delete_all）
+let idx_prefix = encode_index_prefix(id);
 ```
 
-## `KvStore`
+## 事务
 
-Async handle to a SlateDB instance. `KvStore` is `Clone` -- the inner SlateDB
-handle is reference-counted, so cloning is cheap and clones talk to the same
-database.
-
-### Opening
+`KvStore::begin_transaction()` 返回 `Transaction`，支持原子批量写入。事务内使用 `encode_key` 手动构建带前缀的键。
 
 ```rust
-pub async fn open(path: &str, object_store: Arc<dyn ObjectStore>) -> Result<Self>
+let txn = db.begin_transaction().await?;
+let key = encode_key(index_id, TYPE_DOC, &doc_id.to_le_bytes());
+txn.put(&key, b"value")?;
+txn.commit().await?;
 ```
 
-`path` is the SlateDB object-store prefix. `object_store` may be any
-`Arc<dyn object_store::ObjectStore>`:
+## 序列化
 
-- `object_store::memory::InMemory` -- tests
-- `object_store::local::LocalFileSystem` -- single-node dev
-- `object_store::aws::AmazonS3` / `gcp::GoogleCloudStorage` / `azure::AzureBlobStorage` -- production
+`KvStore` 同时提供裸和带前缀的序列化方法，使用 `serde_json` 编码：
 
-### Basic ops
-
-```rust
-pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()>
-pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>
-pub async fn delete(&self, key: &[u8]) -> Result<()>
-pub async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>
-pub async fn close(&self) -> Result<()>
-```
-
-`scan_prefix` returns a fully materialised `Vec` of `(key, value)` pairs --
-fine for the small namespace scans SeekPower does (meta, length, deltas) but
-not intended for streaming the whole index.
-
-### JSON helpers
-
-```rust
-pub async fn put_serialized<T: Serialize>(&self, key: &[u8], value: &T) -> Result<()>
-pub async fn get_deserialized<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>>
-```
-
-The raw `put`/`get` take byte slices. For anything structured (schema, stats,
-`IndexConfig`, `IvfMeta`) use the `_serialized` / `_deserialized` pair --
-they round-trip through `serde_json`.
-
-## `ReadCache`
-
-Two independent, size-budgeted maps living behind `RwLock`s, with byte-size
-tracking.
-
-```rust
-pub fn new(posting_max_mb: usize, cluster_max_mb: usize) -> Self
-```
-
-Sizes are in MiB; the constructor multiplies by `1024 * 1024` internally.
-
-### Posting-list cache (key is the `key_hash`, value is a `PostingListBlock`)
-
-```rust
-pub fn get_posting(&self, key: &[u8]) -> Option<Vec<u8>>
-pub fn insert_posting(&self, key: &[u8], value: Vec<u8>)
-```
-
-### Cluster-blob cache (key is the cluster id, value is `ClusterData`)
-
-```rust
-pub fn get_cluster(&self, key: &[u8]) -> Option<Vec<u8>>
-pub fn insert_cluster(&self, key: &[u8], value: Vec<u8>)
-```
-
-### Maintenance
-
-```rust
-pub fn invalidate(&self, key: &[u8])   // drop a single entry from BOTH caches
-pub fn clear(&self)                     // drop everything
-```
-
-### Eviction
-
-Eviction is intentionally simple and deterministic: when an `insert_*` would
-push the cache above its byte budget, half of the current entries (the first
-half of the `HashMap` iteration order) are dropped. It is **not** a true LRU
--- the only freshness signal is that re-inserting an existing key overwrites
-its value but does not reorder the map.
-
-## Typical usage
-
-```rust
-use std::sync::Arc;
-use object_store::memory::InMemory;
-use seekpower_storage::{KvStore, ReadCache, make_key, PREFIX_META};
-
-let store = KvStore::open("idx", Arc::new(InMemory::new())).await?;
-let cache = ReadCache::new(256, 512); // 256 MiB postings, 512 MiB clusters
-
-let key = make_key(&[PREFIX_META, b"idx:config"]);
-store.put_serialized(&key, &my_index_config).await?;
-
-if let Some(bytes) = cache.get_posting(&key) {
-    // hit
-} else if let Some(bytes) = store.get(&key).await? {
-    cache.insert_posting(&key, bytes.clone());
-    // ...
-}
-
-store.close().await?;
-```
-
-## Verifying against source
-
-Everything above is the public API of
-`crates/seekpower-storage/src/lib.rs`. Re-read that file (it is short) when
-the spec and the source disagree -- the source wins.
+- `put_serialized` / `get_deserialized` — 裸键
+- `prefixed_put_serialized` / `prefixed_get_deserialized` — 带 `index_id` + `data_type` 前缀键

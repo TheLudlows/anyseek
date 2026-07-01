@@ -5,8 +5,10 @@ edition = "2021"
 
 [dependencies]
 seekpower-error = { workspace = true }
+seekpower-schema = { workspace = true }
 slatedb = { workspace = true }
 object_store = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ahash = { workspace = true }

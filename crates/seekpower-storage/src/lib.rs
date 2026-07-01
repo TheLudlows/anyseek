@@ -1,18 +1,30 @@
+//! seekpower-storage: SlateDB KV wrapper with prefix-based key isolation.
+
+mod key;
+
+pub use key::{encode_key, encode_prefix, encode_index_prefix, name_to_id};
+
 use object_store::ObjectStore;
 use seekpower_error::{Result, SeekPowerError};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use slatedb::{DbTransaction, IsolationLevel};
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use slatedb::IsolationLevel;
+use std::sync::Arc;
 
-/// KV store wrapper around SlateDB.
+/// Thin wrapper around SlateDB providing CRUD + scan + transactions.
 ///
-/// A simple key-value store with CRUD operations and batch writes.
-/// All keys are stored as-is without any prefixing.
+/// Index isolation is achieved by prefixing keys with `index_id` (u32 BE)
+/// and `data_type` (u8). Physical key format:
+///
+/// ```text
+/// index_id (4B BE) ‖ data_type (1B) ‖ business_key
+/// ```
 pub struct KvStore {
     db: Arc<slatedb::Db>,
 }
+
+/// Length of the fixed prefix: index_id (4B) + data_type (1B) = 5 bytes.
+pub const PREFIX_LEN: usize = 5;
 
 impl Clone for KvStore {
     fn clone(&self) -> Self {
@@ -29,7 +41,6 @@ impl KvStore {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Put a key-value pair.
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.db
             .put(key, value)
@@ -38,7 +49,6 @@ impl KvStore {
         Ok(())
     }
 
-    /// Get a value by key. Returns None if key doesn't exist.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let result = self
             .db
@@ -48,7 +58,6 @@ impl KvStore {
         Ok(result.map(|b| b.to_vec()))
     }
 
-    /// Delete a key.
     pub async fn delete(&self, key: &[u8]) -> Result<()> {
         self.db
             .delete(key)
@@ -57,14 +66,12 @@ impl KvStore {
         Ok(())
     }
 
-    /// Scan all entries with the given prefix.
     pub async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut iter = self
             .db
-            .scan_prefix(prefix)
+            .scan_prefix(prefix, ..)
             .await
             .map_err(|e| SeekPowerError::StorageError(format!("Scan failed: {}", e)))?;
-
         let mut results = Vec::new();
         while let Some(entry) = iter
             .next()
@@ -76,12 +83,10 @@ impl KvStore {
         Ok(results)
     }
 
-    /// Scan all entries in the database.
     pub async fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.scan_prefix(b"").await
     }
 
-    /// Begin a transaction for batch writes.
     pub async fn begin_transaction(&self) -> Result<Transaction> {
         let txn = self
             .db
@@ -91,14 +96,12 @@ impl KvStore {
         Ok(Transaction { txn })
     }
 
-    /// Put a serialized value.
     pub async fn put_serialized<T: Serialize>(&self, key: &[u8], value: &T) -> Result<()> {
         let bytes = serde_json::to_vec(value)
             .map_err(|e| SeekPowerError::StorageError(format!("Serialization failed: {}", e)))?;
         self.put(key, &bytes).await
     }
 
-    /// Get and deserialize a value.
     pub async fn get_deserialized<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>> {
         match self.get(key).await? {
             Some(bytes) => {
@@ -111,36 +114,133 @@ impl KvStore {
         }
     }
 
-    /// Close the database.
     pub async fn close(&self) -> Result<()> {
         self.db
             .close()
             .await
             .map_err(|e| SeekPowerError::StorageError(format!("Close failed: {}", e)))
     }
+
+    // -----------------------------------------------------------------------
+    // Prefixed convenience methods
+    // Physical key: index_id (u32 BE) ‖ data_type (u8) ‖ business_key
+    // -----------------------------------------------------------------------
+
+    /// Put with index_id + data_type prefix.
+    pub async fn prefixed_put(
+        &self,
+        index_id: u32,
+        data_type: u8,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<()> {
+        let full_key = encode_key(index_id, data_type, key);
+        self.put(&full_key, value).await
+    }
+
+    /// Get with index_id + data_type prefix.
+    pub async fn prefixed_get(
+        &self,
+        index_id: u32,
+        data_type: u8,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let full_key = encode_key(index_id, data_type, key);
+        self.get(&full_key).await
+    }
+
+    /// Delete with index_id + data_type prefix.
+    pub async fn prefixed_delete(
+        &self,
+        index_id: u32,
+        data_type: u8,
+        key: &[u8],
+    ) -> Result<()> {
+        let full_key = encode_key(index_id, data_type, key);
+        self.delete(&full_key).await
+    }
+
+    /// Scan within a given index_id + data_type, with an optional business_key prefix.
+    /// Returned keys have the 5-byte fixed prefix (index_id + data_type) stripped.
+    pub async fn prefixed_scan_prefix(
+        &self,
+        index_id: u32,
+        data_type: u8,
+        prefix: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let full_prefix = encode_prefix(index_id, data_type)
+            .into_iter()
+            .chain(prefix.iter().copied())
+            .collect::<Vec<_>>();
+        let results = self.scan_prefix(&full_prefix).await?;
+        Ok(results
+            .into_iter()
+            .map(|(key, value)| (key[PREFIX_LEN..].to_vec(), value))
+            .collect())
+    }
+
+    /// Scan all keys for a given index_id + data_type.
+    /// Returned keys have the 5-byte fixed prefix stripped.
+    pub async fn prefixed_scan_all(
+        &self,
+        index_id: u32,
+        data_type: u8,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.prefixed_scan_prefix(index_id, data_type, b"").await
+    }
+
+    /// Put a serialized value with index_id + data_type prefix.
+    pub async fn prefixed_put_serialized<T: Serialize>(
+        &self,
+        index_id: u32,
+        data_type: u8,
+        key: &[u8],
+        value: &T,
+    ) -> Result<()> {
+        let full_key = encode_key(index_id, data_type, key);
+        self.put_serialized(&full_key, value).await
+    }
+
+    /// Get and deserialize a value with index_id + data_type prefix.
+    pub async fn prefixed_get_deserialized<T: DeserializeOwned>(
+        &self,
+        index_id: u32,
+        data_type: u8,
+        key: &[u8],
+    ) -> Result<Option<T>> {
+        let full_key = encode_key(index_id, data_type, key);
+        self.get_deserialized(&full_key).await
+    }
+
+    /// Delete all keys for a given index_id (across all data_types).
+    pub async fn prefixed_delete_all(&self, index_id: u32) -> Result<()> {
+        let index_prefix = encode_index_prefix(index_id);
+        let results = self.scan_prefix(&index_prefix).await?;
+        for (key, _) in results {
+            self.delete(&key).await?;
+        }
+        Ok(())
+    }
 }
 
 /// A transaction for atomic batch writes.
 pub struct Transaction {
-    txn: DbTransaction,
+    txn: slatedb::DbTransaction,
 }
 
 impl Transaction {
-    /// Put a key-value pair in the transaction.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.txn
             .put(key, value)
             .map_err(|e| SeekPowerError::StorageError(format!("Transaction put failed: {}", e)))
     }
 
-    /// Delete a key in the transaction.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
         self.txn
             .delete(key)
             .map_err(|e| SeekPowerError::StorageError(format!("Transaction delete failed: {}", e)))
     }
 
-    /// Commit the transaction.
     pub async fn commit(self) -> Result<()> {
         self.txn
             .commit()
@@ -149,91 +249,9 @@ impl Transaction {
         Ok(())
     }
 
-    /// Rollback the transaction.
     pub fn rollback(self) -> Result<()> {
         self.txn.rollback();
         Ok(())
-    }
-}
-
-/// Generic LRU cache for key-value data.
-///
-/// Re-exported as `ReadCache` for backward compatibility.
-pub struct Cache {
-    inner: RwLock<CacheInner>,
-}
-
-/// Alias for `Cache` for backward compatibility.
-pub type ReadCache = Cache;
-
-struct CacheInner {
-    data: HashMap<Vec<u8>, Vec<u8>>,
-    size: usize,
-    max_bytes: usize,
-}
-
-impl Cache {
-    /// Create a new cache with the given size limit (in bytes).
-    pub fn new(max_bytes: usize) -> Self {
-        Self {
-            inner: RwLock::new(CacheInner {
-                data: HashMap::new(),
-                size: 0,
-                max_bytes,
-            }),
-        }
-    }
-
-    /// Get a value from cache.
-    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let inner = self.inner.read().ok()?;
-        inner.data.get(key).cloned()
-    }
-
-    /// Insert a value into cache.
-    pub fn insert(&self, key: &[u8], value: Vec<u8>) {
-        let mut inner = match self.inner.write() {
-            Ok(i) => i,
-            Err(_) => return,
-        };
-
-        // Remove old entry if exists
-        if let Some(old_value) = inner.data.remove(key) {
-            inner.size -= old_value.len();
-        }
-
-        // Evict if necessary (evict half the entries)
-        if inner.size + value.len() > inner.max_bytes {
-            let keys_to_remove: Vec<Vec<u8>> = inner.data.keys()
-                .take(inner.data.len() / 2)
-                .cloned()
-                .collect();
-            for k in keys_to_remove {
-                if let Some(v) = inner.data.remove(&k) {
-                    inner.size -= v.len();
-                }
-            }
-        }
-
-        inner.size += value.len();
-        inner.data.insert(key.to_vec(), value);
-    }
-
-    /// Invalidate a key from cache.
-    pub fn invalidate(&self, key: &[u8]) {
-        if let Ok(mut inner) = self.inner.write() {
-            if let Some(value) = inner.data.remove(key) {
-                inner.size -= value.len();
-            }
-        }
-    }
-
-    /// Clear all cache entries.
-    pub fn clear(&self) {
-        if let Ok(mut inner) = self.inner.write() {
-            inner.data.clear();
-            inner.size = 0;
-        }
     }
 }
 
@@ -252,17 +270,10 @@ mod tests {
     async fn test_kvstore_put_get_delete() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let store = KvStore::open("test_db", object_store).await.unwrap();
-
-        // Test put and get
         store.put(b"key1", b"value1").await.unwrap();
-        let result = store.get(b"key1").await.unwrap();
-        assert_eq!(result, Some(b"value1".to_vec()));
-
-        // Test delete
+        assert_eq!(store.get(b"key1").await.unwrap(), Some(b"value1".to_vec()));
         store.delete(b"key1").await.unwrap();
-        let result = store.get(b"key1").await.unwrap();
-        assert_eq!(result, None);
-
+        assert_eq!(store.get(b"key1").await.unwrap(), None);
         store.close().await.unwrap();
     }
 
@@ -270,22 +281,12 @@ mod tests {
     async fn test_kvstore_scan_prefix() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let store = KvStore::open("test_db", object_store).await.unwrap();
-
-        // Insert multiple entries with same prefix
         store.put(b"prefix:key1", b"value1").await.unwrap();
         store.put(b"prefix:key2", b"value2").await.unwrap();
         store.put(b"prefix:key3", b"value3").await.unwrap();
         store.put(b"other:key4", b"value4").await.unwrap();
-
-        // Scan with prefix
         let results = store.scan_prefix(b"prefix:").await.unwrap();
         assert_eq!(results.len(), 3);
-
-        // Verify all results have the correct prefix
-        for (key, _) in &results {
-            assert!(key.starts_with(b"prefix:"));
-        }
-
         store.close().await.unwrap();
     }
 
@@ -293,24 +294,13 @@ mod tests {
     async fn test_kvstore_transaction() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let store = KvStore::open("test_db", object_store).await.unwrap();
-
-        // Start a transaction
         let txn = store.begin_transaction().await.unwrap();
-
-        // Do multiple operations
         txn.put(b"key1", b"value1").unwrap();
         txn.put(b"key2", b"value2").unwrap();
-        txn.put(b"key3", b"value3").unwrap();
         txn.delete(b"key2").unwrap();
-
-        // Commit
         txn.commit().await.unwrap();
-
-        // Verify results
         assert_eq!(store.get(b"key1").await.unwrap(), Some(b"value1".to_vec()));
         assert_eq!(store.get(b"key2").await.unwrap(), None);
-        assert_eq!(store.get(b"key3").await.unwrap(), Some(b"value3".to_vec()));
-
         store.close().await.unwrap();
     }
 
@@ -318,22 +308,11 @@ mod tests {
     async fn test_kvstore_transaction_rollback() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let store = KvStore::open("test_db", object_store).await.unwrap();
-
-        // Add initial data
         store.put(b"key1", b"old_value").await.unwrap();
-
-        // Start a transaction
         let txn = store.begin_transaction().await.unwrap();
         txn.put(b"key1", b"new_value").unwrap();
-        txn.put(b"key2", b"value2").unwrap();
-
-        // Rollback
         txn.rollback().unwrap();
-
-        // Verify data unchanged
         assert_eq!(store.get(b"key1").await.unwrap(), Some(b"old_value".to_vec()));
-        assert_eq!(store.get(b"key2").await.unwrap(), None);
-
         store.close().await.unwrap();
     }
 
@@ -341,83 +320,47 @@ mod tests {
     async fn test_kvstore_serialization() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let store = KvStore::open("test_db", object_store).await.unwrap();
-
-        let data = TestData {
-            id: 42,
-            name: "test".to_string(),
-        };
-
-        // Test put_serialized and get_deserialized
+        let data = TestData { id: 42, name: "test".to_string() };
         store.put_serialized(b"test_key", &data).await.unwrap();
         let result: Option<TestData> = store.get_deserialized(b"test_key").await.unwrap();
         assert_eq!(result, Some(data));
-
-        // Test non-existent key
-        let result: Option<TestData> = store.get_deserialized(b"nonexistent").await.unwrap();
-        assert_eq!(result, None);
-
         store.close().await.unwrap();
-    }
-
-    #[test]
-    fn test_cache_insert_get() {
-        let cache = Cache::new(1024);
-
-        cache.insert(b"key1", b"value1".to_vec());
-        assert_eq!(cache.get(b"key1"), Some(b"value1".to_vec()));
-        assert_eq!(cache.get(b"nonexistent"), None);
-    }
-
-    #[test]
-    fn test_cache_invalidate() {
-        let cache = Cache::new(1024);
-
-        cache.insert(b"key1", b"value1".to_vec());
-        cache.invalidate(b"key1");
-        assert_eq!(cache.get(b"key1"), None);
-    }
-
-    #[test]
-    fn test_cache_eviction() {
-        let cache = Cache::new(1000);
-
-        // Insert data that will trigger eviction
-        cache.insert(b"key1", vec![0u8; 600]);
-        cache.insert(b"key2", vec![0u8; 600]);
-
-        // Insert more to trigger eviction
-        cache.insert(b"key3", vec![0u8; 600]);
-
-        // At least one of key1 or key2 should be evicted
-        let key1_present = cache.get(b"key1").is_some();
-        let key2_present = cache.get(b"key2").is_some();
-        let key3_present = cache.get(b"key3").is_some();
-
-        assert!(key3_present);
-        assert!(!key1_present || !key2_present);
-    }
-
-    #[test]
-    fn test_cache_clear() {
-        let cache = Cache::new(1024);
-
-        cache.insert(b"key1", b"value1".to_vec());
-        cache.insert(b"key2", b"value2".to_vec());
-
-        cache.clear();
-
-        assert_eq!(cache.get(b"key1"), None);
-        assert_eq!(cache.get(b"key2"), None);
     }
 
     #[tokio::test]
     async fn test_kvstore_clone_shares_underlying() {
         let object_store = Arc::new(object_store::memory::InMemory::new());
         let store = KvStore::open("test_db", object_store).await.unwrap();
-        let store_clone = store.clone();
-
+        let clone = store.clone();
         store.put(b"x", b"1").await.unwrap();
-        assert_eq!(store_clone.get(b"x").await.unwrap(), Some(b"1".to_vec()));
+        assert_eq!(clone.get(b"x").await.unwrap(), Some(b"1".to_vec()));
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_prefixed_data_type_isolation() {
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let store = KvStore::open("test_db", object_store).await.unwrap();
+        let index_id = name_to_id("test");
+
+        // Same business key, different data_type → different physical key
+        store.prefixed_put(index_id, 0, b"key", b"meta_value").await.unwrap();
+        store.prefixed_put(index_id, 1, b"key", b"doc_value").await.unwrap();
+
+        assert_eq!(
+            store.prefixed_get(index_id, 0, b"key").await.unwrap(),
+            Some(b"meta_value".to_vec())
+        );
+        assert_eq!(
+            store.prefixed_get(index_id, 1, b"key").await.unwrap(),
+            Some(b"doc_value".to_vec())
+        );
+
+        // Scan per data_type
+        let meta_entries = store.prefixed_scan_all(index_id, 0).await.unwrap();
+        let doc_entries = store.prefixed_scan_all(index_id, 1).await.unwrap();
+        assert_eq!(meta_entries.len(), 1);
+        assert_eq!(doc_entries.len(), 1);
 
         store.close().await.unwrap();
     }

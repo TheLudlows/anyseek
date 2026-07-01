@@ -75,6 +75,7 @@ pub struct IndexConfig {
     // Tokenizer
     pub tokenizer: TokenizerType,
     pub stemmer_language: Option<String>,
+    pub stop_words_preset: StopWordsPreset,
     pub stop_words: Option<Vec<String>>,
     pub lowercase: bool,
 
@@ -83,28 +84,20 @@ pub struct IndexConfig {
     pub vector_similarity: Similarity,
     pub clustering: ClusteringConfig,
     pub quantization: QuantType,
-
-    // Compression
-    // (removed: SlateDB handles compression transparently)
-
-    // Cache
-    pub posting_cache_size_mb: usize,
-    pub cluster_cache_size_mb: usize,
 }
 
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
-            tokenizer: TokenizerType::Unicode,
+            tokenizer: TokenizerType::Jieba,
             stemmer_language: None,
+            stop_words_preset: StopWordsPreset::Auto,
             stop_words: None,
             lowercase: true,
             vector_dimensions: 768,
             vector_similarity: Similarity::Cosine,
             clustering: ClusteringConfig::Auto,
             quantization: QuantType::SqI8,
-            posting_cache_size_mb: 256,
-            cluster_cache_size_mb: 512,
         }
     }
 }
@@ -115,6 +108,20 @@ pub enum TokenizerType {
     Unicode,
     Jieba,
     Custom(String),
+}
+
+/// Preset stop-words source.
+///
+/// - `Auto` – pick a language based on the tokenizer type
+///   (Jieba → Chinese, Simple/Unicode → English).
+/// - `None` – no preset stop-words (the default before this field existed).
+/// - `Language(code)` – use the `stop-words` crate's built-in list for the
+///   given ISO 639-1 code (e.g. `"en"`, `"zh"`, `"ja"`, `"de"`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StopWordsPreset {
+    Auto,
+    None,
+    Language(String),
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -147,15 +154,15 @@ pub struct IndexStats {
 }
 
 // ---------------------------------------------------------------------------
-// Storage key prefixes (moved from seekpower-storage)
+// Storage key data-type tags (u8, used as 1-byte prefix in physical keys)
 // ---------------------------------------------------------------------------
 
-pub const PREFIX_META: &[u8] = b"m:";
-pub const PREFIX_IDX: &[u8] = b"i:";
-pub const PREFIX_VEC: &[u8] = b"v:";
-pub const PREFIX_DOC: &[u8] = b"d:";
-pub const PREFIX_DELL: &[u8] = b"l:";
-pub const PREFIX_LEN: &[u8] = b"s:";
+pub const TYPE_META: u8 = 0;  // schema, config, stats, fields
+pub const TYPE_DOC: u8 = 1;   // document content
+pub const TYPE_IDX: u8 = 2;   // inverted index (posting list)
+pub const TYPE_VEC: u8 = 3;   // vector index (meta, medoid, cluster)
+pub const TYPE_DELL: u8 = 4;  // deletion marker (tombstone)
+pub const TYPE_LEN: u8 = 5;   // document length
 
 /// Construct a key from multiple parts.
 pub fn make_key(parts: &[&[u8]]) -> Vec<u8> {
@@ -166,18 +173,18 @@ pub fn make_key(parts: &[&[u8]]) -> Vec<u8> {
     key
 }
 
-/// Validate an index path name.
-pub fn validate_path(path: &str) -> Result<(), String> {
-    const PATH_MAX_LEN: usize = 128;
+/// Validate an index name.
+pub fn validate_name(name: &str) -> Result<(), String> {
+    const NAME_MAX_LEN: usize = 128;
 
-    if path.is_empty() {
+    if name.is_empty() {
         return Err("index name must not be empty".into());
     }
-    if path.len() > PATH_MAX_LEN {
-        return Err(format!("index name too long: {} > {} chars", path.len(), PATH_MAX_LEN));
+    if name.len() > NAME_MAX_LEN {
+        return Err(format!("index name too long: {} > {} chars", name.len(), NAME_MAX_LEN));
     }
-    if !path.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
-        return Err(format!("index name must match [a-zA-Z0-9_-]+: {:?}", path));
+    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err(format!("index name must match [a-zA-Z0-9_-]+: {:?}", name));
     }
     Ok(())
 }
@@ -223,16 +230,15 @@ mod tests {
     #[test]
     fn test_index_config_default() {
         let config = IndexConfig::default();
-        assert!(matches!(config.tokenizer, TokenizerType::Unicode));
+        assert!(matches!(config.tokenizer, TokenizerType::Jieba));
         assert!(config.stemmer_language.is_none());
+        assert!(matches!(config.stop_words_preset, StopWordsPreset::Auto));
         assert!(config.stop_words.is_none());
         assert!(config.lowercase);
         assert_eq!(config.vector_dimensions, 768);
         assert!(matches!(config.vector_similarity, Similarity::Cosine));
         assert!(matches!(config.clustering, ClusteringConfig::Auto));
         assert!(matches!(config.quantization, QuantType::SqI8));
-        assert_eq!(config.posting_cache_size_mb, 256);
-        assert_eq!(config.cluster_cache_size_mb, 512);
     }
 
     #[test]
@@ -241,7 +247,7 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: IndexConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.vector_dimensions, config.vector_dimensions);
-        assert!(matches!(parsed.tokenizer, TokenizerType::Unicode));
+        assert!(matches!(parsed.tokenizer, TokenizerType::Jieba));
     }
 
     #[test]
@@ -265,40 +271,38 @@ mod tests {
 
     #[test]
     fn test_make_key() {
-        let key = make_key(&[PREFIX_META, b"index1", b":config"]);
-        assert_eq!(key, b"m:index1:config");
-
-        let key = make_key(&[PREFIX_VEC, b"123"]);
-        assert_eq!(key, b"v:123");
+        let key = make_key(&[b"medoid:", &42u32.to_le_bytes()]);
+        assert!(key.starts_with(b"medoid:"));
+        assert_eq!(&key[7..], &42u32.to_le_bytes());
     }
 
     #[test]
-    fn test_validate_path_accepts_valid() {
-        assert!(validate_path("blog").is_ok());
-        assert!(validate_path("shop").is_ok());
-        assert!(validate_path("a").is_ok());
-        assert!(validate_path("foo_bar-baz123").is_ok());
-        assert!(validate_path("__indexes__").is_ok());
-        assert!(validate_path(&"a".repeat(128)).is_ok());
+    fn test_validate_name_accepts_valid() {
+        assert!(validate_name("blog").is_ok());
+        assert!(validate_name("shop").is_ok());
+        assert!(validate_name("a").is_ok());
+        assert!(validate_name("foo_bar-baz123").is_ok());
+        assert!(validate_name("__indexes__").is_ok());
+        assert!(validate_name(&"a".repeat(128)).is_ok());
     }
 
     #[test]
-    fn test_validate_path_rejects_empty() {
-        assert!(validate_path("").is_err());
+    fn test_validate_name_rejects_empty() {
+        assert!(validate_name("").is_err());
     }
 
     #[test]
-    fn test_validate_path_rejects_too_long() {
-        assert!(validate_path(&"a".repeat(129)).is_err());
+    fn test_validate_name_rejects_too_long() {
+        assert!(validate_name(&"a".repeat(129)).is_err());
     }
 
     #[test]
-    fn test_validate_path_rejects_bad_chars() {
-        assert!(validate_path("foo/bar").is_err());
-        assert!(validate_path("foo:bar").is_err());
-        assert!(validate_path("foo bar").is_err());
-        assert!(validate_path("foo.bar").is_err());
-        assert!(validate_path("foo@bar").is_err());
-        assert!(validate_path("föo").is_err());
+    fn test_validate_name_rejects_bad_chars() {
+        assert!(validate_name("foo/bar").is_err());
+        assert!(validate_name("foo:bar").is_err());
+        assert!(validate_name("foo bar").is_err());
+        assert!(validate_name("foo.bar").is_err());
+        assert!(validate_name("foo@bar").is_err());
+        assert!(validate_name("föo").is_err());
     }
 }

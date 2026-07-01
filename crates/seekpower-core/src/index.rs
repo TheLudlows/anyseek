@@ -1,131 +1,16 @@
 use ahash::AHashSet;
-use seekpower_schema::{IndexConfig, IndexStats, SchemaField, SchemaMap, validate_path};
+use seekpower_schema::{IndexConfig, IndexStats, SchemaField, SchemaMap, validate_name, TYPE_META, TYPE_DELL};
 use seekpower_error::{Result, SeekPowerError};
-use seekpower_storage::{Cache, KvStore};
+use seekpower_storage::{KvStore, name_to_id};
 use seekpower_vector::IvfIndex;
 
 use crate::lexical_index::LexicalIndex;
 use crate::search::QueryEngine;
 
-type ReadCache = Cache;
-
-/// Wrapper that prefixes all keys with an index path.
-#[derive(Clone)]
-pub struct PrefixedKvStore {
-    db: KvStore,
-    prefix: Vec<u8>,
-}
-
-impl PrefixedKvStore {
-    pub fn new(db: KvStore, path: &str) -> Result<Self> {
-        validate_path(path).map_err(|e| SeekPowerError::InvalidIndexName(e))?;
-        let mut prefix = Vec::with_capacity(path.len() + 1);
-        prefix.extend_from_slice(path.as_bytes());
-        prefix.push(b':');
-        Ok(Self { db, prefix })
-    }
-
-    fn prefixed_key(&self, key: &[u8]) -> Vec<u8> {
-        let mut result = Vec::with_capacity(self.prefix.len() + key.len());
-        result.extend_from_slice(&self.prefix);
-        result.extend_from_slice(key);
-        result
-    }
-
-    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.db.put(&self.prefixed_key(key), value).await
-    }
-
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.db.get(&self.prefixed_key(key)).await
-    }
-
-    pub async fn delete(&self, key: &[u8]) -> Result<()> {
-        self.db.delete(&self.prefixed_key(key)).await
-    }
-
-    pub async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let full_prefix = self.prefixed_key(prefix);
-        let results = self.db.scan_prefix(&full_prefix).await?;
-        // Strip the view prefix from returned keys
-        let prefix_len = self.prefix.len();
-        Ok(results.into_iter()
-            .filter_map(|(k, v)| {
-                if k.len() >= prefix_len {
-                    Some((k[prefix_len..].to_vec(), v))
-                } else {
-                    None
-                }
-            })
-            .collect())
-    }
-
-    pub async fn scan_all(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        self.scan_prefix(b"").await
-    }
-
-    pub async fn put_serialized<T: serde::Serialize>(&self, key: &[u8], value: &T) -> Result<()> {
-        let bytes = serde_json::to_vec(value)
-            .map_err(|e| SeekPowerError::StorageError(format!("Serialization failed: {}", e)))?;
-        self.put(key, &bytes).await
-    }
-
-    pub async fn get_deserialized<T: serde::de::DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>> {
-        match self.get(key).await? {
-            Some(bytes) => {
-                let value = serde_json::from_slice(&bytes).map_err(|e| {
-                    SeekPowerError::StorageError(format!("Deserialization failed: {}", e))
-                })?;
-                Ok(Some(value))
-            }
-            None => Ok(None),
-        }
-    }
-
-    pub async fn begin_transaction(&self) -> Result<PrefixedTransaction> {
-        let txn = self.db.begin_transaction().await?;
-        Ok(PrefixedTransaction { txn, prefix: self.prefix.clone() })
-    }
-
-    pub fn raw_db(&self) -> KvStore {
-        self.db.clone()
-    }
-}
-
-/// Transaction wrapper that prefixes all keys.
-pub struct PrefixedTransaction {
-    txn: seekpower_storage::Transaction,
-    prefix: Vec<u8>,
-}
-
-impl PrefixedTransaction {
-    fn prefixed_key(&self, key: &[u8]) -> Vec<u8> {
-        let mut result = Vec::with_capacity(self.prefix.len() + key.len());
-        result.extend_from_slice(&self.prefix);
-        result.extend_from_slice(key);
-        result
-    }
-
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.txn.put(&self.prefixed_key(key), value)
-    }
-
-    pub fn delete(&self, key: &[u8]) -> Result<()> {
-        self.txn.delete(&self.prefixed_key(key))
-    }
-
-    pub async fn commit(self) -> Result<()> {
-        self.txn.commit().await
-    }
-
-    pub fn rollback(self) -> Result<()> {
-        self.txn.rollback()
-    }
-}
-
 pub struct Index {
-    pub db: PrefixedKvStore,
-    pub path: String,
+    db: KvStore,
+    pub index_id: u32,
+    pub name: String,
     pub schema: SchemaMap,
     pub field_names: Vec<String>,
     pub config: IndexConfig,
@@ -137,23 +22,32 @@ pub struct Index {
     pub delete_set: tokio::sync::RwLock<AHashSet<u64>>,
 }
 
+impl Index {
+    /// Access the underlying KvStore for this index.
+    pub fn db(&self) -> &KvStore {
+        &self.db
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Index lifecycle management
 // ---------------------------------------------------------------------------
 
 pub async fn create_index(
     shared_db: &KvStore,
-    path: &str,
+    name: &str,
     config: IndexConfig,
     schema_fields: Vec<SchemaField>,
 ) -> Result<Index> {
-    let db = PrefixedKvStore::new(shared_db.clone(), path)?;
-    create_index_with_db(db, path, config, schema_fields).await
+    validate_name(name).map_err(|e| SeekPowerError::StorageError(format!("Invalid index name: {}", e)))?;
+    let index_id = name_to_id(name);
+    create_index_with_id(shared_db.clone(), index_id, name, config, schema_fields).await
 }
 
-pub async fn create_index_with_db(
-    db: PrefixedKvStore,
-    path: &str,
+pub async fn create_index_with_id(
+    db: KvStore,
+    index_id: u32,
+    name: &str,
     config: IndexConfig,
     schema_fields: Vec<SchemaField>,
 ) -> Result<Index> {
@@ -164,21 +58,19 @@ pub async fn create_index_with_db(
         field_names.push(field.field.clone());
     }
 
-    db.put_serialized(b"m:schema", &schema).await?;
-    db.put_serialized(b"m:config", &config).await?;
-    db.put_serialized(b"m:stats", &IndexStats::default()).await?;
-    db.put_serialized(b"m:fields", &field_names).await?;
-
-    let cache = ReadCache::new((config.posting_cache_size_mb + config.cluster_cache_size_mb) * 1024 * 1024);
-    let raw_db = db.raw_db();
-    let vector_index = IvfIndex::new(raw_db.clone(), config.clone());
+    db.prefixed_put_serialized(index_id, TYPE_META, b"schema", &schema).await?;
+    db.prefixed_put_serialized(index_id, TYPE_META, b"config", &config).await?;
+    db.prefixed_put_serialized(index_id, TYPE_META, b"stats", &IndexStats::default()).await?;
+    db.prefixed_put_serialized(index_id, TYPE_META, b"fields", &field_names).await?;
+    let vector_index = IvfIndex::new(db.clone(), index_id, config.clone());
     let lexical_index = LexicalIndex::new(
-        db.clone(), config.clone(), schema.clone(), field_names.clone(), cache, AHashSet::new(),
+        db.clone(), index_id, config.clone(), schema.clone(), field_names.clone(),
     );
 
     Ok(Index {
         db,
-        path: path.to_string(),
+        index_id,
+        name: name.to_string(),
         schema,
         field_names,
         config,
@@ -191,53 +83,52 @@ pub async fn create_index_with_db(
     })
 }
 
-pub async fn open_index(shared_db: &KvStore, path: &str) -> Result<Index> {
-    let db = PrefixedKvStore::new(shared_db.clone(), path)?;
-    open_index_with_db(db, path).await
+pub async fn open_index(shared_db: &KvStore, name: &str) -> Result<Index> {
+    validate_name(name).map_err(|e| SeekPowerError::InvalidIndexName(e))?;
+    let index_id = name_to_id(name);
+    open_index_with_id(shared_db.clone(), index_id, name).await
 }
 
-pub async fn open_index_with_db(db: PrefixedKvStore, path: &str) -> Result<Index> {
+pub async fn open_index_with_id(db: KvStore, index_id: u32, name: &str) -> Result<Index> {
     let schema: SchemaMap = db
-        .get_deserialized(b"m:schema")
+        .prefixed_get_deserialized(index_id, TYPE_META, b"schema")
         .await?
-        .ok_or_else(|| SeekPowerError::IndexNotFound(format!("schema not found for index '{}'", path)))?;
+        .ok_or_else(|| SeekPowerError::IndexNotFound(format!("schema not found for index '{}'", name)))?;
 
     let config: IndexConfig = db
-        .get_deserialized(b"m:config")
+        .prefixed_get_deserialized(index_id, TYPE_META, b"config")
         .await?
-        .ok_or_else(|| SeekPowerError::IndexNotFound(format!("config not found for index '{}'", path)))?;
+        .ok_or_else(|| SeekPowerError::IndexNotFound(format!("config not found for index '{}'", name)))?;
 
     let stats: IndexStats = db
-        .get_deserialized(b"m:stats")
+        .prefixed_get_deserialized(index_id, TYPE_META, b"stats")
         .await?
         .unwrap_or_default();
 
     let field_names: Vec<String> = db
-        .get_deserialized(b"m:fields")
+        .prefixed_get_deserialized(index_id, TYPE_META, b"fields")
         .await?
         .unwrap_or_else(|| schema.keys().cloned().collect());
 
     let mut delete_set = AHashSet::new();
-    let dell_entries = db.scan_prefix(b"l:").await?;
+    let dell_entries = db.prefixed_scan_prefix(index_id, TYPE_DELL, b"").await?;
     for (key_bytes, _) in dell_entries {
-        let suffix = &key_bytes[2..];
-        if suffix.len() == 8 {
-            let bytes: [u8; 8] = suffix.try_into().unwrap();
+        if key_bytes.len() == 8 {
+            let bytes: [u8; 8] = key_bytes.try_into().unwrap();
             delete_set.insert(u64::from_le_bytes(bytes));
         }
     }
 
-    let cache = ReadCache::new((config.posting_cache_size_mb + config.cluster_cache_size_mb) * 1024 * 1024);
-    let raw_db = db.raw_db();
-    let vector_index = IvfIndex::new(raw_db.clone(), config.clone());
+    let vector_index = IvfIndex::new(db.clone(), index_id, config.clone());
     let lexical_index = LexicalIndex::new(
-        db.clone(), config.clone(), schema.clone(), field_names.clone(), cache, delete_set.clone(),
+        db.clone(), index_id, config.clone(), schema.clone(), field_names.clone(),
     );
     let next_doc_id = stats.doc_count;
 
     Ok(Index {
         db,
-        path: path.to_string(),
+        index_id,
+        name: name.to_string(),
         schema,
         field_names,
         config,
@@ -251,18 +142,15 @@ pub async fn open_index_with_db(db: PrefixedKvStore, path: &str) -> Result<Index
 }
 
 pub async fn close_index(index: &Index) -> Result<()> {
-    index.db.raw_db().close().await
+    index.db().close().await
 }
 
-pub async fn delete_index(shared_db: &KvStore, path: &str) -> Result<()> {
-    validate_path(path).map_err(|e| SeekPowerError::InvalidIndexName(e))?;
-    let prefixed = PrefixedKvStore::new(shared_db.clone(), path)?;
-    let entries = prefixed.scan_all().await?;
-    for (key, _) in entries {
-        prefixed.delete(&key).await?;
-    }
+pub async fn delete_index(shared_db: &KvStore, name: &str) -> Result<()> {
+    validate_name(name).map_err(|e| SeekPowerError::InvalidIndexName(e))?;
+    let index_id = name_to_id(name);
+    shared_db.prefixed_delete_all(index_id).await?;
     // Remove from index registry
-    shared_db.delete(format!("__indexes__:{}", path).as_bytes()).await?;
+    shared_db.delete(format!("__indexes__:{}", name).as_bytes()).await?;
     Ok(())
 }
 
@@ -279,20 +167,15 @@ mod tests {
         vec![
             SchemaField::text("title"),
             SchemaField::text("body").with_boost(0.5).with_store(true),
-            SchemaField::vector("embedding"),
         ]
-    }
-
-    fn test_config() -> IndexConfig {
-        IndexConfig { vector_dimensions: 4, ..IndexConfig::default() }
     }
 
     #[tokio::test]
     async fn test_create_and_close_index() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let shared_db = KvStore::open("test-create-close", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
-        assert_eq!(idx.schema.len(), 3);
+        let idx = create_index(&shared_db, "test", IndexConfig::default(), test_schema()).await.unwrap();
+        assert_eq!(idx.schema.len(), 2);
         shared_db.close().await.unwrap();
     }
 
@@ -301,8 +184,8 @@ mod tests {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let shared_db = KvStore::open("test-two-idx", store).await.unwrap();
 
-        let a = create_index(&shared_db, "a", test_config(), test_schema()).await.unwrap();
-        let b = create_index(&shared_db, "b", test_config(), test_schema()).await.unwrap();
+        let a = create_index(&shared_db, "a", IndexConfig::default(), test_schema()).await.unwrap();
+        let b = create_index(&shared_db, "b", IndexConfig::default(), test_schema()).await.unwrap();
 
         let mut doc = std::collections::HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("hello"));
@@ -312,10 +195,10 @@ mod tests {
         crate::commit::commit(&b).await.unwrap();
 
         // Verify indexes are isolated
-        let raw_a = PrefixedKvStore::new(shared_db.clone(), "a").unwrap();
-        let raw_b = PrefixedKvStore::new(shared_db.clone(), "b").unwrap();
-        assert!(!raw_a.scan_prefix(b"m:").await.unwrap().is_empty());
-        assert!(!raw_b.scan_prefix(b"m:").await.unwrap().is_empty());
+        let a_entries = shared_db.prefixed_scan_all(a.index_id, TYPE_META).await.unwrap();
+        let b_entries = shared_db.prefixed_scan_all(b.index_id, TYPE_META).await.unwrap();
+        assert!(!a_entries.is_empty());
+        assert!(!b_entries.is_empty());
 
         shared_db.close().await.unwrap();
     }
@@ -324,15 +207,18 @@ mod tests {
     async fn test_delete_index_removes_all_keys() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let shared_db = KvStore::open("test-delete-idx", store).await.unwrap();
-        let idx = create_index(&shared_db, "doomed", test_config(), test_schema()).await.unwrap();
+        let idx = create_index(&shared_db, "doomed", IndexConfig::default(), test_schema()).await.unwrap();
         let mut doc = std::collections::HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("x"));
         crate::document::index_document(&idx, doc).await.unwrap();
         crate::commit::commit(&idx).await.unwrap();
 
-        assert!(!PrefixedKvStore::new(shared_db.clone(), "doomed").unwrap().scan_all().await.unwrap().is_empty());
+        let index_prefix = seekpower_storage::encode_index_prefix(idx.index_id);
+        let view_check = shared_db.scan_prefix(&index_prefix).await.unwrap();
+        assert!(!view_check.is_empty());
         delete_index(&shared_db, "doomed").await.unwrap();
-        assert!(PrefixedKvStore::new(shared_db.clone(), "doomed").unwrap().scan_all().await.unwrap().is_empty());
+        let view_check2 = shared_db.scan_prefix(&index_prefix).await.unwrap();
+        assert!(view_check2.is_empty());
         shared_db.close().await.unwrap();
     }
 

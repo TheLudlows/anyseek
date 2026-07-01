@@ -32,7 +32,7 @@ pub trait VectorIndex: Send + Sync {
 
 | Method | Effect |
 |---|---|
-| `search` | Synchronous top-k search; consults in-memory buffer and the `ReadCache` of cluster blobs. |
+| `search` | Synchronous top-k search; consults in-memory buffer and KvStore for cluster data. |
 | `add_vector` | Pushes a `ClusterVector` into the in-memory write buffer (non-blocking). |
 | `flush` | Async; commits the buffer to SlateDB via `store_meta` / `store_medoid` / `store_cluster`. |
 | `n_clusters` | Returns `0` for flat indexes, otherwise the persisted `IvfMeta::n_clusters`. |
@@ -60,8 +60,9 @@ pub struct VectorSearchResult {
 
 ## Persisted types
 
-All three live under the `PREFIX_VEC` (`v:`) namespace, addressed by the index
-`path` (which lets a single SlateDB host many indexes).
+All three live under the `TYPE_VEC` data-type namespace within the index's
+keyspace (isolated by `index_id` + `data_type` prefix in KvStore). A single
+SlateDB instance can host many indexes without key collisions.
 
 | Type | Storage key | Purpose |
 |---|---|---|
@@ -128,33 +129,35 @@ pub struct QuantizedVectorHeader {
 ```rust
 pub fn new(
     kv: seekpower_storage::KvStore,
-    path: &str,
+    index_id: u32,
     config: seekpower_schema::IndexConfig,
 ) -> Self;
 ```
 
-The constructor seeds a `ReadCache` sized from `config.posting_cache_size_mb`
-and `config.cluster_cache_size_mb`.
+The constructor takes a shared `KvStore` and the index's `index_id` (derived
+from the index name via `name_to_id`). All KV operations use `KvStore`'s
+`prefixed_*` methods for automatic key isolation.
 
 ### KV I/O
 
 | Method | Reads / writes |
 |---|---|
-| `load_meta()` | Reads `v:{path}:meta`, refreshes the cached `meta` lock. |
-| `load_medoids()` | Scans `v:{path}:medoid:*`, sorts by `medoid_id`, refreshes the medoids cache. |
-| `load_cluster(id)` | Hits `ReadCache` first, falls back to SlateDB on miss, then warms the cache. |
-| `store_meta(&meta)` | Writes the key and updates the cached `meta`. |
-| `store_medoid(id, &m)` | Writes one medoid row. |
-| `store_cluster(id, &[u8])` | Writes the cluster blob and warms the cache. |
+| `load_meta()` | Reads `v:meta` via `prefixed_get_deserialized`, refreshes the cached `meta` lock. |
+| `load_medoids()` | Scans `v:medoid:*` via `prefixed_scan_prefix`, sorts by `medoid_id`, refreshes the medoids cache. |
+| `load_cluster(id)` | Reads `v:cluster:{id}` via `prefixed_get`. |
+| `store_meta(&meta)` | Writes the key via `prefixed_put_serialized` and updates the cached `meta`. |
+| `store_medoid(id, &m)` | Writes one medoid row via `prefixed_put_serialized`. |
+| `store_cluster(id, &[u8])` | Writes the cluster blob via `prefixed_put`. |
 
 ### In-memory state
 
 | Field | Lock | Notes |
 |---|---|---|
+| `kv` | — | Shared `KvStore` (clone is cheap, backed by `Arc`). |
+| `index_id` | — | u32 prefix for key isolation. |
 | `meta` | `std::sync::RwLock<Option<IvfMeta>>` | Hydrated lazily by `load_meta`. |
 | `medoids` | `std::sync::RwLock<Vec<MedoidData>>` | Hydrated lazily by `load_medoids`. |
 | `buffer` | `tokio::sync::RwLock<Vec<ClusterVector>>` | Drain target of `add_vector`. |
-| `cache` | `ReadCache` | LRU over cluster blobs (the hot path of search). |
 
 ### `flush` strategy
 
@@ -181,9 +184,7 @@ current state (spec §5.3):
    `All` returns every index; `Nprobe(n)` returns the top-`n`; the threshold
    variant walks the sorted list and stops once similarity drops below the
    threshold.
-3. For each selected cluster id, ask `cache.get_cluster(&key)` (which only
-   hits what `load_cluster` previously warmed — synchronous `search` cannot
-   `.await` the KV store).
+3. For each selected cluster id, load via `self.kv.prefixed_get(self.index_id, &key)`.
 4. Dequantize every vector in the cluster and compute the configured
    `Similarity` against the query.
 5. Also score every vector still in the in-memory buffer (using
@@ -196,18 +197,11 @@ blob, then truncate to `k`.
 
 ## Verification
 
-Read `D:\code\seekpower\crates\seekpower-vector\src\lib.rs` end-to-end:
+All KV operations use `KvStore::prefixed_*` methods with `self.index_id`,
+ensuring automatic key isolation. Integration tests create `IvfIndex` via:
 
-- `ClusterHeader` / `QuantizedVectorHeader` encode/decode and round-trip tests.
-- `AnnMode` selection tests (`All`, `Nprobe`, `SimilarityThreshold`, empty
-  medoids, `Nprobe(0)`).
-- Cluster blob serialize/deserialize round-trip.
-- `Dequantize` tests with and without a non-zero `zero_point`.
-- KV integration: `store_meta` / `load_meta`, `store_medoid` / `load_medoids`,
-  `store_cluster` / `load_cluster`, and the "not found" error path.
-- End-to-end `flush` + `search`: flat mode with 50 vectors, clustered mode
-  with two well-separated groups of 600, delete-set respect, and incremental
-  flush that preserves a prior 500-vector baseline.
-
-The sync `search` only sees clusters that have been pre-warmed into the cache;
-the integration tests exercise that contract explicitly.
+```rust
+let kv = KvStore::open("test_vec", os).await.unwrap();
+let index_id = name_to_id("test");
+IvfIndex::new(kv, index_id, default_config())
+```

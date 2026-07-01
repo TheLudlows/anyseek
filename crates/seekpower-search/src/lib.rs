@@ -219,7 +219,7 @@ impl QueryEngine {
     }
 
     /// Execute a vector search using the provided index.
-    pub fn search_vector<V: seekpower_vector::VectorIndex>(
+    pub async fn search_vector<V: seekpower_vector::VectorIndex>(
         &self,
         vector_index: &V,
         query: &[f32],
@@ -227,7 +227,7 @@ impl QueryEngine {
         ann_mode: &seekpower_vector::AnnMode,
         delete_set: &std::collections::HashSet<u64>,
     ) -> Vec<seekpower_ranking::SearchResult> {
-        vector_index.search(query, k, ann_mode, delete_set)
+        vector_index.search(query, k, ann_mode, delete_set).await
             .into_iter()
             .map(|r| seekpower_ranking::SearchResult {
                 doc_id: r.doc_id,

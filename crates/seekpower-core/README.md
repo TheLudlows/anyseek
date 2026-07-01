@@ -47,7 +47,7 @@ let config = IndexConfig {
 let index = create_index(&shared_db, "articles", config, schema).await?;
 ```
 
-`create_index(shared_db, path, config, schema_fields)` 会在 SlateDB 中写入以下元数据：
+`create_index(shared_db, name, config, schema_fields)` 会在 SlateDB 中写入以下元数据：
 - `m:schema` - 字段定义
 - `m:config` - 索引配置
 - `m:stats` - 索引统计信息
@@ -71,7 +71,7 @@ use seekpower_core::close_index;
 close_index(&index).await?;
 ```
 
-注意：只能关闭原始（未加前缀）的 `KvStore`，派生的索引视图不能直接关闭。
+注意：关闭底层 `KvStore` 实例。
 
 ### 删除索引
 
@@ -143,10 +143,9 @@ commit(&index).await?;
 1. **交换缓冲区**: 使用 `std::mem::take` 将当前 `WriteBuffer` 替换为空缓冲区，新写入不会阻塞
 2. **写入删除标记**: 在 `l:` 前缀下写入删除标记
 3. **合并 Posting List**: 对每个 term，执行 read-modify-write：
-   - 从缓存或 SlateDB 读取现有 posting list
+   - 从 SlateDB 读取现有 posting list
    - 使用 `merge_postings` 合并新 entries
    - 重新编码并写回
-   - 更新 `ReadCache`
 4. **写入文档长度**: 在 `s:` 前缀下写入文档长度（u8 压缩值）
 5. **写入文档原文**: 在 `d:` 前缀下写入压缩后的文档
 6. **刷新向量索引**: 调用 `VectorIndex::flush()` 将新向量合并到 IVF 索引
@@ -247,17 +246,17 @@ score_hybrid = w_lexical / (K + rank_lexical) + w_vector / (K + rank_vector)
 
 ```rust
 pub struct Index {
-    pub db: KvStore,                                    // SlateDB 视图（带前缀）
-    pub path: String,                                   // 索引路径/名称
+    pub db: KvStore,                                    // 共享 SlateDB 实例
+    pub index_id: u32,                                  // 索引前缀 ID（name 哈希）
+    pub name: String,                                   // 索引名称
     pub schema: SchemaMap,                              // 字段定义映射
     pub field_names: Vec<String>,                       // 字段顺序（index = field_id）
     pub config: IndexConfig,                            // 索引配置
     pub stats: tokio::sync::RwLock<IndexStats>,         // 索引统计信息
     pub next_doc_id: std::sync::atomic::AtomicU64,      // 文档 ID 计数器
-    pub buffer: tokio::sync::RwLock<WriteBuffer>,       // 写缓冲区
+    pub lexical_index: LexicalIndex,                    // 词法索引
     pub vector_index: IvfIndex,                         // 向量索引
     pub query_engine: QueryEngine,                      // 查询引擎
-    pub cache: ReadCache,                               // 读缓存
     pub delete_set: tokio::sync::RwLock<AHashSet<u64>>, // 删除集合
 }
 ```
@@ -284,21 +283,23 @@ pub struct WriteBuffer {
 
 ## KV 存储布局
 
-索引数据在 SlateDB 中的逻辑键格式：
+索引数据在 SlateDB 中的物理键格式：`index_id (u32 BE) ‖ data_type (u8) ‖ business_key`
 
-| 前缀 | 键格式 | 值类型 |
-|------|--------|--------|
-| `m:` | `m:schema` | Schema JSON |
-| `m:` | `m:config` | IndexConfig JSON |
-| `m:` | `m:stats` | IndexStats JSON |
-| `m:` | `m:fields` | Vec<String> JSON |
-| `i:` | `i:{term_hash}` | PostingListBlock (binary) |
-| `v:` | `v:meta` | IvfMeta JSON |
-| `v:` | `v:medoid:{id}` | MedoidData (binary) |
-| `v:` | `v:cluster:{id}` | ClusterData (binary) |
-| `d:` | `d:{doc_id}` | 压缩文档 JSON |
-| `l:` | `l:{doc_id}` | 删除标记 (tombstone) |
-| `s:` | `s:doc_len:{doc_id}:{field_id}` | 文档长度 (u8) |
+通过 `KvStore` 的 `prefixed_*` 方法访问时，`index_id` + `data_type` 前缀自动附加/剥离，调用方只需使用逻辑业务键：
+
+| data_type | 业务键 | 值类型 |
+|-----------|--------|--------|
+| `TYPE_META (0)` | `schema` | Schema JSON |
+| `TYPE_META (0)` | `config` | IndexConfig JSON |
+| `TYPE_META (0)` | `stats` | IndexStats JSON |
+| `TYPE_META (0)` | `fields` | Vec<String> JSON |
+| `TYPE_IDX (2)` | `term_hash (u64 LE)` | PostingListBlock (binary) |
+| `TYPE_VEC (3)` | `meta` | IvfMeta JSON |
+| `TYPE_VEC (3)` | `medoid:{id}` | MedoidData (binary) |
+| `TYPE_VEC (3)` | `cluster:{id}` | ClusterData (binary) |
+| `TYPE_DOC (1)` | `doc_id (u64 LE)` | 压缩文档 JSON |
+| `TYPE_DELL (4)` | `doc_id (u64 LE)` | 删除标记 (tombstone) |
+| `TYPE_LEN (5)` | `doc_id (u64 LE) ‖ field_id (u16 LE)` | 文档长度 (u8) |
 
 `term_hash` 计算方式：
 ```rust
@@ -395,7 +396,6 @@ async fn main() -> Result<()> {
 ## 性能考虑
 
 - **批量索引**: 多次调用 `index_document` 后统一 `commit`，减少 read-modify-write 次数
-- **缓存配置**: 通过 `IndexConfig` 的 `posting_cache_size_mb` 和 `cluster_cache_size_mb` 调整缓存大小
 - **字段权重**: 合理设置 `boost` 值，标题等关键字段可设置较高权重
 - **向量搜索**: 使用 `AnnMode::Nprobe` 控制搜索精度和延迟的权衡
 
