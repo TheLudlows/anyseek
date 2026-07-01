@@ -110,6 +110,12 @@ async fn main() {
     let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
     let db = KvStore::open(&config.storage.path, store).await.unwrap();
     let state = Arc::new(seekpower_server::state::State::new(db));
+
+    // Initialize the next_index_id counter by scanning existing indexes
+    if let Err(e) = state.init_from_registry().await {
+        tracing::warn!("Failed to initialize index_id counter: {}", e);
+    }
+
     let app = create_app(state);
 
     tracing::info!("SeekPower server listening on {}", addr);

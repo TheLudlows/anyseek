@@ -19,7 +19,7 @@ axum = { version = "0.7", features = ["macros"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-object_store = "0.12"
+object_store = { workspace = true }
 anyhow = "1"
 thiserror = { workspace = true }
 tracing = "0.1"

@@ -9,7 +9,7 @@ pub mod write_buffer;
 // Re-exports for backward compatibility
 pub use commit::commit;
 pub use document::{delete_document, get_document, index_document};
-pub use index::{Index, close_index, create_index, create_index_with_id, delete_index, open_index, open_index_with_id};
+pub use index::{Index, close_index, create_index_with_id, delete_index_with_id, open_index_with_id};
 pub use lexical_index::LexicalIndex;
 pub use search::search;
 pub use seekpower::SeekPower;

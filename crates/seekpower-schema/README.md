@@ -34,18 +34,18 @@ pub struct SchemaField {
 ### Constructors and builders
 
 ```rust
-let title   = SchemaField::text("title");        // store=true, index_lexical=true
-let embed   = SchemaField::vector("embedding");   // index_vector=true
+let title   = SchemaField::text("title");                     // store=true, index_lexical=true
+let embed   = SchemaField::vector("embedding", 768);           // index_vector=true, 768 dims
 
 let boosted = SchemaField::text("title").with_boost(2.5);
-let stored  = SchemaField::vector("embedding").with_store(true);
+let stored  = SchemaField::vector("embedding", 384).with_store(true);
 ```
 
 `text(name)` produces a field with `store=true`, `index_lexical=true`,
 `index_vector=false`, `field_type=Text`, `boost=1.0`.
 
-`vector(name)` produces a field with `store=false`, `index_lexical=false`,
-`index_vector=true`, `field_type=Vector`, `boost=1.0`.
+`vector(name, dimensions)` produces a field with `store=false`, `index_lexical=false`,
+`index_vector=true`, `field_type=Vector { dimensions }`, `boost=1.0`.
 
 `with_boost(f32)` and `with_store(bool)` return `self` and are chainable.
 

@@ -50,6 +50,8 @@ pub struct SchemaFieldSpec {
     pub index_vector: Option<bool>,
     #[serde(default)]
     pub boost: Option<f32>,
+    #[serde(default)]
+    pub vector_dimensions: Option<u32>,
 }
 
 impl SchemaFieldSpec {
@@ -60,7 +62,10 @@ impl SchemaFieldSpec {
             .map(|s| s.to_ascii_lowercase())
             .as_deref()
         {
-            Some("vector") => SchemaField::vector(&self.field),
+            Some("vector") => {
+                let dims = self.vector_dimensions.unwrap_or(768); // Default to 768 if not specified
+                SchemaField::vector(&self.field, dims)
+            }
             _ => SchemaField::text(&self.field),
         };
         if let Some(s) = self.store {

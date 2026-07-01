@@ -8,8 +8,80 @@ use object_store::ObjectStore;
 use seekpower_error::{Result, SeekPowerError};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use slatedb::IsolationLevel;
+use slatedb::{bytes::Bytes, config::WriteOptions, IsolationLevel, WriteBatch};
+
+pub use seekpower_schema::{TYPE_DELL, TYPE_DOC, TYPE_DICT, TYPE_IDX, TYPE_LEN, TYPE_META, TYPE_VEC};
 use std::sync::Arc;
+
+/// Term identifier type (u32 can store ~4.3 billion unique terms)
+pub type TermId = u32;
+
+/// Maximum number of unique terms allowed per index
+pub const MAX_TERM_ID: TermId = TermId::MAX;
+
+/// Term dictionary for bidirectional term <-> term_id mapping.
+/// Used to replace term hash with a compact 32-bit identifier while maintaining
+/// the ability to recover the original term for highlighting, verification, etc.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TermDictionary {
+    /// term -> term_id mapping
+    pub term_to_id: ahash::AHashMap<Vec<u8>, TermId>,
+    /// term_id -> term mapping
+    pub id_to_term: ahash::AHashMap<TermId, Vec<u8>>,
+    /// Next term_id to allocate
+    pub next_id: TermId,
+}
+
+impl Default for TermDictionary {
+    fn default() -> Self {
+        Self {
+            term_to_id: ahash::AHashMap::new(),
+            id_to_term: ahash::AHashMap::new(),
+            next_id: 0,
+        }
+    }
+}
+
+impl TermDictionary {
+    /// Get term_id for a term, creating a new mapping if not exists.
+    pub fn get_or_create(&mut self, term: &[u8]) -> Result<TermId> {
+        if let Some(&id) = self.term_to_id.get(term) {
+            return Ok(id);
+        }
+
+        if self.next_id >= MAX_TERM_ID {
+            return Err(SeekPowerError::StorageError(
+                "Term dictionary full: maximum number of unique terms reached".to_string(),
+            ));
+        }
+
+        let id = self.next_id;
+        self.next_id += 1;
+        self.term_to_id.insert(term.to_vec(), id);
+        self.id_to_term.insert(id, term.to_vec());
+        Ok(id)
+    }
+
+    /// Get term_id for a term if exists, returns None otherwise.
+    pub fn get_id(&self, term: &[u8]) -> Option<TermId> {
+        self.term_to_id.get(term).copied()
+    }
+
+    /// Get term for a term_id if exists, returns None otherwise.
+    pub fn get_term(&self, term_id: TermId) -> Option<&[u8]> {
+        self.id_to_term.get(&term_id).map(|v| v.as_slice())
+    }
+
+    /// Return the number of unique terms in the dictionary.
+    pub fn len(&self) -> usize {
+        self.term_to_id.len()
+    }
+
+    /// Check if the dictionary is empty.
+    pub fn is_empty(&self) -> bool {
+        self.term_to_id.is_empty()
+    }
+}
 
 /// Thin wrapper around SlateDB providing CRUD + scan + transactions.
 ///
@@ -212,12 +284,36 @@ impl KvStore {
         self.get_deserialized(&full_key).await
     }
 
+    /// Batch put multiple key-value pairs with index_id + data_type prefix atomically.
+    /// All writes in the batch are applied atomically to the database.
+    pub async fn prefixed_batch_put(
+        &self,
+        index_id: u32,
+        data_type: u8,
+        writes: &[(&[u8], Vec<u8>)],
+    ) -> Result<()> {
+        let mut batch = WriteBatch::new();
+        for (key, value) in writes {
+            let full_key = encode_key(index_id, data_type, key);
+            batch.put_bytes(Bytes::from(full_key), Bytes::from(value.clone()));
+        }
+        self.db
+            .write_with_options(batch, &WriteOptions::default())
+            .await
+            .map_err(|e| SeekPowerError::StorageError(format!("Batch write failed: {}", e)))?;
+        Ok(())
+    }
+
     /// Delete all keys for a given index_id (across all data_types).
+    /// Since data_type comes first, we need to scan each data_type separately.
     pub async fn prefixed_delete_all(&self, index_id: u32) -> Result<()> {
-        let index_prefix = encode_index_prefix(index_id);
-        let results = self.scan_prefix(&index_prefix).await?;
-        for (key, _) in results {
-            self.delete(&key).await?;
+        let data_types = [TYPE_META, TYPE_DOC, TYPE_IDX, TYPE_VEC, TYPE_DELL, TYPE_LEN];
+        for data_type in data_types {
+            let prefix = encode_prefix(index_id, data_type);
+            let results = self.scan_prefix(&prefix).await?;
+            for (key, _) in results {
+                self.delete(&key).await?;
+            }
         }
         Ok(())
     }
@@ -287,6 +383,28 @@ mod tests {
         store.put(b"other:key4", b"value4").await.unwrap();
         let results = store.scan_prefix(b"prefix:").await.unwrap();
         assert_eq!(results.len(), 3);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_prefixed_batch_put() {
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        let store = KvStore::open("test_batch_db", object_store).await.unwrap();
+        let index_id = 123;
+
+        // Batch write multiple keys
+        store.prefixed_batch_put(index_id, 0, &[
+            (b"key1", b"value1".to_vec()),
+            (b"key2", b"value2".to_vec()),
+            (b"key3", b"value3".to_vec()),
+        ]).await.unwrap();
+
+        // Verify all writes succeeded
+        assert_eq!(store.prefixed_get(index_id, 0, b"key1").await.unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(store.prefixed_get(index_id, 0, b"key2").await.unwrap(), Some(b"value2".to_vec()));
+        assert_eq!(store.prefixed_get(index_id, 0, b"key3").await.unwrap(), Some(b"value3".to_vec()));
+        assert_eq!(store.prefixed_get(index_id, 0, b"key4").await.unwrap(), None);
+
         store.close().await.unwrap();
     }
 

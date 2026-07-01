@@ -32,9 +32,9 @@ let shared_db = seekpower_storage::KvStore::open("my_db", store).await?;
 
 // 定义 schema
 let schema = vec![
-    SchemaField::text("title").with_boost(2.0),  // 标题字段，权重 2.0
-    SchemaField::text("body").with_boost(1.0),   // 正文字段，权重 1.0
-    SchemaField::vector("embedding"),            // 向量字段
+    SchemaField::text("title").with_boost(2.0),          // 标题字段，权重 2.0
+    SchemaField::text("body").with_boost(1.0),           // 正文字段，权重 1.0
+    SchemaField::vector("embedding", 768),               // 向量字段，768 维
 ];
 
 // 配置索引

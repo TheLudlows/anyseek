@@ -1700,30 +1700,6 @@ dependencies = [
 
 [[package]]
 name = "object_store"
-version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c1be0c6c22ec0817cdc77d3842f721a17fd30ab6965001415b5402a74e6b740"
-dependencies = [
- "async-trait",
- "bytes",
- "chrono",
- "futures",
- "http",
- "humantime",
- "itertools 0.14.0",
- "parking_lot",
- "percent-encoding",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
- "walkdir",
- "wasm-bindgen-futures",
- "web-time",
-]
-
-[[package]]
-name = "object_store"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "765784b4390c6bcf80316e5a22f4e3661b639c9d8c83246856643c27d8ce9dbe"
@@ -2433,7 +2409,7 @@ name = "seekpower-core"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "object_store 0.14.0",
+ "object_store",
  "seekpower-error",
  "seekpower-posting",
  "seekpower-quantize",
@@ -2509,7 +2485,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "object_store 0.12.4",
+ "object_store",
  "seekpower-core",
  "seekpower-error",
  "seekpower-schema",
@@ -2532,7 +2508,7 @@ name = "seekpower-storage"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "object_store 0.14.0",
+ "object_store",
  "seekpower-error",
  "seekpower-schema",
  "serde",
@@ -2558,7 +2534,7 @@ name = "seekpower-vector"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "object_store 0.14.0",
+ "object_store",
  "seekpower-error",
  "seekpower-quantize",
  "seekpower-schema",
@@ -2738,7 +2714,7 @@ dependencies = [
  "futures",
  "log",
  "lru",
- "object_store 0.14.0",
+ "object_store",
  "ouroboros",
  "parking_lot",
  "rand 0.9.4",
@@ -2767,7 +2743,7 @@ checksum = "d7696aae130a0a617ec44e7c9e731d6f5408f58d949a91ba5082fcab84a896be"
 dependencies = [
  "chrono",
  "log",
- "object_store 0.14.0",
+ "object_store",
  "rand 0.9.4",
  "rand_xoshiro",
  "serde",
@@ -2786,7 +2762,7 @@ dependencies = [
  "chrono",
  "futures",
  "log",
- "object_store 0.14.0",
+ "object_store",
  "parking_lot",
  "slatedb-common",
  "thiserror 1.0.69",

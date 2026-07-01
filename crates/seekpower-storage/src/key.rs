@@ -8,24 +8,25 @@ pub fn name_to_id(name: &str) -> u32 {
     hasher.finish() as u32
 }
 
-/// Encode a full key: index_id (u32 BE) ‖ data_type (u8) ‖ business_key.
+/// Encode a full key: data_type (u8) ‖ index_id (u32 BE) ‖ business_key.
 pub fn encode_key(index_id: u32, data_type: u8, business_key: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(4 + 1 + business_key.len());
-    key.extend_from_slice(&index_id.to_be_bytes());
+    let mut key = Vec::with_capacity(1 + 4 + business_key.len());
     key.push(data_type);
+    key.extend_from_slice(&index_id.to_be_bytes());
     key.extend_from_slice(business_key);
     key
 }
 
-/// Encode just the prefix: index_id (u32 BE) ‖ data_type (u8).
+/// Encode just the prefix: data_type (u8) ‖ index_id (u32 BE).
 pub fn encode_prefix(index_id: u32, data_type: u8) -> Vec<u8> {
     let mut prefix = Vec::with_capacity(5);
-    prefix.extend_from_slice(&index_id.to_be_bytes());
     prefix.push(data_type);
+    prefix.extend_from_slice(&index_id.to_be_bytes());
     prefix
 }
 
-/// Encode the index_id prefix only (for delete_all which spans all data_types).
+/// Encode the index_id prefix (no data_type) for index-wide operations.
+/// Note: With data_type first, this returns just the index_id, NOT the full prefix.
 pub fn encode_index_prefix(index_id: u32) -> Vec<u8> {
     index_id.to_be_bytes().to_vec()
 }
@@ -42,8 +43,9 @@ mod tests {
 
         let key = encode_key(index_id, data_type, business_key);
 
-        assert_eq!(&key[..4], &index_id.to_be_bytes());
-        assert_eq!(key[4], data_type);
+        // Format: data_type (1B) ‖ index_id (4B BE) ‖ business_key
+        assert_eq!(key[0], data_type);
+        assert_eq!(&key[1..5], &index_id.to_be_bytes());
         assert_eq!(&key[5..], business_key);
     }
 

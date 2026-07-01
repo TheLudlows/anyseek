@@ -2,11 +2,41 @@ use ahash::{AHashMap, AHashSet};
 use seekpower_error::Result;
 use seekpower_posting::{PostingCodec, PostingEntry, PostingListBlock};
 use seekpower_ranking::{compute_idf, Bm25fScorer, ResultType, SearchResult};
-use seekpower_schema::{FieldType, IndexConfig, IndexStats, SchemaMap, TYPE_IDX, TYPE_DELL, TYPE_LEN};
-use seekpower_storage::KvStore;
+use seekpower_schema::{FieldType, IndexConfig, IndexStats, SchemaMap, TYPE_DICT, TYPE_IDX, TYPE_DELL, TYPE_LEN};
+use seekpower_storage::{KvStore, TermDictionary, TermId};
 use seekpower_tokenizer::{TermObject, TokenizerRegistry};
 
 use crate::write_buffer::WriteBuffer;
+
+/// Business key for term dictionary: term_id (u32 LE)
+fn term_dict_key(term_id: TermId) -> Vec<u8> {
+    term_id.to_le_bytes().to_vec()
+}
+
+/// Business key for posting list: term_id (u32 LE)
+fn posting_key(term_id: TermId) -> Vec<u8> {
+    let key = term_id.to_le_bytes();
+    key.to_vec()
+}
+
+/// Key for storing the next_term_id in the dictionary
+const NEXT_TERM_ID_KEY: &[u8] = b"__next_term_id__";
+
+/// Load next_term_id from storage
+async fn load_next_term_id(db: &KvStore, index_id: u32) -> TermId {
+    match db.prefixed_get(index_id, TYPE_DICT, NEXT_TERM_ID_KEY).await {
+        Ok(Some(bytes)) if bytes.len() == 4 => {
+            let arr: [u8; 4] = bytes.try_into().unwrap_or([0u8; 4]);
+            TermId::from_le_bytes(arr)
+        }
+        _ => 0,
+    }
+}
+
+/// Save next_term_id to storage
+async fn save_next_term_id(db: &KvStore, index_id: u32, next_id: TermId) -> Result<()> {
+    db.prefixed_put(index_id, TYPE_DICT, NEXT_TERM_ID_KEY, &next_id.to_le_bytes()).await
+}
 
 pub struct LexicalIndex {
     db: KvStore,
@@ -14,11 +44,47 @@ pub struct LexicalIndex {
     config: IndexConfig,
     schema: SchemaMap,
     field_names: Vec<String>,
+    term_dictionary: tokio::sync::RwLock<TermDictionary>,
     buffer: tokio::sync::RwLock<WriteBuffer>,
     delete_set: tokio::sync::RwLock<AHashSet<u64>>,
 }
 
+/// Load term dictionary from storage.
+/// Scans all TYPE_DICT entries and reconstructs the term <-> term_id mapping.
+/// Uses persisted next_term_id to continue allocation.
+async fn load_term_dictionary(db: &KvStore, index_id: u32) -> Result<TermDictionary> {
+    let mut dict = TermDictionary::default();
+    let entries = db.prefixed_scan_all(index_id, TYPE_DICT).await?;
+
+    // Load persisted next_term_id first
+    dict.next_id = load_next_term_id(db, index_id).await;
+
+    // Key format: term_id (u32 LE) for term entries
+    // Value format: term bytes
+    for (key, term) in entries {
+        // Skip the special next_term_id key
+        if key == NEXT_TERM_ID_KEY {
+            continue;
+        }
+
+        if key.len() == 4 {
+            let term_id_bytes: [u8; 4] = key.as_slice().try_into()
+                .map_err(|_| seekpower_error::SeekPowerError::StorageError(
+                    format!("Invalid term_id key length: {}", key.len())
+                ))?;
+            let term_id = TermId::from_le_bytes(term_id_bytes);
+
+            // Insert mappings
+            dict.term_to_id.insert(term.clone(), term_id);
+            dict.id_to_term.insert(term_id, term);
+        }
+    }
+
+    Ok(dict)
+}
+
 impl LexicalIndex {
+    /// Create a new LexicalIndex with an empty term dictionary.
     pub fn new(
         db: KvStore,
         index_id: u32,
@@ -26,15 +92,38 @@ impl LexicalIndex {
         schema: SchemaMap,
         field_names: Vec<String>,
     ) -> Self {
+        let term_dictionary = tokio::sync::RwLock::new(TermDictionary::default());
         Self {
             db,
             index_id,
             config,
             schema,
             field_names,
+            term_dictionary,
             buffer: tokio::sync::RwLock::new(WriteBuffer::default()),
             delete_set: tokio::sync::RwLock::new(AHashSet::new()),
         }
+    }
+
+    /// Open an existing LexicalIndex, loading the term dictionary from storage.
+    pub async fn open(
+        db: KvStore,
+        index_id: u32,
+        config: IndexConfig,
+        schema: SchemaMap,
+        field_names: Vec<String>,
+    ) -> Result<Self> {
+        let term_dictionary = load_term_dictionary(&db, index_id).await?;
+        Ok(Self {
+            db,
+            index_id,
+            config,
+            schema,
+            field_names,
+            term_dictionary: tokio::sync::RwLock::new(term_dictionary),
+            buffer: tokio::sync::RwLock::new(WriteBuffer::default()),
+            delete_set: tokio::sync::RwLock::new(AHashSet::new()),
+        })
     }
 
     pub fn add_posting(&self, _term_hash: u64, _entry: PostingEntry) {
@@ -48,13 +137,13 @@ impl LexicalIndex {
 
     /// Tokenize a text field and add the resulting postings to the buffer.
     /// Returns the token count for this field.
-    pub fn index_text_field(
+    pub async fn index_text_field(
         &self,
         text: &str,
         field_id: u16,
         doc_id: u64,
         buffer: &mut WriteBuffer,
-    ) -> u16 {
+    ) -> Result<u16> {
         let registry = TokenizerRegistry::global();
         let registry_guard = registry.read().unwrap();
 
@@ -66,7 +155,7 @@ impl LexicalIndex {
         };
 
         if registry_guard.get(tokenizer_name).is_none() {
-            return 0;
+            return Ok(0);
         }
 
         let terms = seekpower_tokenizer::tokenize_index(
@@ -74,8 +163,11 @@ impl LexicalIndex {
         );
 
         let mut token_count: u16 = 0;
+        let mut dict = self.term_dictionary.write().await;
         for term in terms {
-            let entry = buffer.postings.entry(term.key_hash).or_default();
+            let term_id = dict.get_or_create(term.term.as_bytes())
+                .map_err(|e| seekpower_error::SeekPowerError::StorageError(format!("Failed to create term_id: {}", e)))?;
+            let entry = buffer.postings.entry(term_id).or_default();
             entry.push(PostingEntry {
                 doc_id,
                 field_id,
@@ -83,7 +175,7 @@ impl LexicalIndex {
             });
             token_count += term.positions.len() as u16;
         }
-        token_count
+        Ok(token_count)
     }
 
     /// Mark a document as deleted.
@@ -117,14 +209,23 @@ impl LexicalIndex {
     pub async fn flush(&self, old_buffer: &WriteBuffer, stats: &mut IndexStats) -> Result<()> {
         let id = self.index_id;
 
+        // First, flush term dictionary (save any new terms added)
+        // For now, we'll write the dictionary entries individually
+        // TODO: Batch write all dictionary entries
+        let dict = self.term_dictionary.read().await;
+        for (term, term_id) in &dict.term_to_id {
+            let key = term_dict_key(*term_id);
+            self.db.prefixed_put(id, TYPE_DICT, &key, term).await?;
+        }
+
         // Write deletion markers.
         for &doc_id in &old_buffer.deletions {
             self.db.prefixed_put(id, TYPE_DELL, &doc_id.to_le_bytes(), b"1").await?;
         }
 
-        // Write posting lists: read-modify-write.
-        for (&term_hash, new_entries) in &old_buffer.postings {
-            let key = term_hash.to_le_bytes();
+        // Write posting lists by term_id instead of term_hash
+        for (&term_id, new_entries) in &old_buffer.postings {
+            let key = posting_key(term_id);
 
             let existing_block = match self.db.prefixed_get(id, TYPE_IDX, &key).await? {
                 Some(data) => Some(PostingCodec::deserialize(&data)?),
@@ -160,19 +261,23 @@ impl LexicalIndex {
             stats.avg_doc_length = stats.total_doc_length as f32 / stats.doc_count as f32;
         }
 
+        // Persist next_term_id for recovery
+        save_next_term_id(&self.db, id, dict.next_id).await?;
+
         Ok(())
     }
 
-    /// Load a posting list from the KV store.
-    pub async fn load_posting(&self, key: &[u8]) -> Result<Option<PostingListBlock>> {
-        if let Some(data) = self.db.prefixed_get(self.index_id, TYPE_IDX, key).await? {
+    /// Load a posting list from the KV store by term_id.
+    pub async fn load_posting_by_term_id(&self, term_id: TermId) -> Result<Option<PostingListBlock>> {
+        let key = posting_key(term_id);
+        if let Some(data) = self.db.prefixed_get(self.index_id, TYPE_IDX, &key).await? {
             let block = PostingCodec::deserialize(&data)?;
             return Ok(Some(block));
         }
         Ok(None)
     }
 
-    /// Compute key_hash for a term in a specific field.
+    /// Compute key_hash for a term in a specific field (kept for compatibility, but not used with term_id).
     pub fn compute_key_hash(field_id: u16, term: &str) -> u64 {
         use std::hash::Hasher;
         let mut hasher = ahash::AHasher::default();
@@ -199,6 +304,19 @@ impl LexicalIndex {
         if avg < 1.0 { 1.0 } else { avg }
     }
 
+    /// Get term_id for a term, creating a new mapping if not exists.
+    async fn get_term_id(&self, term: &[u8]) -> Result<TermId> {
+        let mut dict = self.term_dictionary.write().await;
+        dict.get_or_create(term)
+            .map_err(|e| seekpower_error::SeekPowerError::StorageError(format!("Failed to create term_id: {}", e)))
+    }
+
+    /// Get term for a term_id if exists.
+    async fn get_term(&self, term_id: TermId) -> Option<Vec<u8>> {
+        let dict = self.term_dictionary.read().await;
+        dict.get_term(term_id).map(|v| v.to_vec())
+    }
+
     /// Perform a lexical search across all fields with BM25F scoring.
     pub async fn search(
         &self,
@@ -221,6 +339,13 @@ impl LexicalIndex {
 
         for term in query_terms {
             let mut field_postings: AHashMap<u16, Vec<PostingEntry>> = AHashMap::new();
+            let term_id = match self.get_term_id(term.term.as_bytes()).await {
+                Ok(id) => id,
+                Err(_) => {
+                    term_field_postings.push(field_postings);
+                    continue;
+                }
+            };
 
             for (field_id, field_name) in self.field_names.iter().enumerate() {
                 let field_schema = match self.schema.get(field_name) {
@@ -232,19 +357,18 @@ impl LexicalIndex {
                 }
 
                 let fid = field_id as u16;
-                let key_hash = Self::compute_key_hash(fid, &term.term);
-                let key = key_hash.to_le_bytes();
-
-                if let Some(block) = self.load_posting(&key).await? {
+                if let Some(block) = self.load_posting_by_term_id(term_id).await? {
                     let entries = PostingCodec::decode(&block);
-                    field_postings.entry(fid).or_default().extend(entries);
+                    // Filter entries by field_id
+                    let filtered: Vec<_> = entries.into_iter().filter(|e| e.field_id == fid).collect();
+                    field_postings.entry(fid).or_default().extend(filtered);
                 }
             }
 
             // Also check buffer postings
             {
                 let buffer = self.buffer.read().await;
-                for (bh, entries) in &buffer.postings {
+                if let Some(entries) = buffer.postings.get(&term_id) {
                     for (field_id, field_name) in self.field_names.iter().enumerate() {
                         let field_schema = match self.schema.get(field_name) {
                             Some(s) => s,
@@ -254,10 +378,9 @@ impl LexicalIndex {
                             continue;
                         }
                         let fid = field_id as u16;
-                        let key_hash = Self::compute_key_hash(fid, &term.term);
-                        if *bh == key_hash {
-                            field_postings.entry(fid).or_default().extend(entries.iter().cloned());
-                        }
+                        // Filter buffer entries by field_id
+                        let filtered: Vec<_> = entries.iter().filter(|e| e.field_id == fid).cloned().collect();
+                        field_postings.entry(fid).or_default().extend(filtered);
                     }
                 }
             }

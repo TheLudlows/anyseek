@@ -80,8 +80,8 @@ pub async fn search(index: &Index, request: SearchRequest) -> Result<SearchRespo
 
 #[cfg(test)]
 mod tests {
-    use crate::open_index;
-use crate::create_index;
+    use crate::open_index_with_id;
+use crate::create_index_with_id;
 use super::*;
     use object_store::memory::InMemory;
     use seekpower_schema::{IndexConfig, SchemaField, TokenizerType};
@@ -93,7 +93,7 @@ use super::*;
         vec![
             SchemaField::text("title"),
             SchemaField::text("body").with_boost(0.5).with_store(true),
-            SchemaField::vector("embedding"),
+            SchemaField::vector("embedding", 4),
         ]
     }
 
@@ -105,7 +105,7 @@ use super::*;
     async fn test_search_empty_index() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-search", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let request = SearchRequest {
             query_string: Some("hello".to_string()),
@@ -123,7 +123,7 @@ use super::*;
     async fn test_lexical_search_union() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-lexical-union", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc1 = HashMap::new();
         doc1.insert("title".to_string(), serde_json::json!("rust programming"));
@@ -157,7 +157,7 @@ use super::*;
     async fn test_lexical_search_intersection() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-lexical-intersection", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc1 = HashMap::new();
         doc1.insert("title".to_string(), serde_json::json!("rust programming language"));
@@ -192,7 +192,7 @@ use super::*;
             tokenizer: TokenizerType::Unicode,
             ..IndexConfig::default()
         };
-        let idx = create_index(&shared_db, "test", config, test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", config, test_schema()).await.unwrap();
 
         let mut doc1 = HashMap::new();
         doc1.insert("title".to_string(), serde_json::json!("the quick brown fox"));
@@ -222,7 +222,7 @@ use super::*;
     async fn test_lexical_search_with_field_boost() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-lexical-boost", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc1 = HashMap::new();
         doc1.insert("title".to_string(), serde_json::json!("rust"));
@@ -254,7 +254,7 @@ use super::*;
     async fn test_lexical_search_uncommitted_buffer() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-lexical-buffer", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("uncommitted document"));
@@ -276,7 +276,7 @@ use super::*;
     async fn test_lexical_search_delete_excludes() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-lexical-delete", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc1 = HashMap::new();
         doc1.insert("title".to_string(), serde_json::json!("rust programming"));
@@ -307,7 +307,7 @@ use super::*;
     async fn test_lexical_search_multiple_fields() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-lexical-multifield", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc1 = HashMap::new();
         doc1.insert("title".to_string(), serde_json::json!("rust"));
@@ -339,14 +339,14 @@ use super::*;
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-open-search", store).await.unwrap();
 
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("persistent data"));
         crate::document::index_document(&idx, doc).await.unwrap();
         crate::commit::commit(&idx).await.unwrap();
 
-        let idx2 = open_index(&shared_db, "test").await.unwrap();
+        let idx2 = open_index_with_id(shared_db.clone(), 1, "test").await.unwrap();
 
         let request = SearchRequest {
             query_string: Some("persistent".to_string()),

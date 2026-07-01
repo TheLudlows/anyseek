@@ -103,22 +103,23 @@ fn search_response_to_json(resp: SearchResponse) -> (StatusCode, Json<serde_json
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::sync::Arc;
     use super::*;
     use crate::router::create_app;
     use crate::state::SharedState;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
-    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
-    fn empty_shared_index() -> SharedState {
-        Arc::new(Mutex::new(HashMap::new()))
+    async fn empty_shared_index() -> SharedState {
+        let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let db = seekpower_storage::KvStore::open("test", store).await.unwrap();
+        Arc::new(crate::state::State::new(db))
     }
 
     #[tokio::test]
     async fn search_on_empty_state_returns_bad_request() {
-        let app = create_app(empty_shared_index());
+        let app = create_app(empty_shared_index().await);
 
         let req = SearchRequestHttp {
             query_string: Some("hello".into()),
@@ -150,7 +151,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_document_without_index_returns_404() {
-        let app = create_app(empty_shared_index());
+        let app = create_app(empty_shared_index().await);
         let resp = app
             .oneshot(
                 Request::builder()

@@ -27,18 +27,25 @@ pub async fn index_document(
             if let Some(text) = value.as_str() {
                 let token_count = index.lexical_index.index_text_field(
                     text, field_id, doc_id, &mut buffer,
-                );
-                if token_count > 0 {
-                    field_lengths.push((field_id, token_count));
+                ).await;
+                if let Ok(count) = token_count {
+                    if count > 0 {
+                        field_lengths.push((field_id, count));
+                    }
                 }
             }
         }
 
-        if field_schema.index_vector && field_schema.field_type == FieldType::Vector {
-            if let Some(arr) = value.as_array() {
-                let embedding: Vec<f32> = arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
-                if !embedding.is_empty() {
-                    index.vector_index.add_vector(doc_id, field_id as u32, embedding);
+        if field_schema.index_vector {
+            if let FieldType::Vector { dimensions } = field_schema.field_type {
+                if let Some(arr) = value.as_array() {
+                    let embedding: Vec<f32> = arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
+                    if embedding.len() as u32 == dimensions && !embedding.is_empty() {
+                        index.vector_index.add_vector(doc_id, field_id as u32, embedding);
+                    } else if !embedding.is_empty() {
+                        // Vector dimension mismatch - skip but could log warning
+                        continue;
+                    }
                 }
             }
         }
@@ -84,7 +91,7 @@ pub async fn get_document(index: &Index, doc_id: u64) -> Result<Option<HashMap<S
 
 #[cfg(test)]
 mod tests {
-    use crate::create_index;
+    use crate::create_index_with_id;
 use super::*;
     use object_store::memory::InMemory;
     use seekpower_schema::{IndexConfig, SchemaField};
@@ -95,7 +102,7 @@ use super::*;
         vec![
             SchemaField::text("title"),
             SchemaField::text("body").with_boost(0.5).with_store(true),
-            SchemaField::vector("embedding"),
+            SchemaField::vector("embedding", 4),
         ]
     }
 
@@ -107,7 +114,7 @@ use super::*;
     async fn test_index_document_returns_doc_id() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-index-doc", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("hello world"));
@@ -121,7 +128,7 @@ use super::*;
     async fn test_get_document_after_commit() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-get-doc", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("test title"));
@@ -143,7 +150,7 @@ use super::*;
     async fn test_delete_document() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-delete", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         delete_document(&idx, 42).await.unwrap();
         let delete_set = idx.lexical_index.delete_set().await;

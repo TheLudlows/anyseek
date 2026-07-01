@@ -1,7 +1,7 @@
 use ahash::AHashSet;
-use seekpower_schema::{IndexConfig, IndexStats, SchemaField, SchemaMap, validate_name, TYPE_META, TYPE_DELL};
+use seekpower_schema::{IndexConfig, IndexStats, SchemaField, SchemaMap, TYPE_META, TYPE_DELL};
 use seekpower_error::{Result, SeekPowerError};
-use seekpower_storage::{KvStore, name_to_id};
+use seekpower_storage::KvStore;
 use seekpower_vector::IvfIndex;
 
 use crate::lexical_index::LexicalIndex;
@@ -33,17 +33,7 @@ impl Index {
 // Index lifecycle management
 // ---------------------------------------------------------------------------
 
-pub async fn create_index(
-    shared_db: &KvStore,
-    name: &str,
-    config: IndexConfig,
-    schema_fields: Vec<SchemaField>,
-) -> Result<Index> {
-    validate_name(name).map_err(|e| SeekPowerError::StorageError(format!("Invalid index name: {}", e)))?;
-    let index_id = name_to_id(name);
-    create_index_with_id(shared_db.clone(), index_id, name, config, schema_fields).await
-}
-
+/// Create a new index with the specified globally unique `index_id`.
 pub async fn create_index_with_id(
     db: KvStore,
     index_id: u32,
@@ -58,10 +48,12 @@ pub async fn create_index_with_id(
         field_names.push(field.field.clone());
     }
 
-    db.prefixed_put_serialized(index_id, TYPE_META, b"schema", &schema).await?;
-    db.prefixed_put_serialized(index_id, TYPE_META, b"config", &config).await?;
-    db.prefixed_put_serialized(index_id, TYPE_META, b"stats", &IndexStats::default()).await?;
-    db.prefixed_put_serialized(index_id, TYPE_META, b"fields", &field_names).await?;
+    db.prefixed_batch_put(index_id, TYPE_META, &[
+        (b"schema", serde_json::to_vec(&schema).map_err(|e| SeekPowerError::StorageError(e.to_string()))?),
+        (b"config", serde_json::to_vec(&config).map_err(|e| SeekPowerError::StorageError(e.to_string()))?),
+        (b"stats", serde_json::to_vec(&IndexStats::default()).map_err(|e| SeekPowerError::StorageError(e.to_string()))?),
+        (b"fields", serde_json::to_vec(&field_names).map_err(|e| SeekPowerError::StorageError(e.to_string()))?),
+    ]).await?;
     let vector_index = IvfIndex::new(db.clone(), index_id, config.clone());
     let lexical_index = LexicalIndex::new(
         db.clone(), index_id, config.clone(), schema.clone(), field_names.clone(),
@@ -83,12 +75,7 @@ pub async fn create_index_with_id(
     })
 }
 
-pub async fn open_index(shared_db: &KvStore, name: &str) -> Result<Index> {
-    validate_name(name).map_err(|e| SeekPowerError::InvalidIndexName(e))?;
-    let index_id = name_to_id(name);
-    open_index_with_id(shared_db.clone(), index_id, name).await
-}
-
+/// Open an existing index by its globally unique `index_id`.
 pub async fn open_index_with_id(db: KvStore, index_id: u32, name: &str) -> Result<Index> {
     let schema: SchemaMap = db
         .prefixed_get_deserialized(index_id, TYPE_META, b"schema")
@@ -120,9 +107,9 @@ pub async fn open_index_with_id(db: KvStore, index_id: u32, name: &str) -> Resul
     }
 
     let vector_index = IvfIndex::new(db.clone(), index_id, config.clone());
-    let lexical_index = LexicalIndex::new(
+    let lexical_index = LexicalIndex::open(
         db.clone(), index_id, config.clone(), schema.clone(), field_names.clone(),
-    );
+    ).await?;
     let next_doc_id = stats.doc_count;
 
     Ok(Index {
@@ -145,12 +132,10 @@ pub async fn close_index(index: &Index) -> Result<()> {
     index.db().close().await
 }
 
-pub async fn delete_index(shared_db: &KvStore, name: &str) -> Result<()> {
-    validate_name(name).map_err(|e| SeekPowerError::InvalidIndexName(e))?;
-    let index_id = name_to_id(name);
+/// Delete an index by its globally unique `index_id`.
+/// Does NOT remove the registry entry - that's handled by SeekPower.
+pub async fn delete_index_with_id(shared_db: &KvStore, index_id: u32) -> Result<()> {
     shared_db.prefixed_delete_all(index_id).await?;
-    // Remove from index registry
-    shared_db.delete(format!("__indexes__:{}", name).as_bytes()).await?;
     Ok(())
 }
 
@@ -174,7 +159,7 @@ mod tests {
     async fn test_create_and_close_index() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let shared_db = KvStore::open("test-create-close", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", IndexConfig::default(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", IndexConfig::default(), test_schema()).await.unwrap();
         assert_eq!(idx.schema.len(), 2);
         shared_db.close().await.unwrap();
     }
@@ -184,8 +169,8 @@ mod tests {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let shared_db = KvStore::open("test-two-idx", store).await.unwrap();
 
-        let a = create_index(&shared_db, "a", IndexConfig::default(), test_schema()).await.unwrap();
-        let b = create_index(&shared_db, "b", IndexConfig::default(), test_schema()).await.unwrap();
+        let a = create_index_with_id(shared_db.clone(), 1, "a", IndexConfig::default(), test_schema()).await.unwrap();
+        let b = create_index_with_id(shared_db.clone(), 2, "b", IndexConfig::default(), test_schema()).await.unwrap();
 
         let mut doc = std::collections::HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("hello"));
@@ -207,18 +192,31 @@ mod tests {
     async fn test_delete_index_removes_all_keys() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let shared_db = KvStore::open("test-delete-idx", store).await.unwrap();
-        let idx = create_index(&shared_db, "doomed", IndexConfig::default(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "doomed", IndexConfig::default(), test_schema()).await.unwrap();
         let mut doc = std::collections::HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("x"));
         crate::document::index_document(&idx, doc).await.unwrap();
         crate::commit::commit(&idx).await.unwrap();
 
-        let index_prefix = seekpower_storage::encode_index_prefix(idx.index_id);
-        let view_check = shared_db.scan_prefix(&index_prefix).await.unwrap();
-        assert!(!view_check.is_empty());
-        delete_index(&shared_db, "doomed").await.unwrap();
-        let view_check2 = shared_db.scan_prefix(&index_prefix).await.unwrap();
-        assert!(view_check2.is_empty());
+        // Before: check index has data (now need to scan each data_type separately)
+        use seekpower_storage::{encode_prefix, TYPE_DOC, TYPE_IDX, TYPE_META, TYPE_VEC};
+        let mut has_data = false;
+        for data_type in [TYPE_META, TYPE_DOC, TYPE_IDX, TYPE_VEC] {
+            let prefix = encode_prefix(idx.index_id, data_type);
+            if !shared_db.scan_prefix(&prefix).await.unwrap().is_empty() {
+                has_data = true;
+                break;
+            }
+        }
+        assert!(has_data);
+
+        delete_index_with_id(&shared_db, idx.index_id).await.unwrap();
+
+        // After: verify all data is deleted
+        for data_type in [TYPE_META, TYPE_DOC, TYPE_IDX, TYPE_VEC] {
+            let prefix = encode_prefix(idx.index_id, data_type);
+            assert!(shared_db.scan_prefix(&prefix).await.unwrap().is_empty());
+        }
         shared_db.close().await.unwrap();
     }
 
@@ -226,7 +224,7 @@ mod tests {
     async fn test_open_index_fails_for_missing() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let shared_db = KvStore::open("test-missing", store).await.unwrap();
-        let res = open_index(&shared_db, "nope").await;
+        let res = open_index_with_id(shared_db.clone(), 999, "nope").await;
         assert!(res.is_err());
         match res {
             Err(SeekPowerError::IndexNotFound(_)) => {}

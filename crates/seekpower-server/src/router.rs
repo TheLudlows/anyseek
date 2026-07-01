@@ -24,32 +24,28 @@ pub fn create_app(state: SharedState) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::sync::Arc;
     use crate::router::create_app;
     use crate::state::SharedState;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
-    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
 
-    fn empty_shared_index() -> SharedState {
-        let store = Arc::new(object_store::memory::InMemory::new());
-        let db = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(seekpower_storage::KvStore::open("test", store))
-            .unwrap();
+    async fn empty_shared_index() -> SharedState {
+        let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let db = seekpower_storage::KvStore::open("test", store).await.unwrap();
         Arc::new(crate::state::State::new(db))
     }
 
     #[tokio::test]
     async fn create_app_does_not_panic() {
-        let app = create_app(empty_shared_index());
+        let app = create_app(empty_shared_index().await);
         drop(app);
     }
 
     #[tokio::test]
     async fn delete_index_when_none_returns_not_found() {
-        let app = create_app(empty_shared_index());
+        let app = create_app(empty_shared_index().await);
 
         let resp = app
             .oneshot(
@@ -67,7 +63,7 @@ mod tests {
 
     #[tokio::test]
     async fn commit_without_index_returns_404() {
-        let app = create_app(empty_shared_index());
+        let app = create_app(empty_shared_index().await);
         let resp = app
             .oneshot(
                 Request::builder()

@@ -21,13 +21,14 @@ impl SchemaField {
         }
     }
 
-    pub fn vector(name: &str) -> Self {
+    /// Create a vector field with specified dimensions.
+    pub fn vector(name: &str, dimensions: u32) -> Self {
         Self {
             field: name.to_string(),
             store: false,
             index_lexical: false,
             index_vector: true,
-            field_type: FieldType::Vector,
+            field_type: FieldType::Vector { dimensions },
             boost: 1.0,
         }
     }
@@ -59,7 +60,10 @@ pub enum FieldType {
     Bool,
     Timestamp,
     Text,
-    Vector,
+
+    /// Vector field with specified dimensions.
+    /// Uses f32 elements (can be extended to f64 in the future).
+    Vector { dimensions: u32 },
 }
 
 /// Schema map: field_name -> SchemaField.
@@ -155,10 +159,11 @@ pub struct IndexStats {
 
 pub const TYPE_META: u8 = 0;  // schema, config, stats, fields
 pub const TYPE_DOC: u8 = 1;   // document content
-pub const TYPE_IDX: u8 = 2;   // inverted index (posting list)
-pub const TYPE_VEC: u8 = 3;   // vector index (meta, medoid, cluster)
-pub const TYPE_DELL: u8 = 4;  // deletion marker (tombstone)
-pub const TYPE_LEN: u8 = 5;   // document length
+pub const TYPE_DICT: u8 = 2;  // term dictionary (term <-> term_id)
+pub const TYPE_IDX: u8 = 3;   // inverted index (posting list)
+pub const TYPE_VEC: u8 = 4;   // vector index (meta, medoid, cluster)
+pub const TYPE_DELL: u8 = 5;  // deletion marker (tombstone)
+pub const TYPE_LEN: u8 = 6;   // document length
 
 /// Construct a key from multiple parts.
 pub fn make_key(parts: &[&[u8]]) -> Vec<u8> {
@@ -202,12 +207,12 @@ mod tests {
 
     #[test]
     fn test_schema_field_vector() {
-        let field = SchemaField::vector("embedding");
+        let field = SchemaField::vector("embedding", 768);
         assert_eq!(field.field, "embedding");
         assert!(!field.store);
         assert!(!field.index_lexical);
         assert!(field.index_vector);
-        assert!(matches!(field.field_type, FieldType::Vector));
+        assert!(matches!(field.field_type, FieldType::Vector { dimensions: 768 }));
         assert_eq!(field.boost, 1.0);
     }
 
@@ -219,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_schema_field_with_store() {
-        let field = SchemaField::vector("embedding").with_store(true);
+        let field = SchemaField::vector("embedding", 384).with_store(true);
         assert!(field.store);
     }
 
@@ -259,7 +264,7 @@ mod tests {
     fn test_schema_map_type() {
         let mut map: SchemaMap = ahash::AHashMap::new();
         map.insert("title".to_string(), SchemaField::text("title"));
-        map.insert("embedding".to_string(), SchemaField::vector("embedding"));
+        map.insert("embedding".to_string(), SchemaField::vector("embedding", 768));
         assert_eq!(map.len(), 2);
         assert!(map.contains_key("title"));
         assert!(map.contains_key("embedding"));

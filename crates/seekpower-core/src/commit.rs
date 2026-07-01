@@ -30,7 +30,7 @@ pub async fn commit(index: &Index) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::create_index;
+    use crate::create_index_with_id;
 use super::*;
     use object_store::memory::InMemory;
     use seekpower_schema::{IndexConfig, SchemaField};
@@ -42,7 +42,7 @@ use super::*;
         vec![
             SchemaField::text("title"),
             SchemaField::text("body").with_boost(0.5).with_store(true),
-            SchemaField::vector("embedding"),
+            SchemaField::vector("embedding", 4),
         ]
     }
 
@@ -54,7 +54,7 @@ use super::*;
     async fn test_commit_persists_data() {
         let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let shared_db = KvStore::open("test-commit", store).await.unwrap();
-        let idx = create_index(&shared_db, "test", test_config(), test_schema()).await.unwrap();
+        let idx = create_index_with_id(shared_db.clone(), 1, "test", test_config(), test_schema()).await.unwrap();
 
         let mut doc = HashMap::new();
         doc.insert("title".to_string(), serde_json::json!("rust programming"));

@@ -133,7 +133,7 @@ seekpower/
 
 为了在单一 KV 引擎中实现多租户与多索引，Key 的设计采用**定长前缀层次结构**。索引路径映射为内部定长 ID（`u32` 大端字节流，4 字节），数据类型用 `u8`（1 字节）标识，确保字典序紧凑且解析高效。
 
-$ \text{Key} = \text{Index\_ID (u32 BE)} \parallel \text{Data\_Type (u8)} \parallel \text{Business\_Key} $
+$ \text{Key} = \text{Data\_Type (u8)} \parallel \text{Index\_ID (u32 BE)} \parallel  \text{Business\_Key} $
 
 调用方通过 `KvStore::prefixed_*` 方法操作索引数据，传入 `index_id` + `data_type`，无需关心物理键编码。`name_to_id(name)` 将索引名称映射为 `u32` ID。`TYPE_META`/`TYPE_DOC`/`TYPE_IDX`/`TYPE_VEC`/`TYPE_DELL`/`TYPE_LEN` 定义各数据类型标签。
 
