@@ -115,7 +115,7 @@ seekpower/
 |---|---|---|---|
 | `seekpower-error` | 全局错误类型 | `SeekPowerError`, `Result<T>` | thiserror |
 | `seekpower-schema` | Schema、字段类型、配置 | `SchemaField`, `FieldType`, `IndexConfig` | seekpower-error, serde |
-| `seekpower-storage` | SlateDB KV 封装 + 定长前缀索引隔离 | `KvStore`, `encode_key`, `name_to_id` | seekpower-error, slatedb, object_store |
+| `seekpower-storage` | SlateDB KV 封装 + TermDictionary | `KvStore`, `TermDictionary`, `TermId`, `encode_key`, `name_to_id` | seekpower-error, slatedb, object_store |
 | `seekpower-tokenizer` | 分词器 trait + 内置实现 | `Tokenizer` trait, `JiebaTokenizer`, `UnicodeTokenizer`, `TokenizerRegistry` | seekpower-error, jieba-rs |
 | `seekpower-posting` | Posting list 编解码 | `PostingCodec`, `PostingIterator`, `PostingListBlock` | seekpower-error, seekpower-schema |
 | `seekpower-ranking` | BM25F 评分、WAND、MinHeap | `Scorer`, `MinHeap`, `SearchResult` | seekpower-error, seekpower-schema |
@@ -135,22 +135,53 @@ seekpower/
 
 $ \text{Key} = \text{Data\_Type (u8)} \parallel \text{Index\_ID (u32 BE)} \parallel  \text{Business\_Key} $
 
-调用方通过 `KvStore::prefixed_*` 方法操作索引数据，传入 `index_id` + `data_type`，无需关心物理键编码。`name_to_id(name)` 将索引名称映射为 `u32` ID。`TYPE_META`/`TYPE_DOC`/`TYPE_IDX`/`TYPE_VEC`/`TYPE_DELL`/`TYPE_LEN` 定义各数据类型标签。
+调用方通过 `KvStore::prefixed_*` 方法操作索引数据，传入 `index_id` + `data_type`，无需关心物理键编码。`name_to_id(name)` 将索引名称映射为 `u32` ID。`TYPE_META`/`TYPE_DOC`/`TYPE_DICT`/`TYPE_IDX`/`TYPE_VEC`/`TYPE_DELL`/`TYPE_LEN` 定义各数据类型标签。
 
 | **data_type (u8)** | **逻辑含义** | **business_key 格式** | **Value 负载设计** |
 |---|---|---|---|
 | `0` (TYPE_META) | 元数据 | `schema` / `config` / `stats` / `fields` | JSON 序列化的 Schema、IndexConfig、IndexStats 等 |
 | `1` (TYPE_DOC) | 文档原文 | `doc_id (u64 LE)` | 序列化后的文档数据 (JSON) |
-| `2` (TYPE_IDX) | 倒排表 | `term_hash (u64 LE)` | PostingListBlock (Delta + VByte 压缩) |
-| `3` (TYPE_VEC) | 向量索引 | `meta` / `medoid:{id}` / `cluster:{id}` | IvfMeta JSON / MedoidData / ClusterData (binary) |
-| `4` (TYPE_DELL) | 删除标记 | `doc_id (u64 LE)` | tombstone (b"1") |
-| `5` (TYPE_LEN) | 文档长度 | `doc_id (u64 LE) ‖ field_id (u16 LE)` | u8 压缩值 |
+| `2` (TYPE_DICT) | 词字典 | `__next_term_id__` / `term_id (u32 LE)` | next_id (u32 LE) / term bytes |
+| `3` (TYPE_IDX) | 倒排表 | `term_id (u32 LE)` | PostingListBlock (Delta + VByte 压缩) |
+| `4` (TYPE_VEC) | 向量索引 | `meta` / `medoid:{id}` / `cluster:{id}` | IvfMeta JSON / MedoidData / ClusterData (binary) |
+| `5` (TYPE_DELL) | 删除标记 | `doc_id (u64 LE)` | tombstone (b"1") |
+| `6` (TYPE_LEN) | 文档长度 | `doc_id (u64 LE) ‖ field_id (u16 LE)` | u8 压缩值 |
 
 ### 文档 ID 方案
 
 ```
 doc_id: u64 索引内单调递增
 ```
+
+### Term ID 方案
+
+为了优化存储和查询性能，使用 compact 32-bit term identifier 替代 term hash：
+
+```
+term_id: u32 索引内单调递增
+```
+
+**优势：**
+- **存储优化** — 32-bit vs 64-bit，减少 50% 空间占用
+- **避免哈希冲突** — term_id 唯一标识 term
+- **支持高亮** — 通过 TermDictionary 双向映射恢复原始 term 文本
+- **ID 范围** — u32 可支持约 43 亿个唯一 term
+
+**存储结构：**
+```
+TermDictionary {
+    term_to_id: HashMap<Vec<u8>, TermId>,  // term → term_id
+    id_to_term: HashMap<TermId, Vec<u8>>,  // term_id → term (高亮用)
+    next_id: TermId,                        // 下一个可分配的 ID
+}
+```
+
+**持久化：**
+- `TYPE_DICT:__next_term_id__` → next_id (u32 LE)
+- `TYPE_DICT:term_id (u32 LE)` → term bytes
+
+**恢复：**
+打开索引时从存储加载所有 term dictionary 条目，恢复 next_id 状态。
 
 ### 写入链路
 
@@ -169,16 +200,18 @@ doc_id: u64 索引内单调递增
 查询时，需要在多路数据间进行交并集计算及动态打分。
 
 1. **条件解析** — 将用户查询（如 `TermA AND TermB`）解析为逻辑执行树。
-2. **前缀定位与扫描 (Seek & Scan)**
-   - 利用 SlateDB 的 `Iterator`，构造起始 Key（如 `idx:Tenant1:Index1:TermA:\x00`）
-   - 顺序 Scan 扫描该 Term 下的所有 `<BlockID>`，将物理上分散的多个 `PostingsList` 分片读入内存
-3. **多路归并 (Merge & Intersect)**
-   - 对读取到的多个 `PostingsList`（TermA 的集合与 TermB 的集合）在内存中执行双指针求交集或位图 (Bitmap) 运算，得出候选 `DocID` 集合
-4. **动态打分与截断 (Scoring & Top-K)**
-   - 结合 `meta` 表中的全局统计信息，计算 TF-IDF 或 BM25
-   - 维护一个大小为 K 的最小堆（Min-Heap），选出得分最高的 Top-K DocID
-5. **回表与组装 (Fetch Forward Data)**
-   - 并发向 SlateDB 发起 `doc:<TenantID>:<IndexID>:<DocID>` 的 Get 请求，提取原文并返回
+2. **Term ID 查找** — 通过 TermDictionary 查找每个 term 对应的 term_id。
+3. **Posting List 加载**
+   - 使用 `prefixed_get(TYPE_IDX, term_id)` 加载对应的 posting list
+   - PostingEntry 包含 `(doc_id, field_id, positions)` 三元组
+4. **多路归并 (Merge & Intersect)**
+   - 对读取到的多个 `PostingsList` 按 field_id 过滤
+   - 在内存中执行双指针求交集或位图运算，得出候选 `DocID` 集合
+5. **动态打分与截断 (Scoring & Top-K)**
+   - 结合统计信息，计算 BM25F 分数
+   - 维护大小为 K 的最小堆，选出得分最高的 Top-K DocID
+6. **回表与组装 (Fetch Forward Data)**
+   - 并发向 SlateDB 发起 `doc:<IndexID>:<DocID>` 的 Get 请求，提取原文并返回
 
 ### 空间放大与压缩算法
 
@@ -191,8 +224,8 @@ doc_id: u64 索引内单调递增
 
 随着时间推移，同一个 Term 会在 SlateDB 中产生大量的 `<BlockID>` 分片。
 
-- **Read-time Merge** — 依靠上文提到的 Scan 机制在查询时进行多版本归并。
-- **Compaction Filter 扩展** — 如果在系统层面能够扩展 SlateDB 的 Compaction 逻辑，可以在底层 SSTable 合并时，拦截相同 Term 的相邻 Block，将短的 `PostingsList` 反序列化、合并、重新压缩后再写入下一层。这能显著降低未来的读放大。
+- **Read-time Merge** — 依靠 `prefixed_get(TYPE_IDX, term_id)` 加载 posting list 后与 buffer 合并。
+- **Compaction Filter 扩展** — 如果在系统层面能够扩展 SlateDB 的 Compaction 逻辑，可以在底层 SSTable 合并时，拦截相同 term_id 的相邻 Block，将短的 `PostingsList` 反序列化、合并、重新压缩后再写入下一层。这能显著降低未来的读放大。
 
 ### 索引的秒级删除
 
@@ -204,6 +237,28 @@ doc_id: u64 索引内单调递增
 ---
 
 ## 词法搜索
+
+### Term Dictionary
+
+```
+TermDictionary {
+    term_to_id: HashMap<Vec<u8>, TermId>,
+    id_to_term: HashMap<TermId, Vec<u8>>,
+    next_id: TermId,
+}
+```
+
+**功能：**
+- `get_or_create(term)`: 获取或创建 term_id
+- `get_id(term)`: 查询 term 的 term_id（不存在返回 None）
+- `get_term(term_id)`: 查询 term_id 对应的原始 term（用于高亮）
+
+**持久化：**
+- `__next_term_id__` → next_id (u32 LE)
+- `term_id (u32 LE)` → term bytes
+
+**恢复：**
+打开索引时从 `TYPE_DICT` 加载所有条目，重建双向映射。
 
 ### Posting List 编码
 
@@ -306,12 +361,16 @@ pub const DOCUMENT_LENGTH_COMPRESSION: [f32; 256] = {
 
 ```
 查询流程:
-1. 搜索 SlateDB 中的 posting list (通过 KvStore::prefixed_get)
-2. 搜索 PostingBuffer 中的未提交 posting
-3. 合并两路结果 (相同 doc_id 的分数取 max 或 sum，取决于查询类型)
-4. 过滤 delete_set 中的文档
-5. 排序 + offset/take
+1. 通过 TermDictionary 查找查询 term 对应的 term_id
+2. 搜索 SlateDB 中的 posting list (通过 KvStore::prefixed_get(TYPE_IDX, term_id))
+3. 搜索 PostingBuffer 中的未提交 posting (按 term_id 索引)
+4. 合并两路结果，按 field_id 过滤 entries
+5. 过滤 delete_set 中的文档
+6. BM25F 评分 + 排序 + offset/take
 ```
+
+**字段过滤：**
+PostingEntry 包含 `field_id`，搜索时按目标字段的 field_id 过滤 entries。
 
 ---
 
