@@ -85,17 +85,17 @@ impl TermDictionary {
 
 /// Thin wrapper around SlateDB providing CRUD + scan + transactions.
 ///
-/// Index isolation is achieved by prefixing keys with `index_id` (u32 BE)
-/// and `data_type` (u8). Physical key format:
+/// Index isolation is achieved by prefixing keys with `data_type` (u8)
+/// and `index_id` (u32 BE). Physical key format:
 ///
 /// ```text
-/// index_id (4B BE) ‖ data_type (1B) ‖ business_key
+/// data_type (1B) ‖ index_id (4B BE) ‖ business_key
 /// ```
 pub struct KvStore {
     db: Arc<slatedb::Db>,
 }
 
-/// Length of the fixed prefix: index_id (4B) + data_type (1B) = 5 bytes.
+/// Length of the fixed prefix: data_type (1B) + index_id (4B) = 5 bytes.
 pub const PREFIX_LEN: usize = 5;
 
 impl Clone for KvStore {
@@ -195,7 +195,7 @@ impl KvStore {
 
     // -----------------------------------------------------------------------
     // Prefixed convenience methods
-    // Physical key: index_id (u32 BE) ‖ data_type (u8) ‖ business_key
+    // Physical key: data_type (1B) ‖ index_id (4B BE) ‖ business_key
     // -----------------------------------------------------------------------
 
     /// Put with index_id + data_type prefix.
@@ -305,7 +305,7 @@ impl KvStore {
     }
 
     /// Delete all keys for a given index_id (across all data_types).
-    /// Since data_type comes first, we need to scan each data_type separately.
+    /// Since data_type comes first, we scan each data_type separately.
     pub async fn prefixed_delete_all(&self, index_id: u32) -> Result<()> {
         let data_types = [TYPE_META, TYPE_DOC, TYPE_IDX, TYPE_VEC, TYPE_DELL, TYPE_LEN];
         for data_type in data_types {

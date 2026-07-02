@@ -51,9 +51,9 @@
 ```rust
 //! 定长前缀层次结构 Key 编解码。
 //!
-//! Key 格式: Data_Type ‖ Tenant_ID (u32 BE) ‖ Index_ID (u32 BE) ‖ Business_Key
+//! 实际实现格式: Data_Type (u8) ‖ Index_ID (u32 BE) ‖ Business_Key
 //!
-//! Tenant_ID 和 Index_ID 在创建/打开索引时由 KvStore 内部分配，
+//! Index_ID 在创建/打开索引时由 KvStore 内部分配，
 //! 对上层透明。当前阶段暂用 index path 的 hash 作为 ID。
 
 /// 将字符串路径映射为定长 u32 ID（使用 fxhash 确定性哈希）。
@@ -64,7 +64,8 @@ pub fn path_to_id(path: &str) -> u32 {
     hasher.finish() as u32
 }
 
-/// 编码定长前缀 Key：`data_type + tenant_id(BE) + index_id(BE) + business_key`
+/// 编码定长前缀 Key：`data_type (u8) + index_id (u32 BE) + business_key`
+/// NOTE: 实际实现使用 `encode_key(index_id, data_type, business_key)` 签名
 pub fn encode_key(data_type: &[u8], index_id: u32, business_key: &[u8]) -> Vec<u8> {
     let mut key = Vec::with_capacity(data_type.len() + 4 + business_key.len());
     key.extend_from_slice(data_type);

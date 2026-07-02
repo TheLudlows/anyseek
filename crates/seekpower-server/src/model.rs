@@ -88,7 +88,7 @@ fn default_object_store_kind() -> ObjectStoreKind {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateIndexRequest {
-    pub name: String,
+    pub index_name: String,
     pub schema: Vec<SchemaFieldSpec>,
     #[serde(default)]
     pub config: Option<IndexConfig>,
@@ -98,19 +98,27 @@ pub struct CreateIndexRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenIndexRequest {
-    pub name: String,
+    pub index_name: String,
     #[serde(default = "default_object_store_kind")]
     pub object_store_kind: ObjectStoreKind,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndexDocumentRequest {
+    pub index_name: String,
     pub document: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndexDocumentsRequest {
+    pub index_name: String,
     pub documents: Vec<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexQuery {
+    #[serde(default)]
+    pub index: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +132,16 @@ pub struct SearchRequestHttp {
     pub ann_mode: Option<String>,
     pub w_lexical: Option<f32>,
     pub w_vector: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitRequest {
+    pub index_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteDocumentRequest {
+    pub index_name: String,
 }
 
 impl SearchRequestHttp {
@@ -196,7 +214,7 @@ impl SearchRequestHttp {
 
 #[derive(Debug, Serialize)]
 pub struct CreateIndexResponse {
-    pub name: String,
+    pub index_name: String,
     pub field_count: usize,
 }
 

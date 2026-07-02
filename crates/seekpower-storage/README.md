@@ -4,9 +4,9 @@ SlateDB KV 封装，内建定长前缀索引隔离与数据类型标签。
 
 ## 核心设计
 
-所有索引共享同一个 SlateDB 实例，通过 `index_id`（u32 大端序，4 字节）+ `data_type`（u8，1 字节）实现键空间隔离与数据类型区分。
+所有索引共享同一个 SlateDB 实例，通过 `data_type`（u8，1 字节）+ `index_id`（u32 大端序，4 字节）实现键空间隔离与数据类型区分。
 
-**物理键格式**: `index_id (u32 BE, 4B) ‖ data_type (u8, 1B) ‖ business_key`
+**物理键格式**: `data_type (1B) ‖ index_id (4B BE) ‖ business_key`
 
 `data_type` 由 `seekpower_schema` 定义：
 
@@ -24,7 +24,7 @@ SlateDB KV 封装，内建定长前缀索引隔离与数据类型标签。
 `KvStore` 是 SlateDB 的薄封装，提供两类方法：
 
 - **裸操作** (`put`/`get`/`delete`/`scan_prefix`): 直接操作物理键，用于索引注册表等全局数据
-- **带前缀操作** (`prefixed_put`/`prefixed_get`/`prefixed_delete`/`prefixed_scan_prefix`/`prefixed_scan_all`/`prefixed_put_serialized`/`prefixed_get_deserialized`/`prefixed_delete_all`): 自动附加/剥离 `index_id` + `data_type` 前缀，用于索引内数据
+- **带前缀操作** (`prefixed_put`/`prefixed_get`/`prefixed_delete`/`prefixed_scan_prefix`/`prefixed_scan_all`/`prefixed_put_serialized`/`prefixed_get_deserialized`/`prefixed_delete_all`): 自动附加/剥离 `data_type` + `index_id` 前缀，用于索引内数据
 
 ### 用法示例
 
@@ -61,10 +61,10 @@ use seekpower_storage::{encode_key, encode_prefix, encode_index_prefix, name_to_
 // 将索引名称映射为定长 u32 ID
 let id = name_to_id("articles");
 
-// 编码带前缀的键: [index_id BE 4B] [data_type 1B] [business_key]
+// 编码带前缀的键: [data_type 1B] [index_id BE 4B] [business_key]
 let key = encode_key(id, TYPE_META, b"schema");
 
-// 编码前缀扫描键: [index_id BE 4B] [data_type 1B]
+// 编码前缀扫描键: [data_type 1B] [index_id BE 4B]
 let prefix = encode_prefix(id, TYPE_IDX);
 
 // 编码仅 index_id 的前缀（用于 delete_all）
@@ -87,4 +87,4 @@ txn.commit().await?;
 `KvStore` 同时提供裸和带前缀的序列化方法，使用 `serde_json` 编码：
 
 - `put_serialized` / `get_deserialized` — 裸键
-- `prefixed_put_serialized` / `prefixed_get_deserialized` — 带 `index_id` + `data_type` 前缀键
+- `prefixed_put_serialized` / `prefixed_get_deserialized` — 带 `data_type` + `index_id` 前缀键

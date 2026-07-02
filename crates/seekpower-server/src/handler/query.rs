@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use seekpower_core::get_document;
@@ -7,13 +7,18 @@ use seekpower_search::{SearchRequest, SearchResponse};
 
 use crate::model::*;
 use crate::error::*;
-use crate::state::{get_any_index, SharedState};
+use crate::state::{get_index, SharedState};
 
 pub async fn handle_get_document(
     State(state): State<SharedState>,
+    Query(query): Query<IndexQuery>,
     Path(doc_id): Path<u64>,
 ) -> impl IntoResponse {
-    let index = match get_any_index(&state) {
+    let index_name = match query.index.as_ref() {
+        Some(n) => n,
+        None => return map_error(SeekPowerError::InvalidQuery("missing index query parameter".into())).into_response(),
+    };
+    let index = match get_index(&state, index_name) {
         Ok(i) => i,
         Err(e) => return map_error(e).into_response(),
     };
@@ -47,6 +52,7 @@ pub async fn handle_get_document(
 
 pub async fn handle_search(
     State(state): State<SharedState>,
+    Query(query): Query<IndexQuery>,
     Json(req): Json<SearchRequestHttp>,
 ) -> impl IntoResponse {
     let parsed: SearchRequest = match req.into_search_request() {
@@ -54,7 +60,12 @@ pub async fn handle_search(
         Err(e) => return map_error(e).into_response(),
     };
 
-    let index = match get_any_index(&state) {
+    let index_name = match query.index.as_ref() {
+        Some(n) => n,
+        None => return map_error(SeekPowerError::InvalidQuery("missing index query parameter".into())).into_response(),
+    };
+
+    let index = match get_index(&state, index_name) {
         Ok(i) => i,
         Err(e) => return map_error(e).into_response(),
     };

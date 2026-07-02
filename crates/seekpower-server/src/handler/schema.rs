@@ -15,14 +15,14 @@ pub async fn handle_create_index(
     State(state): State<SharedState>,
     Json(req): Json<CreateIndexRequest>,
 ) -> impl IntoResponse {
-    match build_object_store(&req.object_store_kind, &req.name) {
+    match build_object_store(&req.object_store_kind, &req.index_name) {
         Ok(_) => {}
         Err(e) => return map_error(e).into_response(),
     };
     let schema: Vec<SchemaField> = req.schema.into_iter().map(|s| s.into_schema_field()).collect();
     let config = req.config.unwrap_or_default();
     let field_count = schema.len();
-    let name = req.name.clone();
+    let name = req.index_name.clone();
 
     // Allocate a globally unique index_id
     let index_id = state.next_index_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -47,7 +47,7 @@ pub async fn handle_create_index(
             (
                 StatusCode::CREATED,
                 Json(CreateIndexResponse {
-                    name,
+                    index_name: name,
                     field_count,
                 }),
             )
@@ -61,7 +61,7 @@ pub async fn handle_open_index(
     State(state): State<SharedState>,
     Json(req): Json<OpenIndexRequest>,
 ) -> impl IntoResponse {
-    let name = req.name.clone();
+    let name = req.index_name.clone();
 
     // Read index_id from registry
     let registry_key = format!("__indexes__:{}", name);

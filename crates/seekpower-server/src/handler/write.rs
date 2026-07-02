@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use seekpower_core::{commit, delete_document, index_document};
@@ -6,13 +6,16 @@ use seekpower_error::SeekPowerError;
 
 use crate::model::*;
 use crate::error::*;
-use crate::state::{get_any_index, SharedState};
+use crate::state::{get_index, SharedState};
 
 pub async fn handle_index_document(
     State(state): State<SharedState>,
+    Query(query): Query<IndexQuery>,
     Json(req): Json<IndexDocumentRequest>,
 ) -> impl IntoResponse {
-    let index = match get_any_index(&state) {
+    let index_name = &req.index_name;
+
+    let index = match get_index(&state, index_name) {
         Ok(i) => i,
         Err(e) => return map_error(e).into_response(),
     };
@@ -40,10 +43,13 @@ pub async fn handle_index_document(
 
 pub async fn handle_index_documents(
     State(state): State<SharedState>,
+    Query(query): Query<IndexQuery>,
     Json(req): Json<IndexDocumentsRequest>,
 ) -> impl IntoResponse {
+    let index_name = &req.index_name;
+
     let documents = req.documents;
-    let index = match get_any_index(&state) {
+    let index = match get_index(&state, index_name) {
         Ok(i) => i,
         Err(e) => return map_error(e).into_response(),
     };
@@ -73,8 +79,13 @@ pub async fn handle_index_documents(
     }
 }
 
-pub async fn handle_commit(State(state): State<SharedState>) -> impl IntoResponse {
-    let index = match get_any_index(&state) {
+pub async fn handle_commit(State(state): State<SharedState>, Query(query): Query<IndexQuery>) -> impl IntoResponse {
+    let index_name = match query.index.as_ref() {
+        Some(n) => n,
+        None => return map_error(SeekPowerError::InvalidQuery("missing index query parameter".into())).into_response(),
+    };
+
+    let index = match get_index(&state, index_name) {
         Ok(i) => i,
         Err(e) => return map_error(e).into_response(),
     };
@@ -101,9 +112,15 @@ pub async fn handle_commit(State(state): State<SharedState>) -> impl IntoRespons
 
 pub async fn handle_delete_document(
     State(state): State<SharedState>,
+    Query(query): Query<IndexQuery>,
     Path(doc_id): Path<u64>,
 ) -> impl IntoResponse {
-    let index = match get_any_index(&state) {
+    let index_name = match query.index.as_ref() {
+        Some(n) => n,
+        None => return map_error(SeekPowerError::InvalidQuery("missing index query parameter".into())).into_response(),
+    };
+
+    let index = match get_index(&state, index_name) {
         Ok(i) => i,
         Err(e) => return map_error(e).into_response(),
     };

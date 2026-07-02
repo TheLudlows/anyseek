@@ -283,9 +283,9 @@ pub struct WriteBuffer {
 
 ## KV 存储布局
 
-索引数据在 SlateDB 中的物理键格式：`index_id (u32 BE) ‖ data_type (u8) ‖ business_key`
+索引数据在 SlateDB 中的物理键格式：`data_type (1B) ‖ index_id (4B BE) ‖ business_key`
 
-通过 `KvStore` 的 `prefixed_*` 方法访问时，`index_id` + `data_type` 前缀自动附加/剥离，调用方只需使用逻辑业务键：
+通过 `KvStore` 的 `prefixed_*` 方法访问时，`data_type` + `index_id` 前缀自动附加/剥离，调用方只需使用逻辑业务键：
 
 | data_type | 业务键 | 值类型 |
 |-----------|--------|--------|
