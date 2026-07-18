@@ -1,8 +1,0 @@
-[package]
-name = "seekpower-ranking"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-seekpower-error = { workspace = true }
-seekpower-schema = { workspace = true }
