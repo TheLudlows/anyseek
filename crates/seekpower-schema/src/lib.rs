@@ -2,3 +2,6 @@
 //!
 //! 实现 Schema-Free 的自动字段类型推断和收敛机制
 
+pub mod error;
+
+pub use error::SchemaError;
