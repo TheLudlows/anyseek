@@ -4,6 +4,8 @@
 
 pub mod error;
 pub mod field_type;
+pub mod field_metadata;
 
 pub use error::SchemaError;
 pub use field_type::FieldType;
+pub use field_metadata::FieldMetadata;
