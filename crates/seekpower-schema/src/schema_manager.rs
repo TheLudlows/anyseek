@@ -110,9 +110,13 @@ impl SchemaManager {
                             let new_type = converged.clone();
 
                             let mut new_metadata = existing.clone();
-                            new_metadata.r#type = converged;
+                            new_metadata.r#type = converged.clone();
                             new_metadata.updated_at = std::time::SystemTime::now();
                             new_metadata.sample_count += 1;
+                            // Json 类型不索引
+                            if matches!(converged, FieldType::Json) {
+                                new_metadata.indexed = false;
+                            }
 
                             schema.add_field(new_metadata);
                             updates.push(SchemaUpdate::TypeEvolved {
@@ -323,6 +327,32 @@ mod tests {
             }
             _ => panic!("Expected TypeEvolved"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_type_evolution_to_json_not_indexed() {
+        let storage = Arc::new(NullStore::new());
+        let manager = SchemaManager::new(storage, "test".to_string());
+        manager.initialize().await.unwrap();
+
+        let doc1 = json!({ "data": "text" });
+        manager.process_document(&doc1).await.unwrap();
+
+        let doc2 = json!({ "data": 12345 });
+        let update = manager.process_document(&doc2).await.unwrap();
+
+        // 收敛应该到 Json
+        match update {
+            SchemaUpdate::TypeEvolved { new_type, .. } => {
+                assert_eq!(new_type, FieldType::Json);
+            }
+            _ => panic!("Expected TypeEvolved to Json"),
+        }
+
+        // 验证 indexed 为 false
+        let schema = manager.get_schema().await;
+        let field = schema.fields.get("data").unwrap();
+        assert!(!field.indexed, "Json field should not be indexed");
     }
 
     #[tokio::test]
