@@ -4,6 +4,7 @@ members = [
     "crates/seekpower-error",
     "crates/seekpower-storage",
     "crates/seekpower-persistence",
+    "crates/seekpower-schema",
 ]
 
 [workspace.dependencies]
