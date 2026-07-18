@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use bytes::Bytes;
 
-use crate::{Schema, FieldType, SchemaError};
+use crate::{Schema, FieldType, SchemaError, FieldMetadata};
 use seekpower_storage::ObjectStore;
 
 /// Schema 更新结果
@@ -68,6 +68,72 @@ impl SchemaManager {
         }
         Ok(())
     }
+
+    pub async fn process_document(&self, doc: &serde_json::Value) -> Result<SchemaUpdate, SchemaError> {
+        let mut updates = Vec::new();
+        let mut schema = self.schema.write().await;
+
+        if let serde_json::Value::Object(fields) = doc {
+            for (field_name, field_value) in fields {
+                let inferred_type = match FieldType::infer(field_value) {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                if let Some(existing) = schema.get_field(field_name) {
+                    if let (FieldType::Vector(existing_dim), FieldType::Vector(new_dim)) =
+                        (&existing.r#type, &inferred_type)
+                    {
+                        if *existing_dim != *new_dim {
+                            return Err(SchemaError::VectorDimensionConflict {
+                                field_name: field_name.clone(),
+                                existing_dim: *existing_dim,
+                                new_dim: *new_dim,
+                            });
+                        }
+                    }
+
+                    if existing.r#type != inferred_type {
+                        let converged = existing.r#type.converge(&inferred_type);
+                        if converged != existing.r#type {
+                            let old_type = existing.r#type.clone();
+                            let new_type = converged.clone();
+
+                            let mut new_metadata = existing.clone();
+                            new_metadata.r#type = converged;
+                            new_metadata.updated_at = std::time::SystemTime::now();
+                            new_metadata.sample_count += 1;
+
+                            schema.add_field(new_metadata);
+                            updates.push(SchemaUpdate::TypeEvolved {
+                                field_name: field_name.clone(),
+                                old_type,
+                                new_type,
+                            });
+                        }
+                    } else {
+                        let mut new_metadata = existing.clone();
+                        new_metadata.sample_count += 1;
+                        schema.fields.insert(field_name.clone(), new_metadata);
+                    }
+                } else {
+                    let metadata = FieldMetadata::new(field_name.clone(), inferred_type.clone());
+                    schema.add_field(metadata);
+                    updates.push(SchemaUpdate::FieldAdded {
+                        field_name: field_name.clone(),
+                        field_type: inferred_type,
+                    });
+                }
+            }
+        }
+
+        if !updates.is_empty() {
+            let schema_clone = schema.clone();
+            self.save_trigger.lock().await.mark_dirty(schema_clone);
+        }
+
+        Ok(updates.into_iter().next().unwrap_or(SchemaUpdate::NoChange))
+    }
 }
 
 /// 保存触发器
@@ -112,6 +178,7 @@ impl SaveTrigger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_schema_update_equality() {
@@ -159,14 +226,72 @@ mod tests {
             let mut trigger = SaveTrigger::new(std::time::Duration::from_millis(10));
             let schema = Schema::new();
             trigger.mark_dirty(schema);
-            assert!(!trigger.should_save()); // 时间未到
+            assert!(!trigger.should_save());
             std::thread::sleep(std::time::Duration::from_millis(20));
             assert!(trigger.should_save());
         }
     }
+
+    #[tokio::test]
+    async fn test_process_document_new_fields() {
+        let storage = Arc::new(NullStore::new());
+        let manager = SchemaManager::new(storage, "test".to_string());
+        manager.initialize().await.unwrap();
+
+        let doc = json!({
+            "title": "Hello",
+            "count": 42,
+            "active": true
+        });
+
+        let update = manager.process_document(&doc).await.unwrap();
+        match update {
+            SchemaUpdate::FieldAdded { field_name, .. } => {
+                assert!(["title", "count", "active"].contains(&field_name.as_str()));
+            }
+            _ => panic!("Expected FieldAdded"),
+        }
+
+        let schema = manager.get_schema().await;
+        assert_eq!(schema.fields.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_process_document_vector_conflict() {
+        let storage = Arc::new(NullStore::new());
+        let manager = SchemaManager::new(storage, "test".to_string());
+        manager.initialize().await.unwrap();
+
+        let doc1 = json!({ "embedding": [0.1, 0.2, 0.3] });
+        manager.process_document(&doc1).await.unwrap();
+
+        let doc2 = json!({ "embedding": [0.1, 0.2, 0.3, 0.4] });
+        let result = manager.process_document(&doc2).await;
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SchemaError::VectorDimensionConflict { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_process_document_type_evolution() {
+        let storage = Arc::new(NullStore::new());
+        let manager = SchemaManager::new(storage, "test".to_string());
+        manager.initialize().await.unwrap();
+
+        let doc1 = json!({ "value": 42 });
+        manager.process_document(&doc1).await.unwrap();
+
+        let doc2 = json!({ "value": 3.14 });
+        let update = manager.process_document(&doc2).await.unwrap();
+        match update {
+            SchemaUpdate::TypeEvolved { old_type, new_type, .. } => {
+                assert_eq!(old_type, FieldType::U64);
+                assert_eq!(new_type, FieldType::F64);
+            }
+            _ => panic!("Expected TypeEvolved"),
+        }
+    }
 }
 
-// 简单的测试用存储实现
 struct NullStore;
 
 impl NullStore {
