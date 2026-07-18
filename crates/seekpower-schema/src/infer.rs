@@ -28,7 +28,11 @@ impl FieldType {
                 if n.as_u64().is_some() {
                     Some(FieldType::U64)
                 } else if let Some(i) = n.as_i64() {
-                    if i >= 0 { Some(FieldType::U64) } else { Some(FieldType::I64) }
+                    if i >= 0 {
+                        Some(FieldType::U64)
+                    } else {
+                        Some(FieldType::I64)
+                    }
                 } else if n.is_f64() {
                     Some(FieldType::F64)
                 } else {

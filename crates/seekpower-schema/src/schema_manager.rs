@@ -1,16 +1,23 @@
+use bytes::Bytes;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use bytes::Bytes;
 
-use crate::{Schema, FieldType, SchemaError, FieldMetadata};
+use crate::{FieldMetadata, FieldType, Schema, SchemaError};
 use seekpower_storage::ObjectStore;
 
 /// Schema 更新结果
 #[derive(Debug, Clone)]
 pub enum SchemaUpdate {
     NoChange,
-    FieldAdded { field_name: String, field_type: FieldType },
-    TypeEvolved { field_name: String, old_type: FieldType, new_type: FieldType },
+    FieldAdded {
+        field_name: String,
+        field_type: FieldType,
+    },
+    TypeEvolved {
+        field_name: String,
+        old_type: FieldType,
+        new_type: FieldType,
+    },
 }
 
 /// Schema 管理器
@@ -27,7 +34,9 @@ impl SchemaManager {
             storage,
             index_prefix,
             schema: Arc::new(RwLock::new(Schema::new())),
-            save_trigger: Arc::new(Mutex::new(SaveTrigger::new(std::time::Duration::from_secs(1)))),
+            save_trigger: Arc::new(Mutex::new(SaveTrigger::new(
+                std::time::Duration::from_secs(1),
+            ))),
         }
     }
 
@@ -44,9 +53,7 @@ impl SchemaManager {
                 *self.schema.write().await = loaded;
                 Ok(())
             }
-            Err(seekpower_error::StoreError::NotFound(_)) => {
-                Ok(())
-            }
+            Err(seekpower_error::StoreError::NotFound(_)) => Ok(()),
             Err(e) => Err(SchemaError::from(e)),
         }
     }
@@ -69,7 +76,10 @@ impl SchemaManager {
         Ok(())
     }
 
-    pub async fn process_document(&self, doc: &serde_json::Value) -> Result<SchemaUpdate, SchemaError> {
+    pub async fn process_document(
+        &self,
+        doc: &serde_json::Value,
+    ) -> Result<SchemaUpdate, SchemaError> {
         let mut updates = Vec::new();
         let mut schema = self.schema.write().await;
 
@@ -224,7 +234,10 @@ mod tests {
         let manager = SchemaManager::new(storage, "test".to_string());
         let result = manager.check_vector_dimension(&FieldType::Vector(3), 4, "embedding");
         assert!(result.is_err());
-        assert!(matches!(result, Err(SchemaError::VectorDimensionConflict { .. })));
+        assert!(matches!(
+            result,
+            Err(SchemaError::VectorDimensionConflict { .. })
+        ));
     }
 
     mod save_trigger_tests {
@@ -284,7 +297,10 @@ mod tests {
         let doc2 = json!({ "embedding": [0.1, 0.2, 0.3, 0.4] });
         let result = manager.process_document(&doc2).await;
         assert!(result.is_err());
-        assert!(matches!(result, Err(SchemaError::VectorDimensionConflict { .. })));
+        assert!(matches!(
+            result,
+            Err(SchemaError::VectorDimensionConflict { .. })
+        ));
     }
 
     #[tokio::test]
@@ -299,7 +315,9 @@ mod tests {
         let doc2 = json!({ "value": 3.14 });
         let update = manager.process_document(&doc2).await.unwrap();
         match update {
-            SchemaUpdate::TypeEvolved { old_type, new_type, .. } => {
+            SchemaUpdate::TypeEvolved {
+                old_type, new_type, ..
+            } => {
                 assert_eq!(old_type, FieldType::U64);
                 assert_eq!(new_type, FieldType::F64);
             }
@@ -356,7 +374,12 @@ impl ObjectStore for TestStore {
         Ok(())
     }
 
-    async fn range(&self, location: &str, _offset: u64, _len: Option<u64>) -> Result<Bytes, seekpower_error::StoreError> {
+    async fn range(
+        &self,
+        location: &str,
+        _offset: u64,
+        _len: Option<u64>,
+    ) -> Result<Bytes, seekpower_error::StoreError> {
         match self.data.lock().await.as_ref() {
             Some(data) => Ok(data.clone()),
             None => Err(seekpower_error::StoreError::NotFound(location.to_string())),
@@ -368,11 +391,18 @@ impl ObjectStore for TestStore {
         Ok(())
     }
 
-    async fn list(&self, _prefix: Option<&str>) -> Result<Vec<String>, seekpower_error::StoreError> {
+    async fn list(
+        &self,
+        _prefix: Option<&str>,
+    ) -> Result<Vec<String>, seekpower_error::StoreError> {
         Ok(vec![])
     }
 
-    async fn put_if_absent(&self, _location: &str, value: Bytes) -> Result<bool, seekpower_error::StoreError> {
+    async fn put_if_absent(
+        &self,
+        _location: &str,
+        value: Bytes,
+    ) -> Result<bool, seekpower_error::StoreError> {
         let mut data = self.data.lock().await;
         if data.is_none() {
             *data = Some(value);
@@ -382,11 +412,19 @@ impl ObjectStore for TestStore {
         }
     }
 
-    async fn put_if_match(&self, location: &str, _bytes: Bytes, _etag: &str) -> Result<String, seekpower_error::StoreError> {
+    async fn put_if_match(
+        &self,
+        location: &str,
+        _bytes: Bytes,
+        _etag: &str,
+    ) -> Result<String, seekpower_error::StoreError> {
         Err(seekpower_error::StoreError::NotFound(location.to_string()))
     }
 
-    async fn metadata(&self, location: &str) -> Result<seekpower_error::ObjectMetadata, seekpower_error::StoreError> {
+    async fn metadata(
+        &self,
+        location: &str,
+    ) -> Result<seekpower_error::ObjectMetadata, seekpower_error::StoreError> {
         Err(seekpower_error::StoreError::NotFound(location.to_string()))
     }
 }
@@ -409,7 +447,12 @@ impl ObjectStore for NullStore {
         Ok(())
     }
 
-    async fn range(&self, location: &str, _offset: u64, _len: Option<u64>) -> Result<Bytes, seekpower_error::StoreError> {
+    async fn range(
+        &self,
+        location: &str,
+        _offset: u64,
+        _len: Option<u64>,
+    ) -> Result<Bytes, seekpower_error::StoreError> {
         Err(seekpower_error::StoreError::NotFound(location.to_string()))
     }
 
@@ -417,19 +460,34 @@ impl ObjectStore for NullStore {
         Ok(())
     }
 
-    async fn list(&self, _prefix: Option<&str>) -> Result<Vec<String>, seekpower_error::StoreError> {
+    async fn list(
+        &self,
+        _prefix: Option<&str>,
+    ) -> Result<Vec<String>, seekpower_error::StoreError> {
         Ok(vec![])
     }
 
-    async fn put_if_absent(&self, _location: &str, _bytes: Bytes) -> Result<bool, seekpower_error::StoreError> {
+    async fn put_if_absent(
+        &self,
+        _location: &str,
+        _bytes: Bytes,
+    ) -> Result<bool, seekpower_error::StoreError> {
         Ok(true)
     }
 
-    async fn put_if_match(&self, location: &str, _bytes: Bytes, _etag: &str) -> Result<String, seekpower_error::StoreError> {
+    async fn put_if_match(
+        &self,
+        location: &str,
+        _bytes: Bytes,
+        _etag: &str,
+    ) -> Result<String, seekpower_error::StoreError> {
         Err(seekpower_error::StoreError::NotFound(location.to_string()))
     }
 
-    async fn metadata(&self, location: &str) -> Result<seekpower_error::ObjectMetadata, seekpower_error::StoreError> {
+    async fn metadata(
+        &self,
+        location: &str,
+    ) -> Result<seekpower_error::ObjectMetadata, seekpower_error::StoreError> {
         Err(seekpower_error::StoreError::NotFound(location.to_string()))
     }
 }
