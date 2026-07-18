@@ -7,6 +7,7 @@ pub mod field_type;
 pub mod field_metadata;
 pub mod schema;
 pub mod infer;
+pub mod converge;
 
 pub use error::SchemaError;
 pub use field_type::FieldType;
