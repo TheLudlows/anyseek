@@ -14,3 +14,4 @@ pub use error::SchemaError;
 pub use field_type::FieldType;
 pub use field_metadata::FieldMetadata;
 pub use schema::Schema;
+pub use schema_manager::{SchemaManager, SchemaUpdate, SaveTrigger};
