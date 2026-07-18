@@ -134,6 +134,22 @@ impl SchemaManager {
 
         Ok(updates.into_iter().next().unwrap_or(SchemaUpdate::NoChange))
     }
+
+    pub async fn flush(&self) -> Result<(), SchemaError> {
+        if let Some(schema) = self.save_trigger.lock().await.take_pending() {
+            let path = format!("{}/schema.json", self.index_prefix);
+            let json = serde_json::to_vec(&schema)
+                .map_err(|e| SchemaError::SerializationError(e.to_string()))?;
+
+            self.storage
+                .put(&path, Bytes::from(json))
+                .await
+                .map_err(SchemaError::from)?;
+
+            self.schema.write().await.version = schema.version;
+        }
+        Ok(())
+    }
 }
 
 /// 保存触发器
@@ -289,6 +305,89 @@ mod tests {
             }
             _ => panic!("Expected TypeEvolved"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_flush_persists_schema() {
+        let storage = Arc::new(TestStore::new());
+        let manager = SchemaManager::new(storage.clone(), "test".to_string());
+        manager.initialize().await.unwrap();
+
+        let doc = json!({ "title": "Hello" });
+        manager.process_document(&doc).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // 等待 save interval
+        manager.flush().await.unwrap();
+
+        let saved = storage.get_data().await;
+        assert!(saved.is_some());
+        let binding = saved.unwrap();
+        let saved_str = std::str::from_utf8(&binding).unwrap();
+        assert!(saved_str.contains("title"));
+    }
+}
+
+struct TestStore {
+    data: Arc<Mutex<Option<bytes::Bytes>>>,
+}
+
+impl TestStore {
+    fn new() -> Self {
+        Self {
+            data: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn get_data(&self) -> Option<bytes::Bytes> {
+        self.data.lock().await.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for TestStore {
+    async fn get(&self, location: &str) -> Result<Bytes, seekpower_error::StoreError> {
+        match self.data.lock().await.as_ref() {
+            Some(data) => Ok(data.clone()),
+            None => Err(seekpower_error::StoreError::NotFound(location.to_string())),
+        }
+    }
+
+    async fn put(&self, _location: &str, value: Bytes) -> Result<(), seekpower_error::StoreError> {
+        *self.data.lock().await = Some(value);
+        Ok(())
+    }
+
+    async fn range(&self, location: &str, _offset: u64, _len: Option<u64>) -> Result<Bytes, seekpower_error::StoreError> {
+        match self.data.lock().await.as_ref() {
+            Some(data) => Ok(data.clone()),
+            None => Err(seekpower_error::StoreError::NotFound(location.to_string())),
+        }
+    }
+
+    async fn delete(&self, _location: &str) -> Result<(), seekpower_error::StoreError> {
+        *self.data.lock().await = None;
+        Ok(())
+    }
+
+    async fn list(&self, _prefix: Option<&str>) -> Result<Vec<String>, seekpower_error::StoreError> {
+        Ok(vec![])
+    }
+
+    async fn put_if_absent(&self, _location: &str, value: Bytes) -> Result<bool, seekpower_error::StoreError> {
+        let mut data = self.data.lock().await;
+        if data.is_none() {
+            *data = Some(value);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn put_if_match(&self, location: &str, _bytes: Bytes, _etag: &str) -> Result<String, seekpower_error::StoreError> {
+        Err(seekpower_error::StoreError::NotFound(location.to_string()))
+    }
+
+    async fn metadata(&self, location: &str) -> Result<seekpower_error::ObjectMetadata, seekpower_error::StoreError> {
+        Err(seekpower_error::StoreError::NotFound(location.to_string()))
     }
 }
 
