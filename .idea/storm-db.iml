@@ -16,6 +16,7 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/seekpower-storage/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/seekpower-tokenizer/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/seekpower-vector/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/seekpower-persistence/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
