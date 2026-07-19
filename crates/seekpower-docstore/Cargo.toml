@@ -1,0 +1,24 @@
+[package]
+name = "seekpower-docstore"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+seekpower-error = { workspace = true }
+seekpower-storage = { workspace = true }
+seekpower-persistence = { workspace = true }
+seekpower-schema = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+dashmap = "6"
+roaring = "0.10"
+crc32fast = { workspace = true }
+bincode = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }

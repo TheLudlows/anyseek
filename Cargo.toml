@@ -5,12 +5,19 @@ members = [
     "crates/seekpower-storage",
     "crates/seekpower-persistence",
     "crates/seekpower-schema",
+    "crates/seekpower-docstore",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
 
 [workspace.dependencies]
 seekpower-error  = { path = "crates/seekpower-error" }
 seekpower-storage = { path = "crates/seekpower-storage" }
 seekpower-persistence = { path = "crates/seekpower-persistence" }
+seekpower-schema = { path = "crates/seekpower-schema" }
+seekpower-docstore = { path = "crates/seekpower-docstore" }
 
 # External dependencies (shared versions)
 thiserror = "2"
