@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use seekpower_error::{Error, Result};
-use crate::{version_of, GetResult, ObjectMeta, ObjectStore, ObjectVersion};
+use crate::{GetResult, ObjectMeta, ObjectStore, ObjectVersion};
 
 pub struct FsObjectStore {
     root: PathBuf,
@@ -151,7 +151,9 @@ impl ObjectStore for FsObjectStore {
 
     async fn list(&self, prefix: Option<&str>) -> Result<Vec<ObjectMeta>> {
         let root = self.root.clone();
-        let prefix = prefix.unwrap_or_default().to_string();
+        let prefix = self.resolve(prefix.unwrap_or_default())?
+            .into_os_string().into_string().unwrap_or_default();
+
         let metas = tokio::task::spawn_blocking(move || -> Result<Vec<ObjectMeta>> {
             let mut out = Vec::new();
             let mut stack = vec![root.clone()];
@@ -228,4 +230,11 @@ impl ObjectStore for FsObjectStore {
         Self::write_atomic(&path, &bytes).await?;
         Ok(version_of(&bytes))
     }
+}
+
+pub fn version_of(bytes: &[u8]) -> ObjectVersion {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(bytes);
+    ObjectVersion(format!("sha256-{digest:x}"))
 }

@@ -8,6 +8,7 @@ pub mod object_store;
 pub mod s3_store;
 
 pub use builder::ObjectStoreBuilder;
+pub use fs::FsObjectStore as FsStore;
 use bytes::Bytes;
 pub use object_store::{BackendType, FsBackendBuilder, ObjectStore, S3BackendBuilder};
 pub use s3_store::S3Store;
@@ -48,12 +49,5 @@ pub struct GetResult {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub struct ObjectVersion(pub String);
-
-pub fn version_of(bytes: &[u8]) -> ObjectVersion {
-    use sha2::{Digest, Sha256};
-
-    let digest = Sha256::digest(bytes);
-    ObjectVersion(format!("sha256-{digest:x}"))
-}
 
 

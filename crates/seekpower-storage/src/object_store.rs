@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::ops::Range;
 
-use seekpower_error::{Error, Result};
+use seekpower_error::Result;
 use crate::{GetResult, ObjectMeta, ObjectVersion};
 
 #[async_trait::async_trait]

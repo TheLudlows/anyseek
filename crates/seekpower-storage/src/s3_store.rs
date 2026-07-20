@@ -6,11 +6,8 @@ use std::ops::Range;
 use bytes::Bytes;
 use futures_util::stream::StreamExt;
 use opendal::{ErrorKind, Metadata, Operator};
-use seekpower_error::Error;
-use chrono::Utc;
-use seekpower_error::Error::Internal;
-use seekpower_error::Result;
-use crate::{ObjectMeta, ObjectStore, ObjectVersion};
+use seekpower_error::{Error, Result};
+use crate::{GetResult, ObjectMeta, ObjectStore, ObjectVersion};
 
 /// S3 存储实现
 ///
@@ -71,20 +68,6 @@ impl S3Store {
             key.to_string()
         }
     }
-
-    /// 从 OpenDAL 元数据转换为 ObjectMeta
-    fn metadata_from_opendal(&self, _location: &str, metadata: opendal::Metadata) -> ObjectMeta {
-        let last_modified = metadata
-            .last_modified()
-            .map(|dt|dt.into_inner().as_millisecond())
-            .unwrap_or(Utc::now().timestamp());
-
-        ObjectMeta::new(
-            _location.to_string(),
-            metadata.content_length(),
-            ObjectVersion(metadata.etag().unwrap_or_default().to_string())
-        )
-    }
 }
 
 #[async_trait::async_trait]
@@ -100,16 +83,19 @@ impl ObjectStore for S3Store {
         object_version(location, &m)
     }
 
-    async fn get(&self, location: &str) -> Result<Bytes> {
+    async fn get(&self, location: &str) -> Result<GetResult> {
         let key = self.object_key(location);
 
-        let buffer = self
-            .op
-            .read(&key)
-            .await
-            .map_err(opendal_error_to_store_error)?;
+        // 一次性获取元数据和内容
+        let (metadata, buffer) = tokio::try_join!(
+            self.op.object(&key),
+            self.op.read(&key)
+        )
+        .map_err(opendal_error_to_store_error)?;
 
-        Ok(Bytes::from(buffer.to_vec()))
+        let bytes = Bytes::from(buffer.to_vec());
+        let version = object_version(location, &metadata)?;
+        Ok(GetResult { bytes, version })
     }
 
     async fn range(&self, location: &str, range: Range<u64>) -> Result<Bytes> {
@@ -149,30 +135,36 @@ impl ObjectStore for S3Store {
             let entry = entry_result
                 .map_err(|e| Error::Internal(format!("List stream error: {}", e)))?;
             let key = entry.path();
+            let metadata = entry.metadata();
             // 移除前缀，返回相对路径
             let relative_key = self.relative_key(key);
-            keys.push();
+            keys.push(ObjectMeta::new(
+                relative_key,
+                metadata.content_length(),
+                ObjectVersion(metadata.etag().unwrap_or_default().to_string())
+            ));
         }
 
         Ok(keys)
     }
 
-    async fn put_if_absent(&self, location: &str, bytes: Bytes) -> Result<bool, Error> {
+    async fn put_if_absent(&self, location: &str, bytes: Bytes) -> Result<ObjectVersion> {
         let key = self.object_key(location);
 
         // 检查对象是否已存在
         let exists = self.op.exists(&key).await.unwrap_or(false);
 
         if exists {
-            return Ok(false);
+            return Err(Error::AlreadyExists(location.to_string()));
         }
 
-        self.op
+        let m = self
+            .op
             .write(&key, bytes)
             .await
             .map_err(opendal_error_to_store_error)?;
 
-        Ok(true)
+        object_version(location, &m)
     }
 
     async fn put_if_match(
@@ -180,13 +172,14 @@ impl ObjectStore for S3Store {
         location: &str,
         bytes: Bytes,
         version: ObjectVersion,
-    ) -> Result<String, Error> {
-        let result = self.op.write_with(location, bytes)
+    ) -> Result<ObjectVersion> {
+        let key = self.object_key(location);
+        let result = self.op.write_with(&key, bytes)
             .if_match(&version.0)
             .await;
 
         match result {
-            Ok(m) => Ok(m.etag().unwrap_or_default().to_string()),
+            Ok(m) => object_version(location, &m),
             Err(e) if e.kind() == ErrorKind::ConditionNotMatch => {
                 println!("Concurrent modification detected, need to retry.");
                Err(Error::VersionMismatch(location.to_string(), version.0, e.message().to_string()))
@@ -214,12 +207,11 @@ fn opendal_error_to_store_error(err: opendal::Error) -> Error {
 fn object_version(key: &str, metadata: &Metadata) -> Result<ObjectVersion> {
     metadata.etag()
         .map(|value| ObjectVersion(value.trim_matches('"').to_string()))
-        .ok_or_else(|| Internal(format!("S3 response for {key:?} carried no ETag")))
+        .ok_or_else(|| Error::Internal(format!("S3 response for {key:?} carried no ETag")))
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    
     #[test]
     fn test_object_key() {
         let prefix = "tenant-123".to_string();
