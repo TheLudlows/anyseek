@@ -1,19 +1,9 @@
 //! SeekPower 统一错误类型定义
 //!
-//! 本 crate 定义了整个 SeekPower 项目的错误类型体系，包括：
-//! - 存储错误 (StoreError)
-//! - 持久化错误 (PersistenceError)
-//! - 并发错误 (ConcurrencyError)
 
-use std::fmt;
-use std::io;
-use std::time::SystemTime;
-
-/// 存储操作错误
-///
-/// 涵盖所有对象存储操作可能出现的错误情况
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum StoreError {
+pub enum Error {
     /// 对象不存在
     #[error("object not found: {0}")]
     NotFound(String),
@@ -42,44 +32,61 @@ pub enum StoreError {
     #[error("IO error: {0}")]
     Io(String),
 
-    /// 版本冲突 (CAS 操作失败)
-    #[error("version conflict for {0}: expected {1}, got {2}")]
-    VersionConflict(String, u64, u64),
-
-    /// ETag 不匹配
-    #[error("ETag mismatch for {0}: expected {1}, got {2}")]
-    ETagMismatch(String, String, String),
+    /// Version 不匹配
+    #[error("Version mismatch for {0}: expected {1}, got {2}")]
+    VersionMismatch(String, String, String),
 
     /// 超时
     #[error("operation timeout: {0}")]
     Timeout(String),
+
+    /// 序列化失败
+    #[error("Serialization failed: {0}")]
+    SerializationError(String),
+
+    /// 反序列化失败
+    #[error("Deserialization failed: {0}")]
+    DeserializationError(String),
+
+    #[error("invalid object range {start}..{end} for object of size {size}")]
+    InvalidRange { start: u64, end: u64, size: u64 },
+    /// 向量维度冲突
+    #[error("Vector dimension conflict for field '{field_name}': existing {existing_dim} vs new {new_dim}")]
+    VectorDimensionConflict {
+        field_name: String,
+        existing_dim: u32,
+        new_dim: u32,
+    },
 }
 
-impl From<std::io::Error> for StoreError {
+impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
-        StoreError::Io(e.to_string())
+        Error::Io(e.to_string())
     }
 }
 
-impl StoreError {
+impl Error {
     /// 判断错误是否可重试
     pub fn is_retryable(&self) -> bool {
-        matches!(self, StoreError::Timeout(_) | StoreError::Unavailable(_))
+        matches!(self, Error::Timeout(_) | Error::Unavailable(_))
     }
 
     /// 获取错误类型名称
     pub fn error_type(&self) -> &'static str {
         match self {
-            StoreError::NotFound(_) => "NotFound",
-            StoreError::AlreadyExists(_) => "AlreadyExists",
-            StoreError::PermissionDenied(_) => "PermissionDenied",
-            StoreError::InvalidArgument(_) => "InvalidArgument",
-            StoreError::Internal(_) => "Internal",
-            StoreError::Unavailable(_) => "Unavailable",
-            StoreError::Io(_) => "Io",
-            StoreError::VersionConflict(_, _, _) => "VersionConflict",
-            StoreError::ETagMismatch(_, _, _) => "ETagMismatch",
-            StoreError::Timeout(_) => "Timeout",
+            Error::NotFound(_) => "NotFound",
+            Error::AlreadyExists(_) => "AlreadyExists",
+            Error::PermissionDenied(_) => "PermissionDenied",
+            Error::InvalidArgument(_) => "InvalidArgument",
+            Error::Internal(_) => "Internal",
+            Error::Unavailable(_) => "Unavailable",
+            Error::Io(_) => "Io",
+            Error::VersionMismatch(_, _, _) => "VersionMismatch",
+            Error::Timeout(_) => "Timeout",
+            Error::SerializationError(_) => "SerializationError",
+            Error::DeserializationError(_) => "DeserializationError",
+            Error::VectorDimensionConflict { .. } => "VectorDimensionConflict",
+            Error::InvalidRange { .. } => "InvalidRange"
         }
     }
 }
@@ -222,49 +229,6 @@ impl RetryConfig {
     }
 }
 
-/// 对象元数据
-///
-/// 描述存储对象的元信息
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObjectMetadata {
-    /// 对象大小（字节）
-    pub size: u64,
-    /// 实体标签（用于 CAS 操作）
-    pub etag: String,
-    /// 最后修改时间
-    pub last_modified: SystemTime,
-}
-
-impl ObjectMetadata {
-    /// 创建新的对象元数据
-    pub fn new(size: u64, etag: String) -> Self {
-        Self {
-            size,
-            etag,
-            last_modified: SystemTime::now(),
-        }
-    }
-
-    /// 创建带指定时间的对象元数据
-    pub fn with_time(size: u64, etag: String, last_modified: SystemTime) -> Self {
-        Self {
-            size,
-            etag,
-            last_modified,
-        }
-    }
-}
-
-impl fmt::Display for ObjectMetadata {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ObjectMetadata {{ size: {}, etag: {}, last_modified: {:?} }}",
-            self.size, self.etag, self.last_modified
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,16 +273,9 @@ mod tests {
 
     #[test]
     fn test_store_error_is_retryable() {
-        assert!(StoreError::Timeout("test".to_string()).is_retryable());
-        assert!(StoreError::Unavailable("test".to_string()).is_retryable());
-        assert!(!StoreError::NotFound("test".to_string()).is_retryable());
-        assert!(!StoreError::InvalidArgument("test".to_string()).is_retryable());
-    }
-
-    #[test]
-    fn test_object_metadata() {
-        let meta = ObjectMetadata::new(1024, "abc123".to_string());
-        assert_eq!(meta.size, 1024);
-        assert_eq!(meta.etag, "abc123");
+        assert!(Error::Timeout("test".to_string()).is_retryable());
+        assert!(Error::Unavailable("test".to_string()).is_retryable());
+        assert!(!Error::NotFound("test".to_string()).is_retryable());
+        assert!(!Error::InvalidArgument("test".to_string()).is_retryable());
     }
 }

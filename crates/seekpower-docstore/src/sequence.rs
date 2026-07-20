@@ -16,7 +16,7 @@ pub struct SequenceAllocator {
     /// 本地缓存值（减少 CAS 调用）
     cached_value: Arc<RwLock<u64>>,
     /// 下一个可分配的序列号（原子）
-    next_seq: AtomicU64,
+    next_seq: Arc<AtomicU64>,
 }
 
 impl SequenceAllocator {
@@ -26,7 +26,7 @@ impl SequenceAllocator {
             store,
             seq_path,
             cached_value: Arc::new(RwLock::new(0)),
-            next_seq: AtomicU64::new(1),
+            next_seq: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -60,8 +60,8 @@ impl SequenceAllocator {
         let next = current_cached + 1;
 
         // 写入对象存储（简化：直接覆盖，不使用 CAS）
-        let bytes_slice: &[u8] = &next.to_le_bytes();
-        self.store.put(&self.seq_path, bytes_slice.into()).await
+        let bytes = next.to_le_bytes();
+        self.store.put(&self.seq_path, bytes.to_vec().into()).await
             .map_err(|e| SequenceError::StorageError(e.to_string()))?;
 
         // 更新本地缓存
@@ -78,8 +78,8 @@ impl SequenceAllocator {
 
     /// 设置序列号（用于恢复）
     pub async fn set(&self, seq: u64) -> Result<(), SequenceError> {
-        let bytes_slice: &[u8] = &seq.to_le_bytes();
-        self.store.put(&self.seq_path, bytes_slice.into()).await
+        let bytes = seq.to_le_bytes();
+        self.store.put(&self.seq_path, bytes.to_vec().into()).await
             .map_err(|e| SequenceError::StorageError(e.to_string()))?;
         *self.cached_value.write().await = seq;
         self.next_seq.store(seq + 1, Ordering::Relaxed);
@@ -102,85 +102,35 @@ pub enum SequenceError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Mock ObjectStore for testing
-    struct MockStore {
-        data: Arc<RwLock<Vec<u8>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for MockStore {
-        async fn put(&self, _location: &str, bytes: bytes::Bytes) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = bytes.to_vec();
-            Ok(())
-        }
-
-        async fn get(&self, _location: &str) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn delete(&self, _location: &str) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = Vec::new();
-            Ok(())
-        }
-
-        async fn list(&self, _prefix: Option<&str>) -> Result<Vec<String>, seekpower_storage::StorageError> {
-            Ok(vec![])
-        }
-
-        async fn range(
-            &self,
-            _location: &str,
-            _offset: u64,
-            _len: Option<u64>,
-        ) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn put_if_absent(
-            &self,
-            _location: &str,
-            _bytes: bytes::Bytes,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            Ok(true)
-        }
-
-        async fn put_if_match(
-            &self,
-            _location: &str,
-            bytes: bytes::Bytes,
-            _etag: &str,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            self.put(_location, bytes).await?;
-            Ok(true)
-        }
-
-        async fn metadata(&self, _location: &str) -> Result<seekpower_storage::ObjectMetadata, seekpower_storage::StorageError> {
-            Ok(seekpower_storage::ObjectMetadata {
-                size: self.data.read().await.len() as u64,
-                last_modified: std::time::SystemTime::now(),
-                etag: Some("mock".to_string()),
-            })
-        }
+    use seekpower_storage::FsStore;
+    fn make_store() -> (Arc<FsStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = FsStore::new(dir.path().to_path_buf()).expect("create FsStore");
+        (Arc::new(store), dir)
     }
 
     #[tokio::test]
     async fn test_sequence_allocator_initialization() {
-        let store = Arc::new(MockStore {
-            data: Arc::new(RwLock::new(vec![100u8, 0, 0, 0, 0, 0, 0, 0])),
-        });
+        let (store, _dir) = make_store();
 
-        let allocator = SequenceAllocator::new(store, "test.seq".to_string());
+        // 空目录：序列文件不存在，初始化为 0
+        let allocator = SequenceAllocator::new(store.clone(), "test.seq".to_string());
         allocator.initialize().await.unwrap();
+        assert_eq!(allocator.current().await, 0);
 
+        // 写入一个值并持久化
+        allocator.set(100).await.unwrap();
         assert_eq!(allocator.current().await, 100);
+
+        // 重新创建分配器（模拟重启），应从对象存储加载到 100
+        let reloaded = SequenceAllocator::new(store, "test.seq".to_string());
+        reloaded.initialize().await.unwrap();
+        assert_eq!(reloaded.current().await, 100);
     }
 
     #[tokio::test]
     async fn test_sequence_allocator_next() {
-        let store = Arc::new(MockStore {
-            data: Arc::new(RwLock::new(vec![0u8; 8])),
-        });
+        let (store, _dir) = make_store();
 
         let allocator = SequenceAllocator::new(store, "test.seq".to_string());
         allocator.initialize().await.unwrap();
@@ -196,9 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence_allocator_set() {
-        let store = Arc::new(MockStore {
-            data: Arc::new(RwLock::new(vec![0u8; 8])),
-        });
+        let (store, _dir) = make_store();
 
         let allocator = SequenceAllocator::new(store, "test.seq".to_string());
         allocator.initialize().await.unwrap();

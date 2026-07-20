@@ -128,73 +128,18 @@ pub enum DeleteSetError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seekpower_storage::FsStore;
 
-    // Mock ObjectStore for testing
-    struct MockStore {
-        data: Arc<RwLock<Vec<u8>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for MockStore {
-        async fn put(&self, _location: &str, bytes: bytes::Bytes) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = bytes.to_vec();
-            Ok(())
-        }
-
-        async fn get(&self, _location: &str) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn delete(&self, _location: &str) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = Vec::new();
-            Ok(())
-        }
-
-        async fn list(&self, _prefix: Option<&str>) -> Result<Vec<String>, seekpower_storage::StorageError> {
-            Ok(vec![])
-        }
-
-        async fn range(
-            &self,
-            _location: &str,
-            _offset: u64,
-            _len: Option<u64>,
-        ) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn put_if_absent(
-            &self,
-            _location: &str,
-            _bytes: bytes::Bytes,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            Ok(true)
-        }
-
-        async fn put_if_match(
-            &self,
-            _location: &str,
-            bytes: bytes::Bytes,
-            _etag: &str,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            self.put(_location, bytes).await?;
-            Ok(true)
-        }
-
-        async fn metadata(&self, _location: &str) -> Result<seekpower_storage::ObjectMetadata, seekpower_storage::StorageError> {
-            Ok(seekpower_storage::ObjectMetadata {
-                size: self.data.read().await.len() as u64,
-                last_modified: std::time::SystemTime::now(),
-                etag: Some("mock".to_string()),
-            })
-        }
+    /// 构建基于临时目录的真实 FsStore
+    fn make_store() -> (Arc<FsStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = FsStore::new(dir.path().to_path_buf()).expect("create FsStore");
+        (Arc::new(store), dir)
     }
 
     #[tokio::test]
     async fn test_delete_set_insert() {
-        let store = Arc::new(MockStore {
-            data: Arc::new(RwLock::new(Vec::new())),
-        });
+        let (store, _dir) = make_store();
 
         let mut delete_set = DeleteSet::new(store.clone(), "delete_set.json".to_string());
         assert!(!delete_set.contains(1));
@@ -210,11 +155,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_set_persistence() {
-        let store = Arc::new(MockStore {
-            data: Arc::new(RwLock::new(Vec::new())),
-        });
+        let (store, _dir) = make_store();
 
-        let delete_set = DeleteSet::new(store.clone(), "delete_set.json".to_string());
+        let mut delete_set = DeleteSet::new(store.clone(), "delete_set.json".to_string());
         delete_set.insert(1);
         delete_set.insert(100);
         delete_set.insert(1000);
@@ -223,7 +166,7 @@ mod tests {
         delete_set.persist().await.unwrap();
 
         // 加载
-        let loaded = DeleteSet::load(store.clone(), "delete_set.json".await.unwrap();
+        let loaded = DeleteSet::load(store.clone(), "delete_set.json").await.unwrap();
         assert!(loaded.contains(1));
         assert!(loaded.contains(100));
         assert!(loaded.contains(1000));
@@ -233,9 +176,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_set_remove() {
-        let mut delete_set = DeleteSet::new(Arc::new(MockStore {
-            data: Arc::new(RwLock::new(Vec::new())),
-        }), "delete_set.json".to_string());
+        let (store, _dir) = make_store();
+        let mut delete_set = DeleteSet::new(store, "delete_set.json".to_string());
 
         delete_set.insert(1);
         assert!(delete_set.contains(1));
@@ -246,9 +188,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_set_batch() {
-        let mut delete_set = DeleteSet::new(Arc::new(MockStore {
-            data: Arc::new(RwLock::new(Vec::new())),
-        }), "delete_set.json".to_string());
+        let (store, _dir) = make_store();
+        let mut delete_set = DeleteSet::new(store, "delete_set.json".to_string());
 
         delete_set.insert_batch(&[1, 2, 3, 4, 5]);
         assert_eq!(delete_set.len(), 5);
@@ -259,9 +200,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_set_stats() {
-        let mut delete_set = DeleteSet::new(Arc::new(MockStore {
-            data: Arc::new(RwLock::new(Vec::new())),
-        }), "delete_set.json".to_string());
+        let (store, _dir) = make_store();
+        let mut delete_set = DeleteSet::new(store, "delete_set.json".to_string());
 
         for i in 1..=1000 {
             delete_set.insert(i);

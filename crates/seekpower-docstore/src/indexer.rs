@@ -111,7 +111,11 @@ impl Indexer {
         let segment_id = self.generate_segment_id()?;
         let mut writer = SSTWriter::new(segment_id, 0);
 
-        for (doc_id, doc) in documents {
+        let min_doc_id = *documents.keys().next().unwrap();
+        let max_doc_id = *documents.keys().next_back().unwrap();
+        let doc_count = documents.len() as u64;
+
+        for (_doc_id, doc) in documents {
             writer.add(doc);
         }
 
@@ -123,13 +127,10 @@ impl Indexer {
         self.store.put(&path, sst_bytes.into()).await?;
 
         // 4. 构建段元数据
-        let min_doc_id = *documents.keys().next().unwrap();
-        let max_doc_id = *documents.keys().next_back().unwrap();
-
         Ok(SegmentMeta {
             segment_id,
             level: 0,
-            doc_count: documents.len() as u64,
+            doc_count,
             min_doc_id,
             max_doc_id,
             size_bytes,
@@ -202,6 +203,7 @@ pub struct IndexerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seekpower_storage::FsStore;
 
     #[test]
     fn test_indexer_config_default() {
@@ -213,8 +215,11 @@ mod tests {
 
     #[test]
     fn test_indexer_stats() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = FsStore::new(dir.path().to_path_buf()).expect("create FsStore");
+
         let indexer = Indexer {
-            store: Arc::new(MockStore::new()),
+            store: Arc::new(store),
             config: DocStoreConfig::default(),
             indexer_config: IndexerConfig::default(),
             shutdown: AtomicBool::new(false),
@@ -224,74 +229,5 @@ mod tests {
         let stats = indexer.stats();
         assert_eq!(stats.last_processed_seq, 100);
         assert!(stats.is_running);
-    }
-
-    // Mock ObjectStore
-    struct MockStore {
-        data: Arc<RwLock<Vec<u8>>>,
-    }
-
-    impl MockStore {
-        fn new() -> Self {
-            Self {
-                data: Arc::new(RwLock::new(Vec::new())),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for MockStore {
-        async fn put(&self, _location: &str, bytes: bytes::Bytes) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = bytes.to_vec();
-            Ok(())
-        }
-
-        async fn get(&self, _location: &str) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn delete(&self, _location: &str) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = Vec::new();
-            Ok(())
-        }
-
-        async fn list(&self, _prefix: Option<&str>) -> Result<Vec<String>, seekpower_storage::StorageError> {
-            Ok(vec![])
-        }
-
-        async fn range(
-            &self,
-            _location: &str,
-            _offset: u64,
-            _len: Option<u64>,
-        ) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn put_if_absent(
-            &self,
-            _location: &str,
-            _bytes: bytes::Bytes,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            Ok(true)
-        }
-
-        async fn put_if_match(
-            &self,
-            _location: &str,
-            bytes: bytes::Bytes,
-            _etag: &str,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            self.put(_location, bytes).await?;
-            Ok(true)
-        }
-
-        async fn metadata(&self, _location: &str) -> Result<seekpower_storage::ObjectMetadata, seekpower_storage::StorageError> {
-            Ok(seekpower_storage::ObjectMetadata {
-                size: self.data.read().await.len() as u64,
-                last_modified: std::time::SystemTime::now(),
-                etag: Some("mock".to_string()),
-            })
-        }
     }
 }

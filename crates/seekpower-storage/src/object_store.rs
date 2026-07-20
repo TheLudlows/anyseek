@@ -1,64 +1,29 @@
-//! ObjectStore trait 定义
-//!
-//! 定义了统一的对象存储抽象接口
-
 use bytes::Bytes;
 use std::ops::Range;
 
-use seekpower_error::{ObjectMetadata, StoreError};
+use seekpower_error::{Error, Result};
+use crate::{GetResult, ObjectMeta, ObjectVersion};
 
-/// 对象存储 Trait
-///
-/// 定义了所有存储后端必须实现的核心接口
 #[async_trait::async_trait]
 pub trait ObjectStore: Send + Sync {
-    /// 存储对象（覆盖写入）
-    ///
-    /// 如果对象已存在，将被覆盖
-    async fn put(&self, location: &str, bytes: Bytes) -> Result<(), StoreError>;
+    async fn put(&self, location: &str, bytes: Bytes) -> Result<ObjectVersion>;
 
-    /// 获取对象
-    ///
-    /// 如果对象不存在，返回 NotFound 错误
-    async fn get(&self, location: &str) -> Result<Bytes, StoreError>;
+    async fn get(&self, location: &str) -> Result<GetResult>;
 
-    /// 获取对象范围数据
-    ///
-    /// 支持 offset 开始读取指定长度的数据
-    /// 如果 len 为 None，读取到文件末尾
-    async fn range(&self, location: &str, offset: u64, len: Option<u64>) -> Result<Bytes, StoreError>;
+    async fn range(&self, location: &str, range: Range<u64>) -> Result<Bytes>;
 
-    /// 删除对象
-    ///
-    /// 如果对象不存在，也返回成功
-    async fn delete(&self, location: &str) -> Result<(), StoreError>;
+    async fn delete(&self, location: &str) -> Result<()>;
 
-    /// 列举前缀下的所有对象
-    ///
-    /// 返回指定前缀下的所有对象键
-    async fn list(&self, prefix: Option<&str>) -> Result<Vec<String>, StoreError>;
+    async fn list(&self, prefix: Option<&str>) -> Result<Vec<ObjectMeta>>;
 
-    /// 条件写入（不存在才写入）
-    ///
-    /// 如果对象已存在，返回 false
-    /// 如果对象不存在，写入并返回 true
-    async fn put_if_absent(&self, location: &str, bytes: Bytes) -> Result<bool, StoreError>;
+    async fn put_if_absent(&self, location: &str, bytes: Bytes) -> Result<ObjectVersion>;
 
-    /// 条件更新（ETag 匹配才更新）
-    ///
-    /// 如果 ETag 匹配，更新并返回新的 ETag
-    /// 如果 ETag 不匹配，返回错误
     async fn put_if_match(
         &self,
         location: &str,
         bytes: Bytes,
-        etag: &str,
-    ) -> Result<String, StoreError>;
-
-    /// 获取对象元数据
-    ///
-    /// 如果对象不存在，返回 NotFound 错误
-    async fn metadata(&self, location: &str) -> Result<ObjectMetadata, StoreError>;
+        version: ObjectVersion,
+    ) -> Result<ObjectVersion>;
 }
 
 /// 对象范围查询辅助类型
@@ -90,9 +55,98 @@ impl BackendType {
         }
     }
 
+    /// 创建 S3 后端 Builder
+    pub fn s3_builder() -> S3BackendBuilder {
+        S3BackendBuilder::default()
+    }
+
     /// 创建文件系统后端配置
     pub fn fs(root: std::path::PathBuf) -> Self {
         Self::Fs { root }
+    }
+
+    /// 创建文件系统后端 Builder
+    pub fn fs_builder() -> FsBackendBuilder {
+        FsBackendBuilder::default()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct S3BackendBuilder {
+    bucket: Option<String>,
+    region: Option<String>,
+    prefix: Option<String>,
+    endpoint: Option<String>,
+}
+
+impl S3BackendBuilder {
+    /// 设置 S3 bucket 名称
+    pub fn bucket(mut self, bucket: String) -> Self {
+        self.bucket = Some(bucket);
+        self
+    }
+
+    /// 设置 S3 region
+    pub fn region(mut self, region: String) -> Self {
+        self.region = Some(region);
+        self
+    }
+
+    /// 设置 S3 key 前缀
+    pub fn prefix(mut self, prefix: String) -> Self {
+        self.prefix = Some(prefix);
+        self
+    }
+
+    /// 设置自定义 endpoint（用于 S3 兼容服务如 MinIO）
+    pub fn endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
+
+    /// 构建 BackendType::S3
+    ///
+    /// bucket、region、prefix 为必填项，缺失时 panic
+    pub fn build(self) -> BackendType {
+        BackendType::S3 {
+            bucket: self.bucket.expect("S3 bucket is required"),
+            region: self.region.expect("S3 region is required"),
+            prefix: self.prefix.expect("S3 prefix is required"),
+            endpoint: self.endpoint,
+        }
+    }
+}
+
+/// 文件系统后端 Builder
+///
+/// 使用 Builder 模式构建文件系统后端配置
+/// # Example
+/// ```
+/// use seekpower_storage::BackendType;
+///
+/// let backend = BackendType::fs_builder()
+///     .root("/tmp/test".into())
+///     .build();
+/// ```
+#[derive(Debug, Default)]
+pub struct FsBackendBuilder {
+    root: Option<std::path::PathBuf>,
+}
+
+impl FsBackendBuilder {
+    /// 设置文件系统根路径
+    pub fn root(mut self, root: std::path::PathBuf) -> Self {
+        self.root = Some(root);
+        self
+    }
+
+    /// 构建 BackendType::Fs
+    ///
+    /// root 为必填项，缺失时 panic
+    pub fn build(self) -> BackendType {
+        BackendType::Fs {
+            root: self.root.expect("Fs root is required"),
+        }
     }
 }
 
@@ -136,6 +190,56 @@ mod tests {
     #[test]
     fn test_backend_type_fs() {
         let backend = BackendType::fs("/tmp/test".into());
+        match backend {
+            BackendType::Fs { root } => {
+                assert_eq!(root, std::path::PathBuf::from("/tmp/test"));
+            }
+            _ => panic!("Expected Fs backend"),
+        }
+    }
+
+    #[test]
+    fn test_s3_builder() {
+        let backend = BackendType::s3_builder()
+            .bucket("my-bucket".to_string())
+            .region("us-east-1".to_string())
+            .prefix("tenant-123".to_string())
+            .build();
+        match backend {
+            BackendType::S3 { bucket, region, prefix, endpoint } => {
+                assert_eq!(bucket, "my-bucket");
+                assert_eq!(region, "us-east-1");
+                assert_eq!(prefix, "tenant-123");
+                assert_eq!(endpoint, None);
+            }
+            _ => panic!("Expected S3 backend"),
+        }
+    }
+
+    #[test]
+    fn test_s3_builder_with_endpoint() {
+        let backend = BackendType::s3_builder()
+            .bucket("my-bucket".to_string())
+            .region("us-east-1".to_string())
+            .prefix("data".to_string())
+            .endpoint(Some("http://localhost:9000".to_string()))
+            .build();
+        match backend {
+            BackendType::S3 { bucket, region, prefix, endpoint } => {
+                assert_eq!(bucket, "my-bucket");
+                assert_eq!(region, "us-east-1");
+                assert_eq!(prefix, "data");
+                assert_eq!(endpoint, Some("http://localhost:9000".to_string()));
+            }
+            _ => panic!("Expected S3 backend"),
+        }
+    }
+
+    #[test]
+    fn test_fs_builder() {
+        let backend = BackendType::fs_builder()
+            .root("/tmp/test".into())
+            .build();
         match backend {
             BackendType::Fs { root } => {
                 assert_eq!(root, std::path::PathBuf::from("/tmp/test"));

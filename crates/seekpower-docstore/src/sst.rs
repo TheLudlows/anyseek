@@ -135,8 +135,8 @@ impl SSTReader {
         let mut buf = data;
 
         for _ in 0..count {
-            let doc_id = buf.get_u64();
-            let offset = buf.get_u64();
+            let doc_id = buf.get_u64_le();
+            let offset = buf.get_u64_le();
             index.insert(doc_id, offset);
         }
 
@@ -219,10 +219,10 @@ impl SSTWriter {
 
         // 写入 Header
         buf.extend_from_slice(SST_MAGIC);
-        buf.put_u32(SST_VERSION);
-        buf.put_u64(self.docs.len() as u64);
+        buf.put_u32_le(SST_VERSION);
+        buf.put_u64_le(self.docs.len() as u64);
         // TODO: 计算 header checksum
-        buf.put_u32(0);
+        buf.put_u32_le(0);
 
         // 索引起始位置（数据开始）
         let index_start_pos = buf.len();
@@ -244,15 +244,15 @@ impl SSTWriter {
 
             let doc_data = bincode::serialize(doc)
                 .map_err(|e| DocStoreError::SerializationError(format!("bincode error: {}", e)))?;
-            buf.put_u32(doc_data.len() as u32);
+            buf.put_u32_le(doc_data.len() as u32);
             buf.extend_from_slice(&doc_data);
         }
 
         // 写入索引（回填）
         let mut index_buf = Vec::new();
         for entry in index_entries {
-            index_buf.put_u64(entry.doc_id);
-            index_buf.put_u64(entry.offset);
+            index_buf.put_u64_le(entry.doc_id);
+            index_buf.put_u64_le(entry.offset);
         }
 
         // 回填索引

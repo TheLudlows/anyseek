@@ -16,7 +16,6 @@ mod docstore;
 mod document;
 mod error;
 mod indexer;
-mod memtable;
 mod sequence;
 mod sst;
 mod wal_store;
@@ -27,7 +26,6 @@ pub use docstore::{DocStore, DocStoreStats};
 pub use document::{Document, DocumentValue};
 pub use error::{DocStoreError, Result};
 pub use indexer::{Indexer, IndexerConfig, IndexerStats};
-pub use memtable::MemTable;  // 保留用于测试，生产环境不使用
 pub use sequence::SequenceAllocator;
 pub use sst::{SSTReader, SSTWriter, SegmentMeta};
 pub use wal_store::{WALRecord, WALRecordType, WALStore};

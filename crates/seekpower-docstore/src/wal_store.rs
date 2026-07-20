@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use seekpower_storage::ObjectStore;
+
 use crate::document::Document;
 use crate::error::{DocStoreError, Result};
 
@@ -83,19 +85,19 @@ impl WALRecord {
         // payload_len
         let payload_len = buf.get_u32_le() as usize;
 
-        if buf.len() < 13 + payload_len + 4 {
+        if buf.len() < payload_len + 4 {
             return Err(DocStoreError::InvalidWalFormat(
                 "Payload length mismatch".to_string(),
             ));
         }
 
         // payload
-        let payload_bytes = &buf[..13 + payload_len];
+        let payload_bytes = &buf[..payload_len];
         let payload: Document = serde_json::from_slice(payload_bytes)
             .map_err(|e| DocStoreError::SerializationError(format!("JSON error: {}", e)))?;
 
         // 验证 checksum
-        let expected_checksum = buf[13 + payload_len..17]
+        let expected_checksum = buf[payload_len..payload_len + 4]
             .try_into()
             .map(u32::from_le_bytes)
             .unwrap();
@@ -139,7 +141,8 @@ impl WALHeader {
 
         let mut buf = data;
         let mut magic = [0u8; 4];
-        buf.copy_to_slice(&magic);
+        magic.copy_from_slice(&buf[..4]);
+        buf.advance(4);
 
         if &magic != WAL_MAGIC {
             return Err(DocStoreError::InvalidWalFormat(format!(
@@ -210,7 +213,7 @@ impl WALStore {
         let mut data = existing.map(|b| b.to_vec()).unwrap_or_default();
 
         // 确保足够空间
-        let required_size = (offset + record_bytes.len()) as usize;
+        let required_size = offset as usize + record_bytes.len();
         if data.len() < required_size {
             data.resize(required_size, 0);
         }
@@ -253,8 +256,63 @@ impl WALStore {
 
     /// 从 WAL 获取文档
     pub async fn get(&self, doc_id: u64) -> Result<Option<Document>> {
-        // TODO: 实现 WAL 查找
-        // 暂时返回 None
+        let current_seq = self.current_sequence.load(Ordering::Acquire);
+
+        // 从最新的段往前查找，优先返回最新版本
+        for seq in (1..=current_seq).rev() {
+            let path = format!("{}/wal/{}.wal", self.prefix, seq);
+            let data = match self.store.get(&path).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // 跳过 WAL 头部（20 字节）
+            let mut offset = 20usize;
+            let bytes = data.as_ref();
+
+            while offset + 14 <= bytes.len() {
+                // 尝试解析一条记录
+                let remaining = &bytes[offset..];
+
+                // record_type: 1 byte
+                let record_type_byte = remaining[0];
+                let record_type = match record_type_byte {
+                    1 => WALRecordType::Add,
+                    2 => WALRecordType::Delete,
+                    _ => break, // 无法识别，停止
+                };
+
+                // doc_id: 8 bytes
+                let record_doc_id = u64::from_le_bytes(
+                    remaining[1..9].try_into().unwrap(),
+                );
+
+                // payload_len: 4 bytes
+                let payload_len = u32::from_le_bytes(
+                    remaining[9..13].try_into().unwrap(),
+                ) as usize;
+
+                // 整条记录长度: 1 + 8 + 4 + payload_len + 4 (checksum)
+                let record_len = 13 + payload_len + 4;
+                if offset + record_len > bytes.len() {
+                    break;
+                }
+
+                if record_doc_id == doc_id {
+                    if record_type == WALRecordType::Delete {
+                        return Ok(None);
+                    }
+                    // 反序列化 payload
+                    let payload_bytes = &remaining[13..13 + payload_len];
+                    let doc: Document = serde_json::from_slice(payload_bytes)
+                        .map_err(|e| DocStoreError::SerializationError(format!("JSON error: {}", e)))?;
+                    return Ok(Some(doc));
+                }
+
+                offset += record_len;
+            }
+        }
+
         Ok(None)
     }
 
@@ -302,67 +360,6 @@ impl WALStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Mock ObjectStore for testing
-    struct MockStore {
-        data: Arc<RwLock<Vec<u8>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for MockStore {
-        async fn put(&self, _location: &str, bytes: bytes::Bytes) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = bytes.to_vec();
-            Ok(())
-        }
-
-        async fn get(&self, _location: &str) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn delete(&self, _location: &str) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = Vec::new();
-            Ok(())
-        }
-
-        async fn list(&self, _prefix: Option<&str>) -> Result<Vec<String>, seekpower_storage::StorageError> {
-            Ok(vec![])
-        }
-
-        async fn range(
-            &self,
-            _location: &str,
-            _offset: u64,
-            _len: Option<u64>,
-        ) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn put_if_absent(
-            &self,
-            _location: &str,
-            _bytes: bytes::Bytes,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            Ok(true)
-        }
-
-        async fn put_if_match(
-            &self,
-            _location: &str,
-            bytes: bytes::Bytes,
-            _etag: &str,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            self.put(_location, bytes).await?;
-            Ok(true)
-        }
-
-        async fn metadata(&self, _location: &str) -> Result<seekpower_storage::ObjectMetadata, seekpower_storage::StorageError> {
-            Ok(seekpower_storage::ObjectMetadata {
-                size: self.data.read().await.len() as u64,
-                last_modified: std::time::SystemTime::now(),
-                etag: Some("mock".to_string()),
-            })
-        }
-    }
 
     #[test]
     fn test_wal_record_serialization() {

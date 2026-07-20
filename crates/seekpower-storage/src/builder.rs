@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use crate::{fs_store::FsStore, BackendType, ObjectStore, S3Store};
-use seekpower_error::StoreError;
+use seekpower_error::Error;
 
 /// 对象存储构建器
 ///
@@ -21,7 +21,7 @@ impl ObjectStoreBuilder {
     }
 
     /// 构建对象存储实例
-    pub async fn build(self) -> Result<Arc<dyn ObjectStore>, StoreError> {
+    pub async fn build(self) -> Result<Arc<dyn ObjectStore>, Error> {
         let store: Arc<dyn ObjectStore> = match self.backend {
             BackendType::Fs { root } => Arc::new(FsStore::new(root)?),
             BackendType::S3 {

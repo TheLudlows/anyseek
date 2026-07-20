@@ -13,7 +13,7 @@ use crate::wal_store::{WALRecord, WALRecordType, WALStore};
 impl From<SequenceError> for DocStoreError {
     fn from(e: SequenceError) -> Self {
         match e {
-            SequenceError::StorageError(msg) => DocStoreError::StorageError(seekpower_error::StoreError::Internal(msg)),
+            SequenceError::StorageError(msg) => DocStoreError::StorageError(seekpower_error::Error::Internal(msg)),
             SequenceError::InvalidFormat(msg) => DocStoreError::SerializationError(msg),
             SequenceError::Conflict => DocStoreError::CasConflict,
         }
@@ -23,7 +23,7 @@ impl From<SequenceError> for DocStoreError {
 impl From<DeleteSetError> for DocStoreError {
     fn from(e: DeleteSetError) -> Self {
         match e {
-            DeleteSetError::StorageError(msg) => DocStoreError::StorageError(seekpower_error::StoreError::Internal(msg)),
+            DeleteSetError::StorageError(msg) => DocStoreError::StorageError(seekpower_error::Error::Internal(msg)),
             DeleteSetError::InvalidFormat(msg) => DocStoreError::SerializationError(msg),
         }
     }
@@ -284,73 +284,17 @@ pub struct DocStoreStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seekpower_storage::{BackendType, FsBackendBuilder, FsStore, ObjectStoreBuilder};
 
-    // Mock ObjectStore for testing
-    struct MockStore {
-        data: Arc<RwLock<Vec<u8>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for MockStore {
-        async fn put(&self, _location: &str, bytes: bytes::Bytes) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = bytes.to_vec();
-            Ok(())
-        }
-
-        async fn get(&self, _location: &str) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn delete(&self, _location: &str) -> Result<(), seekpower_storage::StorageError> {
-            *self.data.write().await = Vec::new();
-            Ok(())
-        }
-
-        async fn list(&self, _prefix: Option<&str>) -> Result<Vec<String>, seekpower_storage::StorageError> {
-            Ok(vec![])
-        }
-
-        async fn range(
-            &self,
-            _location: &str,
-            _offset: u64,
-            _len: Option<u64>,
-        ) -> Result<bytes::Bytes, seekpower_storage::StorageError> {
-            Ok(self.data.read().await.clone().into())
-        }
-
-        async fn put_if_absent(
-            &self,
-            _location: &str,
-            _bytes: bytes::Bytes,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            Ok(true)
-        }
-
-        async fn put_if_match(
-            &self,
-            _location: &str,
-            bytes: bytes::Bytes,
-            _etag: &str,
-        ) -> Result<bool, seekpower_storage::StorageError> {
-            self.put(_location, bytes).await?;
-            Ok(true)
-        }
-
-        async fn metadata(&self, _location: &str) -> Result<seekpower_storage::ObjectMetadata, seekpower_storage::StorageError> {
-            Ok(seekpower_storage::ObjectMetadata {
-                size: self.data.read().await.len() as u64,
-                last_modified: std::time::SystemTime::now(),
-                etag: Some("mock".to_string()),
-            })
-        }
+    async fn  make_store() -> (Arc<dyn ObjectStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let store = ObjectStoreBuilder::new(BackendType::fs_builder().build()).build().await.unwrap();
+        (store, dir)
     }
 
     #[tokio::test]
     async fn test_docstore_insert() {
-        let store = Arc::new(MockStore {
-            data: Arc::new(RwLock::new(Vec::new())),
-        });
+        let (store, _dir) = make_store().await;
 
         let config = DocStoreConfig::new().with_index_prefix("test".to_string());
         let docstore = DocStore::new(store, config).await.unwrap();
@@ -364,9 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_docstore_insert_and_get() {
-        let store = Arc::new(MockStore {
-            data: Arc::new(RwLock::new(Vec::new())),
-        });
+        let (store, _dir) = make_store().await;
 
         let config = DocStoreConfig::new().with_index_prefix("test".to_string());
         let docstore = DocStore::new(store, config).await.unwrap();
@@ -383,9 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_docstore_delete() {
-        let store = Arc::new(MockStore {
-            data: Arc::new(RwLock::new(Vec::new())),
-        });
+        let (store, _dir) = make_store().await;
 
         let config = DocStoreConfig::new().with_index_prefix("test".to_string());
         let docstore = DocStore::new(store, config).await.unwrap();

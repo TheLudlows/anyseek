@@ -1,4 +1,4 @@
-use seekpower_error::StoreError;
+use seekpower_error::Error;
 use std::io;
 use thiserror::Error;
 
@@ -22,7 +22,7 @@ pub enum DocStoreError {
     ChunkError(String),
 
     #[error("Storage error: {0}")]
-    StorageError(#[from] StoreError),
+    StorageError(#[from] Error),
 
     #[error("Serialization error: {0}")]
     SerializationError(String),
