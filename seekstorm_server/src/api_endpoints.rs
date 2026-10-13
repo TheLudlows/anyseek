@@ -16,13 +16,12 @@ use seekstorm::{
     index::{
         AccessType, ApikeyObject, ApikeyQuotaObject, Close, Clustering, CreateIndexRequest,
         DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
-        FileType, FrequentwordType, GetDocumentRequest, GetIteratorRequest, IS_AVX2, IS_NEON,
+        FrequentwordType, GetDocumentRequest, GetIteratorRequest, IS_AVX2, IS_NEON,
         IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
         IndexResponseObject, LexicalSimilarity, QueryCompletion, SchemaField, SearchRequestObject,
         SearchResultObject, SpellingCorrection, StemmerType, StopwordType, Synonym, TokenizerType,
         UpdateDocument, UpdateDocuments, create_index, open_index,
     },
-    ingest::IndexPdfBytes,
     iterator::{GetIterator, IteratorResult},
     search::{Search, SearchMode},
     vector::Inference,
@@ -663,86 +662,9 @@ pub(crate) async fn index_document_api(
     index_arc: &IndexArc,
     document: Document,
 ) -> Result<usize, String> {
-    index_arc.index_document(document, FileType::None).await?;
+    index_arc.index_document(document).await?;
 
     Ok(index_arc.read().await.indexed_doc_count().await)
-}
-
-/// Index PDF file
-///
-/// Index PDF file (byte array) to the index with the specified apikey and index_id, and return the number of indexed docs.
-/// - Converts PDF to a JSON document with "title", "body", "url" and "date" fields and indexes it.
-/// - extracts title from metatag, or first line of text, or from filename
-/// - extracts creation date from metatag, or from file creation date (Unix timestamp: the number of seconds since 1 January 1970)
-/// - copies all ingested pdf files to "files" subdirectory in index
-#[utoipa::path(
-    post,
-    tag = "PDF File",
-    path = "/api/v1/index/{index_id}/file",
-    params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("file" = String, Header, description = "filepath from header for JSON 'url' field"),
-        ("date" = String, Header, description = "date (timestamp) from header, as fallback for JSON 'date' field, if PDF date meta tag unaivailable"),
-        ("index_id" = u64, Path, description = "index id"),
-    ),
-    request_body = inline(&[u8]),
-    responses(
-        (status = 200, description = "PDF file indexed, returns the number of indexed documents", body = usize),
-        (status = BAD_REQUEST, description = "Document object invalid"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "API key does not exist"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing")
-    ),
-    operation_id = "index_pdf_file",
-)]
-pub(crate) async fn index_file_api(
-    index_arc: &IndexArc,
-    file_path: &Path,
-    file_date: i64,
-    document: &[u8],
-) -> Result<usize, String> {
-    match index_arc
-        .index_pdf_bytes(file_path, file_date, document)
-        .await
-    {
-        Ok(_) => Ok(index_arc.read().await.indexed_doc_count().await),
-        Err(e) => Err(e),
-    }
-}
-
-/// Get PDF file
-///
-/// Get PDF file from index with index_id
-/// ⚠️ Use search or get_iterator first to obtain s valid doc_id. Document IDs are not guaranteed to be continuous and gapless!
-#[utoipa::path(
-    get,
-    tag = "PDF File",
-    path = "/api/v1/index/{index_id}/file/{document_id}",
-    params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
-        ("document_id" = u64, Path, description = "document id"),
-    ),
-    responses(
-        (status = 200, description = "PDF file found, returns the PDF file as byte array", body = [u8]),
-        (status = BAD_REQUEST, description = "index_id invalid or missing"),
-        (status = BAD_REQUEST, description = "doc_id invalid or missing"),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "Document id does not exist"),
-        (status = NOT_FOUND, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing"),
-    ),
-    operation_id = "get_pdf_file",
-)]
-pub(crate) async fn get_file_api(index_arc: &IndexArc, document_id: usize) -> Option<Vec<u8>> {
-    if !index_arc.read().await.stored_field_names.is_empty() {
-        index_arc.read().await.get_file(document_id).await.ok()
-    } else {
-        None
-    }
 }
 
 pub(crate) async fn index_documents_api(
@@ -1389,9 +1311,7 @@ pub(crate) async fn query_index_api(
     get_iterator_api_get,
     index_document_api,
     update_document_api,
-    index_file_api,
     get_document_api,
-    get_file_api,
     delete_document_by_parameter_api,
     delete_document_by_object_api,
     query_index_api_post,
@@ -1403,7 +1323,6 @@ tags(
     (name="Index", description="Create and delete indices"),
     (name="Iterator", description="Iterate through document IDs and documents"),
     (name="Document", description="Index, update, get and delete documents"),
-    (name="PDF File", description="Index, and get PDF file"),
     (name="Query", description="Query an index"),
 )
 )]

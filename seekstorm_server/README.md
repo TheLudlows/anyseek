@@ -1,3 +1,5 @@
+> SeekPower S1.3: file parsing and local dataset import have been removed. Prepare text, vectors and metadata externally, then send a JSON object or array to `POST /api/v1/index/{index_id}/doc`. PDF/CSV parsing, directory scanning, local JSON/SIFT import and PDF attachment hosting are no longer engine responsibilities. No PDFium installation is needed. Existing indexed records remain readable; legacy PDF files are not deleted, but the service no longer serves them. Host source files externally and put their URL in a record.
+
 > SeekPower S1.2: model inference and automatic chunking have been removed. Supply external vectors through the HTTP API. The Web UI defaults to Lexical; Vector/Hybrid require a pasted JSON vector and display validation errors. See the [external vector contract](../README.md#external-vector-contract) for configuration, error handling and migration details.
 
 # SeekStorm server 
@@ -14,7 +16,6 @@ SeekStorm open-source, multi-tenancy, vector & lexical search server
 
 * The SeekStorm server is a standalone search server to be accessed via HTTP, while the SeekStorm crate/library can be embedded into your program.
 * Index and search via [RESTful API](#rest-api-endpoints) endpoints and via [Embedded  web UI](#open-embedded-web-ui-in-browser).
-* Ingest local data files in [JSON](https://en.wikipedia.org/wiki/JSON), [Newline-delimited JSON](https://github.com/ndjson/ndjson-spec) (ndjson), and [Concatenated JSON](https://en.wikipedia.org/wiki/JSON_streaming) formats via console command.  
 * Multi-tenancy index management: multiple users, each with multiple indices
 * API-key management
 * Rate-limiting
@@ -22,7 +23,6 @@ SeekStorm open-source, multi-tenancy, vector & lexical search server
 
 ## Command line parameters
 
-* ingest_path   (default = path of the current running executable) : The default path for data files to ingest with the console command `ingest`, if entered without absolute path/filename.
 * index_path   (default = "/seekstorm_index" in the path of the current running executable)
 * local_ip     (default = 0.0.0.0)
 * local_port   (default = 80)
@@ -37,63 +37,16 @@ SeekStorm open-source, multi-tenancy, vector & lexical search server
 
 ## Console commands
 
-Index local files in [PDF](https://en.wikipedia.org/wiki/PDF), [CSV](https://en.wikipedia.org/wiki/Comma-separated_values), [SSV](https://en.wikipedia.org/wiki/Comma-separated_values), [TSV](https://en.wikipedia.org/wiki/Comma-separated_values), [PSV](https://en.wikipedia.org/wiki/Comma-separated_values), [JSON](https://en.wikipedia.org/wiki/JSON), [Newline-delimited JSON](https://github.com/ndjson/ndjson-spec) (ndjson), or [Concatenated JSON](https://en.wikipedia.org/wiki/JSON_streaming) formats via console command. 
+Use the HTTP document API for single-record and batch writes. File import commands (`ingest`, `ingestcsv`, `ingestsift`, `searchsift`) have been removed, and `ingest_path` is rejected at startup. Retained commands: `create`, `delete`, `info`, `search`, `openapi`, `help`, `quit`.
 
-```
-ingest
-```
-
-```
-ingest [file_path]
+```text
+search -v [1,0,0]
 ```
 
-```
-ingest [file_path] -t [type] -k [api_key] -i [index_id] -d [delimiter] -h [header] -q [quoting] -s [skip] -n [num]
-```
+`search` is a vector diagnostic for demo index 0 and requires an external-vector index.
 
--t [type]:      file type, default=derived from file extension  
--k [api_key]:   default=Demo API Key  
--i [index_id]:  default=0  
--h [header]:    CSV header, treat first line of file as header, default=false  
--d [delimiter]: CSV delimiter, default=derived from file type or file extension  
--q [quoting]:   CSV quoting, default=true  
--s [skip]:      number of records to skip from start, default=None=0  
--n [num]:       number of records to read, default=None=usize::MAX   
+The `create` command creates the demo API key. Create an index/schema through the HTTP API before writing records; see the examples below. The UI can display stored text and follow external source URLs, including PDF URLs, without an internal file endpoint.
 
-The path to the PDF, CSV or JSON files is specified by the `[data_filename]` parameter, the API key is specified by the `[api_key]` parameter, the index ID by specified in the `[index_id]` parameter.  
-If no absolute path is specified then the path specified with the command line parameter `ingest_path` or the path of the current running seekstorm_server.exe is used.
-The document file ingestion is streamed without loading the whole document vector into memory to allow for bulk import with unlimited file size and document number while keeping RAM consumption low.
-
-If the file extension is `PDF` then [PDF](https://en.wikipedia.org/wiki/PDF) format is assumed, if the file extension is `CSV` then [CSV](https://en.wikipedia.org/wiki/Comma-separated_values) format is assumed, if the file extension is `JSON` then it is automatically detected whether it is in [JSON](https://en.wikipedia.org/wiki/JSON), [Newline-delimited JSON](https://github.com/ndjson/ndjson-spec) (ndjson), or [Concatenated JSON](https://en.wikipedia.org/wiki/JSON_streaming) format.  
-If the specified `[file_path]` is a `directory` instead of a file, then all `PDF` files within that directory are indexed, including all subdirectories.
-
-If no `[file_path]` parameter is specified then **wiki-articles.json** is indexed, if present in same directory like seekstorm_server.exe or the directory specified by the command line parameter `ingest_path`.  
-If no `[api_key]` and `[index_id]` parameter are specified then the default demo API key and index_id=0 are used.
-
-&#x26A0; **CAUTION**: When ingesting a `CSV` file, the **columns in the CSV file** are assigned **sequentially** to the defined **fields in the schema** of the index.  
-  Any columns in the CSV file exceeding the number of defined fields are ignored.
-
-&#x26A0; **CAUTION**: The **array of documents** is expected to be in the **root element** of a `JSON` file.
-
-If API key or index specified by `[api_key]` and `[index_id]` parameter do not yet exist they have to be created prior to ingest via REST API endpoints:
-
-create api key: Use master API key displayed in the server console at startup.
-```
-curl --request POST --url http://127.0.0.1:80/api/v1/apikey --header 'apikey: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=' --header 'content-type: application/json' --data '{"indices_max": 10,"indices_size_max":100000,"documents_max":10000000,"operations_max":10000000,"rate_limit": 100000}'
-```
-
-create index: Use individual API key (use create api key above to generate)
-```
-curl --request POST --url http://127.0.0.1:80/api/v1/index --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"schema":[{"field_type": "Text","store": true,"field": "title","index_lexical": true,"boost":10.0},{"field_type": "Text","store": true,"field": "body","index_lexical": true},{"field_type": "String","store": true,"field": "url","index_lexical": false}],"index_name": "test_index","similarity": "Bm25fProximity","tokenizer": "UnicodeAlphanumeric"}'
-```
-
-&#x26A0; **CAUTION**: If sending CURL commands from MS Windows Powershell use 'curl.exe' instead of 'curl' AND escape (\") all double quotes within the JSON request object!
-
-
-After ingest you can search the index via [REST API endpoints](https://github.com/SeekStorm/SeekStorm/blob/main/src/seekstorm_server#rest-api-endpoints) or via [browser in the embedded web UI](https://github.com/SeekStorm/SeekStorm/blob/main/src/seekstorm_server#open-embedded-web-ui-in-browser).  
-The field names to display in the web UI can be automatically detected or pre-defined. 
-
-<br><br>
 
 ```
 delete
@@ -120,7 +73,7 @@ In the index.json file you also may change access_type":"Mmap" to access_type":"
 The embedded web UI allows to search and display results (document fields) from an index:  
 [http://127.0.0.1](http://127.0.0.1)
 
-Per default the web UI is set to the [Wikipedia demo](https://github.com/SeekStorm/SeekStorm/?tab=readme-ov-file#build-a-wikipedia-search-engine-with-the-seekstorm-server) **API key**, **index_id** and **field names** ([use console command `ingest` first](#console-commands)).  
+The Web UI uses the demo API key and index 0 by default. Create and populate the index through the JSON API first; select another index with the `index_id` URL parameter.
 
 <img src="../../assets/wikipedia_demo.png" width="800">
 <br><br>
@@ -188,61 +141,6 @@ curl --request POST --url http://127.0.0.1:80/api/v1/index/0/doc --header 'apike
 multiple documents
 ```
 curl --request POST --url http://127.0.0.1:80/api/v1/index/0/doc --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --header 'user-agent: vscode-restclient' --data '[{"title":"title2","body":"body2 test","url":"url2"},{"title":"title3 test","body":"body3 test","url":"url3"}]'
-```
-
-### index PDF file 
-
-- converts pdf to text and indexes it
-- extracts title from metatag, or first line of text, or from filename
-- extracts creation date from metatag, or from file creation date (Unix timestamp: the number of seconds since 1 January 1970)
-- copies all ingested pdf files to "files" subdirectory in index
-- the following index schema is required (and automatically created by the console `ingest` command):
-```json
- [
-   {
-     "field": "title",
-     "store": true,
-     "index_lexical": true,
-     "field_type": "Text",
-     "boost": 10
-   },
-   {
-     "field": "body",
-     "store": true,
-     "index_lexical": true,
-     "field_type": "Text"
-   },
-   {
-     "field": "url",
-     "store": true,
-     "index_lexical": false,
-     "field_type": "Text"
-   },
-   {
-     "field": "date",
-     "store": true,
-     "index_lexical": false,
-     "field_type": "Timestamp",
-     "facet": true
-   }
- ]
-```
-
-create index
-```
-curl.exe --request POST --url 'http://127.0.0.1/api/v1/index' --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{\"schema\":[{\"field\": \"title\", \"field_type\": \"Text\",\"stored\": true, \"indexed\": true,\"boost\":10.0},{\"field\": \"body\", \"field_type\": \"Text\",\"stored\": true, \"indexed\": true},{\"field\": \"url\", \"field_type\": \"Text\",\"stored\": true, \"indexed\": false},{\"field\": \"date\", \"field_type\": \"Timestamp\",\"stored\": true, \"indexed\": true, \"facet\": true}],\"index_name\": \"pdf_index\",\"similarity\": \"Bm25fProximity\",\"tokenizer\": \"UnicodeAlphanumeric\"}'
-```
-
-index PDF
-```
-curl.exe --request POST --url 'http://127.0.0.1/api/v1/index/0/file' --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/pdf' --header 'file: C:\Users\johndoe\Downloads\odsceast2018.pdf' --data-binary '@C:\Users\johndoe\Downloads\odsceast2018.pdf'
-```
-
-### get PDF file 
-
-get PDF file bytes from file folder in index
-```
-curl --request GET --url http://127.0.0.1/api/v1/index/0/file/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json'
 ```
 
 ### get document 

@@ -50,8 +50,8 @@ use crate::api_endpoints::{
     delete_document_by_object_api, delete_document_by_parameter_api, index_documents_api,
 };
 use crate::api_endpoints::{delete_documents_by_object_api, delete_documents_by_query_api};
-use crate::api_endpoints::{delete_index_api, get_file_api};
-use crate::api_endpoints::{get_apikey_indices_info_api, index_file_api};
+use crate::api_endpoints::delete_index_api;
+use crate::api_endpoints::get_apikey_indices_info_api;
 use crate::api_endpoints::{get_document_api, get_synonyms_api};
 use crate::api_endpoints::{
     get_iterator_api_get, get_iterator_api_post, live_api, update_document_api,
@@ -108,7 +108,6 @@ enum HttpServerError {
     BadRequest(String),
     InternalServerError,
     NotImplemented,
-    FileNotFound,
     DocumentNotFound,
     RateLimitExceeded,
 }
@@ -139,9 +138,6 @@ impl From<HttpServerError> for Result<Response<BoxBody<Bytes, Infallible>>, Infa
             ),
             HttpServerError::NotImplemented => {
                 status(StatusCode::NOT_IMPLEMENTED, "not implemented".to_string())
-            }
-            HttpServerError::FileNotFound => {
-                status(StatusCode::NOT_FOUND, "file not found".to_string())
             }
             HttpServerError::DocumentNotFound => {
                 status(StatusCode::NOT_FOUND, "document not found".to_string())
@@ -750,63 +746,6 @@ pub(crate) async fn http_request_handler(
             }
         }
 
-        ("api", "v1", "index", _, "file", _, &Method::POST) => {
-            let Some(apikey) = apikey_header else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
-            let Ok(index_id) = parts[3].parse() else {
-                return HttpServerError::BadRequest("index_id invalid or missing".to_string())
-                    .into();
-            };
-
-            let file_date = req
-                .headers()
-                .get("date")
-                .and_then(|file_date| file_date.to_str().ok())
-                .and_then(|date_str| date_str.parse::<i64>().ok())
-                .unwrap_or_else(|| Utc::now().timestamp());
-
-            let file_path = req
-                .headers()
-                .get("file")
-                .and_then(|file_path| file_path.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            let file_path = Path::new(&file_path);
-
-            let Ok(collected_body) = req.into_body().collect().await else {
-                return HttpServerError::BadRequest("failed to read request body".to_string())
-                    .into();
-            };
-            let request_bytes = collected_body.to_bytes();
-
-            let apikey_list_ref = apikey_list.read().await;
-
-            let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(index_arc) = apikey_object.index_list.get(&index_id) else {
-                return HttpServerError::IndexNotFound.into();
-            };
-            let index_arc_clone = index_arc.clone();
-            drop(apikey_list_ref);
-
-            let status_object =
-                index_file_api(&index_arc_clone, file_path, file_date, &request_bytes).await;
-            let status_object_json = serde_json::to_vec(&status_object).unwrap();
-            Ok(Response::new(BoxBody::new(Full::new(
-                status_object_json.into(),
-            ))))
-        }
-
         ("api", "v1", "index", _, "synonyms", _, &Method::POST) => {
             let Some(apikey) = apikey_header else {
                 return HttpServerError::Unauthorized.into();
@@ -1068,47 +1007,6 @@ pub(crate) async fn http_request_handler(
             Ok(Response::new(BoxBody::new(Full::new(
                 status_object_json.into(),
             ))))
-        }
-
-        ("api", "v1", "index", _, "file", _, &Method::GET) => {
-            let Some(apikey) = apikey_header else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
-            let Ok(index_id) = parts[3].parse() else {
-                return HttpServerError::BadRequest("index_id invalid or missing".to_string())
-                    .into();
-            };
-            let Ok(doc_id) = parts[5].parse() else {
-                return HttpServerError::BadRequest("doc_id invalid or missing".to_string()).into();
-            };
-            let apikey_list_ref = apikey_list.read().await;
-            let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(index_arc) = apikey_object.index_list.get(&index_id) else {
-                return HttpServerError::IndexNotFound.into();
-            };
-            let file = get_file_api(index_arc, doc_id).await;
-            drop(apikey_list_ref);
-
-            let Some(file) = file else {
-                return HttpServerError::FileNotFound.into();
-            };
-            let response = Response::builder()
-                .header("Content-Type", "application/pdf")
-                .header("content-length", file.len())
-                .header("Content-Disposition", "attachment;filename=file.pdf")
-                .body(BoxBody::new(Full::new(file.into())))
-                .unwrap();
-            Ok(response)
         }
 
         ("api", "v1", "index", _, "doc", _, &Method::GET) => {
@@ -1553,6 +1451,11 @@ pub(crate) async fn http_request_handler(
             }
         }
 
+        ("api", "v1", "index", _, "file", _, _) => Ok(status(
+            StatusCode::NOT_FOUND,
+            "file endpoints have been removed; use the JSON document API and external source URLs".to_string(),
+        )),
+
         (_, _, _, _, _, _, &Method::GET) => match path {
             "/" => Ok(Response::new(BoxBody::new(INDEX_HTML.to_string()))),
             "/css/flexboxgrid.min.css" => Ok(Response::new(BoxBody::new(FLEXBOX_CSS.to_string()))),
@@ -1671,3 +1574,4 @@ pub(crate) async fn http_server(
         }
     }
 }
+

@@ -4,7 +4,7 @@
 
 use seekstorm::commit::Commit;
 use seekstorm::index::{
-    AccessType, Close, Clustering, DeleteDocument, DocumentCompression, FileType, FrequentwordType,
+    AccessType, Close, Clustering, DeleteDocument, DocumentCompression, FrequentwordType,
     IndexArc, IndexDocument, IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet,
     StemmerType, StopwordType, TokenizerType, create_index, open_index,
 };
@@ -77,7 +77,7 @@ async fn test_02_index_document() {
     let document_json = r#"
     {"title":"title1 test","body":"body1","url":"url1"}"#;
     let document = serde_json::from_str(document_json).unwrap();
-    index_arc.index_document(document, FileType::None).await.unwrap();
+    index_arc.index_document(document).await.unwrap();
 
     // index documents
     let documents_json = r#"
@@ -355,7 +355,7 @@ async fn test_06_clear_index() {
     let document_json = r#"
     {"title":"title1 test","body":"body1","url":"url1"}"#;
     let document = serde_json::from_str(document_json).unwrap();
-    index_arc.index_document(document, FileType::None).await.unwrap();
+    index_arc.index_document(document).await.unwrap();
 
     // wait until all index threads are finished and commit
     index_arc.commit().await;
@@ -873,3 +873,4 @@ async fn test_15_facet_scope() {
     index_arc.close().await;
     let _ = fs::remove_dir_all(index_path);
 }
+

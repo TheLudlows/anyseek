@@ -1,12 +1,12 @@
 # SeekPower 执行状态
 
-更新日期：2026-10-13（Asia/Singapore）。
+更新日期：2026-10-13（Asia/Shanghai）。
 
 入口：[实施计划](SEEKPOWER_PLAN.md) · [上游基线](UPSTREAM.md) · [验证记录](VALIDATION.md) · [S1 实施 Issue #1](https://github.com/TheLudlows/seekpower/issues/1)
 
 ## 当前阶段
 
-**R0 已完成；独立 S0 已取消，直接以 S1 剥离裁剪为当前工作阶段。S1.1 已实施 workspace/MCP/SDK 裁剪并迁移 HTTP 冒烟；[PR #2](https://github.com/TheLudlows/seekpower/pull/2) 已通过构建和 HTTP/UI 冒烟，继承的同分边界测试夹具已修复，45 个既有测试全部通过，已合入主干（`61f11306b45af0cf29c0e040708b14f76c8ee1f2`）；S1.2 在 [PR #3](https://github.com/TheLudlows/seekpower/pull/3) 代码与本批验证完成，待审查合入。**
+**R0 已完成；独立 S0 已取消，直接以 S1 剥离裁剪为当前工作阶段。S1.1 已实施 workspace/MCP/SDK 裁剪并迁移 HTTP 冒烟；[PR #2](https://github.com/TheLudlows/seekpower/pull/2) 已通过构建和 HTTP/UI 冒烟，继承的同分边界测试夹具已修复，45 个既有测试全部通过，已合入主干（`61f11306b45af0cf29c0e040708b14f76c8ee1f2`）；S1.2 在 [PR #3](https://github.com/TheLudlows/seekpower/pull/3) 已合入主干（`fc47cf83a1482f18e249c8f9c6f8e8ec87e47acc`）。**
 
 不再要求先完成原版全量构建/性能/UI/可靠性审计才能开始裁剪。编译、受影响功能和 UI 冒烟随每批裁剪执行；完整可靠性与单机发布验收留在 S2。
 
@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | R0 原样代码导入 | 已完成 | `1986b14215c82a07fac77d7c5b169b90743d76a4`；与上游树完全相同 |
 | R0 计划文档 | 已提交并调整 | 已取消独立基线阶段，改为直接实施 S1 |
-| S1 外围裁剪 | S1.1 已合入，S1.2 已验证、待合入 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 原样保留 |
+| S1 外围裁剪 | S1.1—S1.2 已合入；S1.3 已验证、待合入 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 保留并按裁剪结果调整 |
 | S2 可靠单机 | 待执行 | ID/版本、可见性、日志/检查点/恢复、过滤和候选接口 |
 | D1 静态分布式 | 待执行 | 分片路由、全局两路候选、RRF、回表 |
 | D2 副本与恢复 | 待执行 | 有序复制、选主、fencing、快照追赶 |
@@ -24,7 +24,7 @@
 ## 已固定的边界
 
 - Web UI 保留并复用，不删除、不另起项目重写；后续按能力调整控件与 API。
-- workspace 已收敛为 `seekstorm`、`seekstorm_server`；S1.2 分支已移除模型/切块依赖，PDF 等依赖待 S1.3 移除，不代表 S1 全部完成。
+- workspace 已收敛为 `seekstorm`、`seekstorm_server`；S1.2 已移除模型/切块依赖，S1.3 分支已移除文件解析依赖，不代表 S1 全部完成。
 - 目标主分支继续使用 `master`；旧代码保存在导入提交的父历史中。
 - S1.1 未改保留 crate 的运行源码、UI 资源、检索算法或索引格式；只额外修正一个继承测试的数据前提，未引入分布式组件。
 - 删除独立 S0 不等于删除测试或宣称未执行测试已经通过；也不以另一个名称恢复全量基线前置要求。
@@ -47,9 +47,17 @@
 - 针对回归失败修正相似度缩放/符号、小维度 SIMD 分派及 commit 响应计数；保留格式和算法，具体最小改动见 VALIDATION。
 - 限制：Vector/Hybrid 非空 `facet_filter` 明确报错；上游向量分支原本未应用该过滤。词法过滤保留，共同候选过滤在 S2 补齐。
 
+## 当前批次：S1.3
+
+- 移除 PDF/CSV/目录扫描及本地 JSON/SIFT 导入；保留 JSON 单条/批量 API、记录读取、更新、删除与提交。
+- 移除 PDF HTTP 接口及 UI 内部附件预览；外部 URL 按普通链接处理，原文预览保留。
+- 清理 pdf feature、pdfium-render/csv/walkdir 依赖；移除 PDF 附件写入/读取和多余 files 目录创建，不删除既有附件，不改变索引编码。
+- 核心 Rust 单条写入改为 `index_document(document)`；控制台信息展示从 ingest 模块迁至 info 模块。
+- 扩展 HTTP/浏览器回归并同步 API 描述、使用说明。[PR #4](https://github.com/TheLudlows/seekpower/pull/4) / `dbd22c7` 的 [CI 38384079928](https://github.com/TheLudlows/seekpower/actions/runs/38384079928) 全部通过：构建、48 个测试、依赖图、HTTP/Chromium 与 OpenAPI 一致性。
+
 ## 下一步
 
-1. 审查并合入 [PR #3](https://github.com/TheLudlows/seekpower/pull/3)；代码与本批验证完成，失败历史和修复证据见 VALIDATION。
-2. S1.2 合入后推进 S1.3 文件导入裁剪，再按 S1.4—S1.5 顺序推进。
+1. 审查并合入 S1.3 [PR #4](https://github.com/TheLudlows/seekpower/pull/4)；本批代码与验证已完成，证据见 VALIDATION。
+2. S1.3 合入后按 S1.4—S1.5 顺序推进。
 
 各批完成时同步 commit/PR、命令、环境、结果及未解决问题。完整可靠性和性能验收留在 S2。

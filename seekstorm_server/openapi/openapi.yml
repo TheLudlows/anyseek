@@ -1150,70 +1150,6 @@ paths:
           description: api_key missing
         '404':
           description: API key does not exist
-  /api/v1/index/{index_id}/file:
-    post:
-      tags:
-      - PDF File
-      summary: Index PDF file
-      description: |-
-        Index PDF file (byte array) to the index with the specified apikey and index_id, and return the number of indexed docs.
-        - Converts PDF to a JSON document with "title", "body", "url" and "date" fields and indexes it.
-        - extracts title from metatag, or first line of text, or from filename
-        - extracts creation date from metatag, or from file creation date (Unix timestamp: the number of seconds since 1 January 1970)
-        - copies all ingested pdf files to "files" subdirectory in index
-      operationId: index_pdf_file
-      parameters:
-      - name: apikey
-        in: header
-        description: YOUR_SECRET_API_KEY
-        required: true
-        schema:
-          type: string
-        example: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-      - name: file
-        in: header
-        description: filepath from header for JSON 'url' field
-        required: true
-        schema:
-          type: string
-      - name: date
-        in: header
-        description: date (timestamp) from header, as fallback for JSON 'date' field, if PDF date meta tag unaivailable
-        required: true
-        schema:
-          type: string
-      - name: index_id
-        in: path
-        description: index id
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 0
-      requestBody:
-        content:
-          application/octet-stream:
-            schema:
-              type: array
-              items:
-                type: integer
-                format: int32
-                minimum: 0
-        required: true
-      responses:
-        '200':
-          description: PDF file indexed, returns the number of indexed documents
-          content:
-            text/plain:
-              schema:
-                type: integer
-                minimum: 0
-        '400':
-          description: Document object invalid
-        '401':
-          description: api_key missing
-        '404':
-          description: API key does not exist
   /api/v1/index/{index_id}/doc/{document_id}:
     get:
       tags:
@@ -1335,56 +1271,6 @@ paths:
               schema:
                 type: integer
                 minimum: 0
-        '400':
-          description: Request object incorrect
-        '401':
-          description: api_key missing
-        '404':
-          description: api_key does not exists
-  /api/v1/index/{index_id}/file/{document_id}:
-    get:
-      tags:
-      - PDF File
-      summary: Get PDF file
-      description: |-
-        Get PDF file from index with index_id
-        ⚠️ Use search or get_iterator first to obtain s valid doc_id. Document IDs are not guaranteed to be continuous and gapless!
-      operationId: get_pdf_file
-      parameters:
-      - name: apikey
-        in: header
-        description: YOUR_SECRET_API_KEY
-        required: true
-        schema:
-          type: string
-        example: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-      - name: index_id
-        in: path
-        description: index id
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 0
-      - name: document_id
-        in: path
-        description: document id
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 0
-      responses:
-        '200':
-          description: PDF file found, returns the PDF file as byte array
-          content:
-            application/octet-stream:
-              schema:
-                type: array
-                items:
-                  type: integer
-                  format: int32
-                  minimum: 0
         '400':
           description: Request object incorrect
         '401':
@@ -4130,7 +4016,5 @@ tags:
   description: Iterate through document IDs and documents
 - name: Document
   description: Index, update, get and delete documents
-- name: PDF File
-  description: Index, and get PDF file
 - name: Query
   description: Query an index

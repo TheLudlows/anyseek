@@ -13,9 +13,8 @@ keywords = ["search", "information", "retrieval"]
 edition = "2024"
 
 [features]
-default = ["zh","pdf","vb"]
+default = ["zh","vb"]
 zh = ["seekstorm/zh"]
-pdf = ["seekstorm/pdf"]
 vb = ["seekstorm/vb"]
 
 [[bin]]

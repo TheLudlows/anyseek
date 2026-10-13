@@ -140,3 +140,27 @@ PR #3 完成代码及本批验证，待审查合入；Issue #1 保持打开，S1
 CI 改用新的缓存命名空间且 `cache-targets: false`，只缓存可跨机器复用的依赖源码/工具下载；每台 runner 本地重编全部 native 目标，继续保留生产构建参数。增加 lscpu 记录。PR 暂回草稿，待无旧目标产物的完整复跑通过。
 
 缓存修正后的提交 `9a82532b534db87395971469120937b233ef824e` 已在 [CI 38374841361](https://github.com/TheLudlows/seekpower/actions/runs/38374841361) / job `115220524747` **完整通过**：从无目标产物的状态全量构建、48 个测试（0 failed/ignored/filtered）、HTTP/Chromium 和 OpenAPI 一致性均通过。日志确认 `cache-targets: false`，缓存路径不再包含仓库 target。之前成功代码的功能结论保持，CI 跨 runner native 目标缓存问题已处理；PR 恢复可审查，仍待合入。
+
+
+## S1.3 — 文件导入外置（2026-10-13）
+
+基线：S1.2 已合入 master，PR #3 / `fc47cf83a1482f18e249c8f9c6f8e8ec87e47acc`。该 PR 最终 head `55fb315` 的 CI 38375267442 全部通过；这不是本批验证结果。
+
+本批移除 PDF、CSV、目录扫描及本地 JSON/SIFT 导入、附件读写、HTTP 文件端点与 UI 内部文件请求。只保留已处理 JSON 记录的写入/查询/读取路径。`display_index_info` 原样迁入 info 模块；不改压缩、索引编码和检索内核。旧 files 目录不主动删除。
+
+验证计划：workspace 构建与既有 48 个测试、HTTP 单条/批量写入与更新/删除/读取、文件端点拒绝且无写入、CLI 旧配置拒绝、Chromium 外部 PDF URL 与纯文本预览、API 生成一致性、Cargo 解析依赖中无 pdfium-render/csv/walkdir。本地无 Rust 工具链，Rust/浏览器验证由 CI 执行。下方记录实际结果；AArch64、Docker 镜像运行、质量/性能和故障恢复未验证，仍归后续阶段。
+
+
+**本批结果：通过。** [PR #4](https://github.com/TheLudlows/seekpower/pull/4)，代码提交 [`dbd22c77f41f8c1ed17dc249419febefe659dc8f`](https://github.com/TheLudlows/seekpower/commit/dbd22c77f41f8c1ed17dc249419febefe659dc8f)，[CI 38384079928](https://github.com/TheLudlows/seekpower/actions/runs/38384079928)，job `115251391454`。Ubuntu x86_64，Rust/Cargo 1.99.0；依赖源码缓存沿用，native target 不跨 runner 复用。
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| `cargo build --workspace` | 通过；核心库与 HTTP 服务完整编译 |
+| `cargo metadata --format-version 1` + 解析后的 packages 检查 | 无 pdfium-render、csv、walkdir（包括传递依赖） |
+| `SEEKPOWER_BROWSER_TEST=1 python3 scripts/http_smoke.py --server target/debug/seekstorm_server` | 通过；鉴权、首页及 12 个资源、JSON 单条/批量写入、更新/删除/读取/提交、外部向量/混合回归保留 |
+| 文件入口与 UI 定向检查 | ingest_path 返回退出码 2；旧 POST/GET 文件端点返回 404 且文档计数不变；新索引不创建 files 目录；Chromium 外部 PDF URL 未改写为内部接口，文本预览正常，0 pageerror |
+| `cargo test --workspace --all-targets` | 48 passed、0 failed、0 ignored、0 filtered；未删除或跳过既有测试，仅迁移单条写入签名 |
+| `generate_openapi=true` + JSON/YAML diff | 通过；保留操作未变，只删除两条 PDF 文件路径及标签 |
+| 本地静态检查 | Python AST、Node 脚本语法、git diff --check 通过 |
+
+本批首次完整 CI 即通过。此后的状态/验证回填仅修改 Markdown；最终 head 的检查结果见 PR Checks。PR 尚未合入，S1.3 清单暂不勾选，S1.4—S1.5 尚未实施。

@@ -14,11 +14,10 @@ edition = "2024"
 exclude = ["assets/*.png","assets/*.jpg"]
 
 [features]
-# comment out the default features below you don't need: zh=Chinese word segmentation, pdf=PDF text extraction, gxhash=GXHash instead of AHash for faster hash computation. 
-# You can also disable all default features and re-enable them case-wise in your toml with: seekstorm = { version = "2.3.0", default-features = false, features = ["zh","pdf"] }
-default = ["zh","pdf","vb"]
+# comment out the default features below you don't need: zh=Chinese word segmentation, gxhash=GXHash instead of AHash for faster hash computation.
+# You can also disable all default features and re-enable them case-wise in your toml with: seekstorm = { version = "2.3.0", default-features = false, features = ["zh"] }
+default = ["zh","vb"]
 zh = []
-pdf = ["pdfium-render"]
 vb = []
 gxhash = ["dep:gxhash", "symspell_complete_rs/gxhash"] # Activate gxhash when you hardware supports AES/SSE2 and you want faster hash computation.
 
@@ -56,12 +55,9 @@ indexmap = { version = "2.14.2", features = ["serde"]}
 unicode-normalization = "0.1.25"
 finl_unicode = "1.4.0"
 colored = "3.1.1"
-walkdir = "2.5.0"
-pdfium-render = { version ="0.9.4",  features = ["thread_safe"], optional = true}
 chrono = "0.4.45"
 utoipa = { version ="6.0.0",  features = ["preserve_order","preserve_path_order","yaml","indexmap"]}
 num_cpus = "1.17.0"
-csv = "1.4.0"
 tokio-test = "0.4.6"
 snap = "1.1.2"
 lz4_flex = "0.14.0"

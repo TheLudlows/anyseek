@@ -287,11 +287,6 @@ content-type: application/json
     { "field": "number", "name":"_number","fragment_number": 0, "fragment_size": 1000, "highlight_markup": true}]
 }
 
-### get file
-GET http://127.0.0.1/api/v1/index/0/file/0
-apikey: {{api_key}}
-content-type: application/json
-
 ### get synonyms
 GET http://127.0.0.1/api/v1/index/0/synonyms
 apikey: {{api_key}}
@@ -493,7 +488,7 @@ content-type: application/json
     "realtime": true
 }
 
-// amazon.csv
+// Structured product records
 
 ### create index
 POST http://127.0.0.1:80/api/v1/index HTTP/1.1

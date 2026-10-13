@@ -3,7 +3,7 @@
 //! Run: cargo test -p seekstorm --test frequent_topk_consistency
 use seekstorm::commit::Commit;
 use seekstorm::index::{
-    AccessType, Close, Clustering, Document, DocumentCompression, FileType, FrequentwordType,
+    AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
     IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType,
     TokenizerType, create_index,
 };
@@ -74,7 +74,7 @@ async fn frequent_terms_topk_returns_results() {
             t.push_str("half ");
         }
         let doc: Document = serde_json::from_str(&format!(r#"{{"title":"{t}"}}"#)).unwrap();
-        index_arc.index_document(doc, FileType::None).await.unwrap();
+        index_arc.index_document(doc).await.unwrap();
     }
     index_arc.commit().await;
 
@@ -126,3 +126,4 @@ async fn frequent_terms_topk_returns_results() {
     index_arc.close().await;
     let _ = fs::remove_dir_all(index_path);
 }
+
