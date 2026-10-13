@@ -263,7 +263,7 @@ def exercise(binary, workdir):
                     browser = browser_driver.chromium.launch()
                     page = browser.new_page()
                     errors = []
-                    page.on('pageerror', lambda error: errors.append(str(error)))
+                    page.on('pageerror', lambda error: (errors.append(str(error)), print(f'BROWSER ERROR: {error}')))
                     page.goto(base + f'/?index_id={vector_id}&q=alpha')
                     page.locator('#contentBox .resultEntry').first.wait_for()
                     check(page.locator('input[value="Lexical"]').is_checked(), 'UI default mode')
@@ -302,6 +302,8 @@ def exercise(binary, workdir):
                         search_input.fill('plaintxt')
                     typed_response = typed.value
                     check(typed_response.status == 200, 'plain typing search failed')
+                    check(typed_response.request.headers.get('content-type', '').startswith('application/json'),
+                          'JSON query sent with an incorrect content type')
                     check('query_rewriting' not in typed_response.request.post_data_json,
                           'UI sent retired rewriting parameter')
                     check(typed_response.json()['count_total'] == 0, 'typo silently corrected')

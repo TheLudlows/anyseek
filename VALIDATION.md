@@ -173,3 +173,6 @@ S1.3 最终 head `242815d` 的 CI 38384967519 已成功，PR #4 合入提交 `56
 删除查询改写及 SymSpell/PruningRadixTrie 词典生命周期；移除分词器中仅用于补全统计的分支，保留原有分词、中文字典、n-gram、布尔/短语匹配。保留 query/original_query 响应字段，两者均为调用方原文；suggestions 移除。HTTP 创建/查询/Schema 旧配置必须报错，Rust 搜索移除末尾 query_rewriting 参数。旧索引 null 元数据仍可读，启用已移除功能的元数据明确返回重建提示。
 
 验证待回填：原有 48 个测试保留，新增 2 个契约测试；HTTP 参数拒绝及未改写结果、Chromium 输入不被补全或替换、依赖图及 OpenAPI 一致性。本地无 Rust 工具链，Rust/浏览器结果以 CI 为准。没有执行生产性能、恢复或 AArch64 测试。
+
+
+首轮 `bc634a4` / [CI 38386035710](https://github.com/TheLudlows/seekpower/actions/runs/38386035710)，job `115257952954`：编译、依赖图、50 个 Rust 测试及 OpenAPI 一致性通过；HTTP 契约检查通过，但 Chromium 新增输入检查等待目标请求超时。排查发现继承 UI 将 JSON 请求体使用 jQuery 默认的 application/x-www-form-urlencoded 发送，Playwright 按声明的内容类型将其解析为表单，无法匹配 query 字段。本批将查询请求 Content-Type 显式设为 application/json，并增加内容类型断言；保留原浏览器断言，未跳过失败检查。修复后的结果待回填。
