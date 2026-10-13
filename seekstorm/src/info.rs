@@ -1,16 +1,26 @@
 use std::{fs::metadata, path::Path, sync::Arc};
-use chrono::{DateTime, Utc};
 use num_format::{Locale, ToFormattedString};
-use tabled::{Table, settings::{Color, Modify, Remove, Style, Width, object::{Columns, Rows}, style::{BorderColor, HorizontalLine}}};
 use tokio::sync::RwLock;
-use crate::{index::{INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR, Index, Info, META_FILENAME}, utils::{dir_size, truncate}, vector::Quantization, vector_similarity::VectorSimilarity};
+use crate::{index::{INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR, Index, Info, META_FILENAME}, utils::dir_size, vector::Quantization, vector_similarity::VectorSimilarity};
 
-/// Display index information in a table format in the console.
-pub async fn display_index_info(
+/// Information collected independently of terminal rendering.
+pub struct IndexInfo {
+    /// Labels and values for index statistics.
+    pub entries: Vec<Info>,
+    /// Creation time, when the filesystem supports it.
+    pub creation_time: Option<std::time::SystemTime>,
+    /// Whether lexical indexing is enabled.
+    pub lexical: bool,
+    /// Whether vector indexing is enabled.
+    pub vector: bool,
+}
+
+/// Collect index statistics without printing or depending on a terminal renderer.
+pub async fn collect_index_info(
     index_arc: &Arc<RwLock<Index>>,
     time_label: &'static str,
     time_value: String,
-) {
+) -> IndexInfo {
     let index_ref = index_arc.read().await;
 
     let non_affine_string = if index_ref.quantization == Quantization::ScalarQuantizationI8
@@ -29,10 +39,7 @@ pub async fn display_index_info(
     let index_path = index_ref.index_path_string.clone();
     let level_count = index_ref.level_count().await;
     let file_date = metadata(Path::new(&index_path).join(META_FILENAME))
-        .unwrap()
-        .created()
-        .unwrap();
-    let dt_now_utc: DateTime<Utc> = file_date.into();
+        .ok().and_then(|metadata| metadata.created().ok());
 
     for shard in index_ref.shard_vec.iter() {
         shard.read().await.index_file.sync_all().unwrap();
@@ -111,7 +118,7 @@ pub async fn display_index_info(
         },
         Info {
             entry: "creation date",
-            value: dt_now_utc.format("%Y-%m-%d %H:%M:%S").to_string(),
+            value: String::new(),
         },
         Info {
             entry: time_label,
@@ -221,108 +228,10 @@ pub async fn display_index_info(
         },
     ];
 
-    let mut table = Table::new(info_entries);
-    table.modify(Columns::first(), Width::increase(26));
-
-    table.modify(Columns::last(), Width::truncate(49).suffix("..."));
-    table.modify(Columns::last(), Width::increase(50));
-
-    table.with(Remove::row(Rows::first()));
-
-    if index_ref.is_lexical_indexing && index_ref.is_vector_indexing {
-        table
-            .with(Style::modern().remove_horizontal().horizontals([
-                (1, HorizontalLine::inherit(Style::modern())),
-                (12, HorizontalLine::inherit(Style::modern())),
-                (13, HorizontalLine::inherit(Style::modern())),
-                (22, HorizontalLine::inherit(Style::modern())),
-                (23, HorizontalLine::inherit(Style::modern())),
-                (30, HorizontalLine::inherit(Style::modern())),
-            ]))
-            .with(BorderColor::filled(Color::FG_BRIGHT_BLACK));
-
-        table.modify(
-            Columns::first(),
-            BorderColor::filled(Color::FG_BRIGHT_BLACK),
-        );
-        table.modify(Columns::last(), BorderColor::filled(Color::FG_BRIGHT_BLACK));
-
-        table.with(Modify::new(Rows::one(0)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(12)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(22)).with(Color::FG_CYAN));
-    } else if index_ref.is_lexical_indexing {
-        table.with(Remove::row(Rows::new(23..30)));
-        table
-            .with(Style::modern().remove_horizontal().horizontals([
-                (1, HorizontalLine::inherit(Style::modern())),
-                (12, HorizontalLine::inherit(Style::modern())),
-                (13, HorizontalLine::inherit(Style::modern())),
-                (22, HorizontalLine::inherit(Style::modern())),
-                (23, HorizontalLine::inherit(Style::modern())),
-                (24, HorizontalLine::inherit(Style::modern())),
-            ]))
-            .with(BorderColor::filled(Color::FG_BRIGHT_BLACK));
-
-        table.modify(
-            Columns::first(),
-            BorderColor::filled(Color::FG_BRIGHT_BLACK),
-        );
-        table.modify(Columns::last(), BorderColor::filled(Color::FG_BRIGHT_BLACK));
-
-        table.with(Modify::new(Rows::one(0)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(12)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(22)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(23)).with(Color::FG_CYAN));
-    } else if index_ref.is_vector_indexing {
-        table.with(Remove::row(Rows::new(13..22)));
-        table
-            .with(Style::modern().remove_horizontal().horizontals([
-                (1, HorizontalLine::inherit(Style::modern())),
-                (12, HorizontalLine::inherit(Style::modern())),
-                (13, HorizontalLine::inherit(Style::modern())),
-                (14, HorizontalLine::inherit(Style::modern())),
-                (21, HorizontalLine::inherit(Style::modern())),
-                (22, HorizontalLine::inherit(Style::modern())),
-            ]))
-            .with(BorderColor::filled(Color::FG_BRIGHT_BLACK));
-
-        table.modify(
-            Columns::first(),
-            BorderColor::filled(Color::FG_BRIGHT_BLACK),
-        );
-        table.modify(Columns::last(), BorderColor::filled(Color::FG_BRIGHT_BLACK));
-
-        table.with(Modify::new(Rows::one(0)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(12)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(13)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(21)).with(Color::FG_CYAN));
-    } else {
-        table.with(Remove::row(Rows::new(23..30)));
-        table.with(Remove::row(Rows::new(13..22)));
-
-        table
-            .with(Style::modern().remove_horizontal().horizontals([
-                (1, HorizontalLine::inherit(Style::modern())),
-                (12, HorizontalLine::inherit(Style::modern())),
-                (13, HorizontalLine::inherit(Style::modern())),
-                (14, HorizontalLine::inherit(Style::modern())),
-                (15, HorizontalLine::inherit(Style::modern())),
-                (16, HorizontalLine::inherit(Style::modern())),
-            ]))
-            .with(BorderColor::filled(Color::FG_BRIGHT_BLACK));
-
-        table.modify(
-            Columns::first(),
-            BorderColor::filled(Color::FG_BRIGHT_BLACK),
-        );
-        table.modify(Columns::last(), BorderColor::filled(Color::FG_BRIGHT_BLACK));
-
-        table.with(Modify::new(Rows::one(0)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(12)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(13)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(14)).with(Color::FG_CYAN));
+    IndexInfo {
+        entries: info_entries,
+        creation_time: file_date,
+        lexical: index_ref.is_lexical_indexing,
+        vector: index_ref.is_vector_indexing,
     }
-
-    println!("{}", table);
 }
-

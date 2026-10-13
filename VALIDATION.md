@@ -272,3 +272,31 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - HTTP/Chromium 全部通过：既有全文/外部向量/混合、原文与日期交互，新增 key 创建旧参数拒绝、重复 demo 创建不丢失数据、两组 key 同索引 ID 隔离、跨作用域读写删拒绝、master 管理权限、旧 quota 为零的实际进程重启、新格式 key 重启、撤销 key 后失效且另一个 key 数据不受影响。
 - OpenAPI JSON/YAML 与 Rust 生成器逐字节一致。具体工具链、CPU、步骤输出见 CI 日志；本地无 Rust 工具链，仅执行静态检查。
 - [PR #8](https://github.com/TheLudlows/seekpower/pull/8) 代码和验证完成，待审查合入。本次结果回填仅修改计划/状态/验证文档，运行代码与已通过 CI 的 `b60d9f6` 相同。S1.5 尚待执行，完整安全审计、恢复故障注入和性能验收不由本批替代。
+
+## 2026-10-13：S1.4d 合入与 S1.5 收尾
+
+- 基点 master `ff79175b264a9ecfe0739b658c78c1bc7951b877`（用户合入 PR #8），tree `27f4119e66923497e790dcde4702a0c5ad030733`。
+- 核心 utoipa/ToSchema/schema 属性改为 opt-in api-schema；服务显式启用。tabled/chrono 展示移到服务层；core info::collect_index_info 采集统计，替代直接控制台输出。文件创建时间不可用时由服务显示 unavailable；既有统计采集/文件同步保持。
+- 删除核心无引用的 regex、lazy_static、url、sha2、rayon、colored、rkyv 直接依赖，移出 tabled/chrono；tokio-test 改 dev-dependency，删除服务无引用 ahash。保留 tokenizer 使用的 regex-syntax、中文字典、哈希、压缩和执行库。依赖删除以源码引用审计和编译/回归共同验证。
+- 新增 scripts/check_core_boundary.py：独立临时消费者分别启用默认/无默认特性，检查 normal/build 图不含 utoipa/tabled/chrono/colored/tokio-test 或已裁剪运行库，并执行 cargo check；避免 workspace 服务开启特性影响结论。
+- CLI 使用 split_once 保留路径内等号，未知/非法/重复参数启动前返回 2；文档读取 URL 与迭代器未知参数明确拒绝，非法 document_id 不再退化为空。新增 CLI 单测，HTTP 覆盖保留与拒绝路径。保留原 57 个测试。
+- README/服务说明移除已退役宣传、上游 registry/image 安装入口，路线图链接当前计划；manifest publish=false 防止以上游名称误发布。crate 名称、来源、许可证与历史 CHANGELOG 保留。
+- 本地 manifest/Python 语法、diff、OpenAPI JSON/YAML 语义一致性检查通过；本地无 Rust，构建/58 tests/HTTP/Chromium/OpenAPI 精确对比在首次提交时等待 CI，最终结果如下。本批不改检索算法或索引编码，不替代 S2 性能、故障恢复和安全审计。
+
+### S1.5 最终验证
+
+- 首轮代码 `ca734259e1f028306968f762d24933aa5339a334` 的 [CI 38399374592](https://github.com/TheLudlows/seekpower/actions/runs/38399374592) 全部通过（58 tests）。复查发现 CLI 应同时保留裸写和方括号 IPv6，且监听地址不能用冒号字符串拼接；后续 `7d5d20c1ab7a15e5de8dab8377420a7fd6da4372` 规范化 CLI 地址并使用 `SocketAddr::new`，补充括号 IPv6 单测。
+- 最终代码的 [CI 38400058396 / job 115305067330](https://github.com/TheLudlows/seekpower/actions/runs/38400058396/job/115305067330) 全部通过。PR 合并测试提交为 `1125e76352825f3f09eaee0f0ab6d48c1d81cc4c`（`7d5d20c` + master `ff79175`）。环境：Ubuntu 24.04.5 x86_64、Intel Xeon Platinum 8573C、rustc 1.99.0 (`b940084d7`)、cargo 1.99.0 (`5f94df478`)，沿用仓库 native 目标设置。
+
+| 命令 / 门禁 | 结果 |
+| --- | --- |
+| `python3 scripts/check_core_boundary.py` | 默认与 `--no-default-features` 独立消费者依赖图及 `cargo check` 均通过，无 API/终端展示或已裁剪运行依赖泄漏 |
+| `cargo build --workspace` | 通过 |
+| `cargo metadata --format-version 1` 与 CI 依赖断言 | 通过，已裁剪解析/模型/改写依赖不在解析图中 |
+| `SEEKPOWER_BROWSER_TEST=1 python3 scripts/http_smoke.py --server target/debug/seekstorm_server` | 通过，11 个 UI 本地资源、全文/向量/混合、元数据、原文、鉴权/key 隔离/重启、CLI 和文档/迭代器参数回归 |
+| `cargo test --workspace --all-targets` | 58 passed，0 failed、ignored、filtered；含 CLI 裸写/方括号 IPv6 参数测试 |
+| `generate_openapi=true` 后 JSON/YAML `diff -u` | 两份精确一致 |
+
+- 尚有非阻塞 Rust 警告：未使用的字段/函数、导入/变量、无默认特性下的变量，以及既有 query_contract 测试文档缺失；不宣称构建零警告。未执行真实 IPv6 网络连接、AArch64、生产性能与恢复故障注入。
+- [PR #9](https://github.com/TheLudlows/seekpower/pull/9) 代码和本批验证完成，等待审查合入。此后仅回填三份 Markdown，运行代码与上述通过 CI 的 `7d5d20c` 相同；最新 head 的自动检查见 PR Checks。状态文档合并为当前里程碑视图，历史过程保留在本记录。
+- S1.5 清单暂不勾选，Issue #1 保持打开；合入后核对 S1 退出证据。两路共同过滤、稳定 ID/版本、日志/恢复和完整可靠性/性能验收仍属 S2。

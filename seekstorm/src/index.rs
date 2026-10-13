@@ -25,6 +25,7 @@ use std::{
 };
 use tokio::sync::{RwLock, Semaphore};
 use utils::{read_u32, write_u16};
+#[cfg(feature = "api-schema")]
 use utoipa::ToSchema;
 
 #[cfg(feature = "zh")]
@@ -114,10 +115,8 @@ pub(crate) const POSTING_BUFFER_SIZE: usize = 400_000_000;
 pub(crate) const MAX_QUERY_TERM_NUMBER: usize = 100;
 pub(crate) const SEGMENT_KEY_CAPACITY: usize = 1000;
 
-use tabled::Tabled;
-
 /// Information about the index, such as number of documents, number of terms, index size, etc. Displayed in the console.
-#[derive(Tabled, Clone)]
+#[derive(Clone)]
 pub struct Info {
     /// Label
     pub entry: &'static str,
@@ -126,7 +125,8 @@ pub struct Info {
 }
 
 /// Search request object
-#[derive(Deserialize, Serialize, Clone, ToSchema, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequestObject {
     /// Query string, search operators + - "" are recognized.
@@ -136,18 +136,18 @@ pub struct SearchRequestObject {
     #[serde(default)]
     pub query_vector: Option<Value>,
     #[serde(default)]
-    #[schema(required = false, default = false, example = false)]
+    #[cfg_attr(feature = "api-schema", schema(required = false, default = false, example = false))]
     /// Enable empty query: if true, an empty query string iterates through all indexed documents, supporting the query parameters: offset, length, query_facets, facet_filter, result_sort,
     /// otherwise an empty query string returns no results.
     /// Typical use cases include index browsing, index export, conversion, analytics, audits, and inspection.
     pub enable_empty_query: bool,
     #[serde(default)]
-    #[schema(required = false, minimum = 0, default = 0, example = 0)]
+    #[cfg_attr(feature = "api-schema", schema(required = false, minimum = 0, default = 0, example = 0))]
     /// Offset of search results to return.
     pub offset: usize,
     /// Number of search results to return.
     #[serde(default = "length_api")]
-    #[schema(required = false, minimum = 1, default = 10, example = 10)]
+    #[cfg_attr(feature = "api-schema", schema(required = false, minimum = 1, default = 10, example = 10))]
     pub length: usize,
     #[serde(default)]
     /// Specify the type of search result.
@@ -156,7 +156,7 @@ pub struct SearchRequestObject {
     #[serde(default)]
     pub realtime: bool,
     /// Specify field names where to search at querytime, whereas SchemaField.indexed is set at indextime. If empty then all indexed fields are searched.
-    #[schema(required = false, example = json!(["title"]))]
+    #[cfg_attr(feature = "api-schema", schema(required = false, example = json!(["title"])))]
     #[serde(default)]
     pub field_filter: Vec<String>,
     /// Specify names of fields to return in the search results, where SchemaField.store is set at indextime. If empty then all stored fields are returned.
@@ -179,15 +179,15 @@ pub struct SearchRequestObject {
     /// Sort is only enabled on facet fields that are defined in schema at create_index!
     /// Examples:
     /// - result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending},ResultSort {field: "language".into(), order: SortOrder::Ascending}];
-    #[schema(required = false, example = json!([{"field": "date", "order": "Ascending" }]))]
+    #[cfg_attr(feature = "api-schema", schema(required = false, example = json!([{"field": "date", "order": "Ascending" }])))]
     #[serde(default)]
     pub result_sort: Vec<ResultSort>,
     /// Specify default query type: (default=Intersection). This can be overwritten by search operator within the query string (+-"").
-    #[schema(required = false, example = QueryType::Intersection)]
+    #[cfg_attr(feature = "api-schema", schema(required = false, example = QueryType::Intersection))]
     #[serde(default = "query_type_api")]
     pub query_type_default: QueryType,
     /// Specify search mode: (default=Lexical).
-    #[schema(required = false, example = SearchMode::Lexical)]
+    #[cfg_attr(feature = "api-schema", schema(required = false, example = SearchMode::Lexical))]
     #[serde(default = "search_mode_api")]
     pub search_mode: SearchMode,
 }
@@ -204,7 +204,8 @@ fn length_api() -> usize {
     10
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 /// Search result object
 pub struct SearchResultObject {
     /// Time taken to execute the search query in nanoseconds
@@ -223,26 +224,27 @@ pub struct SearchResultObject {
     pub count_total: usize,
     /// Vector of lexical search query terms.
     pub query_terms: Vec<String>,
-    #[schema(value_type=Vec<HashMap<String, serde_json::Value>>)]
+    #[cfg_attr(feature = "api-schema", schema(value_type=Vec<HashMap<String, serde_json::Value>>))]
     /// Vector of search result documents
     pub results: Vec<Document>,
-    #[schema(value_type=HashMap<String, Vec<(String, usize)>>)]
+    #[cfg_attr(feature = "api-schema", schema(value_type=HashMap<String, Vec<(String, usize)>>))]
     /// Facets with their values and corresponding document counts
     pub facets: AHashMap<String, Facet>,
 }
 
 /// Create index request object
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateIndexRequest {
     /// Index name, used for informational purposes only.
-    #[schema(example = "demo_index")]
+    #[cfg_attr(feature = "api-schema", schema(example = "demo_index"))]
     pub index_name: String,
-    #[schema(required = true, example = json!([
+    #[cfg_attr(feature = "api-schema", schema(required = true, example = json!([
     {"field":"title","field_type":"Text","store":true,"index_lexical":true,"boost":10.0},
     {"field":"body","field_type":"Text","store":true,"index_lexical":true,"longest":true},
     {"field":"url","field_type":"Text","store":true,"index_lexical":false},
-    {"field":"date","field_type":"Timestamp","store":true,"index_lexical":false,"facet":true}]))]
+    {"field":"date","field_type":"Timestamp","store":true,"index_lexical":false,"facet":true}])))]
     /// Schema definition for the index: field name, field type, and indexing options. The schema defines how documents are indexed and searched. It specifies the fields that are indexed, stored, and used for faceting, as well as the field types and their properties. It also defines whether lexical, hybrid, or vector search is enabled for each field.
     #[serde(default)]
     pub schema: Vec<SchemaField>,
@@ -280,7 +282,7 @@ pub struct CreateIndexRequest {
     #[serde(default = "document_compression_api")]
     pub document_compression: DocumentCompression,
     /// Specify synonyms for the index. Synonyms are used to expand search queries with additional terms that have the same or similar meaning, improving recall and search relevance. The multiway option specifies whether the synonym relationship is multiway (if true, all terms in the synonym set are considered synonyms of each other) or one-way (if false, only the first term in the synonym set is considered the main term, and the other terms are considered synonyms of the main term).
-    #[schema(required = false, example = json!([{"terms":["berry","lingonberry","blueberry","gooseberry"],"multiway":false}]))]
+    #[cfg_attr(feature = "api-schema", schema(required = false, example = json!([{"terms":["berry","lingonberry","blueberry","gooseberry"],"multiway":false}])))]
     #[serde(default)]
     pub synonyms: Vec<Synonym>,
     #[serde(default)]
@@ -308,7 +310,9 @@ fn document_compression_api() -> DocumentCompression {
 }
 
 /// Specifies which document ID to return
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
+#[serde(deny_unknown_fields)]
 pub struct GetIteratorRequest {
     /// base document ID to start the iteration from
     /// Use None to start from the beginning (take>0) or the end (take<0) of the index
@@ -338,7 +342,8 @@ fn default_1usize() -> isize {
 }
 
 /// Specifies which document and which field to return
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetDocumentRequest {
     /// which fields to return
@@ -346,15 +351,16 @@ pub struct GetDocumentRequest {
     pub fields: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 /// Index response object
 pub struct IndexResponseObject {
     /// Index ID
     pub id: u64,
     /// Index name
-    #[schema(example = "demo_index")]
+    #[cfg_attr(feature = "api-schema", schema(example = "demo_index"))]
     pub name: String,
-    #[schema(example = json!({
+    #[cfg_attr(feature = "api-schema", schema(example = json!({
         "title":{
             "field":"title",
             "store":true,
@@ -385,7 +391,7 @@ pub struct IndexResponseObject {
            "facet":true,
            "field_id":3
         }
-     }))]
+     })))]
     /// Schema definition for the index
     pub schema: HashMap<String, SchemaField>,
     /// Number of indexed documents
@@ -397,10 +403,10 @@ pub struct IndexResponseObject {
     /// Number of queries (informational)
     pub query_count: u64,
     /// SeekStorm version the index was created with
-    #[schema(example = "0.11.1")]
+    #[cfg_attr(feature = "api-schema", schema(example = "0.11.1"))]
     pub version: String,
     /// Minimum and maximum values of numeric facet fields
-    #[schema(example = json!({"date":{"min":831306011,"max":1730901447}}))]
+    #[cfg_attr(feature = "api-schema", schema(example = json!({"date":{"min":831306011,"max":1730901447}})))]
     pub facets_minmax: HashMap<String, MinMaxFieldJson>,
 }
 
@@ -408,7 +414,8 @@ pub struct IndexResponseObject {
 pub type Document = IndexMap<String, Value>;
 
 /// Compression type for document store
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum DocumentCompression {
     /// No compression (fastest, largest size)
     None,
@@ -455,7 +462,8 @@ pub enum AccessType {
 /// Similarity type defines the scoring and ranking of the search results:
 /// - Bm25f: considers documents composed from several fields, with different field lengths and importance
 /// - Bm25fProximity: considers term proximity, e.g. for implicit phrase search with improved relevancy
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum LexicalSimilarity {
     /// Bm25f considers documents composed from several fields, with different field lengths and importance
     Bm25f = 0,
@@ -493,7 +501,8 @@ impl fmt::Display for LexicalSimilarity {
 /// - Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
 /// - Supports mixed Latin and Chinese texts
 /// - Requires feature #[cfg(feature = "zh")]
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum TokenizerType {
     /// Only ASCII alphabetic chars are recognized as token. Mainly for benchmark compatibility.
     #[default]
@@ -534,7 +543,8 @@ impl fmt::Display for TokenizerType {
 
 /// Defines stemming behavior, reducing inflected words to their word stem, base or root form.
 /// Stemming increases recall, but decreases precision. It can introduce false positive results.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum StemmerType {
     /// No stemming
     #[default]
@@ -899,7 +909,8 @@ pub(crate) struct SegmentLevel0 {
 }
 
 /// FieldType defines the type of a field in the document: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, point, string, stringset, text.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum FieldType {
     /// Unsigned 8-bit integer
     U8,
@@ -963,7 +974,8 @@ pub enum FieldType {
 }
 
 /// Defines synonyms for terms per index.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct Synonym {
     /// List of terms that are synonyms.
     pub terms: Vec<String>,
@@ -985,7 +997,8 @@ fn default_as_true() -> bool {
 }
 
 /// Defines a field in index schema: field, stored, indexed , field_type, facet, boost.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SchemaField {
     /// unique name of a field
@@ -1027,7 +1040,7 @@ pub struct SchemaField {
     #[serde(skip)]
     pub(crate) indexed_field_id: usize,
     #[serde(default)]
-    #[schema(ignore)]
+    #[cfg_attr(feature = "api-schema", schema(ignore))]
     pub(crate) field_id: usize,
 }
 
@@ -1108,7 +1121,8 @@ pub(crate) struct IndexedField {
 /// Stopword removal has drawbacks: “The Who”, “Take That”, “Let it be”, “To be or not to be”, "The The", "End of days", "What might have been" are all valid queries for bands, songs, movies, literature,
 /// but become impossible when stopwords are removed.
 /// The lists of stop_words and frequent_words should not overlap.
-#[derive(Debug, Clone, Deserialize, Serialize, Default, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum StopwordType {
     /// No stopwords
     #[default]
@@ -1131,7 +1145,8 @@ pub enum StopwordType {
 /// FrequentwordType defines the frequentword behavior: None, English, German, French, Spanish, Custom.
 /// Adjacent frequent terms are combined to bi-grams, both in index and query: for shorter posting lists and faster phrase queries (only for bi-grams of frequent terms).
 /// The lists of stop_words and frequent_words should not overlap.
-#[derive(Debug, Clone, Deserialize, Serialize, Default, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum FrequentwordType {
     /// No frequent words
     None,
@@ -1152,7 +1167,8 @@ pub enum FrequentwordType {
 }
 
 /// Clustering defines the clustering behavior for approximate nearest neighbor (ANN) search: None, Auto, Fixed(usize).
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Default, ToSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum Clustering {
     /// Exhaustive vector search, no clustering/ANN.
     None,
@@ -1265,7 +1281,8 @@ pub struct MinMaxField {
 }
 
 /// MinMaxFieldJson is a JSON representation of the minimum and maximum value of a field.
-#[derive(Deserialize, Serialize, Debug, Clone, Default, ToSchema)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct MinMaxFieldJson {
     /// minimum value of the field
     pub min: Value,

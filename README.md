@@ -1,3 +1,5 @@
+> SeekPower S1.5: build from this checkout. OpenAPI is an optional core feature enabled by the HTTP service; terminal tables and date formatting live in the service. Core consumers can call `info::collect_index_info` instead of the removed console renderer. Startup accepts only documented `name=value` options and rejects invalid/duplicate/unknown names. Document reads use a JSON body for `fields`; iterator requests reject unknown options. Index encoding and search algorithms are unchanged.
+
 > SeekPower S1.4d: API key quotas and built-in rate limiting have been removed. Create a random key with `POST /api/v1/apikey` and JSON `{}`; `{"demo":true}` explicitly requests the fixed demonstration key. Creation and revocation still require the master key; data APIs require a scoped key. Retired quota fields and key-creation URL parameters return HTTP 400. Existing `apikey.json` files remain readable: historical `quota` is ignored, key IDs/hashes and index paths are unchanged, and files are not rewritten on startup. New files contain only identity. Deployments that need rate limits must enforce them outside this server. Key identity/request types now belong to the HTTP service, not the search core.
 
 > SeekPower S1.4c: core highlighting and keyword-in-context snippets have been removed. Search requests no longer accept `highlights`; document reads accept only `fields` (remove `query_terms` and `highlights`). Retired options return HTTP 400. Rust reads now use `get_document(doc_id, include_uncommitted, &fields)`. Search and document reads return stored values unchanged; search response `query_terms` remains available. Web UI cards show plain stored text and previews show the full text, preserving line breaks. Any application-specific summarization belongs outside the engine.
@@ -50,7 +52,7 @@ The existing Web UI defaults to Lexical. Select Vector or Hybrid, paste a JSON q
 
 To run the API and browser regressions locally, install Python Playwright and Chromium (`python3 -m pip install playwright`, `python3 -m playwright install chromium`), then set `SEEKPOWER_BROWSER_TEST=1` when running the smoke script. Export the current API reference with `target/debug/seekstorm_server generate_openapi=true`; files are written beside the executable.
 
-The following documentation is inherited from SeekStorm. Features scheduled for later S1 batches still exist until their removal is recorded in STATUS.md. Upstream attribution and licenses are preserved.
+The retained technical documentation below originates from SeekStorm. Upstream benchmark claims and blog links are historical references, not SeekPower validation results. The maintained surface is the core, HTTP service and embedded Web UI; see the migration notes above and current plan. Upstream attribution and licenses are preserved.
 
 <img src="assets/logo.png" width="450" alt="Logo"><br>
 **SeekStorm**: **sub-millisecond**, native **vector** & **lexical search** - **in-process library** & **multi-tenancy server**, in **Rust**.
@@ -59,17 +61,10 @@ Development started in 2015, in [production](https://seekstorm.com) since 2020.
 SeekStorm is open source licensed under the [Apache License 2.0](https://github.com/SeekStorm/SeekStorm?tab=Apache-2.0-1-ov-file#readme)
 
 ## SeekStorm in-process search library
-[![Crates.io](https://img.shields.io/crates/v/seekstorm.svg)](https://crates.io/crates/seekstorm)
-[![Downloads](https://img.shields.io/crates/d/seekstorm.svg?style=flat-square)](https://crates.io/crates/seekstorm)
-[![Documentation](https://docs.rs/seekstorm/badge.svg)](https://docs.rs/seekstorm)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/SeekStorm?tab=Apache-2.0-1-ov-file#readme)
 [![Roadmap](https://img.shields.io/badge/Roadmap-2026-DA7F07.svg)](#roadmap)
 
 ## SeekStorm multi-tenancy search server
-[![Crates.io](https://img.shields.io/crates/v/seekstorm_server.svg)](https://crates.io/crates/seekstorm_server)
-[![Downloads](https://img.shields.io/crates/d/seekstorm_server.svg?style=flat-square)](https://crates.io/crates/seekstorm_server)
-[![Docker](https://img.shields.io/docker/pulls/wolfgarbe/seekstorm_server)](https://hub.docker.com/r/wolfgarbe/seekstorm_server)
-[![REST API Documentation](https://docs.rs/seekstorm/badge.svg)](https://seekstorm.com/documentation/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/SeekStorm?tab=Apache-2.0-1-ov-file#readme)
 [![Roadmap](https://img.shields.io/badge/Roadmap-2026-DA7F07.svg)](#roadmap)
 
@@ -78,7 +73,7 @@ SeekStorm is open source licensed under the [Apache License 2.0](https://github.
   <a href="https://seekstorm.github.io/search-benchmark-game/">Benchmark</a> | 
   <a href="https://deephn.org/">Demo</a> | 
   <a href="#documentation">Library Docs</a> | 
-  <a href="https://seekstorm.com/documentation/">REST API Docs</a> |
+  <a href="seekstorm_server/openapi/openapi.yml">REST API Docs</a> |
   <a href="seekstorm_server/README.md">Server Readme</a> |
   <a href="#roadmap">Roadmap</a> | 
   <a href="https://seekstorm.com/blog/">Blog</a> | 
@@ -189,10 +184,9 @@ Blog Posts:
 * API-key management.
 * [Embedded web server and web UI](https://github.com/SeekStorm/SeekStorm/blob/main/src/seekstorm_server#open-embedded-web-ui-in-browser) to search and display results from any index without coding.
 * Web UI with instant search, histogram, date filter, faceting, result sorting, document preview (as demo, for testing, as template).
-* Code first OpenAPI generated [REST API documentation](https://seekstorm.com/documentation/)
+* Code first OpenAPI generated [REST API documentation](seekstorm_server/openapi/openapi.yml)
 * Cross-platform: runs on Linux, Windows, and macOS (other OS untested).
-* Docker file and container image at [Docker Hub](https://hub.docker.com/r/wolfgarbe/seekstorm_server)
-* Client libraries/SDK in Rust, Python, C#, Java, TypeScript.
+* Build the service from this checkout using [Dockerfile](Dockerfile); upstream container images do not contain this fork's changes.
 
 ---
 
@@ -404,7 +398,7 @@ Fast algorithms will shine even more with a performance-conscious programming la
 
 ## Architecture
 
-see [ARCHITECTURE.md](https://github.com/SeekStorm/SeekStorm/blob/main/ARCHITECTURE.md) 
+see [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ---
 
@@ -418,7 +412,7 @@ cargo build --release
 
 ### Documentation
 
-[https://docs.rs/seekstorm](https://docs.rs/seekstorm)
+Generate documentation from this checkout; upstream published packages do not contain these SeekPower changes.
 
 **Build documentation**
 
@@ -443,13 +437,14 @@ SeekStorm\target\doc\seekstorm_server\index.html
   - vector_score
   - lexical_score
   - source: ResultSource (Lexical/Vector/Hybrid)
+- **`api-schema`** (opt-in): derives OpenAPI schemas; enabled by `seekstorm_server`, disabled for ordinary core consumers.
 - **`gxhash`**: high-performance hashing via `gxhash`, both for `x86_64` and `aarch64`. Otherwise fallback to `ahash`.
 
 You can disable the SeekStorm default features by using default-features = false in the cargo.toml of your application.  
 This can be useful to reduce the size of your application or if there are dependency version conflicts.
 ```cargo
 [dependencies]
-seekstorm = { version = "0.12.19", default-features = false }
+seekstorm = { path = "../seekstorm", default-features = false }
 ```
 
 ## Usage of the library
@@ -460,7 +455,7 @@ The single-record Rust API is `index_arc.index_document(document).await?`; the a
 
 Add required crates to your project
 ```text
-cargo add seekstorm
+cargo add seekstorm --path ../seekstorm
 cargo add tokio
 cargo add serde_json
 ```
@@ -891,7 +886,7 @@ A minimal working example of faceted indexing & search requires just 60 lines of
 
 Add required crates to your project
 ```text
-cargo add seekstorm
+cargo add seekstorm --path ../seekstorm
 cargo add tokio
 cargo add serde_json
 ```
@@ -1177,53 +1172,4 @@ See roadmap below.
 
 ## Roadmap
 
-The following new features are planned to be implemented.  
-Are you missing something? Let us know via issue or discussions.
-
-**Improvements**
-
-* Relevancy benchmarks: BeIR, MS MARCO
-
-**New features**
-
-* ✅ Native vector search
-* ✅ TurboQuant (TQ) for vector search
-* Late Interaction Multimodal Retrieval
-* **Split of storage and compute**
-  * Use S3 object storage as index backend
-  * Use Distributed Key-Value store as index backend
-* Elasticity: automatic spawning and winding down of shards in the cloud depending on index size and load.
-* Distributed search cluster (currently PoC)
-* More tokenizer types (Japanese, Korean)
-* WebAssembly (Wasm)
-* Wrapper/bindings in JavaScript, Python, Java, C#, C, Go for the SeekStorm Rust library
-* Client libraries/SDK for the SeekStorm server REST API
-  * ✅ Rust
-  * ✅ Python
-  * ✅ C#
-  * ✅ Java 
-  * ✅ TypeScript
-  * Go
-  * C
-* Improved SIMD support
-  - ✅ lexical search: 
-	- ✅ x86_64 (Intel, AMD)
-	  - ✅ AVX2
-	  - AVX512
-	  - AVX10
-	- ✅ AArch64 (Apple Silicon, AWS Graviton)
-	  - ✅ NEON 
-	  - SVE/SVE2 
-	- GPU (NVIDIA)
-  - ✅ vector search: 
-	- ✅ x86_64 (Intel, AMD)
-	  - ✅ AVX2
-	  - AVX512
-	  - AVX10
-	- ✅ AArch64 (Apple Silicon, AWS Graviton)
-	  - ✅ NEON 
-	  - SVE/SVE2 
-	- GPU (NVIDIA)
-
-
-
+The active SeekPower roadmap is [SEEKPOWER_PLAN.md](SEEKPOWER_PLAN.md), with execution evidence in [VALIDATION.md](VALIDATION.md). S1 removes peripheral product features; S2 strengthens single-node reliability. Distributed routing, replication and object storage remain later phases. Published upstream SDKs/images and upstream roadmap promises are not this fork's release surface.

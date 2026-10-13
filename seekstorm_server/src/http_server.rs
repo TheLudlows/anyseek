@@ -935,12 +935,8 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::BadRequest("doc_id invalid or missing".to_string()).into();
             };
 
-            if let Some(query) = req.uri().query() {
-                if let Some((name, _)) = url::form_urlencoded::parse(query.as_bytes())
-                    .find(|(name, _)| matches!(name.as_ref(), "distance_fields" | "highlights" | "query_terms"))
-                {
-                    return HttpServerError::BadRequest(format!("{name} has been removed")).into();
-                }
+            if req.uri().query().is_some_and(|query| !query.is_empty()) {
+                return HttpServerError::BadRequest("document reads accept fields in the JSON body, not URL parameters".into()).into();
             }
 
             let Ok(collected_body) = req.into_body().collect().await else {
@@ -1170,8 +1166,16 @@ pub(crate) async fn http_request_handler(
                 })
                 .unwrap_or_default();
 
+            for name in params.keys() {
+                if !["document_id", "skip", "take", "include_deleted", "include_document", "fields"].contains(&name.as_str()) {
+                    return HttpServerError::BadRequest(format!("unsupported iterator URL parameter: {name}")).into();
+                }
+            }
             let document_id = if let Some(doc_id) = params.get("document_id") {
-                doc_id.parse::<u64>().ok()
+                match doc_id.parse::<u64>() {
+                    Ok(id) => Some(id),
+                    Err(_) => return HttpServerError::BadRequest("document_id is invalid".into()).into(),
+                }
             } else {
                 None
             };
@@ -1398,9 +1402,7 @@ pub(crate) async fn http_server(
     local_port: &u16,
     force_shard_number: &Option<usize>,
 ) {
-    let local_address: SocketAddr = format!("{}:{}", local_ip, local_port)
-        .parse()
-        .expect("Unable to parse socket address");
+    let local_address = SocketAddr::new(local_ip.parse().expect("validated local_ip"), *local_port);
 
     match TcpListener::bind(local_address).await {
         Ok(listener) => {

@@ -20,6 +20,7 @@ use std::{
     fmt,
     io::{Seek, SeekFrom, Write},
 };
+#[cfg(feature = "api-schema")]
 use utoipa::ToSchema;
 
 /// Normalization factor for cosine similarity when using i8 quantization.
@@ -29,7 +30,8 @@ pub const SIMILARITY_NORMALIZATION_64_I8: f32 = 1.0 / 16129.0;
 
 /// Vector precision
 #[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Deserialize, Serialize, ToSchema, Debug)]
+#[derive(Clone, Copy, PartialEq, Deserialize, Serialize, Debug)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum Precision {
     /// No vector embedding, e.g. for lexical fields or fields without indexing.
     None = 0,
@@ -227,7 +229,8 @@ pub(crate) fn read_record(
 }
 
 /// Quantization method for embeddings.
-#[derive(Clone, Copy, Default, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum Quantization {
     /// Affine Scalar Quantization (SQ) f32 to i8 (8 bit per dimension).
     /// Affine quantization (or asymmetric quantization) maps high-precision floating-point numbers (e.g., FP32) to lower-precision integers (e.g., INT8)
@@ -260,7 +263,8 @@ impl fmt::Display for Quantization {
 
 /// Vector configuration. Embeddings and document segmentation are supplied by callers.
 /// The serialized `External` configuration is retained for existing external-vector indexes.
-#[derive(Clone, Default, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Default, Debug, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 #[serde(deny_unknown_fields)]
 pub enum Inference {
     /// External inference

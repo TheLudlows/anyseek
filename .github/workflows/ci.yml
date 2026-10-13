@@ -32,6 +32,8 @@ jobs:
           rustc --version --verbose
           cargo --version
           lscpu
+      - name: Verify standalone core boundary
+        run: python3 scripts/check_core_boundary.py
       - name: Build retained workspace
         id: build
         run: cargo build --workspace
@@ -43,11 +45,11 @@ jobs:
           with open('/tmp/seekpower-metadata.json') as source:
               packages = json.load(source)['packages']
               names = {package['name'] for package in packages}
-          forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs'}
+          forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs'}
           assert not forbidden, f'retired dependencies remain: {forbidden}'
           core = next(package for package in packages if package['name'] == 'seekstorm')
           assert not any(dependency['name'] == 'aho-corasick' for dependency in core['dependencies']), 'direct highlighter dependency remains'
-          # regex still uses aho-corasick transitively; the tokenizer is retained.
+          # The tokenizer retains regex-syntax; optional API dependencies are checked separately.
           print('PASS no direct highlighter dependency')
           print('PASS no PDF/CSV/directory parser or query rewriting dependencies in resolved graph')
           PYCODE

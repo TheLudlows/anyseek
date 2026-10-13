@@ -367,7 +367,7 @@ pub(crate) mod doc_store;
 /// Operate the index: reate_index, open_index, clear_index, close_index, delete_index, index_document(s)
 pub mod index;
 pub(crate) mod index_posting;
-/// Display index information in the console.
+/// Collect index information independently of terminal rendering.
 pub mod info;
 pub(crate) mod intersection;
 pub(crate) mod intersection_simd;

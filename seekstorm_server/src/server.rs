@@ -8,12 +8,12 @@ use num_cpus::get_physical;
 use num_format::{Locale, ToFormattedString};
 
 use crate::multi_tenancy::ApikeyObject;
+use crate::info::{Info, display_index_info};
 
 use seekstorm::{
     index::{
-        Close, IS_AVX2, IS_NEON, Info,
+        Close, IS_AVX2, IS_NEON,
     },
-    info::display_index_info,
     search::{QueryType, ResultType, Search, SearchMode},
     utils::dir_size,
     vector_similarity::AnnMode,
