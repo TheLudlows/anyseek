@@ -3,7 +3,8 @@ use crate::{
     clustering::{ClusterHeader, Medoid, ParentMedoid},
     index::{Clustering, Document, FieldType, IS_SYSTEM_LE, Shard, ShardArc},
     min_heap,
-    search::ResultObject,
+    search::{ResultObject, FacetFilter, FilterSparse},
+    metadata_filter::{compile_filters, is_facet_filter},
     utils::decode_bytes_from_base64_string,
     vector_similarity::{
         AnnMode, QuantizedVector, QuerySimd, normalize_f32, normalize_f32_simd, quantize_f32_to_i8,
@@ -1078,6 +1079,7 @@ pub(crate) trait SearchVectorShard {
         similarity_threshold: Option<f32>,
         cluster_search: AnnMode,
         field_filter: Vec<String>,
+        facet_filter: Vec<FacetFilter>,
     ) -> ResultObject;
 }
 
@@ -1105,6 +1107,7 @@ impl Shard {
         sum_q: i32,
         vector_similarity: &VectorSimilarity,
         field_filter_set: &AHashSet<u16>,
+        facet_filter: &[FilterSparse],
         top_k: &mut TopK,
     ) {
         let level_id = self.level_index.len();
@@ -1114,6 +1117,10 @@ impl Shard {
         let non_affine = self.max_vector_value == f32::MIN;
 
         for record in self.block_vector_buffer.iter() {
+            let doc_id = (level_id << 16) | (record.doc_id as usize);
+            if self.delete_hashset.contains(&doc_id) || is_facet_filter(self, facet_filter, doc_id) {
+                continue;
+            }
             if field_filter_set.is_empty() || field_filter_set.contains(&(record.field_id as u16)) {
                 let scale_norm = if enable_scale {
                     Some((
@@ -1174,10 +1181,15 @@ impl SearchVectorShard for ShardArc {
         similarity_threshold: Option<f32>,
         ann_mode: AnnMode,
         field_filter: Vec<String>,
+        facet_filter: Vec<FacetFilter>,
     ) -> ResultObject {
         let mut result_object: ResultObject = Default::default();
 
         let shard_ref = self.read().await;
+        let facet_filter = match compile_filters(&shard_ref, &facet_filter) {
+            Ok(filters) => filters,
+            Err(error) => return ResultObject { error: Some(error), ..Default::default() },
+        };
         let mut observed_cluster_count = 0;
 
         let non_affine = shard_ref.max_vector_value == f32::MIN;
@@ -1190,7 +1202,7 @@ impl SearchVectorShard for ShardArc {
         for item in field_filter.iter() {
             match shard_ref.schema_map.get(item) {
                 Some(value) => {
-                    if value.index_lexical {
+                    if value.index_vector {
                         field_filter_set.insert(value.indexed_field_id as u16);
                     }
                 }
@@ -1243,6 +1255,7 @@ impl SearchVectorShard for ShardArc {
                     query_embedding.4,
                     &vector_similarity,
                     &field_filter_set,
+                    &facet_filter,
                     &mut top_k,
                 )
                 .await;
@@ -1380,6 +1393,13 @@ impl SearchVectorShard for ShardArc {
                             vector_dimensions,
                             vector_type,
                         );
+
+                        let doc_id = (level_id << 16) | (record.header.doc_id as usize);
+                        if shard_ref.delete_hashset.contains(&doc_id)
+                            || is_facet_filter(&shard_ref, &facet_filter, doc_id)
+                        {
+                            continue;
+                        }
 
                         if field_filter_set.is_empty()
                             || field_filter_set.contains(&(record.header.field_id as u16))

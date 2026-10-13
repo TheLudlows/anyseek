@@ -814,6 +814,9 @@ pub(crate) async fn http_request_handler(
                                 let status_object =
                                     delete_documents_by_query_api(&index_arc_clone, search_request)
                                         .await;
+                                if let Err(error) = &status_object {
+                                    return HttpServerError::BadRequest(error.clone()).into();
+                                }
                                 let status_object_json =
                                     serde_json::to_vec(&status_object).unwrap();
                                 Ok(Response::new(BoxBody::new(Full::new(

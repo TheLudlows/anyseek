@@ -255,7 +255,7 @@ GET http://127.0.0.1/api/v1/index/0/synonyms
 apikey: {{api_key}}
 content-type: application/json
 
-### query index POST with metadata filter
+### query index POST with metadata filter (Lexical, Vector or Hybrid)
 POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json

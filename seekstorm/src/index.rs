@@ -161,8 +161,10 @@ pub struct SearchRequestObject {
     #[serde(default)]
     pub fields: Vec<String>,
 
-    /// Facet filters apply to Lexical search only and require facet fields in the schema.
-    /// Nonempty filters in Vector or Hybrid mode return an explicit error; vector candidate filtering is not implemented.
+    /// Metadata filters apply to Lexical, Vector and Hybrid search and require facet:true fields.
+    /// Predicates are ANDed; values within a string/set predicate are ORed. Ranges are start-inclusive, end-exclusive.
+    /// Vector candidates are filtered before scoring and Top-K; ANN still scans only the configured clusters.
+    /// Unknown fields, type mismatches and invalid range bounds return an explicit error.
     #[serde(default)]
     pub facet_filter: Vec<FacetFilter>,
     /// Sort field and order:
@@ -3891,7 +3893,9 @@ impl Shard {
         let _ = fs::remove_file(index_path.join(FACET_VALUES_FILENAME));
         for facet in self.facets.iter_mut() {
             facet.values.clear();
-
+        }
+        for members in self.string_set_to_single_term_id_vec.iter_mut() {
+            members.clear();
         }
 
         if !self.stored_field_names.is_empty() && self.meta.access_type == AccessType::Mmap {
@@ -4696,10 +4700,18 @@ impl IndexDocumentShard2 for ShardArc {
                             key.sort();
 
                             let key_string = key.join("_");
+                            let is_new = !facet.values.contains_key(&key_string);
+                            let terms = key.clone();
                             facet.values.entry(key_string.clone()).or_insert(key);
 
                             let facet_value_id =
                                 facet.values.get_index_of(&key_string).unwrap() as u16;
+                            if is_new {
+                                for term in terms {
+                                    shard_mut.string_set_to_single_term_id_vec[i]
+                                        .entry(term).or_default().insert(facet_value_id as u32);
+                                }
+                            }
                             write_u16(facet_value_id, &mut shard_mut.facets_file_mmap, address)
                         }
 
@@ -4723,10 +4735,18 @@ impl IndexDocumentShard2 for ShardArc {
                             key.sort();
 
                             let key_string = key.join("_");
+                            let is_new = !facet.values.contains_key(&key_string);
+                            let terms = key.clone();
                             facet.values.entry(key_string.clone()).or_insert(key);
 
                             let facet_value_id =
                                 facet.values.get_index_of(&key_string).unwrap() as u32;
+                            if is_new {
+                                for term in terms {
+                                    shard_mut.string_set_to_single_term_id_vec[i]
+                                        .entry(term).or_default().insert(facet_value_id);
+                                }
+                            }
                             write_u32(facet_value_id, &mut shard_mut.facets_file_mmap, address)
                         }
 

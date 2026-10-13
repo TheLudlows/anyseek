@@ -12,6 +12,7 @@ SeekPower 保留一个 Rust 核心库和一个 HTTP/Web UI 服务。当前是单
 | 全文 | `tokenizer.rs`、`index_posting.rs`、`intersection*.rs`、`union.rs` | 分词、倒排、布尔/短语、BM25 与剪枝 |
 | 向量 | `vector.rs`、`vector_similarity.rs`、`clustering.rs` | 外部向量校验、量化、相似度、聚类与 IVF 检索 |
 | 存储 | `commit.rs`、`doc_store.rs`、`compress_postinglist.rs` | 本地提交、文档压缩、posting 编码 |
+| 过滤 | `metadata_filter.rs` | 共享 schema 校验、每分片字典编译、候选元数据判定 |
 | 统计 | `info.rs` | 收集索引信息；终端渲染位于服务 |
 
 源码路径分别相对于 [核心目录](seekstorm/src) 或 [服务目录](seekstorm_server/src)。核心 OpenAPI derive 通过可选 `api-schema` 启用，核心不依赖终端表格、模型运行时或文件解析器。
@@ -20,7 +21,7 @@ SeekPower 保留一个 Rust 核心库和一个 HTTP/Web UI 服务。当前是单
 
 调用方显式选择 Lexical、Vector 或 Hybrid。Lexical 使用倒排，Vector 使用外部查询向量；Hybrid 收集两路候选，汇总本机分片结果后按文档 ID 执行 RRF。融合参数目前固定在代码中，没有公开的多策略自动规划器。
 
-词法路径支持元数据过滤、文档命中计数和字段排序；向量路径支持检索字段选择、聚类探测与相似度阈值。Vector/Hybrid 对非空元数据过滤明确报错。Hybrid 默认按融合分数排序，也可按字段重排候选；候选截断后的重排不保证全库字段排序 Top-K。详见 [功能边界](FEATURES.md)。
+词法路径支持元数据过滤、文档命中计数和字段排序；向量路径支持检索字段选择、聚类探测与相似度阈值。三种模式复用元数据过滤谓词；向量评分/Top-K 前排除不匹配及已删除记录。ANN 保留已有簇探测规则，可能因未探测簇中的有效记录而返回不足 K。Hybrid 默认按融合分数排序，也可按字段重排候选；候选截断后的重排不保证全库字段排序 Top-K。详见 [功能边界](FEATURES.md)。
 
 ## 数据与文件
 

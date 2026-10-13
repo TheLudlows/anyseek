@@ -23,7 +23,7 @@
 - 普通字段及既有外部向量数据布局保留。旧 `apikey.json` 的 quota 被忽略，key ID/hash 和路径不变，启动不重写旧 key 文件。
 - 非法向量配置、维度、精度、非有限值、过大范数、零余弦范数及畸形 base64 返回错误。所有向量字段写入时必须存在。
 - 批次输入在入队前校验；非法更新在删除旧记录前拒绝。这不等于崩溃安全事务。
-- Vector/Hybrid 非空 `facet_filter` 返回 400，不能把字段选择 `field_filter` 当作元数据过滤替代。
+- `facet_filter` 现已支持 Lexical/Vector/Hybrid；`field_filter` 仍只选择检索字段。未知过滤字段、类型不匹配及反向/非有限范围现在明确报错，原来被静默忽略的条件须修正。
 
 ## Rust 与服务接入
 
@@ -38,7 +38,7 @@
 
 - 删除 `query_facets` 参数，旧请求即使传空数组也返回 400；删除响应 `facets` 和索引信息 `facets_minmax`。
 - Rust 删除 `QueryFacet/RangeType/Ranges/ResultFacet/MinMaxField/MinMaxFieldJson` 以及索引聚合方法；`Search::search` 删除 `query_facets` 参数。
-- 保留 `facet:true` 字段、`facet_filter`、`result_sort`、按文档读取元数据值、文档命中计数及分页。Vector/Hybrid 的过滤限制不变。
+- 保留 `facet:true` 字段、`facet_filter`、`result_sort`、按文档读取元数据值、文档命中计数及分页。Vector/Hybrid 过滤已由后续共享谓词批次实现。
 - UI 删除直方图和滑块，改为 UTC 起止日期输入，保留日期过滤/排序；不再自动查询最早/最晚日期。
 - 旧字典的统计值读取时丢弃；保存时仅写兼容占位（计数 0、极值 None）。字典顺序和 facet.bin 的值/ID 编码不变。旧版本若重新打开此数据，不能把占位值当成准确统计；如需旧聚合结果，应重新构建。
 - 内部 ANN/量化所需的 min/max 数值范围不属于字段统计，不删除。

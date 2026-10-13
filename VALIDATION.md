@@ -355,4 +355,26 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 
 本地默认并行 codegen 链接曾出现缺失 hidden symbols/空对象文件；清理后以 `CARGO_INCREMENTAL=0`、对应 `CARGO_PROFILE_DEV_CODEGEN_UNITS=1` / `CARGO_PROFILE_TEST_CODEGEN_UNITS=1`、`CARGO_PROFILE_DEV_DEBUG=0` / `CARGO_PROFILE_TEST_DEBUG=0`、`-j 2` 完成构建和测试。未修改仓库构建配置。CI 仍使用原标准命令。
 
-此记录为提交前本地结果；远端 CI 结果以本批 PR 为准，尚未合入。
+聚合裁剪已由 PR #11 合入主干 `97bea80133a5f708260449f44573dec4c943e498`。提交 `cc26f9e` 的 [CI 38420880047](https://github.com/TheLudlows/seekpower/actions/runs/38420880047) 全部通过：独立核心边界、标准 workspace 构建、依赖检查、58 个 Rust 测试、HTTP/Chromium（日期输入及清空）、7 个 UI 资源、OpenAPI 精确对比。
+
+
+## 2026-10-13：S2.1 共享元数据候选过滤（稳定业务 ID/版本不在本批）
+
+基点 `97bea80133a5f708260449f44573dec4c943e498`；聚合裁剪合入记录已回填。
+
+- 抽出共享 schema 校验、每分片字典编译与谓词；Lexical/Vector/Hybrid 使用同一条件。谓词 AND（包括同字段重复条件）、值 OR、范围左闭右开；未知字段、未配置 facet、类型错误和反向/非有限范围明确报错。按查询删除的非法过滤返回 HTTP 400，避免错误被包装成 200。
+- 已提交与未提交向量在评分/Top-K 入堆前排除不匹配及删除记录，Hybrid 两路过滤后融合；向量字段选择读取 index_vector。ANN 保留簇探测与阈值限制，不自动扩大 Nprobe，结果可能不足 K。
+- 新回归发现原实现未提交集合成员映射缺失及 clear 后映射残留；已随索引字典增量维护并在 clear 清理。集合谓词匹配真实成员，不将拼接字典键当成员。
+- 两个新增测试覆盖 Ram/Mmap、1/3 本机分片、所有数值过滤类型、字符串/集合16/32、多条件/重复条件、空值/未知值/范围、过滤选择率、K 超过有效记录数、实时/提交/重开/更新/删除；另覆盖 F32/I8、三种量化与距离度量、四种 ANN 模式、多向量字段选择以及全簇 F32 余弦结果与已知顺序对照。
+
+| 检查 | 提交前结果 |
+| --- | --- |
+| workspace build | 通过，Rust 1.99.0 |
+| workspace all-targets tests | 60 passed，0 failed |
+| 核心 doctest | 44 passed，0 failed |
+| HTTP 与 7 个 UI 静态资源 | 通过；三模式合法/非法过滤，Vector/Hybrid 的 filtered Top-1，鉴权及已有接口回归 |
+| OpenAPI JSON/YAML | 根据实际服务重新生成 |
+| Python/JS 语法与 diff 检查 | 通过 |
+| 本地浏览器交互 | 未执行；此前环境的 Chromium 下载 ZIP 损坏；CI 增加三模式原生日期输入回归，结果以 PR 为准 |
+
+本地沿用上批的非增量、单 codegen unit、debug=0、-j 2 参数避免环境链接问题，仓库配置未修改。未执行生产规模性能/召回基准、故障注入和共同可见视图验证，不将本批记录解释为 S2.1 全部完成或持久化保证。提交时尚未合入。

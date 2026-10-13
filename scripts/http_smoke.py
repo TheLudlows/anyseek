@@ -275,7 +275,10 @@ def exercise(binary, workdir):
             print('PASS JSON create/write/commit/query/get/update/delete; PDF endpoints removed')
 
             vector_schema = [schema[1], {'field': 'category', 'field_type': 'String16', 'store': True,
-                                        'index_lexical': False, 'facet': True}, {'field': 'vector', 'field_type': 'Json', 'store': True,
+                                        'index_lexical': False, 'facet': True},
+                             {'field': 'date', 'field_type': 'Timestamp', 'store': True, 'index_lexical': False, 'facet': True},
+                             {'field': 'price', 'field_type': 'F64', 'store': True, 'index_lexical': False, 'facet': True},
+                             {'field': 'tags', 'field_type': 'StringSet32', 'store': True, 'index_lexical': False, 'facet': True}, {'field': 'vector', 'field_type': 'Json', 'store': True,
                                          'index_lexical': False, 'index_vector': True}]
             config = {'index_name': 'external_vectors', 'schema': vector_schema,
                       'inference': {'External': {'dimensions': 3, 'precision': 'F32',
@@ -287,8 +290,8 @@ def exercise(binary, workdir):
                             [{'body': 'partial', 'vector': [1, 0, 0]}, {'body': 'missing'}]):
                 request('POST', vp + '/doc', invalid, api_key, expected=400)
             check(api('PATCH', vp) == 0, 'invalid batch partially indexed')
-            api('POST', vp + '/doc', [{'body': 'alpha', 'vector': [1, 0, 0], 'category': 'a'},
-                                     {'body': 'beta', 'vector': [0, 1, 0], 'category': 'b'}])
+            api('POST', vp + '/doc', [{'body': 'alpha', 'vector': [1, 0, 0], 'category': 'a', 'date': 1609459200, 'price': 10, 'tags': ['red', 'green']},
+                                     {'body': 'beta', 'vector': [0, 1, 0], 'category': 'b', 'date': 1640995200, 'price': 20, 'tags': ['blue']}])
             check(api('PATCH', vp) == 2, 'external write count')
             for mode in ('Vector', 'Hybrid'):
                 query_request = {'query': 'alpha', 'search_mode': {mode: {
@@ -300,12 +303,32 @@ def exercise(binary, workdir):
                             api_key, expected=400)
                 result = api('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0]})
                 check(result['results'][0]['body'] == 'alpha', f'{mode} ranking: {result}')
-                # The inherited vector branch did not apply facet_filter. Fail closed until S2.
-                rejected_filter = request('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0],
-                    'facet_filter': [{'String16': {'field': 'category', 'filter': ['b']}}]},
-                    api_key, expected=400)
-                check(b'vector candidate filtering is not implemented' in rejected_filter,
-                      'vector facet_filter must fail explicitly after valid deserialization')
+                for predicate in [
+                    {'String16': {'field': 'category', 'filter': ['b']}},
+                    {'Timestamp': {'field': 'date', 'filter': {'start': 1640995200, 'end': 1672531200}}},
+                    {'F64': {'field': 'price', 'filter': {'start': 20, 'end': 30}}},
+                    {'StringSet32': {'field': 'tags', 'filter': ['blue']}}
+                ]:
+                    filtered_vector = api('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0],
+                        'length': 1, 'facet_filter': [predicate]})
+                    check([doc['body'] for doc in filtered_vector['results']] == ['beta'], f'{mode} filtered Top-1')
+                absent = api('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0],
+                    'facet_filter': [{'String16': {'field': 'category', 'filter': ['absent']}}]})
+                check(absent['results'] == [], f'{mode} absent metadata')
+            for name in ('Lexical', 'Vector', 'Hybrid'):
+                search_mode = 'Lexical' if name == 'Lexical' else {name: {'ann_mode': 'All', 'similarity_threshold': None}}
+                for predicate in [
+                    {'String16': {'field': 'missing', 'filter': ['b']}},
+                    {'String16': {'field': 'body', 'filter': ['beta']}},
+                    {'F64': {'field': 'category', 'filter': {'start': 0, 'end': 1}}},
+                    {'Timestamp': {'field': 'date', 'filter': {'start': 2, 'end': 1}}}
+                ]:
+                    rejected = request('POST', vp + '/query', {'query': 'alpha', 'query_vector': [1, 0, 0],
+                        'search_mode': search_mode, 'facet_filter': [predicate]}, api_key, expected=400)
+                    check(b'facet_filter' in rejected, f'{name} invalid metadata predicate accepted')
+            request('DELETE', vp + '/doc', {'query': 'alpha', 'facet_filter': [
+                {'String16': {'field': 'missing', 'filter': ['a']}}]}, api_key, expected=400)
+            print('PASS metadata filters before vector/hybrid Top-K; invalid predicates fail across modes')
             filtered = api('POST', vp + '/query', {'query': '', 'enable_empty_query': True,
                 'search_mode': 'Lexical', 'facet_filter': [{'String16': {'field': 'category', 'filter': ['b']}}]})
             check([doc['body'] for doc in filtered['results']] == ['beta'], 'lexical metadata filter')
@@ -506,6 +529,18 @@ def exercise(binary, workdir):
                     response = cleared_response.value
                     check(response.status == 200 and response.json()['count_total'] == 2, 'UI clear dates failed')
                     check(response.request.post_data_json['facet_filter'] == [], 'UI kept cleared date filter')
+                    page.goto(base + f'/?index_id={vector_id}&q=beta')
+                    page.locator('#dateApply').wait_for()
+                    page.locator('#dateFrom').fill('2022-01-01')
+                    page.locator('#dateTo').fill('2022-12-31')
+                    for selector in ('#dateApply', '#vectorSearch', 'label[data-index="1"]'):
+                        if selector == '#vectorSearch':
+                            page.locator('label[data-index="0"]').click()
+                            page.locator('#queryVector').fill('[1,0,0]')
+                        with page.expect_response(lambda response: '/query' in response.url and response.request.method == 'POST') as mode_filter:
+                            page.locator(selector).click()
+                        response = mode_filter.value
+                        check(response.status == 200 and [doc['body'] for doc in response.json()['results']] == ['beta'], 'UI shared date filtering failed')
                     check(not errors, f'browser errors: {errors}')
                     browser.close()
                 print('PASS Chromium lexical/vector/hybrid, source/text preview, literal raw/JSON preview, unchanged typed query and date sorting/filtering')

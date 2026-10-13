@@ -3048,7 +3048,7 @@
             "items": {
               "$ref": "#/components/schemas/FacetFilter"
             },
-            "description": "Facet filters apply to Lexical search only and require facet fields in the schema.\nNonempty filters in Vector or Hybrid mode return an explicit error; vector candidate filtering is not implemented."
+            "description": "Metadata filters apply to Lexical, Vector and Hybrid search and require facet:true fields.\nPredicates are ANDed; values within a string/set predicate are ORed. Ranges are start-inclusive, end-exclusive.\nVector candidates are filtered before scoring and Top-K; ANN still scans only the configured clusters.\nUnknown fields, type mismatches and invalid range bounds return an explicit error."
           },
           "result_sort": {
             "type": "array",
