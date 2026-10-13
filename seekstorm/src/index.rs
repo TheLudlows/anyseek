@@ -231,47 +231,6 @@ pub struct SearchResultObject {
     pub facets: AHashMap<String, Facet>,
 }
 
-/// Quota per API key
-#[derive(Default, Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct ApikeyQuotaObject {
-    /// number of indices per API key
-    pub indices_max: usize,
-    /// combined index size per API key in MB
-    pub indices_size_max: usize,
-    /// combined number of documents in all indices per API key
-    pub documents_max: usize,
-    /// operations per month per API key: index/update/delete/query doc
-    pub operations_max: usize,
-    /// queries per sec per API key
-    pub rate_limit: Option<usize>,
-    /// for rate limit: time of first access within current window
-    #[serde(skip)]
-    #[schema(ignore)]
-    pub timestamp_nanos: usize,
-    #[serde(skip)]
-    #[schema(ignore)]
-    /// for rate limit: number of violations within current window
-    pub violation_count: usize,
-    /// create fixed demo api key instead of random api key for demonstration, example, and documentation purposes (default=false)
-    #[serde(default)]
-    pub demo: bool,
-}
-
-/// API key object
-#[derive(Deserialize, Serialize)]
-pub struct ApikeyObject {
-    /// API key id: self maintained, also used for index directory path
-    pub id: u64,
-    /// self maintained, pure informational
-    pub apikey_hash: u128,
-    /// Quota per API key
-    pub quota: ApikeyQuotaObject,
-
-    /// list of index_id below this apikey
-    #[serde(skip)]
-    pub index_list: HashMap<u64, IndexArc>,
-}
-
 /// Create index request object
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -346,13 +305,6 @@ fn ngram_indexing_api() -> u8 {
 
 fn document_compression_api() -> DocumentCompression {
     DocumentCompression::Snappy
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-/// Delete API key request object
-pub struct DeleteApikeyRequest {
-    /// Base64 encoded API key to delete
-    pub apikey_base64: String,
 }
 
 /// Specifies which document ID to return
@@ -442,7 +394,7 @@ pub struct IndexResponseObject {
     pub committed_doc_count: usize,
     /// Number of operations: index, update, delete, queries
     pub operations_count: u64,
-    /// Number of queries, for quotas and billing
+    /// Number of queries (informational)
     pub query_count: u64,
     /// SeekStorm version the index was created with
     #[schema(example = "0.11.1")]

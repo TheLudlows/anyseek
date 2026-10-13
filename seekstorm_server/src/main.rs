@@ -28,7 +28,7 @@
 //! [**interactive API endpoint examples**](https://github.com/SeekStorm/SeekStorm/blob/master/src/seekstorm_server/test_api.rest)
 //! ### create api key
 //! ```
-//! curl --request POST --url http://127.0.0.1:80/api/v1/apikey --header 'apikey: A6xnQhbz4Vx2HuGl4lXwZ5U2I8iziLRFnhP5eNfIRvQ=' --header 'content-type: application/json' --data '{"indices_max": 10,"indices_size_max":100000,"documents_max":10000000,"operations_max":10000000,"rate_limit": 100000}'
+//! curl --request POST --url http://127.0.0.1:80/api/v1/apikey --header 'apikey: A6xnQhbz4Vx2HuGl4lXwZ5U2I8iziLRFnhP5eNfIRvQ=' --header 'content-type: application/json' --data '{}'
 //! ```
 //! ### delete api key
 //! ```

@@ -7,9 +7,11 @@ use indexmap::IndexMap;
 use num_cpus::get_physical;
 use num_format::{Locale, ToFormattedString};
 
+use crate::multi_tenancy::ApikeyObject;
+
 use seekstorm::{
     index::{
-        ApikeyObject, ApikeyQuotaObject, Close, IS_AVX2, IS_NEON, Info,
+        Close, IS_AVX2, IS_NEON, Info,
     },
     info::display_index_info,
     search::{QueryType, ResultType, Search, SearchMode},
@@ -283,59 +285,16 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                 value: apikey.1.id.to_string(),
             },
             Info {
-                entry: "indices quota",
-                value: format!(
-                    "{: >2}",
-                    apikey.1.index_list.len() * 100 / apikey.1.quota.indices_max
-                ) + "% | "
-                    + &apikey.1.index_list.len().to_string()
-                    + " of "
-                    + &apikey.1.quota.indices_max.to_string(),
+                entry: "indices",
+                value: apikey.1.index_list.len().to_string(),
             },
             Info {
-                entry: "documents quota",
-                value: format!(
-                    "{: >2}",
-                    indexed_doc_count_sum * 100 / apikey.1.quota.documents_max
-                ) + "% | "
-                    + &indexed_doc_count_sum.to_formatted_string(&Locale::en)
-                    + " of "
-                    + &apikey
-                        .1
-                        .quota
-                        .documents_max
-                        .to_formatted_string(&Locale::en),
+                entry: "documents",
+                value: indexed_doc_count_sum.to_formatted_string(&Locale::en),
             },
             Info {
-                entry: "operations quota",
-                value: format!(
-                    "{: >2}",
-                    indexed_doc_count_sum * 100 / apikey.1.quota.operations_max
-                ) + "% | "
-                    + &indexed_doc_count_sum.to_formatted_string(&Locale::en)
-                    + " of "
-                    + &apikey
-                        .1
-                        .quota
-                        .operations_max
-                        .to_formatted_string(&Locale::en),
-            },
-            Info {
-                entry: "disk usage quota",
-                value: format!("{: >2}", index_size * 100 / apikey.1.quota.indices_size_max)
-                    + "% | "
-                    + &index_size.to_formatted_string(&Locale::en)
-                    + " of "
-                    + &apikey
-                        .1
-                        .quota
-                        .indices_size_max
-                        .to_formatted_string(&Locale::en)
-                    + " bytes",
-            },
-            Info {
-                entry: "rate limit",
-                value: format!("{:?}", apikey.1.quota.rate_limit),
+                entry: "disk usage",
+                value: index_size.to_formatted_string(&Locale::en) + " bytes",
             },
         ];
 
@@ -603,17 +562,8 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                         {
                             println!("create demo api_key");
                             let mut apikey_list_mut = apikey_list_clone.write().await;
-                            let apikey_quota_object=ApikeyQuotaObject {
-                                indices_max: 10,
-                                indices_size_max: 100_000_000_000,
-                                documents_max: 100_000_000,
-                                operations_max: 1_000_000_000,
-                                rate_limit:None,
-                                ..Default::default()
-                            };
                             create_apikey_api(
                                 &index_path,
-                                apikey_quota_object,
                                 &demo_api_key,
                                 &mut apikey_list_mut,
                             );

@@ -10,10 +10,12 @@ use itertools::Itertools;
 use std::collections::HashSet;
 use utoipa::{OpenApi, openapi::OpenApiVersion};
 
+use crate::multi_tenancy::{ApikeyObject, CreateApikeyRequest};
+
 use seekstorm::{
     commit::Commit,
     index::{
-        AccessType, ApikeyObject, ApikeyQuotaObject, Close, Clustering, CreateIndexRequest,
+        AccessType, Close, Clustering, CreateIndexRequest,
         DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
         FrequentwordType, GetDocumentRequest, GetIteratorRequest, IS_AVX2, IS_NEON,
         IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
@@ -88,9 +90,10 @@ pub(crate) fn live_api() -> String {
     params(
         ("apikey" = String, Header, description = "YOUR_MASTER_API_KEY",example="BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="),
     ),
-    request_body = inline(ApikeyQuotaObject),
+    request_body = inline(CreateApikeyRequest),
     responses(
         (status = 200, description = "API key created, returns Base64 encoded API key", body = String),
+        (status = BAD_REQUEST, description = "Invalid or retired API key creation options"),
         (status = UNAUTHORIZED, description = "master_apikey invalid"),
         (status = UNAUTHORIZED, description = "master_apikey missing")
     ),
@@ -98,11 +101,14 @@ pub(crate) fn live_api() -> String {
 )]
 pub(crate) fn create_apikey_api<'a>(
     index_path: &'a PathBuf,
-    apikey_quota_request_object: ApikeyQuotaObject,
     apikey: &[u8],
     apikey_list: &'a mut HashMap<u128, ApikeyObject>,
 ) -> &'a mut ApikeyObject {
     let apikey_hash_u128 = calculate_hash(&apikey) as u128;
+    // Recreating the fixed demo key must not replace its scope or orphan indices.
+    if apikey_list.contains_key(&apikey_hash_u128) {
+        return apikey_list.get_mut(&apikey_hash_u128).unwrap();
+    }
 
     let mut apikey_id: u64 = 0;
     let mut apikey_list_vec: Vec<(&u128, &ApikeyObject)> = apikey_list.iter().collect();
@@ -118,7 +124,6 @@ pub(crate) fn create_apikey_api<'a>(
     let apikey_object = ApikeyObject {
         id: apikey_id,
         apikey_hash: apikey_hash_u128,
-        quota: apikey_quota_request_object,
         index_list: HashMap::new(),
     };
 

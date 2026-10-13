@@ -254,3 +254,13 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - 首轮环境：Ubuntu x86_64、rustc 1.99.0 / cargo 1.99.0、AMD EPYC 9V74；实际 runner 环境与完整步骤输出见各运行日志。本地只做静态检查，没有把 CI 运行记作本地验证。
 - HTTP/Chromium 通过原文/嵌套 JSON/投影、旧参数拒绝、长文滚动及安全文本展示；现有词法/外部向量/混合、更新删除、认证、来源链接和日期排序过滤均通过。新增双分片 RAM/MMAP 提交前后/关闭重开契约通过，原 53 个测试全部保留。
 - [PR #7](https://github.com/TheLudlows/seekpower/pull/7) 代码和验证已完成，待审查合入。本次结果回填只修改计划/状态/验证文档，运行代码与上述已通过 CI 的 `03da2f2` 相同。S1.4 配额和 S1.5 尚待执行；不把本批测试等同完整可靠性、性能或生产恢复验收。
+
+## 2026-10-13：S1.4c 合入与 S1.4d 配额裁剪
+
+- PR #7 已由用户合入；基点 master `8026d378eb6169749924aeceed66406aa1d88d62`，tree `454f4b50e5fca97a2cc74fd4d987686e176c6ee9`。
+- 删除 ApikeyQuotaObject、服务端 rate_limit 和各路由限流调用，移除服务层直接 chrono 依赖（核心 info 仍使用 chrono）。容量/文档/操作配额此前仅配置和显示，没有新增或保留虚假的配额执行承诺。
+- ApikeyObject 与创建/删除请求下移服务层；key 哈希算法、ID、索引目录和按 key 查找路径保留。创建请求只接受 demo，旧 quota 字段/URL 参数明确 400；旧文件的 quota 仅为读取兼容忽略，不回写或迁移目录。
+- 修正重复创建固定 demo key 会覆盖 index_list 的继承问题：已有身份直接复用。该修复随 key 创建契约验证。
+- 两个新增服务测试覆盖请求拒绝和旧身份反序列化；HTTP 增加两组 key 同索引 ID、互相不可见/跨作用域读写删拒绝、master 管理权限、重复 demo 创建、旧 quota 为零重启兼容、新格式 key 重启、撤销只影响目标 key。
+- 本地 Python 语法、diff 和 OpenAPI JSON/YAML 语义对比通过；无本地 Rust 工具链。等待 GitHub Actions 的构建、57 个测试、HTTP/Chromium 与 OpenAPI 精确对比，不把未执行写作通过。
+- 配额退出后需要限流的部署由外围网关处理。认证/隔离保留不等同完整安全审计；完整恢复/性能与 S2 验收未在本批执行。

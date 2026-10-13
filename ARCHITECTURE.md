@@ -101,7 +101,7 @@ seekstorm_index/
 │  │               ├─ 2 
 ```
 
-* apikey.json : contains API key hash and quotas
+* apikey.json : contains API key identity (id and hash); indices remain scoped under the same key directory
 
 You can manually delete, copy, or backup and restore both API key and index directories (shutdown server first and then restart).
 
@@ -144,3 +144,4 @@ There is a limit of
 * maximum 65_535 (String16) and of 4_294_967_295 (String32) distinct values per string facet field.  
 * maximum 65_535 (StringSet16) and of 4_294_967_295 (StringSet32) distinct value combinations per string set facet field.  
 * maximum 65_536 distinct numerical ranges per facet field. 
+

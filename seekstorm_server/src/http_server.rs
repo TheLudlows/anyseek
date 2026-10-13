@@ -11,7 +11,6 @@ use std::str;
 use std::sync::Arc;
 use std::{convert::Infallible, net::SocketAddr};
 
-use chrono::Utc;
 use rand::TryRng;
 use rand::rngs::SysRng;
 
@@ -26,7 +25,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 
 use seekstorm::INDEX_RUNTIME;
 use seekstorm::index::{
-    ApikeyObject, ApikeyQuotaObject, CreateIndexRequest, DeleteApikeyRequest, Document,
+    CreateIndexRequest, Document,
     GetDocumentRequest, GetIteratorRequest, SearchRequestObject, Synonym,
 };
 use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
@@ -57,7 +56,7 @@ use crate::api_endpoints::{
     get_iterator_api_get, get_iterator_api_post, live_api, update_document_api,
 };
 use crate::api_endpoints::{index_document_api, query_index_api_get, query_index_api_post};
-use crate::multi_tenancy::get_apikey_hash;
+use crate::multi_tenancy::{ApikeyObject, CreateApikeyRequest, DeleteApikeyRequest, get_apikey_hash};
 use crate::{MASTER_KEY_SECRET, VERSION};
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
@@ -108,7 +107,6 @@ enum HttpServerError {
     InternalServerError,
     NotImplemented,
     DocumentNotFound,
-    RateLimitExceeded,
 }
 
 impl From<HttpServerError> for Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
@@ -141,43 +139,7 @@ impl From<HttpServerError> for Result<Response<BoxBody<Bytes, Infallible>>, Infa
             HttpServerError::DocumentNotFound => {
                 status(StatusCode::NOT_FOUND, "document not found".to_string())
             }
-            HttpServerError::RateLimitExceeded => status(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate limit exceeded".to_string(),
-            ),
         })
-    }
-}
-
-pub(crate) async fn rate_limit(
-    apikey_list: &Arc<tokio::sync::RwLock<HashMap<u128, ApikeyObject>>>,
-    apikey_hash: u128,
-) -> bool {
-    const GRACE_VIOLATION_COUNT: usize = 10;
-
-    let timestamp_nanos =
-        usize::try_from(Utc::now().timestamp_nanos_opt().unwrap_or(0)).unwrap_or(0);
-
-    let mut apikey_list_mut = apikey_list.write().await;
-    if let Some(apikey_object) = apikey_list_mut.get_mut(&apikey_hash) {
-        if let Some(rate_limit) = apikey_object.quota.rate_limit {
-            if (timestamp_nanos - apikey_object.quota.timestamp_nanos)
-                / (apikey_object.quota.violation_count + 1)
-                > 1_000_000_000 / rate_limit
-            {
-                apikey_object.quota.timestamp_nanos = timestamp_nanos;
-                apikey_object.quota.violation_count = 0;
-                false
-            } else {
-                apikey_object.quota.violation_count += 1;
-
-                apikey_object.quota.violation_count > GRACE_VIOLATION_COUNT
-            }
-        } else {
-            false
-        }
-    } else {
-        false
     }
 }
 
@@ -324,10 +286,6 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
 
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::IndexNotFound.into();
             };
@@ -376,10 +334,6 @@ pub(crate) async fn http_request_handler(
             let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
                 return HttpServerError::Unauthorized.into();
             };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
 
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::IndexNotFound.into();
@@ -527,10 +481,6 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
 
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
             let Ok(collected_body) = req.into_body().collect().await else {
                 return HttpServerError::BadRequest("failed to read request body".to_string())
                     .into();
@@ -585,10 +535,6 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
 
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::IndexNotFound.into();
             };
@@ -617,10 +563,6 @@ pub(crate) async fn http_request_handler(
             let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
                 return HttpServerError::Unauthorized.into();
             };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
 
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::IndexNotFound.into();
@@ -661,10 +603,6 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
 
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::IndexNotFound.into();
             };
@@ -694,10 +632,6 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
 
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
             let apikey_list_ref = apikey_list.read().await;
             let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
                 return HttpServerError::Unauthorized.into();
@@ -717,10 +651,6 @@ pub(crate) async fn http_request_handler(
             let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
                 return HttpServerError::Unauthorized.into();
             };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
 
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::BadRequest("index_id invalid or missing".to_string())
@@ -753,10 +683,6 @@ pub(crate) async fn http_request_handler(
             let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
                 return HttpServerError::Unauthorized.into();
             };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
 
             let apikey_list_ref = apikey_list.read().await;
             let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
@@ -802,10 +728,6 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
 
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
             let apikey_list_ref = apikey_list.read().await;
             let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
                 return HttpServerError::Unauthorized.into();
@@ -850,10 +772,6 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
 
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
             let apikey_list_ref = apikey_list.read().await;
             let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
                 return HttpServerError::Unauthorized.into();
@@ -881,10 +799,6 @@ pub(crate) async fn http_request_handler(
             let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
                 return HttpServerError::Unauthorized.into();
             };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
 
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::BadRequest("index_id invalid or missing".to_string())
@@ -939,10 +853,6 @@ pub(crate) async fn http_request_handler(
             let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
                 return HttpServerError::Unauthorized.into();
             };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
 
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::BadRequest("index_id invalid or missing".to_string())
@@ -1017,10 +927,6 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
 
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::BadRequest("index_id invalid or missing".to_string())
                     .into();
@@ -1085,10 +991,6 @@ pub(crate) async fn http_request_handler(
             let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
                 return HttpServerError::Unauthorized.into();
             };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
 
             let apikey_list_ref = apikey_list.read().await;
             let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
@@ -1196,10 +1098,6 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
 
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
-
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::BadRequest("index_id invalid or missing".to_string())
                     .into();
@@ -1256,10 +1154,6 @@ pub(crate) async fn http_request_handler(
             let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
                 return HttpServerError::Unauthorized.into();
             };
-
-            if rate_limit(&apikey_list, apikey_hash).await {
-                return HttpServerError::RateLimitExceeded.into();
-            }
 
             let Ok(index_id) = parts[3].parse() else {
                 return HttpServerError::BadRequest("index_id invalid or missing".to_string())
@@ -1381,21 +1275,24 @@ pub(crate) async fn http_request_handler(
             if apikey_header != master_apikey_base64 {
                 return HttpServerError::Unauthorized.into();
             };
+            if req.uri().query().is_some_and(|query| !query.is_empty()) {
+                return HttpServerError::BadRequest("API key creation accepts only a JSON body with optional demo".into()).into();
+            }
             let Ok(collected_body) = req.into_body().collect().await else {
                 return HttpServerError::BadRequest("failed to read request body".to_string())
                     .into();
             };
             let request_bytes = collected_body.to_bytes();
-            let apikey_quota_object: ApikeyQuotaObject =
+            let create_request: CreateApikeyRequest =
                 match serde_json::from_slice(&request_bytes) {
-                    Ok(apikey_quota_object) => apikey_quota_object,
+                    Ok(create_request) => create_request,
                     Err(e) => {
                         return Ok(status(StatusCode::BAD_REQUEST, e.to_string()));
                     }
                 };
 
             let mut apikey = [0u8; 32];
-            if !apikey_quota_object.demo {
+            if !create_request.demo {
                 SysRng.try_fill_bytes(&mut apikey).unwrap();
             }
             let api_key_base64 = general_purpose::STANDARD.encode(apikey);
@@ -1403,7 +1300,6 @@ pub(crate) async fn http_request_handler(
             let mut apikey_list_mut = apikey_list.write().await;
             create_apikey_api(
                 &index_path,
-                apikey_quota_object,
                 &apikey,
                 &mut apikey_list_mut,
             );
