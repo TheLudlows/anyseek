@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "vb")]
 use crate::vector::ResultSource;
 use crate::{
-    geo_search::morton_ordering,
     index::{FieldType, Shard},
-    search::{FacetValue, ResultSortIndex, SortOrder},
+    search::{ResultSortIndex, SortOrder},
     utils::{
         read_f32, read_f64, read_i8, read_i16, read_i32, read_i64, read_u16, read_u32, read_u64,
     },
@@ -49,7 +48,7 @@ pub(crate) struct MinHeap<'a> {
 
     pub index: &'a Shard,
     pub empty_query: bool,
-    pub result_sort: &'a Vec<ResultSortIndex<'a>>,
+    pub result_sort: &'a Vec<ResultSortIndex>,
 }
 
 #[inline]
@@ -57,7 +56,7 @@ pub(crate) fn result_ordering_root(
     shard_vec: &[RwLockReadGuard<'_, Shard>],
     shard_number: usize,
     empty_query: bool,
-    result_sort: &Vec<ResultSortIndex<'_>>,
+    result_sort: &Vec<ResultSortIndex>,
     result1: Result,
     result2: Result,
 ) -> core::cmp::Ordering {
@@ -507,26 +506,6 @@ pub(crate) fn result_ordering_root(
                 };
             }
 
-            FieldType::Point => {
-                if let FacetValue::Point(base) = &field.base {
-                    let offset = shard1.facets[field.idx].offset;
-
-                    let facet_value_1 = read_u64(
-                        &shard1.facets_file_mmap,
-                        (shard1.facets_size_sum * doc_id1) + offset,
-                    );
-                    let facet_value_2 = read_u64(
-                        &shard2.facets_file_mmap,
-                        (shard2.facets_size_sum * doc_id2) + offset,
-                    );
-
-                    let order = morton_ordering(facet_value_1, facet_value_2, base, &field.order);
-
-                    if order != core::cmp::Ordering::Equal {
-                        return order;
-                    };
-                }
-            }
 
             _ => {}
         }
@@ -1014,27 +993,6 @@ impl<'a> MinHeap<'a> {
                     };
                 }
 
-                FieldType::Point => {
-                    if let FacetValue::Point(base) = &field.base {
-                        let offset = self.index.facets[field.idx].offset;
-
-                        let facet_value_1 = read_u64(
-                            &self.index.facets_file_mmap,
-                            (self.index.facets_size_sum * result1.doc_id) + offset,
-                        );
-                        let facet_value_2 = read_u64(
-                            &self.index.facets_file_mmap,
-                            (self.index.facets_size_sum * result2.doc_id) + offset,
-                        );
-
-                        let order =
-                            morton_ordering(facet_value_1, facet_value_2, base, &field.order);
-
-                        if order != core::cmp::Ordering::Equal {
-                            return order;
-                        };
-                    }
-                }
 
                 _ => {}
             }
@@ -1280,3 +1238,4 @@ impl<'a> MinHeap<'a> {
         }
     }
 }
+

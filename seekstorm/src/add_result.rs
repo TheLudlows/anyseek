@@ -3,7 +3,6 @@ use smallvec::{SmallVec, smallvec};
 use std::cmp::Ordering;
 
 use crate::{
-    geo_search::{decode_morton_2_d, euclidian_distance},
     index::{
         AccessType, CompressionType, FIELD_STOP_BIT_1, FIELD_STOP_BIT_2, FieldType,
         LexicalSimilarity, NgramType, NonUniquePostingListObjectQuery, PostingListObjectQuery,
@@ -459,23 +458,6 @@ pub(crate) fn is_facet_filter(index: &Shard, facet_filter: &[FilterSparse], doci
                 }
             }
 
-            FilterSparse::Point(point, distance_range, unit, range) => {
-                let morton_code = read_u64(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if range.contains(&morton_code) {
-                    if !distance_range.contains(&euclidian_distance(
-                        point,
-                        &decode_morton_2_d(morton_code),
-                        unit,
-                    )) {
-                        return true;
-                    }
-                } else {
-                    return true;
-                }
-            }
 
             FilterSparse::None => {}
         }
@@ -602,20 +584,6 @@ pub(crate) fn facet_count(shard: &Shard, search_result: &mut SearchResult, docid
                         as u32
                 }
 
-                Ranges::Point(_range_type, ranges, base, unit) => {
-                    let facet_value = read_u64(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    let facet_value_distance =
-                        euclidian_distance(base, &decode_morton_2_d(facet_value), unit);
-                    ranges
-                        .binary_search_by(|range| {
-                            range.1.partial_cmp(&facet_value_distance).unwrap()
-                        })
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
 
                 _ => {
                     if facet.field_type == FieldType::String16
@@ -3704,3 +3672,4 @@ pub(crate) fn add_result_multiterm_singlefield(
         top_k,
     );
 }
+

@@ -180,10 +180,9 @@
 //! ];    
 //! let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 //! let return_fields_filter= HashSet::new();
-//! let distance_fields=Vec::new();
 //! let index=index_arc.read().await;
 //! for result in result_object.results.iter() {
-//!   let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter,&distance_fields).await.unwrap();
+//!   let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
 //!   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 //! }
 //! println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);
@@ -200,9 +199,8 @@
 //! let doc_id=0;
 //! let highlighter=None;
 //! let return_fields_filter= HashSet::new();
-//! let distance_fields=Vec::new();
 //! let index=index_arc.read().await;
-//! let doc=index.get_document(doc_id,false,&highlighter,&return_fields_filter,&distance_fields).await.unwrap();
+//! let doc=index.get_document(doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
 //! # });
 //! ```
 //! ### clear index
@@ -343,10 +341,9 @@
 //!     ];    
 //! let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 //! let return_fields_filter= HashSet::new();
-//! let distance_fields=Vec::new();
 //! let index=index_arc.write().await;
 //! for result in result_object.results.iter() {
-//!   let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter,&distance_fields).await.unwrap();
+//!   let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
 //!   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 //! }
 //! println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);
@@ -392,8 +389,6 @@ pub mod commit;
 pub(crate) mod compatible;
 pub(crate) mod compress_postinglist;
 pub(crate) mod doc_store;
-/// Geo search by indexing geo points (latitude, longitude), proximity searching for points within a specified radius, and proximity sorting.
-pub mod geo_search;
 /// Extracts the most relevant fragments (snippets, summaries) from specified fields of the document to provide a "keyword in context" (KWIC) functionality.
 /// With highlight_markup the matching query terms within the fragments can be highlighted with HTML markup.
 pub mod highlighter;

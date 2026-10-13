@@ -1664,7 +1664,7 @@
           "Query"
         ],
         "summary": "Query Index",
-        "description": "Query results from index with index_id\nThe following parameters are supported:\n- Result type\n- Result sorting\n- Realtime search\n- Field filter\n- Fields to include in search results\n- Distance fields: derived fields from distance calculations\n- Highlights: keyword-in-context snippets and term highlighting\n- Query facets: which facets fields to calculate and return at query time\n- Facet filter: filter facets by field and value\n- Result sort: sort results by field and direction\n- Query type default: default query type, if not specified in query",
+        "description": "Query results from index with index_id\nThe following parameters are supported:\n- Result type\n- Result sorting\n- Realtime search\n- Field filter\n- Fields to include in search results\n- Highlights: keyword-in-context snippets and term highlighting\n- Query facets: which facets fields to calculate and return at query time\n- Facet filter: filter facets by field and value\n- Result sort: sort results by field and direction\n- Query type default: default query type, if not specified in query",
         "operationId": "query_index_post",
         "parameters": [
           {
@@ -2120,42 +2120,6 @@
         },
         "additionalProperties": false
       },
-      "DistanceField": {
-        "type": "object",
-        "description": "DistanceField defines a field for proximity search.",
-        "required": [
-          "field",
-          "distance",
-          "base",
-          "unit"
-        ],
-        "properties": {
-          "field": {
-            "type": "string",
-            "description": "field name of a numeric facet field (currently onyl Point field type supported)"
-          },
-          "distance": {
-            "type": "string",
-            "description": "field name of the distance field we are deriving from the numeric facet field (Point type) and the base (Point type)"
-          },
-          "base": {
-            "$ref": "#/components/schemas/Vec",
-            "description": "base point (lat,lon) for distance calculation"
-          },
-          "unit": {
-            "$ref": "#/components/schemas/DistanceUnit",
-            "description": "distance unit for the distance field: kilometers or miles"
-          }
-        }
-      },
-      "DistanceUnit": {
-        "type": "string",
-        "description": "DistanceUnit defines the unit for distance calculation: kilometers or miles.",
-        "enum": [
-          "Kilometers",
-          "Miles"
-        ]
-      },
       "DocumentCompression": {
         "type": "string",
         "description": "Compression type for document store",
@@ -2584,299 +2548,9 @@
                 }
               }
             }
-          },
-          {
-            "type": "object",
-            "description": "Point proximity range filter",
-            "required": [
-              "Point"
-            ],
-            "properties": {
-              "Point": {
-                "type": "object",
-                "description": "Point proximity range filter",
-                "required": [
-                  "field",
-                  "filter"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "filter": {
-                    "type": "array",
-                    "items": false,
-                    "prefixItems": [
-                      {
-                        "type": "array",
-                        "items": {
-                          "type": "number",
-                          "format": "double"
-                        }
-                      },
-                      {
-                        "type": "object",
-                        "description": "F64 range filter",
-                        "required": [
-                          "start",
-                          "end"
-                        ],
-                        "properties": {
-                          "start": {
-                            "type": "number",
-                            "format": "double",
-                            "description": "range start"
-                          },
-                          "end": {
-                            "type": "number",
-                            "format": "double",
-                            "description": "range end"
-                          }
-                        }
-                      },
-                      {
-                        "type": "string",
-                        "description": "DistanceUnit defines the unit for distance calculation: kilometers or miles.",
-                        "enum": [
-                          "Kilometers",
-                          "Miles"
-                        ]
-                      }
-                    ],
-                    "description": "filter: base point (latitude/lat, longitude/lon), proximity range start, proximity range end, distance unit"
-                  }
-                }
-              }
-            }
           }
         ],
         "description": "FacetFilter:\neither numerical range facet filter (range start/end) or\nstring facet filter (vector of strings) at least one (boolean OR) must match."
-      },
-      "FacetValue": {
-        "oneOf": [
-          {
-            "type": "object",
-            "description": "Boolean value",
-            "required": [
-              "Bool"
-            ],
-            "properties": {
-              "Bool": {
-                "type": "boolean",
-                "description": "Boolean value"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Unsigned 8-bit integer",
-            "required": [
-              "U8"
-            ],
-            "properties": {
-              "U8": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Unsigned 8-bit integer",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Unsigned 16-bit integer",
-            "required": [
-              "U16"
-            ],
-            "properties": {
-              "U16": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Unsigned 16-bit integer",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Unsigned 32-bit integer",
-            "required": [
-              "U32"
-            ],
-            "properties": {
-              "U32": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Unsigned 32-bit integer",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Unsigned 64-bit integer",
-            "required": [
-              "U64"
-            ],
-            "properties": {
-              "U64": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Unsigned 64-bit integer",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Signed 8-bit integer",
-            "required": [
-              "I8"
-            ],
-            "properties": {
-              "I8": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Signed 8-bit integer"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Signed 16-bit integer",
-            "required": [
-              "I16"
-            ],
-            "properties": {
-              "I16": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Signed 16-bit integer"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Signed 32-bit integer",
-            "required": [
-              "I32"
-            ],
-            "properties": {
-              "I32": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Signed 32-bit integer"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Signed 64-bit integer",
-            "required": [
-              "I64"
-            ],
-            "properties": {
-              "I64": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Signed 64-bit integer"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Unix timestamp: the number of seconds since 1 January 1970",
-            "required": [
-              "Timestamp"
-            ],
-            "properties": {
-              "Timestamp": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Unix timestamp: the number of seconds since 1 January 1970"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "32-bit floating point number",
-            "required": [
-              "F32"
-            ],
-            "properties": {
-              "F32": {
-                "type": "number",
-                "format": "float",
-                "description": "32-bit floating point number"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "64-bit floating point number",
-            "required": [
-              "F64"
-            ],
-            "properties": {
-              "F64": {
-                "type": "number",
-                "format": "double",
-                "description": "64-bit floating point number"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "String value",
-            "required": [
-              "String"
-            ],
-            "properties": {
-              "String": {
-                "type": "string",
-                "description": "String value"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "String set value",
-            "required": [
-              "StringSet"
-            ],
-            "properties": {
-              "StringSet": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "String set value"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Point value: latitude/lat, longitude/lon",
-            "required": [
-              "Point"
-            ],
-            "properties": {
-              "Point": {
-                "$ref": "#/components/schemas/Vec",
-                "description": "Point value: latitude/lat, longitude/lon"
-              }
-            }
-          },
-          {
-            "type": "string",
-            "description": "No value",
-            "enum": [
-              "None"
-            ]
-          }
-        ],
-        "description": "FacetValue: Facet field value types"
       },
       "FieldType": {
         "type": "string",
@@ -2898,7 +2572,6 @@
           "String32",
           "StringSet16",
           "StringSet32",
-          "Point",
           "Text",
           "Json",
           "Binary"
@@ -2993,15 +2666,9 @@
               "type": "string"
             },
             "description": "which fields to return"
-          },
-          "distance_fields": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DistanceField"
-            },
-            "description": "which distance fields to derive and return"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "GetIteratorRequest": {
         "type": "object",
@@ -3972,61 +3639,6 @@
             }
           },
           {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type Point (distance between base of type Point and facet field of type Point)",
-            "required": [
-              "Point"
-            ],
-            "properties": {
-              "Point": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type Point (distance between base of type Point and facet field of type Point)",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges",
-                  "base",
-                  "unit"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "number",
-                          "format": "double"
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  },
-                  "base": {
-                    "$ref": "#/components/schemas/Vec",
-                    "description": "base point (latitude/lat, longitude/lon)"
-                  },
-                  "unit": {
-                    "$ref": "#/components/schemas/DistanceUnit",
-                    "description": "distance unit (kilometers/miles)"
-                  }
-                }
-              }
-            }
-          },
-          {
             "type": "string",
             "description": "No query facet",
             "enum": [
@@ -4278,12 +3890,9 @@
           "order": {
             "$ref": "#/components/schemas/SortOrder",
             "description": "Sort order: Ascending or Descending"
-          },
-          "base": {
-            "$ref": "#/components/schemas/FacetValue",
-            "description": "Base value/point for (geo) proximity sorting"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ResultType": {
         "type": "string",
@@ -4478,13 +4087,6 @@
             },
             "description": "Specify names of fields to return in the search results, where SchemaField.store is set at indextime. If empty then all stored fields are returned."
           },
-          "distance_fields": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DistanceField"
-            },
-            "description": "Specify distance fields to derive at query time and return in the search results."
-          },
           "query_facets": {
             "type": "array",
             "items": {
@@ -4504,12 +4106,11 @@
             "items": {
               "$ref": "#/components/schemas/ResultSort"
             },
-            "description": "Sort field and order:\nSearch results are sorted by the specified facet field, either in ascending or descending order.\nIf no sort field is specified, then the search results are sorted by rank in descending order per default.\nMultiple sort fields are combined by a \"sort by, then sort by\"-method (\"tie-breaking\"-algorithm).\nThe results are sorted by the first field, and only for those results where the first field value is identical (tie) the results are sub-sorted by the second field,\nuntil the n-th field value is either not equal or the last field is reached.\nA special _score field (BM25x), reflecting how relevant the result is for a given search query (phrase match, match in title etc.) can be combined with any of the other sort fields as primary, secondary or n-th search criterium.\nSort is only enabled on facet fields that are defined in schema at create_index!\nExamples:\n- result_sort = vec![ResultSort {field: \"price\".into(), order: SortOrder::Descending, base: FacetValue::None},ResultSort {field: \"language\".into(), order: SortOrder::Ascending, base: FacetValue::None}];\n- result_sort = vec![ResultSort {field: \"location\".into(),order: SortOrder::Ascending, base: FacetValue::Point(vec![38.8951, -77.0364])}];",
+            "description": "Sort field and order:\nSearch results are sorted by the specified facet field, either in ascending or descending order.\nIf no sort field is specified, then the search results are sorted by rank in descending order per default.\nMultiple sort fields are combined by a \"sort by, then sort by\"-method (\"tie-breaking\"-algorithm).\nThe results are sorted by the first field, and only for those results where the first field value is identical (tie) the results are sub-sorted by the second field,\nuntil the n-th field value is either not equal or the last field is reached.\nA special _score field (BM25x), reflecting how relevant the result is for a given search query (phrase match, match in title etc.) can be combined with any of the other sort fields as primary, secondary or n-th search criterium.\nSort is only enabled on facet fields that are defined in schema at create_index!\nExamples:\n- result_sort = vec![ResultSort {field: \"price\".into(), order: SortOrder::Descending},ResultSort {field: \"language\".into(), order: SortOrder::Ascending}];",
             "example": [
               {
                 "field": "date",
-                "order": "Ascending",
-                "base": "None"
+                "order": "Ascending"
               }
             ]
           },
@@ -4765,13 +4366,6 @@
           "WhitespaceLowercase",
           "UnicodeAlphanumericZH"
         ]
-      },
-      "Vec": {
-        "type": "array",
-        "items": {
-          "type": "number",
-          "format": "double"
-        }
       },
       "VectorSimilarity": {
         "type": "string",

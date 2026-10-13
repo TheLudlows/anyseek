@@ -3,13 +3,11 @@ use serde_json::json;
 use std::collections::{HashSet, VecDeque};
 use std::io::{Seek, SeekFrom, Write};
 
-use crate::geo_search::euclidian_distance;
 use crate::highlighter::{Highlighter, top_fragments_from_field};
 use crate::index::{
-    AccessType, DistanceField, Document, DocumentCompression, FieldType, Index,
+    AccessType, Document, DocumentCompression, Index,
     ROARING_BLOCK_SIZE, Shard,
 };
-use crate::search::FacetValue;
 use crate::utils::{read_u32, write_u32};
 
 impl Shard {
@@ -19,7 +17,6 @@ impl Shard {
         include_uncommitted: bool,
         highlighter_option: &Option<Highlighter>,
         fields: &HashSet<String>,
-        distance_fields: &[DistanceField],
     ) -> Result<Document, String> {
         if !self.delete_hashset.is_empty() && self.delete_hashset.contains(&doc_id) {
             return Err("not found".to_owned());
@@ -155,19 +152,6 @@ impl Shard {
                     .to_string(),
                     json!(kwic),
                 );
-            }
-        }
-
-        for distance_field in distance_fields.iter() {
-            if let Some(idx) = self.facets_map.get(&distance_field.field)
-                && self.facets[*idx].field_type == FieldType::Point
-                && let FacetValue::Point(point) =
-                    self.get_facet_value_shard(&distance_field.field, doc_id)
-            {
-                let distance =
-                    euclidian_distance(&point, &distance_field.base, &distance_field.unit);
-
-                doc.insert(distance_field.distance.clone(), json!(distance));
             }
         }
 
@@ -332,15 +316,12 @@ impl Index {
     /// * `include_uncommitted`: Return also documents which have not yet been committed.
     /// * `highlighter_option`: Specifies the extraction of keyword-in-context (KWIC) fragments from fields in documents, and the highlighting of the query terms within.
     /// * `fields`: Specifies which of the stored fields to return with each document. Default: If empty return all stored fields
-    /// * `distance_fields`: insert distance fields into result documents, calculating the distance between a specified facet field of type Point and a base Point, in kilometers or miles.
-    ///   using Euclidian distance (Pythagoras theorem) with Equirectangular approximation.
     pub async fn get_document(
         &self,
         doc_id: usize,
         include_uncommitted: bool,
         highlighter_option: &Option<Highlighter>,
         fields: &HashSet<String>,
-        distance_fields: &[DistanceField],
     ) -> Result<Document, String> {
         let shard_id = doc_id % self.shard_number;
         let doc_id_shard = doc_id / self.shard_number;
@@ -350,7 +331,6 @@ impl Index {
             include_uncommitted,
             highlighter_option,
             fields,
-            distance_fields,
         )
     }
 }

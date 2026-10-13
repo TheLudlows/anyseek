@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 
 
@@ -163,6 +163,27 @@ def exercise(binary, workdir):
                   literal['count_total'] == 0 and 'suggestions' not in literal,
                   f'query unexpectedly rewritten: {literal}')
             print('PASS retired query options rejected and literal query preserved')
+            request('POST', '/api/v1/index', {'index_name': 'geo', 'schema': [
+                {'field': 'location', 'field_type': 'Point', 'store': True, 'index_lexical': False, 'facet': True}]}, api_key, expected=400)
+            geo_options = [
+                {'distance_fields': []},
+                {'facet_filter': [{'Point': {'field': 'location', 'filter': [[0, 0], {'start': 0, 'end': 10}, 'Kilometers']}}]},
+                {'query_facets': [{'Point': {'field': 'location', 'base': [0, 0], 'unit': 'Kilometers',
+                    'range_type': 'CountWithinRange', 'ranges': [['near', 0]]}}]},
+                {'result_sort': [{'field': 'location', 'order': 'Ascending', 'base': {'Point': [0, 0]}}]},
+                {'result_sort': [{'field': 'date', 'order': 'Ascending', 'base': 'None'}]},
+            ]
+            for options in geo_options:
+                for method in ('GET', 'POST'):
+                    request(method, path + '/query', {'query': 'test', **options}, api_key, expected=400)
+                request('GET', path + '/query?' + urlencode({'query': 'test',
+                    **{name: json.dumps(value) for name, value in options.items()}}), key=api_key, expected=400)
+            request('GET', path + '/doc/0', {'distance_fields': []}, api_key, expected=400)
+            request('GET', path + '/doc/0?distance_fields=%5B%5D', key=api_key, expected=400)
+            check(api('GET', path + '/query?query=test&length=10')['count_total'] == 2,
+                  'retained GET query URL options failed')
+            print('PASS retired geographic schema/query/read options rejected by HTTP')
+
             result = api('POST', path + '/query', {
                 'query': '+body2 +test', 'result_type': 'TopkCount',
                 'search_mode': 'Lexical', 'realtime': False})
@@ -248,6 +269,33 @@ def exercise(binary, workdir):
                 'search_mode': {'Vector': {'similarity_threshold': None, 'ann_mode': 'All'}}})
             check(result['results'][0]['body'] == 'binary', 'base64 vector query')
             print('PASS external vector/hybrid, invalid input, batch and update atomic validation')
+            metadata_id = api('POST', '/api/v1/index', {'index_name': 'metadata', 'schema': [
+                {**field, 'store': True} for field in schema] + [
+                {'field': 'category', 'field_type': 'String16', 'store': True, 'index_lexical': False, 'facet': True},
+                {'field': 'price', 'field_type': 'F64', 'store': True, 'index_lexical': False, 'facet': True},
+                {'field': 'tags', 'field_type': 'StringSet32', 'store': True, 'index_lexical': False, 'facet': True},
+                {'field': 'date', 'field_type': 'Timestamp', 'store': True, 'index_lexical': False, 'facet': True}]})
+            mp = f'/api/v1/index/{metadata_id}'
+            api('POST', mp + '/doc', [
+                {'title': 'Old record', 'body': 'ordinary metadata', 'url': '', 'category': 'a',
+                 'tags': ['red'], 'price': 10, 'date': 1590969600},
+                {'title': 'New record', 'body': 'ordinary metadata', 'url': '', 'category': 'b',
+                 'tags': ['blue'], 'price': 20, 'date': 1654041600}])
+            api('PATCH', mp)
+            for filter_value in [
+                {'String16': {'field': 'category', 'filter': ['b']}},
+                {'StringSet32': {'field': 'tags', 'filter': ['blue']}},
+                {'F64': {'field': 'price', 'filter': {'start': 20, 'end': 30}}},
+                {'Timestamp': {'field': 'date', 'filter': {'start': 1640995200, 'end': 1672531200}}},
+            ]:
+                filtered = api('POST', mp + '/query', {'query': 'ordinary', 'facet_filter': [filter_value]})
+                check(filtered['count_total'] == 1 and filtered['results'][0]['title'] == 'New record',
+                      f'ordinary metadata filter changed: {filtered}')
+            for order, titles in [('Ascending', ['Old record', 'New record']), ('Descending', ['New record', 'Old record'])]:
+                sorted_result = api('POST', mp + '/query', {'query': 'ordinary',
+                    'result_sort': [{'field': 'date', 'order': order}]})
+                check([doc['title'] for doc in sorted_result['results']] == titles, 'ordinary date sorting')
+            print('PASS ordinary string/set/number/timestamp filters and date sorting')
             if os.environ.get('SEEKPOWER_BROWSER_TEST') == '1':
                 source_id = api('POST', '/api/v1/index', {
                     'index_name': 'source_links', 'schema': [
@@ -310,9 +358,27 @@ def exercise(binary, workdir):
                     check(search_input.input_value() == 'plaintxt', 'typed input was rewritten')
                     check(page.locator('#suggestions, #suggestionsMain, #did_you_mean').count() == 0,
                           'retired suggestions UI remains')
+                    page.goto(base + f'/?index_id={metadata_id}&q=ordinary')
+                    page.locator('#new').wait_for()
+                    for selector, title in [('#new', 'New record'), ('#old', 'Old record')]:
+                        with page.expect_response(lambda response: '/query' in response.url and
+                                response.request.method == 'POST') as sorted_response:
+                            page.locator(selector).click()
+                        response = sorted_response.value
+                        check(response.status == 200, 'UI date sorting request failed')
+                        check(all('base' not in item for item in response.request.post_data_json['result_sort']),
+                              'UI sent retired sort base')
+                        check(response.json()['results'][0]['title'].startswith(title), 'UI date ordering changed')
+                    with page.expect_response(lambda response: '/query' in response.url and
+                            response.request.method == 'POST') as filtered_response:
+                        page.evaluate('update_filter(2022, 2023)')
+                    response = filtered_response.value
+                    check(response.status == 200 and response.json()['count_total'] == 1,
+                          'UI timestamp filter failed')
+                    check(response.json()['results'][0]['title'].startswith('New record'), 'UI timestamp result changed')
                     check(not errors, f'browser errors: {errors}')
                     browser.close()
-                print('PASS Chromium lexical/vector/hybrid, source/text preview and unchanged typed query')
+                print('PASS Chromium lexical/vector/hybrid, source/text preview, unchanged typed query and date sorting/filtering')
 
             check(api('DELETE', path + '/doc', b'clear') == 0, 'clear count mismatch')
             check(api('GET', path)['indexed_doc_count'] == 0, 'index not empty after clear')

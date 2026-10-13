@@ -1,3 +1,5 @@
+> SeekPower S1.4b: geographic Point fields, radius/distance filtering, geographic sorting and derived distance fields have been removed. Requests using Point variants, `distance_fields`, or `result_sort[].base` return HTTP 400 (including `base: "None"`; omit it for ordinary sorting). Rust `get_document` no longer takes a final distance-fields argument. Old Point indices must be exported with the previous version and rebuilt with ordinary fields; non-geographic schema and facet layouts remain unchanged. Latitude/longitude may be kept as ordinary JSON or numeric data, without geographic query semantics. GET query URLs accept `query`, `offset`, `length`, `realtime`, and `enable_empty_query`; use a JSON body for advanced options. Unknown URL options are rejected rather than ignored.
+
 > SeekPower S1.4a: query spelling correction, autocomplete and automatic rewriting have been removed. Search text is used as supplied. Remove `query_rewriting`, `spelling_correction`, `query_completion`, `dictionary_source` and `completion_source` from requests; retired fields return HTTP 400. Rust `Search::search` no longer takes the final rewriting argument. Boolean/phrase search, Chinese segmentation and metadata filtering remain. Existing indices with enabled retired options must be exported and rebuilt; indices with null options remain readable. No retired dictionary files are loaded or created.
 
 > SeekPower S1.3: file parsing and local dataset import have been removed. Prepare text, vectors and metadata externally, then send a JSON object or array to `POST /api/v1/index/{index_id}/doc`. PDF/CSV parsing, directory scanning, local JSON/SIFT import and PDF attachment hosting are no longer engine responsibilities. No PDFium installation is needed. Existing indexed records remain readable; legacy PDF files are not deleted, but the service no longer serves them. Host source files externally and put their URL in a record.
@@ -146,7 +148,6 @@ Blog Posts:
 * Field filtering
 * [Faceted search](https://github.com/SeekStorm/SeekStorm/blob/main/FACETED_SEARCH.md): Counting & filtering of String & Numeric range facets (with Histogram/Bucket & Min/Max aggregation)
 * Result sorting by any field, ascending or descending, multiple fields combined by "tie-breaking". 
-* Geo proximity search, filtering and sorting.
 * Iterator to iterate through all documents of an index, in both directions, e.g., for index export, conversion, analytics and inspection.  
 * Search with empty query, but query facets, facet filter, and result sort parameters, ascending and descending.
 * Typo-tolerant Query Auto-Completion (QAC) and Instant search.
@@ -163,7 +164,6 @@ Blog Posts:
 + String16, String32 
 + StringSet16, StringSet32
 + Text (lexical indexing; vector fields use Json or Binary)
-+ Point
 + Json
 + Binary (embedded images, audio, video, pdf)
 + Vector (**externally generated embeddings**)
@@ -650,10 +650,9 @@ let highlights:Vec<Highlight>= vec![
 
 let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 let return_fields_filter= HashSet::new();
-let distance_fields=Vec::new();
 let mut index=index_arc.write().await;
 for result in result_object.results.iter() {
-  let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter,&distance_fields).await.unwrap();
+  let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 }
 
@@ -1030,10 +1029,9 @@ let highlights:Vec<Highlight>= vec![
 
 let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 let return_fields_filter= HashSet::new();
-let distance_fields=Vec::new();
 let index=index_arc.write().await;
 for result in result_object.results.iter() {
-  let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter,&distance_fields).await.unwrap();
+  let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 }
 println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);
@@ -1215,7 +1213,6 @@ Are you missing something? Let us know via issue or discussions.
 * ✅ Native vector search
 * ✅ TurboQuant (TQ) for vector search
 * Late Interaction Multimodal Retrieval
-* Geocoding, reverse geocoding, GeoJSON
 * **Split of storage and compute**
   * Use S3 object storage as index backend
   * Use Distributed Key-Value store as index backend

@@ -1,7 +1,6 @@
 use crate::INDEX_RUNTIME;
-use crate::geo_search::{decode_morton_2_d, point_distance_to_morton_range};
 use crate::index::{
-    DOCUMENT_LENGTH_COMPRESSION, DistanceUnit, Facet, FieldType, NgramType, ResultFacet, Shard,
+    DOCUMENT_LENGTH_COMPRESSION, Facet, FieldType, NgramType, ResultFacet, Shard,
     ShardArc,
 };
 use crate::iterator::{search_iterator_index, search_iterator_shard};
@@ -301,19 +300,6 @@ pub enum QueryFacet {
         /// maximum number of facet values to return
         length: u32,
     },
-    /// Range segment definition for numerical facet field values of type Point (distance between base of type Point and facet field of type Point)
-    Point {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, f64)>,
-        /// base point (latitude/lat, longitude/lon)
-        base: Point,
-        /// distance unit (kilometers/miles)
-        unit: DistanceUnit,
-    },
     /// No query facet
     #[default]
     None,
@@ -344,8 +330,6 @@ pub enum Ranges {
     F32(RangeType, Vec<(String, f32)>),
     /// F64 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
     F64(RangeType, Vec<(String, f64)>),
-    /// Proximity range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, base point (longitude/lon, latitude/lat), distance unit
-    Point(RangeType, Vec<(String, f64)>, Point, DistanceUnit),
     #[default]
     /// No range filter
     None,
@@ -382,8 +366,6 @@ pub enum FacetValue {
     String(String),
     /// String set value
     StringSet(Vec<String>),
-    /// Point value: latitude/lat, longitude/lon
-    Point(Point),
     /// No value
     #[default]
     None,
@@ -544,16 +526,6 @@ impl Shard {
                     FacetValue::StringSet(facet_value.1.0.clone())
                 }
 
-                FieldType::Point => {
-                    let code = read_u64(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-
-                    let x = decode_morton_2_d(code);
-
-                    FacetValue::Point(x.clone())
-                }
 
                 _ => FacetValue::None,
             }
@@ -784,14 +756,6 @@ pub enum FacetFilter {
         /// filter: array of facet string values
         filter: Vec<String>,
     },
-    /// Point proximity range filter
-    Point {
-        /// field name
-        field: String,
-        /// filter: base point (latitude/lat, longitude/lon), proximity range start, proximity range end, distance unit
-        #[schema(value_type=(Point, RangeF64, DistanceUnit))]
-        filter: (Point, Range<f64>, DistanceUnit),
-    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
@@ -810,7 +774,6 @@ pub(crate) enum FilterSparse {
     F64(Range<f64>),
     String16(Vec<u16>),
     String32(Vec<u32>),
-    Point(Point, Range<f64>, DistanceUnit, Range<u64>),
     #[default]
     None,
 }
@@ -826,30 +789,22 @@ pub enum SortOrder {
 
 /// Specifies the sort order for the search results.
 #[derive(Clone, Deserialize, Serialize, ToSchema, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ResultSort {
     /// name of the facet field to sort by
     pub field: String,
     /// Sort order: Ascending or Descending
     pub order: SortOrder,
-    /// Base value/point for (geo) proximity sorting
-    #[serde(default)]
-    pub base: FacetValue,
 }
 
 /// Specifies the sort order for the search results.
 #[derive(Clone, Serialize)]
-pub(crate) struct ResultSortIndex<'a> {
+pub(crate) struct ResultSortIndex {
     /// Index/ID of the facet field to sort by
     pub idx: usize,
     /// Sort order: Ascending or Descending
     pub order: SortOrder,
-    /// Base value/point for (geo) proximity sorting
-    pub base: &'a FacetValue,
 }
-
-/// latitude lat
-/// longitude lon
-pub type Point = Vec<f64>;
 
 #[allow(clippy::too_many_arguments)]
 #[allow(async_fn_in_trait)]
@@ -926,7 +881,6 @@ pub type Point = Vec<f64>;
 ///   Examples:
 ///   query_facets = vec![QueryFacet::String16 {field: "language".into(),prefix: "ger".into(),length: 5},QueryFacet::String16 {field: "brand".into(),prefix: "a".into(),length: 5}];
 ///   query_facets = vec![QueryFacet::U8 {field: "age".into(), range_type: RangeType::CountWithinRange, ranges: vec![("0-20".into(), 0),("20-40".into(), 20), ("40-60".into(), 40),("60-80".into(), 60), ("80-100".into(), 80)]}];
-///   query_facets = vec![QueryFacet::Point {field: "location".into(),base:vec![38.8951, -77.0364],unit:DistanceUnit::Kilometers,range_type: RangeType::CountWithinRange,ranges: vec![ ("0-200".into(), 0.0),("200-400".into(), 200.0), ("400-600".into(), 400.0), ("600-800".into(), 600.0), ("800-1000".into(), 800.0)]}];
 ///
 /// * `facet_filter`: Search results are filtered to documents matching specific string values or numerical ranges in the facet fields. If set to Vec::new() then result are not facet filtered.
 ///   The filter parameter filters the returned results to those documents both matching the query AND matching for all (boolean AND) stated facet filter fields at least one (boolean OR) of the stated values.
@@ -935,7 +889,6 @@ pub type Point = Vec<f64>;
 ///   Examples:
 ///   facet_filter=vec![FacetFilter::String{field:"language".into(),filter:vec!["german".into()]},FacetFilter::String{field:"brand".into(),filter:vec!["apple".into(),"google".into()]}];
 ///   facet_filter=vec![FacetFilter::U8{field:"age".into(),filter: 21..65}];
-///   facet_filter = vec![FacetFilter::Point {field: "location".into(),filter: (vec![38.8951, -77.0364], 0.0..1000.0, DistanceUnit::Kilometers)}];
 ///
 /// * `result_sort`: Sort field and order: Search results are sorted by the specified facet field, either in ascending or descending order.
 ///   If no sort field is specified, then the search results are sorted by rank in descending order per default.
@@ -945,8 +898,7 @@ pub type Point = Vec<f64>;
 ///   A special _score field (BM25x), reflecting how relevant the result is for a given search query (phrase match, match in title etc.) can be combined with any of the other sort fields as primary, secondary or n-th search criterium.
 ///   Sort is only enabled on facet fields that are defined in schema at create_index!
 ///   Examples:
-///   result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending, base: FacetValue::None},ResultSort {field: "language".into(), order: SortOrder::Ascending, base: FacetValue::None}];
-///   result_sort = vec![ResultSort {field: "location".into(),order: SortOrder::Ascending, base: FacetValue::Point(vec![38.8951, -77.0364])}];
+///   result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending},ResultSort {field: "language".into(), order: SortOrder::Ascending}];
 ///  
 ///   If query_string is empty and enable_empty_query is false, then no query is executed and index facets (collected at index time) are returned.
 ///   Otherwise query facets (collected at query time) are returned, counted over the documents matching the query and the facet filter.
@@ -1029,7 +981,6 @@ pub trait Search {
     ///   Examples:
     ///   query_facets = vec![QueryFacet::String16 {field: "language".into(),prefix: "ger".into(),length: 5},QueryFacet::String16 {field: "brand".into(),prefix: "a".into(),length: 5}];
     ///   query_facets = vec![QueryFacet::U8 {field: "age".into(), range_type: RangeType::CountWithinRange, ranges: vec![("0-20".into(), 0),("20-40".into(), 20), ("40-60".into(), 40),("60-80".into(), 60), ("80-100".into(), 80)]}];
-    ///   query_facets = vec![QueryFacet::Point {field: "location".into(),base:vec![38.8951, -77.0364],unit:DistanceUnit::Kilometers,range_type: RangeType::CountWithinRange,ranges: vec![ ("0-200".into(), 0.0),("200-400".into(), 200.0), ("400-600".into(), 400.0), ("600-800".into(), 600.0), ("800-1000".into(), 800.0)]}];
     ///
     /// * `facet_filter`: Search results are filtered to documents matching specific string values or numerical ranges in the facet fields. If set to Vec::new() then result are not facet filtered.
     ///   The filter parameter filters the returned results to those documents both matching the query AND matching for all (boolean AND) stated facet filter fields at least one (boolean OR) of the stated values.
@@ -1038,7 +989,6 @@ pub trait Search {
     ///   Examples:
     ///   facet_filter=vec![FacetFilter::String{field:"language".into(),filter:vec!["german".into()]},FacetFilter::String{field:"brand".into(),filter:vec!["apple".into(),"google".into()]}];
     ///   facet_filter=vec![FacetFilter::U8{field:"age".into(),filter: 21..65}];
-    ///   facet_filter = vec![FacetFilter::Point {field: "location".into(),filter: (vec![38.8951, -77.0364], 0.0..1000.0, DistanceUnit::Kilometers)}];
     ///
     /// * `result_sort`: Sort field and order: Search results are sorted by the specified facet field, either in ascending or descending order.
     ///   If no sort field is specified, then the search results are sorted by rank in descending order per default.
@@ -1048,8 +998,7 @@ pub trait Search {
     ///   A special _score field (BM25x), reflecting how relevant the result is for a given search query (phrase match, match in title etc.) can be combined with any of the other sort fields as primary, secondary or n-th search criterium.
     ///   Sort is only enabled on facet fields that are defined in schema at create_index!
     ///   Examples:
-    ///   result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending, base: FacetValue::None},ResultSort {field: "language".into(), order: SortOrder::Ascending, base: FacetValue::None}];
-    ///   result_sort = vec![ResultSort {field: "location".into(),order: SortOrder::Ascending, base: FacetValue::Point(vec![38.8951, -77.0364])}];
+    ///   result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending},ResultSort {field: "language".into(), order: SortOrder::Ascending}];
     ///
     async fn search(
         &self,
@@ -1521,15 +1470,6 @@ impl Search for IndexArc {
                     } => {
                         result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
                     }
-                    QueryFacet::Point {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                        base: _,
-                        unit: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
 
                     _ => {}
                 }
@@ -1721,7 +1661,6 @@ impl Search for IndexArc {
                         result_sort_index.push(ResultSortIndex {
                             idx: usize::MAX,
                             order: rs.order.clone(),
-                            base: &rs.base,
                         });
                         continue;
                     }
@@ -1729,7 +1668,6 @@ impl Search for IndexArc {
                         result_sort_index.push(ResultSortIndex {
                             idx: usize::MAX - 1,
                             order: rs.order.clone(),
-                            base: &rs.base,
                         });
                         continue;
                     }
@@ -1743,7 +1681,6 @@ impl Search for IndexArc {
                         result_sort_index.push(ResultSortIndex {
                             idx: *idx,
                             order: rs.order.clone(),
-                            base: &rs.base,
                         });
                     }
                 }
@@ -2160,7 +2097,6 @@ impl SearchLexicalShard for ShardArc {
                     result_sort_index.push(ResultSortIndex {
                         idx: usize::MAX,
                         order: rs.order.clone(),
-                        base: &rs.base,
                     });
                     continue;
                 }
@@ -2168,7 +2104,6 @@ impl SearchLexicalShard for ShardArc {
                     result_sort_index.push(ResultSortIndex {
                         idx: usize::MAX - 1,
                         order: rs.order.clone(),
-                        base: &rs.base,
                     });
                     continue;
                 }
@@ -2177,7 +2112,6 @@ impl SearchLexicalShard for ShardArc {
                     result_sort_index.push(ResultSortIndex {
                         idx: *idx,
                         order: rs.order.clone(),
-                        base: &rs.base,
                     });
                 }
             }
@@ -2367,18 +2301,6 @@ impl SearchLexicalShard for ShardArc {
                         }
                     }
 
-                    FacetFilter::Point { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::Point
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::Point(
-                                filter.0.clone(),
-                                filter.1.clone(),
-                                filter.2.clone(),
-                                point_distance_to_morton_range(&filter.0, filter.1.end, &filter.2),
-                            );
-                        }
-                    }
                 }
             }
         }
@@ -2652,31 +2574,6 @@ impl SearchLexicalShard for ShardArc {
                         }
                     }
 
-                    QueryFacet::Point {
-                        field,
-                        range_type,
-                        ranges,
-                        base,
-                        unit,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::Point
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::Point(
-                                    range_type.clone(),
-                                    ranges.clone(),
-                                    base.clone(),
-                                    unit.clone(),
-                                ),
-                                ..Default::default()
-                            };
-                        }
-                    }
 
                     QueryFacet::None => {}
                 };
@@ -3341,7 +3238,6 @@ impl SearchLexicalShard for ShardArc {
                             Ranges::Timestamp(range_type, _ranges) => range_type.clone(),
                             Ranges::F32(range_type, _ranges) => range_type.clone(),
                             Ranges::F64(range_type, _ranges) => range_type.clone(),
-                            Ranges::Point(range_type, _ranges, _base, _unit) => range_type.clone(),
                             _ => RangeType::CountWithinRange,
                         };
 
@@ -3409,9 +3305,6 @@ impl SearchLexicalShard for ShardArc {
                                         ranges.get(range_index).map(|value| value.0.clone())
                                     }
                                     Ranges::F64(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::Point(_range_type, ranges, _base, _unit) => {
                                         ranges.get(range_index).map(|value| value.0.clone())
                                     }
                                     _ => return None,

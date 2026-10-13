@@ -192,3 +192,47 @@ S1.3 最终 head `242815d` 的 CI 38384967519 已成功，PR #4 合入提交 `56
 | 本地静态 | Node 语法、Python AST、JSON/YAML 语义对齐、git diff --check 通过 |
 
 不改变索引二进制编码或 ANN/评分/压缩算法。Rust 搜索与 schema 构造 API 存在显式签名变化，迁移说明已写入 README。未执行 AArch64、生产恢复/性能验证。PR #5 尚未合入；S1.4 其余三项及 S1.5 仍未实施。之后仅回填 Markdown 证据，最新提交的自动检查见 PR Checks。
+
+
+## S1.4b — 地理搜索裁剪（2026-10-13）
+
+S1.4a 最终 head `a5da5b9` 的 [CI 38387377669](https://github.com/TheLudlows/seekpower/actions/runs/38387377669) 已成功，PR #5 合入 master（`e5e0850ef255032d5a389663bafab7d350659715`）。以下基于该主干。
+
+移除 geo_search/Point/Morton/距离派生字段及其专用过滤、范围统计和堆排序分支；保留普通字段的字节宽度、偏移和算法，不改倒排/ANN/压缩/评分。移除 ResultSort.base 和 get_document 最后一个距离参数，同步 Rust 调用、REST 示例、UI 和 OpenAPI。旧 Point schema 在根/分片打开时明确拒绝，并将分片打开错误向上传递；不迁移或删除用户旧数据。GET 查询 URL 仅接受已有实际解析的五个参数，其他参数明确拒绝；复杂查询继续通过 JSON body。
+
+静态审查发现 UI 时间过滤原来发送数组，API Range 要求 start/end 对象；修正请求形状和日期字段引用，增加真实浏览器检查。
+
+新增 3 个 Rust 契约测试：旧地理请求拒绝；字符串/集合/数值/时间过滤、多字段排序、空查询/Union/Intersection、数值分面在双分片 RAM/MMAP、实时/提交/重开场景下的结果；根和分片旧 Point schema 明确报错且不改写。原有 50 个测试保留。HTTP 检查旧 GET/POST 参数/Schema 返回 400、普通元数据过滤/排序；Chromium 检查日期排序无 base、时间范围过滤。验证结果待 CI 回填。
+
+本地 Python 语法、Node 语法、JSON/YAML 语义一致和 git diff --check 已通过。无本地 Rust 工具链，编译和实际测试由 CI 执行；没有把静态检查当作运行验证。完整质量/性能及故障恢复仍归 S2。
+
+
+首轮 `4e12a148` 的 [CI 38388969948](https://github.com/TheLudlows/seekpower/actions/runs/38388969948)，job `115267692631`：workspace 构建、依赖、OpenAPI 一致性及 HTTP 地理旧参数拒绝通过；新增测试夹具有误，普通元数据 HTTP schema 缺失必填 index_lexical，Rust 测试误把 Option<Value> 传给需要 Option<Embedding> 的内核。修正夹具显式关闭非文本字段词法索引，纯词法测试传 None；没有删测试或放宽断言。修复后的运行结果另行回填。
+
+
+第二轮 `b6ca0ca` 的 [CI 38389512410](https://github.com/TheLudlows/seekpower/actions/runs/38389512410)，job `115269526246`：构建、依赖、完整 HTTP/Chromium、OpenAPI 全部通过。新增普通元数据回归在未提交数据的 Count 分面断言失败（总数 4，但分面为空）。审查显示继承的 realtime_search 单词计数捷径不考虑 query_facets，单词逐记录函数也仅在有过滤时统计分面；多词 Count bitmap 捷径同样不能执行过滤/分面。最小修正为有这些请求时使用已有逐记录路径，保持无约束计数捷径。增加同分片多词及带过滤计数覆盖，不移除原失败断言；没有改评分、编码或 ANN 算法。新的验证结果待回填。
+
+
+第三轮 `c1cb814` 的 [CI 38390277784](https://github.com/TheLudlows/seekpower/actions/runs/38390277784)，job `115272091103`：构建、依赖、HTTP/Chromium 和 OpenAPI 通过；实时分面已返回正确计数。测试错误地要求同计数分面按标签 low/high 排序，而现有根聚合按计数排序，同分项顺序没有保证。修正测试先按标签规范化后严格比较完整标签/计数列表；仍检查精确总数、全部分面、过滤结果和记录排序，不修改产品的同分排序规则。
+
+
+第四轮 `b3a72ff` 的 [CI 38390866235](https://github.com/TheLudlows/seekpower/actions/runs/38390866235)，job `115274028287`：实时过滤/计数/分面通过，下一断言定位到已提交 north/south 多词 TopkCount + 排序/分面的空汇总。原 union 扫描跳过逐记录 facet_count，而只有大于 32 词的 TopkCount 做独立 bitmap 汇总；本批复用既有 union_count，为请求元数据统计的 TopkCount 补全精确计数/分面，同时避免仅过滤时访问空 query_facets。无过滤/分面的原快速路径保持；编码/评分不变。增加同分片多词仅过滤覆盖，保留失败断言。这会为要求元数据精确统计的排序查询执行必要的额外统计遍历，不宣称获得性能提升；完整性能基线在 S2。
+
+
+**S1.4b 验证通过。** [PR #6](https://github.com/TheLudlows/seekpower/pull/6)，代码提交 [`1a73048c24fd6a60cfb4486de21f5095abf07d4e`](https://github.com/TheLudlows/seekpower/commit/1a73048c24fd6a60cfb4486de21f5095abf07d4e)，[CI 38391526830](https://github.com/TheLudlows/seekpower/actions/runs/38391526830)，job `115276230370`。Ubuntu x86_64 / Rust、Cargo 1.99.0；native 目标不跨 runner 复用。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `cargo build --workspace` | 通过；核心与 HTTP 服务完整构建 |
+| Cargo metadata 依赖图 | 通过；此前裁剪的四个依赖均未重新引入 |
+| `cargo test --workspace --all-targets` | **53 passed，0 failed/ignored/filtered**；既有 50 个测试保留，新增 3 个契约测试 |
+| 普通元数据契约 | 双分片 RAM/MMAP，实时/提交/重开均通过；字符串/集合/数值/时间过滤、空查询、Union/Intersection、多字段排序、带过滤和不带过滤的单词/多词 Count/TopkCount 范围汇总 |
+| 旧地理能力拒绝 | Point 创建/过滤/分面、sort.base、distance_fields 均报错；GET URL 和 JSON body 均覆盖；根/分片旧 schema 明确重建提示且原文件未改写 |
+| HTTP | 鉴权、首页及 11 个静态资源、JSON 写读更新删除提交、外部向量/混合、普通元数据过滤/排序通过 |
+| Chromium | 词法/向量/混合、来源/文本预览、输入原文保留、日期新旧排序和日期区间筛选通过；无 pageerror |
+| OpenAPI | Rust 生成 JSON/YAML 与仓库逐字节一致；地理类型/参数移除，普通 API 保留 |
+| 本地静态 | Python AST、Node 语法、JSON/YAML 语义一致、git diff --check 通过 |
+
+新增 metadata_contract 三项测试耗时 0.48 秒，这是该小型功能夹具的总运行时间，不是吞吐/延迟基线。修正触及的是必须统计完整匹配集时的路径选择；无过滤/分面的原快速计数、索引编码、评分及 ANN 算法未改。未执行 AArch64、生产规模性能和故障恢复验证；完整性能/可靠性验收仍在 S2。
+
+PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue #1 保持打开。此后仅回填 Markdown 记录，最新提交自动检查见 PR Checks。
