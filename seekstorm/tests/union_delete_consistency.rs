@@ -63,7 +63,7 @@ async fn search(
             result_type,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -122,4 +122,3 @@ async fn union_count_no_deletes_control() {
     assert_eq!(topk_count.result_count_total, 20);
     index.close().await;
 }
-

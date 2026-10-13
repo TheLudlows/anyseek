@@ -36,7 +36,7 @@ fn retired_query_options_are_rejected() {
 
 async fn assert_query(index: &IndexArc, text: &str, expected: usize) {
     let result = index.search(text.into(), None, QueryType::Intersection, SearchMode::Lexical,
-        false, 0, 10, ResultType::TopkCount, false, vec![], vec![], vec![], vec![]).await;
+        false, 0, 10, ResultType::TopkCount, false, vec![],  vec![], vec![]).await;
     assert!(result.error.is_none(), "{:?}", result.error);
     assert_eq!(result.original_query, text);
     assert_eq!(result.query, text);

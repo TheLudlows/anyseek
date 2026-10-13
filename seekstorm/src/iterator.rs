@@ -1,4 +1,4 @@
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -374,7 +374,6 @@ pub(crate) async fn search_iterator_index(
         observed_vector_count: 0,
         observed_cluster_count: 0,
         results: Vec::new(),
-        facets: AHashMap::new(),
 
     };
 

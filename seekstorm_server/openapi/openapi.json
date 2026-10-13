@@ -1379,7 +1379,7 @@
           "Query"
         ],
         "summary": "Query Index",
-        "description": "Query results from index with index_id\nThe following parameters are supported:\n- Result type\n- Result sorting\n- Realtime search\n- Field filter\n- Fields to include in search results\n- Query facets: which facets fields to calculate and return at query time\n- Facet filter: filter facets by field and value\n- Result sort: sort results by field and direction\n- Query type default: default query type, if not specified in query",
+        "description": "Query results from index with index_id\nThe following parameters are supported:\n- Result type\n- Result sorting\n- Realtime search\n- Field filter\n- Fields to include in search results\n- Facet filter: filter facets by field and value\n- Result sort: sort results by field and direction\n- Query type default: default query type, if not specified in query",
         "operationId": "query_index_post",
         "parameters": [
           {
@@ -2411,8 +2411,7 @@
           "committed_doc_count",
           "operations_count",
           "query_count",
-          "version",
-          "facets_minmax"
+          "version"
         ],
         "properties": {
           "id": {
@@ -2494,22 +2493,6 @@
             "type": "string",
             "description": "SeekStorm version the index was created with",
             "example": "0.11.1"
-          },
-          "facets_minmax": {
-            "type": "object",
-            "description": "Minimum and maximum values of numeric facet fields",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/MinMaxFieldJson"
-            },
-            "propertyNames": {
-              "type": "string"
-            },
-            "example": {
-              "date": {
-                "min": 831306011,
-                "max": 1730901447
-              }
-            }
           }
         }
       },
@@ -2619,22 +2602,6 @@
           "Bm25fProximity"
         ]
       },
-      "MinMaxFieldJson": {
-        "type": "object",
-        "description": "MinMaxFieldJson is a JSON representation of the minimum and maximum value of a field.",
-        "required": [
-          "min",
-          "max"
-        ],
-        "properties": {
-          "min": {
-            "description": "minimum value of the field"
-          },
-          "max": {
-            "description": "maximum value of the field"
-          }
-        }
-      },
       "Precision": {
         "type": "string",
         "description": "Vector precision",
@@ -2652,653 +2619,6 @@
           "TurboQuantI8",
           "None"
         ]
-      },
-      "QueryFacet": {
-        "oneOf": [
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type u8",
-            "required": [
-              "U8"
-            ],
-            "properties": {
-              "U8": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type u8",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "integer",
-                          "format": "int32",
-                          "minimum": 0
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type u16",
-            "required": [
-              "U16"
-            ],
-            "properties": {
-              "U16": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type u16",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "integer",
-                          "format": "int32",
-                          "minimum": 0
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type u32",
-            "required": [
-              "U32"
-            ],
-            "properties": {
-              "U32": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type u32",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "integer",
-                          "format": "int32",
-                          "minimum": 0
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type u64",
-            "required": [
-              "U64"
-            ],
-            "properties": {
-              "U64": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type u64",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "integer",
-                          "format": "int64",
-                          "minimum": 0
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type i8",
-            "required": [
-              "I8"
-            ],
-            "properties": {
-              "I8": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type i8",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "integer",
-                          "format": "int32"
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type i16",
-            "required": [
-              "I16"
-            ],
-            "properties": {
-              "I16": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type i16",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "integer",
-                          "format": "int32"
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type i32",
-            "required": [
-              "I32"
-            ],
-            "properties": {
-              "I32": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type i32",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "integer",
-                          "format": "int32"
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type i64",
-            "required": [
-              "I64"
-            ],
-            "properties": {
-              "I64": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type i64",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "integer",
-                          "format": "int64"
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type Unix timestamp",
-            "required": [
-              "Timestamp"
-            ],
-            "properties": {
-              "Timestamp": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type Unix timestamp",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "integer",
-                          "format": "int64"
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type f32",
-            "required": [
-              "F32"
-            ],
-            "properties": {
-              "F32": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type f32",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "number",
-                          "format": "float"
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Range segment definition for numerical facet field values of type f64",
-            "required": [
-              "F64"
-            ],
-            "properties": {
-              "F64": {
-                "type": "object",
-                "description": "Range segment definition for numerical facet field values of type f64",
-                "required": [
-                  "field",
-                  "range_type",
-                  "ranges"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "range_type": {
-                    "$ref": "#/components/schemas/RangeType",
-                    "description": "range type (CountWithinRange,CountBelowRange,CountAboveRange)"
-                  },
-                  "ranges": {
-                    "type": "array",
-                    "items": {
-                      "type": "array",
-                      "items": false,
-                      "prefixItems": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "type": "number",
-                          "format": "double"
-                        }
-                      ]
-                    },
-                    "description": "range label, range start"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Facet field values of type string",
-            "required": [
-              "String16"
-            ],
-            "properties": {
-              "String16": {
-                "type": "object",
-                "description": "Facet field values of type string",
-                "required": [
-                  "field",
-                  "prefix",
-                  "length"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "prefix": {
-                    "type": "string",
-                    "description": "Prefix filter of facet values to return"
-                  },
-                  "length": {
-                    "type": "integer",
-                    "format": "int32",
-                    "description": "maximum number of facet values to return",
-                    "minimum": 0
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Facet field values of type string",
-            "required": [
-              "String32"
-            ],
-            "properties": {
-              "String32": {
-                "type": "object",
-                "description": "Facet field values of type string",
-                "required": [
-                  "field",
-                  "prefix",
-                  "length"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "prefix": {
-                    "type": "string",
-                    "description": "Prefix filter of facet values to return"
-                  },
-                  "length": {
-                    "type": "integer",
-                    "format": "int32",
-                    "description": "maximum number of facet values to return",
-                    "minimum": 0
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Facet field values of type string set",
-            "required": [
-              "StringSet16"
-            ],
-            "properties": {
-              "StringSet16": {
-                "type": "object",
-                "description": "Facet field values of type string set",
-                "required": [
-                  "field",
-                  "prefix",
-                  "length"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "prefix": {
-                    "type": "string",
-                    "description": "Prefix filter of facet values to return"
-                  },
-                  "length": {
-                    "type": "integer",
-                    "format": "int32",
-                    "description": "maximum number of facet values to return",
-                    "minimum": 0
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Facet field values of type string set",
-            "required": [
-              "StringSet32"
-            ],
-            "properties": {
-              "StringSet32": {
-                "type": "object",
-                "description": "Facet field values of type string set",
-                "required": [
-                  "field",
-                  "prefix",
-                  "length"
-                ],
-                "properties": {
-                  "field": {
-                    "type": "string",
-                    "description": "field name"
-                  },
-                  "prefix": {
-                    "type": "string",
-                    "description": "Prefix filter of facet values to return"
-                  },
-                  "length": {
-                    "type": "integer",
-                    "format": "int32",
-                    "description": "maximum number of facet values to return",
-                    "minimum": 0
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "string",
-            "description": "No query facet",
-            "enum": [
-              "None"
-            ]
-          }
-        ],
-        "description": "Defines the query facets:\n- string facet field values\n- range segments for numerical facet field values"
       },
       "QueryType": {
         "type": "string",
@@ -3429,15 +2749,6 @@
             "description": "range end"
           }
         }
-      },
-      "RangeType": {
-        "type": "string",
-        "description": "Create query_list and non_unique_query_list\nblockwise intersection : if the corresponding blocks with a 65k docid range for each term have at least a single docid,\nthen the intersect_docid within a single block is executed  (=segments?)\nspecifies how to count the frequency of numerical facet field values",
-        "enum": [
-          "CountWithinRange",
-          "CountAboveRange",
-          "CountBelowRange"
-        ]
       },
       "RangeU16": {
         "type": "object",
@@ -3587,7 +2898,7 @@
           },
           "facet": {
             "type": "boolean",
-            "description": "optional faceting for a field\nFaceting can be enabled both for string field type and numerical field types.\nboth numerical and string fields can be indexed (indexed=true) and stored (stored=true) in the json document,\nbut with field_facet=true they are additionally stored in a binary format, for fast faceting and sorting without docstore access (decompression, deserialization)"
+            "description": "Enable metadata filtering and sorting for string and numerical fields.\nboth numerical and string fields can be indexed (indexed=true) and stored (stored=true) in the json document,\nbut with field_facet=true they are additionally stored in a binary format, for fast filtering and sorting without docstore access (decompression, deserialization)"
           },
           "longest": {
             "type": "boolean",
@@ -3689,7 +3000,7 @@
           },
           "enable_empty_query": {
             "type": "boolean",
-            "description": "Enable empty query: if true, an empty query string iterates through all indexed documents, supporting the query parameters: offset, length, query_facets, facet_filter, result_sort,\notherwise an empty query string returns no results.\nTypical use cases include index browsing, index export, conversion, analytics, audits, and inspection.",
+            "description": "Enable empty queries to browse all documents with pagination, filtering and sorting.\nOtherwise an empty query string returns no results.\nTypical use cases include index browsing, index export, conversion, analytics, audits, and inspection.",
             "default": false,
             "example": false
           },
@@ -3731,13 +3042,6 @@
               "type": "string"
             },
             "description": "Specify names of fields to return in the search results, where SchemaField.store is set at indextime. If empty then all stored fields are returned."
-          },
-          "query_facets": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/QueryFacet"
-            },
-            "description": "Facets to return with search results: if empty then no facets are returned. Facets are only enabled on facet fields that are defined in schema at create_index!"
           },
           "facet_filter": {
             "type": "array",
@@ -3782,8 +3086,7 @@
           "count",
           "count_total",
           "query_terms",
-          "results",
-          "facets"
+          "results"
         ],
         "properties": {
           "time": {
@@ -3836,29 +3139,6 @@
               }
             },
             "description": "Vector of search result documents"
-          },
-          "facets": {
-            "type": "object",
-            "description": "Facets with their values and corresponding document counts",
-            "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "array",
-                "items": false,
-                "prefixItems": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer",
-                    "minimum": 0
-                  }
-                ]
-              }
-            },
-            "propertyNames": {
-              "type": "string"
-            }
           }
         }
       },

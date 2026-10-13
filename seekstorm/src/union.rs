@@ -3,14 +3,14 @@ use crate::{
     add_result::{add_result_multiterm_multifield, is_facet_filter},
     compatible::{_blsr_u64, _mm_tzcnt_64},
     index::{
-        AccessType, CompressionType, FieldType, NonUniquePostingListObjectQuery,
+        AccessType, CompressionType, NonUniquePostingListObjectQuery,
         PostingListObjectQuery, QueueObject, ROARING_BLOCK_SIZE, Shard,
     },
     intersection::intersection_blockid,
-    search::{FilterSparse, Ranges, ResultType, SearchResult},
+    search::{FilterSparse, ResultType, SearchResult},
     single::{single_blockid, single_docid},
     utils::{
-        read_f32, read_f64, read_i8, read_i16, read_i32, read_i64, read_u16, read_u32, read_u64,
+        read_u16, read_u64,
         write_u64,
     },
 };
@@ -171,11 +171,9 @@ pub(crate) async fn union_docid<'a>(
     }
 
     if valid_term_count == 1 {
-        if result_type == &ResultType::Count && search_result.query_facets.is_empty() {
+        if result_type == &ResultType::Count {
             *result_count += query_list[single_term_index].p_docid_count as i32;
         } else {
-            let skip_facet_count = search_result.skip_facet_count;
-            search_result.skip_facet_count = false;
 
             single_docid(
                 shard,
@@ -193,7 +191,6 @@ pub(crate) async fn union_docid<'a>(
             )
             .await;
 
-            search_result.skip_facet_count = skip_facet_count;
         }
         return;
     };
@@ -212,17 +209,12 @@ pub(crate) async fn union_docid<'a>(
         return;
     }
 
-    // Ranked scans may prune candidates and do not aggregate all facets.
-    // Reuse the exact bitmap pass when metadata counts are requested.
+    // Ranked scans may prune candidates. Reuse the exact bitmap pass
+    // for document hit counts when filters or large disjunctions require it.
     let count_before = *result_count;
     let exact_metadata_count = result_type == &ResultType::TopkCount
         && (query_list.len() > 32
-            || !search_result.query_facets.is_empty()
-            || !facet_filter.is_empty());
-    let skip_facet_count = search_result.skip_facet_count;
-    if exact_metadata_count {
-        search_result.skip_facet_count = true;
-    }
+                        || !facet_filter.is_empty());
 
     if query_list.len() <= 8 {
         union_scan_8(
@@ -269,7 +261,7 @@ pub(crate) async fn union_docid<'a>(
         )
         .await;
         *result_count = exact_count;
-        search_result.skip_facet_count = skip_facet_count;
+
     }
 
 }
@@ -822,7 +814,7 @@ pub(crate) async fn union_scan_32<'a>(
 pub(crate) async fn union_count<'a>(
     shard: &'a Shard,
     result_count: &mut i32,
-    search_result: &mut SearchResult<'_>,
+    _search_result: &mut SearchResult<'_>,
 
     query_list: &mut [PostingListObjectQuery<'a>],
     not_query_list: &mut [PostingListObjectQuery<'a>],
@@ -977,7 +969,7 @@ pub(crate) async fn union_count<'a>(
         }
     }
 
-    if !search_result.query_facets.is_empty() || !facet_filter.is_empty() {
+    if !facet_filter.is_empty() {
         let block_id_msb = block_id << 16;
         for ulong_pos in 0usize..1024 {
             let ulong_pos_msb = block_id_msb | ulong_pos << 6;
@@ -993,150 +985,6 @@ pub(crate) async fn union_count<'a>(
                     continue 'next;
                 }
 
-                if search_result.query_facets.is_empty() {
-                    continue 'next;
-                }
-                for (i, facet) in shard.facets.iter().enumerate() {
-                    if search_result.query_facets[i].length == 0 {
-                        continue;
-                    }
-
-                    let facet_value_id = match &search_result.query_facets[i].ranges {
-                        Ranges::U8(_range_type, ranges) => {
-                            let facet_value = shard.facets_file_mmap
-                                [(shard.facets_size_sum * docid) + facet.offset];
-                            ranges
-                                .binary_search_by_key(&facet_value, |range| range.1)
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::U16(_range_type, ranges) => {
-                            let facet_value = read_u16(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by_key(&facet_value, |range| range.1)
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::U32(_range_type, ranges) => {
-                            let facet_value = read_u32(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by_key(&facet_value, |range| range.1)
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::U64(_range_type, ranges) => {
-                            let facet_value = read_u64(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by_key(&facet_value, |range| range.1)
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::I8(_range_type, ranges) => {
-                            let facet_value = read_i8(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by_key(&facet_value, |range| range.1)
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::I16(_range_type, ranges) => {
-                            let facet_value = read_i16(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by_key(&facet_value, |range| range.1)
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::I32(_range_type, ranges) => {
-                            let facet_value = read_i32(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by_key(&facet_value, |range| range.1)
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::I64(_range_type, ranges) => {
-                            let facet_value = read_i64(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by_key(&facet_value, |range| range.1)
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::Timestamp(_range_type, ranges) => {
-                            let facet_value = read_i64(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by_key(&facet_value, |range| range.1)
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::F32(_range_type, ranges) => {
-                            let facet_value = read_f32(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by(|range| {
-                                    range.1.partial_cmp(&facet_value).unwrap()
-                                })
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-                        Ranges::F64(_range_type, ranges) => {
-                            let facet_value = read_f64(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            ranges
-                                .binary_search_by(|range| {
-                                    range.1.partial_cmp(&facet_value).unwrap()
-                                })
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
-
-                        _ => {
-                            if facet.field_type == FieldType::String16
-                                || facet.field_type == FieldType::StringSet16
-                            {
-                                read_u16(
-                                    &shard.facets_file_mmap,
-                                    (shard.facets_size_sum * docid) + facet.offset,
-                                ) as u32
-                            } else {
-                                read_u32(
-                                    &shard.facets_file_mmap,
-                                    (shard.facets_size_sum * docid) + facet.offset,
-                                )
-                            }
-                        }
-                    };
-
-                    *search_result.query_facets[i]
-                        .values
-                        .entry(facet_value_id)
-                        .or_insert(0) += 1;
-                }
             }
         }
     }
@@ -1511,4 +1359,3 @@ pub(crate) async fn union_docid_3<'a>(
         .await;
     }
 }
-

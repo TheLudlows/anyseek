@@ -7,7 +7,7 @@ use ahash::{AHashMap, AHashSet};
 use smallvec::SmallVec;
 
 use crate::{
-    add_result::{B, K, SIGMA, facet_count, is_facet_filter, read_multifield_vec},
+    add_result::{B, K, SIGMA, is_facet_filter, read_multifield_vec},
     index::{
         AccessType, DOCUMENT_LENGTH_COMPRESSION, DUMMY_VEC_8, LexicalSimilarity, NgramType,
         NonUniquePostingListObjectQuery, NonUniqueTermObject, PostingListObjectQuery, STOP_BIT,
@@ -96,8 +96,7 @@ pub(crate) fn add_result_singleterm_uncommitted(
     let filtered = !not_query_list.is_empty()
         || !field_filter_set.is_empty()
         || !shard.delete_hashset.is_empty()
-        || !facet_filter.is_empty()
-        || !search_result.query_facets.is_empty();
+        || !facet_filter.is_empty();
 
     shard.decode_positions_uncommitted(plo_single, false);
 
@@ -118,7 +117,6 @@ pub(crate) fn add_result_singleterm_uncommitted(
     match *result_type {
         ResultType::Count => {
             if filtered {
-                facet_count(shard, search_result, docid);
 
                 *result_count += 1;
             }
@@ -127,7 +125,6 @@ pub(crate) fn add_result_singleterm_uncommitted(
         ResultType::Topk => {}
         ResultType::TopkCount => {
             if filtered {
-                facet_count(shard, search_result, docid);
 
                 *result_count += 1;
             }
@@ -199,7 +196,6 @@ pub(crate) fn add_result_multiterm_uncommitted(
         || !facet_filter.is_empty();
 
     if !filtered && result_type == &ResultType::Count {
-        facet_count(shard, search_result, docid);
 
         *result_count += 1;
         return;
@@ -478,14 +474,12 @@ pub(crate) fn add_result_multiterm_uncommitted(
 
     match *result_type {
         ResultType::Count => {
-            facet_count(shard, search_result, docid);
 
             *result_count += 1;
             return;
         }
         ResultType::Topk => {}
         ResultType::TopkCount => {
-            facet_count(shard, search_result, docid);
 
             *result_count += 1;
         }
@@ -1245,8 +1239,7 @@ impl Shard {
         let filtered = !not_query_list.is_empty()
             || !field_filter_set.is_empty()
             || !self.delete_hashset.is_empty()
-            || !facet_filter.is_empty()
-            || !search_result.query_facets.is_empty();
+            || !facet_filter.is_empty();
 
         if (self.enable_single_term_topk || (result_type == &ResultType::Count))
             && (non_unique_query_list.len() <= 1 && !filtered)
@@ -1285,8 +1278,7 @@ impl Shard {
             let filtered = !not_query_list.is_empty()
                 || !field_filter_set.is_empty()
                 || !self.delete_hashset.is_empty()
-                || !facet_filter.is_empty()
-                || !search_result.query_facets.is_empty();
+                || !facet_filter.is_empty();
             result_count_arc.fetch_add(
                 if filtered {
                     result_count_local as usize
@@ -1933,9 +1925,9 @@ impl Shard {
     ) {
         let mut result_count: i32 = 0;
 
-        // Bitmap totals cannot apply filters or populate requested facet counts.
+        // Bitmap totals cannot apply metadata filters.
         if result_type == &ResultType::Count
-            && search_result.query_facets.is_empty()
+
             && facet_filter.is_empty()
             && field_filter_set.is_empty()
             && not_query_list.is_empty()
@@ -2042,8 +2034,7 @@ impl Shard {
             }
 
             if result_type != &ResultType::Count
-                || !search_result.query_facets.is_empty()
-                || !facet_filter.is_empty()
+                                || !facet_filter.is_empty()
                 || !field_filter_set.is_empty()
                 || !not_query_list.is_empty()
             {
@@ -2076,7 +2067,7 @@ impl Shard {
                         && field_filter_set.is_empty()
                         && self.delete_hashset.is_empty()
                         && facet_filter.is_empty()
-                        && search_result.query_facets.is_empty()
+
                         && result_type != &ResultType::Topk
                     {
                         *result_count += 1;
@@ -2124,4 +2115,3 @@ impl Shard {
         }
     }
 }
-

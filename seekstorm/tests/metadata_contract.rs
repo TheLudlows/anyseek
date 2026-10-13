@@ -1,4 +1,4 @@
-//! The geo removal must retain the shared facet layout, filters and sort heaps.
+//! Aggregate removal must retain metadata dictionaries, filters and sort heaps.
 use seekstorm::{
     commit::Commit,
     index::{AccessType, Close, Clustering, CreateIndexRequest, Document, DocumentCompression,
@@ -38,7 +38,7 @@ async fn search(index: &IndexArc, options: Value, realtime: bool) -> ResultObjec
     let r: SearchRequestObject = serde_json::from_value(value).unwrap();
     let result = index.search(r.query_string, None, r.query_type_default,
         r.search_mode, r.enable_empty_query, r.offset, r.length, r.result_type, realtime,
-        r.field_filter, r.query_facets, r.facet_filter, r.result_sort).await;
+        r.field_filter,  r.facet_filter, r.result_sort).await;
     assert!(result.error.is_none(), "{:?}", result.error);
     result
 }
@@ -80,14 +80,10 @@ async fn check_metadata(index: &IndexArc, realtime: bool) {
         for result_type in ["Count", "TopkCount"] {
             for filtered in [false, true] {
                 let result = search(index,json!({"query":query,"query_type_default":"Union","result_type":result_type,
-                    "facet_filter": if filtered { json!([{"String16":{"field":"category","filter":["a"]}}]) } else { json!([]) },
-                    "query_facets":[{"F64":{"field":"price","range_type":"CountWithinRange","ranges":[["low",0.],["high",25.]]}}]}),realtime).await;
+                    "facet_filter": if filtered { json!([{"String16":{"field":"category","filter":["a"]}}]) } else { json!([]) }}),realtime).await;
                 let per_bin = if filtered {1} else {2};
                 assert_eq!(result.result_count_total,2 * per_bin,"{query} {result_type} realtime={realtime}");
-                // Root aggregation ranks facets by count; ties have no label-order guarantee.
-                let mut bins = result.facets["price"].clone();
-                bins.sort_by(|a,b| a.0.cmp(&b.0));
-                assert_eq!(bins,vec![("high".into(),per_bin),("low".into(),per_bin)],"{query} {result_type} realtime={realtime}");
+
             }
         }
     }
@@ -112,7 +108,7 @@ fn retired_geo_requests_are_rejected() {
 }
 
 #[tokio::test]
-async fn ordinary_metadata_survives_geo_removal() {
+async fn ordinary_metadata_survives_aggregate_removal() {
     for (name, access) in [("mmap",AccessType::Mmap),("ram",AccessType::Ram)] {
         let path_buf = format!("tests/index_metadata_{name}"); let path = Path::new(&path_buf);
         let index = create(path, access).await;
@@ -133,6 +129,22 @@ async fn ordinary_metadata_survives_geo_removal() {
         index.commit().await;
         check_metadata(&index,false).await;
         index.close().await; drop(index);
+        // Emulate a legacy dictionary with real aggregates; IDs/order must survive loading.
+        for shard in 0..2 {
+            let file=path.join(format!("shards/{shard}/facet.json"));
+            let mut fields: Value=serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+            for field in fields.as_array_mut().unwrap() {
+                assert_eq!(field["min"],json!("None"));
+                assert_eq!(field["max"],json!("None"));
+                for entry in field["values"].as_object_mut().unwrap().values_mut() {
+                    assert_eq!(entry[1],json!(0));
+                    entry[1]=json!(42);
+                }
+                field["min"]=json!({"F64":-999.});
+                field["max"]=json!({"F64":999.});
+            }
+            fs::write(&file,serde_json::to_vec(&fields).unwrap()).unwrap();
+        }
         let reopened=open_index(path).await.unwrap();
         check_metadata(&reopened,false).await;
         reopened.close().await; drop(reopened);

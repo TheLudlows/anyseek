@@ -10,7 +10,7 @@ use seekstorm::index::{
 };
 use seekstorm::iterator::GetIterator;
 use seekstorm::search::{
-    FacetFilter, QueryFacet, QueryType, ResultSort, ResultType, Search,
+    FacetFilter, QueryType, ResultSort, ResultType, Search,
     SearchMode, SortOrder,
 };
 use seekstorm::vector::{Embedding, Inference, Precision, Quantization};
@@ -159,7 +159,7 @@ async fn test_04_query_index() {
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -189,7 +189,7 @@ async fn test_04_query_index() {
             ResultType::Count,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -231,7 +231,7 @@ async fn test_05_empty_query() {
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -268,7 +268,7 @@ async fn test_05_empty_query() {
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             result_sort,
         )
@@ -305,7 +305,7 @@ async fn test_05_empty_query() {
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             result_sort,
         )
@@ -368,7 +368,7 @@ async fn test_06_clear_index() {
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -432,7 +432,7 @@ async fn test_08_delete_document() {
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -460,7 +460,7 @@ async fn test_08_delete_document() {
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -576,7 +576,7 @@ async fn test_11_query_index_vector_supplied() {
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -707,7 +707,7 @@ async fn test_14_query_index_vector_external() {
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -724,8 +724,8 @@ async fn test_14_query_index_vector_external() {
 }
 
 #[tokio::test]
-/// query facets are scoped to the query and to the facet filter, also across shards
-async fn test_15_facet_scope() {
+/// Filtering and result counts remain correct across shards after aggregate removal.
+async fn test_15_filter_scope() {
     let index_path = Path::new("tests/index_facet_test/");
     let _ = fs::remove_dir_all(index_path);
 
@@ -766,13 +766,12 @@ async fn test_15_facet_scope() {
     let result = index_arc.read().await.indexed_doc_count().await;
     assert_eq!(result, 3);
 
-    // returns the total number of results and the facet counts of the "kind" facet field
-    async fn kind_facets(
+    async fn kind_results(
         index_arc: &IndexArc,
         query: &str,
         enable_empty_query: bool,
         facet_filter: Vec<FacetFilter>,
-    ) -> (usize, Vec<(String, usize)>) {
+    ) -> (usize, Vec<String>) {
         let result_object = index_arc
             .search(
                 query.into(),
@@ -785,66 +784,52 @@ async fn test_15_facet_scope() {
                 ResultType::TopkCount,
                 false,
                 Vec::new(),
-                vec![QueryFacet::String16 {
-                    field: "kind".into(),
-                    prefix: "".into(),
-                    length: 10,
-                }],
+
                 facet_filter,
                 Vec::new(),
             )
             .await;
 
-        let mut facets = result_object
-            .facets
-            .get("kind")
-            .cloned()
-            .unwrap_or_default();
-        facets.sort();
-        (result_object.result_count_total, facets)
+        let mut ids = Vec::new();
+        for result in &result_object.results {
+            let doc = index_arc.read().await.get_document(result.doc_id, false, &HashSet::new()).await.unwrap();
+            ids.push(doc["id"].as_str().unwrap().to_owned());
+        }
+        ids.sort();
+        (result_object.result_count_total, ids)
     }
 
-    // query matching 2 documents in 2 shards, both documents with the same facet value
-    let (count, facets) = kind_facets(&index_arc, "alpha", false, Vec::new()).await;
+    let (count, facets) = kind_results(&index_arc, "alpha", false, Vec::new()).await;
     assert_eq!(count, 2);
-    assert_eq!(facets, vec![("invoice".to_string(), 2)]);
+    assert_eq!(facets, vec!["a".to_string(), "b".to_string()]);
 
-    // query matching a single document in a single shard
-    let (count, facets) = kind_facets(&index_arc, "charlie", false, Vec::new()).await;
+    let (count, facets) = kind_results(&index_arc, "charlie", false, Vec::new()).await;
     assert_eq!(count, 1);
-    assert_eq!(facets, vec![("minutes".to_string(), 1)]);
+    assert_eq!(facets, vec!["c".to_string()]);
 
-    // query matching no document: no facet counts, in none of the shards
-    let (count, facets) = kind_facets(&index_arc, "zulu", false, Vec::new()).await;
+    let (count, facets) = kind_results(&index_arc, "zulu", false, Vec::new()).await;
     assert_eq!(count, 0);
     assert!(facets.is_empty());
 
-    // empty query with enable_empty_query: query facets over all documents
-    let (count, facets) = kind_facets(&index_arc, "", true, Vec::new()).await;
+    let (count, facets) = kind_results(&index_arc, "", true, Vec::new()).await;
     assert_eq!(count, 3);
     assert_eq!(
         facets,
-        vec![("invoice".to_string(), 2), ("minutes".to_string(), 1)]
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
     );
 
-    // the facet filter narrows both the search results and the facet counts
     let facet_filter = vec![FacetFilter::String16 {
         field: "kind".into(),
         filter: vec!["invoice".into()],
     }];
-    let (count, facets) = kind_facets(&index_arc, "", true, facet_filter).await;
+    let (count, facets) = kind_results(&index_arc, "", true, facet_filter).await;
     assert_eq!(count, 2);
-    assert_eq!(facets, vec![("invoice".to_string(), 2)]);
+    assert_eq!(facets, vec!["a".to_string(), "b".to_string()]);
 
-    // empty query without enable_empty_query: no query is executed, index facets are returned
-    let (count, facets) = kind_facets(&index_arc, "", false, Vec::new()).await;
+    let (count, ids) = kind_results(&index_arc, "", false, Vec::new()).await;
     assert_eq!(count, 0);
-    assert_eq!(
-        facets,
-        vec![("invoice".to_string(), 2), ("minutes".to_string(), 1)]
-    );
+    assert!(ids.is_empty());
 
     index_arc.close().await;
     let _ = fs::remove_dir_all(index_path);
 }
-

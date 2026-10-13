@@ -1,6 +1,4 @@
-var API_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";var INDEX_ID=0;var TITLE_FIELD="title";var TEXT_FIELD="body";var URL_FIELD="url";var IMAGE_FIELD="image";var DATE_FIELD="date";var QUERY_URL=`api/v1/index/${INDEX_ID}/query`;var STATUS_URL=`api/v1/index/${INDEX_ID}`;var IS_DATE_FIELD=false;var MIN_YEAR=0;var MAX_YEAR=0;var MIN_YEAR_FILTER=0;var MAX_YEAR_FILTER=0;var ranges=[];var status_loaded=false;let query="";let maxPages=-1;let currPage=1;let currSort='score';let search_mode="Lexical";function update_filter(min,max)
-{MIN_YEAR_FILTER=min;MAX_YEAR_FILTER=max;loadResults(1,currSort);}
-function debounce(func,wait,immediate){var timeout;return function(){var context=this,args=arguments;var later=function(){timeout=null;if(!immediate)func.apply(context,args);};var callNow=immediate&&!timeout;clearTimeout(timeout);timeout=setTimeout(later,wait);if(callNow)func.apply(context,args);};}
+var API_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";var INDEX_ID=0;var TITLE_FIELD="title";var TEXT_FIELD="body";var URL_FIELD="url";var IMAGE_FIELD="image";var DATE_FIELD="date";var QUERY_URL=`api/v1/index/${INDEX_ID}/query`;var STATUS_URL=`api/v1/index/${INDEX_ID}`;var IS_DATE_FIELD=false;var status_loaded=false;let query="";let maxPages=-1;let currPage=1;let currSort='score';let search_mode="Lexical";function debounce(func,wait,immediate){var timeout;return function(){var context=this,args=arguments;var later=function(){timeout=null;if(!immediate)func.apply(context,args);};var callNow=immediate&&!timeout;clearTimeout(timeout);timeout=setTimeout(later,wait);if(callNow)func.apply(context,args);};}
 function moveSplitter(y,hide=false){const[l1,l2,l3,l4]=[$("#l1"),$("#l2"),$("#l3"),$("#l4")];l1.attr("y2",y-70);l2.attr("y1",y-70);l2.attr("y2",y-30);l3.attr("y1",y-30);l3.attr("y2",y+10);l4.attr("y1",y+10);if(hide)$("#splitter").hide();else $("#splitter").show();}
 function updateTitle(useDefault=false){const title=query&&!useDefault?`${query}-SeekStorm Search`:"SeekStorm Search";if(document.title!=title){document.title=title;}}
 let active=null;function setHeader(xhr){xhr.setRequestHeader('apikey',API_KEY);}
@@ -16,15 +14,19 @@ if(!Array.isArray(queryVector)||queryVector.length===0||!queryVector.every(v=>ty
 }catch(error){$("#searchError").text(error.message);$("#contentBox").empty();return;}
 }
 updateTitle();active=null;if((currPage!=page||currSort!=sort)&&!ignoreHistory){var newURL=updateURLParameter(window.location.href,"q",query);newURL=updateURLParameter(newURL,"page",page);newURL=updateURLParameter(newURL,"sort",sort);window.history.pushState("","",newURL);}
-currPage=page;currSort=sort;const contentBox=$("#contentBox");const prevUrl=$("#prevUrl");const prevTitle=$("#prevTitle");const prevText=$("#prevText");const prevText2=$("#prevText2");moveSplitter(-50,true);prevUrl.hide();prevTitle.text("");prevText2.text("");prevText.hide();if(!status_loaded)showStatus(false);var d_min=new Date(MIN_YEAR_FILTER,0,1,0,0,0,0);var timestamp_min=d_min.getTime()/1000;var d_max=new Date(MAX_YEAR_FILTER,0,1,0,0,0,0);var timestamp_max=d_max.getTime()/1000;
-$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:query,query_vector:queryVector,enable_empty_query:true,offset:(page-1)*10,length:10,realtime:true,result_sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],query_facets:ranges.length>0?[{Timestamp:{field:DATE_FIELD,range_type:"CountWithinRange",ranges:ranges}}]:[],facet_filter:IS_DATE_FIELD&&(MIN_YEAR!=MIN_YEAR_FILTER||MAX_YEAR+1!=MAX_YEAR_FILTER)?[{Timestamp:{field:DATE_FIELD,filter:{start:timestamp_min,end:timestamp_max}}}]:[],search_mode:search_mode}),traditional:true,cache:false,type:"POST",dataType:'json',success:function(data){contentBox.empty();
-if(IS_DATE_FIELD){var newEntry1=$(`<div id="chart"style="width:100%;"><div id="histogramSlider"style="width:100%"></div><table style="display: none;"><tr id="data"><th>Value</th><th>Running Count</th></tr></table></div>`);contentBox.append(newEntry1);var numBins=MAX_YEAR-MIN_YEAR+1;var histogram_data={"items":[]};if(data.facets[DATE_FIELD]){data.facets[DATE_FIELD].forEach(element=>{var index=parseInt(element[0])-MIN_YEAR
-var count=element[1];histogram_data.items.push({"index":index,"count":count});});}
-$("#histogramSlider").histogramSlider({data:histogram_data,sliderRange:[MIN_YEAR,MAX_YEAR+1],optimalRange:[-100,-10],selectedRange:[MIN_YEAR_FILTER,MAX_YEAR_FILTER],height:60,numberOfBins:numBins,showTooltips:true,showSelectedRange:true});renderData(histogram_data);function renderData(data){var dataArray=[];for(var i=0;i<data.items.length;i++){dataArray.push(data.items[i].value);}
-dataArray=dataArray.sort(function(a,b){return b-a;});var count=0,dataTable=$("#data");for(var i=0;i<dataArray.length;i++){count++;dataTable.after("<tr><td>"+dataArray[i]+"</td><td>"+count+"</td></tr>");if(round25000(dataArray[i])>round25000(dataArray[i+1])){count=0;dataTable.after("<tr><td>----------</td></tr>");}}}
-function round25000(x)
-{return Math.ceil(x/25000)*25000;}
-let newEntry=$(`<div id="sort"class="resultEntry col-xs-12"style="display:flex"><span id="sortBy">sort by</span><div id="score"class="${sort=='score' ? 'active' : ''}"><span>score</span></div><div class="${sort=='new' ? 'active' : ''}"id="new"><span>newest</span></div><div class="${sort=='old' ? 'active' : ''}"id="old"><span>oldest</span></div></div>`);contentBox.append(newEntry);$("#sort div").click(event=>{var target_id=event.currentTarget.id;$("#sort div").each(function(){if($(this).attr("id")===target_id){$(this).addClass("active");}else{$(this).removeClass("active");}});loadResults(1,target_id);});};data.results.forEach(element=>{
+currPage=page;currSort=sort;$('#sort button').removeClass('active');$('#sort button').filter(function(){return this.id===sort;}).addClass('active');const contentBox=$("#contentBox");const prevUrl=$("#prevUrl");const prevTitle=$("#prevTitle");const prevText=$("#prevText");const prevText2=$("#prevText2");moveSplitter(-50,true);prevUrl.hide();prevTitle.text("");prevText2.text("");prevText.hide();if(!status_loaded)showStatus(false);let facetFilter=[];
+if(IS_DATE_FIELD){
+const from=document.getElementById('dateFrom').value;
+const to=document.getElementById('dateTo').value;
+if(from||to){
+const start=from?Date.parse(from+'T00:00:00Z')/1000:Number.MIN_SAFE_INTEGER;
+const end=to?Date.parse(to+'T00:00:00Z')/1000+86400:Number.MAX_SAFE_INTEGER;
+if(!Number.isFinite(start)||!Number.isFinite(end)||start>=end){$('#searchError').text('Enter a valid date range.');return;}
+facetFilter=[{Timestamp:{field:DATE_FIELD,filter:{start:start,end:end}}}];
+}
+}
+$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:query,query_vector:queryVector,enable_empty_query:true,offset:(page-1)*10,length:10,realtime:true,result_sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],facet_filter:facetFilter,search_mode:search_mode}),traditional:true,cache:false,type:"POST",dataType:'json',success:function(data){contentBox.empty();
+data.results.forEach(element=>{
 const linkText=valid(element[URL_FIELD]);
 const linkUrl=httpUrl(linkText);
 const dateValue=element[DATE_FIELD];
@@ -52,23 +54,34 @@ else{prevText2.text(bodyText);}
 setPage(page,data.count,data.count_total,data.time);},error:function(xhr){$("#contentBox").empty();$("#searchError").text(xhr.responseText||"Search request failed.");},beforeSend:setHeader});}
 function valid(value){return value==null?'':typeof value==='object'?JSON.stringify(value):String(value);}
 function httpUrl(value){try{const url=new URL(value);return ['http:','https:'].includes(url.protocol)?url.href:null;}catch{return null;}}
-function showStatus(async=true)
-{$.ajax({url:STATUS_URL,data:{},traditional:true,cache:false,type:"GET",async:async,dataType:'json',success:function(data){$("#welcome").hide();$("#version").text(data.version);$("#indexName").text(data.name);$("#indexedDocs").text(data.indexed_doc_count.toLocaleString());let schema=new Map(Object.entries(data.schema).sort((a,b)=>a[1].field_id-b[1].field_id));for(let[key,value]of schema){if(value.field_type=="Timestamp"){IS_DATE_FIELD=true;}
-if(value.field_type=="Binary"&&value.stored){if(!data.schema[IMAGE_FIELD])IMAGE_FIELD=key;continue;}
-if(value.field_type=="U32"){continue;}
-if((key!=TITLE_FIELD)&&(key!=TEXT_FIELD)&&(key!=URL_FIELD)&&(key!=DATE_FIELD)&&value.stored)
-{if(!data.schema[TITLE_FIELD])TITLE_FIELD=key;else
-if(!data.schema[TEXT_FIELD])TEXT_FIELD=key;else
-if(!data.schema[URL_FIELD])URL_FIELD=key;else
-if(!data.schema[DATE_FIELD]&&value.field_type=="Timestamp")DATE_FIELD=key;else
-break;}}
-if(IS_DATE_FIELD){MIN_YEAR=(new Date(data.facets_minmax[DATE_FIELD].min*1000)).getFullYear();MAX_YEAR=(new Date(data.facets_minmax[DATE_FIELD].max*1000)).getFullYear();MIN_YEAR_FILTER=MIN_YEAR;MAX_YEAR_FILTER=MAX_YEAR+1;for(let i=MIN_YEAR;i<=MAX_YEAR;i++){var d=new Date(i,0,1,0,0,0,0);var timestamp=d.getTime()/1000;var range=[i.toString(),timestamp];ranges.push(range);}}
-status_loaded=true;},error:function(xhr){$("#landingSearch").hide();$('#welcome').css('display','flex');},beforeSend:setHeader});}
+function showStatus(async=true){
+$.ajax({url:STATUS_URL,traditional:true,cache:false,type:'GET',async:async,dataType:'json',
+success:function(data){
+$('#welcome').hide();$('#version').text(data.version);$('#indexName').text(data.name);$('#indexedDocs').text(data.indexed_doc_count.toLocaleString());
+const schema=new Map(Object.entries(data.schema).sort((a,b)=>a[1].field_id-b[1].field_id));
+const textFields=[...schema].filter(([key,value])=>value.stored&&value.field_type!=='Binary'&&value.field_type!=='Timestamp'&&value.field_type!=='U32').map(([key])=>key);
+for(const target of ['title','body','url']){
+if(target==='title'&&!data.schema[TITLE_FIELD])TITLE_FIELD=textFields.shift()||TITLE_FIELD;
+if(target==='body'&&!data.schema[TEXT_FIELD])TEXT_FIELD=textFields.find(key=>key!==TITLE_FIELD)||TEXT_FIELD;
+if(target==='url'&&!data.schema[URL_FIELD])URL_FIELD=textFields.find(key=>key!==TITLE_FIELD&&key!==TEXT_FIELD)||URL_FIELD;
+}
+const dateFields=[...schema].filter(([key,value])=>value.field_type==='Timestamp'&&value.facet).map(([key])=>key);
+IS_DATE_FIELD=dateFields.length>0;
+if(IS_DATE_FIELD&&!dateFields.includes(DATE_FIELD))DATE_FIELD=dateFields[0];
+for(const [key,value] of schema){if(value.field_type==='Binary'&&value.stored&&!data.schema[IMAGE_FIELD]){IMAGE_FIELD=key;break;}}
+document.getElementById('dateControls').hidden=!IS_DATE_FIELD;
+status_loaded=true;
+},error:function(){$('#landingSearch').hide();$('#welcome').css('display','flex');},beforeSend:setHeader});
+}
 function setPage(page,results,count_total,statsTime){maxPages=Math.ceil(count_total/10);let vars=$("#footer").children();const[from,to,count,stats]=[$("#from"),$("#to"),$("#count"),$("#stats")];from.text(((page-1)*10+1).toLocaleString());to.text(Math.min(page*10,count_total).toLocaleString());count.text(count_total.toLocaleString());stats.attr("title",`${count_total.toLocaleString()} results in ${(statsTime/1000_000).toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:3})}ms`);for(const element of vars){const elem=$(element);elem.removeClass("active");elem.show();}
 if(page==1)$(vars[0]).hide();else $(vars[0]).show();if(page==maxPages)$(vars[11]).hide();else $(vars[11]).show();if(page>5){for(let i=0;i<10;i++){const element=$(vars[i+1]);element.text(page-5+i);if(i==5){element.addClass("active");}
 if(page-5+i>maxPages){element.hide();}}}else{for(let i=0;i<10;i++){const element=$(vars[i+1]);element.text(i+1);if(i==page-1){element.addClass("active");}
 if(i>=maxPages){element.hide();}}}}
-$(function(){$("#vectorSearch").on("click",()=>loadResults(1,"score"));$("#searchInput").on("input",function(e){e.preventDefault();$("#landingSearch").hide();$("#landingMain").show();$("#searchMain").val($("#searchInput").val()).trigger("input");$("#searchMain").focus();$("#searchInput").val("");});$("#footer, #topBar").on("mouseenter",function(){const prevUrl=$("#prevUrl");const prevTitle=$("#prevTitle");const prevText=$("#prevText");const prevText2=$("#prevText2");moveSplitter(-50,true);prevUrl.hide();prevTitle.text("");prevText2.text("");prevText.hide();});$("#topLogo").on("click",function(e){e.preventDefault();$("#landingSearch").show();$("#searchInput").focus();$("#landingMain").hide();updateTitle(true);window.history.pushState("","",window.location.href.split("?")[0]);});const mainSearch=$("#searchMain");mainSearch.on("input",debounce(()=>{query=mainSearch.val();loadResults(1,'score');},50));mainSearch.on("input",debounce(()=>{var newURL=updateURLParameter(window.location.href,"q",query);newURL=updateURLParameter(newURL,"page",1);window.history.pushState("","",newURL);},700));$("#footer div").click(event=>{let target=$(event.target);if(!target.hasClass("action")){loadResults(target.text(),currSort);}else{const cPage=parseInt($("#footer div.active")[0].innerText);if(target.attr("next")){loadResults(cPage+1,currSort);}else{loadResults(cPage-1,currSort);}}});window.addEventListener("popstate",function(e){checkUrl();});checkUrl();$('.switch-label').on('click',function(){const index=$(this).data('index');const value=$(this).find('input').val();$('.switch-label').removeClass('active');$(this).addClass('active');const position=index*33.33;$('.switch-selector').css('left',`calc(${position}% + 4px)`);$(this).find('input').prop('checked',true);switch(value){case"Vector":search_mode={Vector:{similarity_threshold:null,ann_mode:{"Nprobe":55}}};break;case"Lexical":search_mode="Lexical";break;default:search_mode={Hybrid:{similarity_threshold:null,ann_mode:{"Nprobe":55}}};}
+$(function(){
+$('#dateApply').on('click',()=>loadResults(1,currSort));
+$('#dateClear').on('click',()=>{$('#dateFrom,#dateTo').val('');loadResults(1,currSort);});
+$('#sort button').on('click',function(){const sort=this.id;$('#sort button').removeClass('active');$(this).addClass('active');loadResults(1,sort);});
+$("#vectorSearch").on("click",()=>loadResults(1,"score"));$("#searchInput").on("input",function(e){e.preventDefault();$("#landingSearch").hide();$("#landingMain").show();$("#searchMain").val($("#searchInput").val()).trigger("input");$("#searchMain").focus();$("#searchInput").val("");});$("#footer, #topBar").on("mouseenter",function(){const prevUrl=$("#prevUrl");const prevTitle=$("#prevTitle");const prevText=$("#prevText");const prevText2=$("#prevText2");moveSplitter(-50,true);prevUrl.hide();prevTitle.text("");prevText2.text("");prevText.hide();});$("#topLogo").on("click",function(e){e.preventDefault();$("#landingSearch").show();$("#searchInput").focus();$("#landingMain").hide();updateTitle(true);window.history.pushState("","",window.location.href.split("?")[0]);});const mainSearch=$("#searchMain");mainSearch.on("input",debounce(()=>{query=mainSearch.val();loadResults(1,'score');},50));mainSearch.on("input",debounce(()=>{var newURL=updateURLParameter(window.location.href,"q",query);newURL=updateURLParameter(newURL,"page",1);window.history.pushState("","",newURL);},700));$("#footer div").click(event=>{let target=$(event.target);if(!target.hasClass("action")){loadResults(target.text(),currSort);}else{const cPage=parseInt($("#footer div.active")[0].innerText);if(target.attr("next")){loadResults(cPage+1,currSort);}else{loadResults(cPage-1,currSort);}}});window.addEventListener("popstate",function(e){checkUrl();});checkUrl();$('.switch-label').on('click',function(){const index=$(this).data('index');const value=$(this).find('input').val();$('.switch-label').removeClass('active');$(this).addClass('active');const position=index*33.33;$('.switch-selector').css('left',`calc(${position}% + 4px)`);$(this).find('input').prop('checked',true);switch(value){case"Vector":search_mode={Vector:{similarity_threshold:null,ann_mode:{"Nprobe":55}}};break;case"Lexical":search_mode="Lexical";break;default:search_mode={Hybrid:{similarity_threshold:null,ann_mode:{"Nprobe":55}}};}
 document.getElementById("vectorControls").hidden=search_mode==="Lexical";loadResults(1,'score');});showStatus();});function checkUrl(){const queryStrings=parse_query_string(window.location.search.substring(1));if(queryStrings.api_key){API_KEY=queryStrings.api_key;}
 if((queryStrings.index_id)&&!isNaN(queryStrings.index_id)){STATUS_URL=`api/v1/index/${queryStrings.index_id}`;QUERY_URL=`api/v1/index/${queryStrings.index_id}/query`;}
 if(queryStrings.q){query=queryStrings.q;let loadPage=1;if(queryStrings.page)loadPage=parseInt(queryStrings.page);loadResults(loadPage,'score',true);$("#searchMain").val(query);$("#landingSearch").hide();$("#landingMain").show();}else{$("#landingSearch").show();$("#searchInput").focus();$("#landingMain").hide();}}

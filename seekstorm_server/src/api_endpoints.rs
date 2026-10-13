@@ -77,11 +77,11 @@ pub(crate) fn live_api() -> String {
 
 /// Create API Key
 ///
-/// Creates an API key and returns the Base64 encoded API key.  
-/// Expects the Base64 encoded master API key in the header.  
+/// Creates an API key and returns the Base64 encoded API key.
+/// Expects the Base64 encoded master API key in the header.
 /// Use the **master API key displayed** in the server console at startup.
-///  
-/// WARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, otherwise your generated API keys will be compromised.  
+///
+/// WARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, otherwise your generated API keys will be compromised.
 /// For development purposes you may also use the SeekStorm server console command 'create' to create an demo API key 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='.
 #[utoipa::path(
     tag = "API Key",
@@ -252,29 +252,28 @@ pub(crate) async fn open_all_apikeys(
         ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
     ),
 
-
     request_body(
         content = CreateIndexRequest,
         examples(
             ("Example: Lexical index" = (value = json!({
 				"schema":[{
-					"field": "title", 
-					"field_type": "Text", 
-					"store": true, 
+					"field": "title",
+					"field_type": "Text",
+					"store": true,
 					"index_lexical": true,
 					"boost":10.0
 				},
 					{
 					"field": "body",
-					"field_type": "Text", 
-					"store": true, 
+					"field_type": "Text",
+					"store": true,
 					"index_lexical": true,
 					"longest": true
 				},
 				{
-					"field": "url", 
-					"field_type": "String32", 
-					"store": true, 
+					"field": "url",
+					"field_type": "String32",
+					"store": true,
 					"index_lexical": false
 				}],
 				"index_name": "wikipedia",
@@ -283,23 +282,23 @@ pub(crate) async fn open_all_apikeys(
 			}))),
 			("Example: Hybrid index" = (value = json!({
 				"schema":[{
-					"field": "title", 
-					"field_type": "Text", 
-					"store": true, 
+					"field": "title",
+					"field_type": "Text",
+					"store": true,
 					"index_lexical": true,
 					"index_vector": false
 				},
 				{
 					"field": "body",
-					"field_type": "Text", 
-					"store": true, 
+					"field_type": "Text",
+					"store": true,
 					"index_lexical": true,
 					"index_vector": false
 				},
 					{
 					"field": "vector",
 					"field_type": "Json",
-					"store": true, 
+					"store": true,
 					"index_lexical": false,
 					"index_vector": true
 				}],
@@ -527,7 +526,7 @@ pub(crate) async fn get_synonyms_api(index_arc: &IndexArc) -> Result<Vec<Synonym
     ),
     responses(
         (
-            status = 200, description = "Index found, returns the index info", 
+            status = 200, description = "Index found, returns the index info",
             body = IndexResponseObject,
         ),
         (status = BAD_REQUEST, description = "Request object incorrect"),
@@ -554,7 +553,7 @@ pub(crate) async fn get_index_info_api(
             committed_doc_count: index_ref.committed_doc_count().await,
             operations_count: 0,
             query_count: 0,
-            facets_minmax: index_ref.index_facets_minmax().await,
+
         })
     } else {
         Err("index_id not found".to_string())
@@ -573,7 +572,7 @@ pub(crate) async fn get_index_info_api(
     ),
     responses(
         (
-            status = 200, description = "Indices found, returns a list of index info", 
+            status = 200, description = "Indices found, returns a list of index info",
             body = Vec<IndexResponseObject>,
         ),
         (status = BAD_REQUEST, description = "Request object incorrect"),
@@ -598,7 +597,7 @@ pub(crate) async fn get_apikey_indices_info_api(
             committed_doc_count: index_ref.committed_doc_count().await,
             operations_count: 0,
             query_count: 0,
-            facets_minmax: index_ref.index_facets_minmax().await,
+
         });
     }
 
@@ -620,9 +619,8 @@ pub(crate) async fn get_apikey_indices_info_api(
         ("index_id" = u64, Path, description = "index id"),
     ),
 
-
  	request_body(
-        content = HashMap<String, Value>, description = "JSON document or array of JSON documents, each consisting of key-value pairs",content_type = "application/json", 
+        content = HashMap<String, Value>, description = "JSON document or array of JSON documents, each consisting of key-value pairs",content_type = "application/json",
         examples(
     ("Example: Single Lexical/Hybrid document" = (value = json!(  {
         "title": "title1 test",
@@ -971,7 +969,6 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
 /// - Realtime search
 /// - Field filter
 /// - Fields to include in search results
-/// - Query facets: which facets fields to calculate and return at query time
 /// - Facet filter: filter facets by field and value
 /// - Result sort: sort results by field and direction
 /// - Query type default: default query type, if not specified in query
@@ -983,7 +980,6 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
         ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
         ("index_id" = u64, Path, description = "index id"),
     ),
-
 
     request_body(
         content = SearchRequestObject,
@@ -1026,7 +1022,7 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
     "realtime": false,
     "search_mode": {
         "Vector":{
-            "similarity_threshold": 0.7, 
+            "similarity_threshold": 0.7,
             "ann_mode": {"Nprobe":55}
         }
     }
@@ -1076,7 +1072,7 @@ pub(crate) async fn query_index_api(
             search_request.result_type,
             search_request.realtime,
             search_request.field_filter,
-            search_request.query_facets,
+
             search_request.facet_filter,
             search_request.result_sort,
 
@@ -1124,7 +1120,6 @@ pub(crate) async fn query_index_api(
         count_total: result_object.result_count_total,
         query_terms: result_object.query_terms,
         results,
-        facets: result_object.facets,
 
     })
 }

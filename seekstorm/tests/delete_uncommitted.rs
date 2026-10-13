@@ -54,7 +54,7 @@ async fn count(index: &seekstorm::index::IndexArc, query: &str, uncommitted: boo
             ResultType::TopkCount,
             uncommitted,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -138,4 +138,3 @@ async fn delete_reused_docid_after_clear() {
     assert_eq!(count(&index, "betaone", false).await, 1);
     index.close().await;
 }
-

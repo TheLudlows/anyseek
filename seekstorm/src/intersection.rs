@@ -132,8 +132,7 @@ pub(crate) async fn intersection_docid(
         || !field_filter_set.is_empty()
         || !shard.delete_hashset.is_empty()
         || !search_result.topk_candidates.result_sort.is_empty()
-        || (!search_result.query_facets.is_empty() || !facet_filter.is_empty())
-            && (!search_result.skip_facet_count || !facet_filter.is_empty());
+        || !facet_filter.is_empty();
 
     for plo in not_query_list.iter_mut() {
         let query_list_item_mut = plo;

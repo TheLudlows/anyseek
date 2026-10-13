@@ -334,3 +334,25 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - 原 README 的 29 个 Rust 示例迁至 docs/library-examples.md，并更新 rustdoc include；保留 FACETED_SEARCH 的 11 个 Rust 示例。移除示例中的已删除 QueryRewriting 引用并修正旧 FacetFilter 名称；核心 rustdoc 修正 String15 拼写和误注释的 clustering 字段。服务 rustdoc 删除重复且过时的 curl 示例。
 - 本地检查通过：Markdown 文件链接/代码块完整性、JSON/shell 示例语法、API 清单覆盖、Rust 示例数量与允许的文本差异、git diff --check。剔除注释及 rustdoc include 路径后，两处修改的 Rust 文件可执行部分与父提交完全相同。
 - 本次仅改文档、文档示例和 rustdoc 引用；保留原有测试、验证历史及许可证。当前环境无 Rust 工具链，未声称本地执行 cargo 或 rustdoc 编译；本次提交的远端结果以 PR Checks 为准。现有 CI 的 all-targets 不包含 doctest，不将示例静态检查称作编译通过。
+
+
+## 2026-10-13：分面计数、直方图、范围聚合与字段 min/max 裁剪
+
+- 基点：已合入 B1/B2 的主干 `af56be64113596eb95bb7f31b99b26e17ce772c5`。
+- 移除聚合请求/响应、Rust 类型、索引统计维护、查询计数与跨分片合并，以及直方图 UI 与四个专用资源。
+- 保留字符串/集合/数字/时间过滤、多字段排序、文档命中总数和分页。日期筛选改为 UTC 日期输入，截止日期包含当天。
+- 原有过滤/排序回归保留；原聚合专用用例改为旧请求拒绝用例。`metadata_contract` 同时验证旧字典计数和 min/max 被忽略、字典 ID/顺序及重开后的过滤排序保持有效。磁盘旧统计槽只写 0/None，不计算或返回聚合。
+
+| 验证 | 结果 |
+| --- | --- |
+| workspace build（Rust 1.99.0） | 通过 |
+| `cargo test --workspace --all-targets` | 58 passed，0 failed |
+| `cargo test -p seekstorm --doc` | 44 passed，0 failed；修复两处旧构造参数示例 |
+| HTTP API / 静态资源 smoke | 通过；7 个 UI 资源、旧聚合请求 400、响应无聚合字段、普通过滤排序保留 |
+| OpenAPI JSON/YAML | 从本次服务重新生成 |
+| JavaScript / Python 语法、`git diff --check` | 通过 |
+| 本地 Chromium | 未执行；浏览器下载得到损坏 ZIP，交由 CI 验证日期输入/清空、排序及其余既有 UI 场景 |
+
+本地默认并行 codegen 链接曾出现缺失 hidden symbols/空对象文件；清理后以 `CARGO_INCREMENTAL=0`、对应 `CARGO_PROFILE_DEV_CODEGEN_UNITS=1` / `CARGO_PROFILE_TEST_CODEGEN_UNITS=1`、`CARGO_PROFILE_DEV_DEBUG=0` / `CARGO_PROFILE_TEST_DEBUG=0`、`-j 2` 完成构建和测试。未修改仓库构建配置。CI 仍使用原标准命令。
+
+此记录为提交前本地结果；远端 CI 结果以本批 PR 为准，尚未合入。

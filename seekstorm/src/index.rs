@@ -2,7 +2,6 @@ use add_result::decode_positions_commit;
 use ahash::{AHashMap, AHashSet};
 use futures::future;
 use indexmap::IndexMap;
-use itertools::Itertools;
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
@@ -36,7 +35,7 @@ use crate::{
     clustering::{ClusterHeader, ParentMedoid},
     commit::Commit,
     search::{
-        self, FacetFilter, QueryFacet, Ranges, ResultObject, ResultSort,
+        self, FacetFilter, ResultObject, ResultSort,
         ResultType, SearchLexicalShard, SearchMode,
     },
     tokenizer::tokenizer,
@@ -89,7 +88,6 @@ pub(crate) const META_FILENAME: &str = "index.json";
 pub(crate) const FACET_FILENAME: &str = "facet.bin";
 pub(crate) const FACET_VALUES_FILENAME: &str = "facet.json";
 
-
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) const VECTOR_FILENAME: &str = "vector.bin";
@@ -137,8 +135,8 @@ pub struct SearchRequestObject {
     pub query_vector: Option<Value>,
     #[serde(default)]
     #[cfg_attr(feature = "api-schema", schema(required = false, default = false, example = false))]
-    /// Enable empty query: if true, an empty query string iterates through all indexed documents, supporting the query parameters: offset, length, query_facets, facet_filter, result_sort,
-    /// otherwise an empty query string returns no results.
+    /// Enable empty queries to browse all documents with pagination, filtering and sorting.
+    /// Otherwise an empty query string returns no results.
     /// Typical use cases include index browsing, index export, conversion, analytics, audits, and inspection.
     pub enable_empty_query: bool,
     #[serde(default)]
@@ -162,9 +160,7 @@ pub struct SearchRequestObject {
     /// Specify names of fields to return in the search results, where SchemaField.store is set at indextime. If empty then all stored fields are returned.
     #[serde(default)]
     pub fields: Vec<String>,
-    /// Facets to return with search results: if empty then no facets are returned. Facets are only enabled on facet fields that are defined in schema at create_index!
-    #[serde(default)]
-    pub query_facets: Vec<QueryFacet>,
+
     /// Facet filters apply to Lexical search only and require facet fields in the schema.
     /// Nonempty filters in Vector or Hybrid mode return an explicit error; vector candidate filtering is not implemented.
     #[serde(default)]
@@ -227,9 +223,7 @@ pub struct SearchResultObject {
     #[cfg_attr(feature = "api-schema", schema(value_type=Vec<HashMap<String, serde_json::Value>>))]
     /// Vector of search result documents
     pub results: Vec<Document>,
-    #[cfg_attr(feature = "api-schema", schema(value_type=HashMap<String, Vec<(String, usize)>>))]
-    /// Facets with their values and corresponding document counts
-    pub facets: AHashMap<String, Facet>,
+
 }
 
 /// Create index request object
@@ -405,9 +399,7 @@ pub struct IndexResponseObject {
     /// SeekStorm version the index was created with
     #[cfg_attr(feature = "api-schema", schema(example = "0.11.1"))]
     pub version: String,
-    /// Minimum and maximum values of numeric facet fields
-    #[cfg_attr(feature = "api-schema", schema(example = json!({"date":{"min":831306011,"max":1730901447}})))]
-    pub facets_minmax: HashMap<String, MinMaxFieldJson>,
+
 }
 
 /// A document is a flattened, single level of key-value pairs, where key is an arbitrary string, and value represents any valid JSON value.
@@ -940,19 +932,19 @@ pub enum FieldType {
     Bool,
     /// String16
     /// allows a maximum cardinality of 65_535 (16 bit) distinct values, is space-saving.
-    /// For faceting and filtering with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
+    /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
     String16,
     /// String32
     /// allows a maximum cardinality of 4_294_967_295 (32 bit) distinct values
-    /// For faceting and filtering with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
+    /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
     String32,
     /// StringSet16 is a set of strings, e.g. tags, categories, keywords, authors, genres, etc.
     /// allows a maximum cardinality of 65_535 (16 bit) distinct values, is space-saving.
-    /// For faceting and filtering with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
+    /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
     StringSet16,
     /// StringSet32 is a set of strings, e.g. tags, categories, keywords, authors, genres, etc.
     /// allows a maximum cardinality of 4_294_967_295 (32 bit) distinct values
-    /// For faceting and filtering with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
+    /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
     StringSet32,
     /// Text is a text field, that will be tokenized by the selected Tokenizer into string tokens.
     #[default]
@@ -986,7 +978,7 @@ pub struct Synonym {
     /// E.g. [street, avenue, road] will result in searches for street to return documents containing any of the terms street, avenue or road,
     /// but searches for avenue will only return documents containing avenue, but not documents containing street or road.
     /// Currently only single terms without spaces are supported.
-    /// The synonyms that were created with the synonyms parameter in create_index are stored in synonyms.json in the index directory contains  
+    /// The synonyms that were created with the synonyms parameter in create_index are stored in synonyms.json in the index directory contains
     /// Can be manually modified, but becomes effective only after restart and only for newly indexed documents.
     #[serde(default = "default_as_true")]
     pub multiway: bool,
@@ -1015,15 +1007,14 @@ pub struct SchemaField {
     pub index_vector: bool,
     /// type of a field
     pub field_type: FieldType,
-    /// optional faceting for a field
-    /// Faceting can be enabled both for string field type and numerical field types.
+    /// Enable metadata filtering and sorting for string and numerical fields.
     /// both numerical and string fields can be indexed (indexed=true) and stored (stored=true) in the json document,
-    /// but with field_facet=true they are additionally stored in a binary format, for fast faceting and sorting without docstore access (decompression, deserialization)
+    /// but with field_facet=true they are additionally stored in a binary format, for fast filtering and sorting without docstore access (decompression, deserialization)
     #[serde(skip_serializing_if = "is_default_bool")]
     #[serde(default = "default_false")]
     pub facet: bool,
 
-    /// Indicate the longest field in schema.  
+    /// Indicate the longest field in schema.
     /// Otherwise the longest field will be automatically detected in first index_document.
     /// Setting/detecting the longest field ensures efficient index encoding.
     #[serde(skip_serializing_if = "is_default_bool")]
@@ -1034,8 +1025,6 @@ pub struct SchemaField {
     #[serde(skip_serializing_if = "is_default_f32")]
     #[serde(default = "default_1")]
     pub boost: f32,
-
-
 
     #[serde(skip)]
     pub(crate) indexed_field_id: usize,
@@ -1051,8 +1040,8 @@ pub struct SchemaField {
 /// - index_lexical: index field into lexical index, only indexed fields can be searched.
 /// - index_vector: index field into vector index, only indexed fields can be searched.
 /// - field_type: type of a field: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, text, strings, JSON
-/// - facet: enable faceting for a field: for sorting results by field values, for range filtering, for result count per field value or range
-/// - `longest`: This allows to annotate (manually set) the longest field in schema.  
+/// - facet: enable metadata filtering and sorting by field values
+/// - `longest`: This allows to annotate (manually set) the longest field in schema.
 ///   Otherwise the longest field will be automatically detected in first index_document.
 ///   Setting/detecting the longest field ensures efficient index encoding.
 /// - boost: optional custom weight factor for Bm25 ranking
@@ -1228,9 +1217,9 @@ pub struct IndexMetaObject {
     /// NgramRFF   = 0b00010000, rare frequent frequent
     /// NgramFFR   = 0b00100000, frequent frequent rare
     /// NgramFRF   = 0b01000000, frequent rare frequent
-    /// When **minimum index size** is more important than phrase query latency, we recommend **Single Terms**:  
+    /// When **minimum index size** is more important than phrase query latency, we recommend **Single Terms**:
     /// `NgramSet::SingleTerm as u8`
-    /// For a **good balance of latency and index size** cost, we recommend **Single Terms + Frequent Bigrams + Frequent Trigrams** (default):  
+    /// For a **good balance of latency and index size** cost, we recommend **Single Terms + Frequent Bigrams + Frequent Trigrams** (default):
     /// `NgramSet::SingleTerm as u8 | NgramSet::NgramFF as u8 | NgramSet::NgramFFF`
     /// When **minimal phrase query latency** is more important than low index size, we recommend **Single Terms + Mixed Bigrams + Frequent Trigrams**:
     /// `NgramSet::SingleTerm as u8 | NgramSet::NgramFF as u8 | NgramSet::NgramFR as u8 | NgramSet::NgramRF | NgramSet::NgramFFF`
@@ -1243,7 +1232,6 @@ pub struct IndexMetaObject {
 
     /// AccessType defines where the index resides during search: Ram or Mmap
     pub access_type: AccessType,
-
 
     /// clustering defines the clustering behavior for approximate nearest neighbor (ANN) search: None, Auto, Fixed(usize).
     #[serde(default)]
@@ -1262,88 +1250,42 @@ fn doc_store_compression_default() -> DocumentCompression {
     DocumentCompression::Snappy
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ResultFacet {
-    pub field: String,
-    pub values: AHashMap<u32, usize>,
-    pub prefix: String,
-    pub length: u32,
-    pub ranges: Ranges,
-}
-
-/// MinMaxField represents the minimum and maximum value of a field.
-#[derive(Deserialize, Serialize, Debug, Clone, Default)]
-pub struct MinMaxField {
-    /// minimum value of the field
-    pub min: ValueType,
-    /// maximum value of the field
-    pub max: ValueType,
-}
-
-/// MinMaxFieldJson is a JSON representation of the minimum and maximum value of a field.
-#[derive(Deserialize, Serialize, Debug, Clone, Default)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-pub struct MinMaxFieldJson {
-    /// minimum value of the field
-    pub min: Value,
-    /// maximum value of the field
-    pub max: Value,
-}
-
-/// Value type for a field: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, none.
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
-pub enum ValueType {
-    /// Unsigned 8-bit integer
-    U8(u8),
-    /// Unsigned 16-bit integer
-    U16(u16),
-    /// Unsigned 32-bit integer
-    U32(u32),
-    /// Unsigned 64-bit integer
-    U64(u64),
-    /// Signed 8-bit integer
-    I8(i8),
-    /// Signed 16-bit integer
-    I16(i16),
-    /// Signed 32-bit integer
-    I32(i32),
-    /// Signed 64-bit integer
-    I64(i64),
-    /// Unix timestamp: the number of seconds since 1 January 1970
-    Timestamp(i64),
-    /// Floating point 32-bit
-    F32(f32),
-    /// Floating point 64-bit
-    F64(f64),
-    /// No value
-    #[default]
-    None,
-}
-
-/// Facet field, with field name and a map of unique values and their count (number of times the specific value appears in the whole index).
-#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+/// Metadata dictionary used by filtering and sorting. Value IDs retain insertion order.
+#[derive(Deserialize, Debug, Clone, Default)]
 pub struct FacetField {
-    /// Facet field name
+    /// Field name.
     pub name: String,
-    /// Vector of facet value names and their count
-    /// The number of distinct string values and numerical ranges per facet field (cardinality) is limited to 65_536.
-    /// Once that number is reached, the facet field is not updated anymore (no new values are added, no existing values are counted).
-    pub values: IndexMap<String, (Vec<String>, usize)>,
-
-    ///Minimum value of the facet field
-    pub min: ValueType,
-    ///Maximum value of the facet field
-    pub max: ValueType,
-
+    /// String values or string sets, without occurrence counts.
+    #[serde(deserialize_with = "read_filter_dictionary")]
+    pub values: IndexMap<String, Vec<String>>,
     #[serde(skip)]
     pub(crate) offset: usize,
     #[serde(skip)]
     pub(crate) field_type: FieldType,
 }
 
-/// Facet field, with field name and a vector of unique values and their count (number of times the specific value appears in the whole index).
-/// Facet field: a vector of unique values and their count (number of times the specific value appears in the whole index).
-pub type Facet = Vec<(String, usize)>;
+// Read the historical dictionary representation, discarding retired statistics.
+fn read_filter_dictionary<'de, D>(deserializer: D) -> Result<IndexMap<String, Vec<String>>, D::Error>
+where D: serde::Deserializer<'de> {
+    let stored = IndexMap::<String, (Vec<String>, serde::de::IgnoredAny)>::deserialize(deserializer)?;
+    Ok(stored.into_iter().map(|(key, (values, _))| (key, values)).collect())
+}
+
+// Keep facet.json readable by the previous format without maintaining aggregates.
+// Counts and extrema are reserved compatibility slots, always zero/None on new writes.
+impl Serialize for FacetField {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        use serde::ser::SerializeStruct;
+        let values: IndexMap<_, _> = self.values.iter().map(|(key, value)| (key, (value, 0usize))).collect();
+        let mut stored = serializer.serialize_struct("FacetField", 4)?;
+        stored.serialize_field("name", &self.name)?;
+        stored.serialize_field("values", &values)?;
+        stored.serialize_field("min", "None")?;
+        stored.serialize_field("max", "None")?;
+        stored.end()
+    }
+}
 
 /// Shard wrapped in Arc and RwLock for concurrent read and write access.
 pub type ShardArc = Arc<RwLock<Shard>>;
@@ -1535,8 +1477,6 @@ pub struct Index {
     pub(crate) shard_number: usize,
     pub(crate) shard_vec: Vec<Arc<RwLock<Shard>>>,
 
-
-
     pub(crate) frequent_hashset: AHashSet<String>,
 
     /// The precision of the vectors: Float32 or Int8
@@ -1664,12 +1604,12 @@ pub(crate) enum NgramType {
 
 /// Create index in RAM.
 /// Inner data structures for create index and open_index
-/// * `index_path` - index path.  
-/// * `meta` - index meta object.  
-/// * `schema` - schema.  
+/// * `index_path` - index path.
+/// * `meta` - index meta object.
+/// * `schema` - schema.
 /// * `synonyms` - vector of synonyms.
-/// * `segment_number_bits1` - number of index segments: e.g. 11 bits for 2048 segments.  
-/// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).  
+/// * `segment_number_bits1` - number of index segments: e.g. 11 bits for 2048 segments.
+/// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).
 /// * `force_shard_number` - set number of shards manually or automatically.
 ///   - none: number of shards is set automatically = number of physical processor cores (default)
 ///   - small: slower indexing, higher latency, slightly higher throughput, faster realtime search, lower RAM consumption
@@ -1798,8 +1738,7 @@ pub(crate) async fn create_index_root(
                     facets_vec.push(FacetField {
                         name: schema_field.field.clone(),
                         values: IndexMap::new(),
-                        min: ValueType::None,
-                        max: ValueType::None,
+
                         offset: facets_size_sum,
                         field_type: schema_field.field_type.clone(),
                     });
@@ -2154,8 +2093,7 @@ pub(crate) fn create_shard(
                     facets_vec.push(FacetField {
                         name: schema_field.field.clone(),
                         values: IndexMap::new(),
-                        min: ValueType::None,
-                        max: ValueType::None,
+
                         offset: facets_size_sum,
                         field_type: schema_field.field_type.clone(),
                     });
@@ -2874,8 +2812,8 @@ fn read_index_meta(file: File) -> Result<IndexMetaObject, String> {
 }
 
 /// Loads the index from disk into RAM or MMAP.
-/// * `index_path` - index path.  
-/// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).  
+/// * `index_path` - index path.
+/// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).
 pub(crate) async fn open_shard(
     index_path: &Path,
     mute: bool,
@@ -3455,8 +3393,8 @@ pub(crate) async fn open_shard(
 }
 
 /// Loads the index from disk into RAM or MMAP.
-/// * `index_path` - index path.  
-/// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).  
+/// * `index_path` - index path.
+/// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).
 pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
     let start_time = Instant::now();
 
@@ -3605,32 +3543,6 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
 
 pub(crate) async fn warmup(shard_object_arc: &ShardArc) {
     shard_object_arc.write().await.frequentword_results.clear();
-    let mut query_facets: Vec<QueryFacet> = Vec::new();
-    for facet in shard_object_arc.read().await.facets.iter() {
-        match facet.field_type {
-            FieldType::String16 => query_facets.push(QueryFacet::String16 {
-                field: facet.name.clone(),
-                prefix: "".into(),
-                length: u16::MAX,
-            }),
-            FieldType::String32 => query_facets.push(QueryFacet::String32 {
-                field: facet.name.clone(),
-                prefix: "".into(),
-                length: u32::MAX,
-            }),
-            FieldType::StringSet16 => query_facets.push(QueryFacet::StringSet16 {
-                field: facet.name.clone(),
-                prefix: "".into(),
-                length: u16::MAX,
-            }),
-            FieldType::StringSet32 => query_facets.push(QueryFacet::StringSet32 {
-                field: facet.name.clone(),
-                prefix: "".into(),
-                length: u32::MAX,
-            }),
-            _ => {}
-        }
-    }
 
     let frequent_words = shard_object_arc.read().await.frequent_words.clone();
     for frequentword in frequent_words.iter() {
@@ -3644,7 +3556,7 @@ pub(crate) async fn warmup(shard_object_arc: &ShardArc) {
                 ResultType::TopkCount,
                 false,
                 Vec::new(),
-                query_facets.clone(),
+
                 Vec::new(),
                 Vec::new(),
             )
@@ -3885,7 +3797,7 @@ impl Shard {
                 || facet.field_type == FieldType::StringSet32
             {
                 for (idx, value) in facet.values.iter().enumerate() {
-                    for term in value.1.0.iter() {
+                    for term in value.1.iter() {
                         self.string_set_to_single_term_id_vec[i]
                             .entry(term.to_string())
                             .or_insert(AHashSet::from_iter(vec![idx as u32]))
@@ -3900,7 +3812,6 @@ impl Shard {
     async fn clear_shard(&mut self) {
         let semaphore = self.semaphore.clone();
         let permit = semaphore.acquire_owned().await.unwrap();
-
 
         let mut mmap_options = MmapOptions::new();
         let mmap: MmapMut = mmap_options.len(4).map_anon().unwrap();
@@ -3980,8 +3891,7 @@ impl Shard {
         let _ = fs::remove_file(index_path.join(FACET_VALUES_FILENAME));
         for facet in self.facets.iter_mut() {
             facet.values.clear();
-            facet.min = ValueType::None;
-            facet.max = ValueType::None;
+
         }
 
         if !self.stored_field_names.is_empty() && self.meta.access_type == AccessType::Mmap {
@@ -4037,135 +3947,6 @@ impl Shard {
         drop(permit);
     }
 
-    pub(crate) fn get_index_string_facets_shard(
-        &self,
-        query_facets: Vec<QueryFacet>,
-    ) -> Option<AHashMap<String, Facet>> {
-        if self.facets.is_empty() {
-            return None;
-        }
-
-        let mut result_query_facets = Vec::new();
-        if !query_facets.is_empty() {
-            result_query_facets = vec![ResultFacet::default(); self.facets.len()];
-            for query_facet in query_facets.iter() {
-                match &query_facet {
-                    QueryFacet::String16 {
-                        field,
-                        prefix,
-                        length,
-                    } => {
-                        if let Some(idx) = self.facets_map.get(field)
-                            && self.facets[*idx].field_type == FieldType::String16
-                        {
-                            result_query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                prefix: prefix.clone(),
-                                length: *length as u32,
-                                ..Default::default()
-                            }
-                        }
-                    }
-                    QueryFacet::StringSet16 {
-                        field,
-                        prefix,
-                        length,
-                    } => {
-                        if let Some(idx) = self.facets_map.get(field)
-                            && self.facets[*idx].field_type == FieldType::StringSet16
-                        {
-                            result_query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                prefix: prefix.clone(),
-                                length: *length as u32,
-                                ..Default::default()
-                            }
-                        }
-                    }
-
-                    QueryFacet::String32 {
-                        field,
-                        prefix,
-                        length,
-                    } => {
-                        if let Some(idx) = self.facets_map.get(field)
-                            && self.facets[*idx].field_type == FieldType::String32
-                        {
-                            result_query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                prefix: prefix.clone(),
-                                length: *length,
-                                ..Default::default()
-                            }
-                        }
-                    }
-                    QueryFacet::StringSet32 {
-                        field,
-                        prefix,
-                        length,
-                    } => {
-                        if let Some(idx) = self.facets_map.get(field)
-                            && self.facets[*idx].field_type == FieldType::StringSet32
-                        {
-                            result_query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                prefix: prefix.clone(),
-                                length: *length,
-                                ..Default::default()
-                            }
-                        }
-                    }
-
-                    _ => {}
-                };
-            }
-        }
-
-        let mut facets: AHashMap<String, Facet> = AHashMap::new();
-        for (i, facet) in result_query_facets.iter().enumerate() {
-            if facet.length == 0 || self.facets[i].values.is_empty() {
-                continue;
-            }
-
-            if self.facets[i].field_type == FieldType::StringSet16
-                || self.facets[i].field_type == FieldType::StringSet32
-            {
-                let mut hash_map: AHashMap<String, usize> = AHashMap::new();
-                for value in self.facets[i].values.iter() {
-                    for term in value.1.0.iter() {
-                        *hash_map.entry(term.clone()).or_insert(0) += value.1.1;
-                    }
-                }
-
-                let v = hash_map
-                    .iter()
-                    .sorted_unstable_by(|a, b| b.1.cmp(a.1))
-                    .map(|(a, c)| (a.to_string(), *c))
-                    .filter(|(a, _c)| facet.prefix.is_empty() || a.starts_with(&facet.prefix))
-                    .take(facet.length as usize)
-                    .collect::<Vec<_>>();
-
-                if !v.is_empty() {
-                    facets.insert(facet.field.clone(), v);
-                }
-            } else {
-                let v = self.facets[i]
-                    .values
-                    .iter()
-                    .sorted_unstable_by(|a, b| b.1.cmp(a.1))
-                    .map(|(a, c)| (a.to_string(), c.1))
-                    .filter(|(a, _c)| facet.prefix.is_empty() || a.starts_with(&facet.prefix))
-                    .take(facet.length as usize)
-                    .collect::<Vec<_>>();
-
-                if !v.is_empty() {
-                    facets.insert(facet.field.clone(), v);
-                }
-            }
-        }
-
-        Some(facets)
-    }
 }
 
 impl Index {
@@ -4246,277 +4027,6 @@ impl Index {
     /// Get number of facets defined in the index schema.
     pub fn facets_count(&self) -> usize {
         self.facets.len()
-    }
-
-    /// get_index_facets_minmax: return map of numeric facet fields, each with field name and min/max values.
-    pub async fn index_facets_minmax(&self) -> HashMap<String, MinMaxFieldJson> {
-        let mut facets_minmax: HashMap<String, MinMaxFieldJson> = HashMap::new();
-        for shard in self.shard_vec.iter() {
-            for facet in shard.read().await.facets.iter() {
-                match (&facet.min, &facet.max) {
-                    (ValueType::U8(min), ValueType::U8(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: (*min.min(&(item.min.as_u64().unwrap() as u8))).into(),
-                                max: (*max.min(&(item.max.as_u64().unwrap() as u8))).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::U16(min), ValueType::U16(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: (*min.min(&(item.min.as_u64().unwrap() as u16))).into(),
-                                max: (*max.min(&(item.max.as_u64().unwrap() as u16))).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::U32(min), ValueType::U32(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: (*min.min(&(item.min.as_u64().unwrap() as u32))).into(),
-                                max: (*max.min(&(item.max.as_u64().unwrap() as u32))).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::U64(min), ValueType::U64(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: (*min.min(&(item.min.as_u64().unwrap()))).into(),
-                                max: (*max.min(&(item.max.as_u64().unwrap()))).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::I8(min), ValueType::I8(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: (*min.min(&(item.min.as_i64().unwrap() as i8))).into(),
-                                max: (*max.min(&(item.max.as_i64().unwrap() as i8))).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::I16(min), ValueType::I16(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: (*min.min(&(item.min.as_i64().unwrap() as i16))).into(),
-                                max: (*max.min(&(item.max.as_i64().unwrap() as i16))).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::I32(min), ValueType::I32(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: (*min.min(&(item.min.as_i64().unwrap() as i32))).into(),
-                                max: (*max.min(&(item.max.as_i64().unwrap() as i32))).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::I64(min), ValueType::I64(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: (*min.min(&(item.min.as_i64().unwrap()))).into(),
-                                max: (*max.min(&(item.max.as_i64().unwrap()))).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::Timestamp(min), ValueType::Timestamp(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: (*min.min(&(item.min.as_i64().unwrap()))).into(),
-                                max: (*max.min(&(item.max.as_i64().unwrap()))).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::F32(min), ValueType::F32(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: min.min(item.min.as_f64().unwrap() as f32).into(),
-                                max: max.min(item.max.as_f64().unwrap() as f32).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    (ValueType::F64(min), ValueType::F64(max)) => {
-                        if let Some(item) = facets_minmax.get_mut(&facet.name) {
-                            *item = MinMaxFieldJson {
-                                min: min.min(item.min.as_f64().unwrap()).into(),
-                                max: max.min(item.max.as_f64().unwrap()).into(),
-                            }
-                        } else {
-                            facets_minmax.insert(
-                                facet.name.clone(),
-                                MinMaxFieldJson {
-                                    min: (*min).into(),
-                                    max: (*max).into(),
-                                },
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        facets_minmax
-    }
-
-    /// get_index_string_facets: list of string facet fields, each with field name and a map of unique values and their count (number of times the specific value appears in the whole index).
-    /// values are sorted by their occurrence count within all indexed documents in descending order
-    /// * `query_facets`: Must be set if facet fields should be returned in get_index_facets. If set to Vec::new() then no facet fields are returned.
-    ///   The prefix property of a QueryFacet allows to filter the returned facet values to those matching a given prefix, if there are too many distinct values per facet field.
-    ///   The length property of a QueryFacet allows limiting the number of returned distinct values per facet field, if there are too many distinct values.  The QueryFacet can be used to improve the usability in an UI.
-    ///   If the length property of a QueryFacet is set to 0 then no facet values for that facet are returned.
-    ///   The facet values are sorted by the frequency of the appearance of the value within the indexed documents matching the query in descending order.
-    ///   Example: query_facets = vec![QueryFacet::String16 {field: "language".to_string(),prefix: "ger".to_string(),length: 5},QueryFacet::String16 {field: "brand".to_string(),prefix: "a".to_string(),length: 5}];
-    pub async fn get_index_string_facets(
-        &self,
-        query_facets: Vec<QueryFacet>,
-    ) -> Option<AHashMap<String, Facet>> {
-        if self.facets.is_empty() {
-            return None;
-        }
-
-        let mut result: AHashMap<String, Facet> = AHashMap::new();
-
-        let mut result_facets: AHashMap<String, (AHashMap<String, usize>, u32)> = AHashMap::new();
-        for query_facet in query_facets.iter() {
-            match query_facet {
-                QueryFacet::String16 {
-                    field,
-                    prefix: _,
-                    length,
-                } => {
-                    result_facets.insert(field.into(), (AHashMap::new(), *length as u32));
-                }
-                QueryFacet::StringSet16 {
-                    field,
-                    prefix: _,
-                    length,
-                } => {
-                    result_facets.insert(field.into(), (AHashMap::new(), *length as u32));
-                }
-
-                QueryFacet::String32 {
-                    field,
-                    prefix: _,
-                    length,
-                } => {
-                    result_facets.insert(field.into(), (AHashMap::new(), *length));
-                }
-                QueryFacet::StringSet32 {
-                    field,
-                    prefix: _,
-                    length,
-                } => {
-                    result_facets.insert(field.into(), (AHashMap::new(), *length));
-                }
-
-                _ => {}
-            }
-        }
-
-        for shard_arc in self.shard_vec.iter() {
-            let shard = shard_arc.read().await;
-            if !shard.facets.is_empty() {
-                for facet in shard.facets.iter() {
-                    if let Some(existing) = result_facets.get_mut(&facet.name) {
-                        for (key, value) in facet.values.iter() {
-                            *existing.0.entry(key.clone()).or_insert(0) += value.1;
-                        }
-                    };
-                }
-            }
-        }
-
-        for (key, value) in result_facets.iter_mut() {
-            let sum = value
-                .0
-                .iter()
-                .sorted_unstable_by(|a, b| b.1.cmp(a.1))
-                .map(|(a, c)| (a.clone(), *c))
-                .take(value.1 as usize)
-                .collect::<Vec<_>>();
-            result.insert(key.clone(), sum);
-        }
-
-        Some(result)
     }
 
     /// Reset the index to empty, while maintaining the schema.
@@ -4753,7 +4263,7 @@ impl DeleteDocumentsByQuery for IndexArc {
                 ResultType::Topk,
                 include_uncommitted,
                 field_filter,
-                Vec::new(),
+
                 facet_filter,
                 result_sort,
             )
@@ -5113,213 +4623,56 @@ impl IndexDocumentShard2 for ShardArc {
                     match facet.field_type {
                         FieldType::U8 => {
                             let value = field_value.as_u64().unwrap_or_default() as u8;
-                            match (&facet.min, &facet.max) {
-                                (ValueType::U8(min), ValueType::U8(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::U8(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::U8(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::U8(value);
-                                    facet.max = ValueType::U8(value);
-                                }
-                                _ => {}
-                            }
+
                             shard_mut.facets_file_mmap[address] = value
                         }
                         FieldType::U16 => {
                             let value = field_value.as_u64().unwrap_or_default() as u16;
-                            match (&facet.min, &facet.max) {
-                                (ValueType::U16(min), ValueType::U16(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::U16(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::U16(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::U16(value);
-                                    facet.max = ValueType::U16(value);
-                                }
-                                _ => {}
-                            }
+
                             write_u16(value, &mut shard_mut.facets_file_mmap, address)
                         }
                         FieldType::U32 => {
                             let value = field_value.as_u64().unwrap_or_default() as u32;
-                            match (&facet.min, &facet.max) {
-                                (ValueType::U32(min), ValueType::U32(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::U32(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::U32(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::U32(value);
-                                    facet.max = ValueType::U32(value);
-                                }
-                                _ => {}
-                            }
+
                             write_u32(value, &mut shard_mut.facets_file_mmap, address)
                         }
                         FieldType::U64 => {
                             let value = field_value.as_u64().unwrap_or_default();
-                            match (&facet.min, &facet.max) {
-                                (ValueType::U64(min), ValueType::U64(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::U64(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::U64(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::U64(value);
-                                    facet.max = ValueType::U64(value);
-                                }
-                                _ => {}
-                            }
+
                             write_u64(value, &mut shard_mut.facets_file_mmap, address)
                         }
                         FieldType::I8 => {
                             let value = field_value.as_i64().unwrap_or_default() as i8;
-                            match (&facet.min, &facet.max) {
-                                (ValueType::I8(min), ValueType::I8(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::I8(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::I8(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::I8(value);
-                                    facet.max = ValueType::I8(value);
-                                }
-                                _ => {}
-                            }
+
                             write_i8(value, &mut shard_mut.facets_file_mmap, address)
                         }
                         FieldType::I16 => {
                             let value = field_value.as_i64().unwrap_or_default() as i16;
-                            match (&facet.min, &facet.max) {
-                                (ValueType::I16(min), ValueType::I16(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::I16(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::I16(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::I16(value);
-                                    facet.max = ValueType::I16(value);
-                                }
-                                _ => {}
-                            }
+
                             write_i16(value, &mut shard_mut.facets_file_mmap, address)
                         }
                         FieldType::I32 => {
                             let value = field_value.as_i64().unwrap_or_default() as i32;
-                            match (&facet.min, &facet.max) {
-                                (ValueType::I32(min), ValueType::I32(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::I32(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::I32(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::I32(value);
-                                    facet.max = ValueType::I32(value);
-                                }
-                                _ => {}
-                            }
+
                             write_i32(value, &mut shard_mut.facets_file_mmap, address)
                         }
                         FieldType::I64 => {
                             let value = field_value.as_i64().unwrap_or_default();
-                            match (&facet.min, &facet.max) {
-                                (ValueType::I64(min), ValueType::I64(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::I64(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::I64(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::I64(value);
-                                    facet.max = ValueType::I64(value);
-                                }
-                                _ => {}
-                            }
+
                             write_i64(value, &mut shard_mut.facets_file_mmap, address)
                         }
                         FieldType::Timestamp => {
                             let value = field_value.as_i64().unwrap_or_default();
-                            match (&facet.min, &facet.max) {
-                                (ValueType::Timestamp(min), ValueType::Timestamp(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::Timestamp(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::Timestamp(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::Timestamp(value);
-                                    facet.max = ValueType::Timestamp(value);
-                                }
-                                _ => {}
-                            }
 
                             write_i64(value, &mut shard_mut.facets_file_mmap, address);
                         }
                         FieldType::F32 => {
                             let value = field_value.as_f64().unwrap_or_default() as f32;
-                            match (&facet.min, &facet.max) {
-                                (ValueType::F32(min), ValueType::F32(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::F32(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::F32(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::F32(value);
-                                    facet.max = ValueType::F32(value);
-                                }
-                                _ => {}
-                            }
 
                             write_f32(value, &mut shard_mut.facets_file_mmap, address)
                         }
                         FieldType::F64 => {
                             let value = field_value.as_f64().unwrap_or_default();
-                            match (&facet.min, &facet.max) {
-                                (ValueType::F64(min), ValueType::F64(max)) => {
-                                    if value < *min {
-                                        facet.min = ValueType::F64(value);
-                                    }
-                                    if value > *max {
-                                        facet.max = ValueType::F64(value);
-                                    }
-                                }
-                                (ValueType::None, ValueType::None) => {
-                                    facet.min = ValueType::F64(value);
-                                    facet.max = ValueType::F64(value);
-                                }
-                                _ => {}
-                            }
 
                             write_f64(value, &mut shard_mut.facets_file_mmap, address)
                         }
@@ -5330,7 +4683,7 @@ impl IndexDocumentShard2 for ShardArc {
                             let key_string = key.clone();
                             let key = vec![key];
 
-                            facet.values.entry(key_string.clone()).or_insert((key, 0)).1 += 1;
+                            facet.values.entry(key_string.clone()).or_insert(key);
 
                             let facet_value_id =
                                 facet.values.get_index_of(&key_string).unwrap() as u16;
@@ -5343,7 +4696,7 @@ impl IndexDocumentShard2 for ShardArc {
                             key.sort();
 
                             let key_string = key.join("_");
-                            facet.values.entry(key_string.clone()).or_insert((key, 0)).1 += 1;
+                            facet.values.entry(key_string.clone()).or_insert(key);
 
                             let facet_value_id =
                                 facet.values.get_index_of(&key_string).unwrap() as u16;
@@ -5357,7 +4710,7 @@ impl IndexDocumentShard2 for ShardArc {
                             let key_string = key.clone();
                             let key = vec![key];
 
-                            facet.values.entry(key_string.clone()).or_insert((key, 0)).1 += 1;
+                            facet.values.entry(key_string.clone()).or_insert(key);
 
                             let facet_value_id =
                                 facet.values.get_index_of(&key_string).unwrap() as u32;
@@ -5370,13 +4723,12 @@ impl IndexDocumentShard2 for ShardArc {
                             key.sort();
 
                             let key_string = key.join("_");
-                            facet.values.entry(key_string.clone()).or_insert((key, 0)).1 += 1;
+                            facet.values.entry(key_string.clone()).or_insert(key);
 
                             let facet_value_id =
                                 facet.values.get_index_of(&key_string).unwrap() as u32;
                             write_u32(facet_value_id, &mut shard_mut.facets_file_mmap, address)
                         }
-
 
                         _ => {}
                     };

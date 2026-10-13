@@ -1,6 +1,6 @@
 use crate::INDEX_RUNTIME;
 use crate::index::{
-    DOCUMENT_LENGTH_COMPRESSION, Facet, FieldType, NgramType, ResultFacet, Shard,
+    DOCUMENT_LENGTH_COMPRESSION, FieldType, NgramType, Shard,
     ShardArc,
 };
 use crate::iterator::{search_iterator_index, search_iterator_shard};
@@ -44,7 +44,6 @@ use std::sync::{
 use std::{cmp, mem};
 #[cfg(feature = "api-schema")]
 use utoipa::ToSchema;
-
 
 /// Specifies the default QueryType: The following query types are supported:
 /// - **Union** (OR, disjunction),
@@ -113,8 +112,7 @@ pub enum ResultType {
 
 pub(crate) struct SearchResult<'a> {
     pub topk_candidates: MinHeap<'a>,
-    pub query_facets: Vec<ResultFacet>,
-    pub skip_facet_count: bool,
+
 }
 
 /// Contains the results returned when searching the index.
@@ -144,201 +142,7 @@ pub struct ResultObject {
 
     /// List of search results: doc ID and BM25 score
     pub results: Vec<Result>,
-    /// List of facet fields: field name and vector of unique values and their counts.
-    /// Unique values and their counts are only accurate if result_type=TopkCount or ResultType=Count, but not for ResultType=Topk
-    pub facets: AHashMap<String, Facet>,
-}
 
-/// Create query_list and non_unique_query_list
-/// blockwise intersection : if the corresponding blocks with a 65k docid range for each term have at least a single docid,
-/// then the intersect_docid within a single block is executed  (=segments?)
-/// specifies how to count the frequency of numerical facet field values
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-pub enum RangeType {
-    /// within the specified range
-    #[default]
-    CountWithinRange,
-    /// within the range and all ranges above
-    CountAboveRange,
-    /// within the range and all ranges below
-    CountBelowRange,
-}
-
-/// Defines the query facets:
-/// - string facet field values
-/// - range segments for numerical facet field values
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-pub enum QueryFacet {
-    /// Range segment definition for numerical facet field values of type u8
-    U8 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, u8)>,
-    },
-    /// Range segment definition for numerical facet field values of type u16
-    U16 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, u16)>,
-    },
-    /// Range segment definition for numerical facet field values of type u32
-    U32 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, u32)>,
-    },
-    /// Range segment definition for numerical facet field values of type u64
-    U64 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, u64)>,
-    },
-    /// Range segment definition for numerical facet field values of type i8
-    I8 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, i8)>,
-    },
-    /// Range segment definition for numerical facet field values of type i16
-    I16 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, i16)>,
-    },
-    /// Range segment definition for numerical facet field values of type i32
-    I32 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, i32)>,
-    },
-    /// Range segment definition for numerical facet field values of type i64
-    I64 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, i64)>,
-    },
-    /// Range segment definition for numerical facet field values of type Unix timestamp
-    Timestamp {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, i64)>,
-    },
-    /// Range segment definition for numerical facet field values of type f32
-    F32 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, f32)>,
-    },
-    /// Range segment definition for numerical facet field values of type f64
-    F64 {
-        /// field name
-        field: String,
-        /// range type (CountWithinRange,CountBelowRange,CountAboveRange)
-        range_type: RangeType,
-        /// range label, range start
-        ranges: Vec<(String, f64)>,
-    },
-    /// Facet field values of type string
-    String16 {
-        /// field name
-        field: String,
-        /// Prefix filter of facet values to return
-        prefix: String,
-        /// maximum number of facet values to return
-        length: u16,
-    },
-    /// Facet field values of type string
-    String32 {
-        /// field name
-        field: String,
-        /// Prefix filter of facet values to return
-        prefix: String,
-        /// maximum number of facet values to return
-        length: u32,
-    },
-    /// Facet field values of type string set
-    StringSet16 {
-        /// field name
-        field: String,
-        /// Prefix filter of facet values to return
-        prefix: String,
-        /// maximum number of facet values to return
-        length: u16,
-    },
-    /// Facet field values of type string set
-    StringSet32 {
-        /// field name
-        field: String,
-        /// Prefix filter of facet values to return
-        prefix: String,
-        /// maximum number of facet values to return
-        length: u32,
-    },
-    /// No query facet
-    #[default]
-    None,
-}
-
-/// Defines the range segments for numerical facet field values
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
-pub enum Ranges {
-    /// U8 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    U8(RangeType, Vec<(String, u8)>),
-    /// U16 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    U16(RangeType, Vec<(String, u16)>),
-    /// U32 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    U32(RangeType, Vec<(String, u32)>),
-    /// U64 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    U64(RangeType, Vec<(String, u64)>),
-    /// I8 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    I8(RangeType, Vec<(String, i8)>),
-    /// I16 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    I16(RangeType, Vec<(String, i16)>),
-    /// I32 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    I32(RangeType, Vec<(String, i32)>),
-    /// I64 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    I64(RangeType, Vec<(String, i64)>),
-    /// Unix timestamp (number of seconds since 1 January 1970) range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    Timestamp(RangeType, Vec<(String, i64)>),
-    /// F32 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    F32(RangeType, Vec<(String, f32)>),
-    /// F64 range filter: range type (CountWithinRange,CountBelowRange,CountAboveRange), range label, range start
-    F64(RangeType, Vec<(String, f64)>),
-    #[default]
-    /// No range filter
-    None,
 }
 
 /// FacetValue: Facet field value types
@@ -379,10 +183,10 @@ pub enum FacetValue {
 }
 
 impl Index {
-    /// get_facet_value: Returns value from facet field for a doc_id even if schema stored=false (field not stored in document JSON).  
+    /// get_facet_value: Returns value from facet field for a doc_id even if schema stored=false (field not stored in document JSON).
     /// Facet fields are more compact than fields stored in document JSON.
     /// Strings are stored more compact as indices to a unique term dictionary. Numbers are stored binary, not as strings.
-    /// Facet fields are faster because no document loading, decompression and JSON decoding is required.  
+    /// Facet fields are faster because no document loading, decompression and JSON decoding is required.
     /// Facet fields are always memory mapped, internally always stored with fixed byte length layout, regardless of string size.
     #[inline]
     pub async fn get_facet_value(self: &Index, field: &str, doc_id: usize) -> FacetValue {
@@ -488,7 +292,7 @@ impl Shard {
                         .get_index((facet_id).into())
                         .unwrap();
 
-                    FacetValue::String(facet_value.1.0[0].clone())
+                    FacetValue::String(facet_value.1[0].clone())
                 }
 
                 FieldType::StringSet16 => {
@@ -502,7 +306,7 @@ impl Shard {
                         .get_index((facet_id).into())
                         .unwrap();
 
-                    FacetValue::StringSet(facet_value.1.0.clone())
+                    FacetValue::StringSet(facet_value.1.clone())
                 }
 
                 FieldType::String32 => {
@@ -516,7 +320,7 @@ impl Shard {
                         .get_index(facet_id as usize)
                         .unwrap();
 
-                    FacetValue::String(facet_value.1.0[0].clone())
+                    FacetValue::String(facet_value.1[0].clone())
                 }
 
                 FieldType::StringSet32 => {
@@ -530,9 +334,8 @@ impl Shard {
                         .get_index(facet_id as usize)
                         .unwrap();
 
-                    FacetValue::StringSet(facet_value.1.0.clone())
+                    FacetValue::StringSet(facet_value.1.clone())
                 }
-
 
                 _ => FacetValue::None,
             }
@@ -840,7 +643,7 @@ pub(crate) struct ResultSortIndex {
 ///   * **Not**, except, minus `-`.
 ///
 /// The default QueryType is superseded if the query parser detects that a different query type is specified within the query string (`+` `-` `""`).
-///   
+///
 /// Boolean queries are specified in the search method either via the query_type parameter or via operator chars within the query parameter.
 /// The interpretation of operator chars within the query string (set `query_type=QueryType::Union`) allows to specify advanced search operations via a simple search box.
 ///
@@ -892,20 +695,8 @@ pub(crate) struct ResultSortIndex {
 /// * `result_type`: type of search results to return: Count, Topk, TopkCount.
 /// * `include_uncommitted`: true realtime search: include indexed documents which where not yet committed into search results.
 /// * `field_filter`: Specify field names where to search at querytime, whereas SchemaField.indexed is set at indextime. If set to Vec::new() then all indexed fields are searched.
-/// * `query_facets`: Must be set if facets should be returned in ResultObject. If set to Vec::new() then no facet fields are returned.
-///   Facet fields are only collected, counted and returned for ResultType::Count and ResultType::TopkCount, but not for ResultType::Topk.
-///   The prefix property of a QueryFacet allows at query time to filter the returned facet values to those matching a given prefix, if there are too many distinct values per facet field.
-///   The length property of a QueryFacet allows at query time limiting the number of returned distinct values per facet field, if there are too many distinct values.  The QueryFacet can be used to improve the usability in an UI.
-///   If the length property of a QueryFacet is set to 0 then no facet values for that facet are collected, counted and returned at query time. That decreases the query latency significantly.
-///   The facet values are sorted by the frequency of the appearance of the value within the indexed documents matching the query in descending order.
-///   Examples:
-///   query_facets = vec![QueryFacet::String16 {field: "language".into(),prefix: "ger".into(),length: 5},QueryFacet::String16 {field: "brand".into(),prefix: "a".into(),length: 5}];
-///   query_facets = vec![QueryFacet::U8 {field: "age".into(), range_type: RangeType::CountWithinRange, ranges: vec![("0-20".into(), 0),("20-40".into(), 20), ("40-60".into(), 40),("60-80".into(), 60), ("80-100".into(), 80)]}];
-///
 /// * `facet_filter`: Search results are filtered to documents matching specific string values or numerical ranges in the facet fields. If set to Vec::new() then result are not facet filtered.
 ///   The filter parameter filters the returned results to those documents both matching the query AND matching for all (boolean AND) stated facet filter fields at least one (boolean OR) of the stated values.
-///   If the query is changed and/or the facet filter is changed then both search results and facet counts are changed:
-///   the query facets are counted over all documents matching the query and the facet filter.
 ///   Examples:
 ///   facet_filter=vec![FacetFilter::String{field:"language".into(),filter:vec!["german".into()]},FacetFilter::String{field:"brand".into(),filter:vec!["apple".into(),"google".into()]}];
 ///   facet_filter=vec![FacetFilter::U8{field:"age".into(),filter: 21..65}];
@@ -919,14 +710,7 @@ pub(crate) struct ResultSortIndex {
 ///   Sort is only enabled on facet fields that are defined in schema at create_index!
 ///   Examples:
 ///   result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending},ResultSort {field: "language".into(), order: SortOrder::Ascending}];
-///  
-///   If query_string is empty and enable_empty_query is false, then no query is executed and index facets (collected at index time) are returned.
-///   Otherwise query facets (collected at query time) are returned, counted over the documents matching the query and the facet filter.
-///   Facets are defined in 3 different places:
-///   the facet fields are defined in schema at create_index,
-///   the facet field values are set in index_document at index time,
-///   the query_facets/facet_filter search parameters are specified at query time.
-///   Facets are then returned in the search result object.
+///
 pub trait Search {
     /// Search the index for all indexed documents, both for committed and uncommitted documents.
     /// The latter enables true realtime search: documents are available for search in exact the same millisecond they are indexed.
@@ -940,7 +724,7 @@ pub trait Search {
     ///   * **Not**, except, minus `-`.
     ///
     /// The default QueryType is superseded if the query parser detects that a different query type is specified within the query string (`+` `-` `""`).
-    ///   
+    ///
     /// Boolean queries are specified in the search method either via the query_type parameter or via operator chars within the query parameter.
     /// The interpretation of operator chars within the query string (set `query_type=QueryType::Union`) allows to specify advanced search operations via a simple search box.
     ///
@@ -992,20 +776,8 @@ pub trait Search {
     /// * `result_type`: type of search results to return: Count, Topk, TopkCount.
     /// * `include_uncommitted`: true realtime search: include indexed documents which where not yet committed into search results.
     /// * `field_filter`: Specify field names where to search at querytime, whereas SchemaField.indexed is set at indextime. If set to Vec::new() then all indexed fields are searched.
-    /// * `query_facets`: Must be set if facets should be returned in ResultObject. If set to Vec::new() then no facet fields are returned.
-    ///   Facet fields are only collected, counted and returned for ResultType::Count and ResultType::TopkCount, but not for ResultType::Topk.
-    ///   The prefix property of a QueryFacet allows at query time to filter the returned facet values to those matching a given prefix, if there are too many distinct values per facet field.
-    ///   The length property of a QueryFacet allows at query time limiting the number of returned distinct values per facet field, if there are too many distinct values.  The QueryFacet can be used to improve the usability in an UI.
-    ///   If the length property of a QueryFacet is set to 0 then no facet values for that facet are collected, counted and returned at query time. That decreases the query latency significantly.
-    ///   The facet values are sorted by the frequency of the appearance of the value within the indexed documents matching the query in descending order.
-    ///   Examples:
-    ///   query_facets = vec![QueryFacet::String16 {field: "language".into(),prefix: "ger".into(),length: 5},QueryFacet::String16 {field: "brand".into(),prefix: "a".into(),length: 5}];
-    ///   query_facets = vec![QueryFacet::U8 {field: "age".into(), range_type: RangeType::CountWithinRange, ranges: vec![("0-20".into(), 0),("20-40".into(), 20), ("40-60".into(), 40),("60-80".into(), 60), ("80-100".into(), 80)]}];
-    ///
     /// * `facet_filter`: Search results are filtered to documents matching specific string values or numerical ranges in the facet fields. If set to Vec::new() then result are not facet filtered.
     ///   The filter parameter filters the returned results to those documents both matching the query AND matching for all (boolean AND) stated facet filter fields at least one (boolean OR) of the stated values.
-    ///   If the query is changed and/or the facet filter is changed then both search results and facet counts are changed:
-    ///   the query facets are counted over all documents matching the query and the facet filter.
     ///   Examples:
     ///   facet_filter=vec![FacetFilter::String{field:"language".into(),filter:vec!["german".into()]},FacetFilter::String{field:"brand".into(),filter:vec!["apple".into(),"google".into()]}];
     ///   facet_filter=vec![FacetFilter::U8{field:"age".into(),filter: 21..65}];
@@ -1032,7 +804,7 @@ pub trait Search {
         result_type: ResultType,
         include_uncommitted: bool,
         field_filter: Vec<String>,
-        query_facets: Vec<QueryFacet>,
+
         facet_filter: Vec<FacetFilter>,
         result_sort: Vec<ResultSort>,
     ) -> ResultObject;
@@ -1051,7 +823,7 @@ impl Search for IndexArc {
         result_type: ResultType,
         include_uncommitted: bool,
         field_filter: Vec<String>,
-        query_facets: Vec<QueryFacet>,
+
         facet_filter: Vec<FacetFilter>,
         result_sort: Vec<ResultSort>,
     ) -> ResultObject {
@@ -1074,7 +846,7 @@ impl Search for IndexArc {
         if enable_empty_query
             && query_string.is_empty()
             && query_vector.is_none()
-            && query_facets.is_empty()
+
             && facet_filter.is_empty()
             && (result_sort.is_empty()
                 || (result_sort.len() == 1
@@ -1103,7 +875,7 @@ impl Search for IndexArc {
                     result_type,
                     include_uncommitted,
                     field_filter,
-                    query_facets,
+
                     facet_filter,
                     result_sort,
                 )
@@ -1278,7 +1050,7 @@ impl Search for IndexArc {
             let query_mode_clone = search_mode.clone();
             let result_type_clone = result_type.clone();
             let field_filter_clone = field_filter.clone();
-            let query_facets_clone = query_facets.clone();
+
             let facet_filter_clone = facet_filter.clone();
             let result_sort_clone = result_sort.clone();
             let shard_id = shard.read().await.meta.id;
@@ -1296,7 +1068,7 @@ impl Search for IndexArc {
                                 result_type_clone,
                                 include_uncommitted,
                                 field_filter_clone,
-                                query_facets_clone,
+
                                 facet_filter_clone,
                                 result_sort_clone,
                             )
@@ -1345,7 +1117,7 @@ impl Search for IndexArc {
                                 result_type_clone,
                                 include_uncommitted,
                                 field_filter_clone.clone(),
-                                query_facets_clone,
+
                                 facet_filter_clone,
                                 result_sort_clone,
                             )
@@ -1379,122 +1151,6 @@ impl Search for IndexArc {
         }
 
         let mut result_object: ResultObject = Default::default();
-
-        let mut result_facets: AHashMap<String, (AHashMap<String, usize>, u32)> = AHashMap::new();
-        if result_type != ResultType::Topk {
-            for query_facet in query_facets.iter() {
-                match query_facet {
-                    QueryFacet::String16 {
-                        field,
-                        prefix: _,
-                        length,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), *length as u32));
-                    }
-                    QueryFacet::StringSet16 {
-                        field,
-                        prefix: _,
-                        length,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), *length as u32));
-                    }
-                    QueryFacet::String32 {
-                        field,
-                        prefix: _,
-                        length,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), *length));
-                    }
-                    QueryFacet::StringSet32 {
-                        field,
-                        prefix: _,
-                        length,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), *length));
-                    }
-                    QueryFacet::Timestamp {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-
-                    QueryFacet::U8 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-                    QueryFacet::U16 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-                    QueryFacet::U32 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-                    QueryFacet::U64 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-                    QueryFacet::I8 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-                    QueryFacet::I16 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-                    QueryFacet::I32 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-                    QueryFacet::I64 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-                    QueryFacet::F32 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-                    QueryFacet::F64 {
-                        field,
-                        range_type: _,
-                        ranges: _,
-                    } => {
-                        result_facets.insert(field.into(), (AHashMap::new(), u16::MAX as u32));
-                    }
-
-                    _ => {}
-                }
-            }
-        }
 
         let mut result_object_results_lexical: Vec<Result> = Vec::new();
         let mut result_object_results_vector: Vec<Result> = Vec::new();
@@ -1553,17 +1209,7 @@ impl Search for IndexArc {
                     };
                 }
             };
-            if let Some(rlo_shard_lexical) = rlo_shard_hybrid_options.0
-                && !rlo_shard_lexical.facets.is_empty()
-            {
-                for facet in rlo_shard_lexical.facets.iter() {
-                    if let Some(existing) = result_facets.get_mut(facet.0) {
-                        for (key, value) in facet.1.iter() {
-                            *existing.0.entry(key.clone()).or_insert(0) += value;
-                        }
-                    };
-                }
-            }
+
         }
         if aggregate_results {
             match search_mode {
@@ -1660,17 +1306,6 @@ impl Search for IndexArc {
                     result_object.results = rrf_results.into_values().collect();
                 }
             };
-        }
-
-        for (key, value) in result_facets.iter_mut() {
-            let sum = value
-                .0
-                .iter()
-                .sorted_unstable_by(|a, b| b.1.cmp(a.1))
-                .map(|(a, c)| (a.clone(), *c))
-                .take(value.1 as usize)
-                .collect::<Vec<_>>();
-            result_object.facets.insert(key.clone(), sum);
         }
 
         if aggregate_results {
@@ -2051,7 +1686,7 @@ pub(crate) trait SearchLexicalShard {
         result_type: ResultType,
         include_uncommitted: bool,
         field_filter: Vec<String>,
-        query_facets: Vec<QueryFacet>,
+
         facet_filter: Vec<FacetFilter>,
         result_sort: Vec<ResultSort>,
     ) -> ResultObject;
@@ -2068,7 +1703,7 @@ impl SearchLexicalShard for ShardArc {
         result_type: ResultType,
         include_uncommitted: bool,
         field_filter: Vec<String>,
-        query_facets: Vec<QueryFacet>,
+
         facet_filter: Vec<FacetFilter>,
         result_sort: Vec<ResultSort>,
     ) -> ResultObject {
@@ -2079,11 +1714,6 @@ impl SearchLexicalShard for ShardArc {
         }
 
         let mut query_type_mut = query_type_default;
-        let facet_cap = if shard_ref.shard_number == 1 {
-            0
-        } else {
-            u32::MAX
-        };
 
         let mut result_type = result_type;
         if length == 0 && result_type != ResultType::Count {
@@ -2149,8 +1779,7 @@ impl SearchLexicalShard for ShardArc {
                 query_string.is_empty(),
                 &result_sort_index,
             ),
-            query_facets: Vec::new(),
-            skip_facet_count: false,
+
         };
 
         let mut facet_filter_sparse: Vec<FilterSparse> = Vec::new();
@@ -2322,281 +1951,6 @@ impl SearchLexicalShard for ShardArc {
                     }
 
                 }
-            }
-        }
-
-        let mut is_range_facet = false;
-        if !query_facets.is_empty() {
-            search_result.query_facets = vec![ResultFacet::default(); shard_ref.facets.len()];
-            for query_facet in query_facets.iter() {
-                match &query_facet {
-                    QueryFacet::U8 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::U8
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::U8(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::U16 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::U16
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::U16(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::U32 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::U32
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::U32(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::U64 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::U64
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::U64(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::I8 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::I8
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::I8(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::I16 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::I16
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::I16(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::I32 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::I32
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::I32(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::I64 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::I64
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::I64(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::Timestamp {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::Timestamp
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::Timestamp(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::F32 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::F32
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::F32(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::F64 {
-                        field,
-                        range_type,
-                        ranges,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::F64
-                            && !ranges.is_empty()
-                        {
-                            is_range_facet = true;
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                length: u16::MAX as u32,
-                                ranges: Ranges::F64(range_type.clone(), ranges.clone()),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                    QueryFacet::String16 {
-                        field,
-                        prefix,
-                        length,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::String16
-                        {
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                prefix: prefix.clone(),
-                                length: *length as u32,
-                                ..Default::default()
-                            }
-                        }
-                    }
-                    QueryFacet::StringSet16 {
-                        field,
-                        prefix,
-                        length,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::StringSet16
-                        {
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                prefix: prefix.clone(),
-                                length: *length as u32,
-                                ..Default::default()
-                            }
-                        }
-                    }
-
-                    QueryFacet::String32 {
-                        field,
-                        prefix,
-                        length,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::String32
-                        {
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                prefix: prefix.clone(),
-                                length: *length,
-                                ..Default::default()
-                            }
-                        }
-                    }
-                    QueryFacet::StringSet32 {
-                        field,
-                        prefix,
-                        length,
-                    } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::StringSet32
-                        {
-                            search_result.query_facets[*idx] = ResultFacet {
-                                field: field.clone(),
-                                prefix: prefix.clone(),
-                                length: *length,
-                                ..Default::default()
-                            }
-                        }
-                    }
-
-
-                    QueryFacet::None => {}
-                };
             }
         }
 
@@ -2979,7 +2333,6 @@ impl SearchLexicalShard for ShardArc {
                     && field_filter_set.is_empty()
                     && shard_ref.delete_hashset.is_empty()
                     && facet_filter_sparse.is_empty()
-                    && !is_range_facet
                     && result_sort_index.is_empty()
                     && let Some(stopword_result_object) = shard_ref
                         .frequentword_results
@@ -3002,30 +2355,6 @@ impl SearchLexicalShard for ShardArc {
                             result_object.results.truncate(length);
                         }
                     }
-                    if !search_result.query_facets.is_empty() && result_type != ResultType::Topk {
-                        let mut facets: AHashMap<String, Facet> = AHashMap::new();
-                        for facet in search_result.query_facets.iter() {
-                            if facet.length == 0
-                                || stopword_result_object.facets[&facet.field].is_empty()
-                            {
-                                continue;
-                            }
-
-                            let v = stopword_result_object.facets[&facet.field]
-                                .iter()
-                                .sorted_unstable_by(|a, b| b.1.cmp(&a.1))
-                                .map(|(a, c)| (a.clone(), *c))
-                                .filter(|(a, _c)| {
-                                    facet.prefix.is_empty() || a.starts_with(&facet.prefix)
-                                })
-                                .take(facet.length.max(facet_cap) as usize)
-                                .collect::<Vec<_>>();
-                            if !v.is_empty() {
-                                facets.insert(facet.field.clone(), v);
-                            }
-                        }
-                        result_object.facets = facets;
-                    };
 
                     return result_object;
                 }
@@ -3045,7 +2374,7 @@ impl SearchLexicalShard for ShardArc {
                 )
                 .await;
             } else if query_type_mut == QueryType::Union {
-                search_result.skip_facet_count = true;
+
                 if result_type == ResultType::Count && query_list_len != 2 {
                     union_blockid(
                         &shard_ref,
@@ -3062,7 +2391,7 @@ impl SearchLexicalShard for ShardArc {
                     .await;
                 } else if SPEEDUP_FLAG
                     && query_list_len == 2
-                    && search_result.query_facets.is_empty()
+
                     && facet_filter_sparse.is_empty()
                     && search_result.topk_candidates.result_sort.is_empty()
                 {
@@ -3182,168 +2511,6 @@ impl SearchLexicalShard for ShardArc {
 
         result_object.result_count_total = result_count_uncommitted_arc.load(Ordering::Relaxed)
             + result_count_arc.load(Ordering::Relaxed);
-
-        if !search_result.query_facets.is_empty() {
-            result_object.facets = if query_string.is_empty() && !enable_empty_query {
-                shard_ref
-                    .get_index_string_facets_shard(query_facets)
-                    .unwrap_or_default()
-            } else {
-                let mut facets: AHashMap<String, Facet> = AHashMap::new();
-                for (i, facet) in search_result.query_facets.iter_mut().enumerate() {
-                    if facet.length == 0 || facet.values.is_empty() {
-                        continue;
-                    }
-
-                    let v = if facet.ranges == Ranges::None {
-                        if shard_ref.facets[i].values.is_empty() {
-                            continue;
-                        }
-
-                        if shard_ref.facets[i].field_type == FieldType::StringSet16
-                            || shard_ref.facets[i].field_type == FieldType::StringSet32
-                        {
-                            let mut hash_map: AHashMap<String, usize> = AHashMap::new();
-                            for value in facet.values.iter() {
-                                let value2 = shard_ref.facets[i]
-                                    .values
-                                    .get_index(*value.0 as usize)
-                                    .unwrap();
-
-                                for term in value2.1.0.iter() {
-                                    *hash_map.entry(term.clone()).or_insert(0) += value.1;
-                                }
-                            }
-                            hash_map
-                                .iter()
-                                .sorted_unstable_by(|a, b| b.1.cmp(a.1))
-                                .map(|(a, c)| (a.clone(), *c))
-                                .filter(|(a, _c)| {
-                                    facet.prefix.is_empty() || a.starts_with(&facet.prefix)
-                                })
-                                .take(facet.length.max(facet_cap) as usize)
-                                .collect::<Vec<_>>()
-                        } else {
-                            facet
-                                .values
-                                .iter()
-                                .sorted_unstable_by(|a, b| b.1.cmp(a.1))
-                                .map(|(a, c)| {
-                                    (
-                                        shard_ref.facets[i]
-                                            .values
-                                            .get_index(*a as usize)
-                                            .unwrap()
-                                            .0
-                                            .clone(),
-                                        *c,
-                                    )
-                                })
-                                .filter(|(a, _c)| {
-                                    facet.prefix.is_empty() || a.starts_with(&facet.prefix)
-                                })
-                                .take(facet.length.max(facet_cap) as usize)
-                                .collect::<Vec<_>>()
-                        }
-                    } else {
-                        let range_type = match &facet.ranges {
-                            Ranges::U8(range_type, _ranges) => range_type.clone(),
-                            Ranges::U16(range_type, _ranges) => range_type.clone(),
-                            Ranges::U32(range_type, _ranges) => range_type.clone(),
-                            Ranges::U64(range_type, _ranges) => range_type.clone(),
-                            Ranges::I8(range_type, _ranges) => range_type.clone(),
-                            Ranges::I16(range_type, _ranges) => range_type.clone(),
-                            Ranges::I32(range_type, _ranges) => range_type.clone(),
-                            Ranges::I64(range_type, _ranges) => range_type.clone(),
-                            Ranges::Timestamp(range_type, _ranges) => range_type.clone(),
-                            Ranges::F32(range_type, _ranges) => range_type.clone(),
-                            Ranges::F64(range_type, _ranges) => range_type.clone(),
-                            _ => RangeType::CountWithinRange,
-                        };
-
-                        match range_type {
-                            RangeType::CountAboveRange => {
-                                let mut sum = 0usize;
-                                for value in facet
-                                    .values
-                                    .iter_mut()
-                                    .sorted_unstable_by(|a, b| b.0.cmp(a.0))
-                                {
-                                    sum += *value.1;
-                                    *value.1 = sum;
-                                }
-                            }
-                            RangeType::CountBelowRange => {
-                                let mut sum = 0usize;
-                                for value in facet
-                                    .values
-                                    .iter_mut()
-                                    .sorted_unstable_by(|a, b| a.0.cmp(b.0))
-                                {
-                                    sum += *value.1;
-                                    *value.1 = sum;
-                                }
-                            }
-                            RangeType::CountWithinRange => {}
-                        }
-
-                        facet
-                            .values
-                            .iter()
-                            .sorted_unstable_by(|a, b| a.0.cmp(b.0))
-                            .filter_map(|(a, c)| {
-                                let range_index = *a as usize;
-                                let label = match &facet.ranges {
-                                    Ranges::U8(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::U16(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::U32(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::U64(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::I8(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::I16(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::I32(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::I64(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::Timestamp(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::F32(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    Ranges::F64(_range_type, ranges) => {
-                                        ranges.get(range_index).map(|value| value.0.clone())
-                                    }
-                                    _ => return None,
-                                }?;
-
-                                Some((label, *c))
-                            })
-                            .filter(|(a, _c)| {
-                                facet.prefix.is_empty() || a.starts_with(&facet.prefix)
-                            })
-                            .collect::<Vec<_>>()
-                    };
-                    if !v.is_empty() {
-                        facets.insert(facet.field.clone(), v);
-                    }
-                }
-                facets
-            };
-        }
 
         result_object
     }

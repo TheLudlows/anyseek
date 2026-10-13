@@ -80,7 +80,7 @@ async fn search(
             result_type,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )

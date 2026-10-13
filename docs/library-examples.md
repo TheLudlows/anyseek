@@ -43,9 +43,9 @@ create schema (from SchemaField)
 use seekstorm::index::{SchemaField,FieldType};
 
 let schema= vec![
-    SchemaField::new("title".to_owned(), false, false,false, FieldType::Text, false,false, 1.0,true,true),
-    SchemaField::new("body".to_owned(),true,true,false,FieldType::Text,false,true,1.0,false,false),
-    SchemaField::new("url".to_owned(), false, false,false, FieldType::Text,false,false,1.0,false,false),
+    SchemaField::new("title".to_owned(), false, false,false, FieldType::Text, false,false, 1.0),
+    SchemaField::new("body".to_owned(),true,true,false,FieldType::Text,false,true,1.0),
+    SchemaField::new("url".to_owned(), false, false,false, FieldType::Text,false,false,1.0),
 ];
 ```
 
@@ -61,9 +61,9 @@ use seekstorm::vector_similarity::VectorSimilarity;
 let index_path=Path::new("C:/index/");
 
 let schema= vec![
-    SchemaField::new("title".to_owned(), false, false,false, FieldType::Text, false,false, 1.0,true,true),
-    SchemaField::new("body".to_owned(),true,true,false,FieldType::Text,false,true,1.0,false,false),
-    SchemaField::new("url".to_owned(), false, false, false,FieldType::Text,false,false,1.0,false,false),
+    SchemaField::new("title".to_owned(), false, false,false, FieldType::Text, false,false, 1.0),
+    SchemaField::new("body".to_owned(),true,true,false,FieldType::Text,false,true,1.0),
+    SchemaField::new("url".to_owned(), false, false, false,FieldType::Text,false,false,1.0),
 ];
 
 let meta = IndexMetaObject {
@@ -95,7 +95,7 @@ use std::path::Path;
 use seekstorm::index::open_index;
 
 let index_path=Path::new("C:/index/");
-let mut index_arc=open_index(index_path).await.unwrap(); 
+let mut index_arc=open_index(index_path).await.unwrap();
 
 # });
 ```
@@ -108,7 +108,7 @@ use std::path::Path;
 use seekstorm::index::{open_index, IndexDocuments};
 
 let index_path=Path::new("C:/index/");
-let mut index_arc=open_index(index_path).await.unwrap(); 
+let mut index_arc=open_index(index_path).await.unwrap();
 
 let documents_json = r#"
 [{"title":"title1 test","body":"body1","url":"url1"},
@@ -116,7 +116,7 @@ let documents_json = r#"
 {"title":"title3 test","body":"body3 test","url":"url3"}]"#;
 let documents_vec=serde_json::from_str(documents_json).unwrap();
 
-index_arc.index_documents(documents_vec).await; 
+index_arc.index_documents(documents_vec).await;
 
 # });
 ```
@@ -130,7 +130,7 @@ use std::path::Path;
 use serde_json::Value;
 
 let index_path=Path::new("C:/index/");
-let mut index_arc=open_index(index_path).await.unwrap(); 
+let mut index_arc=open_index(index_path).await.unwrap();
 
 let document= Document::from([
     ("title".to_string(), Value::String("title4 test".to_string())),
@@ -152,7 +152,7 @@ use seekstorm::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
-let mut index_arc=open_index(index_path).await.unwrap(); 
+let mut index_arc=open_index(index_path).await.unwrap();
 
 index_arc.commit().await;
 
@@ -168,7 +168,7 @@ use seekstorm::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
-let mut index_arc=open_index(index_path).await.unwrap(); 
+let mut index_arc=open_index(index_path).await.unwrap();
 
 let query="test".to_string();
 let query_vector=None;
@@ -176,14 +176,13 @@ let search_mode=SearchMode::Lexical;
 let enable_empty_query=false;
 let offset=0;
 let length=10;
-let query_type=QueryType::Intersection; 
+let query_type=QueryType::Intersection;
 let result_type=ResultType::TopkCount;
 let include_uncommitted=false;
 let field_filter=Vec::new();
-let query_facets=Vec::new();
 let facet_filter=Vec::new();
 let result_sort=Vec::new();
-let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort).await;
+let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,facet_filter,result_sort).await;
 
 // ### display results
 
@@ -203,53 +202,53 @@ println!("result counts {} {} {}",result_object.results.len(), result_object.res
 
 *Query operators and query type*
 
-Boolean queries are specified in the search method either via the query_type parameter or via operator chars within the query parameter.  
+Boolean queries are specified in the search method either via the query_type parameter or via operator chars within the query parameter.
 The interpretation of operator chars within the query string (set `query_type=QueryType::Union`) allows to specify advanced search operations via a simple search box.
 
 Intersection, AND `+`
 ```rust ,no_run
 use seekstorm::search::QueryType;
-let query_type=QueryType::Union; 
+let query_type=QueryType::Union;
 let query="+red +apple".to_string();
 ```
 
 ```rust ,no_run
 use seekstorm::search::QueryType;
-let query_type=QueryType::Intersection; 
+let query_type=QueryType::Intersection;
 let query="red apple".to_string();
 ```
 
 Union, OR
 ```rust ,no_run
 use seekstorm::search::QueryType;
-let query_type=QueryType::Union; 
+let query_type=QueryType::Union;
 let query="red apple".to_string();
 ```
 
 Phrase `""`
 ```rust ,no_run
 use seekstorm::search::QueryType;
-let query_type=QueryType::Union; 
+let query_type=QueryType::Union;
 let query="\"red apple\"".to_string();
 ```
 
 ```rust ,no_run
 use seekstorm::search::QueryType;
-let query_type=QueryType::Phrase; 
+let query_type=QueryType::Phrase;
 let query="red apple".to_string();
 ```
 
 Except, minus, NOT `-`
 ```rust ,no_run
 use seekstorm::search::QueryType;
-let query_type=QueryType::Union; 
+let query_type=QueryType::Union;
 let query="apple -red".to_string();
 ```
 
 Mixed phrase and intersection
 ```rust ,no_run
 use seekstorm::search::QueryType;
-let query_type=QueryType::Union; 
+let query_type=QueryType::Union;
 let query="+\"the who\" +uk".to_string();
 ```
 
@@ -265,7 +264,7 @@ use seekstorm::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
-let mut index_arc=open_index(index_path).await.unwrap(); 
+let mut index_arc=open_index(index_path).await.unwrap();
 
 let query_vec=vec!["house".to_string(),"car".to_string(),"bird".to_string(),"sky".to_string()];
 let query_vector=None;
@@ -273,12 +272,11 @@ let offset=0;
 let length=10;
 let search_mode=SearchMode::Lexical;
 let enable_empty_query=false;
-let query_type=QueryType::Union; 
+let query_type=QueryType::Union;
 let result_type=ResultType::TopkCount;
 
 let include_uncommitted=false;
 let field_filter=Vec::new();
-let query_facets=Vec::new();
 let facet_filter=Vec::new();
 let result_sort=Vec::new();
 
@@ -298,7 +296,6 @@ for query in query_vec {
     let result_type_clone = result_type.clone();
     let include_uncommitted_clone=include_uncommitted;
     let field_filter_clone=field_filter.clone();
-    let query_facets_clone=query_facets.clone();
     let facet_filter_clone=facet_filter.clone();
     let result_sort_clone=result_sort.clone();
 
@@ -315,13 +312,13 @@ for query in query_vec {
                 result_type_clone,
                 include_uncommitted_clone,
                 field_filter_clone,
-                query_facets_clone,
+
                 facet_filter_clone,
                 result_sort_clone,)
             .await;
 
         println!("result count {}", rlo.result_count);
-        
+
         drop(permit_thread);
     });
 }
@@ -381,8 +378,8 @@ println!("max doc_id: {}",iterator.results.first().unwrap().doc_id);
 let mut iterator=index_arc.get_iterator(None,0,1,false,false,vec![]).await;
 let mut i=0;
 if !iterator.results.is_empty() {println!("$ i: {} doc_id: {}",i,iterator.results.first().unwrap().doc_id);}
-while !iterator.results.is_empty() {           
-    iterator=index_arc.get_iterator(Some(iterator.results.first().unwrap().doc_id),1,1,false,false,vec![]).await;                              
+while !iterator.results.is_empty() {
+    iterator=index_arc.get_iterator(Some(iterator.results.first().unwrap().doc_id),1,1,false,false,vec![]).await;
     i+=1;
     if !iterator.results.is_empty() && ( i % 10_000 ==0 || i<=10 )  {println!("i: {} doc_id: {}",i,iterator.results.first().unwrap().doc_id);}
 }
@@ -391,8 +388,8 @@ while !iterator.results.is_empty() {
 let mut iterator=index_arc.get_iterator(None,0,-1,false,false,vec![]).await;
 let mut i=0;
 if !iterator.results.is_empty() {println!("$ i: {} doc_id: {}",i,iterator.results.first().unwrap().doc_id);}
-while !iterator.results.is_empty() {           
-    iterator=index_arc.get_iterator(Some(iterator.results.first().unwrap().doc_id),1,-1,false,false,vec![]).await;                              
+while !iterator.results.is_empty() {
+    iterator=index_arc.get_iterator(Some(iterator.results.first().unwrap().doc_id),1,-1,false,false,vec![]).await;
     i+=1;
     if !iterator.results.is_empty() && ( i % 10_000 ==0 || i<=10 )  {println!("i: {} doc_id: {}",i,iterator.results.first().unwrap().doc_id);}
 }
@@ -429,15 +426,14 @@ println!("version {}",version);
 <br/>
 
 ---
-### Faceted search - Quick start
+### Metadata fields - Quick start
 
-Facets are defined in 3 different places:
+Metadata filtering uses schema fields and query filters:
 1. The facet fields are defined in the schema at create_index.
 2. The facet field values are set in index_document at index time.
-3. The query_facets/facet_filter parameters are specified at query time.  
-   Facets are then returned in the search result object.
+3. Use facet_filter at query time. Aggregate results are no longer returned.
 
-A minimal working example of faceted indexing & search requires just 60 lines of code. But to puzzle it all together from the documentation alone might be tedious. This is why we provide a quick start example here:
+This example combines metadata indexing, filtering, and search:
 
 Add required crates to your project
 ```text
@@ -516,7 +512,7 @@ let documents_json = r#"
 {"title":"title3 test","body":"body3 test","url":"url3","town":"New York"}]"#;
 let documents_vec=serde_json::from_str(documents_json).unwrap();
 
-index_arc.index_documents(documents_vec).await; 
+index_arc.index_documents(documents_vec).await;
 
 // ### commit documents
 
@@ -531,7 +527,7 @@ search index
 
 use std::path::Path;
 use seekstorm::index::{IndexDocuments,open_index};
-use seekstorm::search::{Search,SearchMode,QueryType,ResultType,QueryFacet};
+use seekstorm::search::{Search,SearchMode,QueryType,ResultType};
 use std::collections::HashSet;
 
 let index_path=Path::new("C:/index/");
@@ -542,16 +538,15 @@ let search_mode=SearchMode::Lexical;
 let enable_empty_query=false;
 let offset=0;
 let length=10;
-let query_type=QueryType::Intersection; 
+let query_type=QueryType::Intersection;
 let result_type=ResultType::TopkCount;
 let include_uncommitted=false;
 let field_filter=Vec::new();
-let query_facets = vec![QueryFacet::String16 {field: "age".to_string(),prefix: "".to_string(),length:u16::MAX}];
 let facet_filter=Vec::new();
 //let facet_filter = vec![FacetFilter::String16 { field: "town".to_string(),filter: vec!["Berlin".to_string()],}];
 let result_sort=Vec::new();
 
-let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,).await;
+let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,facet_filter,result_sort,).await;
 
 // ### display results
 
@@ -563,9 +558,8 @@ for result in result_object.results.iter() {
 }
 println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);
 
-// ### display facets
+// Stored document results only
 
-println!("{}", serde_json::to_string_pretty(&result_object.facets).unwrap());
 
 # });
 ```
@@ -603,7 +597,7 @@ create index
         clustering: Clustering::None,
         inference: Inference::External { dimensions: 128, precision: Precision::F32,  quantization: Quantization::None,similarity:VectorSimilarity::Euclidean },
     };
-    
+
     let segment_number_bits1=11;
     let index_arc=create_index(index_path,meta,&schema,&Vec::new(),segment_number_bits1,false,None).await.unwrap();
     let index=index_arc.read().await;
@@ -624,7 +618,7 @@ index documents/vectors
 
     // open index
     let index_path=Path::new("tests/index_test/");
-    let index_arc=open_index(index_path).await.unwrap(); 
+    let index_arc=open_index(index_path).await.unwrap();
 
     // index documents
     let documents_json = r#"
@@ -649,7 +643,7 @@ query documents/vectors
 
     use std::path::Path;
     use seekstorm::index::{IndexDocuments,open_index};
-    use seekstorm::search::{Search,SearchMode,QueryType,ResultType,QueryFacet};
+    use seekstorm::search::{Search,SearchMode,QueryType,ResultType};
     use seekstorm::vector_similarity::{AnnMode, VectorSimilarity};
     use seekstorm::commit::Commit;
     use seekstorm::vector::Embedding;
@@ -657,7 +651,7 @@ query documents/vectors
 
   // open index
     let index_path=Path::new("tests/index_test/");
-    let index_arc=open_index(index_path).await.unwrap(); 
+    let index_arc=open_index(index_path).await.unwrap();
 
     let result=index_arc.read().await.indexed_doc_count().await;
     assert_eq!(result, 3);
@@ -677,7 +671,7 @@ query documents/vectors
             ResultType::TopkCount,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )

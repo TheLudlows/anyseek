@@ -51,7 +51,7 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 
 访问 `http://127.0.0.1:8080/`。默认使用 demo key 与索引 0，或用 `/?api_key=KEY&index_id=ID` 选择；URL 中的 key 应编码（例如 `+` 为 `%2B`）。UI 默认 Lexical，Vector/Hybrid 需要手动粘贴 JSON 查询向量，文本变化后由调用方更新向量。
 
-保留结果分页、原文/外部链接预览、图片展示、日期直方图、词法日期过滤和排序。日期交互依赖配置好的时间字段；Vector/Hybrid 的元数据过滤会明确报错。创建索引、文档写入和 key 管理通过 API 完成。
+保留结果分页、原文/外部链接预览、图片展示、UTC 日期起止输入、词法日期过滤和排序。日期交互依赖配置好的时间字段；Vector/Hybrid 的元数据过滤会明确报错。创建索引、文档写入和 key 管理通过 API 完成。
 
 显示字段与默认 key/index 在 [web/js/master.js](web/js/master.js) 配置。静态资源嵌入可执行文件，修改后需重新构建。
 
@@ -68,3 +68,5 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 | `quit` | 退出服务 |
 
 正常提交/关闭及本地索引文件仍保留；当前没有在线一致快照或崩溃恢复可靠性承诺。文件解析、SIFT 导入/评测等入口已删除，迁移细节见 [MIGRATION.md](../MIGRATION.md)。
+
+统计聚合已移除：`query_facets`（包括空数组）返回 400，查询不再返回 `facets`，索引信息不再返回 `facets_minmax`。UI 不再依赖自动计算的数据日期范围，起止日期由用户输入，结束日期包含当天。

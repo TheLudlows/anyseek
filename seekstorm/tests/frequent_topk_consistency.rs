@@ -30,7 +30,7 @@ async fn search(
             rt,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -123,4 +123,3 @@ async fn frequent_terms_topk_returns_results() {
     index_arc.close().await;
     let _ = fs::remove_dir_all(index_path);
 }
-
