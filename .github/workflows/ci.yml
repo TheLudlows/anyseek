@@ -22,11 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # target-cpu=native artifacts cannot be shared across heterogeneous runners.
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: s12-native-source-only
+          cache-targets: false
       - name: Record toolchain
         run: |
           rustc --version --verbose
           cargo --version
+          lscpu
       - name: Build retained workspace
         id: build
         run: cargo build --workspace
