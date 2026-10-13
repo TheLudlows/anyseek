@@ -93,5 +93,32 @@ async fn external_write_query_reopen_contract() {
     let result = query(&reopened,SearchMode::Vector { similarity_threshold:Some(0.7),ann_mode:AnnMode::All },
         Some(Embedding::F32(vec![1.0,0.0,0.0]))).await;
     assert!(result.error.is_none()); assert_eq!(result.results.len(),1); assert_eq!(result.results[0].doc_id,0);
-    reopened.close().await; drop(reopened); fs::remove_dir_all(path).unwrap();
+    reopened.close().await; drop(reopened);
+    let meta_path = path.join("index.json");
+    let mut old_meta: serde_json::Value = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    old_meta["inference"] = json!({"Model2Vec":{"model":"PotionBase2M","chunk_size":1000,"quantization":"None"}});
+    fs::write(meta_path, serde_json::to_vec(&old_meta).unwrap()).unwrap();
+    assert!(open_index(path).await.err().unwrap().contains("unsupported or invalid index metadata"));
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn external_f32_and_quantized_thresholds() {
+    for quantization in [Quantization::None, Quantization::ScalarQuantizationI8, Quantization::TurboQuantI8] {
+        let path = std::env::temp_dir().join(format!("seekpower-threshold-{}-{quantization}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        let mut config = meta();
+        if let Inference::External { quantization: q, .. } = &mut config.inference { *q = quantization; }
+        let index = create_index(&path, config, &schema(), &vec![], 11, true, Some(1)).await.unwrap();
+        index.index_documents(vec![document("alpha",json!([1,0,0])), document("beta",json!([0,1,0]))]).await.unwrap();
+        index.commit().await;
+        for ann_mode in [AnnMode::All, AnnMode::Nprobe(1)] {
+            let result = query(&index,SearchMode::Vector {similarity_threshold:Some(0.7),ann_mode},
+                Some(Embedding::F32(vec![1.0,0.0,0.0]))).await;
+            assert!(result.error.is_none());
+            assert_eq!(result.results.len(),1,"{quantization}");
+            assert_eq!(result.results[0].doc_id,0,"{quantization}");
+        }
+        index.close().await; drop(index); fs::remove_dir_all(path).unwrap();
+    }
 }

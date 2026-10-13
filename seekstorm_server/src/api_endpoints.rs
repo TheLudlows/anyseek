@@ -7,7 +7,6 @@ use std::{
 };
 
 use itertools::Itertools;
-use serde_json::Value;
 use std::collections::HashSet;
 use utoipa::{OpenApi, openapi::OpenApiVersion};
 
@@ -1467,3 +1466,4 @@ pub fn generate_openapi() {
         path_yml.to_string_lossy()
     );
 }
+

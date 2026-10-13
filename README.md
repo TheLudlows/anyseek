@@ -30,6 +30,8 @@ POST `{"body":"example text","vector":[1,0,0]}` to `/api/v1/index/0/doc`, then P
 
 `Vector` and `Hybrid` require `query_vector`; `Lexical` needs only text. All configured vector fields are required on writes. Invalid configuration, dimensions, precision, nonfinite/overflowing values, zero-norm cosine vectors, malformed base64 and removed model options return HTTP 400. Every document in a batch is validated before any is queued; invalid updates are rejected before deleting old records. This is input-validation atomicity, not a crash-safe transaction guarantee.
 
+**Current filter boundary:** metadata storage and lexical `facet_filter` remain available. The inherited vector branch did not apply facet filters; Vector/Hybrid now reject nonempty `facet_filter` with HTTP 400 rather than return unfiltered results. Shared vector candidate filtering remains S2 work.
+
 Rust write/update methods now return `Result<(), String>`. Check `ResultObject.error` before using search results. Existing external-vector metadata and record layouts are retained. Indexes configured for removed built-in models fail to open explicitly; regenerate their embeddings externally and rebuild them. There is no automatic model migration.
 
 The existing Web UI defaults to Lexical. Select Vector or Hybrid, paste a JSON query vector and click **Search with vector**; update the vector when the text changes. The vector is not stored in the page URL. API errors appear beside the input.

@@ -149,7 +149,8 @@ def exercise(binary, workdir):
             check(document == {'body': 'body2 test'}, f'stored document mismatch: {document}')
             print('PASS create, single/batch write, commit, lexical query and get')
 
-            vector_schema = [schema[1], {'field': 'vector', 'field_type': 'Json', 'store': True,
+            vector_schema = [schema[1], {'field': 'category', 'field_type': 'String16', 'store': True,
+                                        'index_lexical': False, 'facet': True}, {'field': 'vector', 'field_type': 'Json', 'store': True,
                                          'index_lexical': False, 'index_vector': True}]
             config = {'index_name': 'external_vectors', 'schema': vector_schema,
                       'inference': {'External': {'dimensions': 3, 'precision': 'F32',
@@ -161,8 +162,8 @@ def exercise(binary, workdir):
                             [{'body': 'partial', 'vector': [1, 0, 0]}, {'body': 'missing'}]):
                 request('POST', vp + '/doc', invalid, api_key, expected=400)
             check(api('PATCH', vp) == 0, 'invalid batch partially indexed')
-            api('POST', vp + '/doc', [{'body': 'alpha', 'vector': [1, 0, 0]},
-                                     {'body': 'beta', 'vector': [0, 1, 0]}])
+            api('POST', vp + '/doc', [{'body': 'alpha', 'vector': [1, 0, 0], 'category': 'a'},
+                                     {'body': 'beta', 'vector': [0, 1, 0], 'category': 'b'}])
             check(api('PATCH', vp) == 2, 'external write count')
             for mode in ('Vector', 'Hybrid'):
                 query_request = {'query': 'alpha', 'search_mode': {mode: {
@@ -174,6 +175,13 @@ def exercise(binary, workdir):
                             api_key, expected=400)
                 result = api('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0]})
                 check(result['results'][0]['body'] == 'alpha', f'{mode} ranking: {result}')
+                # The inherited vector branch did not apply facet_filter. Fail closed until S2.
+                request('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0],
+                    'facet_filter': [{'String': {'field': 'category', 'filter': ['b']}}]},
+                    api_key, expected=400)
+            filtered = api('POST', vp + '/query', {'query': '', 'enable_empty_query': True,
+                'search_mode': 'Lexical', 'facet_filter': [{'String': {'field': 'category', 'filter': ['b']}}]})
+            check([doc['body'] for doc in filtered['results']] == ['beta'], 'lexical metadata filter')
             request('PATCH', vp + '/doc', [0, {'body': 'invalid update'}], api_key, expected=400)
             request('PATCH', vp + '/doc', [[0, {'body': 'changed', 'vector': [0, 0, 1]}],
                                            [1, {'body': 'invalid'}]], api_key, expected=400)
@@ -184,6 +192,16 @@ def exercise(binary, workdir):
                               {'External': {'dimensions': 0, 'precision': 'F32', 'quantization': 'None', 'similarity': 'Cosine'}},
                               {'External': {'dimensions': 3, 'precision': 'F32', 'quantization': 'None', 'similarity': 'invalid'}}):
                 request('POST', '/api/v1/index', {**config, 'inference': inference}, api_key, expected=400)
+            binary_schema = [{**field, 'field_type': 'Binary'} if field['field'] == 'vector' else field
+                             for field in vector_schema]
+            binary_id = api('POST', '/api/v1/index', {**config, 'schema': binary_schema})
+            bp = f'/api/v1/index/{binary_id}'
+            encoded = base64.b64encode(bytes.fromhex('3f8000000000000000000000')).decode()
+            api('POST', bp + '/doc', {'body': 'binary', 'vector': encoded})
+            check(api('PATCH', bp) == 1, 'binary vector write')
+            result = api('POST', bp + '/query', {'query': '', 'query_vector': encoded,
+                'search_mode': {'Vector': {'similarity_threshold': None, 'ann_mode': 'All'}}})
+            check(result['results'][0]['body'] == 'binary', 'base64 vector query')
             print('PASS external vector/hybrid, invalid input, batch and update atomic validation')
             if os.environ.get('SEEKPOWER_BROWSER_TEST') == '1':
                 from playwright.sync_api import sync_playwright

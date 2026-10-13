@@ -520,6 +520,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                                 QueryRewriting::SearchOnly,
                                             )
                                             .await;
+                                            if let Some(error) = &result_object_vector.error { eprintln!("search failed: {error}"); break; }
 
                                             let search_time = start_time.elapsed().as_nanos() as i64;
                                             search_time_sum+=search_time;
@@ -577,7 +578,19 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                 if let Some(index_arc) = apikey_object.index_list.get_mut(&index_id) {
 
 
-                                    let query="rosy panther";
+                                    let Some(raw_vector) = dash.get("v") else {
+                                        eprintln!("search requires an external vector: search -v [1,0,0] (no spaces in JSON)");
+                                        continue;
+                                    };
+                                    let value = match serde_json::from_str::<serde_json::Value>(raw_vector) {
+                                        Ok(value) => value,
+                                        Err(error) => { eprintln!("invalid vector JSON: {error}"); continue; }
+                                    };
+                                    let query_vector = match seekstorm::vector::parse_external_embedding(&value, &index_arc.read().await.meta.inference) {
+                                        Ok(vector) => vector,
+                                        Err(error) => { eprintln!("invalid vector: {error}"); continue; }
+                                    };
+                                    let query="";
                                     let len=10;
                                     let similarity_threshold=Some(0.7);
                                     let field_filter=Vec::new();
@@ -590,7 +603,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                     let result_object_vector = index_arc
                                     .search(
                                         query.to_string(),
-                                        None,
+                                        Some(query_vector.clone()),
                                         QueryType::Intersection,
                                         SearchMode::Vector { similarity_threshold , ann_mode: AnnMode::Similaritythreshold(0.0) },
                                         false,
@@ -605,6 +618,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                         QueryRewriting::SearchOnly,
                                     )
                                     .await;
+                                    if let Some(error) = &result_object_vector.error { eprintln!("search failed: {error}"); continue; }
 
                                     let search_time = start_time.elapsed().as_nanos() as i64;
 
@@ -644,7 +658,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                     let result_object_vector = index_arc
                                     .search(
                                         query.to_string(),
-                                        None,
+                                        Some(query_vector.clone()),
                                         QueryType::Intersection,
                                         SearchMode::Vector { similarity_threshold , ann_mode: AnnMode::Similaritythreshold(min_cluster_score)},
                                         false,
@@ -659,6 +673,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                         QueryRewriting::SearchOnly,
                                     )
                                     .await;
+                                    if let Some(error) = &result_object_vector.error { eprintln!("search failed: {error}"); continue; }
 
                                     let mut recall_count=0;
                                     let search_time = start_time.elapsed().as_nanos() as i64;
@@ -683,7 +698,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                     let result_object_vector = index_arc
                                     .search(
                                         query.to_string(),
-                                        None,
+                                        Some(query_vector.clone()),
                                         QueryType::Intersection,
                                         SearchMode::Vector { similarity_threshold  , ann_mode: AnnMode::Nprobe(55) },
                                         false,
@@ -698,6 +713,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                         QueryRewriting::SearchOnly,
                                     )
                                     .await;
+                                    if let Some(error) = &result_object_vector.error { eprintln!("search failed: {error}"); continue; }
 
                                     let mut recall_count=0;
                                     let search_time = start_time.elapsed().as_nanos() as i64;
@@ -1144,3 +1160,4 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
         }
     }
 }
+

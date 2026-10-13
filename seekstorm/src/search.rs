@@ -1176,6 +1176,9 @@ impl Search for IndexArc {
         query_rewriting: QueryRewriting,
     ) -> ResultObject {
         let index_ref = self.read().await;
+        if !matches!(search_mode, SearchMode::Lexical) && !facet_filter.is_empty() {
+            return ResultObject { error: Some("facet_filter is currently supported only in Lexical mode; vector candidate filtering is not implemented".into()), ..Default::default() };
+        }
         if let Err(error) = crate::vector::validate_query_vector(
             &index_ref.meta.inference, &search_mode, query_vector.as_ref(),
         ) {

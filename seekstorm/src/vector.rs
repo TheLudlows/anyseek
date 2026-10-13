@@ -400,6 +400,7 @@ impl TopK {
         k: usize,
         similarity_threshold_option: Option<f32>,
         vector_similarity: VectorSimilarity,
+        similarity_normalization: f32,
     ) -> Self {
         Self {
             items: vec![
@@ -422,10 +423,10 @@ impl TopK {
             {
                 match vector_similarity {
                     VectorSimilarity::Dot => {
-                        ((similarity_threshold * 2.0) - 1.0) / SIMILARITY_NORMALIZATION_64_I8
+                        ((similarity_threshold * 2.0) - 1.0) / similarity_normalization
                     }
                     VectorSimilarity::Cosine => {
-                        ((similarity_threshold * 2.0) - 1.0) / SIMILARITY_NORMALIZATION_64_I8
+                        ((similarity_threshold * 2.0) - 1.0) / similarity_normalization
                     }
                     VectorSimilarity::Euclidean => -similarity_threshold,
                 }
@@ -1214,7 +1215,14 @@ impl SearchVectorShard for ShardArc {
 
         let query_simd = unsafe { QuerySimd::new(&query_embedding.0) };
 
-        let mut top_k = TopK::new(length, similarity_threshold, vector_similarity);
+        // I8 cosine/dot records use the historical quantized score scale.
+        // Unquantized F32 records already have floating-point similarity units.
+        let similarity_normalization = if vector_type == Precision::I8 {
+            SIMILARITY_NORMALIZATION_64_I8
+        } else {
+            1.0
+        };
+        let mut top_k = TopK::new(length, similarity_threshold, vector_similarity, similarity_normalization);
 
         if include_uncommitted && shard_ref.uncommitted && !shard_ref.block_vector_buffer.is_empty()
         {
@@ -1269,7 +1277,7 @@ impl SearchVectorShard for ShardArc {
             let selected_clusters: Vec<(u32, u32, f32, ClusterHeader)> = if ann_mode != AnnMode::All
             {
                 let mut top_k_medoid =
-                    TopK::new(n_probe, cluster_similarity_threshold, vector_similarity);
+                    TopK::new(n_probe, cluster_similarity_threshold, vector_similarity, similarity_normalization);
                 for (cluster_id, cluster) in clusters.iter().enumerate() {
                     let medoid_offset = offset + cluster.start_index as usize * vector_size;
                     let medoid_record = read_record(
@@ -1447,13 +1455,13 @@ impl SearchVectorShard for ShardArc {
                 cluster_score: if shard_ref.vector_similarity == VectorSimilarity::Euclidean {
                     -item.cluster_score
                 } else {
-                    ((item.cluster_score * SIMILARITY_NORMALIZATION_64_I8) + 1.0) * 0.5
+                    ((item.cluster_score * similarity_normalization) + 1.0) * 0.5
                 },
                 #[cfg(feature = "vb")]
                 vector_score: if shard_ref.vector_similarity == VectorSimilarity::Euclidean {
                     -item.score
                 } else {
-                    ((item.score * SIMILARITY_NORMALIZATION_64_I8) + 1.0) * 0.5
+                    ((item.score * similarity_normalization) + 1.0) * 0.5
                 },
                 #[cfg(feature = "vb")]
                 lexical_score: 0.0,
