@@ -104,12 +104,13 @@ async fn external_write_query_reopen_contract() {
 
 #[tokio::test]
 async fn external_f32_and_quantized_thresholds() {
+    for similarity in [VectorSimilarity::Cosine, VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
     for dimensions in [3, 32] {
     for quantization in [Quantization::None, Quantization::ScalarQuantizationI8, Quantization::TurboQuantI8] {
-        let path = std::env::temp_dir().join(format!("seekpower-threshold-{}-{quantization}-{dimensions}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("seekpower-threshold-{}-{quantization}-{dimensions}-{similarity}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         let mut config = meta();
-        if let Inference::External { quantization: q, dimensions: d, .. } = &mut config.inference { *q = quantization; *d = dimensions; }
+        if let Inference::External { quantization: q, dimensions: d, similarity: metric, .. } = &mut config.inference { *q = quantization; *d = dimensions; *metric = similarity; }
         let mut alpha = vec![0.0; dimensions]; alpha[0] = 1.0;
         let mut beta = vec![0.0; dimensions]; beta[1] = 1.0;
         let index = create_index(&path, config, &schema(), &vec![], 11, true, Some(1)).await.unwrap();
@@ -119,10 +120,11 @@ async fn external_f32_and_quantized_thresholds() {
             let result = query(&index,SearchMode::Vector {similarity_threshold:Some(0.7),ann_mode},
                 Some(Embedding::F32(alpha.clone()))).await;
             assert!(result.error.is_none());
-            assert_eq!(result.results.len(),1,"{quantization}");
-            assert_eq!(result.results[0].doc_id,0,"{quantization}");
+            assert_eq!(result.results.len(),1,"{similarity} {quantization} dimensions={dimensions}");
+            assert_eq!(result.results[0].doc_id,0,"{similarity} {quantization} dimensions={dimensions}");
         }
         index.close().await; drop(index); fs::remove_dir_all(path).unwrap();
     }
+}
 }
 }

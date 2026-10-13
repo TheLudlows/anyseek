@@ -255,7 +255,7 @@ impl Shard {
         let mut medoids: AHashMap<usize, Medoid> = AHashMap::new();
 
         let enable_scale = self.quantization != Quantization::None
-            && self.vector_similarity != VectorSimilarity::Cosine;
+            && (self.vector_similarity != VectorSimilarity::Cosine || self.quantization == Quantization::TurboQuantI8);
         unsafe {
             let mut sum_vector = vec![0f32; self.vector_dimensions];
             for i in (0..vector_count_block).step_by(vector_step) {

@@ -45,7 +45,8 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           target/debug/seekstorm_server generate_openapi=true > /dev/null
-          python3 -c 'import json; from pathlib import Path; print("OPENAPI_JSON=" + json.dumps(Path("target/debug/openapi.json").read_text())); print("OPENAPI_YAML=" + json.dumps(Path("target/debug/openapi.yml").read_text()))'
+          diff -u seekstorm_server/openapi/openapi.json target/debug/openapi.json
+          diff -u seekstorm_server/openapi/openapi.yml target/debug/openapi.yml
       - uses: actions/upload-artifact@v4
         with:
           name: openapi

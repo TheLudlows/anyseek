@@ -1105,7 +1105,7 @@ impl Shard {
     ) {
         let level_id = self.level_index.len();
         let enable_scale = self.quantization != Quantization::None
-            && self.vector_similarity != VectorSimilarity::Cosine;
+            && (self.vector_similarity != VectorSimilarity::Cosine || self.quantization == Quantization::TurboQuantI8);
 
         let non_affine = self.max_vector_value == f32::MIN;
 
@@ -1215,9 +1215,12 @@ impl SearchVectorShard for ShardArc {
 
         let query_simd = QuerySimd::for_dispatch(&query_embedding.0, shard_ref.is_simd);
 
-        // I8 cosine/dot records use the historical quantized score scale.
-        // Unquantized F32 records already have floating-point similarity units.
-        let similarity_normalization = if vector_type == Precision::I8 {
+        // Only raw I8 and scalar-quantized cosine use the fixed 127^2 scale.
+        // F32 and scale-restored quantized similarities use floating-point units.
+        let similarity_normalization = if vector_type == Precision::I8
+            && (shard_ref.quantization == Quantization::None
+                || (shard_ref.quantization == Quantization::ScalarQuantizationI8
+                    && vector_similarity == VectorSimilarity::Cosine)) {
             SIMILARITY_NORMALIZATION_64_I8
         } else {
             1.0
@@ -1273,7 +1276,7 @@ impl SearchVectorShard for ShardArc {
             };
 
             let enable_scale = shard_ref.quantization != Quantization::None
-                && shard_ref.vector_similarity != VectorSimilarity::Cosine;
+                && (shard_ref.vector_similarity != VectorSimilarity::Cosine || shard_ref.quantization == Quantization::TurboQuantI8);
             let selected_clusters: Vec<(u32, u32, f32, ClusterHeader)> = if ann_mode != AnnMode::All
             {
                 let mut top_k_medoid =
