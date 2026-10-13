@@ -1740,7 +1740,6 @@
                     ],
                     "fields": [],
                     "query_type_default": "Intersection",
-                    "query_rewriting": "SearchOnly",
                     "search_mode": "Lexical"
                   }
                 },
@@ -2107,28 +2106,6 @@
                   "gooseberry"
                 ],
                 "multiway": false
-              }
-            ]
-          },
-          "spelling_correction": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/SpellingCorrection",
-                "description": "Enable spelling correction for search queries using the SymSpell algorithm.\nWhen enabled, a SymSpell dictionary is incrementally created during indexing of documents and stored in the index.\nIn addition you need to set the parameter `query_rewriting` in the search method to enable it per query.\nThe creation of an individual dictionary derived from the indexed documents improves the correction quality compared to a generic dictionary.\nAn dictionary per index improves the privacy compared to a global dictionary derived from all indices.\nThe dictionary is deleted when delete_index or clear_index is called.\nNote: enabling spelling correction increases the index size, indexing time and query latency.\nDefault: None. Enable by setting a value for max_dictionary_edit_distance (1..2 recommended).\nThe higher the value, the higher the number of errors that can be corrected - but also the memory consumption, lookup latency, and the number of false positives."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "query_completion": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/QueryCompletion",
-                "description": "Enable query completion for search queries using a prefix dictionary. When enabled, a prefix dictionary is incrementally created during indexing of documents and stored in the index. The prefix dictionary is used to generate suggestions for query completion based on the indexed documents. In addition you need to set the parameter `query_rewriting` in the search method to enable it per query. Note: enabling query completion increases the index size, indexing time and query latency."
-              },
-              {
-                "type": "null"
               }
             ]
           },
@@ -3357,20 +3334,6 @@
           "None"
         ]
       },
-      "QueryCompletion": {
-        "type": "object",
-        "description": "Defines query completion generation for an index.",
-        "required": [
-          "max_completion_entries"
-        ],
-        "properties": {
-          "max_completion_entries": {
-            "type": "integer",
-            "description": "Maximum number of completions to generate during indexing\ndisabled if == 0",
-            "minimum": 0
-          }
-        }
-      },
       "QueryFacet": {
         "oneOf": [
           {
@@ -4073,192 +4036,6 @@
         ],
         "description": "Defines the query facets:\n- string facet field values\n- range segments for numerical facet field values"
       },
-      "QueryRewriting": {
-        "oneOf": [
-          {
-            "type": "string",
-            "description": "Query rewriting disabled, returns query results for query as-is, returns no suggestions for corrected or completed query.\nNo performance overhead for spelling correction and suggestions.",
-            "enum": [
-              "SearchOnly"
-            ]
-          },
-          {
-            "type": "object",
-            "description": "Query rewriting disabled, returns query results for original query string, returns suggestions for corrected or completed query.\nAdditional latency for spelling suggestions.",
-            "required": [
-              "SearchSuggest"
-            ],
-            "properties": {
-              "SearchSuggest": {
-                "type": "object",
-                "description": "Query rewriting disabled, returns query results for original query string, returns suggestions for corrected or completed query.\nAdditional latency for spelling suggestions.",
-                "required": [
-                  "distance"
-                ],
-                "properties": {
-                  "correct": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "Enable query correction, for queries with query string length >= threshold\nA minimum length of 2 is advised to prevent irrelevant suggestions and results.",
-                    "minimum": 0
-                  },
-                  "distance": {
-                    "type": "integer",
-                    "description": "The edit distance thresholds for suggestions: 1..2 recommended; higher values increase latency and memory consumption.",
-                    "minimum": 0
-                  },
-                  "term_length_threshold": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "description": "Term length thresholds for each edit distance.\n  None:    max_dictionary_edit_distance for all terms lengths\n  Some(\\[4\\]):    max_dictionary_edit_distance for all terms lengths >= 4,\n  Some(\\[2,8\\]):    max_dictionary_edit_distance for all terms lengths >=2, max_dictionary_edit_distance +1 for all terms for lengths>=8"
-                  },
-                  "complete": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "Enable query completions, for queries with query string length >= threshold, in addition to spelling corrections\nA minimum length of 2 is advised to prevent irrelevant suggestions and results.",
-                    "minimum": 0
-                  },
-                  "length": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "An option to limit maximum number of returned suggestions.",
-                    "minimum": 0
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Query rewriting enabled, returns query results for spelling corrected or completed query string (=instant search), returns suggestions for corrected or completed query.\nAdditional latency for spelling correction and suggestions.",
-            "required": [
-              "SearchRewrite"
-            ],
-            "properties": {
-              "SearchRewrite": {
-                "type": "object",
-                "description": "Query rewriting enabled, returns query results for spelling corrected or completed query string (=instant search), returns suggestions for corrected or completed query.\nAdditional latency for spelling correction and suggestions.",
-                "required": [
-                  "distance"
-                ],
-                "properties": {
-                  "correct": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "Enable query correction, for queries with query string length >= threshold\nA minimum length of 2 is advised to prevent irrelevant suggestions and results.",
-                    "minimum": 0
-                  },
-                  "distance": {
-                    "type": "integer",
-                    "description": "The edit distance thresholds for suggestions: 1..2 recommended; higher values increase latency and memory consumption.",
-                    "minimum": 0
-                  },
-                  "term_length_threshold": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "description": "Term length thresholds for each edit distance.\n  None:    max_dictionary_edit_distance for all terms lengths\n  Some(\\[4\\]):    max_dictionary_edit_distance for all terms lengths >= 4,\n  Some(\\[2,8\\]):    max_dictionary_edit_distance for all terms lengths >=2, max_dictionary_edit_distance +1 for all terms for lengths>=8"
-                  },
-                  "complete": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "Enable query completions, for queries with query string length >= threshold, in addition to spelling corrections\nA minimum length of 2 is advised to prevent irrelevant suggestions and results.",
-                    "minimum": 0
-                  },
-                  "length": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "An option to limit maximum number of returned suggestions.",
-                    "minimum": 0
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Search disabled, returns no query results, only returns suggestions for corrected or completed query.",
-            "required": [
-              "SuggestOnly"
-            ],
-            "properties": {
-              "SuggestOnly": {
-                "type": "object",
-                "description": "Search disabled, returns no query results, only returns suggestions for corrected or completed query.",
-                "required": [
-                  "distance"
-                ],
-                "properties": {
-                  "correct": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "Enable query correction, for queries with query string length >= threshold\nA minimum length of 2 is advised to prevent irrelevant suggestions and results.",
-                    "minimum": 0
-                  },
-                  "distance": {
-                    "type": "integer",
-                    "description": "The edit distance thresholds for suggestions: 1..2 recommended; higher values increase latency and memory consumption.",
-                    "minimum": 0
-                  },
-                  "term_length_threshold": {
-                    "type": [
-                      "array",
-                      "null"
-                    ],
-                    "items": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "description": "Term length thresholds for each edit distance.\n  None:    max_dictionary_edit_distance for all terms lengths\n  Some(\\[4\\]):    max_dictionary_edit_distance for all terms lengths >= 4,\n  Some(\\[2,8\\]):    max_dictionary_edit_distance for all terms lengths >=2, max_dictionary_edit_distance +1 for all terms for lengths>=8"
-                  },
-                  "complete": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "Enable query completions, for queries with query string length >= threshold, in addition to spelling corrections\nA minimum length of 2 is advised to prevent irrelevant suggestions and results.",
-                    "minimum": 0
-                  },
-                  "length": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "An option to limit maximum number of returned suggestions.",
-                    "minimum": 0
-                  }
-                }
-              }
-            }
-          }
-        ],
-        "description": "Specifies whether query rewriting is enabled or disabled"
-      },
       "QueryType": {
         "type": "string",
         "description": "Specifies the default QueryType: The following query types are supported:\n- **Union** (OR, disjunction),\n- **Intersection** (AND, conjunction),\n- **Phrase** (\"\"),\n- **Not** (-).\n\nThe default QueryType is superseded if the query parser detects that a different query type is specified within the query string (+ - \"\").",
@@ -4559,16 +4336,9 @@
             "type": "number",
             "format": "float",
             "description": "optional custom weight factor for Bm25 ranking"
-          },
-          "dictionary_source": {
-            "type": "boolean",
-            "description": "if both indexed=true and dictionary_source=true then the terms from this field are added to dictionary to the spelling correction dictionary.\nif disabled, then a manually generated dictionary can be used: {index_path}/dictionary.csv"
-          },
-          "completion_source": {
-            "type": "boolean",
-            "description": "if both indexed=true and completion_source=true then the n-grams (unigrams, bigrams, trigrams) from this field are added to the auto-completion list.\nif disabled, then a manually generated completion list can be used: {index_path}/completions.csv\nit is recommended to enable completion_source only for fields that contain short text with high-quality terms for auto-completion, e.g. title, author, category, product name, tags,\nin order to keep the extraction time and RAM requirement for completions low and the completions relevance high."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "SearchMode": {
         "oneOf": [
@@ -4747,10 +4517,6 @@
             "$ref": "#/components/schemas/QueryType",
             "description": "Specify default query type: (default=Intersection). This can be overwritten by search operator within the query string (+-\"\")."
           },
-          "query_rewriting": {
-            "$ref": "#/components/schemas/QueryRewriting",
-            "description": "Specify query rewriting method for search query correction and completion: (default=SearchOnly)."
-          },
           "search_mode": {
             "$ref": "#/components/schemas/SearchMode",
             "description": "Specify search mode: (default=Lexical)."
@@ -4771,8 +4537,7 @@
           "count_total",
           "query_terms",
           "results",
-          "facets",
-          "suggestions"
+          "facets"
         ],
         "properties": {
           "time": {
@@ -4786,7 +4551,7 @@
           },
           "query": {
             "type": "string",
-            "description": "Search query string after any automatic query correction or completion"
+            "description": "Search query string, unchanged from the caller input"
           },
           "offset": {
             "type": "integer",
@@ -4848,13 +4613,6 @@
             "propertyNames": {
               "type": "string"
             }
-          },
-          "suggestions": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Suggestions for query correction or completion"
           }
         }
       },
@@ -4865,43 +4623,6 @@
           "Ascending",
           "Descending"
         ]
-      },
-      "SpellingCorrection": {
-        "type": "object",
-        "description": "Defines spelling correction (fuzzy search) and dictionary generation settings for an index.",
-        "required": [
-          "max_dictionary_edit_distance",
-          "count_threshold",
-          "max_dictionary_entries"
-        ],
-        "properties": {
-          "max_dictionary_edit_distance": {
-            "type": "integer",
-            "description": "The edit distance thresholds for suggestions: 1..2 recommended; higher values increase latency and memory consumption.",
-            "minimum": 0
-          },
-          "term_length_threshold": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "description": "Term length thresholds for each edit distance.\n  None:    max_dictionary_edit_distance for all terms lengths\n  Some(\\[4\\]):    max_dictionary_edit_distance for all terms lengths >= 4,\n  Some(\\[2,8\\]):    max_dictionary_edit_distance for all terms lengths >=2, max_dictionary_edit_distance +1 for all terms for lengths>=8"
-          },
-          "count_threshold": {
-            "type": "integer",
-            "description": "The minimum frequency count for dictionary words to be considered eligible for spelling correction.\nDepends on the corpus size, 1..20 recommended.\nIf count_threshold is too high, some correct words might be missed from the dictionary and deemed misspelled,\nif count_threshold is too low, some misspelled words from the corpus might be considered correct and added to the dictionary.\nDictionary terms eligible for spelling correction (frequency count >= count_threshold) consume much more RAM, than the candidates (frequency count < count_threshold),\nbut the terms below count_threshold will be included in dictionary.csv too.",
-            "minimum": 0
-          },
-          "max_dictionary_entries": {
-            "type": "integer",
-            "description": "Limits the maximum number of dictionary entries (terms >= count_threshold) to generate during indexing, preventing excessive RAM consumption.\nThe number of terms in dictionary.csv will be higher, because it contains also the terms < count_threshold, to become eligible in the future during incremental dictionary updates.\nDictionary terms eligible for spelling correction (frequency count >= count_threshold) consume much more RAM, than the candidates (frequency count < count_threshold).\n⚠️ Above this threshold no new terms are added to the dictionary, causing them to be deemed incorrect during spelling correction and possibly changed to similar terms that are in the dictionary.",
-            "minimum": 0
-          }
-        }
       },
       "StemmerType": {
         "type": "string",

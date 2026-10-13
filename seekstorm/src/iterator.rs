@@ -376,7 +376,7 @@ pub(crate) async fn search_iterator_index(
         observed_cluster_count: 0,
         results: Vec::new(),
         facets: AHashMap::new(),
-        suggestions: Vec::new(),
+
     };
 
     if result_type != ResultType::Count {

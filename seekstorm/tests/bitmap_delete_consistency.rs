@@ -15,7 +15,7 @@ use seekstorm::index::{
     IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType,
     TokenizerType, create_index,
 };
-use seekstorm::search::{QueryRewriting, QueryType, ResultType, Search, SearchMode};
+use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
 use seekstorm::vector::Inference;
 use std::{collections::HashSet, fs, path::Path};
 
@@ -44,8 +44,6 @@ fn meta() -> IndexMetaObject {
         ngram_indexing: NgramSet::SingleTerm as u8,
         document_compression: DocumentCompression::Snappy,
         access_type: AccessType::Mmap,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::None,
     }
@@ -79,7 +77,6 @@ async fn search(
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await
 }
@@ -194,3 +191,4 @@ fn ground_truth(set_x: &HashSet<u64>, set_y: &HashSet<u64>) -> (HashSet<u64>, Ha
     let live_or: HashSet<u64> = live_x.union(&live_y).copied().collect();
     (live_and, live_or)
 }
+

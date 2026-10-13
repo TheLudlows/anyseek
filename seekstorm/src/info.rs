@@ -34,25 +34,6 @@ pub async fn display_index_info(
         .unwrap();
     let dt_now_utc: DateTime<Utc> = file_date.into();
 
-    let s = if let Some(symspell) = index_ref.symspell_option.as_ref() {
-        symspell
-            .read()
-            .await
-            .get_candidates_size()
-            .to_formatted_string(&Locale::en)
-    } else {
-        "None".to_string()
-    };
-    let s2 = if let Some(completions) = index_ref.completion_option.as_ref() {
-        completions
-            .read()
-            .await
-            .len()
-            .to_formatted_string(&Locale::en)
-    } else {
-        "None".to_string()
-    };
-
     for shard in index_ref.shard_vec.iter() {
         shard.read().await.index_file.sync_all().unwrap();
         shard.read().await.vector_file.sync_all().unwrap();
@@ -238,26 +219,6 @@ pub async fn display_index_info(
             entry: "similarity",
             value: index_ref.vector_similarity.to_string(),
         },
-        Info {
-            entry: "Query rewriting",
-            value: "".to_string(),
-        },
-        Info {
-            entry: "spelling correction",
-            value: if let Some(symspell) = index_ref.symspell_option.as_ref() {
-                symspell
-                    .read()
-                    .await
-                    .get_dictionary_size()
-                    .to_formatted_string(&Locale::en)
-            } else {
-                "None".to_string()
-            },
-        },
-        Info {
-            entry: "auto completion",
-            value: s + " " + &s2,
-        },
     ];
 
     let mut table = Table::new(info_entries);
@@ -277,7 +238,6 @@ pub async fn display_index_info(
                 (22, HorizontalLine::inherit(Style::modern())),
                 (23, HorizontalLine::inherit(Style::modern())),
                 (30, HorizontalLine::inherit(Style::modern())),
-                (31, HorizontalLine::inherit(Style::modern())),
             ]))
             .with(BorderColor::filled(Color::FG_BRIGHT_BLACK));
 
@@ -290,7 +250,6 @@ pub async fn display_index_info(
         table.with(Modify::new(Rows::one(0)).with(Color::FG_CYAN));
         table.with(Modify::new(Rows::one(12)).with(Color::FG_CYAN));
         table.with(Modify::new(Rows::one(22)).with(Color::FG_CYAN));
-        table.with(Modify::new(Rows::one(30)).with(Color::FG_CYAN));
     } else if index_ref.is_lexical_indexing {
         table.with(Remove::row(Rows::new(23..30)));
         table

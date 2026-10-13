@@ -164,3 +164,12 @@ CI 改用新的缓存命名空间且 `cache-targets: false`，只缓存可跨机
 | 本地静态检查 | Python AST、Node 脚本语法、git diff --check 通过 |
 
 本批首次完整 CI 即通过。此后的状态/验证回填仅修改 Markdown；最终 head 的检查结果见 PR Checks。PR 尚未合入，S1.3 清单暂不勾选，S1.4—S1.5 尚未实施。
+
+
+## S1.4a — 纠错补全与查询改写裁剪（2026-10-13）
+
+S1.3 最终 head `242815d` 的 CI 38384967519 已成功，PR #4 合入提交 `567d8a22908179236e239e4d82155a2546095273`。本批基于该提交，范围仅覆盖 S1.4 第一项；地理/高亮/配额保持待执行。
+
+删除查询改写及 SymSpell/PruningRadixTrie 词典生命周期；移除分词器中仅用于补全统计的分支，保留原有分词、中文字典、n-gram、布尔/短语匹配。保留 query/original_query 响应字段，两者均为调用方原文；suggestions 移除。HTTP 创建/查询/Schema 旧配置必须报错，Rust 搜索移除末尾 query_rewriting 参数。旧索引 null 元数据仍可读，启用已移除功能的元数据明确返回重建提示。
+
+验证待回填：原有 48 个测试保留，新增 2 个契约测试；HTTP 参数拒绝及未改写结果、Chromium 输入不被补全或替换、依赖图及 OpenAPI 一致性。本地无 Rust 工具链，Rust/浏览器结果以 CI 为准。没有执行生产性能、恢复或 AArch64 测试。

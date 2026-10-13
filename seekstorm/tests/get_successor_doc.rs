@@ -31,8 +31,6 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
         ngram_indexing: NgramSet::SingleTerm as u8,
         document_compression: compression,
         access_type: access,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::None,
     };

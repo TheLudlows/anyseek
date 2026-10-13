@@ -23,7 +23,6 @@ use std::{
     thread::available_parallelism,
     time::Instant,
 };
-use symspell_complete_rs::{PruningRadixTrie, SymSpell};
 use tokio::sync::{RwLock, Semaphore};
 use utils::{read_u32, write_u16};
 use utoipa::ToSchema;
@@ -38,7 +37,7 @@ use crate::{
     geo_search::encode_morton_2_d,
     highlighter::Highlight,
     search::{
-        self, FacetFilter, Point, QueryFacet, QueryRewriting, Ranges, ResultObject, ResultSort,
+        self, FacetFilter, Point, QueryFacet, Ranges, ResultObject, ResultSort,
         ResultType, SearchLexicalShard, SearchMode,
     },
     tokenizer::tokenizer,
@@ -91,8 +90,6 @@ pub(crate) const META_FILENAME: &str = "index.json";
 pub(crate) const FACET_FILENAME: &str = "facet.bin";
 pub(crate) const FACET_VALUES_FILENAME: &str = "facet.json";
 
-pub(crate) const DICTIONARY_FILENAME: &str = "dictionary.csv";
-pub(crate) const COMPLETIONS_FILENAME: &str = "completions.csv";
 
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -198,10 +195,6 @@ pub struct SearchRequestObject {
     #[schema(required = false, example = QueryType::Intersection)]
     #[serde(default = "query_type_api")]
     pub query_type_default: QueryType,
-    /// Specify query rewriting method for search query correction and completion: (default=SearchOnly).
-    #[schema(required = false, example = QueryRewriting::SearchOnly)]
-    #[serde(default = "query_rewriting_api")]
-    pub query_rewriting: QueryRewriting,
     /// Specify search mode: (default=Lexical).
     #[schema(required = false, example = SearchMode::Lexical)]
     #[serde(default = "search_mode_api")]
@@ -216,10 +209,6 @@ fn query_type_api() -> QueryType {
     QueryType::Intersection
 }
 
-fn query_rewriting_api() -> QueryRewriting {
-    QueryRewriting::SearchOnly
-}
-
 fn length_api() -> usize {
     10
 }
@@ -231,7 +220,7 @@ pub struct SearchResultObject {
     pub time: u128,
     /// Search query string
     pub original_query: String,
-    /// Search query string after any automatic query correction or completion
+    /// Search query string, unchanged from the caller input
     pub query: String,
     /// Offset of the returned search results
     pub offset: usize,
@@ -249,8 +238,6 @@ pub struct SearchResultObject {
     #[schema(value_type=HashMap<String, Vec<(String, usize)>>)]
     /// Facets with their values and corresponding document counts
     pub facets: AHashMap<String, Facet>,
-    /// Suggestions for query correction or completion
-    pub suggestions: Vec<String>,
 }
 
 /// Quota per API key
@@ -346,20 +333,6 @@ pub struct CreateIndexRequest {
     #[schema(required = false, example = json!([{"terms":["berry","lingonberry","blueberry","gooseberry"],"multiway":false}]))]
     #[serde(default)]
     pub synonyms: Vec<Synonym>,
-    /// Enable spelling correction for search queries using the SymSpell algorithm.
-    /// When enabled, a SymSpell dictionary is incrementally created during indexing of documents and stored in the index.
-    /// In addition you need to set the parameter `query_rewriting` in the search method to enable it per query.
-    /// The creation of an individual dictionary derived from the indexed documents improves the correction quality compared to a generic dictionary.
-    /// An dictionary per index improves the privacy compared to a global dictionary derived from all indices.
-    /// The dictionary is deleted when delete_index or clear_index is called.
-    /// Note: enabling spelling correction increases the index size, indexing time and query latency.
-    /// Default: None. Enable by setting a value for max_dictionary_edit_distance (1..2 recommended).
-    /// The higher the value, the higher the number of errors that can be corrected - but also the memory consumption, lookup latency, and the number of false positives.
-    #[serde(default)]
-    pub spelling_correction: Option<SpellingCorrection>,
-    /// Enable query completion for search queries using a prefix dictionary. When enabled, a prefix dictionary is incrementally created during indexing of documents and stored in the index. The prefix dictionary is used to generate suggestions for query completion based on the indexed documents. In addition you need to set the parameter `query_rewriting` in the search method to enable it per query. Note: enabling query completion increases the index size, indexing time and query latency.
-    #[serde(default)]
-    pub query_completion: Option<QueryCompletion>,
     #[serde(default)]
     /// Enable clustering for vector search.
     pub clustering: Clustering,
@@ -1089,6 +1062,7 @@ fn default_as_true() -> bool {
 
 /// Defines a field in index schema: field, stored, indexed , field_type, facet, boost.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SchemaField {
     /// unique name of a field
     pub field: String,
@@ -1124,23 +1098,12 @@ pub struct SchemaField {
     #[serde(default = "default_1")]
     pub boost: f32,
 
-    /// if both indexed=true and dictionary_source=true then the terms from this field are added to dictionary to the spelling correction dictionary.
-    /// if disabled, then a manually generated dictionary can be used: {index_path}/dictionary.csv
-    #[serde(skip_serializing_if = "is_default_bool")]
-    #[serde(default = "default_false")]
-    pub dictionary_source: bool,
 
-    /// if both indexed=true and completion_source=true then the n-grams (unigrams, bigrams, trigrams) from this field are added to the auto-completion list.
-    /// if disabled, then a manually generated completion list can be used: {index_path}/completions.csv
-    /// it is recommended to enable completion_source only for fields that contain short text with high-quality terms for auto-completion, e.g. title, author, category, product name, tags,
-    /// in order to keep the extraction time and RAM requirement for completions low and the completions relevance high.
-    #[serde(skip_serializing_if = "is_default_bool")]
-    #[serde(default = "default_false")]
-    pub completion_source: bool,
 
     #[serde(skip)]
     pub(crate) indexed_field_id: usize,
-    #[serde(skip_deserializing)]
+    #[serde(default)]
+    #[schema(ignore)]
     pub(crate) field_id: usize,
 }
 
@@ -1161,7 +1124,7 @@ pub struct SchemaField {
 /// # Example
 /// ```rust
 /// use seekstorm::index::{SchemaField, FieldType};
-/// let schema_field = SchemaField::new("title".to_string(), true, true, false, FieldType::String16, false, false, 1.0, false, false);
+/// let schema_field = SchemaField::new("title".to_string(), true, true, false, FieldType::String16, false, false, 1.0);
 /// ```
 impl SchemaField {
     /// Creates a new SchemaField.
@@ -1175,8 +1138,6 @@ impl SchemaField {
         facet: bool,
         longest: bool,
         boost: f32,
-        dictionary_source: bool,
-        completion_source: bool,
     ) -> Self {
         SchemaField {
             field,
@@ -1187,8 +1148,6 @@ impl SchemaField {
             facet,
             longest,
             boost,
-            dictionary_source,
-            completion_source,
 
             indexed_field_id: 0,
             field_id: 0,
@@ -1268,40 +1227,6 @@ pub enum FrequentwordType {
     },
 }
 
-/// Defines spelling correction (fuzzy search) and dictionary generation settings for an index.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct SpellingCorrection {
-    /// The edit distance thresholds for suggestions: 1..2 recommended; higher values increase latency and memory consumption.
-    pub max_dictionary_edit_distance: usize,
-    /// Term length thresholds for each edit distance.
-    ///   None:    max_dictionary_edit_distance for all terms lengths
-    ///   Some(\[4\]):    max_dictionary_edit_distance for all terms lengths >= 4,
-    ///   Some(\[2,8\]):    max_dictionary_edit_distance for all terms lengths >=2, max_dictionary_edit_distance +1 for all terms for lengths>=8
-    pub term_length_threshold: Option<Vec<usize>>,
-
-    /// The minimum frequency count for dictionary words to be considered eligible for spelling correction.
-    /// Depends on the corpus size, 1..20 recommended.
-    /// If count_threshold is too high, some correct words might be missed from the dictionary and deemed misspelled,
-    /// if count_threshold is too low, some misspelled words from the corpus might be considered correct and added to the dictionary.
-    /// Dictionary terms eligible for spelling correction (frequency count >= count_threshold) consume much more RAM, than the candidates (frequency count < count_threshold),  
-    /// but the terms below count_threshold will be included in dictionary.csv too.
-    pub count_threshold: usize,
-
-    /// Limits the maximum number of dictionary entries (terms >= count_threshold) to generate during indexing, preventing excessive RAM consumption.
-    /// The number of terms in dictionary.csv will be higher, because it contains also the terms < count_threshold, to become eligible in the future during incremental dictionary updates.
-    /// Dictionary terms eligible for spelling correction (frequency count >= count_threshold) consume much more RAM, than the candidates (frequency count < count_threshold).
-    /// ⚠️ Above this threshold no new terms are added to the dictionary, causing them to be deemed incorrect during spelling correction and possibly changed to similar terms that are in the dictionary.
-    pub max_dictionary_entries: usize,
-}
-
-/// Defines query completion generation for an index.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct QueryCompletion {
-    /// Maximum number of completions to generate during indexing
-    /// disabled if == 0
-    pub max_completion_entries: usize,
-}
-
 /// Clustering defines the clustering behavior for approximate nearest neighbor (ANN) search: None, Auto, Fixed(usize).
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Default, ToSchema)]
 pub enum Clustering {
@@ -1378,27 +1303,7 @@ pub struct IndexMetaObject {
 
     /// AccessType defines where the index resides during search: Ram or Mmap
     pub access_type: AccessType,
-    /// Enable spelling correction for search queries using the SymSpell algorithm.
-    /// SymSpell enables finding those spelling suggestions in a dictionary very fast with minimum Damerau-Levenshtein edit distance and maximum word occurrence frequency.
-    /// When enabled, a SymSpell dictionary is incrementally created during indexing of documents and stored in the index.
-    /// The spelling correction is not based on a generic dictionary, but on a domain specific one derived from your indexed documents (only indexed fields).
-    /// This makes it language independent and prevents any discrepancy between corrected word and indexed content.
-    /// The creation of an individual dictionary derived from the indexed documents improves the correction quality compared to a generic dictionary.
-    /// An dictionary per index improves the privacy compared to a global dictionary derived from all indices.
-    /// The dictionary is deleted when delete_index or clear_index is called.
-    /// Note: enabling spelling correction increases the index size, indexing time and query latency.
-    /// Default: None. Enable by setting CreateDictionary with values for max_dictionary_edit_distance (1..2 recommended) and optionally a term length thresholds for each edit distance.
-    /// The higher the value, the higher the number of errors taht can be corrected - but also the memory consumption, lookup latency, and the number of false positives.
-    /// ⚠️ In addition to the create_index parameter `meta.spelling_correction` you also need to set the parameter `query_rewriting` in the search method to enable it per query.
-    #[serde(default)]
-    pub spelling_correction: Option<SpellingCorrection>,
 
-    /// Enable query completion for search queries
-    /// When enabled, an auto-completion list is incrementally created during indexing of documents and stored in the index.
-    /// Because the completions are not based on a generic dictionary, but on a domain specific one derived from your indexed documents (only from indexed fields with completion_source=true), this increases the relevance of completions.
-    /// ⚠️ Deriving completions from indexed documents increases the indexing time and index size.
-    #[serde(default)]
-    pub query_completion: Option<QueryCompletion>,
 
     /// clustering defines the clustering behavior for approximate nearest neighbor (ANN) search: None, Auto, Fixed(usize).
     #[serde(default)]
@@ -1655,8 +1560,6 @@ pub struct Shard {
     pub(crate) frequent_words: Vec<String>,
     pub(crate) frequent_hashset: AHashSet<u64>,
     pub(crate) key_head_size: usize,
-    pub(crate) level_terms: AHashMap<u32, String>,
-    pub(crate) level_completions: Arc<RwLock<AHashMap<Vec<String>, usize>>>,
 
     /// AVX2 (x86_64) support enabled.
     pub(crate) is_avx2: bool,
@@ -1726,11 +1629,7 @@ pub struct Index {
     pub(crate) shard_number: usize,
     pub(crate) shard_vec: Vec<Arc<RwLock<Shard>>>,
 
-    pub(crate) max_dictionary_entries: usize,
-    pub(crate) symspell_option: Option<Arc<RwLock<SymSpell>>>,
 
-    pub(crate) max_completion_entries: usize,
-    pub(crate) completion_option: Option<Arc<RwLock<PruningRadixTrie>>>,
 
     pub(crate) frequent_hashset: AHashSet<String>,
 
@@ -2145,35 +2044,6 @@ pub(crate) async fn create_index_root(
 
                 shard_number,
                 shard_vec,
-
-                max_dictionary_entries: if let Some(spelling_correction) = &meta.spelling_correction
-                {
-                    spelling_correction.max_dictionary_entries
-                } else {
-                    usize::MAX
-                },
-
-                symspell_option: if let Some(spelling_correction) = meta.spelling_correction {
-                    Some(Arc::new(RwLock::new(SymSpell::new(
-                        spelling_correction.max_dictionary_edit_distance,
-                        spelling_correction.term_length_threshold,
-                        7,
-                        spelling_correction.count_threshold,
-                    ))))
-                } else {
-                    None
-                },
-
-                max_completion_entries: if let Some(query_completion) = &meta.query_completion {
-                    query_completion.max_completion_entries
-                } else {
-                    usize::MAX
-                },
-
-                completion_option: meta
-                    .query_completion
-                    .as_ref()
-                    .map(|_query_completion| Arc::new(RwLock::new(PruningRadixTrie::new()))),
 
                 frequent_hashset,
 
@@ -2649,8 +2519,6 @@ pub(crate) fn create_shard(
                 } else {
                     23
                 },
-                level_terms: AHashMap::new(),
-                level_completions: Arc::new(RwLock::new(AHashMap::with_capacity(200_000))),
 
                 vector_file,
                 vector_file_mmap,
@@ -3083,6 +2951,16 @@ pub(crate) fn update_list_max_impact_score(index: &mut Shard) {
     }
 }
 
+fn read_index_meta(file: File) -> Result<IndexMetaObject, String> {
+    let value: Value = serde_json::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
+    for field in ["spelling_correction", "query_completion"] {
+        if value.get(field).is_some_and(|v| !v.is_null()) {
+            return Err(format!("{field} has been removed; export the records and rebuild without query rewriting"));
+        }
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
+}
+
 /// Loads the index from disk into RAM or MMAP.
 /// * `index_path` - index path.  
 /// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).  
@@ -3109,7 +2987,7 @@ pub(crate) async fn open_shard(
 
     match File::open(Path::new(index_path).join(META_FILENAME)) {
         Ok(meta_file) => {
-            let meta: IndexMetaObject = serde_json::from_reader(BufReader::new(meta_file))
+            let meta: IndexMetaObject = read_index_meta(meta_file)
                 .map_err(|e| format!("unsupported or invalid index metadata: {e}"))?;
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
@@ -3672,7 +3550,7 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
 
     match File::open(Path::new(index_path).join(META_FILENAME)) {
         Ok(meta_file) => {
-            let meta: IndexMetaObject = serde_json::from_reader(BufReader::new(meta_file))
+            let meta: IndexMetaObject = read_index_meta(meta_file)
                 .map_err(|e| format!("unsupported or invalid index metadata: {e}"))?;
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
@@ -3715,32 +3593,6 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
                             let index = RwLock::into_inner(lock);
 
                             let index_arc = Arc::new(RwLock::new(index));
-
-                            if let Some(symspell) =
-                                &mut index_arc.read().await.symspell_option.as_ref()
-                            {
-                                let dictionary_path =
-                                    Path::new(&index_arc.read().await.index_path_string)
-                                        .join(DICTIONARY_FILENAME);
-                                let _ = symspell.write().await.load_dictionary(
-                                    &dictionary_path,
-                                    0,
-                                    1,
-                                    " ",
-                                );
-                            }
-
-                            if let Some(completion_option) =
-                                &mut index_arc.read().await.completion_option.as_ref()
-                            {
-                                let _ = completion_option.write().await.load_completions(
-                                    &Path::new(&index_arc.read().await.index_path_string)
-                                        .join(COMPLETIONS_FILENAME),
-                                    0,
-                                    1,
-                                    ":",
-                                );
-                            }
 
                             let mut shard_vec: Vec<Arc<RwLock<Shard>>> = Vec::new();
 
@@ -4139,7 +3991,6 @@ impl Shard {
         let semaphore = self.semaphore.clone();
         let permit = semaphore.acquire_owned().await.unwrap();
 
-        self.level_terms.clear();
 
         let mut mmap_options = MmapOptions::new();
         let mmap: MmapMut = mmap_options.len(4).map_anon().unwrap();
@@ -4760,22 +4611,6 @@ impl Index {
 
     /// Reset the index to empty, while maintaining the schema.
     pub async fn clear_index(&mut self) {
-        let index_path = Path::new(&self.index_path_string);
-        let _ = fs::remove_file(index_path.join(DICTIONARY_FILENAME));
-        if let Some(spelling_correction) = self.meta.spelling_correction.as_ref() {
-            self.symspell_option = Some(Arc::new(RwLock::new(SymSpell::new(
-                spelling_correction.max_dictionary_edit_distance,
-                spelling_correction.term_length_threshold.clone(),
-                7,
-                spelling_correction.count_threshold,
-            ))));
-        }
-
-        let _ = fs::remove_file(index_path.join(COMPLETIONS_FILENAME));
-        if let Some(_query_completion) = self.meta.query_completion.as_ref() {
-            self.completion_option = Some(Arc::new(RwLock::new(PruningRadixTrie::new())));
-        }
-
         let mut result_object_list = Vec::new();
         for shard in self.shard_vec.iter() {
             let shard_clone = shard.clone();
@@ -4863,44 +4698,6 @@ impl Close for IndexArc {
     /// Remove index from RAM (Reverse of open_index)
     async fn close(&self) {
         self.commit().await;
-
-        let mut modified = false;
-        for shard in self.read().await.shard_vec.iter() {
-            if shard.read().await.modified {
-                modified = true;
-                break;
-            }
-        }
-
-        let mut dictionary_source = false;
-        let mut completion_source = false;
-        if modified {
-            for schema_item in self.read().await.schema_map.iter() {
-                if schema_item.1.dictionary_source {
-                    dictionary_source = true;
-                }
-                if schema_item.1.completion_source {
-                    completion_source = true;
-                }
-            }
-        }
-
-        if completion_source
-            && let Some(completion_option) = &self.read().await.completion_option.as_ref()
-        {
-            let trie = completion_option.read().await;
-            let completions_path =
-                Path::new(&self.read().await.index_path_string).join(COMPLETIONS_FILENAME);
-
-            _ = trie.save_completions(&completions_path, ":");
-        }
-
-        if dictionary_source && let Some(symspell) = &mut self.read().await.symspell_option.as_ref()
-        {
-            let dictionary_path =
-                Path::new(&self.read().await.index_path_string).join(DICTIONARY_FILENAME);
-            let _ = symspell.read().await.save_dictionary(&dictionary_path, " ");
-        }
 
         let mut result_object_list = Vec::new();
         for shard in self.read().await.shard_vec.iter() {
@@ -5049,7 +4846,6 @@ impl DeleteDocumentsByQuery for IndexArc {
                 Vec::new(),
                 facet_filter,
                 result_sort,
-                QueryRewriting::SearchOnly,
             )
             .await;
 

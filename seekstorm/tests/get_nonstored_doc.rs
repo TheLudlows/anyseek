@@ -28,8 +28,6 @@ fn meta(access_type: AccessType) -> IndexMetaObject {
         ngram_indexing: NgramSet::SingleTerm as u8,
         document_compression: DocumentCompression::Snappy,
         access_type,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::None,
     }
@@ -98,3 +96,4 @@ async fn get_stored_control() {
     assert!(get0(&index).await.is_ok());
     index.close().await;
 }
+

@@ -46,9 +46,7 @@
 //! ngram_indexing: NgramSet::NgramFF as u8,
 //! document_compression:  DocumentCompression::Snappy,
 //! access_type: AccessType::Mmap,
-//! spelling_correction: None,
-//! query_completion: None,
-//! clustering: Clustering::None,
+//! //! clustering: Clustering::None,
 //! inference: Inference::None,
 //! };
 //! let segment_number_bits1=11;
@@ -152,7 +150,7 @@
 //! # use seekstorm::index::open_index;
 //! # let index_path=Path::new("C:/index/");
 //! # let index_arc=open_index(index_path).await.unwrap();
-//! use seekstorm::search::{Search, SearchMode, QueryType, ResultType, QueryRewriting};
+//! use seekstorm::search::{Search, SearchMode, QueryType, ResultType};
 //! let query="test".to_string();
 //! let query_vector=None;
 //! let search_mode=SearchMode::Lexical;
@@ -166,7 +164,7 @@
 //! let query_facets=Vec::new();
 //! let facet_filter=Vec::new();
 //! let result_sort=Vec::new();
-//! let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,QueryRewriting::SearchOnly).await;
+//! let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,).await;
 //! // ### display results
 //! use seekstorm::highlighter::{Highlight, highlighter};
 //! use std::collections::HashSet;
@@ -279,9 +277,7 @@
 //!     ngram_indexing: NgramSet::NgramFF as u8,
 //!     document_compression:  DocumentCompression::Snappy,
 //!     access_type: AccessType::Mmap,
-//!     spelling_correction: None,
-//!     query_completion: None,
-//!     clustering: Clustering::None,
+//!     //!     //!     clustering: Clustering::None,
 //!     inference: Inference::None,
 //! };
 //! let serialize_schema=true;
@@ -316,7 +312,7 @@
 //! # use seekstorm::index::open_index;
 //! # let index_path=Path::new("C:/index/");
 //! # let index_arc=open_index(index_path).await.unwrap();
-//! use seekstorm::search::{QueryType, SearchMode, ResultType, QueryFacet, FacetFilter, QueryRewriting,Search};
+//! use seekstorm::search::{QueryType, SearchMode, ResultType, QueryFacet, FacetFilter,Search};
 //! let query="test".to_string();
 //! let query_vector=None;
 //! let search_mode=SearchMode::Lexical;
@@ -331,7 +327,7 @@
 //! let facet_filter=Vec::new();
 //! //let facet_filter = vec![FacetFilter {field: "town".to_string(),   filter:Filter::String(vec!["Berlin".to_string()])}];
 //! let result_sort=Vec::new();
-//! let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,QueryRewriting::SearchOnly).await;
+//! let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,).await;
 //! // ### display results
 //! use std::collections::HashSet;
 //! use seekstorm::highlighter::{highlighter, Highlight};

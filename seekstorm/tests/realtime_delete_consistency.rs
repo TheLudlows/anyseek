@@ -18,7 +18,7 @@ use seekstorm::index::{
     IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType,
     TokenizerType, create_index,
 };
-use seekstorm::search::{QueryRewriting, QueryType, ResultType, Search, SearchMode};
+use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
 use seekstorm::vector::Inference;
 use std::{fs, path::Path, time::Duration};
 
@@ -34,8 +34,6 @@ fn meta() -> IndexMetaObject {
         ngram_indexing: NgramSet::SingleTerm as u8,
         document_compression: DocumentCompression::Snappy,
         access_type: AccessType::Mmap,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::None,
     }
@@ -74,7 +72,6 @@ async fn search(
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await
 }
@@ -176,3 +173,4 @@ async fn realtime_union_count_excludes_deleted() {
     assert_eq!(count.result_count_total, 17);
     index.close().await;
 }
+

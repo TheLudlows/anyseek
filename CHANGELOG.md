@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove file/dataset importers, PDF attachment APIs/storage helpers, and pdfium-render/csv/walkdir dependencies; preserve JSON record APIs and Web UI source links.
 - Remove `FileType` from the Rust single-record write API; reject retired `ingest_path` configuration. Existing index encoding and stored records are unchanged.
 
+- Remove spelling correction, autocomplete and query rewriting from indexing, search and Web UI; remove symspell_complete_rs. Requests with retired options fail explicitly; normal lexical/Chinese/phrase matching remains.
+
 Entries below describe upstream releases before the SeekPower pruning and are retained as historical records, not current product capabilities.
 
 ## [3.4.1] - 2026-10-12
