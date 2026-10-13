@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Remove geographic Point indexing, Morton helpers, distance filters/sorts/facets and derived distance fields. Remove the Rust get_document distance argument and ResultSort.base; reject retired HTTP options and legacy Point schemas explicitly. Preserve ordinary metadata filters, sorting, facet aggregation and Web UI. Propagate shard-open errors without panicking.
 
+- Fix inherited metadata aggregation omissions in realtime counts and committed ranked unions. Retain exact filters/facet totals through existing record/bitmap paths; preserve unconstrained counting shortcuts. Fix Web UI date Range request shape.
+
 Entries below describe upstream releases before the SeekPower pruning and are retained as historical records, not current product capabilities.
 
 ## [3.4.1] - 2026-10-12

@@ -217,3 +217,22 @@ S1.4a 最终 head `a5da5b9` 的 [CI 38387377669](https://github.com/TheLudlows/s
 
 
 第四轮 `b3a72ff` 的 [CI 38390866235](https://github.com/TheLudlows/seekpower/actions/runs/38390866235)，job `115274028287`：实时过滤/计数/分面通过，下一断言定位到已提交 north/south 多词 TopkCount + 排序/分面的空汇总。原 union 扫描跳过逐记录 facet_count，而只有大于 32 词的 TopkCount 做独立 bitmap 汇总；本批复用既有 union_count，为请求元数据统计的 TopkCount 补全精确计数/分面，同时避免仅过滤时访问空 query_facets。无过滤/分面的原快速路径保持；编码/评分不变。增加同分片多词仅过滤覆盖，保留失败断言。这会为要求元数据精确统计的排序查询执行必要的额外统计遍历，不宣称获得性能提升；完整性能基线在 S2。
+
+
+**S1.4b 验证通过。** [PR #6](https://github.com/TheLudlows/seekpower/pull/6)，代码提交 [`1a73048c24fd6a60cfb4486de21f5095abf07d4e`](https://github.com/TheLudlows/seekpower/commit/1a73048c24fd6a60cfb4486de21f5095abf07d4e)，[CI 38391526830](https://github.com/TheLudlows/seekpower/actions/runs/38391526830)，job `115276230370`。Ubuntu x86_64 / Rust、Cargo 1.99.0；native 目标不跨 runner 复用。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `cargo build --workspace` | 通过；核心与 HTTP 服务完整构建 |
+| Cargo metadata 依赖图 | 通过；此前裁剪的四个依赖均未重新引入 |
+| `cargo test --workspace --all-targets` | **53 passed，0 failed/ignored/filtered**；既有 50 个测试保留，新增 3 个契约测试 |
+| 普通元数据契约 | 双分片 RAM/MMAP，实时/提交/重开均通过；字符串/集合/数值/时间过滤、空查询、Union/Intersection、多字段排序、带过滤和不带过滤的单词/多词 Count/TopkCount 范围汇总 |
+| 旧地理能力拒绝 | Point 创建/过滤/分面、sort.base、distance_fields 均报错；GET URL 和 JSON body 均覆盖；根/分片旧 schema 明确重建提示且原文件未改写 |
+| HTTP | 鉴权、首页及 11 个静态资源、JSON 写读更新删除提交、外部向量/混合、普通元数据过滤/排序通过 |
+| Chromium | 词法/向量/混合、来源/文本预览、输入原文保留、日期新旧排序和日期区间筛选通过；无 pageerror |
+| OpenAPI | Rust 生成 JSON/YAML 与仓库逐字节一致；地理类型/参数移除，普通 API 保留 |
+| 本地静态 | Python AST、Node 语法、JSON/YAML 语义一致、git diff --check 通过 |
+
+新增 metadata_contract 三项测试耗时 0.48 秒，这是该小型功能夹具的总运行时间，不是吞吐/延迟基线。修正触及的是必须统计完整匹配集时的路径选择；无过滤/分面的原快速计数、索引编码、评分及 ANN 算法未改。未执行 AArch64、生产规模性能和故障恢复验证；完整性能/可靠性验收仍在 S2。
+
+PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue #1 保持打开。此后仅回填 Markdown 记录，最新提交自动检查见 PR Checks。

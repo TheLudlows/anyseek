@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | R0 原样代码导入 | 已完成 | `1986b14215c82a07fac77d7c5b169b90743d76a4`；与上游树完全相同 |
 | R0 计划文档 | 已提交并调整 | 已取消独立基线阶段，改为直接实施 S1 |
-| S1 外围裁剪 | S1.1—S1.4a 已合入；S1.4b 地理裁剪验证中 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 保留并按裁剪结果调整 |
+| S1 外围裁剪 | S1.1—S1.4a 已合入；S1.4b 地理裁剪已验证、待合入 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 保留并按裁剪结果调整 |
 | S2 可靠单机 | 待执行 | ID/版本、可见性、日志/检查点/恢复、过滤和候选接口 |
 | D1 静态分布式 | 待执行 | 分片路由、全局两路候选、RRF、回表 |
 | D2 副本与恢复 | 待执行 | 有序复制、选主、fencing、快照追赶 |
@@ -70,12 +70,13 @@ S1.3 已通过最终 head CI 38384967519 并合入 master（PR #4，`567d8a22908
 - 删除 geo_search 模块、Point 类型、Morton 编码、距离过滤/排序/分面和返回距离计算；保留普通字段编码、过滤、排序、分面和 ANN 距离度量。
 - 移除 Rust get_document 距离参数、ResultSort.base；HTTP 旧地理参数返回 400，旧 Point schema 返回重建提示。分片打开错误向上传递，避免 panic。
 - Web UI 时间排序不再发送 base；同时修正日期范围过滤的 JSON Range 形状，使用实际 DATE_FIELD。
-- 新增地理请求拒绝、普通元数据多分片 RAM/MMAP 提交前后/重开回归、旧 schema 拒绝；扩展 HTTP 与 Chromium 日期排序/过滤回归。结果待 CI 回填。
+- 新增地理请求拒绝、普通元数据多分片 RAM/MMAP 提交前后/重开回归、旧 schema 拒绝；扩展 HTTP 与 Chromium 日期排序/过滤回归。[PR #6](https://github.com/TheLudlows/seekpower/pull/6) / `1a73048` 的 [CI 38391526830](https://github.com/TheLudlows/seekpower/actions/runs/38391526830) 全部通过：53 tests、HTTP/Chromium、依赖图和 OpenAPI。
+- 回归发现并修复继承的实时 Count 分面遗漏，以及已提交多词 TopkCount + 排序遗漏元数据汇总；复用现有逐记录/bitmap 计数路径，无约束快速路径保留，失败和修复详见 VALIDATION。
 - 高亮、配额及 S1.5 仍待执行，S1.4 不宣称全部完成。
 
 ## 下一步
 
-1. 完成 S1.4b 地理裁剪的 CI 与审查。
+1. 审查并合入 S1.4b [PR #6](https://github.com/TheLudlows/seekpower/pull/6)。
 2. 推进高亮、配额，再完成 S1.5 清理闭环。
 
 各批完成时同步 commit/PR、命令、环境、结果及未解决问题。完整可靠性和性能验收留在 S2。
