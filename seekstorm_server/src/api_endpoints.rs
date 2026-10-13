@@ -885,86 +885,7 @@ pub(crate) async fn delete_documents_by_query_api(
 
 /// Document iterator
 ///
-/// Document iterator via GET and POST are identical, only the way parameters are passed differ.
-/// The document iterator allows to iterate over all document IDs and documents in the entire index, forward or backward.
-/// It enables efficient sequential access to every document, even in very large indexes, without running a search.
-/// Paging through the index works without collecting document IDs to Min-heap in size-limited RAM first.
-/// The iterator guarantees that only valid document IDs are returned, even though document IDs are not strictly continuous.
-/// Document IDs can also be fetched in batches, reducing round trips and significantly improving performance, especially when using the REST API.
-/// Typical use cases include index export, conversion, analytics, audits, and inspection.
-/// Explanation of "eventually continuous" docid:
-/// In SeekStorm, document IDs become continuous over time. In a multi-sharded index, each shard maintains its own document ID space.
-/// Because documents are distributed across shards in a non-deterministic, load-dependent way, shard-local document IDs advance at different rates.
-/// When these are mapped to global document IDs, temporary gaps can appear.
-/// As a result, simply iterating from 0 to the total document count may encounter invalid IDs near the end.
-/// The Document Iterator abstracts this complexity and reliably returns only valid document IDs.
-/// # Parameters
-/// - docid=None, take>0: **skip first s document IDs**, then **take next t document IDs** of an index.
-/// - docid=None, take<0: **skip last s document IDs**, then **take previous t document IDs** of an index.
-/// - docid=Some, take>0: **skip next s document IDs**, then **take next t document IDs** of an index, relative to a given document ID, with end-of-index indicator.
-/// - docid=Some, take<0: **skip previous s document IDs**, then **take previous t document IDs**, relative to a given document ID, with start-of-index indicator.
-/// - take=0: does not make sense, that defies the purpose of get_iterator.
-/// - The sign of take indicates the direction of iteration: positive take for forward iteration, negative take for backward iteration.
-/// - The skip parameter is always positive, indicating the number of document IDs to skip before taking document IDs. The skip direction is determined by the sign of take too.
-/// - include_document: if true, the documents are also retrieved along with their document IDs.
-/// Next page:     take last  docid from previous result set, skip=1, take=+page_size
-/// Previous page: take first docid from previous result set, skip=1, take=-page_size
-/// Returns an IteratorResult, consisting of the number of actually skipped document IDs, and a list of taken document IDs and documents, sorted ascending).
-/// Detect end/begin of index during iteration: if returned vec.len() < requested take || if returned skip <requested skip
-#[utoipa::path(
-    get,
-    tag = "Iterator",
-    path = "/api/v1/index/{index_id}/iterator",
-    params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
-    ),
-
-  params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id", example=0),
-        ("document_id" = u64, Query,  description = "document id"),
-        ("skip" = u64, Query,  description = "skip document IDs", minimum = 0, example=0),
-        ("take" = u64, Query,  description = "take document IDs",  example=-1),
-        ("include_deleted" = bool, Query,  description = "include deleted document IDs in results", example=false),
-        ("include_document" = bool, Query,  description = "include documents in results", example=false),
-        ("fields" = Vec<String>, Query,  description = "fields to include in document. If not specified, all fields are included", example=json!(["title","body"]) ),
-    ),
-    responses(
-        (status = 200, description = "Document ID found, returning an IteratorResult", body = IteratorResult),
-        (status = BAD_REQUEST, description = "index_id invalid or missing"),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing"),
-    ),
-    operation_id = "document_iterator_get"
-)]
-pub(crate) async fn get_iterator_api_get(
-    index_arc: &IndexArc,
-    document_id: Option<u64>,
-    skip: usize,
-    take: isize,
-    include_deleted: bool,
-    include_document: bool,
-    fields: Vec<String>,
-) -> IteratorResult {
-    index_arc
-        .get_iterator(
-            document_id,
-            skip,
-            take,
-            include_deleted,
-            include_document,
-            fields,
-        )
-        .await
-}
-
-/// Document iterator
-///
-/// Document iterator via GET and POST are identical, only the way parameters are passed differ.
+/// Document iterator accepts a JSON request body via POST.
 /// The document iterator allows to iterate over all document IDs and documents in the entire index, forward or backward.
 /// It enables efficient sequential access to every document, even in very large indexes, without running a search.
 /// Paging through the index works without collecting document IDs to Min-heap in size-limited RAM first.
@@ -1130,44 +1051,6 @@ pub(crate) async fn query_index_api_post(
     query_index_api(index_arc, search_request).await
 }
 
-/// Query Index
-///
-/// Query results from index with index_id.
-/// Query index via GET is a convenience function, that **offers only a limited set of parameters compared to Query Index via POST**.
-/// Always use Query Index via POST for the full set of parameters and maximum flexibility.
-/// Query Index via GET is provided for simple queries and quick testing, and to be easily callable from browser address bar, but it is not intended for production use.
-#[utoipa::path(
-    get,
-    tag = "Query",
-    path = "/api/v1/index/{index_id}/query",
-    params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id", example=0),
-        ("query" = String, Query,  description = "query string", example="hello"),
-        ("offset" = u64, Query,  description = "result offset", minimum = 0, example=0),
-        ("length" = u64, Query,  description = "result length", minimum = 1, example=10),
-        ("realtime" = bool, Query,  description = "include uncommitted documents", example=false),
-        ("enable_empty_query" = bool, Query,  description = "allow empty query", example=false)
-    ),
-    responses(
-        (status = 200, description = "Results found, returns the SearchResultObject", body = SearchResultObject),
-        (status = BAD_REQUEST, description = "Invalid query, external vector, or unsupported vector facet filter"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "API key does not exist"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing"),
-    ),
-    operation_id = "query_index_get"
-)]
-pub(crate) async fn query_index_api_get(
-    index_arc: &IndexArc,
-    search_request: SearchRequestObject,
-) -> Result<SearchResultObject, String> {
-    query_index_api(index_arc, search_request).await
-}
-
-
-
 pub(crate) async fn query_index_api(
     index_arc: &IndexArc,
     search_request: SearchRequestObject,
@@ -1257,14 +1140,12 @@ pub(crate) async fn query_index_api(
     commit_index_api,
     delete_index_api,
     get_iterator_api_post,
-    get_iterator_api_get,
     index_document_api,
     update_document_api,
     get_document_api,
     delete_document_by_parameter_api,
     delete_document_by_object_api,
     query_index_api_post,
-    query_index_api_get,
 ),
 tags(
     (name="Info", description="Return info about the server"),

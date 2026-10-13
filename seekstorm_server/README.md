@@ -90,6 +90,13 @@ The embedded Web UI is intended for demonstration, test and debugging rather tha
 
 ## REST API endpoints
 
+Search and document iteration accept POST with a JSON body only. GET and HTTP QUERY return 405 (`Allow: POST, OPTIONS`); parameters in the POST URL return 400. The former rkyv binary `/api/v2/index/{index_id}/query` returns 404. Ordinary resource GET endpoints remain supported.
+
+Iterator example:
+```sh
+curl --request POST --url http://127.0.0.1/api/v1/index/0/iterator --header 'apikey: YOUR_API_KEY' --header 'content-type: application/json' --data '{"take":10,"include_document":true,"fields":["body"]}'
+```
+
 See full [documentation of the REST API](openapi/openapi.yml).
 
 You can use a REST client like [Bruno](https://www.usebruno.com/) or the VSC extension [Rest client](https://marketplace.visualstudio.com/items?itemName=humao.rest-client) to execute API calls, inspect responses and generate code snippets in your language:  
@@ -189,18 +196,6 @@ curl --request DELETE --url http://127.0.0.1/api/v1/index/0/doc --header 'apikey
 ```
 
 --- 
-
-### query index (GET)
-
-wit URL parameter
-```
-curl --request GET --url 'http://127.0.0.1/api/v1/index/0/query?query=test&offset=0&length=10' --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json'
-```
-
-with JSON parameter
-```
-curl --request GET --url http://127.0.0.1/api/v1/index/0/query --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"query":"test","offset":0,"length":10,"realtime": true,"field_filter": ["title", "body"]}'
-```
 
 ### query index (POST)
 

@@ -52,7 +52,7 @@ def exercise(binary, workdir):
     master = base64.b64encode(hashlib.sha256(secret.encode()).digest()).decode()
     api_key = None
 
-    def request(method, path, data=None, key=None, expected=200):
+    def request(method, path, data=None, key=None, expected=200, expected_headers=None):
         headers = {}
         if key is not None:
             headers['apikey'] = key
@@ -68,6 +68,9 @@ def exercise(binary, workdir):
             body = response.read()
             check(response.status == expected,
                   f'{method} {path}: expected {expected}, got {response.status}: {body!r}')
+            for name, value in (expected_headers or {}).items():
+                check(response.headers.get(name) == value,
+                      f'{method} {path}: header {name}: {response.headers.get(name)!r} != {value!r}')
             return body
 
     def api(method, path, data=None):
@@ -170,7 +173,7 @@ def exercise(binary, workdir):
                 request('POST', path + '/query', {'query': 'test', 'query_rewriting': mode},
                         api_key, expected=400)
             request('GET', path + '/query?query=test&query_rewriting=SearchOnly',
-                    key=api_key, expected=400)
+                    key=api_key, expected=405)
             literal = api('POST', path + '/query', {'query': 'tset', 'search_mode': 'Lexical',
                           'result_type': 'TopkCount'})
             check(literal['query'] == literal['original_query'] == 'tset' and
@@ -189,13 +192,13 @@ def exercise(binary, workdir):
             ]
             for options in geo_options:
                 for method in ('GET', 'POST'):
-                    request(method, path + '/query', {'query': 'test', **options}, api_key, expected=400)
+                    request(method, path + '/query', {'query': 'test', **options}, api_key, expected=405 if method == 'GET' else 400)
                 request('GET', path + '/query?' + urlencode({'query': 'test',
-                    **{name: json.dumps(value) for name, value in options.items()}}), key=api_key, expected=400)
+                    **{name: json.dumps(value) for name, value in options.items()}}), key=api_key, expected=405)
             request('GET', path + '/doc/0', {'distance_fields': []}, api_key, expected=400)
             request('GET', path + '/doc/0?distance_fields=%5B%5D', key=api_key, expected=400)
-            check(api('GET', path + '/query?query=test&length=10')['count_total'] == 2,
-                  'retained GET query URL options failed')
+            check(api('POST', path + '/query', {'query': 'test', 'length': 10, 'result_type': 'TopkCount'})['count_total'] == 2,
+                  'retained POST JSON query options failed')
             print('PASS retired geographic schema/query/read options rejected by HTTP')
 
             result = api('POST', path + '/query', {
@@ -209,9 +212,9 @@ def exercise(binary, workdir):
             check(document == {'body': 'body2 test'}, f'stored document mismatch: {document}')
             for highlights in ([], [{'field': 'body', 'highlight_markup': True}]):
                 for method in ('GET', 'POST'):
-                    request(method, path + '/query', {'query': 'test', 'highlights': highlights}, api_key, expected=400)
+                    request(method, path + '/query', {'query': 'test', 'highlights': highlights}, api_key, expected=405 if method == 'GET' else 400)
                 request('GET', path + '/query?' + urlencode({'query': 'test', 'highlights': json.dumps(highlights)}),
-                        key=api_key, expected=400)
+                        key=api_key, expected=405)
                 request('GET', path + f'/doc/{doc_id}', {'highlights': highlights}, api_key, expected=400)
             for name in ('highlights', 'query_terms'):
                 request('GET', path + f'/doc/{doc_id}?' + urlencode({name: '[]'}), key=api_key, expected=400)
@@ -221,10 +224,33 @@ def exercise(binary, workdir):
             check(result['query_terms'], 'lexical query terms missing from search response')
             print('PASS retired presentation options rejected; stored fields and response query terms retained')
             request('GET', path + f'/doc/{doc_id}?fields=body', key=api_key, expected=400)
-            request('GET', path + '/iterator?unknown=true', key=api_key, expected=400)
-            request('GET', path + '/iterator?document_id=bad', key=api_key, expected=400)
+            request('GET', path + '/iterator?unknown=true', key=api_key, expected=405)
+            request('GET', path + '/iterator?document_id=bad', key=api_key, expected=405)
             request('POST', path + '/iterator', {'unknown': True}, api_key, expected=400)
-            request('GET', path + '/iterator?take=1&include_document=true', key=api_key)
+            request('POST', path + '/iterator', {'document_id': 'bad'}, api_key, expected=400)
+            first_page = api('POST', path + '/iterator', {'take': 2, 'include_document': True, 'fields': ['body']})
+            check(len(first_page['results']) == 2, f'POST iterator first page: {first_page}')
+            check(all(set(item['doc']) == {'body'} for item in first_page['results']),
+                  f'POST iterator projection: {first_page}')
+            next_page = api('POST', path + '/iterator', {'document_id': first_page['results'][-1]['doc_id'],
+                            'skip': 1, 'take': 2, 'include_document': True})
+            check(len(next_page['results']) == 2 and
+                  next_page['results'][0]['doc_id'] > first_page['results'][-1]['doc_id'],
+                  f'POST iterator next page: {next_page}')
+            last_page = api('POST', path + '/iterator', {'take': -2})
+            check([item['doc_id'] for item in last_page['results']] ==
+                  [item['doc_id'] for item in next_page['results']], 'POST iterator reverse traversal')
+            for suffix, body in [('/query', {'query': 'test'}), ('/iterator', {'take': 1})]:
+                for method in ('GET', 'QUERY'):
+                    for ending in ('', '/', '?query=test'):
+                        request(method, path + suffix + ending, body, api_key, expected=405,
+                                expected_headers={'Allow': 'POST, OPTIONS'})
+                request('POST', path + suffix, body, expected=401)
+                request('POST', path + suffix, b'invalid JSON', api_key, expected=400)
+                request('POST', path + suffix + '?ignored=true', body, api_key, expected=400)
+                request('OPTIONS', path + suffix, expected=204,
+                        expected_headers={'Access-Control-Allow-Methods': 'POST, OPTIONS'})
+            print('PASS POST-only search/iterator contracts, authentication, pagination and projection')
             print('PASS explicit document/iterator option handling')
 
             # The retired file endpoints must fail without adding a record.
@@ -286,7 +312,9 @@ def exercise(binary, workdir):
                                            [1, {'body': 'invalid'}]], api_key, expected=400)
             lexical = api('POST', vp + '/query', {'query': 'alpha', 'search_mode': 'Lexical'})
             check(lexical['results'][0]['body'] == 'alpha', 'failed update lost original')
-            request('POST', f'/api/v2/index/{vector_id}/query', b'invalid archive', api_key, expected=400)
+            for method in ('GET', 'POST', 'QUERY', 'OPTIONS'):
+                request(method, f'/api/v2/index/{vector_id}/query', b'retired binary payload', api_key, expected=404)
+            print('PASS retired binary query protocol is unavailable')
             for inference in ({'Model2Vec': {'model': 'PotionBase2M', 'chunk_size': 1000}},
                               {'External': {'dimensions': 0, 'precision': 'F32', 'quantization': 'None', 'similarity': 'Cosine'}},
                               {'External': {'dimensions': 3, 'precision': 'F32', 'quantization': 'None', 'similarity': 'invalid'}}):

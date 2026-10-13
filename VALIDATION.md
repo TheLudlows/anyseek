@@ -300,3 +300,12 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - 尚有非阻塞 Rust 警告：未使用的字段/函数、导入/变量、无默认特性下的变量，以及既有 query_contract 测试文档缺失；不宣称构建零警告。未执行真实 IPv6 网络连接、AArch64、生产性能与恢复故障注入。
 - [PR #9](https://github.com/TheLudlows/seekpower/pull/9) 代码和本批验证完成，等待审查合入。此后仅回填三份 Markdown，运行代码与上述通过 CI 的 `7d5d20c` 相同；最新 head 的自动检查见 PR Checks。状态文档合并为当前里程碑视图，历史过程保留在本记录。
 - S1.5 清单暂不勾选，Issue #1 保持打开；合入后核对 S1 退出证据。两路共同过滤、稳定 ID/版本、日志/恢复和完整可靠性/性能验收仍属 S2。
+
+## B1/B2：二进制协议与重复方法裁剪（2026-10-13）
+
+- 基准：master `4df02a860d9cacf37a9265819294be4147b5a536`；用户确认仅 B1/B2。
+- 删除 v2 rkyv 解码/检索/编码实现与 rkyv/url 服务依赖；v2 查询返回 404。
+- v1 搜索和遍历统一 POST JSON；GET/QUERY 返回 405 + `Allow: POST, OPTIONS`；POST URL 参数返回 400，OPTIONS 保留。
+- 同步 OpenAPI、HTTP 示例和说明；保持核心检索/迭代/存储代码不变，保留所有既有 Rust 测试。旧方法的 HTTP 断言迁移为拒绝契约，POST 的旧参数校验继续覆盖。新增 iterator 正向/反向分页、字段投影、旧协议退出与方法/鉴权回归。
+- 本地已执行：`python -m py_compile scripts/http_smoke.py`、`git diff --check`；OpenAPI JSON/YAML 解析结果相等，组件 schema 和其他路径相对基准保持一致。
+- 本地无 Rust/cargo，未执行或宣称本地构建、Rust/HTTP/Chromium 测试通过；PR CI 结果待回填。

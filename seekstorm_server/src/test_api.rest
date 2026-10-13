@@ -164,28 +164,6 @@ content-type: application/json
 [[1,{"title":"title1 test","body":"body1","url":"url1"}],
 [2,{"title":"title3 test","body":"body3 test","url":"url3"}]]
 
-### query index GET
-GET http://127.0.0.1/api/v1/index/0/query 
-?query=test
-&offset=0
-&length=10
-&realtime=true 
-apikey: {{api_key}}
-content-type: application/json
-
-### query index GET with json request
-GET http://127.0.0.1/api/v1/index/0/query 
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"test",
-    "offset":0,
-    "length":10,
-    "realtime": true,
-    "field_filter": ["title", "body"]
-}
-
 ### query index POST
 POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
 apikey: {{api_key}}
@@ -298,11 +276,6 @@ content-type: application/json
 
 
 ### iterator: get first 2 documents
-GET http://127.0.0.1/api/v1/index/0/iterator/?document_id=null&skip=0&take=2&include_document=true&fields=["title","body"]
-apikey: {{api_key}}
-content-type: application/json
-
-### iterator: get first 2 documents
 POST http://127.0.0.1/api/v1/index/0/iterator/
 apikey: {{api_key}}
 content-type: application/json
@@ -317,7 +290,7 @@ content-type: application/json
 }
 
 ### iterator: get last 2 documents
-POST http://127.0.0.1/api/v1/index/0/doc_id/
+POST http://127.0.0.1/api/v1/index/0/iterator/
 apikey: {{api_key}}
 content-type: application/json
 
