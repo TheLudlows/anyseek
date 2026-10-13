@@ -214,3 +214,6 @@ S1.4a 最终 head `a5da5b9` 的 [CI 38387377669](https://github.com/TheLudlows/s
 
 
 第三轮 `c1cb814` 的 [CI 38390277784](https://github.com/TheLudlows/seekpower/actions/runs/38390277784)，job `115272091103`：构建、依赖、HTTP/Chromium 和 OpenAPI 通过；实时分面已返回正确计数。测试错误地要求同计数分面按标签 low/high 排序，而现有根聚合按计数排序，同分项顺序没有保证。修正测试先按标签规范化后严格比较完整标签/计数列表；仍检查精确总数、全部分面、过滤结果和记录排序，不修改产品的同分排序规则。
+
+
+第四轮 `b3a72ff` 的 [CI 38390866235](https://github.com/TheLudlows/seekpower/actions/runs/38390866235)，job `115274028287`：实时过滤/计数/分面通过，下一断言定位到已提交 north/south 多词 TopkCount + 排序/分面的空汇总。原 union 扫描跳过逐记录 facet_count，而只有大于 32 词的 TopkCount 做独立 bitmap 汇总；本批复用既有 union_count，为请求元数据统计的 TopkCount 补全精确计数/分面，同时避免仅过滤时访问空 query_facets。无过滤/分面的原快速路径保持；编码/评分不变。增加同分片多词仅过滤覆盖，保留失败断言。这会为要求元数据精确统计的排序查询执行必要的额外统计遍历，不宣称获得性能提升；完整性能基线在 S2。

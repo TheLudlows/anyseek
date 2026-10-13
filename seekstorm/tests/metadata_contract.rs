@@ -65,7 +65,7 @@ async fn check_metadata(index: &IndexArc, realtime: bool) {
         (json!({"F64":{"field":"price","filter":{"start":20.,"end":40.}}}), vec![20.,30.]),
         (json!({"Timestamp":{"field":"date","filter":{"start":200,"end":400}}}), vec![20.,30.]),
     ] {
-        for query in ["common", "alpha beta", ""] {
+        for query in ["common", "alpha beta", "north south", ""] {
             check_prices(index,json!({"query":query,"query_type_default":"Union","facet_filter":[filter.clone()]}),realtime,&expected).await;
         }
     }

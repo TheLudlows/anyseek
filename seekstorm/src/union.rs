@@ -212,6 +212,18 @@ pub(crate) async fn union_docid<'a>(
         return;
     }
 
+    // Ranked scans may prune candidates and do not aggregate all facets.
+    // Reuse the exact bitmap pass when metadata counts are requested.
+    let count_before = *result_count;
+    let exact_metadata_count = result_type == &ResultType::TopkCount
+        && (query_list.len() > 32
+            || !search_result.query_facets.is_empty()
+            || !facet_filter.is_empty());
+    let skip_facet_count = search_result.skip_facet_count;
+    if exact_metadata_count {
+        search_result.skip_facet_count = true;
+    }
+
     if query_list.len() <= 8 {
         union_scan_8(
             shard,
@@ -228,7 +240,6 @@ pub(crate) async fn union_docid<'a>(
         )
         .await;
     } else {
-        let mut result_count_local = *result_count;
         union_scan_32(
             shard,
             non_unique_query_list,
@@ -244,20 +255,23 @@ pub(crate) async fn union_docid<'a>(
         )
         .await;
 
-        if query_list.len() > 32 && result_type == &ResultType::TopkCount {
-            union_count(
-                shard,
-                &mut result_count_local,
-                search_result,
-                query_list,
-                not_query_list,
-                facet_filter,
-                block_id,
-            )
-            .await;
-            *result_count = result_count_local;
-        }
     }
+    if exact_metadata_count {
+        let mut exact_count = count_before;
+        union_count(
+            shard,
+            &mut exact_count,
+            search_result,
+            query_list,
+            not_query_list,
+            facet_filter,
+            block_id,
+        )
+        .await;
+        *result_count = exact_count;
+        search_result.skip_facet_count = skip_facet_count;
+    }
+
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -979,6 +993,9 @@ pub(crate) async fn union_count<'a>(
                     continue 'next;
                 }
 
+                if search_result.query_facets.is_empty() {
+                    continue 'next;
+                }
                 for (i, facet) in shard.facets.iter().enumerate() {
                     if search_result.query_facets[i].length == 0 {
                         continue;
