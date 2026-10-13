@@ -1,3 +1,5 @@
+> Build this SeekPower service from the repository; upstream registry packages and Docker images do not include the pruning changes. Quotas and built-in rate limiting are removed. Key creation accepts `{}` or `{"demo":true}` and requires the master key; scoped keys, old key files and index directories remain supported. See the [migration notes](../README.md).
+
 > SeekPower S1.3: file parsing and local dataset import have been removed. Prepare text, vectors and metadata externally, then send a JSON object or array to `POST /api/v1/index/{index_id}/doc`. PDF/CSV parsing, directory scanning, local JSON/SIFT import and PDF attachment hosting are no longer engine responsibilities. No PDFium installation is needed. Existing indexed records remain readable; legacy PDF files are not deleted, but the service no longer serves them. Host source files externally and put their URL in a record.
 
 > SeekPower S1.2: model inference and automatic chunking have been removed. Supply external vectors through the HTTP API. The Web UI defaults to Lexical; Vector/Hybrid require a pasted JSON vector and display validation errors. See the [external vector contract](../README.md#external-vector-contract) for configuration, error handling and migration details.
@@ -7,10 +9,6 @@
 SeekStorm open-source, multi-tenancy, vector & lexical search server
 
 <img src="assets/logo.png" width="450" alt="Logo"><br>
-[![Crates.io](https://img.shields.io/crates/v/seekstorm_server.svg)](https://crates.io/crates/seekstorm_server)
-[![Downloads](https://img.shields.io/crates/d/seekstorm_server.svg?style=flat-square)](https://crates.io/crates/seekstorm_server)
-[![Docker](https://img.shields.io/docker/pulls/wolfgarbe/seekstorm_server)](https://hub.docker.com/r/wolfgarbe/seekstorm_server)
-[![REST API Documentation](https://docs.rs/seekstorm/badge.svg)](https://seekstorm.com/documentation/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/SeekStorm?tab=Apache-2.0-1-ov-file#readme)
 [![Roadmap](https://img.shields.io/badge/Roadmap-2026-DA7F07.svg)](#roadmap)
 
@@ -18,7 +16,6 @@ SeekStorm open-source, multi-tenancy, vector & lexical search server
 * Index and search via [RESTful API](#rest-api-endpoints) endpoints and via [Embedded  web UI](#open-embedded-web-ui-in-browser).
 * Multi-tenancy index management: multiple users, each with multiple indices
 * API-key management
-* Rate-limiting
 * Cross-platform: runs on Linux, Windows, and macOS (other OS untested)
 
 ## Command line parameters
@@ -26,7 +23,8 @@ SeekStorm open-source, multi-tenancy, vector & lexical search server
 * index_path   (default = "/seekstorm_index" in the path of the current running executable)
 * local_ip     (default = 0.0.0.0)
 * local_port   (default = 80)
-* force_shard_number : Set number of shards manually.
+* generate_openapi (default = false): write JSON/YAML API descriptions beside the executable and exit.
+* force_shard_number (positive integer) : Set number of shards manually.
     - not set: number of shards is set automatically = number of physical processor cores (default)
     - small: slower indexing, higher latency, slightly higher throughput, faster realtime search, lower RAM consumption, more frequent auto-commit (docs round-robin distributed across shards, commit after 64k docs per shard)
     - large: faster indexing, lower latency, slightly lower throughput, slower realtime search, higher RAM consumption, less frequent auto-commit (docs round-robin distributed across shards, commit after 64k docs per shard)
@@ -34,6 +32,8 @@ SeekStorm open-source, multi-tenancy, vector & lexical search server
 ```
 ./seekstorm_server.exe local_ip="127.0.0.1" local_port=80 index_path="c:/seekstorm_index"
 ```
+
+Unknown, malformed or duplicate startup options fail with exit code 2 before startup. Paths may contain `=`.
 
 ## Console commands
 
@@ -75,7 +75,7 @@ The embedded web UI allows to search and display results (document fields) from 
 
 The Web UI uses the demo API key and index 0 by default. Create and populate the index through the JSON API first; select another index with the `index_id` URL parameter.
 
-<img src="../../assets/wikipedia_demo.png" width="800">
+<img src="../assets/wikipedia_demo.png" width="800">
 <br><br>
 
 To overwrite the default **API key** and **index_id** use url parameters: [http://127.0.0.1/?api_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&index_id=0](http://127.0.0.1/?api_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&index_id=0).  
@@ -90,7 +90,7 @@ The embedded Web UI is intended for demonstration, test and debugging rather tha
 
 ## REST API endpoints
 
-See full [documentation of the REST API](https://seekstorm.com/documentation/).
+See full [documentation of the REST API](openapi/openapi.yml).
 
 You can use a REST client like [Bruno](https://www.usebruno.com/) or the VSC extension [Rest client](https://marketplace.visualstudio.com/items?itemName=humao.rest-client) to execute API calls, inspect responses and generate code snippets in your language:  
 [**interactive API endpoint examples**](https://github.com/SeekStorm/SeekStorm/blob/master/src/seekstorm_server/test_api.rest)

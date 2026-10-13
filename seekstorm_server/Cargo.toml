@@ -11,6 +11,7 @@ repository = "https://github.com/SeekStorm/SeekStorm"
 readme = "README.md"
 keywords = ["search", "information", "retrieval"]
 edition = "2024"
+publish = false # Build this fork from source; do not publish under upstream crate names.
 
 [features]
 default = ["zh","vb"]
@@ -23,10 +24,10 @@ path = "src/main.rs"
 
 [dependencies]
 # This forces the library to compile WITH gxhash when building the server binary
-seekstorm = { version = "3.4.1", path = "../seekstorm" , features = ["gxhash"], default-features = false} 
-ahash ={ version = "0.8.12", features = ["serde"]}
+seekstorm = { version = "3.4.1", path = "../seekstorm" , features = ["gxhash", "api-schema"], default-features = false}
 base64 = "0.23.1"
 colored = "3.1.1"
+chrono = "0.4.45"
 crossbeam-channel = "0.5.17"
 ctrlc = "3.5.2"
 http-body-util = "0.1.5"

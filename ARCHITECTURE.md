@@ -1,3 +1,5 @@
+> SeekPower boundary: the workspace retains the Rust core and HTTP/Web UI service. OpenAPI derives are opt-in (`api-schema`); terminal rendering and key management belong to the service. Index statistics collection, tokenization, storage, compression, scoring and vector search remain in the core. The following inherited architecture discussion does not constitute a performance or reliability certification.
+
 # Architecture
 
 SeekStorm is an open-source, sub-millisecond full-text search library & multi-tenancy server implemented in Rust.

@@ -2628,7 +2628,8 @@
             },
             "description": "which fields to return (if include_document is true, if empty then return all stored fields)"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "IndexResponseObject": {
         "type": "object",

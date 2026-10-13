@@ -9,7 +9,6 @@
 //! * it is both accessible via RESTful API endpoints and via embedded web UI
 //! * supports multi-tenancy: multiple users, each with multiple indices
 //! * API-key management
-//! * rate-limiting
 //! ### Command line parameters
 //! ```rust
 //! * index_path   (default = "/seekstorm_index" in current directory)
@@ -136,6 +135,7 @@ pub static MASTER_KEY_SECRET: LazyLock<String> =
 
 #[doc(hidden)]
 mod api_endpoints;
+mod info;
 #[doc(hidden)]
 mod http_server;
 #[doc(hidden)]
@@ -153,16 +153,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         SetPriorityClass(process, ABOVE_NORMAL_PRIORITY_CLASS);
     }
 
-    let args: Vec<String> = env::args().collect();
-    let mut params = HashMap::new();
-    if args.len() > 1 {
-        for s in args {
-            let split: Vec<&str> = s.split('=').collect();
-            if split.len() == 2 {
-                params.insert(split[0].trim().to_owned(), split[1].trim().to_owned());
-            }
-        }
-    }
+    let params = match parse_params(env::args().skip(1)) {
+        Ok(params) => params,
+        Err(error) => { eprintln!("{error}"); std::process::exit(2); }
+    };
 
     if params.get("generate_openapi").is_some_and(|value| value == "true") {
         api_endpoints::generate_openapi();
@@ -173,3 +167,40 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
+
+fn parse_params(args: impl Iterator<Item=String>) -> Result<HashMap<String, String>, String> {
+    let mut params = HashMap::new();
+    for arg in args {
+        let (name, value) = arg.split_once('=').ok_or_else(|| format!("expected name=value: {arg}"))?;
+        let (name, value) = (name.trim(), value.trim());
+        if name == "ingest_path" { return Err("ingest_path has been removed; use the JSON document API".into()); }
+        match name {
+            "index_path" if !value.is_empty() => {},
+            "local_ip" if value.parse::<std::net::IpAddr>().is_ok() => {},
+            "local_port" if value.parse::<u16>().is_ok() => {},
+            "force_shard_number" if value.parse::<usize>().is_ok_and(|n| n > 0) => {},
+            "generate_openapi" if value.parse::<bool>().is_ok() => {},
+            _ => return Err(format!("unsupported or invalid parameter: {name}")),
+        }
+        if params.insert(name.to_string(), value.to_string()).is_some() {
+            return Err(format!("duplicate parameter: {name}"));
+        }
+    }
+    Ok(params)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_params;
+    #[test]
+    fn cli_options_are_explicit_and_validated() {
+        let parse = |args: &[&str]| parse_params(args.iter().map(|s| s.to_string()));
+        assert!(parse(&[]).is_ok());
+        assert_eq!(parse(&["index_path=a=b", "local_port=0", "local_ip=::1", "force_shard_number=1"]).unwrap()["index_path"], "a=b");
+        for args in [vec!["unknown=x"],vec!["ingest_path=x"],vec!["--help"],vec!["local_port=bad"],
+            vec!["local_ip=bad"],vec!["force_shard_number=0"],vec!["index_path="],vec!["generate_openapi=yes"],
+            vec!["local_port=80","local_port=81"]] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
+}

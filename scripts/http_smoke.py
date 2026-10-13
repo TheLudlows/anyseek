@@ -83,6 +83,13 @@ def exercise(binary, workdir):
     check(retired.returncode == 2 and b'ingest_path has been removed' in retired.stderr,
           'retired import configuration was silently accepted')
     print('PASS retired import configuration rejected')
+    for args in (['unknown=value'], ['local_port=bad'], ['force_shard_number=0'],
+                 ['generate_openapi=yes'], ['index_path='], ['bare_argument'],
+                 ['local_port=80', 'local_port=81']):
+        rejected = subprocess.run([str(binary), *args], cwd=workdir, capture_output=True, timeout=10)
+        check(rejected.returncode == 2, f'unsupported startup arguments accepted: {args}')
+    print('PASS invalid/unknown/duplicate startup options rejected')
+
 
     log_path = workdir / 'server.log'
     with log_path.open('wb') as log:
@@ -213,6 +220,13 @@ def exercise(binary, workdir):
                   'search changed stored text or created a presentation field')
             check(result['query_terms'], 'lexical query terms missing from search response')
             print('PASS retired presentation options rejected; stored fields and response query terms retained')
+            request('GET', path + f'/doc/{doc_id}?fields=body', key=api_key, expected=400)
+            request('GET', path + '/iterator?unknown=true', key=api_key, expected=400)
+            request('GET', path + '/iterator?document_id=bad', key=api_key, expected=400)
+            request('POST', path + '/iterator', {'unknown': True}, api_key, expected=400)
+            request('GET', path + '/iterator?take=1&include_document=true', key=api_key)
+            print('PASS explicit document/iterator option handling')
+
             # The retired file endpoints must fail without adding a record.
             request('POST', path + '/file', b'%PDF-1.7 removed', api_key, expected=404)
             request('GET', path + '/file/0', key=api_key, expected=404)

@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | R0 原样代码导入 | 已完成 | `1986b14215c82a07fac77d7c5b169b90743d76a4`；与上游树完全相同 |
 | R0 计划文档 | 已提交并调整 | 已取消独立基线阶段，改为直接实施 S1 |
-| S1 外围裁剪 | S1.1—S1.4c 已合入；S1.4d 配额裁剪已验证、待合入 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 保留并按裁剪结果调整 |
+| S1 外围裁剪 | S1.1—S1.4d 已合入；S1.5 收尾实施中 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 保留并按裁剪结果调整 |
 | S2 可靠单机 | 待执行 | ID/版本、可见性、日志/检查点/恢复、过滤和候选接口 |
 | D1 静态分布式 | 待执行 | 分片路由、全局两路候选、RRF、回表 |
 | D2 副本与恢复 | 待执行 | 有序复制、选主、fencing、快照追赶 |
@@ -91,9 +91,16 @@ S1.3 已通过最终 head CI 38384967519 并合入 master（PR #4，`567d8a22908
 - 创建 key 使用 `{}` 或显式 `{"demo":true}`；旧字段/URL 参数返回 400。重复创建 demo key 复用已有身份和索引列表，避免覆盖。
 - 保留既有 55 个测试，新增两个请求/历史身份契约测试，HTTP 增加双 key 同 ID 隔离、越权拒绝、旧配置重启和撤销回归；[PR #8](https://github.com/TheLudlows/seekpower/pull/8) / `b60d9f6` 的 [CI 38396745382](https://github.com/TheLudlows/seekpower/actions/runs/38396745382) 全部通过：57 tests、构建、依赖图、HTTP/Chromium、OpenAPI 精确一致性。
 
+## 当前批次：S1.5 — 依赖、接口和文档收尾
+
+- PR #8 已由用户合入（`ff79175b264a9ecfe0739b658c78c1bc7951b877`）。
+- 核心 OpenAPI 改为可选 api-schema 特性，由 HTTP 服务显式开启；终端表格与日期渲染移至服务层，核心保留统计采集。清理无引用的直接依赖，tokio-test 改为开发依赖，保留 regex-syntax/中文分词、压缩、哈希和检索执行依赖。
+- CLI 拒绝未知/非法/重复参数；文档读取与迭代器拒绝未支持选项。刷新功能宣传、当前 API 链接、源代码安装说明与路线图，禁用使用上游 crate 名称发布；保留来源和许可。
+- CI 增加 workspace 外部消费者的默认/无默认特性依赖图和构建，避免 feature 合并掩盖依赖泄漏；原 57 个测试保留，新增 CLI 契约测试，扩展 HTTP 参数回归。等待 CI，尚未宣称 S1 完成。
+
 ## 下一步
 
-1. 审查并合入 S1.4d [PR #8](https://github.com/TheLudlows/seekpower/pull/8)。
-2. 完成 S1.5 依赖、接口、文档与 UI 清理闭环。
+1. 完成 S1.5 独立核心构建、服务/API/UI 回归并提交审查。
+2. S1.5 合入后核对 S1 退出证据，再进入 S2 可靠单机。
 
 各批完成时同步 commit/PR、命令、环境、结果及未解决问题。完整可靠性和性能验收留在 S2。

@@ -42,6 +42,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::{cmp, mem};
+#[cfg(feature = "api-schema")]
 use utoipa::ToSchema;
 
 
@@ -52,7 +53,8 @@ use utoipa::ToSchema;
 /// - **Not** (-).
 ///
 /// The default QueryType is superseded if the query parser detects that a different query type is specified within the query string (+ - "").
-#[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum QueryType {
     /// Union (OR, disjunction)
     #[default]
@@ -66,7 +68,8 @@ pub enum QueryType {
 }
 
 /// Specifies the default QueryMode: The following query modes are supported:
-#[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum SearchMode {
     /// Lexical search mode: Search results are retrieved based on exact matches of query terms with the indexed terms.
     #[default]
@@ -96,7 +99,8 @@ pub enum SearchMode {
 /// - **Count** (count all results that match the query, but returning top-k results is not required)
 /// - **Topk** (returns the top-k results per query, but counting all results that match the query is not required)
 /// - **TopkCount** (returns the top-k results per query + count all results that match the query)
-#[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum ResultType {
     /// Count all results that match the query, without returning top-k results
     Count = 0,
@@ -149,7 +153,8 @@ pub struct ResultObject {
 /// blockwise intersection : if the corresponding blocks with a 65k docid range for each term have at least a single docid,
 /// then the intersect_docid within a single block is executed  (=segments?)
 /// specifies how to count the frequency of numerical facet field values
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum RangeType {
     /// within the specified range
     #[default]
@@ -163,7 +168,8 @@ pub enum RangeType {
 /// Defines the query facets:
 /// - string facet field values
 /// - range segments for numerical facet field values
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum QueryFacet {
     /// Range segment definition for numerical facet field values of type u8
     U8 {
@@ -336,7 +342,8 @@ pub enum Ranges {
 }
 
 /// FacetValue: Facet field value types
-#[derive(Clone, PartialEq, Serialize, Deserialize, ToSchema, Debug, Default)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum FacetValue {
     /// Boolean value
     Bool(bool),
@@ -537,7 +544,8 @@ impl Shard {
 
 /// U8 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeU8 {
     /// range start
     pub start: u8,
@@ -547,7 +555,8 @@ pub struct RangeU8 {
 
 /// U16 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeU16 {
     /// range start
     pub start: u16,
@@ -557,7 +566,8 @@ pub struct RangeU16 {
 
 /// U32 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeU32 {
     /// range start
     pub start: u32,
@@ -567,7 +577,8 @@ pub struct RangeU32 {
 
 /// U64 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeU64 {
     /// range start
     pub start: u64,
@@ -577,7 +588,8 @@ pub struct RangeU64 {
 
 /// I8 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeI8 {
     /// range start
     pub start: i8,
@@ -587,7 +599,8 @@ pub struct RangeI8 {
 
 /// I16 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeI16 {
     /// range start
     pub start: i16,
@@ -597,7 +610,8 @@ pub struct RangeI16 {
 
 /// I32 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeI32 {
     /// range start
     pub start: i32,
@@ -607,7 +621,8 @@ pub struct RangeI32 {
 
 /// I64 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeI64 {
     /// range start
     pub start: i64,
@@ -617,7 +632,8 @@ pub struct RangeI64 {
 
 /// F32 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeF32 {
     /// range start
     pub start: f32,
@@ -627,7 +643,8 @@ pub struct RangeF32 {
 
 /// F64 range filter
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive()]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct RangeF64 {
     /// range start
     pub start: f64,
@@ -638,14 +655,15 @@ pub struct RangeF64 {
 /// FacetFilter:
 /// either numerical range facet filter (range start/end) or
 /// string facet filter (vector of strings) at least one (boolean OR) must match.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum FacetFilter {
     /// U8 range filter
     U8 {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeU8)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeU8))]
         filter: Range<u8>,
     },
     /// U16 range filter
@@ -653,7 +671,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeU16)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeU16))]
         filter: Range<u16>,
     },
     /// U32 range filter
@@ -661,7 +679,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeU32)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeU32))]
         filter: Range<u32>,
     },
     /// U64 range filter
@@ -669,7 +687,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeU64)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeU64))]
         filter: Range<u64>,
     },
     /// I8 range filter
@@ -677,7 +695,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeI8)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeI8))]
         filter: Range<i8>,
     },
     /// I16 range filter
@@ -685,7 +703,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeI16)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeI16))]
         filter: Range<i16>,
     },
     /// I32 range filter
@@ -693,7 +711,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeI32)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeI32))]
         filter: Range<i32>,
     },
     /// I64 range filter
@@ -701,7 +719,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeI64)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeI64))]
         filter: Range<i64>,
     },
     /// Timestamp range filter, Unix timestamp: the number of seconds since 1 January 1970
@@ -709,7 +727,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeI64)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeI64))]
         filter: Range<i64>,
     },
     /// F32 range filter
@@ -717,7 +735,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeF32)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeF32))]
         filter: Range<f32>,
     },
     /// F64 range filter
@@ -725,7 +743,7 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeF64)]
+        #[cfg_attr(feature = "api-schema", schema(value_type=RangeF64))]
         filter: Range<f64>,
     },
     /// String16 filter
@@ -779,7 +797,8 @@ pub(crate) enum FilterSparse {
 }
 
 /// Specifies the sort order for the search results.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum SortOrder {
     /// Ascending sort order
     Ascending = 0,
@@ -788,7 +807,8 @@ pub enum SortOrder {
 }
 
 /// Specifies the sort order for the search results.
-#[derive(Clone, Deserialize, Serialize, ToSchema, Debug)]
+#[derive(Clone, Deserialize, Serialize, Debug)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ResultSort {
     /// name of the facet field to sort by

@@ -8,10 +8,12 @@ use crate::vector::Quantization;
 use crate::vector::{Embedding, EmbeddingView};
 use rand::rngs::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "api-schema")]
 use utoipa::ToSchema;
 
 /// Similarity measure for comparing vector embeddings.
-#[derive(Clone, Copy, Default, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum VectorSimilarity {
     /// Cosine Similarity
     /// Cosine similarity measures only the direction (angle) between vectors.
@@ -39,7 +41,8 @@ impl fmt::Display for VectorSimilarity {
 }
 
 ///Specifies in which cluster to search for ANN results.
-#[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum AnnMode {
     /// Search in all clusters (default)
     #[default]
