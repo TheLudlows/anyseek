@@ -1,0 +1,203 @@
+use std::path::PathBuf;
+use std::{fs, io};
+
+use base64::Engine;
+use base64::engine::general_purpose;
+
+pub(crate) fn write_u8_ref(value: u8, vec8: &mut [u8], pos: &mut usize) {
+    vec8[*pos] = value;
+    *pos += 1;
+}
+
+pub(crate) fn write_u16_ref(value: u16, vec8: &mut [u8], pos: &mut usize) {
+    vec8[*pos..(*pos + 2)].copy_from_slice(&value.to_le_bytes());
+    *pos += 2;
+}
+
+pub(crate) fn write_u32_ref(value: u32, vec8: &mut [u8], pos: &mut usize) {
+    vec8[*pos..(*pos + 4)].copy_from_slice(&value.to_le_bytes());
+    *pos += 4;
+}
+
+pub(crate) fn write_u64_ref(value: u64, vec8: &mut [u8], pos: &mut usize) {
+    vec8[*pos..(*pos + 8)].copy_from_slice(&value.to_le_bytes());
+    *pos += 8;
+}
+
+pub(crate) fn write_u16(value: u16, vec8: &mut [u8], pos: usize) {
+    vec8[pos..(pos + 2)].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_u32(value: u32, vec8: &mut [u8], pos: usize) {
+    vec8[pos..(pos + 4)].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_u64(value: u64, vec8: &mut [u8], pos: usize) {
+    vec8[pos..(pos + 8)].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_i8(value: i8, vec8: &mut [u8], pos: usize) {
+    vec8[pos..(pos + 1)].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_i16(value: i16, vec8: &mut [u8], pos: usize) {
+    vec8[pos..(pos + 2)].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_i32(value: i32, vec8: &mut [u8], pos: usize) {
+    vec8[pos..(pos + 4)].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_i64(value: i64, vec8: &mut [u8], pos: usize) {
+    vec8[pos..(pos + 8)].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_f32(value: f32, vec8: &mut [u8], pos: usize) {
+    vec8[pos..(pos + 4)].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn write_f64(value: f64, vec8: &mut [u8], pos: usize) {
+    vec8[pos..(pos + 8)].copy_from_slice(&value.to_le_bytes());
+}
+
+#[inline]
+pub(crate) fn read_u8_ref(vec8: &[u8], pos: &mut usize) -> u8 {
+    *pos += 1;
+    vec8[*pos - 1]
+}
+
+#[inline]
+pub(crate) fn read_u16_ref(vec8: &[u8], pos: &mut usize) -> u16 {
+    *pos += 2;
+    u16::from_le_bytes(vec8[*pos - 2..*pos].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_u32_ref(vec8: &[u8], pos: &mut usize) -> u32 {
+    *pos += 4;
+    u32::from_le_bytes(vec8[*pos - 4..*pos].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_u64_ref(vec8: &[u8], pos: &mut usize) -> u64 {
+    *pos += 8;
+    u64::from_le_bytes(vec8[*pos - 8..*pos].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_u8(vec8: &[u8], pos: usize) -> u8 {
+    vec8[pos]
+}
+
+#[inline]
+pub(crate) fn read_i8(vec8: &[u8], pos: usize) -> i8 {
+    i8::from_le_bytes(vec8[pos..pos + 1].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_u16(vec8: &[u8], pos: usize) -> u16 {
+    u16::from_le_bytes(vec8[pos..pos + 2].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_i16(vec8: &[u8], pos: usize) -> i16 {
+    i16::from_le_bytes(vec8[pos..pos + 2].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_u32(vec8: &[u8], pos: usize) -> u32 {
+    u32::from_le_bytes(vec8[pos..pos + 4].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_i32(vec8: &[u8], pos: usize) -> i32 {
+    i32::from_le_bytes(vec8[pos..pos + 4].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_u64(vec8: &[u8], pos: usize) -> u64 {
+    u64::from_le_bytes(vec8[pos..pos + 8].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_i64(vec8: &[u8], pos: usize) -> i64 {
+    i64::from_le_bytes(vec8[pos..pos + 8].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_f32(vec8: &[u8], pos: usize) -> f32 {
+    f32::from_le_bytes(vec8[pos..pos + 4].try_into().unwrap())
+}
+
+#[inline]
+pub(crate) fn read_f64(vec8: &[u8], pos: usize) -> f64 {
+    f64::from_le_bytes(vec8[pos..pos + 8].try_into().unwrap())
+}
+
+pub(crate) fn block_copy_mut(
+    source: &mut [u8],
+    source_offset: usize,
+    destination: &mut [u8],
+    destination_offset: usize,
+    len: usize,
+) {
+    destination[destination_offset..(destination_offset + len)]
+        .copy_from_slice(&source[source_offset..(source_offset + len)]);
+}
+
+pub(crate) fn block_copy(
+    source: &[u8],
+    source_offset: usize,
+    destination: &mut [u8],
+    destination_offset: usize,
+    len: usize,
+) {
+    destination[destination_offset..(destination_offset + len)]
+        .copy_from_slice(&source[source_offset..(source_offset + len)]);
+}
+
+/// Truncates a string to a maximum number of characters.
+pub fn truncate(source: &str, max_chars: usize) -> &str {
+    match source.char_indices().nth(max_chars) {
+        None => source,
+        Some((idx, _)) => &source[..idx],
+    }
+}
+
+/// Returns a substring of the given string, starting at the specified index and with the specified length.
+pub fn substring(source: &str, start: usize, length: usize) -> String {
+    if source.len() <= start + length {
+        return source.to_string();
+    }
+    source.chars().skip(start).take(length).collect()
+}
+
+/// Encodes a byte slice into a base64 string.
+pub fn encode_bytes_to_base64_string(input: &[u8]) -> String {
+    general_purpose::STANDARD.encode(input)
+}
+
+/// Decodes a base64 string into a byte vector.
+pub fn decode_bytes_from_base64_string(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    general_purpose::STANDARD.decode(input)
+}
+
+/// Recursively calculates the total size of a directory, including all subdirectories and files.
+pub fn dir_size(path: impl Into<PathBuf>) -> io::Result<u64> {
+    let path = path.into();
+    if !path.exists() {
+        return Ok(0);
+    }
+    fn dir_size(mut dir: fs::ReadDir) -> io::Result<u64> {
+        dir.try_fold(0, |acc, file| {
+            let file = file?;
+            let size = match file.metadata()? {
+                data if data.is_dir() => dir_size(fs::read_dir(file.path())?)?,
+                data => data.len(),
+            };
+            Ok(acc + size)
+        })
+    }
+
+    dir_size(fs::read_dir(path)?)
+}

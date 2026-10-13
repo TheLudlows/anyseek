@@ -1,0 +1,146 @@
+# Architecture
+
+SeekStorm is an open-source, sub-millisecond full-text search library & multi-tenancy server implemented in Rust.
+
+Scalability and performance are the two fundamental design goals.
+
+Index size and latency grow linearly with the number of indexed documents, while the RAM consumption remains constant, ensuring scalability.
+
+## Dual Engine Architecture for Hybrid Search
+
+* Internally, SeekStorm uses **two separate, first-class, native index architectures** for **vector search** and **keyword search**. Two native cores, not just a retrofit, add-on layer.
+* SeekStorm doesn’t try to make one index do everything. It runs two native search engines and lets the query planner decide how to combine them.
+* Two native index architectures under one roof:
+  - Lexical search: an inverted index optimized for lexical relevance, 
+  - Vector search: an ANN index optimized for vector similarity.
+* Both are first-class engines, integrated at the query planner level.
+  - Query planner with 6 dedicated QueryModes and FusionTypes
+  - Query planner mode can be automatically or manually selected.
+  - Active QueryModes mode is returned for explainability, relatability and credibility.
+* Separate internal index, storage layouts, indexing, search, scoring, top-k candidates - unified query planner and result fusion (Reciprocal Rank Fusion - RRF).
+* But the user is fully shielded from the complexity, as if it was only a single index.
+* Enables pure lexical, pure vector or hybrid search (exhaustive, not only re-ranking of preliminary candidates). 
+
+</br>
+
+
+                            ┌────────────────────┐
+                            │     User / API     │
+                            │   (hybrid query)   │
+                            └─────────┬──────────┘
+                                      │
+                                      ▼
+                            ┌────────────────────┐
+                            │    Query Planner   │
+                            │ (intent + strategy)│
+                            └───────┬───────┬────┘
+                                    │       │
+                     ┌──────────────┘       └──────────────┐
+                     ▼                                     ▼
+            ┌────────────────────┐            ┌────────────────────┐
+            │ Lexical Engine     │            │ Vector Engine      │
+            │ Inverted Index     │            │ Native ANN Index   │
+            │ (BM25 / Boolean)   │            │ (Leveled‑IVF)      │
+            └─────────┬──────────┘            └─────────┬──────────┘
+                      │                                 │
+                      ▼                                 ▼
+              Ranked Results L                    Ranked Results V
+                      │                                 │
+                      └───────┬───────────────┬─────────┘
+                              ▼               ▼
+                        ┌────────────────────────────┐
+                        │       Result Fusion        │
+                        │ (RRF / rerank strategies)  │
+                        │                            │
+                        └────────────┬───────────────┘
+                                     ▼
+                            Final Ranked Results
+
+
+## Leveled IVF index (vector)
+
+- **Disk-based**, **Leveled IVF index** for unlimited index size.
+- **Sharded index** for lock-free utilization of all processor cores.
+- true **real-time** indexing and search capable.
+- **Approximate Nearest Neighbor Search** (ANNS) and exhaustive **k-nearest neighbor** search (kNN)
+- **K-Medoid clustering**: PAM (Partition Around Medoids) with actual data points as centers.
+
+## Inverted Index (lexical)
+
+The index is based on an **inverted index**. The index can either be kept in RAM or memory mapped files. In both cases it is fully persistent on disk.
+The identical index file format for both RAM and memory mapping mode, allows to switch the index access mode for an existing index at any time.
+* Ram: no disc access at search time for minimal latency, even after cold start, at the cost of longer index load time and higher RAM consumption as the whole index is preloaded to RAM.
+* Mmap: disc access via mmap during search time, for minimal RAM consumption, high scalability, and minimal index load time. With Mmap disk access is cached by the OS, being persistent between program starts until reboot.
+
+</br>
+
+* index.bin : contains posting lists with document IDs and term positions. Posting lists are compressed with roaring bitmaps. Term positions of each field are delta compressed and VINT encoded.
+* index.json : contains index meta data such as similarity (e.g. Bm25), access type (e.g. Ram/Mmap), tokenizer (e.g. AsciiAlphabetic).
+* vector.bin : contains vectors and clusters.
+* delete.bin : contains document IDs of deleted documents. By manually deleting the delete.bin file the deleted documents can be recovered (until compaction).
+* facet.bin : contains the serialized values of all facet fields of all documents in the index
+* facet.json : contains the unique values of all facet fields of all documents in the index
+* synonyms.json : contains the synonyms that were created with the synonyms parameter in create_index. Can be manually modified, but becomes effective only after restart and only for subsequently indexed documents.
+
+## SeekStorm server index directory structure
+
+First hierarchy level: API keys  
+Second hierarchy level: Indices per API key  
+Third hierarchy level: Shards of an index
+Fourth hierarchy level: Level per shard (level = 64k documents per shard). Lexical posting lists and vectors are collected in RAM, once 64k document threshold is reached they are committed to disk and become immutable.
+```
+seekstorm_index/  
+├─ 0/  
+│  ├─ 0  
+│  ├─ 1  
+│  ├─ 2  
+├─ 1/  
+│  ├─ 0  
+│  ├─ 1 ─ shards ─ ├─ 0  
+│  │               ├─ 1  
+│  │               ├─ 2 
+```
+
+* apikey.json : contains API key hash and quotas
+
+You can manually delete, copy, or backup and restore both API key and index directories (shutdown server first and then restart).
+
+## Search
+
+* DaaT (Document-at-a-Time) intersection and union: 
+  + prevents writing long intermediate result lists in RAM of TaaT (Term-at-a-Time)
+  + allows streaming to enable scalability for huge indexes
+* SIMD vector processing hardware support for intersection and union of roaring bitmaps compressed posting lists
+* Galloping intersection
+* Improved Block-max WAND
+* N-gram indexing of frequent terms
+
+## Database schema
+
+Every document can contain an arbitrary number of fields of different types.
+
+Every field can be searched and filtered individually or all field together globally.
+
+* schema.json : contains the definition of fields, their field types, and whether they are stored and/or indexed.
+
+## Document store
+
+The documents are stored in JSON format and compressed with Zstandard.
+
+The index schema defines which fields of the documents are stored in the document store and can be part of the returned search results.
+
+* docstore.bin : contains the compressed documents
+
+## Limits
+
+There are **no** limits on the number of 
+* indices
+* documents
+* fields
+* field length
+* terms
+
+There is a limit of 
+* maximum 65_535 (String16) and of 4_294_967_295 (String32) distinct values per string facet field.  
+* maximum 65_535 (StringSet16) and of 4_294_967_295 (StringSet32) distinct value combinations per string set facet field.  
+* maximum 65_536 distinct numerical ranges per facet field. 

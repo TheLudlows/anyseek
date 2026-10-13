@@ -1,0 +1,5 @@
+/assets/*.png
+/target
+.vscode
+.idea
+*.md
