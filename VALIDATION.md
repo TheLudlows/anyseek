@@ -112,3 +112,23 @@ S1.1 首个提交时结论：代码已实施，等待构建和运行验证；未
 第五轮 CI [38372367599](https://github.com/TheLudlows/seekpower/actions/runs/38372367599) / job 115212236591：构建、完整 HTTP/Chromium 通过；3 维量化阈值回归触发 SIGABRT（malloc invalid next size）。源码定位到 SIMD 查询打包按整 lane 加载，以及小于 8 维的 TurboQuant AVX2 FWHT 按 8 元素写入。修复为按有效维度/精度选择原有标量路径，并在标量分派时不构建 SIMD query；不改 SIMD kernel、ANN 算法或数据格式。保留 3 维，追加 32 维覆盖 SIMD 路径。CI 中核心测试与文档生成在构建成功后独立执行，以便 HTTP 测试失败时仍取得诊断结果；失败仍使整个 job 失败。
 
 第六轮 CI [38373018666](https://github.com/TheLudlows/seekpower/actions/runs/38373018666) / job 115214402403：构建、HTTP/Chromium、基础外部契约与关闭重开通过，小维度内存错误消失；TurboQuant cosine 阈值断言仍失败。进一步发现其原有路径丢弃每向量 scale、误用 ScalarQuant 的 127² 常量，而启用 scale 的 TurboQuant dot/cosine 包装又错误取负。修正评分适配：恢复 TQ cosine 的每向量 scale，dot/cosine 保持正向相似度，按实际分数单位换算阈值（原始 I8/ScalarQuant cosine 保留固定比例）。仅修正包装/分派，不改 SIMD 运算 kernel、量化算法、ANN 候选算法、RRF 或索引格式。回归矩阵扩为 F32/ScalarQuant/TurboQuant × 3/32 维 × Cosine/Dot/Euclidean × All/Nprobe，保留原阈值与精确文档断言。OpenAPI 已成功生成。
+
+### S1.2 最终代码验证结果
+
+代码提交：`9e0d23dff2ed1c08cd8593e49a9a3115d9483383`。
+完整通过：[CI 38373701225](https://github.com/TheLudlows/seekpower/actions/runs/38373701225)，job `115216672899`。
+环境：GitHub ubuntu-latest、x86_64/AVX2，rustc 1.99.0 / cargo 1.99.0，Playwright 1.63.0 / Chromium 153.0.8010.12。
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| `cargo build --workspace` | 通过 |
+| `cargo test --workspace --all-targets` | 48 passed，0 failed/ignored/filtered；含原 45 个测试（3 个内置模型场景改为固定外部向量）和 3 个新增契约测试 |
+| `SEEKPOWER_BROWSER_TEST=1 python3 scripts/http_smoke.py --server target/debug/seekstorm_server` | 通过：健康、首页/12 资源、鉴权、基本 CRUD/commit、JSON/base64 外部向量、三类查询、非法输入 400、批量及更新拒绝保护、词法过滤和向量过滤明确拒绝 |
+| Chromium 交互 | Lexical 默认、Vector/Hybrid 输入查询、缺失及错误维度反馈通过，无 pageerror |
+| 距离/量化回归 | Cosine/Dot/Euclidean × F32/ScalarQuant/TurboQuant × 3/32 维 × All/Nprobe，共 36 组阈值/命中文档断言通过；另有关闭重开与旧模型元数据拒绝 |
+| `seekstorm_server generate_openapi=true` + JSON/YAML `diff -u` | 生成结果与提交文件一致；无 Model schema/内置模型示例 |
+| 本地 Python/JS 语法与 `git diff --check` | 通过 |
+
+未执行/限制：AArch64/NEON 运行验证、真正多聚类的大数据 ANN recall/延迟基准、崩溃与故障注入、生产恢复验收尚未完成。小矩阵不代表全量 ANN 质量或性能认证。向量/混合 facet_filter 显式拒绝，共同过滤能力待 S2；不将“不再静默忽略”写成“已实现向量过滤”。本批保持索引格式与 SIMD kernel/量化算法/ANN 候选/RRF 实现，最小评分适配、分派和服务响应修正及全部失败记录见上文。
+
+PR #3 完成代码及本批验证，待审查合入；Issue #1 保持打开，S1.3—S1.5 未实施。最后的状态/验证回填为文档变更，其 CI 可从 PR 检查项查看。

@@ -6,7 +6,7 @@
 
 ## 当前阶段
 
-**R0 已完成；独立 S0 已取消，直接以 S1 剥离裁剪为当前工作阶段。S1.1 已实施 workspace/MCP/SDK 裁剪并迁移 HTTP 冒烟；[PR #2](https://github.com/TheLudlows/seekpower/pull/2) 已通过构建和 HTTP/UI 冒烟，继承的同分边界测试夹具已修复，45 个既有测试全部通过，已合入主干（`61f11306b45af0cf29c0e040708b14f76c8ee1f2`）；S1.2 在 [PR #3](https://github.com/TheLudlows/seekpower/pull/3) 实施，CI 验证中。**
+**R0 已完成；独立 S0 已取消，直接以 S1 剥离裁剪为当前工作阶段。S1.1 已实施 workspace/MCP/SDK 裁剪并迁移 HTTP 冒烟；[PR #2](https://github.com/TheLudlows/seekpower/pull/2) 已通过构建和 HTTP/UI 冒烟，继承的同分边界测试夹具已修复，45 个既有测试全部通过，已合入主干（`61f11306b45af0cf29c0e040708b14f76c8ee1f2`）；S1.2 在 [PR #3](https://github.com/TheLudlows/seekpower/pull/3) 代码与本批验证完成，待审查合入。**
 
 不再要求先完成原版全量构建/性能/UI/可靠性审计才能开始裁剪。编译、受影响功能和 UI 冒烟随每批裁剪执行；完整可靠性与单机发布验收留在 S2。
 
@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | R0 原样代码导入 | 已完成 | `1986b14215c82a07fac77d7c5b169b90743d76a4`；与上游树完全相同 |
 | R0 计划文档 | 已提交并调整 | 已取消独立基线阶段，改为直接实施 S1 |
-| S1 外围裁剪 | S1.1 已合入，S1.2 实施/验证中 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 原样保留 |
+| S1 外围裁剪 | S1.1 已合入，S1.2 已验证、待合入 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 原样保留 |
 | S2 可靠单机 | 待执行 | ID/版本、可见性、日志/检查点/恢复、过滤和候选接口 |
 | D1 静态分布式 | 待执行 | 分片路由、全局两路候选、RRF、回表 |
 | D2 副本与恢复 | 待执行 | 有序复制、选主、fencing、快照追赶 |
@@ -42,11 +42,14 @@
 - 移除内置模型、下载/管理、自动向量化和自动切块；保留 External 配置、ANN/exact/RRF、分词和现有向量记录格式。
 - 写入和查询校验外部向量；非法批量输入在入队前拒绝，非法更新在删除前拒绝；HTTP 返回 400。
 - Web UI 保留，默认 Lexical，Vector/Hybrid 支持 JSON 向量输入与可见错误。
-- 替换依赖模型下载的 3 个测试，新增外部向量契约测试及 API/Chromium 回归。CI 结果待写入 VALIDATION；当前不宣称运行验收通过。
+- 替换依赖模型下载的 3 个测试，新增外部向量契约测试及 API/Chromium 回归。[CI 38373701225](https://github.com/TheLudlows/seekpower/actions/runs/38373701225) 已通过构建、48 个测试、HTTP/Chromium 交互与 OpenAPI 一致性检查。
+
+- 针对回归失败修正相似度缩放/符号、小维度 SIMD 分派及 commit 响应计数；保留格式和算法，具体最小改动见 VALIDATION。
+- 限制：Vector/Hybrid 非空 `facet_filter` 明确报错；上游向量分支原本未应用该过滤。词法过滤保留，共同候选过滤在 S2 补齐。
 
 ## 下一步
 
-1. 完成 [PR #3](https://github.com/TheLudlows/seekpower/pull/3) 的 CI 验证、文档同步与审查。
+1. 审查并合入 [PR #3](https://github.com/TheLudlows/seekpower/pull/3)；代码与本批验证完成，失败历史和修复证据见 VALIDATION。
 2. S1.2 合入后推进 S1.3 文件导入裁剪，再按 S1.4—S1.5 顺序推进。
 
 各批完成时同步 commit/PR、命令、环境、结果及未解决问题。完整可靠性和性能验收留在 S2。

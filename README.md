@@ -34,6 +34,8 @@ POST `{"body":"example text","vector":[1,0,0]}` to `/api/v1/index/0/doc`, then P
 
 Rust write/update methods now return `Result<(), String>`. Check `ResultObject.error` before using search results. Existing external-vector metadata and record layouts are retained. Indexes configured for removed built-in models fail to open explicitly; regenerate their embeddings externally and rebuild them. There is no automatic model migration.
 
+Dimensions that do not fill native SIMD lanes use the existing scalar vector implementation; index formats remain unchanged.
+
 The existing Web UI defaults to Lexical. Select Vector or Hybrid, paste a JSON query vector and click **Search with vector**; update the vector when the text changes. The vector is not stored in the page URL. API errors appear beside the input.
 
 To run the API and browser regressions locally, install Python Playwright and Chromium (`python3 -m pip install playwright`, `python3 -m playwright install chromium`), then set `SEEKPOWER_BROWSER_TEST=1` when running the smoke script. Export the current API reference with `target/debug/seekstorm_server generate_openapi=true`; files are written beside the executable.

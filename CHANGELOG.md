@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove the MCP server and Rust SDK distribution projects and their product entry points.
 - Migrate the SDK end-to-end scenarios to `scripts/http_smoke.py`, using direct HTTP requests.
 
+- Remove built-in model inference/downloads and automatic chunking; require caller-supplied embeddings.
+- Validate vector configuration, dimensions, precision and numeric values before writes/updates/search. Rust writes return `Result`; search exposes `ResultObject.error`; invalid HTTP requests return 400.
+- Preserve the Web UI and add external query-vector input with visible validation errors; synchronize generated OpenAPI.
+- Fix F32/quantized similarity threshold units and TurboQuant dot/cosine score sign; select existing scalar kernels for dimensions that cannot fill SIMD lanes.
+- Read HTTP commit/close document counts after pending writes finish.
+- Reject unsupported Vector/Hybrid facet filters explicitly; retain lexical metadata filtering pending shared vector filtering in S2.
+
 Entries below describe upstream releases before the SeekPower pruning and are retained as historical records, not current product capabilities.
 
 ## [3.4.1] - 2026-10-12
