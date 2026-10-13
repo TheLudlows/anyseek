@@ -4,11 +4,11 @@
 #![doc(html_favicon_url = "http://seekstorm.com/favicon.ico")]
 
 //! # `seekstorm`
-//! SeekStorm is an open-source, sub-millisecond vector and lexical search library & multi-tenancy server written in Rust.
+//! SeekPower retains the SeekStorm Rust crate name for its lexical, vector and hybrid search core.
 //! The **SeekStorm library** can be embedded into your program, while the **SeekStorm server** is a standalone search server to be accessed via HTTP.
 //! ### Add required crates to your project
 //! ```text
-//! cargo add seekstorm
+//! # Use a path dependency on this checkout: seekstorm = { path = "../seekpower/seekstorm" }
 //! cargo add tokio
 //! cargo add serde_json
 //! ```
@@ -46,7 +46,7 @@
 //! ngram_indexing: NgramSet::NgramFF as u8,
 //! document_compression:  DocumentCompression::Snappy,
 //! access_type: AccessType::Mmap,
-//! //! clustering: Clustering::None,
+//! clustering: Clustering::None,
 //! inference: Inference::None,
 //! };
 //! let segment_number_bits1=11;
@@ -249,7 +249,7 @@
 //! [{"field":"title","field_type":"Text","store":false,"index_lexical":false},
 //! {"field":"body","field_type":"Text","store":true,"index_lexical":true},
 //! {"field":"url","field_type":"Text","store":true,"index_lexical":false},
-//! {"field":"town","field_type":"String15","store":false,"index_lexical":false,"facet":true}]"#;
+//! {"field":"town","field_type":"String16","store":false,"index_lexical":false,"facet":true}]"#;
 //! let schema=serde_json::from_str(schema_json).unwrap();
 //! let meta = IndexMetaObject {
 //!     id: 0,
@@ -262,7 +262,7 @@
 //!     ngram_indexing: NgramSet::NgramFF as u8,
 //!     document_compression:  DocumentCompression::Snappy,
 //!     access_type: AccessType::Mmap,
-//!     //!     //!     clustering: Clustering::None,
+//!     clustering: Clustering::None,
 //!     inference: Inference::None,
 //! };
 //! let serialize_schema=true;
@@ -310,7 +310,7 @@
 //! let field_filter=Vec::new();
 //! let query_facets = vec![QueryFacet::String16 {field: "town".to_string(),prefix: "".to_string(),length: u16::MAX}];
 //! let facet_filter=Vec::new();
-//! //let facet_filter = vec![FacetFilter {field: "town".to_string(),   filter:Filter::String(vec!["Berlin".to_string()])}];
+//! //let facet_filter = vec![FacetFilter::String16 {field: "town".to_string(), filter: vec!["Berlin".to_string()]}];
 //! let result_sort=Vec::new();
 //! let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,).await;
 //! // ### display results
@@ -335,8 +335,8 @@
     unused_qualifications
 )]
 
-/// include README.md in documentation
-#[cfg_attr(doctest, doc = include_str!("../../README.md"))]
+/// Include the retained library examples in documentation.
+#[cfg_attr(doctest, doc = include_str!("../../docs/library-examples.md"))]
 pub struct ReadmeDoctests;
 
 /// include FACETED_SEARCH.md in documentation
@@ -390,4 +390,5 @@ pub mod vector;
 pub mod vector_similarity;
 #[cfg(feature = "zh")]
 pub(crate) mod word_segmentation;
+
 

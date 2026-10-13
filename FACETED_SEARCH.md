@@ -1,108 +1,28 @@
-<h1>What is faceted search?</h1>
+# 分面、过滤与排序
 
-Searching is an important part of any business database function.<br>
-The more the amount of data and documents grows that we need to store, index and retrieve, the higher is the risk that we drown in the sheer amount of results, 
-and the more important it becomes to refine the search query and filter results to support finding the most relevant documents to us - the needle in a haystack.
-This can be done by **adding extra keywords to the query**, **field search** which restricts the search within certain specified fields only, or **faceted search**.
+当前词法路径保留分面统计、元数据过滤和字段排序。它们共用 schema 中的 `facet:true` 字段：`query_facets` 请求统计，`facet_filter` 限制结果，`result_sort` 设定排序。`field_filter` 仅选择检索字段，含义不同。
 
-<img src="assets/deephn_demo.png" width="800">
+| 类型 | 能力 |
+| --- | --- |
+| String16/String32 | 按字符串过滤、计数、前缀限制和排序 |
+| StringSet16/StringSet32 | 多值字符串集合过滤与统计 |
+| 整数、浮点、Timestamp | 范围过滤、分桶计数、CountWithinRange/CountAboveRange/CountBelowRange、排序 |
+| 索引信息 | 返回已配置 facet 的信息及数值 min/max |
 
-The [DeepHN.org](https://deephn.org/) demo, powered by SeekStorm, makes heavy use of **faceted search**: for the **domain and hash tag filter** (string facets), the **comment and points filter** (numerical range facets) check boxes on the left, as well as the **date range filter and histogram** (numerical range facets) slider on top.
+统计行为与 `ResultType` 有关，完整分面计数应使用 Count/TopkCount。Vector/Hybrid 非空 `facet_filter` 返回错误；Hybrid 的分面来自词法分支，不是融合结果的聚合。Vector/Hybrid 可按字段重排已召回候选，但向量候选已先按相似度截断，因此不保证全库字段排序 Top-K。
 
-### Faceted search vs. field search
-
-Faceted search is much more than just a field search. Field search allows you to restrict the search within specified fields, 
-but requires you to know both **all available fields** in the indexed documents as well as 
-**all unique values per field**. This leads often to trial and error, leaving the user with no or unsatisfactory results. 
-
-Faceted search is not just a filter, but a complete set of filters is automatically generated/derived from the indexed documents.
-Faceted search automatically clusters the indexed documents or search results into categories.
-The user can then filter and refine the search results by selecting specific values or numeric ranges for each facet field. 
-For each facet field the number of search results matching each distinct facet value or numeric range is shown. 
-The difference between field filterinng and faceted search is like between open question and multiple choice.
-
-As faceted search allows counting and filtering of documents matching specific facet field values, 
-it is often used in product search to narrow down and count the search results according to specific product features like brand, manufacturer, rating, or price.
-
-### Index facets
-
-After indexing, the **index facets** list all available facet fields, their unique values, and count how often a specific value occurs 
-**within all indexed documents**. This provides a complete overview of all filtering options **for the entire index**, 
-  together with quantitative information about the potential result number for each option.
-
-### Query facets
-
-When searching, the **query facets** list all available facet fields, 
-their unique values, and count how often a specific value occurs **within all indexed documents <u>that match a given query</u>**. 
-This provides a complete overview of all filtering options **for the current result set**, together with quantitative information about the potential result number for each option.
-
-### Facet filtering, counting &amp; sorting
-
-The **facet filter** specified in the query filters the returned results to those documents both matching the query AND matching for all (boolean AND) specified facet filter fields 
-at least one (boolean OR) of the specified values.
-
-If the **query is changed** and/or the **facet filter is changed** then both **search results and facet counts are changed**.
-
-#### String Facets (FieldType::String16 and FieldType::String32)
-
-E.g. the **Language field** of a document may have different values: e.g. English, French, German, Russian, Chinese.
-
-**String facet counting**: Each distinct value is counted across all indexed documents (**index facet**) or all results documents (**query facet**).
-The string facets return both information about **which languages exist** and **how often they occur**, 
-within all indexed documents (**index facet**) or within in all documents that match the query (**query facet**).
-
-**Facet sorting**: The values within each facet field are sorted by the number of their occurrences in the documents in descending order. 
-The number of returned values per facet field can be limited by the parameter **facetvalueslength**.
-
-**Search result filtering**: Besides **counting**, we may also **filter** the results to return only those documents, where the **Language field** contains specific language values e.g. English or French.
-
-**Search result sorting**: The returned search results can be sorted by the (first) value of the specified **facet field** of a document in ascending or descending order.
-If no **sort** field is specified, then the results are sorted by rank in descending order per default. 
-
-SeekStorm supports the **String** field type for **String Facet** counting, filtering &amp; sorting.
-
-#### Multi-value string facets (FieldType::StringSet16 and FieldType::StringSet32)
-
-Similar to String facets, but while string facets allow only one value per field per document, String Set facets allow to assign multiple values at the same time per field per document.
-Great for e.g. genres, authors, languages, educations, product categories, tags ..., where an item can be associated with multiple values of a field.
-
-#### Numerical Range Facets (FieldType::U8...FieldType::F64)
-
-In contrast to **string facets** which define themselves by the existing distinct values, for **range facets** we have to explicitly **define the ranges** we want to distinguish and count.
-E.g. for the **Price field** we want to define price ranges: e.g. 0..10 USD, 10..20 USD, 20..50 USD, 50..100 USD, 100..1000 USD. The ranges may be defined differently for each query. 
-
-**Range facet counting**: Across all results documents (query facet) it is then counted how often a price value falls within one of the defined price ranges.
-
-**Search result filtering**: Besides **counting**, we may also **filter** the results to return only those documents, where the **Price field** value is within the range of 15..25 USD.
-The filter range is independent from the defined range facets for counting.
-
-**Search result sorting**: The returned search results can be sorted by the value of the specified **integerFacet, floatFacet, or dateFacet field** of a document in ascending or descending order.
-If no **sort** field is specified, then the results are sorted by rank in descending order per default. 
-
-SeekStorm supports **u8, u16, u32, u64, i8, i16, i32, i64, f32, f64** field types for **Numerical Range Facet** counting, filtering &amp; sorting.
-
-
-### Performance
-
-Faceted search is known to have a heavy impact on search performance. For SeekStorm performance and scaling are always paramount, also for faceted search. 
-We went the extra mile to optimize our index architecture so that faceting has only **low impact on the search performance**.
-
-<img src="assets/faceted_search.png" width="800">
-
-<br>
-<hr>
-<br>
+下面保留 Rust 接口示例；本地使用 `cargo doc` 生成当前源码文档，HTTP 使用 POST JSON，参见 [服务文档](seekstorm_server/README.md) 和 [功能清单](FEATURES.md)。
 
 ### Relevant API endpoints
 
-#### [Create index](https://docs.rs/seekstorm/latest/seekstorm/#create-index)
+#### Create index
 
 Facet fields allow counting, filtering, and sorting of indexed documents matching specific **facet field values** or **numeric ranges**.
 
 **Create index**: Facet fields are defined in the **schema** parameter of **create_index** by setting the **field_type** to one of the following types: 
 
 ```text
-u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, String
+U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, Timestamp, String16, String32, StringSet16, StringSet32
 ```
 and set
 ```text
@@ -111,8 +31,8 @@ and set
 in the schema (see code below).
 
 Faceting can be enabled both for string field type and numerical field types.
-Both numerical, string and text fields can be indexed (indexed=true) and stored (stored=true) in the json document,
-but with field_facet=true a numerical or string field is additionally stored in a binary format, for fast faceting and sorting without document store access (decompression, deserialization).
+Both numerical, string and text fields can be indexed (index_lexical=true) and stored (store=true) in the json document,
+but with facet=true a numerical or string field is additionally stored in a binary format, for fast faceting and sorting without document store access (decompression, deserialization).
 Setting a numerical field to "facet":true is also the precondition for sorting the search result by this fields value ('score' is treated as a special field to allow sorting by relevancy).
 
 ```rust ,no_run
@@ -156,9 +76,9 @@ let index_arc=create_index(index_path,meta,&schema,&synonyms,segment_number_bits
 # });
 ```
 
-#### [Index document(s)](https://docs.rs/seekstorm/latest/seekstorm/#index-documents)
+#### Index document(s)
 
-While the **type** of the facet fields (u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, String) is defined in **create index**, the **value** of those fields
+While the **type** of the facet fields (U8, U16, U32, U64, I8, I16, I32, I64, F32, F64, Timestamp, String16, String32, StringSet16, StringSet32) is defined in **create index**, the **value** of those fields
 is defined and indexed with **index document**.
 
 **Index document request object**: Each facet field can be assigned a single string values or numerical value per document:<br>
@@ -194,7 +114,7 @@ The number of distinct value combinations per string set facet field, across the
 The string length of a stringFacet value is limited to 100 characters.
 
 
-#### [Get index string facets](https://docs.rs/seekstorm/latest/seekstorm/index/struct.Index.html#method.get_index_string_facets)
+#### Get index string facets
 
 **get_index_string_facets**: list of string facet fields, each with field name and a map of unique values and their count (number of times the specific value appears in the whole index).<br>
 Values are sorted by their occurrence count within all indexed documents in descending order.<br> 
@@ -280,7 +200,7 @@ Within each facet field, the values are sorted by their occurrence count **withi
 where the ranges can be defined dynamically with different boundaries for each query. This allows defining facets ranges like Last hour, last day, last week, last month.<br>
 
 
-#### [Search index](https://docs.rs/seekstorm/latest/seekstorm/#search-index)
+#### Search index
 
 ```rust ,no_run
 # tokio_test::block_on(async {
@@ -506,6 +426,7 @@ Numerical range & String value facet counting depend both on the query and on th
   }
 ]
 ```
+
 
 
 

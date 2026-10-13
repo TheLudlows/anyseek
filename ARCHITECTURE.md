@@ -1,149 +1,50 @@
-> SeekPower boundary: the workspace retains the Rust core and HTTP/Web UI service. OpenAPI derives are opt-in (`api-schema`); terminal rendering and key management belong to the service. Index statistics collection, tokenization, storage, compression, scoring and vector search remain in the core. The following inherited architecture discussion does not constitute a performance or reliability certification.
+# 当前架构
 
-# Architecture
+SeekPower 保留一个 Rust 核心库和一个 HTTP/Web UI 服务。当前是单机实现，本机 shard/level 用于并行与增量索引，不代表分布式路由或副本。
 
-SeekStorm is an open-source, sub-millisecond full-text search library & multi-tenancy server implemented in Rust.
+## 模块边界
 
-Scalability and performance are the two fundamental design goals.
+| 层 | 代码 | 职责 |
+| --- | --- | --- |
+| UI | `seekstorm_server/web/` | 搜索、分页、原文/链接预览、日期交互 |
+| 服务 | `http_server.rs`、`api_endpoints.rs`、`multi_tenancy.rs`、`server.rs` | HTTP 参数、API key、索引作用域、启动与终端展示 |
+| 核心入口 | `index.rs`、`search.rs`、`iterator.rs` | schema、文档操作、三类查询与遍历 |
+| 全文 | `tokenizer.rs`、`index_posting.rs`、`intersection*.rs`、`union.rs` | 分词、倒排、布尔/短语、BM25 与剪枝 |
+| 向量 | `vector.rs`、`vector_similarity.rs`、`clustering.rs` | 外部向量校验、量化、相似度、聚类与 IVF 检索 |
+| 存储 | `commit.rs`、`doc_store.rs`、`compress_postinglist.rs` | 本地提交、文档压缩、posting 编码 |
+| 统计 | `info.rs` | 收集索引信息；终端渲染位于服务 |
 
-Index size and latency grow linearly with the number of indexed documents, while the RAM consumption remains constant, ensuring scalability.
+源码路径分别相对于 [核心目录](seekstorm/src) 或 [服务目录](seekstorm_server/src)。核心 OpenAPI derive 通过可选 `api-schema` 启用，核心不依赖终端表格、模型运行时或文件解析器。
 
-## Dual Engine Architecture for Hybrid Search
+## 查询执行
 
-* Internally, SeekStorm uses **two separate, first-class, native index architectures** for **vector search** and **keyword search**. Two native cores, not just a retrofit, add-on layer.
-* SeekStorm doesn’t try to make one index do everything. It runs two native search engines and lets the query planner decide how to combine them.
-* Two native index architectures under one roof:
-  - Lexical search: an inverted index optimized for lexical relevance, 
-  - Vector search: an ANN index optimized for vector similarity.
-* Both are first-class engines, integrated at the query planner level.
-  - Query planner with 6 dedicated QueryModes and FusionTypes
-  - Query planner mode can be automatically or manually selected.
-  - Active QueryModes mode is returned for explainability, relatability and credibility.
-* Separate internal index, storage layouts, indexing, search, scoring, top-k candidates - unified query planner and result fusion (Reciprocal Rank Fusion - RRF).
-* But the user is fully shielded from the complexity, as if it was only a single index.
-* Enables pure lexical, pure vector or hybrid search (exhaustive, not only re-ranking of preliminary candidates). 
+调用方显式选择 Lexical、Vector 或 Hybrid。Lexical 使用倒排，Vector 使用外部查询向量；Hybrid 收集两路候选，汇总本机分片结果后按文档 ID 执行 RRF。融合参数目前固定在代码中，没有公开的多策略自动规划器。
 
-</br>
+词法路径支持元数据过滤、分面、计数和字段排序；向量路径支持检索字段选择、聚类探测与相似度阈值。Vector/Hybrid 对非空元数据过滤明确报错。Hybrid 分面来自词法分支，默认按融合分数排序，也可按字段重排候选；候选截断后的重排不保证全库字段排序 Top-K。详见 [功能边界](FEATURES.md)。
 
+## 数据与文件
 
-                            ┌────────────────────┐
-                            │     User / API     │
-                            │   (hybrid query)   │
-                            └─────────┬──────────┘
-                                      │
-                                      ▼
-                            ┌────────────────────┐
-                            │    Query Planner   │
-                            │ (intent + strategy)│
-                            └───────┬───────┬────┘
-                                    │       │
-                     ┌──────────────┘       └──────────────┐
-                     ▼                                     ▼
-            ┌────────────────────┐            ┌────────────────────┐
-            │ Lexical Engine     │            │ Vector Engine      │
-            │ Inverted Index     │            │ Native ANN Index   │
-            │ (BM25 / Boolean)   │            │ (Leveled‑IVF)      │
-            └─────────┬──────────┘            └─────────┬──────────┘
-                      │                                 │
-                      ▼                                 ▼
-              Ranked Results L                    Ranked Results V
-                      │                                 │
-                      └───────┬───────────────┬─────────┘
-                              ▼               ▼
-                        ┌────────────────────────────┐
-                        │       Result Fusion        │
-                        │ (RRF / rerank strategies)  │
-                        │                            │
-                        └────────────┬───────────────┘
-                                     ▼
-                            Final Ranked Results
+服务目录按 API key、索引、本机 shard/level 组织。主要文件如下；实际文件位于索引或其 shard/level 下，以源码打开/提交逻辑为准。
 
+| 文件 | 用途 |
+| --- | --- |
+| `apikey.json` | key 身份与目录关联 |
+| `schema.json`、`index.json` | 字段定义、索引元数据与配置 |
+| `index.bin` | 词项 posting、文档 ID 与位置编码 |
+| `vector.bin` | 向量及聚类数据 |
+| `docstore.bin` | 压缩的已存储文档字段 |
+| `facet.bin`、`facet.json` | facet 值及词典 |
+| `delete.bin` | 删除标记 |
+| `synonyms.json` | 同义词配置 |
 
-## Leveled IVF index (vector)
+Rust 核心支持 Ram 与 Mmap；HTTP 创建索引使用 Mmap。文档压缩可选 None、Lz4、Snappy、Zstd，默认 Snappy。分词、高频词、N-gram、SIMD 和 posting 压缩仍保留。
 
-- **Disk-based**, **Leveled IVF index** for unlimited index size.
-- **Sharded index** for lock-free utilization of all processor cores.
-- true **real-time** indexing and search capable.
-- **Approximate Nearest Neighbor Search** (ANNS) and exhaustive **k-nearest neighbor** search (kNN)
-- **K-Medoid clustering**: PAM (Partition Around Medoids) with actual data points as centers.
+## 持久化边界
 
-## Inverted Index (lexical)
+数据先进入内存，搜索可通过 realtime 包含未提交数据；显式提交与内部自动提交将数据写入本地索引。未提交数据在异常退出时可能丢失。已有磁盘重开能力不能等同于经过故障注入验证的 WAL、原子检查点或一致快照。
 
-The index is based on an **inverted index**. The index can either be kept in RAM or memory mapped files. In both cases it is fully persistent on disk.
-The identical index file format for both RAM and memory mapping mode, allows to switch the index access mode for an existing index at any time.
-* Ram: no disc access at search time for minimal latency, even after cold start, at the cost of longer index load time and higher RAM consumption as the whole index is preloaded to RAM.
-* Mmap: disc access via mmap during search time, for minimal RAM consumption, high scalability, and minimal index load time. With Mmap disk access is cached by the OS, being persistent between program starts until reboot.
+稳定业务 ID/版本、共同可见视图、可恢复日志、结构化错误、资源边界和分布式协议见 [后续计划](SEEKPOWER_PLAN.md)，尚未完成。当前文件布局与功能清单不能作为无限容量、固定延迟或高可用承诺。
 
-</br>
+本实现来源及许可见 [UPSTREAM.md](UPSTREAM.md) 和 [LICENSE](LICENSE)。
 
-* index.bin : contains posting lists with document IDs and term positions. Posting lists are compressed with roaring bitmaps. Term positions of each field are delta compressed and VINT encoded.
-* index.json : contains index meta data such as similarity (e.g. Bm25), access type (e.g. Ram/Mmap), tokenizer (e.g. AsciiAlphabetic).
-* vector.bin : contains vectors and clusters.
-* delete.bin : contains document IDs of deleted documents. By manually deleting the delete.bin file the deleted documents can be recovered (until compaction).
-* facet.bin : contains the serialized values of all facet fields of all documents in the index
-* facet.json : contains the unique values of all facet fields of all documents in the index
-* synonyms.json : contains the synonyms that were created with the synonyms parameter in create_index. Can be manually modified, but becomes effective only after restart and only for subsequently indexed documents.
-
-## SeekStorm server index directory structure
-
-First hierarchy level: API keys  
-Second hierarchy level: Indices per API key  
-Third hierarchy level: Shards of an index
-Fourth hierarchy level: Level per shard (level = 64k documents per shard). Lexical posting lists and vectors are collected in RAM, once 64k document threshold is reached they are committed to disk and become immutable.
-```
-seekstorm_index/  
-├─ 0/  
-│  ├─ 0  
-│  ├─ 1  
-│  ├─ 2  
-├─ 1/  
-│  ├─ 0  
-│  ├─ 1 ─ shards ─ ├─ 0  
-│  │               ├─ 1  
-│  │               ├─ 2 
-```
-
-* apikey.json : contains API key identity (id and hash); indices remain scoped under the same key directory
-
-You can manually delete, copy, or backup and restore both API key and index directories (shutdown server first and then restart).
-
-## Search
-
-* DaaT (Document-at-a-Time) intersection and union: 
-  + prevents writing long intermediate result lists in RAM of TaaT (Term-at-a-Time)
-  + allows streaming to enable scalability for huge indexes
-* SIMD vector processing hardware support for intersection and union of roaring bitmaps compressed posting lists
-* Galloping intersection
-* Improved Block-max WAND
-* N-gram indexing of frequent terms
-
-## Database schema
-
-Every document can contain an arbitrary number of fields of different types.
-
-Every field can be searched and filtered individually or all field together globally.
-
-* schema.json : contains the definition of fields, their field types, and whether they are stored and/or indexed.
-
-## Document store
-
-The documents are stored in JSON format and compressed with Zstandard.
-
-The index schema defines which fields of the documents are stored in the document store and can be part of the returned search results.
-
-* docstore.bin : contains the compressed documents
-
-## Limits
-
-There are **no** limits on the number of 
-* indices
-* documents
-* fields
-* field length
-* terms
-
-There is a limit of 
-* maximum 65_535 (String16) and of 4_294_967_295 (String32) distinct values per string facet field.  
-* maximum 65_535 (StringSet16) and of 4_294_967_295 (StringSet32) distinct value combinations per string set facet field.  
-* maximum 65_536 distinct numerical ranges per facet field. 
 
