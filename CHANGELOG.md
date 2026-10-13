@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Remove spelling correction, autocomplete and query rewriting from indexing, search and Web UI; remove symspell_complete_rs. Requests with retired options fail explicitly; normal lexical/Chinese/phrase matching remains.
 
+- Remove geographic Point indexing, Morton helpers, distance filters/sorts/facets and derived distance fields. Remove the Rust get_document distance argument and ResultSort.base; reject retired HTTP options and legacy Point schemas explicitly. Preserve ordinary metadata filters, sorting, facet aggregation and Web UI. Propagate shard-open errors without panicking.
+
 Entries below describe upstream releases before the SeekPower pruning and are retained as historical records, not current product capabilities.
 
 ## [3.4.1] - 2026-10-12

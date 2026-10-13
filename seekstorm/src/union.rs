@@ -2,7 +2,6 @@ use crate::{
     INDEX_RUNTIME,
     add_result::{add_result_multiterm_multifield, is_facet_filter},
     compatible::{_blsr_u64, _mm_tzcnt_64},
-    geo_search::{decode_morton_2_d, euclidian_distance},
     index::{
         AccessType, CompressionType, FieldType, NonUniquePostingListObjectQuery,
         PostingListObjectQuery, QueueObject, ROARING_BLOCK_SIZE, Shard,
@@ -1098,20 +1097,6 @@ pub(crate) async fn union_count<'a>(
                                 .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
                                 as u32
                         }
-                        Ranges::Point(_range_type, ranges, base, unit) => {
-                            let facet_value = read_u64(
-                                &shard.facets_file_mmap,
-                                (shard.facets_size_sum * docid) + facet.offset,
-                            );
-                            let facet_value_distance =
-                                euclidian_distance(base, &decode_morton_2_d(facet_value), unit);
-                            ranges
-                                .binary_search_by(|range| {
-                                    range.1.partial_cmp(&facet_value_distance).unwrap()
-                                })
-                                .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                                as u32
-                        }
 
                         _ => {
                             if facet.field_type == FieldType::String16
@@ -1509,3 +1494,4 @@ pub(crate) async fn union_docid_3<'a>(
         .await;
     }
 }
+

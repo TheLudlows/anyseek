@@ -326,10 +326,9 @@ let highlights:Vec<Highlight>= vec![
 
 let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 let return_fields_filter= HashSet::new();
-let distance_fields=Vec::new();
 let index=index_arc.read().await;
 for result in result_object.results.iter() {
-  let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter,&distance_fields).await.unwrap();
+  let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 }
 println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);
@@ -447,7 +446,6 @@ use seekstorm::search::{ResultSort,SortOrder,FacetValue};
 let result_sort = vec![ResultSort {
     field: "age".into(),
     order: SortOrder::Ascending,
-    base: FacetValue::None,
 }];
 ```
 

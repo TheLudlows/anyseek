@@ -734,7 +734,6 @@ pub(crate) async fn get_document_api(
                 true,
                 &highlighter_option,
                 &HashSet::from_iter(get_document_request.fields),
-                &get_document_request.distance_fields,
             )
             .await
             .ok()
@@ -1068,7 +1067,6 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
 /// - Realtime search
 /// - Field filter
 /// - Fields to include in search results
-/// - Distance fields: derived fields from distance calculations
 /// - Highlights: keyword-in-context snippets and term highlighting
 /// - Query facets: which facets fields to calculate and return at query time
 /// - Facet filter: filter facets by field and value
@@ -1261,7 +1259,6 @@ pub(crate) async fn query_index_api(
                     search_request.realtime,
                     &highlighter_option,
                     &return_fields_filter,
-                    &search_request.distance_fields,
                 )
                 .await
             {

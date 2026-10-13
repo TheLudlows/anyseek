@@ -209,7 +209,6 @@ impl GetIterator for IndexArc {
                                 false,
                                 &None,
                                 &fields_hashset,
-                                &Vec::new(),
                             )
                             .await
                             .ok(),
@@ -286,7 +285,6 @@ impl GetIterator for IndexArc {
                                 false,
                                 &None,
                                 &std::collections::HashSet::new(),
-                                &Vec::new(),
                             )
                             .await
                             .ok(),

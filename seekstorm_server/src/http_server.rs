@@ -407,8 +407,10 @@ pub(crate) async fn http_request_handler(
                 })
                 .unwrap_or_default();
 
-            if params.contains_key("query_rewriting") {
-                return HttpServerError::BadRequest("query_rewriting has been removed".into()).into();
+            for name in params.keys() {
+                if !["query", "offset", "length", "realtime", "enable_empty_query"].contains(&name.as_str()) {
+                    return HttpServerError::BadRequest(format!("unsupported query URL parameter: {name}; use the JSON request body for supported advanced options")).into();
+                }
             }
             let search_request = if !params.is_empty() {
                 let query_string = if let Some(query_string) = params.get("query") {
@@ -476,7 +478,6 @@ pub(crate) async fn http_request_handler(
                     highlights: Vec::new(),
                     field_filter: Vec::new(),
                     fields: Vec::new(),
-                    distance_fields: Vec::new(),
                     query_facets: Vec::new(),
                     facet_filter: Vec::new(),
                     result_sort: Vec::new(),
@@ -1029,6 +1030,10 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::BadRequest("doc_id invalid or missing".to_string()).into();
             };
 
+            if req.uri().query().is_some_and(|query| url::form_urlencoded::parse(query.as_bytes()).any(|(name, _)| name == "distance_fields")) {
+                return HttpServerError::BadRequest("distance_fields has been removed".into()).into();
+            }
+
             let Ok(collected_body) = req.into_body().collect().await else {
                 return HttpServerError::BadRequest("failed to read request body".to_string())
                     .into();
@@ -1049,7 +1054,6 @@ pub(crate) async fn http_request_handler(
                     query_terms: Vec::new(),
                     highlights: Vec::new(),
                     fields: Vec::new(),
-                    distance_fields: Vec::new(),
                 }
             };
 

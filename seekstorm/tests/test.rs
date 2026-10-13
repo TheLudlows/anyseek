@@ -10,7 +10,7 @@ use seekstorm::index::{
 };
 use seekstorm::iterator::GetIterator;
 use seekstorm::search::{
-    FacetFilter, FacetValue, QueryFacet, QueryType, ResultSort, ResultType, Search,
+    FacetFilter, QueryFacet, QueryType, ResultSort, ResultType, Search,
     SearchMode, SortOrder,
 };
 use seekstorm::vector::{Embedding, Inference, Precision, Quantization};
@@ -254,7 +254,6 @@ async fn test_05_empty_query() {
     let result_sort = vec![ResultSort {
         field: "_id".into(),
         order: SortOrder::Descending,
-        base: FacetValue::None,
     }];
 
     let result_object = index_arc
@@ -292,7 +291,6 @@ async fn test_05_empty_query() {
     let result_sort = vec![ResultSort {
         field: "_id".into(),
         order: SortOrder::Ascending,
-        base: FacetValue::None,
     }];
 
     let result_object = index_arc
@@ -394,7 +392,6 @@ async fn test_07_get_document() {
 
     let highlighter = None;
     let return_fields_filter = HashSet::new();
-    let distance_fields = Vec::new();
     let index = index_arc.read().await;
 
     let doc = index
@@ -403,7 +400,6 @@ async fn test_07_get_document() {
             false,
             &highlighter,
             &return_fields_filter,
-            &distance_fields,
         )
         .await
         .unwrap();

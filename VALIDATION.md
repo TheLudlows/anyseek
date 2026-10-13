@@ -192,3 +192,16 @@ S1.3 最终 head `242815d` 的 CI 38384967519 已成功，PR #4 合入提交 `56
 | 本地静态 | Node 语法、Python AST、JSON/YAML 语义对齐、git diff --check 通过 |
 
 不改变索引二进制编码或 ANN/评分/压缩算法。Rust 搜索与 schema 构造 API 存在显式签名变化，迁移说明已写入 README。未执行 AArch64、生产恢复/性能验证。PR #5 尚未合入；S1.4 其余三项及 S1.5 仍未实施。之后仅回填 Markdown 证据，最新提交的自动检查见 PR Checks。
+
+
+## S1.4b — 地理搜索裁剪（2026-10-13）
+
+S1.4a 最终 head `a5da5b9` 的 [CI 38387377669](https://github.com/TheLudlows/seekpower/actions/runs/38387377669) 已成功，PR #5 合入 master（`e5e0850ef255032d5a389663bafab7d350659715`）。以下基于该主干。
+
+移除 geo_search/Point/Morton/距离派生字段及其专用过滤、范围统计和堆排序分支；保留普通字段的字节宽度、偏移和算法，不改倒排/ANN/压缩/评分。移除 ResultSort.base 和 get_document 最后一个距离参数，同步 Rust 调用、REST 示例、UI 和 OpenAPI。旧 Point schema 在根/分片打开时明确拒绝，并将分片打开错误向上传递；不迁移或删除用户旧数据。GET 查询 URL 仅接受已有实际解析的五个参数，其他参数明确拒绝；复杂查询继续通过 JSON body。
+
+静态审查发现 UI 时间过滤原来发送数组，API Range 要求 start/end 对象；修正请求形状和日期字段引用，增加真实浏览器检查。
+
+新增 3 个 Rust 契约测试：旧地理请求拒绝；字符串/集合/数值/时间过滤、多字段排序、空查询/Union/Intersection、数值分面在双分片 RAM/MMAP、实时/提交/重开场景下的结果；根和分片旧 Point schema 明确报错且不改写。原有 50 个测试保留。HTTP 检查旧 GET/POST 参数/Schema 返回 400、普通元数据过滤/排序；Chromium 检查日期排序无 base、时间范围过滤。验证结果待 CI 回填。
+
+本地 Python 语法、Node 语法、JSON/YAML 语义一致和 git diff --check 已通过。无本地 Rust 工具链，编译和实际测试由 CI 执行；没有把静态检查当作运行验证。完整质量/性能及故障恢复仍归 S2。

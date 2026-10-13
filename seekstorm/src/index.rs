@@ -34,10 +34,9 @@ use crate::{
     add_result::{self, B, K, SIGMA},
     clustering::{ClusterHeader, ParentMedoid},
     commit::Commit,
-    geo_search::encode_morton_2_d,
     highlighter::Highlight,
     search::{
-        self, FacetFilter, Point, QueryFacet, Ranges, ResultObject, ResultSort,
+        self, FacetFilter, QueryFacet, Ranges, ResultObject, ResultSort,
         ResultType, SearchLexicalShard, SearchMode,
     },
     tokenizer::tokenizer,
@@ -167,9 +166,6 @@ pub struct SearchRequestObject {
     /// Specify names of fields to return in the search results, where SchemaField.store is set at indextime. If empty then all stored fields are returned.
     #[serde(default)]
     pub fields: Vec<String>,
-    /// Specify distance fields to derive at query time and return in the search results.
-    #[serde(default)]
-    pub distance_fields: Vec<DistanceField>,
     /// Facets to return with search results: if empty then no facets are returned. Facets are only enabled on facet fields that are defined in schema at create_index!
     #[serde(default)]
     pub query_facets: Vec<QueryFacet>,
@@ -186,9 +182,8 @@ pub struct SearchRequestObject {
     /// A special _score field (BM25x), reflecting how relevant the result is for a given search query (phrase match, match in title etc.) can be combined with any of the other sort fields as primary, secondary or n-th search criterium.
     /// Sort is only enabled on facet fields that are defined in schema at create_index!
     /// Examples:
-    /// - result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending, base: FacetValue::None},ResultSort {field: "language".into(), order: SortOrder::Ascending, base: FacetValue::None}];
-    /// - result_sort = vec![ResultSort {field: "location".into(),order: SortOrder::Ascending, base: FacetValue::Point(vec![38.8951, -77.0364])}];
-    #[schema(required = false, example = json!([{"field": "date", "order": "Ascending", "base": "None" }]))]
+    /// - result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending},ResultSort {field: "language".into(), order: SortOrder::Ascending}];
+    #[schema(required = false, example = json!([{"field": "date", "order": "Ascending" }]))]
     #[serde(default)]
     pub result_sort: Vec<ResultSort>,
     /// Specify default query type: (default=Intersection). This can be overwritten by search operator within the query string (+-"").
@@ -396,6 +391,7 @@ fn default_1usize() -> isize {
 
 /// Specifies which document and which field to return
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetDocumentRequest {
     /// query terms for highlighting
     #[serde(default)]
@@ -406,9 +402,6 @@ pub struct GetDocumentRequest {
     /// which fields to return
     #[serde(default)]
     pub fields: Vec<String>,
-    /// which distance fields to derive and return
-    #[serde(default)]
-    pub distance_fields: Vec<DistanceField>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -1010,13 +1003,6 @@ pub enum FieldType {
     /// allows a maximum cardinality of 4_294_967_295 (32 bit) distinct values
     /// For faceting and filtering with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
     StringSet32,
-    /// Point is a geographic field type: A `Vec<f64>` with two coordinate values (latitude and longitude) are internally encoded into a single u64 value (Morton code).
-    /// Morton codes enable efficient range queries.
-    /// Latitude and longitude are a pair of numbers (coordinates) used to describe a position on the plane of a geographic coordinate system.
-    /// The numbers are in decimal degrees format and range from -90 to 90 for latitude and -180 to 180 for longitude.
-    /// Coordinates are internally stored as u64 morton code: both f64 values are multiplied by 10_000_000, converted to i32 and bitwise interleaved into a single u64 morton code
-    /// The conversion between longitude/latitude coordinates and Morton code is lossy due to rounding errors.
-    Point,
     /// Text is a text field, that will be tokenized by the selected Tokenizer into string tokens.
     #[default]
     Text,
@@ -1331,39 +1317,6 @@ pub(crate) struct ResultFacet {
     pub ranges: Ranges,
 }
 
-/// DistanceUnit defines the unit for distance calculation: kilometers or miles.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
-pub enum DistanceUnit {
-    /// Kilometers
-    Kilometers,
-    /// Miles
-    Miles,
-}
-
-/// DistanceField defines a field for proximity search.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct DistanceField {
-    /// field name of a numeric facet field (currently onyl Point field type supported)
-    pub field: String,
-    /// field name of the distance field we are deriving from the numeric facet field (Point type) and the base (Point type)
-    pub distance: String,
-    /// base point (lat,lon) for distance calculation
-    pub base: Point,
-    /// distance unit for the distance field: kilometers or miles
-    pub unit: DistanceUnit,
-}
-
-impl Default for DistanceField {
-    fn default() -> Self {
-        DistanceField {
-            field: String::new(),
-            distance: String::new(),
-            base: Vec::new(),
-            unit: DistanceUnit::Kilometers,
-        }
-    }
-}
-
 /// MinMaxField represents the minimum and maximum value of a field.
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct MinMaxField {
@@ -1382,7 +1335,7 @@ pub struct MinMaxFieldJson {
     pub max: Value,
 }
 
-/// Value type for a field: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, point, none.
+/// Value type for a field: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, none.
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 pub enum ValueType {
     /// Unsigned 8-bit integer
@@ -1407,8 +1360,6 @@ pub enum ValueType {
     F32(f32),
     /// Floating point 64-bit
     F64(f64),
-    /// Geographic Point: a pair of latitude and longitude coordinates and a distance unit (kilometers, miles)
-    Point(Point, DistanceUnit),
     /// No value
     #[default]
     None,
@@ -1885,7 +1836,6 @@ pub(crate) async fn create_index_root(
                         FieldType::String32 => 4,
                         FieldType::StringSet16 => 2,
                         FieldType::StringSet32 => 4,
-                        FieldType::Point => 8,
                         _ => 1,
                     };
 
@@ -2242,7 +2192,6 @@ pub(crate) fn create_shard(
                         FieldType::String32 => 4,
                         FieldType::StringSet16 => 2,
                         FieldType::StringSet32 => 4,
-                        FieldType::Point => 8,
                         _ => 1,
                     };
 
@@ -2951,6 +2900,14 @@ pub(crate) fn update_list_max_impact_score(index: &mut Shard) {
     }
 }
 
+fn read_index_schema(file: File) -> Result<Vec<SchemaField>, String> {
+    let value: Value = serde_json::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
+    if value.as_array().is_some_and(|fields| fields.iter().any(|field| field.get("field_type").and_then(Value::as_str) == Some("Point"))) {
+        return Err("geographic Point fields have been removed; export the records with the previous version and rebuild without Point fields".into());
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
+}
+
 fn read_index_meta(file: File) -> Result<IndexMetaObject, String> {
     let value: Value = serde_json::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
     for field in ["spelling_correction", "query_completion"] {
@@ -2992,7 +2949,7 @@ pub(crate) async fn open_shard(
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
                 Ok(schema_file) => {
-                    let schema = serde_json::from_reader(BufReader::new(schema_file))
+                    let schema = read_index_schema(schema_file)
                         .map_err(|e| format!("invalid index schema: {e}"))?;
 
                     let synonyms = if let Ok(synonym_file) =
@@ -3555,7 +3512,7 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
                 Ok(schema_file) => {
-                    let schema = serde_json::from_reader(BufReader::new(schema_file))
+                    let schema = read_index_schema(schema_file)
                         .map_err(|e| format!("invalid index schema: {e}"))?;
 
                     let synonyms = if let Ok(synonym_file) =
@@ -3617,14 +3574,12 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
                                 shard_handle_vec.push(tokio::spawn(async move {
                                     let path = index_path_clone2.join("shards").join(i.to_string());
 
-                                    open_shard(&path, true, vector_type_clone, dimensions_clone)
-                                        .await
-                                        .unwrap()
+                                    open_shard(&path, true, vector_type_clone, dimensions_clone).await
                                 }));
                             }
 
                             for shard_handle in shard_handle_vec {
-                                let shard_arc = shard_handle.await.unwrap();
+                                let shard_arc = shard_handle.await.map_err(|e| format!("failed to open shard: {e}"))??;
                                 shard_arc.write().await.index_option = Some(index_arc.clone());
 
                                 shard_arc.write().await.quantization =
@@ -5467,25 +5422,6 @@ impl IndexDocumentShard2 for ShardArc {
                             write_u32(facet_value_id, &mut shard_mut.facets_file_mmap, address)
                         }
 
-                        FieldType::Point => {
-                            if let Ok(point) = serde_json::from_value::<Point>(field_value.clone())
-                                && point.len() == 2
-                            {
-                                if point[0] >= -90.0
-                                    && point[0] <= 90.0
-                                    && point[1] >= -180.0
-                                    && point[1] <= 180.0
-                                {
-                                    let morton_code = encode_morton_2_d(&point);
-                                    write_u64(morton_code, &mut shard_mut.facets_file_mmap, address)
-                                } else {
-                                    println!(
-                                        "outside valid coordinate range: {} {}",
-                                        point[0], point[1]
-                                    );
-                                }
-                            }
-                        }
 
                         _ => {}
                     };
