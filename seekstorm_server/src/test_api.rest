@@ -102,22 +102,17 @@ content-type: application/json
 }
 ]
 
-### get documents with highlight
+### get documents with selected fields
 GET http://127.0.0.1/api/v1/index/0/doc/0 
 apikey: {{api_key}}
 content-type: application/json
 
 //optional request body
 {
-    "query_terms": ["test"],
-    "fields": ["title", "body"],
-    "highlights": [
-    { "field": "title", "fragment_number": 0, "fragment_size": 1000, "highlight_markup": true},
-    { "field": "body", "fragment_number": 2, "fragment_size": 160, "highlight_markup": true},
-    { "field": "body", "name": "body2", "fragment_number": 0, "fragment_size": 4000, "highlight_markup": true}]
+    "fields": ["title", "body"]
 }
 
-### get document without highlight
+### get document with stored fields
 GET http://127.0.0.1/api/v1/index/0/doc/0
 apikey: {{api_key}}
 content-type: application/json
@@ -209,7 +204,7 @@ content-type: application/json
     "field_filter": ["title", "body"]
 }
 
-### query index POST with highlight
+### query index POST with stored fields
 POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
@@ -218,11 +213,7 @@ content-type: application/json
     "query":"test",
     "offset":0,
     "length":10,
-    "realtime": true,
-    "highlights": [
-    { "field": "title", "fragment_number": 0, "fragment_size": 1000, "highlight_markup": true},
-    { "field": "body", "fragment_number": 2, "fragment_size": 160, "highlight_markup": true},
-    { "field": "body", "name": "body2", "fragment_number": 0, "fragment_size": 4000, "highlight_markup": true}]
+    "realtime": true
 }
 
 ### create index NUMBER
@@ -273,7 +264,7 @@ content-type: application/json
     "number": 12345
 }
 
-### query index POST with highlight NUMBER
+### query index POST with numeric fields
 POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
@@ -282,9 +273,7 @@ content-type: application/json
     "query":"12345",
     "offset":0,
     "length":10,
-    "realtime": true,
-    "highlights": [
-    { "field": "number", "name":"_number","fragment_number": 0, "fragment_size": 1000, "highlight_markup": true}]
+    "realtime": true
 }
 
 ### get synonyms
@@ -302,9 +291,6 @@ content-type: application/json
     "offset":0,
     "length":10,
     "realtime":false,
-    "highlights":[{"field":"title","fragment_number":0,"fragment_size":1000,"highlight_markup":true},
-    {"field":"body","fragment_number":2,"fragment_size":160,"highlight_markup":true},
-    {"field":"body","name":"body2","fragment_number":0,"fragment_size":4000,"highlight_markup":true}],
     "result_sort":[],
     "query_facets":[			
 	{"Timestamp":{"field":"date","range_type":"CountWithinRange",

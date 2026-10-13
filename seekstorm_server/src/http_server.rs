@@ -475,7 +475,6 @@ pub(crate) async fn http_request_handler(
                     length,
                     result_type: ResultType::default(),
                     realtime,
-                    highlights: Vec::new(),
                     field_filter: Vec::new(),
                     fields: Vec::new(),
                     query_facets: Vec::new(),
@@ -1030,8 +1029,12 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::BadRequest("doc_id invalid or missing".to_string()).into();
             };
 
-            if req.uri().query().is_some_and(|query| url::form_urlencoded::parse(query.as_bytes()).any(|(name, _)| name == "distance_fields")) {
-                return HttpServerError::BadRequest("distance_fields has been removed".into()).into();
+            if let Some(query) = req.uri().query() {
+                if let Some((name, _)) = url::form_urlencoded::parse(query.as_bytes())
+                    .find(|(name, _)| matches!(name.as_ref(), "distance_fields" | "highlights" | "query_terms"))
+                {
+                    return HttpServerError::BadRequest(format!("{name} has been removed")).into();
+                }
             }
 
             let Ok(collected_body) = req.into_body().collect().await else {
@@ -1051,8 +1054,6 @@ pub(crate) async fn http_request_handler(
                 get_document_request
             } else {
                 GetDocumentRequest {
-                    query_terms: Vec::new(),
-                    highlights: Vec::new(),
                     fields: Vec::new(),
                 }
             };

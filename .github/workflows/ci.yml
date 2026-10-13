@@ -41,9 +41,14 @@ jobs:
           python3 - <<'PYCODE'
           import json
           with open('/tmp/seekpower-metadata.json') as source:
-              names = {package['name'] for package in json.load(source)['packages']}
+              packages = json.load(source)['packages']
+              names = {package['name'] for package in packages}
           forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs'}
           assert not forbidden, f'retired dependencies remain: {forbidden}'
+          core = next(package for package in packages if package['name'] == 'seekstorm')
+          assert not any(dependency['name'] == 'aho-corasick' for dependency in core['dependencies']), 'direct highlighter dependency remains'
+          # regex still uses aho-corasick transitively; the tokenizer is retained.
+          print('PASS no direct highlighter dependency')
           print('PASS no PDF/CSV/directory parser or query rewriting dependencies in resolved graph')
           PYCODE
       - name: Install browser test runtime

@@ -389,8 +389,6 @@ async fn test_07_get_document() {
 
     let result = index_arc.read().await.indexed_doc_count().await;
     assert_eq!(result, 1);
-
-    let highlighter = None;
     let return_fields_filter = HashSet::new();
     let index = index_arc.read().await;
 
@@ -398,7 +396,6 @@ async fn test_07_get_document() {
         .get_document(
             0,
             false,
-            &highlighter,
             &return_fields_filter,
         )
         .await

@@ -487,7 +487,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
 
                                     let mut min_cluster_score = f32::MAX;
                                     for (i, result) in result_object_vector.results.iter().enumerate() {
-                                        let doc = index_arc.read().await.get_document(result.doc_id, false,&None, &fields_hashset).await.ok();
+                                        let doc = index_arc.read().await.get_document(result.doc_id, false, &fields_hashset).await.ok();
                                         let title= if let Some(doc) = &doc { if let Some(title) = doc.get("title") { title.to_string() } else { "".to_string() } } else {"".to_string()};
                                         #[cfg(feature = "vb")]
                                         if result.cluster_score < min_cluster_score {
@@ -540,7 +540,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                     let mut recall_count=0;
                                     let search_time = start_time.elapsed().as_nanos() as i64;
                                     for (i, result) in result_object_vector.results.iter().enumerate() {
-                                        let doc = index_arc.read().await.get_document(result.doc_id, false,&None, &fields_hashset).await.ok();
+                                        let doc = index_arc.read().await.get_document(result.doc_id, false, &fields_hashset).await.ok();
                                         let title= if let Some(doc) = &doc { if let Some(title) = doc.get("title") { title.to_string() } else { "".to_string() } } else {"".to_string()};
                                         #[cfg(feature = "vb")]
                                         println!("Top {}: doc_id: {}, similarity: {}, lexical_score: {}, vector_score: {},  cluster_score: {}, shard_id: {}, level_id: {}, cluster_id: {}, field_id: {}, chunk_id: {}, source: {:?}, document: {} ", i+1, result.doc_id, result.score, result.lexical_score, result.vector_score, result.cluster_score, result.shard_id, result.level_id, result.cluster_id, result.field_id,result.chunk_id, result.source, title);
@@ -579,7 +579,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                     let mut recall_count=0;
                                     let search_time = start_time.elapsed().as_nanos() as i64;
                                     for (i, result) in result_object_vector.results.iter().enumerate() {
-                                        let doc = index_arc.read().await.get_document(result.doc_id, false,&None, &fields_hashset).await.ok();
+                                        let doc = index_arc.read().await.get_document(result.doc_id, false, &fields_hashset).await.ok();
                                         let title= if let Some(doc) = &doc { if let Some(title) = doc.get("title") { title.to_string() } else { "".to_string() } } else {"".to_string()};
 
                                         #[cfg(feature = "vb")]

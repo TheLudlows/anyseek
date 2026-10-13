@@ -48,7 +48,7 @@ async fn check_prices(index: &IndexArc, options: Value, realtime: bool, expected
     assert_eq!(result.result_count_total, expected.len(), "{options}");
     let mut prices = Vec::new();
     for result in result.results {
-        let doc = index.read().await.get_document(result.doc_id, realtime, &None, &HashSet::new()).await.unwrap();
+        let doc = index.read().await.get_document(result.doc_id, realtime, &HashSet::new()).await.unwrap();
         prices.push(doc["price"].as_f64().unwrap());
     }
     assert_eq!(prices, expected, "{options}");

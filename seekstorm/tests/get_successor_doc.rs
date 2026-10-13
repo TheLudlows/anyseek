@@ -61,13 +61,13 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
     // Empty docs themselves stay not-found (documented behavior, cf. #72).
     assert!(
         index
-            .get_document(0, false, &None, &HashSet::new())
+            .get_document(0, false, &HashSet::new())
             .await
             .is_err()
     );
     assert!(
         index
-            .get_document(1, false, &None, &HashSet::new())
+            .get_document(1, false, &HashSet::new())
             .await
             .is_err()
     );
@@ -78,7 +78,7 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
         (5, "mixed successor"),
     ] {
         let doc = index
-            .get_document(id, false, &None, &HashSet::new())
+            .get_document(id, false, &HashSet::new())
             .await
             .unwrap_or_else(|e| panic!("BUG [{tag}]: valid doc {id} unreadable: {e}"));
         let title: String = serde_json::from_value(doc.get("title").unwrap().clone()).unwrap();

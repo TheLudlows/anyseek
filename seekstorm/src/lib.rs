@@ -166,23 +166,11 @@
 //! let result_sort=Vec::new();
 //! let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,).await;
 //! // ### display results
-//! use seekstorm::highlighter::{Highlight, highlighter};
 //! use std::collections::HashSet;
-//! let highlights:Vec<Highlight>= vec![
-//! Highlight {
-//!     field: "body".to_string(),
-//!     name:String::new(),
-//!     fragment_number: 2,
-//!     fragment_size: 160,
-//!     highlight_markup: true,
-//!     ..Default::default()
-//! },
-//! ];    
-//! let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 //! let return_fields_filter= HashSet::new();
 //! let index=index_arc.read().await;
 //! for result in result_object.results.iter() {
-//!   let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
+//!   let doc=index.get_document(result.doc_id,false,&return_fields_filter).await.unwrap();
 //!   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 //! }
 //! println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);
@@ -197,10 +185,9 @@
 //! # let index_arc=open_index(index_path).await.unwrap();
 //! use std::collections::HashSet;
 //! let doc_id=0;
-//! let highlighter=None;
 //! let return_fields_filter= HashSet::new();
 //! let index=index_arc.read().await;
-//! let doc=index.get_document(doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
+//! let doc=index.get_document(doc_id,false,&return_fields_filter).await.unwrap();
 //! # });
 //! ```
 //! ### clear index
@@ -328,22 +315,10 @@
 //! let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,).await;
 //! // ### display results
 //! use std::collections::HashSet;
-//! use seekstorm::highlighter::{highlighter, Highlight};
-//! let highlights:Vec<Highlight>= vec![
-//!         Highlight {
-//!             field: "body".to_owned(),
-//!             name:String::new(),
-//!             fragment_number: 2,
-//!             fragment_size: 160,
-//!             highlight_markup: true,
-//!            ..Default::default()
-//!         },
-//!     ];    
-//! let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 //! let return_fields_filter= HashSet::new();
 //! let index=index_arc.write().await;
 //! for result in result_object.results.iter() {
-//!   let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
+//!   let doc=index.get_document(result.doc_id,false,&return_fields_filter).await.unwrap();
 //!   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 //! }
 //! println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);
@@ -389,9 +364,6 @@ pub mod commit;
 pub(crate) mod compatible;
 pub(crate) mod compress_postinglist;
 pub(crate) mod doc_store;
-/// Extracts the most relevant fragments (snippets, summaries) from specified fields of the document to provide a "keyword in context" (KWIC) functionality.
-/// With highlight_markup the matching query terms within the fragments can be highlighted with HTML markup.
-pub mod highlighter;
 /// Operate the index: reate_index, open_index, clear_index, close_index, delete_index, index_document(s)
 pub mod index;
 pub(crate) mod index_posting;

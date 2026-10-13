@@ -1,3 +1,5 @@
+> SeekPower S1.4c: core highlighting and keyword-in-context snippets have been removed. Search requests no longer accept `highlights`; document reads accept only `fields` (remove `query_terms` and `highlights`). Retired options return HTTP 400. Rust reads now use `get_document(doc_id, include_uncommitted, &fields)`. Search and document reads return stored values unchanged; search response `query_terms` remains available. Web UI cards show plain stored text and previews show the full text, preserving line breaks. Any application-specific summarization belongs outside the engine.
+
 > SeekPower S1.4b: geographic Point fields, radius/distance filtering, geographic sorting and derived distance fields have been removed. Requests using Point variants, `distance_fields`, or `result_sort[].base` return HTTP 400 (including `base: "None"`; omit it for ordinary sorting). Rust `get_document` no longer takes a final distance-fields argument. Old Point indices must be exported with the previous version and rebuilt with ordinary fields; non-geographic schema and facet layouts remain unchanged. Latitude/longitude may be kept as ordinary JSON or numeric data, without geographic query semantics. GET query URLs accept `query`, `offset`, `length`, `realtime`, and `enable_empty_query`; use a JSON body for advanced options. Unknown URL options are rejected rather than ignored.
 
 > SeekPower S1.4a: query spelling correction, autocomplete and automatic rewriting have been removed. Search text is used as supplied. Remove `query_rewriting`, `spelling_correction`, `query_completion`, `dictionary_source` and `completion_source` from requests; retired fields return HTTP 400. Rust `Search::search` no longer takes the final rewriting argument. Boolean/phrase search, Chinese segmentation and metadata filtering remain. Existing indices with enabled retired options must be exported and rebuilt; indices with null options remain readable. No retired dictionary files are loaded or created.
@@ -151,7 +153,6 @@ Blog Posts:
 * Iterator to iterate through all documents of an index, in both directions, e.g., for index export, conversion, analytics and inspection.  
 * Search with empty query, but query facets, facet filter, and result sort parameters, ascending and descending.
 * Typo-tolerant Query Auto-Completion (QAC) and Instant search.
-* KWIC snippets, highlighting
 * One-way and multi-way synonyms
 * Language independent
 
@@ -185,7 +186,7 @@ Blog Posts:
 * Multi-tenancy index management.
 * API-key management.
 * [Embedded web server and web UI](https://github.com/SeekStorm/SeekStorm/blob/main/src/seekstorm_server#open-embedded-web-ui-in-browser) to search and display results from any index without coding.
-* Web UI with instant search, keyword highlighting, histogram, date filter, faceting, result sorting, document preview (as demo, for testing, as template).
+* Web UI with instant search, histogram, date filter, faceting, result sorting, document preview (as demo, for testing, as template).
 * Code first OpenAPI generated [REST API documentation](https://seekstorm.com/documentation/)
 * Cross-platform: runs on Linux, Windows, and macOS (other OS untested).
 * Docker file and container image at [Docker Hub](https://hub.docker.com/r/wolfgarbe/seekstorm_server)
@@ -634,25 +635,12 @@ let result_object = index_arc.search(query, query_vector, query_type, search_mod
 
 // ### display results
 
-use seekstorm::highlighter::{Highlight, highlighter};
 use std::collections::HashSet;
 
-let highlights:Vec<Highlight>= vec![
-    Highlight {
-        field: "body".to_string(),
-        name:String::new(),
-        fragment_number: 2,
-        fragment_size: 160,
-        highlight_markup: true,
-        ..Default::default()
-    },
-];    
-
-let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 let return_fields_filter= HashSet::new();
 let mut index=index_arc.write().await;
 for result in result_object.results.iter() {
-  let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
+  let doc=index.get_document(result.doc_id,false,&return_fields_filter).await.unwrap();
   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 }
 
@@ -992,7 +980,6 @@ search index
 use std::path::Path;
 use seekstorm::index::{IndexDocuments,open_index};
 use seekstorm::search::{Search,SearchMode,QueryType,ResultType,QueryFacet,QueryRewriting};
-use seekstorm::highlighter::{Highlight,highlighter};
 use std::collections::HashSet;
 
 let index_path=Path::new("C:/index/");
@@ -1016,22 +1003,10 @@ let result_object = index_arc.search(query, query_vector, query_type, search_mod
 
 // ### display results
 
-let highlights:Vec<Highlight>= vec![
-        Highlight {
-            field: "body".to_owned(),
-            name:String::new(),
-            fragment_number: 2,
-            fragment_size: 160,
-            highlight_markup: true,
-            ..Default::default()
-        },
-    ];    
-
-let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 let return_fields_filter= HashSet::new();
 let index=index_arc.write().await;
 for result in result_object.results.iter() {
-  let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
+  let doc=index.get_document(result.doc_id,false,&return_fields_filter).await.unwrap();
   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 }
 println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);
@@ -1126,7 +1101,6 @@ query documents/vectors
     use seekstorm::vector_similarity::{AnnMode, VectorSimilarity};
     use seekstorm::commit::Commit;
     use seekstorm::vector::Embedding;
-    use seekstorm::highlighter::{Highlight,highlighter};
     use std::collections::HashSet;
 
   // open index

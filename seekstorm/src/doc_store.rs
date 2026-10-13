@@ -1,9 +1,7 @@
 use memmap2::Mmap;
-use serde_json::json;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::io::{Seek, SeekFrom, Write};
 
-use crate::highlighter::{Highlighter, top_fragments_from_field};
 use crate::index::{
     AccessType, Document, DocumentCompression, Index,
     ROARING_BLOCK_SIZE, Shard,
@@ -15,7 +13,6 @@ impl Shard {
         &self,
         doc_id: usize,
         include_uncommitted: bool,
-        highlighter_option: &Option<Highlighter>,
         fields: &HashSet<String>,
     ) -> Result<Document, String> {
         if !self.delete_hashset.is_empty() && self.delete_hashset.contains(&doc_id) {
@@ -131,29 +128,6 @@ impl Shard {
                 }
             }
         };
-
-        if let Some(highlighter) = highlighter_option {
-            let mut kwic_vec: VecDeque<String> = VecDeque::new();
-            for highlight in highlighter.highlights.iter() {
-                let kwic =
-                    top_fragments_from_field(self, &doc, &highlighter.query_terms_ac, highlight)
-                        .unwrap();
-                kwic_vec.push_back(kwic);
-            }
-
-            for highlight in highlighter.highlights.iter() {
-                let kwic = kwic_vec.pop_front().unwrap();
-                doc.insert(
-                    (if highlight.name.is_empty() {
-                        &highlight.field
-                    } else {
-                        &highlight.name
-                    })
-                    .to_string(),
-                    json!(kwic),
-                );
-            }
-        }
 
         if !fields.is_empty() {
             for key in self.stored_field_names.iter() {
@@ -314,13 +288,11 @@ impl Index {
     ///   ⚠️ Use search or get_iterator first to obtain a valid doc_id. Document IDs are not guaranteed to be continuous and gapless!
     ///
     /// * `include_uncommitted`: Return also documents which have not yet been committed.
-    /// * `highlighter_option`: Specifies the extraction of keyword-in-context (KWIC) fragments from fields in documents, and the highlighting of the query terms within.
     /// * `fields`: Specifies which of the stored fields to return with each document. Default: If empty return all stored fields
     pub async fn get_document(
         &self,
         doc_id: usize,
         include_uncommitted: bool,
-        highlighter_option: &Option<Highlighter>,
         fields: &HashSet<String>,
     ) -> Result<Document, String> {
         let shard_id = doc_id % self.shard_number;
@@ -329,7 +301,6 @@ impl Index {
         self.shard_vec[shard_id].read().await.get_document_shard(
             doc_id_shard,
             include_uncommitted,
-            highlighter_option,
             fields,
         )
     }

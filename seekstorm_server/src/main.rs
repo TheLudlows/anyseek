@@ -88,13 +88,13 @@
 //! curl --request PATCH --url http://127.0.0.1/api/v1/index/0/doc --header 'apikey: VF9vcy0U1l19VQWYEKD+eeyX+RxuOLsj19EPuIWGc6A=' --header 'content-type: application/json' --data '[[1,{"title":"title1 test","body":"body1","url":"url1"}],[2,{"title":"title3 test","body":"body3 test","url":"url3"}]]'
 //! ```
 //! ### get document
-//! without highlight
+//! all stored fields
 //! ```
 //! curl --request GET --url http://127.0.0.1/api/v1/index/0/doc/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json'
 //! ```
-//! with highlight
+//! selected stored fields
 //! ```
-//! curl --request GET --url http://127.0.0.1/api/v1/index/0/doc/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"query_terms": ["test"],"fields": ["title", "body"],"highlights": [{ "field": "title", "fragment_number": 0, "fragment_size": 1000, "highlight_markup": true},{ "field": "body", "fragment_number": 2, "fragment_size": 160, "highlight_markup": true},{ "field": "body", "name": "body2", "fragment_number": 0, "fragment_size": 4000, "highlight_markup": true}]}'
+//! curl --request GET --url http://127.0.0.1/api/v1/index/0/doc/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"fields": ["title", "body"]}'
 //! ```
 //! ---
 //! ### query index (GET)
@@ -172,3 +172,4 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     Ok(())
 }
+
