@@ -6,4 +6,4 @@
 #vectorHelp { font-size: 13px; color: #555; }
 #searchError { color: #a32020; white-space: pre-wrap; }
 
-#prevText2{white-space:pre-wrap;overflow-wrap:anywhere}
+#prevText2{white-space:pre-wrap;overflow-wrap:anywhere;max-height:60vh;overflow-y:auto}

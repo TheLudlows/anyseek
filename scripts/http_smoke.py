@@ -413,6 +413,10 @@ def exercise(binary, workdir):
                     check(page.evaluate('window.rawExecuted !== true'), 'stored markup executed')
                     check(page.locator('#prevText2').evaluate('(el) => getComputedStyle(el).whiteSpace') == 'pre-wrap',
                           'preview loses raw line breaks')
+                    check(page.locator('#prevText2').evaluate('(el) => el.scrollHeight > el.clientHeight'),
+                          'long raw preview has no scrollable viewport')
+                    page.locator('#prevText2').evaluate('(el) => { el.scrollTop = el.scrollHeight; }')
+                    check(page.locator('#prevText2').evaluate('(el) => el.scrollTop > 0'), 'long raw preview cannot scroll')
                     # JSON fields use readable JSON text, including false and zero values.
                     with page.expect_response(lambda response: '/query' in response.url and response.request.method == 'POST'):
                         page.evaluate("TEXT_FIELD='data'; loadResults(1, 'score')")
