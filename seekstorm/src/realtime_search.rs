@@ -1286,7 +1286,7 @@ impl Shard {
                 || !field_filter_set.is_empty()
                 || !self.delete_hashset.is_empty()
                 || !facet_filter.is_empty()
-            || !search_result.query_facets.is_empty();
+                || !search_result.query_facets.is_empty();
             result_count_arc.fetch_add(
                 if filtered {
                     result_count_local as usize

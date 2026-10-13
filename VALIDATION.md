@@ -211,3 +211,6 @@ S1.4a 最终 head `a5da5b9` 的 [CI 38387377669](https://github.com/TheLudlows/s
 
 
 第二轮 `b6ca0ca` 的 [CI 38389512410](https://github.com/TheLudlows/seekpower/actions/runs/38389512410)，job `115269526246`：构建、依赖、完整 HTTP/Chromium、OpenAPI 全部通过。新增普通元数据回归在未提交数据的 Count 分面断言失败（总数 4，但分面为空）。审查显示继承的 realtime_search 单词计数捷径不考虑 query_facets，单词逐记录函数也仅在有过滤时统计分面；多词 Count bitmap 捷径同样不能执行过滤/分面。最小修正为有这些请求时使用已有逐记录路径，保持无约束计数捷径。增加同分片多词及带过滤计数覆盖，不移除原失败断言；没有改评分、编码或 ANN 算法。新的验证结果待回填。
+
+
+第三轮 `c1cb814` 的 [CI 38390277784](https://github.com/TheLudlows/seekpower/actions/runs/38390277784)，job `115272091103`：构建、依赖、HTTP/Chromium 和 OpenAPI 通过；实时分面已返回正确计数。测试错误地要求同计数分面按标签 low/high 排序，而现有根聚合按计数排序，同分项顺序没有保证。修正测试先按标签规范化后严格比较完整标签/计数列表；仍检查精确总数、全部分面、过滤结果和记录排序，不修改产品的同分排序规则。

@@ -84,7 +84,10 @@ async fn check_metadata(index: &IndexArc, realtime: bool) {
                     "query_facets":[{"F64":{"field":"price","range_type":"CountWithinRange","ranges":[["low",0.],["high",25.]]}}]}),realtime).await;
                 let per_bin = if filtered {1} else {2};
                 assert_eq!(result.result_count_total,2 * per_bin,"{query} {result_type} realtime={realtime}");
-                assert_eq!(result.facets["price"],vec![("low".into(),per_bin),("high".into(),per_bin)],"{query} {result_type} realtime={realtime}");
+                // Root aggregation ranks facets by count; ties have no label-order guarantee.
+                let mut bins = result.facets["price"].clone();
+                bins.sort_by(|a,b| a.0.cmp(&b.0));
+                assert_eq!(bins,vec![("high".into(),per_bin),("low".into(),per_bin)],"{query} {result_type} realtime={realtime}");
             }
         }
     }
