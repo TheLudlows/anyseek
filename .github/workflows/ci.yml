@@ -1,0 +1,35 @@
+name: Retained workspace
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retained-workspace-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Record toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+      - name: Build retained workspace
+        run: cargo build --workspace
+      - name: HTTP API and embedded UI smoke (no SDK)
+        run: python3 scripts/http_smoke.py --server target/debug/seekstorm_server
+      - name: Existing core and server tests
+        run: cargo test --workspace --all-targets

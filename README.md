@@ -1,3 +1,12 @@
+# SeekPower
+
+SeekPower is being reduced to a Rust hybrid search core, an HTTP service, and the existing Web UI. See [the plan](SEEKPOWER_PLAN.md), [status](STATUS.md), and [validation](VALIDATION.md) for the current pruning stage.
+
+The workspace contains `seekstorm` and `seekstorm_server`. Crate names are retained during pruning. Access the service directly through its [HTTP API examples](seekstorm_server/src/test_api.rest) or the embedded Web UI; separately published SDKs are outside this product's maintained surface.
+
+Build the retained targets with `cargo build --workspace`. Run the server with `cargo run -p seekstorm_server -- local_ip=127.0.0.1 local_port=8080`, then open `http://127.0.0.1:8080/`. Run the SDK-independent API and static-resource smoke check with `python3 scripts/http_smoke.py --server target/debug/seekstorm_server`; it starts an isolated temporary server and cleans it up.
+
+The following documentation is inherited from SeekStorm. Features scheduled for later S1 batches still exist until their removal is recorded in STATUS.md. Upstream attribution and licenses are preserved.
 
 <img src="assets/logo.png" width="450" alt="Logo"><br>
 **SeekStorm**: **sub-millisecond**, native **vector** & **lexical search** - **in-process library** & **multi-tenancy server**, in **Rust**.
@@ -12,12 +21,6 @@ SeekStorm is open source licensed under the [Apache License 2.0](https://github.
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/SeekStorm?tab=Apache-2.0-1-ov-file#readme)
 [![Roadmap](https://img.shields.io/badge/Roadmap-2026-DA7F07.svg)](#roadmap)
 
-## SeekStorm MCP search server
-[![Crates.io](https://img.shields.io/crates/v/seekstorm_mcp_server.svg)](https://crates.io/crates/seekstorm_mcp_server)
-[![Downloads](https://img.shields.io/crates/d/seekstorm_mcp_server.svg?style=flat-square)](https://crates.io/crates/seekstorm_mcp_server)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/SeekStorm?tab=Apache-2.0-1-ov-file#readme)
-[![Roadmap](https://img.shields.io/badge/Roadmap-2026-DA7F07.svg)](#roadmap)
-
 ## SeekStorm multi-tenancy search server
 [![Crates.io](https://img.shields.io/crates/v/seekstorm_server.svg)](https://crates.io/crates/seekstorm_server)
 [![Downloads](https://img.shields.io/crates/d/seekstorm_server.svg?style=flat-square)](https://crates.io/crates/seekstorm_server)
@@ -26,48 +29,13 @@ SeekStorm is open source licensed under the [Apache License 2.0](https://github.
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/SeekStorm?tab=Apache-2.0-1-ov-file#readme)
 [![Roadmap](https://img.shields.io/badge/Roadmap-2026-DA7F07.svg)](#roadmap)
 
-## SeekStorm REST client (Rust)
-[![Crates.io](https://img.shields.io/crates/v/seekstorm_client_rs.svg)](https://crates.io/crates/seekstorm_client_rs)
-[![Downloads](https://img.shields.io/crates/d/seekstorm_client_rs.svg?style=flat-square)](https://crates.io/crates/seekstorm_client_rs)
-[![Documentation](https://docs.rs/seekstorm_client_rs/badge.svg)](https://docs.rs/seekstorm_client_rs)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/SeekStorm?tab=Apache-2.0-1-ov-file#readme)
-[![Roadmap](https://img.shields.io/badge/Roadmap-2026-DA7F07.svg)](#roadmap)
-
-## SeekStorm REST client (Python)
-[![GitHub Stars](https://img.shields.io/github/stars/SeekStorm/seekstorm_client_pure_py)](https://github.com/SeekStorm/seekstorm_client_pure_py)
-[![PyPI](https://img.shields.io/pypi/v/seekstorm-client-pure-py?label=PyPI)](https://pypi.org/project/seekstorm-client-pure-py/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/seekstorm_client_pure_py?tab=Apache-2.0-1-ov-file#readme)
-
-## SeekStorm REST client (TypeScript)
-[![GitHub Stars](https://img.shields.io/github/stars/SeekStorm/seekstorm_client_ts)](https://github.com/SeekStorm/seekstorm_client_ts)
-[![npm](https://img.shields.io/npm/v/seekstorm_client_ts?label=npm)](https://www.npmjs.com/package/seekstorm_client_ts)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/seekstorm_client_pure_ts?tab=Apache-2.0-1-ov-file#readme)
-
-## SeekStorm REST client (C#)
-[![GitHub Stars](https://img.shields.io/github/stars/SeekStorm/seekstorm_client_cs)](https://github.com/SeekStorm/seekstorm_client_cs)
-[![NuGet version](https://badge.fury.io/nu/SeekStorm.Client.svg)](https://badge.fury.io/nu/SeekStorm.Client)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/seekstorm_client_cs?tab=Apache-2.0-1-ov-file#readme)
-
-## SeekStorm REST client (Java)
-[![GitHub Stars](https://img.shields.io/github/stars/SeekStorm/seekstorm_client_java)](https://github.com/SeekStorm/seekstorm_client_java)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/seekstorm_client_java?tab=Apache-2.0-1-ov-file#readme)
-
-## SeekStorm Instant search adapter
-A drop-in adapter to redirect an existing Algolia InstantSearch.js frontend to a SeekStorm backend — no UI rewrite required.  
-Or, use the InstantSearch widget library to build a fresh UI from scratch, with SeekStorm's REST API as the backend.
-
-[![GitHub Stars](https://img.shields.io/github/stars/SeekStorm/seekstorm-instantsearch-adapter)](https://github.com/SeekStorm/seekstorm-instantsearch-adapter)
-[![npm](https://img.shields.io/npm/v/seekstorm-instantsearch-adapter?label=npm)](https://www.npmjs.com/package/seekstorm-instantsearch-adapter)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://github.com/SeekStorm/seekstorm-instantsearch-adapter?tab=MIT-1-ov-file#readme)
-
 <p>
   <a href="https://seekstorm.com">Website</a> | 
   <a href="https://seekstorm.github.io/search-benchmark-game/">Benchmark</a> | 
   <a href="https://deephn.org/">Demo</a> | 
   <a href="#documentation">Library Docs</a> | 
   <a href="https://seekstorm.com/documentation/">REST API Docs</a> |
-  <a href="https://github.com/SeekStorm/SeekStorm/blob/main/seekstorm_server/README.md">Server Readme</a> |
-  <a href="https://github.com/SeekStorm/SeekStorm/blob/main/seekstorm_client/README.md">Client Readme</a> |
+  <a href="seekstorm_server/README.md">Server Readme</a> |
   <a href="#roadmap">Roadmap</a> | 
   <a href="https://seekstorm.com/blog/">Blog</a> | 
   <a href="https://x.com/seekstorm">X</a>
@@ -1897,7 +1865,6 @@ Are you missing something? Let us know via issue or discussions.
 
 * ✅ Native vector search
 * ✅ TurboQuant (TQ) for vector search
-* ✅ Model Context Protocol (MCP) server and CLI for Retrieval Augmented Generation (RAG) and agentic search.
 * Late Interaction Multimodal Retrieval
 * Geocoding, reverse geocoding, GeoJSON
 * **Split of storage and compute**
@@ -1935,5 +1902,6 @@ Are you missing something? Let us know via issue or discussions.
 	  - ✅ NEON 
 	  - SVE/SVE2 
 	- GPU (NVIDIA)
+
 
 

@@ -18,8 +18,8 @@
 //! legitimately differ between two deterministic-but-arbitrary tie selections,
 //! so the assertion is deliberately tie-tolerant.
 //!
-//! On top of that, a strictly-distinct-score corpus locks the exact doc set,
-//! because with no ties the top-`k` set is unique.
+//! On top of that, a corpus with a strict score gap at the truncation boundary
+//! locks the exact doc set. Ties inside the selected set do not change membership.
 //!
 //! Self-contained (own index directories), deterministic, no sleeps.
 
@@ -131,8 +131,8 @@ fn assert_valid_topk(topk: &ResultObject, oracle: &ResultObject) {
     }
 }
 
-/// Sorted multiset of (doc_id, exact f32 score bits); safe only when no two
-/// hits share the same score, so the top-`k` doc set is unique.
+/// Sorted multiset of (doc_id, exact f32 score bits). Exact membership comparisons
+/// require a strict score gap at the truncation boundary, not globally unique scores.
 fn strict_key(results: &[(usize, u32)]) -> Vec<(usize, u32)> {
     let mut v = results.to_vec();
     v.sort_unstable();
@@ -213,20 +213,20 @@ async fn scan32_sparse_uniform_fills_heap() {
     index.close().await;
 }
 
-/// Strict distinct-score corpus: every doc length differs, so every score is
-/// distinct and the top-`k` doc set is unique — here the exact doc/score
-/// multiset must match the global ranking exactly.
+/// Twenty score tiers of twenty docs each: top-100 selects five complete tiers.
+/// Verify the boundary gap before requiring exact doc/score membership.
+/// The former modulo-13 corpus split a tied tier at rank 100, making that
+/// assertion depend on an unspecified tie selection.
 #[tokio::test]
-async fn scan32_distinct_scores_exact_selection() {
-    let index = fresh("tests/index_scan32_distinct/").await;
+async fn scan32_score_gap_exact_selection() {
+    let index = fresh("tests/index_scan32_score_gap/").await;
 
     let words: Vec<String> = (1..=11).map(|i| format!("d{i:02}")).collect();
     let mut docs = vec![];
-    // Each doc: all 11 query words + a unique number of inert pad tokens, so
-    // lengths (hence BM25 document-length normalization, hence scores) are all
-    // strictly distinct.
+    // Each doc contains all query terms. Equal-size length tiers keep the
+    // top-100 boundary between tiers rather than inside a tied group.
     for i in 0..400 {
-        let pad = "pad ".repeat(i % 13);
+        let pad = "pad ".repeat(i % 20);
         docs.push(doc(&format!("{} {pad}rare{i} finite{i}", words.join(" "))));
     }
     index.index_documents(docs).await;
@@ -235,6 +235,10 @@ async fn scan32_distinct_scores_exact_selection() {
     let query = words.join(" ");
     let oracle = search(&index, &query, 0, 400, ResultType::Topk).await;
     assert_eq!(oracle.results.len(), 400);
+    assert!(
+        oracle.results[99].score > oracle.results[100].score,
+        "fixture must have a strict score gap at the top-100 boundary"
+    );
 
     let topk = search(&index, &query, 0, 100, ResultType::Topk).await;
     assert_eq!(topk.results.len(), 100);
@@ -251,7 +255,7 @@ async fn scan32_distinct_scores_exact_selection() {
     assert_eq!(
         strict_key(&a),
         strict_key(&b),
-        "distinct-score top-100 must match the global ranking exactly"
+        "score-gap top-100 must match the global ranking exactly"
     );
 
     index.close().await;
