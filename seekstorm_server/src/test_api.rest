@@ -445,7 +445,7 @@ content-type: application/json
     },
     {
         "field": "json", 
-        "field_type": "Json", 
+        "field_type": "Json",
         "store": true, 
         "index_lexical": true
     }], 
@@ -571,18 +571,18 @@ content-type: application/json
 
 {
     "schema":[{
-        "field": "title", 
-        "field_type": "Text", 
+        "field": "vector",
+        "field_type": "Json",
         "store": true, 
         "index_lexical": false,
         "index_vector": true
     },
     {
         "field": "body",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": false,
-        "index_vector": true
+        "field_type": "Text",
+        "store": true,
+        "index_lexical": true,
+        "index_vector": false
     },
         {
         "field": "url", 
@@ -593,7 +593,7 @@ content-type: application/json
     }], 
     "index_name": "test_index",
     "clustering": "None",
-    "inference": {"Model2Vec": { "model": "PotionBase2M", "chunk_size": 1000, "quantization": "ScalarQuantizationI8" }}
+    "inference": {"External": { "dimensions": 3, "precision": "F32", "similarity": "Cosine", "quantization": "None" }}
 }
 
 ### index document
@@ -602,9 +602,9 @@ apikey: {{api_key}}
 content-type: application/json
 
 [
-    {"title":"pink panther","body":"animal from a comedy","url":"url1"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"red fox","body":"small carnivorous mammal","url":"url3"}
+    {"vector":[1,0,0],"body":"animal from a comedy","url":"url1"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,0,1],"body":"small carnivorous mammal","url":"url3"}
 ]
 
 ### query index POST
@@ -614,6 +614,7 @@ content-type: application/json
 
 {
     "query":"rosy panther",
+    "query_vector":[1,0,0],
     "offset":0,
     "length":10,
     "result_type": "TopkCount",
@@ -630,18 +631,18 @@ content-type: application/json
 
 {
     "schema":[{
-        "field": "title", 
-        "field_type": "Text", 
+        "field": "vector",
+        "field_type": "Json",
         "store": true, 
         "index_lexical": false,
         "index_vector": true
     },
     {
         "field": "body",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": false,
-        "index_vector": true
+        "field_type": "Text",
+        "store": true,
+        "index_lexical": true,
+        "index_vector": false
     },
         {
         "field": "url", 
@@ -652,7 +653,7 @@ content-type: application/json
     }], 
     "index_name": "test_index",
     "clustering": "None",
-    "inference": {"Model2Vec": { "model": "PotionBase2M", "chunk_size": 1000, "quantization": "ScalarQuantizationI8" }}
+    "inference": {"External": { "dimensions": 3, "precision": "F32", "similarity": "Cosine", "quantization": "None" }}
 }
 
 ### index document
@@ -661,30 +662,30 @@ apikey: {{api_key}}
 content-type: application/json
 
 [
-    {"title":"pink panther","body":"animal from a comedy","url":"url1"},
+    {"vector":[1,0,0],"body":"animal from a comedy","url":"url1"},
 
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
 
-    {"title":"red fox","body":"small carnivorous mammal","url":"url3"}
+    {"vector":[0,0,1],"body":"small carnivorous mammal","url":"url3"}
 ]
 
 ### commit index
@@ -698,30 +699,30 @@ apikey: {{api_key}}
 content-type: application/json
 
 [
-    {"title":"pink panther","body":"animal from a comedy","url":"url1"},
+    {"vector":[1,0,0],"body":"animal from a comedy","url":"url1"},
 
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
-    {"title":"blue whale","body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
+    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
     
-    {"title":"red fox","body":"small carnivorous mammal","url":"url3"}
+    {"vector":[0,0,1],"body":"small carnivorous mammal","url":"url3"}
 ]
 
 ### commit index
@@ -736,6 +737,7 @@ content-type: application/json
 
 {
     "query":"rosy panther",
+    "query_vector":[1,0,0],
     "offset":0,
     "length":10,
     "result_type": "TopkCount",

@@ -90,3 +90,13 @@ S1.1 首个提交时结论：代码已实施，等待构建和运行验证；未
 本批代码和上述验证已完成，PR #2 可审查，等待合入；S1 整体未完成。测试修复后的生产源码 `seekstorm/src/`、HTTP 服务与 Web UI 内容仍与基点完全相同。浏览器交互、独立混合检索质量基准、完整恢复与故障注入未执行；不以本批 45 个测试替代 S1.2—S1.5/S2 的验收。
 
 本次结果回填仅修改计划/状态/验证文档，运行代码与已通过 CI 的 `4121118` 相同；CI 链接和结论明确对应上述代码提交，不将未发生的后续主干运行记为通过。
+
+## 2026-10-13：S1.1 合入与 S1.2 实施
+
+- S1.1 PR #2 已合入 master，merge commit `61f11306b45af0cf29c0e040708b14f76c8ee1f2`；合入前 head `5054b8244ab1b6b153b7276801fe1edf5b4594f1` 的 CI 38368352623 通过。
+- S1.2 PR #3，首个实现提交 `3cc1e0cf6ab952f48cc3e605e46b93db2da221d6`。移除模型/自动切块、明确外部向量契约、API 400 与 UI 向量输入。
+- 本地执行 `python -m py_compile scripts/http_smoke.py`、`node --check seekstorm_server/web/js/master.js`，通过。当前环境无 Rust 工具链，Rust 与 HTTP/浏览器测试由 GitHub Actions 执行；等待实际结果，不以静态检查替代。
+- 新增测试覆盖非法配置/维度/数值/精度、缺失向量、base64 非有限数、批量写入与更新校验、全文/向量/混合、外部向量关闭重开；原 3 个内置模型测试改用固定外部向量，不再下载模型。
+- 记录格式、native ANN/exact/RRF 与分词器不改；崩溃恢复、性能与 ANN recall 大规模基准仍属于 S2，未执行。
+
+首轮 CI [38370570453](https://github.com/TheLudlows/seekpower/actions/runs/38370570453) / job 115206243467 在编译阶段失败：迭代器初始化遗漏新增的 `ResultObject.error` 字段。已补 `error: None`，其余测试未运行，待重跑。
