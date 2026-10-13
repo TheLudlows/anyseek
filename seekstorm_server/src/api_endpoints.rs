@@ -1194,38 +1194,11 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
         "query_rewriting": "SearchOnly",
         "search_mode": "Lexical"
     }   ))),
-	("Example: Hybrid search" = (value = json!(  {
-        "query": "detroit",
-        "query_vector": null,
-        "enable_empty_query": false,
-        "offset": 0,
-        "length": 10,
-        "result_type": "TopkCount",
-        "realtime": true,
-        "highlights": [
-            {
-                "field": "",
-                "name": "",
-                "fragment_number": 0,
-                "fragment_size": 0,
-                "highlight_markup": true,
-                "pre_tags": "",
-                "post_tags": ""
-            }
-        ],
-        "field_filter": ["title"],
-        "fields": [],
-        "query_type_default": "Intersection",
-        "query_rewriting": "SearchOnly",
-        "search_mode": {
-            "Hybrid": {
-                "similarity_threshold": 0.7,
-                "ann_mode": {
-                    "Nprobe": 55
-                }
-            }
-        }
-    }  ))),
+	("Example: Hybrid search" = (value = json!({
+        "query": "example", "query_vector": [1.0, 0.0, 0.0],
+        "length": 10, "result_type": "TopkCount", "realtime": true,
+        "search_mode": {"Hybrid": {"similarity_threshold": null, "ann_mode": "All"}}
+    }))),
 ("Example: Vector search" = (value = json!(  {
     "query":"",
     "query_vector": [
@@ -1292,7 +1265,7 @@ pub(crate) async fn query_index_api_post(
     ),
     responses(
         (status = 200, description = "Results found, returns the SearchResultObject", body = SearchResultObject),
-        (status = BAD_REQUEST, description = "No query specified"),
+        (status = BAD_REQUEST, description = "Invalid query, external vector, or unsupported vector facet filter"),
         (status = NOT_FOUND, description = "Index id does not exist"),
         (status = NOT_FOUND, description = "API key does not exist"),
         (status = UNAUTHORIZED, description = "api_key does not exists"),

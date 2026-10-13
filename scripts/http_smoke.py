@@ -176,11 +176,13 @@ def exercise(binary, workdir):
                 result = api('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0]})
                 check(result['results'][0]['body'] == 'alpha', f'{mode} ranking: {result}')
                 # The inherited vector branch did not apply facet_filter. Fail closed until S2.
-                request('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0],
-                    'facet_filter': [{'String': {'field': 'category', 'filter': ['b']}}]},
+                rejected_filter = request('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0],
+                    'facet_filter': [{'String16': {'field': 'category', 'filter': ['b']}}]},
                     api_key, expected=400)
+                check(b'vector candidate filtering is not implemented' in rejected_filter,
+                      'vector facet_filter must fail explicitly after valid deserialization')
             filtered = api('POST', vp + '/query', {'query': '', 'enable_empty_query': True,
-                'search_mode': 'Lexical', 'facet_filter': [{'String': {'field': 'category', 'filter': ['b']}}]})
+                'search_mode': 'Lexical', 'facet_filter': [{'String16': {'field': 'category', 'filter': ['b']}}]})
             check([doc['body'] for doc in filtered['results']] == ['beta'], 'lexical metadata filter')
             request('PATCH', vp + '/doc', [0, {'body': 'invalid update'}], api_key, expected=400)
             request('PATCH', vp + '/doc', [[0, {'body': 'changed', 'vector': [0, 0, 1]}],

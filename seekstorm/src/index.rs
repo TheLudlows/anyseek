@@ -177,7 +177,8 @@ pub struct SearchRequestObject {
     /// Facets to return with search results: if empty then no facets are returned. Facets are only enabled on facet fields that are defined in schema at create_index!
     #[serde(default)]
     pub query_facets: Vec<QueryFacet>,
-    /// Facet filters to filter search results by facet values: if empty then no facet filters are applied. Facet filters are only enabled on facet fields that are defined in schema at create_index!
+    /// Facet filters apply to Lexical search only and require facet fields in the schema.
+    /// Nonempty filters in Vector or Hybrid mode return an explicit error; vector candidate filtering is not implemented.
     #[serde(default)]
     pub facet_filter: Vec<FacetFilter>,
     /// Sort field and order:

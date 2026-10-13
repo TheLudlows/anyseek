@@ -106,3 +106,5 @@ S1.1 首个提交时结论：代码已实施，等待构建和运行验证；未
 调用链复查发现上游 vector 分支根本不接收 facet_filter，Hybrid 仅过滤词法分支。S1.2 明确拒绝 Vector/Hybrid 非空 facet_filter（HTTP 400），避免无声返回未过滤数据；词法元数据过滤保留并增加回归。共同向量候选过滤仍归 S2，本批不宣称三种模式已具有共同过滤语义。追加 Binary/base64 写入查询和旧模型元数据拒绝测试。
 
 第三轮 CI [38371668492](https://github.com/TheLudlows/seekpower/actions/runs/38371668492) / job 115209891638：构建通过，既有 HTTP 冒烟在 commit 返回数量断言失败，后续测试未运行。定位到服务的 commit/close 端点在等待异步写入之前读取数量，因此响应可能落后一条。将计数读取移到 commit/close 完成之后；保留原四条文档断言，不增加睡眠或重试来掩盖竞争。核心提交屏障和持久化路径不改。
+
+第四轮 CI [38372039419](https://github.com/TheLudlows/seekpower/actions/runs/38372039419) / job 115211134080：构建和原 commit 数量断言通过；新增过滤测试误用继承文档中的 `String` 枚举，实际 API 为 `String16`，导致请求解码 400。修正测试 payload，并断言向量过滤拒绝响应包含具体原因，避免把反序列化失败误判为过滤保护通过。
