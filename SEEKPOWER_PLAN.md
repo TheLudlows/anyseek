@@ -41,7 +41,7 @@ SeekPower 基于 SeekStorm，先得到职责清晰、可恢复、可独立部署
 
 这里的“最新”指本次执行时查询并固定的上游 main，不是一个会自动变化的依赖。更新基线必须再次评估差异，不能静默追随上游。
 
-当前上游 workspace 包含 `seekstorm`、`seekstorm_server`、`seekstorm_mcp_server`、`seekstorm_client`。Web UI 位于 `seekstorm_server/web/`，HTTP 路由在服务层。首次导入全部保留这些目录；后续删除动作属于 S1/S2。
+R0 导入时上游 workspace 包含 `seekstorm`、`seekstorm_server`、`seekstorm_mcp_server`、`seekstorm_client`。Web UI 位于 `seekstorm_server/web/`，HTTP 路由在服务层。首次导入全部保留这些目录；S1.1 已将工作分支 workspace 收敛为 `seekstorm` 与 `seekstorm_server`，MCP/SDK 工程已移除，等待 PR 验证与合入。
 
 当前核心库并非只含检索：依赖与代码还涉及 PDF 解析、模型推理、切块、纠错补全、地理搜索、高亮、分面统计和接口展示。需要按依赖关系拆分，不能仅靠关闭 default features 或直接删文件。
 
@@ -298,7 +298,7 @@ D2 采用复制日志时统一其与本地日志的提交定义，不维护两�
 
 ### S1 建议拆分
 
-- [ ] S1.1：收敛 workspace 和 MCP/非必要 SDK 发布入口；保留 HTTP 与 UI。
+- [ ] S1.1：代码已实施，等待 PR 验证/合入；workspace 仅保留核心与服务，HTTP/UI 原样保留，SDK 测试迁为直接 HTTP 冒烟。
 - [ ] S1.2：外置推理与切块，贯通文本+外部向量的 API/UI 调试路径。
 - [ ] S1.3：外置文件导入与 PDF 运行时；保留 JSON 结构化写入。
 - [ ] S1.4：移除纠错、补全、地理和高亮生成等旁支；同步 UI、配置、文档与测试。
@@ -335,10 +335,10 @@ D2 采用复制日志时统一其与本地日志的提交定义，不维护两�
 
 ## 13. 上游同步、版本与变更纪律
 
-导入后的根 README 和上游架构文档保留原貌，描述的是导入时的 SeekStorm；SeekPower 的约定以本计划及后续状态/验证记录为准。完成裁剪后另行更新产品文档，避免当前就声称具备尚未实现的能力。
+根 README 随裁剪删除失效产品入口并注明当前范围；上游架构文档与 CHANGELOG 历史记录仍保留来源信息。SeekPower 的约定以本计划及状态/验证记录为准，不能提前宣称后续批次已经完成。
 
 上游后续只按固定提交审查和选择性吸收，优先 bugfix/安全修复。更新时必须查看旁支是否重新引入，以及 API、格式、分词、评分和 UI 是否发生变化。可维护裁剪清单、来源记录和必要补丁，不自动整仓覆盖已经裁剪的实现。
 
 新格式发布前定义版本与错误行为，不静默用错误格式打开旧数据。无需立即承诺兼容覆盖前 seekpower 的私有格式，迁移需求单独评审。
 
-下一步直接执行 [Issue #1](https://github.com/TheLudlows/seekpower/issues/1) 的 S1.1：移除 MCP、收敛非必要客户端/发布入口，保留 HTTP 服务与 Web UI；不等待独立基线阶段，也不直接进入分布式开发。
+下一步完成 [Issue #1](https://github.com/TheLudlows/seekpower/issues/1) 的 S1.1 PR 验证与合入，再执行 S1.2 外置模型/切块。没有独立基线前置阶段，不直接进入分布式开发。

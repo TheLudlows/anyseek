@@ -50,3 +50,25 @@ R0 主分支更新采用带预期旧 SHA 的快进操作。原文档提交 `0066
 ## 后续验证记录模板
 
 每轮记录：阶段/提交 SHA、工具链和硬件、输入数据与随机种子、命令/配置、实际结果、日志/工作流链接、与适用对照的差异、未解决问题、该批是否可合入。S2/D 阶段另记录对应发布/阶段退出结论。失败和未执行项必须保留，不通过删除测试获得表面通过。
+
+
+## 2026-10-13：S1.1 workspace 与产品入口收敛
+
+- 起点：`9d269bbf7d0148631d227a49f01da088f60404b4`；实施分支：`codex/s1-1-prune-workspace`；Refs #1。
+- 范围：移除 MCP/SDK 两个完整工程、workspace member、README 产品/发布入口；保留核心/服务 Rust 源码、Web UI 子树及全部保留路径的许可证。
+- 依赖核对：在保留 crate manifest、Rust 源码、测试、Web UI、Dockerfile 中没有 SDK/MCP 引用；Web UI 通过 `master.js` 的 HTTP API 调用服务，无 SDK 运行依赖。上游本次快照没有 CI/发布工作流和 Cargo.lock。
+- 测试迁移：原 SDK 测试中 live、create_apikey、create_index、index_documents、commit、query_index、get_document、clear_index 场景迁到 `scripts/http_smoke.py`；直接 HTTP 请求，无 SDK 或 Python 第三方依赖。另校验 401、首页和 HTML 引用的 CSS/JS/SVG/favicon。使用临时索引目录、动态高位端口、就绪轮询和失败后子进程回收。
+- 原客户端多个测试间依赖磁盘状态、固定端口和固定等待改为单次隔离场景；不再逐个请求重启服务，因此不把此脚本称为恢复测试。完整恢复验证仍归 S2。
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| `python3 -m py_compile scripts/http_smoke.py` | 通过；仅语法检查 |
+| `python3 scripts/http_smoke.py --help` | 通过；CLI 可用 |
+| Cargo manifest/TOML、保留路径引用检查 | 通过；仅两个 workspace member，保留代码无 SDK/MCP 依赖 |
+| `git diff --check` | 通过 |
+| Git tree 范围核对 | 本批不修改保留 Rust 源码、Web UI 和索引编码；删除目录包含各自源码、测试、README、manifest 和 logo |
+| 本地 `cargo build/test`、HTTP/UI 运行 | 未执行；当前执行环境没有 cargo/rustc，直接 Git HTTPS 克隆也未获得凭证，使用授权 GitHub 插件读取固定提交并提交补丁 |
+| 新增 CI | `.github/workflows/ci.yml`：`cargo build --workspace` → HTTP/UI smoke → `cargo test --workspace --all-targets`；等待运行结果 |
+| 浏览器交互、ANN/混合质量、故障注入 | 未执行；不能用静态资源 HTTP 检查代替完整浏览器交互或后续批次验收 |
+
+S1.1 当前结论：代码已实施，等待构建和运行验证；未合入、未勾选阶段完成。S1.2—S1.5 尚未实施。
