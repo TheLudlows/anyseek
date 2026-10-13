@@ -171,7 +171,7 @@ pub(crate) fn similarity_embedding_view(
                     _embedding_sum_q,
                 )) = scale_norm
                 {
-                    -TurboQuant::dot_i8_turboquant(a, query_scale, b, embedding_scale)
+                    TurboQuant::dot_i8_turboquant(a, query_scale, b, embedding_scale)
                 } else {
                     dot_i8(a, b) as f32
                 }
@@ -230,7 +230,7 @@ pub(crate) fn similarity_embedding_view(
                     _embedding_sum_q,
                 )) = scale_norm
                 {
-                    -TurboQuant::dot_i8_turboquant(a, query_scale, b, embedding_scale)
+                    TurboQuant::dot_i8_turboquant(a, query_scale, b, embedding_scale)
                 } else {
                     dot_i8(a, b) as f32
                 }
@@ -390,7 +390,7 @@ pub(crate) fn similarity_embedding(
                     _embedding_sum_q,
                 )) = scale_norm
                 {
-                    -TurboQuant::dot_i8_turboquant(a, query_scale, b, embedding_scale)
+                    TurboQuant::dot_i8_turboquant(a, query_scale, b, embedding_scale)
                 } else {
                     dot_i8(a, b) as f32
                 }
@@ -450,7 +450,7 @@ pub(crate) fn similarity_embedding(
                     _embedding_sum_q,
                 )) = scale_norm
                 {
-                    -TurboQuant::dot_i8_turboquant(a, query_scale, b, embedding_scale)
+                    TurboQuant::dot_i8_turboquant(a, query_scale, b, embedding_scale)
                 } else {
                     dot_i8(a, b) as f32
                 }
@@ -605,7 +605,7 @@ pub(crate) unsafe fn similarity_embedding_view_avx2(
                     _embedding_sum_q,
                 )) = scale_norm
                 {
-                    -TurboQuant::dot_i8_turboquant_avx2(query, query_scale, e, embedding_scale)
+                    TurboQuant::dot_i8_turboquant_avx2(query, query_scale, e, embedding_scale)
                 } else {
                     dot_i8_avx2(query, e) as f32
                 }
@@ -651,7 +651,7 @@ pub(crate) unsafe fn similarity_embedding_view_avx2(
                     _embedding_sum_q,
                 )) = scale_norm
                 {
-                    -TurboQuant::dot_i8_turboquant_avx2(query, query_scale, e, embedding_scale)
+                    TurboQuant::dot_i8_turboquant_avx2(query, query_scale, e, embedding_scale)
                 } else {
                     dot_i8_avx2(query, e) as f32
                 }
@@ -782,7 +782,7 @@ pub(crate) unsafe fn similarity_embedding_avx2(
                     _embedding_sum_q,
                 )) = scale_norm
                 {
-                    -TurboQuant::dot_i8_turboquant_avx2(query, query_scale, e, embedding_scale)
+                    TurboQuant::dot_i8_turboquant_avx2(query, query_scale, e, embedding_scale)
                 } else {
                     dot_i8_avx2(query, e) as f32
                 }
@@ -824,7 +824,7 @@ pub(crate) unsafe fn similarity_embedding_avx2(
                     _embedding_sum_q,
                 )) = scale_norm
                 {
-                    -TurboQuant::dot_i8_turboquant_avx2(query, query_scale, e, embedding_scale)
+                    TurboQuant::dot_i8_turboquant_avx2(query, query_scale, e, embedding_scale)
                 } else {
                     dot_i8_avx2(query, e) as f32
                 }
@@ -1044,6 +1044,18 @@ pub(crate) enum QuerySimd {
 }
 
 impl QuerySimd {
+    /// Scalar dispatch must not pre-pack partial SIMD lanes or execute SIMD instructions.
+    pub(crate) fn for_dispatch(query: &Embedding, is_simd: bool) -> Self {
+        if is_simd {
+            unsafe { Self::new(query) }
+        } else {
+            match query {
+                Embedding::I8(_) => Self::I(Vec::new()),
+                Embedding::F32(_) => Self::F(Vec::new()),
+            }
+        }
+    }
+
     /// Pre-pack `query` into the platform-native SIMD lane layout.
     /// Dispatches at compile time to the AVX2 implementation on x86_64, the
     /// NEON implementation on aarch64, and a plain `Vec` clone everywhere
@@ -2500,7 +2512,7 @@ pub(crate) unsafe fn similarity_embedding_view_neon(
             }
             (EmbeddingView::I8(e), VectorSimilarity::Dot, Quantization::TurboQuantI8) => {
                 if let Some((qs, _, _, _, es, _, _, _)) = scale_norm {
-                    -TurboQuant::dot_i8_turboquant_neon(query, qs, e, es)
+                    TurboQuant::dot_i8_turboquant_neon(query, qs, e, es)
                 } else {
                     dot_i8_neon(query, e) as f32
                 }
@@ -2522,7 +2534,7 @@ pub(crate) unsafe fn similarity_embedding_view_neon(
             }
             (EmbeddingView::I8(e), VectorSimilarity::Cosine, Quantization::TurboQuantI8) => {
                 if let Some((qs, _, _, _, es, _, _, _)) = scale_norm {
-                    -TurboQuant::dot_i8_turboquant_neon(query, qs, e, es)
+                    TurboQuant::dot_i8_turboquant_neon(query, qs, e, es)
                 } else {
                     dot_i8_neon(query, e) as f32
                 }
@@ -3144,3 +3156,4 @@ mod neon_parity_tests {
         }
     }
 }
+

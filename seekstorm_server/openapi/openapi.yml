@@ -1,4 +1,4 @@
-openapi: 3.1.0
+openapi: 3.2.0
 info:
   title: SeekStorm REST API documentation
   description: Vector & lexical search engine library & multi-tenancy server
@@ -113,7 +113,7 @@ paths:
                   minimum: 0
                 demo:
                   type: boolean
-                  description: create fixed demo api key instead of random api key for demo purposes (default=false)
+                  description: create fixed demo api key instead of random api key for demonstration, example, and documentation purposes (default=false)
         required: true
       responses:
         '200':
@@ -180,26 +180,27 @@ paths:
                     field_type: Text
                     store: true
                     index_lexical: true
-                    index_vector: true
+                    index_vector: false
                   - field: body
                     field_type: Text
                     store: true
                     index_lexical: true
-                    index_vector: true
-                  - field: url
-                    field_type: String32
+                    index_vector: false
+                  - field: vector
+                    field_type: Json
                     store: true
                     index_lexical: false
-                    index_vector: false
+                    index_vector: true
                   index_name: wikipedia
                   similarity: Bm25fProximity
                   tokenizer: UnicodeAlphanumeric
                   clustering: Auto
                   inference:
-                    Model2Vec:
-                      model: PotionBase2M
-                      chunk_size: 1000
-                      quantization: ScalarQuantizationI8
+                    External:
+                      dimensions: 3
+                      precision: F32
+                      similarity: Cosine
+                      quantization: None
               'Example: Lexical index':
                 value:
                   schema:
@@ -1465,7 +1466,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/SearchResultObject'
         '400':
-          description: No query specified
+          description: Invalid query, external vector, or unsupported vector facet filter
         '401':
           description: api_key missing
         '404':
@@ -1513,31 +1514,18 @@ paths:
             examples:
               'Example: Hybrid search':
                 value:
-                  query: detroit
-                  query_vector: null
-                  enable_empty_query: false
-                  offset: 0
+                  query: example
+                  query_vector:
+                  - 1.0
+                  - 0.0
+                  - 0.0
                   length: 10
                   result_type: TopkCount
                   realtime: true
-                  highlights:
-                  - field: ''
-                    name: ''
-                    fragment_number: 0
-                    fragment_size: 0
-                    highlight_markup: true
-                    pre_tags: ''
-                    post_tags: ''
-                  field_filter:
-                  - title
-                  fields: []
-                  query_type_default: Intersection
-                  query_rewriting: SearchOnly
                   search_mode:
                     Hybrid:
-                      similarity_threshold: 0.7
-                      ann_mode:
-                        Nprobe: 55
+                      similarity_threshold: null
+                      ann_mode: All
               'Example: Lexical search':
                 value:
                   query: detroit
@@ -1895,7 +1883,6 @@ components:
             multiway: false
         spelling_correction:
           oneOf:
-          - type: 'null'
           - $ref: '#/components/schemas/SpellingCorrection'
             description: |-
               Enable spelling correction for search queries using the SymSpell algorithm.
@@ -1907,17 +1894,19 @@ components:
               Note: enabling spelling correction increases the index size, indexing time and query latency.
               Default: None. Enable by setting a value for max_dictionary_edit_distance (1..2 recommended).
               The higher the value, the higher the number of errors that can be corrected - but also the memory consumption, lookup latency, and the number of false positives.
+          - type: 'null'
         query_completion:
           oneOf:
-          - type: 'null'
           - $ref: '#/components/schemas/QueryCompletion'
             description: 'Enable query completion for search queries using a prefix dictionary. When enabled, a prefix dictionary is incrementally created during indexing of documents and stored in the index. The prefix dictionary is used to generate suggestions for query completion based on the indexed documents. In addition you need to set the parameter `query_rewriting` in the search method to enable it per query. Note: enabling query completion increases the index size, indexing time and query latency.'
+          - type: 'null'
         clustering:
           $ref: '#/components/schemas/Clustering'
           description: Enable clustering for vector search.
         inference:
           $ref: '#/components/schemas/Inference'
-          description: Enable inference for search and indexing. This can be used to create vector representations of documents and queries for semantic search, e.g. by using a model like PotionBase2M.
+          description: Configure external vector dimensions, precision, quantization and distance metric.
+      additionalProperties: false
     DistanceField:
       type: object
       description: DistanceField defines a field for proximity search.
@@ -2680,52 +2669,6 @@ components:
     Inference:
       oneOf:
       - type: object
-        description: Predefined model2vec models, already normalized + dot product = cosine similarity, use the same similarity metric that was used during the training of the embedding model.
-        required:
-        - Model2Vec
-        properties:
-          Model2Vec:
-            type: object
-            description: Predefined model2vec models, already normalized + dot product = cosine similarity, use the same similarity metric that was used during the training of the embedding model.
-            required:
-            - model
-            - chunk_size
-            - quantization
-            properties:
-              model:
-                $ref: '#/components/schemas/Model'
-                description: Predefined model type for embeddings.
-              chunk_size:
-                type: integer
-                description: Chunk size for splitting input text, e.g. 1000 characters. This should be the same chunk size that was used during the training of the embedding model.
-                minimum: 0
-              quantization:
-                $ref: '#/components/schemas/Quantization'
-                description: Quantization method for embeddings.
-      - type: object
-        description: Custom model2vec models, already normalized + dot product = cosine similarity, use the same similarity metric that was used during the training of the embedding model.
-        required:
-        - Model2VecCustom
-        properties:
-          Model2VecCustom:
-            type: object
-            description: Custom model2vec models, already normalized + dot product = cosine similarity, use the same similarity metric that was used during the training of the embedding model.
-            required:
-            - path
-            - chunk_size
-            - quantization
-            properties:
-              path:
-                type: string
-                description: Model ID from Hugging Face or local path to model directory, e.g. "minishlab/potion-base-2M"
-              chunk_size:
-                type: integer
-                description: Chunk size for splitting input text, e.g. 1000 characters. This should be the same chunk size that was used during the training of the embedding model.
-                minimum: 0
-              quantization:
-                $ref: '#/components/schemas/Quantization'
-                description: Quantization method for embeddings.
-      - type: object
         description: External inference
         required:
         - External
@@ -2759,8 +2702,8 @@ components:
         enum:
         - None
       description: |-
-        Inference type, to transform input text into vector embeddings.
-        This can be a predefined model2vec model, a custom model2vec model, an external inference, or no inference.
+        Vector configuration. Embeddings and document segmentation are supplied by callers.
+        The serialized `External` configuration is retained for existing external-vector indexes.
     IteratorResult:
       type: object
       description: Iterator
@@ -2816,17 +2759,6 @@ components:
           description: minimum value of the field
         max:
           description: maximum value of the field
-    Model:
-      type: string
-      description: Predefined model type for embeddings.
-      enum:
-      - PotionCode16MV2
-      - PotionBase32M
-      - PotionMultilingual128M
-      - PotionRetrieval32M
-      - PotionBase8M
-      - PotionBase4M
-      - PotionBase2M
     Precision:
       type: string
       description: Vector precision
@@ -3673,7 +3605,6 @@ components:
       required:
       - field
       - order
-      - base
       properties:
         field:
           type: string
@@ -3712,10 +3643,14 @@ components:
           description: only stored fields are returned in the search results
         index_lexical:
           type: boolean
-          description: only indexed fields can be searched
+          description: |-
+            only indexed fields can be searched
+            Even if index_lexical is true in the schema, the field in the actual document is optional. You can index documents without that field, but you cannot search for that field in those documents.
         index_vector:
           type: boolean
-          description: only indexed fields can be searched
+          description: |-
+            only indexed fields can be searched
+            Vector fields are required and validated before the document is queued for indexing.
         field_type:
           $ref: '#/components/schemas/FieldType'
           description: type of a field
@@ -3815,7 +3750,7 @@ components:
           type: string
           description: Query string, search operators + - "" are recognized.
         query_vector:
-          description: 'Optional query vector: If None, then the query vector is derived from the query string using the specified model. If Some, then the query vector is used for semantic search and the query string is only used for lexical search and highlighting.'
+          description: External query vector, required for Vector and Hybrid search. No model inference is performed.
         enable_empty_query:
           type: boolean
           description: |-
@@ -3873,7 +3808,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/FacetFilter'
-          description: 'Facet filters to filter search results by facet values: if empty then no facet filters are applied. Facet filters are only enabled on facet fields that are defined in schema at create_index!'
+          description: |-
+            Facet filters apply to Lexical search only and require facet fields in the schema.
+            Nonempty filters in Vector or Hybrid mode return an explicit error; vector candidate filtering is not implemented.
         result_sort:
           type: array
           items:
@@ -3903,6 +3840,7 @@ components:
         search_mode:
           $ref: '#/components/schemas/SearchMode'
           description: 'Specify search mode: (default=Lexical).'
+      additionalProperties: false
     SearchResultObject:
       type: object
       description: Search result object

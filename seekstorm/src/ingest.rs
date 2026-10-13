@@ -394,7 +394,7 @@ impl IndexPdf for IndexArc {
                 ("date".to_string(), json!(creation_timestamp)),
             ]);
 
-            self.index_document(document, file).await;
+            if let Err(error) = self.index_document(document, file).await { eprintln!("indexing failed: {error}"); return; }
 
             let date_time = Utc.timestamp_opt(creation_timestamp, 0).unwrap();
             println!(
@@ -575,8 +575,7 @@ impl IngestJson for IndexArc {
                     reader.seek_relative(-1).unwrap();
 
                     for doc_object in Deserializer::from_reader(reader).into_iter::<Document>() {
-                        self.index_document(doc_object.unwrap(), FileType::None)
-                            .await;
+                        if let Err(error) = self.index_document(doc_object.unwrap(), FileType::None).await { eprintln!("indexing failed: {error}"); return; }
                     }
                 } else {
                     println!("JSON detected");
@@ -587,8 +586,7 @@ impl IngestJson for IndexArc {
                             .next();
                         match next_obj {
                             Some(doc_object) => {
-                                self.index_document(doc_object.unwrap(), FileType::None)
-                                    .await
+                                if let Err(error) = self.index_document(doc_object.unwrap(), FileType::None).await { eprintln!("indexing failed: {error}"); return; }
                             }
                             None => break,
                         }
@@ -1103,9 +1101,7 @@ impl IngestCsv for IndexArc {
                         document.insert(schema_vec[i].clone(), json!(element));
                     }
 
-                    index_arc_clone_clone
-                        .index_document(document, FileType::None)
-                        .await;
+                    if let Err(error) = index_arc_clone_clone.index_document(document, FileType::None).await { eprintln!("indexing failed: {error}"); return; }
                     docid += 1;
                 }
 
@@ -1233,7 +1229,7 @@ pub async fn ingest_sift(
                     ))),
                 )]);
 
-                index_arc.index_document(document, FileType::None).await;
+                if let Err(error) = index_arc.index_document(document, FileType::None).await { eprintln!("indexing failed: {error}"); return; }
 
                 docid += 1;
                 if docid >= max_count.unwrap_or(usize::MAX) {

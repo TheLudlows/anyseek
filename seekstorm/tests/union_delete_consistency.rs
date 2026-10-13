@@ -92,7 +92,7 @@ async fn union_count_excludes_deleted() {
     for i in 0..10 {
         docs.push(doc(&format!("beta uniqb{i}")));
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
     index.delete_documents(vec![0, 1, 10]).await;
     index.commit().await;
@@ -116,7 +116,7 @@ async fn union_count_no_deletes_control() {
     for i in 0..10 {
         docs.push(doc(&format!("beta uniqb{i}")));
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let count = search(&index, "alpha beta", ResultType::Count).await;

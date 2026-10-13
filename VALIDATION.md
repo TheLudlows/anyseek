@@ -90,3 +90,53 @@ S1.1 首个提交时结论：代码已实施，等待构建和运行验证；未
 本批代码和上述验证已完成，PR #2 可审查，等待合入；S1 整体未完成。测试修复后的生产源码 `seekstorm/src/`、HTTP 服务与 Web UI 内容仍与基点完全相同。浏览器交互、独立混合检索质量基准、完整恢复与故障注入未执行；不以本批 45 个测试替代 S1.2—S1.5/S2 的验收。
 
 本次结果回填仅修改计划/状态/验证文档，运行代码与已通过 CI 的 `4121118` 相同；CI 链接和结论明确对应上述代码提交，不将未发生的后续主干运行记为通过。
+
+## 2026-10-13：S1.1 合入与 S1.2 实施
+
+- S1.1 PR #2 已合入 master，merge commit `61f11306b45af0cf29c0e040708b14f76c8ee1f2`；合入前 head `5054b8244ab1b6b153b7276801fe1edf5b4594f1` 的 CI 38368352623 通过。
+- S1.2 PR #3，首个实现提交 `3cc1e0cf6ab952f48cc3e605e46b93db2da221d6`。移除模型/自动切块、明确外部向量契约、API 400 与 UI 向量输入。
+- 本地执行 `python -m py_compile scripts/http_smoke.py`、`node --check seekstorm_server/web/js/master.js`，通过。当前环境无 Rust 工具链，Rust 与 HTTP/浏览器测试由 GitHub Actions 执行；等待实际结果，不以静态检查替代。
+- 新增测试覆盖非法配置/维度/数值/精度、缺失向量、base64 非有限数、批量写入与更新校验、全文/向量/混合、外部向量关闭重开；原 3 个内置模型测试改用固定外部向量，不再下载模型。
+- 记录格式、native ANN/exact/RRF 与分词器不改；崩溃恢复、性能与 ANN recall 大规模基准仍属于 S2，未执行。
+
+首轮 CI [38370570453](https://github.com/TheLudlows/seekpower/actions/runs/38370570453) / job 115206243467 在编译阶段失败：迭代器初始化遗漏新增的 `ResultObject.error` 字段。已补 `error: None`，其余测试未运行，待重跑。
+
+第二轮 CI [38370931173](https://github.com/TheLudlows/seekpower/actions/runs/38370931173) / job 115207441554：workspace 构建、HTTP 与 Chromium 全部通过；新增关闭重开回归失败。定位到继承的 TopK 阈值换算对 F32 也使用 I8 的 1/16129 系数，0.7 阈值错误排除了相同 F32 向量。最小修复按实际存储精度选缩放系数（同时用于结果与 medoid 阈值、调试分数），保留 I8 公式、SIMD/距离计算、候选算法与格式；保留失败断言，不降低阈值规避。
+
+调用链复查发现上游 vector 分支根本不接收 facet_filter，Hybrid 仅过滤词法分支。S1.2 明确拒绝 Vector/Hybrid 非空 facet_filter（HTTP 400），避免无声返回未过滤数据；词法元数据过滤保留并增加回归。共同向量候选过滤仍归 S2，本批不宣称三种模式已具有共同过滤语义。追加 Binary/base64 写入查询和旧模型元数据拒绝测试。
+
+第三轮 CI [38371668492](https://github.com/TheLudlows/seekpower/actions/runs/38371668492) / job 115209891638：构建通过，既有 HTTP 冒烟在 commit 返回数量断言失败，后续测试未运行。定位到服务的 commit/close 端点在等待异步写入之前读取数量，因此响应可能落后一条。将计数读取移到 commit/close 完成之后；保留原四条文档断言，不增加睡眠或重试来掩盖竞争。核心提交屏障和持久化路径不改。
+
+第四轮 CI [38372039419](https://github.com/TheLudlows/seekpower/actions/runs/38372039419) / job 115211134080：构建和原 commit 数量断言通过；新增过滤测试误用继承文档中的 `String` 枚举，实际 API 为 `String16`，导致请求解码 400。修正测试 payload，并断言向量过滤拒绝响应包含具体原因，避免把反序列化失败误判为过滤保护通过。
+
+第五轮 CI [38372367599](https://github.com/TheLudlows/seekpower/actions/runs/38372367599) / job 115212236591：构建、完整 HTTP/Chromium 通过；3 维量化阈值回归触发 SIGABRT（malloc invalid next size）。源码定位到 SIMD 查询打包按整 lane 加载，以及小于 8 维的 TurboQuant AVX2 FWHT 按 8 元素写入。修复为按有效维度/精度选择原有标量路径，并在标量分派时不构建 SIMD query；不改 SIMD kernel、ANN 算法或数据格式。保留 3 维，追加 32 维覆盖 SIMD 路径。CI 中核心测试与文档生成在构建成功后独立执行，以便 HTTP 测试失败时仍取得诊断结果；失败仍使整个 job 失败。
+
+第六轮 CI [38373018666](https://github.com/TheLudlows/seekpower/actions/runs/38373018666) / job 115214402403：构建、HTTP/Chromium、基础外部契约与关闭重开通过，小维度内存错误消失；TurboQuant cosine 阈值断言仍失败。进一步发现其原有路径丢弃每向量 scale、误用 ScalarQuant 的 127² 常量，而启用 scale 的 TurboQuant dot/cosine 包装又错误取负。修正评分适配：恢复 TQ cosine 的每向量 scale，dot/cosine 保持正向相似度，按实际分数单位换算阈值（原始 I8/ScalarQuant cosine 保留固定比例）。仅修正包装/分派，不改 SIMD 运算 kernel、量化算法、ANN 候选算法、RRF 或索引格式。回归矩阵扩为 F32/ScalarQuant/TurboQuant × 3/32 维 × Cosine/Dot/Euclidean × All/Nprobe，保留原阈值与精确文档断言。OpenAPI 已成功生成。
+
+### S1.2 最终代码验证结果
+
+代码提交：`9e0d23dff2ed1c08cd8593e49a9a3115d9483383`。
+完整通过：[CI 38373701225](https://github.com/TheLudlows/seekpower/actions/runs/38373701225)，job `115216672899`。
+环境：GitHub ubuntu-latest、x86_64/AVX2，rustc 1.99.0 / cargo 1.99.0，Playwright 1.63.0 / Chromium 153.0.8010.12。
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| `cargo build --workspace` | 通过 |
+| `cargo test --workspace --all-targets` | 48 passed，0 failed/ignored/filtered；含原 45 个测试（3 个内置模型场景改为固定外部向量）和 3 个新增契约测试 |
+| `SEEKPOWER_BROWSER_TEST=1 python3 scripts/http_smoke.py --server target/debug/seekstorm_server` | 通过：健康、首页/12 资源、鉴权、基本 CRUD/commit、JSON/base64 外部向量、三类查询、非法输入 400、批量及更新拒绝保护、词法过滤和向量过滤明确拒绝 |
+| Chromium 交互 | Lexical 默认、Vector/Hybrid 输入查询、缺失及错误维度反馈通过，无 pageerror |
+| 距离/量化回归 | Cosine/Dot/Euclidean × F32/ScalarQuant/TurboQuant × 3/32 维 × All/Nprobe，共 36 组阈值/命中文档断言通过；另有关闭重开与旧模型元数据拒绝 |
+| `seekstorm_server generate_openapi=true` + JSON/YAML `diff -u` | 生成结果与提交文件一致；无 Model schema/内置模型示例 |
+| 本地 Python/JS 语法与 `git diff --check` | 通过 |
+
+未执行/限制：AArch64/NEON 运行验证、真正多聚类的大数据 ANN recall/延迟基准、崩溃与故障注入、生产恢复验收尚未完成。小矩阵不代表全量 ANN 质量或性能认证。向量/混合 facet_filter 显式拒绝，共同过滤能力待 S2；不将“不再静默忽略”写成“已实现向量过滤”。本批保持索引格式与 SIMD kernel/量化算法/ANN 候选/RRF 实现，最小评分适配、分派和服务响应修正及全部失败记录见上文。
+
+PR #3 完成代码及本批验证，待审查合入；Issue #1 保持打开，S1.3—S1.5 未实施。最后的状态/验证回填为文档变更，其 CI 可从 PR 检查项查看。
+
+### 文档提交复跑暴露的 CI 缓存问题
+
+[CI 38374281458](https://github.com/TheLudlows/seekpower/actions/runs/38374281458) / job 115218635945，文档提交 `d53f48b`：构建和 OpenAPI 一致性通过，但 HTTP 在首次创建词法索引时进程断连，既有 bitmap 测试收到 SIGILL。该轮命中上一成功轮保存的完整 target 缓存，仅重编 workspace。仓库使用 `target-cpu=native`，跨异构 runner 复用依赖机器码不具备指令集兼容保证，是本次缓存命中后故障的首要原因；此前源码不变的成功证据保留，不把失败称为通过。
+
+CI 改用新的缓存命名空间且 `cache-targets: false`，只缓存可跨机器复用的依赖源码/工具下载；每台 runner 本地重编全部 native 目标，继续保留生产构建参数。增加 lscpu 记录。PR 暂回草稿，待无旧目标产物的完整复跑通过。
+
+缓存修正后的提交 `9a82532b534db87395971469120937b233ef824e` 已在 [CI 38374841361](https://github.com/TheLudlows/seekpower/actions/runs/38374841361) / job `115220524747` **完整通过**：从无目标产物的状态全量构建、48 个测试（0 failed/ignored/filtered）、HTTP/Chromium 和 OpenAPI 一致性均通过。日志确认 `cache-targets: false`，缓存路径不再包含仓库 target。之前成功代码的功能结论保持，CI 跨 runner native 目标缓存问题已处理；PR 恢复可审查，仍待合入。

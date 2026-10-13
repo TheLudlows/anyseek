@@ -83,7 +83,7 @@ async fn union_topk_forty_terms() {
             docs.push(doc(&format!("w{t:02} z{i}")));
         }
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let query = (0..40)

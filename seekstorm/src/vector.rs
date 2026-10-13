@@ -13,7 +13,6 @@ use crate::{
 };
 use ahash::AHashSet;
 use bytemuck::{Pod, Zeroable, bytes_of, cast_slice, from_bytes, try_cast_slice};
-use chunk::chunk;
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -117,7 +116,7 @@ pub fn embedding_from_bytes_be(
 ) -> Option<Embedding> {
     match (vector_type, is_system_le) {
         (Precision::F32, true) => {
-            if bytes.len() == dimensions * 4 {
+            if Some(bytes.len()) == dimensions.checked_mul(4) {
                 let chunks = bytes.chunks_exact(4);
                 let vector = chunks
                     .map(|chunk| f32::from_be_bytes(chunk.try_into().unwrap()))
@@ -259,47 +258,11 @@ impl fmt::Display for Quantization {
     }
 }
 
-/// Predefined model type for embeddings.
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
-pub enum Model {
-    /// nomic-ai/CodeRankEmbed, 16M parameters, 256 dimensions, English only, code retrieval.
-    PotionCode16MV2,
-    /// bge-base-en-v1.5: 512 dimensions, 32.3M parameters, English only, general purpose
-    PotionBase32M,
-    /// bge-base-multilingual-v1.5: 256 dimensions, 128M parameters, multilingual, general purpose
-    PotionMultilingual128M,
-    /// bge-retrieval-en-v1.5: 512 dimensions, 32.3M parameters, English only, retrieval
-    PotionRetrieval32M,
-    /// bge-base-en-v1.5: 256 dimensions, 7.5M parameters, English only, general purpose
-    PotionBase8M,
-    /// bge-base-en-v1.5: 128 dimensions, 3.7M parameters, English only, general purpose
-    PotionBase4M,
-    /// bge-base-en-v1.5: 64 dimensions, 1.8M parameters, English only, general purpose
-    PotionBase2M,
-}
-
-/// Inference type, to transform input text into vector embeddings.  
-/// This can be a predefined model2vec model, a custom model2vec model, an external inference, or no inference.
+/// Vector configuration. Embeddings and document segmentation are supplied by callers.
+/// The serialized `External` configuration is retained for existing external-vector indexes.
 #[derive(Clone, Default, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub enum Inference {
-    /// Predefined model2vec models, already normalized + dot product = cosine similarity, use the same similarity metric that was used during the training of the embedding model.
-    Model2Vec {
-        /// Predefined model type for embeddings.
-        model: Model,
-        /// Chunk size for splitting input text, e.g. 1000 characters. This should be the same chunk size that was used during the training of the embedding model.
-        chunk_size: usize,
-        /// Quantization method for embeddings.
-        quantization: Quantization,
-    },
-    /// Custom model2vec models, already normalized + dot product = cosine similarity, use the same similarity metric that was used during the training of the embedding model.
-    Model2VecCustom {
-        /// Model ID from Hugging Face or local path to model directory, e.g. "minishlab/potion-base-2M"
-        path: String,
-        /// Chunk size for splitting input text, e.g. 1000 characters. This should be the same chunk size that was used during the training of the embedding model.
-        chunk_size: usize,
-        /// Quantization method for embeddings.
-        quantization: Quantization,
-    },
     /// External inference
     External {
         /// Number of dimensions for the embeddings.
@@ -317,19 +280,88 @@ pub enum Inference {
     None,
 }
 
+/// Validate external-vector configuration before creating any index files.
+pub fn validate_vector_schema(inference: &Inference, schema: &[crate::index::SchemaField]) -> Result<(), String> {
+    let fields: Vec<_> = schema.iter().filter(|field| field.index_vector).collect();
+    match inference {
+        Inference::None if fields.is_empty() => Ok(()),
+        Inference::None => Err("vector fields require External inference configuration".into()),
+        Inference::External { dimensions, precision, quantization, .. } => {
+            if *dimensions == 0 || dimensions.checked_next_power_of_two().and_then(|n| n.checked_mul(4)).is_none() {
+                return Err("vector dimensions must be positive and fit the supported address space".into());
+            }
+            if *precision == Precision::None || (*precision == Precision::I8 && *quantization != Quantization::None) {
+                return Err("vectors require F32 or I8 precision; I8 requires quantization None".into());
+            }
+            if fields.is_empty() || fields.iter().any(|f| !matches!(f.field_type, FieldType::Json | FieldType::Binary)) {
+                return Err("External inference requires vector fields of type Json or Binary".into());
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Validate caller-supplied values before normalization, quantization or indexing.
+pub fn validate_embedding(inference: &Inference, embedding: &Embedding) -> Result<(), String> {
+    let Inference::External { dimensions, precision, similarity, .. } = inference else {
+        return Err("vector search requires External inference configuration".into());
+    };
+    let (len, norm) = match (precision, embedding) {
+        (Precision::F32, Embedding::F32(values)) => {
+            if values.iter().any(|v| !v.is_finite()) { return Err("vector values must be finite".into()); }
+            (values.len(), values.iter().map(|v| v * v).sum::<f32>())
+        }
+        (Precision::I8, Embedding::I8(values)) => (values.len(), values.iter().map(|v| (*v as f32).powi(2)).sum::<f32>()),
+        _ => return Err("vector precision does not match index configuration".into()),
+    };
+    if len != *dimensions { return Err(format!("vector dimensions must be {dimensions}, got {len}")); }
+    if !norm.is_finite() { return Err("vector magnitude exceeds F32 range".into()); }
+    if *similarity == VectorSimilarity::Cosine && norm == 0.0 { return Err("cosine vector must have a nonzero norm".into()); }
+    Ok(())
+}
+
+/// Parse JSON arrays or base64 network-order vectors and validate their values.
+pub fn parse_external_embedding(value: &Value, inference: &Inference) -> Result<Embedding, String> {
+    let Inference::External { dimensions, precision, .. } = inference else {
+        return Err("vector search requires External inference configuration".into());
+    };
+    let embedding = match value {
+        Value::Array(_) => embedding_from_json(value, *precision, *dimensions),
+        Value::String(encoded) => {
+            let bytes = decode_bytes_from_base64_string(encoded).map_err(|_| "invalid base64 vector".to_string())?;
+            embedding_from_bytes_be(&bytes, *precision, *dimensions, *IS_SYSTEM_LE)
+        }
+        _ => return Err("vector must be a numeric array or base64 string".into()),
+    }.ok_or_else(|| format!("invalid vector: expected {dimensions} values with precision {precision}"))?;
+    validate_embedding(inference, &embedding)?;
+    Ok(embedding)
+}
+
+pub(crate) fn validate_document_vectors(index: &crate::index::Index, document: &Document) -> Result<(), String> {
+    for field in index.schema_map.values().filter(|f| f.index_vector) {
+        let value = document.get(&field.field).ok_or_else(|| format!("missing vector field: {}", field.field))?;
+        if !matches!((&field.field_type, value), (FieldType::Json, Value::Array(_)) | (FieldType::Binary, Value::String(_))) {
+            return Err(format!("invalid vector field type: {}", field.field));
+        }
+        parse_external_embedding(value, &index.meta.inference).map_err(|e| format!("{}: {e}", field.field))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_query_vector(inference: &Inference, mode: &crate::search::SearchMode, embedding: Option<&Embedding>) -> Result<(), String> {
+    use crate::search::SearchMode;
+    match mode {
+        SearchMode::Lexical => Ok(()),
+        SearchMode::Vector { similarity_threshold, .. } | SearchMode::Hybrid { similarity_threshold, .. } => {
+            if similarity_threshold.is_some_and(|v| !v.is_finite()) { return Err("similarity threshold must be finite".into()); }
+            validate_embedding(inference, embedding.ok_or_else(|| "Vector and Hybrid search require query_vector".to_string())?)
+        }
+    }
+}
+
 impl fmt::Display for Inference {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Inference::Model2Vec {
-                model,
-                chunk_size,
-                quantization: _,
-            } => write!(f, "Model2Vec: {:?}, chunks: {} byte", model, chunk_size),
-            Inference::Model2VecCustom {
-                path,
-                chunk_size,
-                quantization: _,
-            } => write!(f, "Model2VecCustom: {}, chunks: {} byte", path, chunk_size),
             Inference::External {
                 dimensions: _,
                 precision: _,
@@ -368,6 +400,7 @@ impl TopK {
         k: usize,
         similarity_threshold_option: Option<f32>,
         vector_similarity: VectorSimilarity,
+        similarity_normalization: f32,
     ) -> Self {
         Self {
             items: vec![
@@ -390,10 +423,10 @@ impl TopK {
             {
                 match vector_similarity {
                     VectorSimilarity::Dot => {
-                        ((similarity_threshold * 2.0) - 1.0) / SIMILARITY_NORMALIZATION_64_I8
+                        ((similarity_threshold * 2.0) - 1.0) / similarity_normalization
                     }
                     VectorSimilarity::Cosine => {
-                        ((similarity_threshold * 2.0) - 1.0) / SIMILARITY_NORMALIZATION_64_I8
+                        ((similarity_threshold * 2.0) - 1.0) / similarity_normalization
                     }
                     VectorSimilarity::Euclidean => -similarity_threshold,
                 }
@@ -497,50 +530,6 @@ impl TopK {
 }
 
 impl Shard {
-    pub(crate) async fn embed_vector_shard(&mut self) {
-        let index = self.index_option.as_ref().unwrap().read().await;
-        let model = if let Some(model) = index.embedding_model_option.as_ref() {
-            model
-        } else {
-            return;
-        };
-
-        let embeddings = model.encode(&self.chunks_string);
-        for (i, embedding) in embeddings.iter().enumerate() {
-            let embedding = if self.quantization == Quantization::ScalarQuantizationI8
-                || self.quantization == Quantization::TurboQuantI8
-            {
-                if self.is_simd {
-                    unsafe { quantize_f32_to_i8_simd(embedding) }
-                } else {
-                    quantize_f32_to_i8(embedding)
-                }
-            } else {
-                Embedding::F32(embedding.to_vec())
-            };
-
-            let record = ParentMedoid {
-                medoid_index: 0,
-                similarity: 0.0,
-                is_medoid: false,
-
-                doc_id: self.chunks_meta[i].0,
-                field_id: self.chunks_meta[i].1,
-                chunk_id: self.chunks_meta[i].2,
-                scale: 0.0,
-                norm: 0.0,
-                zero_point: 0,
-                sum_q: 0,
-                embedding,
-            };
-
-            self.block_vector_buffer.push(record);
-        }
-
-        self.chunks_meta.clear();
-        self.chunks_string.clear();
-    }
-
     pub(crate) async fn index_vector_shard(&mut self, doc_id: usize, document: &Document) {
         if !self.is_vector_indexing {
             return;
@@ -554,28 +543,6 @@ impl Shard {
                 && let Some(field_value) = document.get(&schema_field.field)
             {
                 match schema_field.field_type {
-                    FieldType::Text => {
-                        let text = serde_json::from_value::<String>(field_value.clone())
-                            .unwrap_or(field_value.to_string());
-                        let field_id = schema_field.indexed_field_id as u32;
-                        let chunks: Vec<&[u8]> = chunk(text.as_bytes())
-                            .delimiters(b"\n.?!")
-                            .size(self.chunk_size)
-                            .collect();
-
-                        for (chunk_id, chunk) in chunks.iter().enumerate() {
-                            let chunk_text = String::from_utf8_lossy(chunk).to_string();
-
-                            self.chunks_meta.push((doc_id, field_id, chunk_id as u32));
-                            self.chunks_string.push(chunk_text);
-                            self.indexed_vector_count += 1;
-
-                            if self.chunks_string.len() >= 256 {
-                                self.embed_vector_shard().await;
-                            }
-                        }
-                    }
-
                     FieldType::Json => {
                         if let Some(mut embedding) = embedding_from_json(
                             field_value,
@@ -1041,10 +1008,6 @@ impl Shard {
             self.last_level_vector_file_start_pos = self.vector_file.stream_position().unwrap();
         }
 
-        if !self.chunks_string.is_empty() {
-            self.embed_vector_shard().await;
-        }
-
         let enable_clustering = if let Clustering::Fixed(size) = self.meta.clustering {
             size > 1 && self.block_vector_buffer.len() >= 100
         } else if let Clustering::None = self.meta.clustering {
@@ -1142,7 +1105,7 @@ impl Shard {
     ) {
         let level_id = self.level_index.len();
         let enable_scale = self.quantization != Quantization::None
-            && self.vector_similarity != VectorSimilarity::Cosine;
+            && (self.vector_similarity != VectorSimilarity::Cosine || self.quantization == Quantization::TurboQuantI8);
 
         let non_affine = self.max_vector_value == f32::MIN;
 
@@ -1210,10 +1173,6 @@ impl SearchVectorShard for ShardArc {
     ) -> ResultObject {
         let mut result_object: ResultObject = Default::default();
 
-        if include_uncommitted && !self.read().await.chunks_string.is_empty() {
-            self.write().await.embed_vector_shard().await;
-        }
-
         let shard_ref = self.read().await;
         let mut observed_cluster_count = 0;
 
@@ -1254,9 +1213,19 @@ impl SearchVectorShard for ShardArc {
 
         let query_embedding = query_vector.unwrap();
 
-        let query_simd = unsafe { QuerySimd::new(&query_embedding.0) };
+        let query_simd = QuerySimd::for_dispatch(&query_embedding.0, shard_ref.is_simd);
 
-        let mut top_k = TopK::new(length, similarity_threshold, vector_similarity);
+        // Only raw I8 and scalar-quantized cosine use the fixed 127^2 scale.
+        // F32 and scale-restored quantized similarities use floating-point units.
+        let similarity_normalization = if vector_type == Precision::I8
+            && (shard_ref.quantization == Quantization::None
+                || (shard_ref.quantization == Quantization::ScalarQuantizationI8
+                    && vector_similarity == VectorSimilarity::Cosine)) {
+            SIMILARITY_NORMALIZATION_64_I8
+        } else {
+            1.0
+        };
+        let mut top_k = TopK::new(length, similarity_threshold, vector_similarity, similarity_normalization);
 
         if include_uncommitted && shard_ref.uncommitted && !shard_ref.block_vector_buffer.is_empty()
         {
@@ -1307,11 +1276,11 @@ impl SearchVectorShard for ShardArc {
             };
 
             let enable_scale = shard_ref.quantization != Quantization::None
-                && shard_ref.vector_similarity != VectorSimilarity::Cosine;
+                && (shard_ref.vector_similarity != VectorSimilarity::Cosine || shard_ref.quantization == Quantization::TurboQuantI8);
             let selected_clusters: Vec<(u32, u32, f32, ClusterHeader)> = if ann_mode != AnnMode::All
             {
                 let mut top_k_medoid =
-                    TopK::new(n_probe, cluster_similarity_threshold, vector_similarity);
+                    TopK::new(n_probe, cluster_similarity_threshold, vector_similarity, similarity_normalization);
                 for (cluster_id, cluster) in clusters.iter().enumerate() {
                     let medoid_offset = offset + cluster.start_index as usize * vector_size;
                     let medoid_record = read_record(
@@ -1489,13 +1458,13 @@ impl SearchVectorShard for ShardArc {
                 cluster_score: if shard_ref.vector_similarity == VectorSimilarity::Euclidean {
                     -item.cluster_score
                 } else {
-                    ((item.cluster_score * SIMILARITY_NORMALIZATION_64_I8) + 1.0) * 0.5
+                    ((item.cluster_score * similarity_normalization) + 1.0) * 0.5
                 },
                 #[cfg(feature = "vb")]
                 vector_score: if shard_ref.vector_similarity == VectorSimilarity::Euclidean {
                     -item.score
                 } else {
-                    ((item.score * SIMILARITY_NORMALIZATION_64_I8) + 1.0) * 0.5
+                    ((item.score * similarity_normalization) + 1.0) * 0.5
                 },
                 #[cfg(feature = "vb")]
                 lexical_score: 0.0,

@@ -1,3 +1,5 @@
+> SeekPower S1.2: model inference and automatic chunking have been removed. Supply external vectors through the HTTP API. The Web UI defaults to Lexical; Vector/Hybrid require a pasted JSON vector and display validation errors. See the [external vector contract](../README.md#external-vector-contract) for configuration, error handling and migration details.
+
 # SeekStorm server 
 
 SeekStorm open-source, multi-tenancy, vector & lexical search server

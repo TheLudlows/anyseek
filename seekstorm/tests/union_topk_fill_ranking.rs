@@ -160,7 +160,7 @@ async fn scan32_topk_matches_global_ranking() {
             docs.push(doc(&format!("{w} lo{i}")));
         }
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let query = words.join(" ");
@@ -192,7 +192,7 @@ async fn scan32_sparse_uniform_fills_heap() {
         }
     }
     let docs: Vec<seekstorm::index::Document> = titles.iter().map(|t| doc(t)).collect();
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let query = (1..=20)
@@ -229,7 +229,7 @@ async fn scan32_score_gap_exact_selection() {
         let pad = "pad ".repeat(i % 20);
         docs.push(doc(&format!("{} {pad}rare{i} finite{i}", words.join(" "))));
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let query = words.join(" ");
@@ -282,7 +282,7 @@ async fn scan32_topkcount_and_topk_agree() {
         let title = words.iter().cloned().collect::<Vec<_>>().join(" ") + &format!(" g{i}");
         docs.push(doc(&title));
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let query = words.join(" ");
@@ -322,7 +322,7 @@ async fn scan32_pagination_is_consistent() {
         let title = format!("{} doc{i}", words.join(" "));
         docs.push(doc(&title));
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let query = words.join(" ");

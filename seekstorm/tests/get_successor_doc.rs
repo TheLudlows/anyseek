@@ -55,7 +55,7 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
         r#"{"title":"mixed successor"}"#,
     ] {
         let doc: Document = serde_json::from_str(json).unwrap();
-        index_arc.index_document(doc, FileType::None).await;
+        index_arc.index_document(doc, FileType::None).await.unwrap();
     }
     index_arc.commit().await;
 

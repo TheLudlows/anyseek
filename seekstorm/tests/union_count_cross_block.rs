@@ -106,7 +106,7 @@ async fn union_count_cross_block_consistent() {
         docs.push(doc(&format!("gamma item{i}")));
     }
 
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     // 60k alpha + 5k beta + 5k gamma = 70_000; padding must not match.
@@ -151,7 +151,7 @@ async fn union_count_two_terms_stable() {
         docs.push(doc(&format!("beta uniq{i}")));
     }
 
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let count = search(&index, "alpha beta", ResultType::Count).await;

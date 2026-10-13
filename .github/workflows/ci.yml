@@ -22,14 +22,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # target-cpu=native artifacts cannot be shared across heterogeneous runners.
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: s12-native-source-only
+          cache-targets: false
       - name: Record toolchain
         run: |
           rustc --version --verbose
           cargo --version
+          lscpu
       - name: Build retained workspace
+        id: build
         run: cargo build --workspace
+      - name: Install browser test runtime
+        run: |
+          python3 -m pip install playwright
+          python3 -m playwright install --with-deps chromium
       - name: HTTP API and embedded UI smoke (no SDK)
+        env:
+          SEEKPOWER_BROWSER_TEST: "1"
         run: python3 scripts/http_smoke.py --server target/debug/seekstorm_server
       - name: Existing core and server tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --workspace --all-targets
+      - name: Generate API reference
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          target/debug/seekstorm_server generate_openapi=true > /dev/null
+          diff -u seekstorm_server/openapi/openapi.json target/debug/openapi.json
+          diff -u seekstorm_server/openapi/openapi.yml target/debug/openapi.yml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: |
+            target/debug/openapi.json
+            target/debug/openapi.yml

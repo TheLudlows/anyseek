@@ -149,6 +149,87 @@ def exercise(binary, workdir):
             check(document == {'body': 'body2 test'}, f'stored document mismatch: {document}')
             print('PASS create, single/batch write, commit, lexical query and get')
 
+            vector_schema = [schema[1], {'field': 'category', 'field_type': 'String16', 'store': True,
+                                        'index_lexical': False, 'facet': True}, {'field': 'vector', 'field_type': 'Json', 'store': True,
+                                         'index_lexical': False, 'index_vector': True}]
+            config = {'index_name': 'external_vectors', 'schema': vector_schema,
+                      'inference': {'External': {'dimensions': 3, 'precision': 'F32',
+                       'quantization': 'None', 'similarity': 'Cosine'}}, 'clustering': 'None'}
+            vector_id = api('POST', '/api/v1/index', config)
+            vp = f'/api/v1/index/{vector_id}'
+            for invalid in ({'body': 'missing'}, {'body': 'bad', 'vector': [1, 2]},
+                            {'body': 'zero', 'vector': [0, 0, 0]},
+                            [{'body': 'partial', 'vector': [1, 0, 0]}, {'body': 'missing'}]):
+                request('POST', vp + '/doc', invalid, api_key, expected=400)
+            check(api('PATCH', vp) == 0, 'invalid batch partially indexed')
+            api('POST', vp + '/doc', [{'body': 'alpha', 'vector': [1, 0, 0], 'category': 'a'},
+                                     {'body': 'beta', 'vector': [0, 1, 0], 'category': 'b'}])
+            check(api('PATCH', vp) == 2, 'external write count')
+            for mode in ('Vector', 'Hybrid'):
+                query_request = {'query': 'alpha', 'search_mode': {mode: {
+                    'similarity_threshold': None, 'ann_mode': 'All'}}, 'result_type': 'TopkCount'}
+                request('POST', vp + '/query', query_request, api_key, expected=400)
+                for invalid in ([1], [0, 0, 0], ['x', 0, 0], '!base64',
+                                base64.b64encode(bytes.fromhex('7f8000000000000000000000')).decode()):
+                    request('POST', vp + '/query', {**query_request, 'query_vector': invalid},
+                            api_key, expected=400)
+                result = api('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0]})
+                check(result['results'][0]['body'] == 'alpha', f'{mode} ranking: {result}')
+                # The inherited vector branch did not apply facet_filter. Fail closed until S2.
+                rejected_filter = request('POST', vp + '/query', {**query_request, 'query_vector': [1, 0, 0],
+                    'facet_filter': [{'String16': {'field': 'category', 'filter': ['b']}}]},
+                    api_key, expected=400)
+                check(b'vector candidate filtering is not implemented' in rejected_filter,
+                      'vector facet_filter must fail explicitly after valid deserialization')
+            filtered = api('POST', vp + '/query', {'query': '', 'enable_empty_query': True,
+                'search_mode': 'Lexical', 'facet_filter': [{'String16': {'field': 'category', 'filter': ['b']}}]})
+            check([doc['body'] for doc in filtered['results']] == ['beta'], 'lexical metadata filter')
+            request('PATCH', vp + '/doc', [0, {'body': 'invalid update'}], api_key, expected=400)
+            request('PATCH', vp + '/doc', [[0, {'body': 'changed', 'vector': [0, 0, 1]}],
+                                           [1, {'body': 'invalid'}]], api_key, expected=400)
+            lexical = api('POST', vp + '/query', {'query': 'alpha', 'search_mode': 'Lexical'})
+            check(lexical['results'][0]['body'] == 'alpha', 'failed update lost original')
+            request('POST', f'/api/v2/index/{vector_id}/query', b'invalid archive', api_key, expected=400)
+            for inference in ({'Model2Vec': {'model': 'PotionBase2M', 'chunk_size': 1000}},
+                              {'External': {'dimensions': 0, 'precision': 'F32', 'quantization': 'None', 'similarity': 'Cosine'}},
+                              {'External': {'dimensions': 3, 'precision': 'F32', 'quantization': 'None', 'similarity': 'invalid'}}):
+                request('POST', '/api/v1/index', {**config, 'inference': inference}, api_key, expected=400)
+            binary_schema = [{**field, 'field_type': 'Binary'} if field['field'] == 'vector' else field
+                             for field in vector_schema]
+            binary_id = api('POST', '/api/v1/index', {**config, 'schema': binary_schema})
+            bp = f'/api/v1/index/{binary_id}'
+            encoded = base64.b64encode(bytes.fromhex('3f8000000000000000000000')).decode()
+            api('POST', bp + '/doc', {'body': 'binary', 'vector': encoded})
+            check(api('PATCH', bp) == 1, 'binary vector write')
+            result = api('POST', bp + '/query', {'query': '', 'query_vector': encoded,
+                'search_mode': {'Vector': {'similarity_threshold': None, 'ann_mode': 'All'}}})
+            check(result['results'][0]['body'] == 'binary', 'base64 vector query')
+            print('PASS external vector/hybrid, invalid input, batch and update atomic validation')
+            if os.environ.get('SEEKPOWER_BROWSER_TEST') == '1':
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as browser_driver:
+                    browser = browser_driver.chromium.launch()
+                    page = browser.new_page()
+                    errors = []
+                    page.on('pageerror', lambda error: errors.append(str(error)))
+                    page.goto(base + f'/?index_id={vector_id}&q=alpha')
+                    page.locator('#contentBox .resultEntry').first.wait_for()
+                    check(page.locator('input[value="Lexical"]').is_checked(), 'UI default mode')
+                    page.locator('label[data-index="0"]').click()
+                    check('require' in page.locator('#searchError').inner_text(), 'UI missing-vector feedback')
+                    page.locator('#queryVector').fill('[1,0,0]')
+                    page.locator('#vectorSearch').click()
+                    page.locator('#contentBox .resultEntry').first.wait_for()
+                    page.locator('label[data-index="1"]').click()
+                    page.locator('#contentBox .resultEntry').first.wait_for()
+                    page.locator('#queryVector').fill('[1]')
+                    with page.expect_response(lambda response: '/query' in response.url and response.status == 400):
+                        page.locator('#vectorSearch').click()
+                    page.wait_for_function("document.getElementById('searchError').textContent.length > 0")
+                    check(not errors, f'browser errors: {errors}')
+                    browser.close()
+                print('PASS Chromium lexical/vector/hybrid interaction and validation feedback')
+
             check(api('DELETE', path + '/doc', b'clear') == 0, 'clear count mismatch')
             check(api('GET', path)['indexed_doc_count'] == 0, 'index not empty after clear')
             print('PASS clear and index info')

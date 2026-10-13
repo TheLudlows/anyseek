@@ -83,7 +83,7 @@ async fn union_count_overlap_same_block() {
         doc("alpha beta both item"),
         doc("beta only item"),
     ];
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     // 6 docs total in the same block; all contain at least one of alpha/beta.

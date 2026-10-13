@@ -77,7 +77,7 @@
 //! let document_json = r#"
 //! {"title":"title1 test","body":"body1","url":"url1"}"#;
 //! let document=serde_json::from_str(document_json).unwrap();
-//! index_arc.index_document(document,FileType::None).await;
+//! index_arc.index_document(document,FileType::None).await.unwrap();
 //! # });
 //! ```
 //! ### index documents
@@ -93,7 +93,7 @@
 //! {"title":"title2","body":"body2 test","url":"url2"},
 //! {"title":"title3 test","body":"body3 test","url":"url3"}]"#;
 //! let documents_vec=serde_json::from_str(documents_json).unwrap();
-//! index_arc.index_documents(documents_vec).await;
+//! index_arc.index_documents(documents_vec).await.unwrap();
 //! # });
 //! ```
 //! ### delete documents by document id
@@ -141,7 +141,7 @@
 //! [[1,{"title":"title1 test","body":"body1","url":"url1"}],
 //! [2,{"title":"title3 test","body":"body3 test","url":"url3"}]]"#;
 //! let id_document_vec=serde_json::from_str(id_document_vec_json).unwrap();
-//! index_arc.update_documents(id_document_vec).await;
+//! index_arc.update_documents(id_document_vec).await.unwrap();
 //! // ### commit documents
 //! index_arc.commit().await;
 //! # });
@@ -404,7 +404,7 @@
 //! {"title":"title2","body":"body2 test","url":"url2","town":"Warsaw"},
 //! {"title":"title3 test","body":"body3 test","url":"url3","town":"New York"}]"#;
 //! let documents_vec=serde_json::from_str(documents_json).unwrap();
-//! index_arc.index_documents(documents_vec).await;
+//! index_arc.index_documents(documents_vec).await.unwrap();
 //! // ### commit documents
 //! index_arc.commit().await;
 //! # });

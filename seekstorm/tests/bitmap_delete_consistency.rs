@@ -116,7 +116,7 @@ async fn setup() -> (seekstorm::index::IndexArc, HashSet<u64>, HashSet<u64>) {
             serde_json::from_str(&format!(r#"{{"title":"{t}"}}"#)).unwrap()
         })
         .collect();
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let vx: Vec<u64> = set_x.iter().copied().collect();

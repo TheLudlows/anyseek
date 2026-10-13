@@ -85,7 +85,7 @@ async fn fresh(dir: &str) -> seekstorm::index::IndexArc {
 async fn single_count_excludes_deleted() {
     let index = fresh("tests/index_delete_count/").await;
     let docs: Vec<_> = (0..10).map(|i| doc(&format!("common word{i}"))).collect();
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
     index.delete_documents(vec![0, 1, 2]).await;
     index.commit().await;
@@ -106,7 +106,7 @@ async fn single_count_excludes_deleted() {
 async fn single_count_no_deletes_control() {
     let index = fresh("tests/index_delete_count_control/").await;
     let docs: Vec<_> = (0..10).map(|i| doc(&format!("common word{i}"))).collect();
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let count = search(&index, "common", ResultType::Count).await;
