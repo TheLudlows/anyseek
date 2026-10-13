@@ -60,7 +60,7 @@ async fn fresh(dir: &str, access_type: AccessType) -> seekstorm::index::IndexArc
 
 async fn index_one(index: &seekstorm::index::IndexArc, json: &str) {
     let doc: seekstorm::index::Document = serde_json::from_str(json).unwrap();
-    index.index_documents(vec![doc]).await;
+    index.index_documents(vec![doc]).await.unwrap();
     index.commit().await;
 }
 

@@ -101,20 +101,27 @@ SeekStorm v<span id=version></span>
 <div class=row style=display:flex;align-self:stretch;height:100%>
 <div class="col-xs-4 col-xs-offset-2 expandOnSlim">
 <div class=switch-container>
-<div class=switch-selector></div>
-<label class="switch-label active" data-index=0>
-<input type=radio name=search-type value=Vector checked>
+<div class=switch-selector style="left:calc(66.66% + 4px)"></div>
+<label class=switch-label data-index=0>
+<input type=radio name=search-type value=Vector>
 <span>Vector</span>
 </label>
 <label class=switch-label data-index=1>
 <input type=radio name=search-type value=Hybrid>
 <span>Hybrid</span>
 </label>
-<label class=switch-label data-index=2>
-<input type=radio name=search-type value=Lexical>
+<label class="switch-label active" data-index=2>
+<input type=radio name=search-type value=Lexical checked>
 <span>Lexical</span>
 </label>
 </div>
+<div id="vectorControls" hidden>
+<label for="queryVector">Query vector (JSON array)</label>
+<textarea id="queryVector" rows="3" placeholder="[0.1, 0.2, 0.3]" aria-describedby="vectorHelp searchError"></textarea>
+<p id="vectorHelp">Paste a vector from the same external model used to index your documents. Update it whenever your query changes.</p>
+<button id="vectorSearch" type="button">Search with vector</button>
+</div>
+<p id="searchError" role="alert" aria-live="polite"></p>
 <div class="row offsetOnLarge" id=contentBox>
 </div>
 </div>

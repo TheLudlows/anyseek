@@ -79,7 +79,7 @@ async fn delete_uncommitted_survives_commit() {
     let index = fresh("tests/index_delete_uncommitted/").await;
     index
         .index_documents(vec![doc("hello world"), doc("foo bar")])
-        .await;
+        .await.unwrap();
     index.delete_documents(vec![0]).await;
     // Must not underflow/panic while the async index task is still running.
     let _ = index.read().await.current_doc_count().await;
@@ -95,7 +95,7 @@ async fn delete_committed_control() {
     let index = fresh("tests/index_delete_committed/").await;
     index
         .index_documents(vec![doc("hello world"), doc("foo bar")])
-        .await;
+        .await.unwrap();
     index.commit().await;
     index.delete_documents(vec![0]).await;
     index.commit().await;
@@ -110,7 +110,7 @@ async fn delete_out_of_range_ignored() {
     let index = fresh("tests/index_delete_range/").await;
     index
         .index_documents(vec![doc("hello world"), doc("foo bar")])
-        .await;
+        .await.unwrap();
     index.commit().await;
     index.delete_documents(Vec::new()).await;
     index.delete_documents(vec![u64::MAX]).await;
@@ -129,12 +129,12 @@ async fn delete_reused_docid_after_clear() {
     let index = fresh("tests/index_delete_clear/").await;
     index
         .index_documents(vec![doc("hello world"), doc("foo bar")])
-        .await;
+        .await.unwrap();
     index.commit().await;
     index.write().await.clear_index().await;
     index
         .index_documents(vec![doc("alphaone"), doc("betaone")])
-        .await;
+        .await.unwrap();
     index.delete_documents(vec![0]).await;
     index.commit().await;
     assert_eq!(count(&index, "alphaone", false).await, 0);

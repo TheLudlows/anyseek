@@ -1,7 +1,5 @@
 use hyper_util::server::conn::auto;
-use rkyv::access_unchecked;
 use rkyv::rancor::Error;
-use rkyv::vec::ArchivedVec;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -269,10 +267,12 @@ pub(crate) async fn http_request_handler(
             };
             let request_bytes = collected_body.to_bytes();
 
-            let archived_query_vector =
-                unsafe { access_unchecked::<ArchivedVec<f32>>(&request_bytes) };
-
-            let query_vector: Vec<f32> = archived_query_vector.as_slice().to_vec();
+            let mut aligned = rkyv::util::AlignedVec::<16>::new();
+            aligned.extend_from_slice(&request_bytes);
+            let query_vector = match rkyv::from_bytes::<Vec<f32>, Error>(&aligned) {
+                Ok(vector) => vector,
+                Err(error) => return HttpServerError::BadRequest(format!("invalid binary vector: {error}")).into(),
+            };
 
             let index_arc_clone = index_arc.clone();
 
@@ -298,6 +298,7 @@ pub(crate) async fn http_request_handler(
                 )
                 .await;
 
+            if let Some(error) = search_result.error { return HttpServerError::BadRequest(error).into(); }
             let mut docid_vector: Vec<u64> = Vec::new();
             for result in search_result.results.iter() {
                 docid_vector.push(result.doc_id as u64);
@@ -363,7 +364,10 @@ pub(crate) async fn http_request_handler(
                 }
             };
 
-            let search_result_local = query_index_api_post(&index_arc_clone, search_request).await;
+            let search_result_local = match query_index_api_post(&index_arc_clone, search_request).await {
+                Ok(result) => result,
+                Err(error) => return HttpServerError::BadRequest(error).into(),
+            };
 
             let search_result_json = serde_json::to_vec(&search_result_local).unwrap();
             Ok(Response::new(BoxBody::new(Full::new(
@@ -508,7 +512,10 @@ pub(crate) async fn http_request_handler(
                 }
             };
 
-            let search_result_local = query_index_api_get(&index_arc_clone, search_request).await;
+            let search_result_local = match query_index_api_get(&index_arc_clone, search_request).await {
+                Ok(result) => result,
+                Err(error) => return HttpServerError::BadRequest(error).into(),
+            };
 
             let search_result_json = serde_json::to_vec(&search_result_local).unwrap();
             Ok(Response::new(BoxBody::new(Full::new(
@@ -568,6 +575,7 @@ pub(crate) async fn http_request_handler(
             )
             .await;
             drop(apikey_list_mut);
+            let index_id = match index_id { Ok(id) => id, Err(error) => return HttpServerError::BadRequest(error).into() };
             Ok(Response::new(BoxBody::new(Full::new(
                 index_id.to_string().into(),
             ))))
@@ -962,20 +970,14 @@ pub(crate) async fn http_request_handler(
 
             let task_result = std::thread::spawn(move || {
                 INDEX_RUNTIME.block_on(async move {
-                    let Ok(request_string) = str::from_utf8(&request_bytes) else {
-                        return serde_json::to_vec(&Err::<usize, String>(
-                            "request body is not valid UTF-8".to_string(),
-                        ));
-                    };
-
-                    let status_object = if !request_string.trim().starts_with('[') {
-                        let document_object = serde_json::from_str(request_string)?;
-                        index_document_api(&index_arc_clone, document_object).await
+                    let request_string = str::from_utf8(&request_bytes).map_err(|e| e.to_string())?;
+                    if !request_string.trim().starts_with('[') {
+                        let document = serde_json::from_str(request_string).map_err(|e| e.to_string())?;
+                        index_document_api(&index_arc_clone, document).await
                     } else {
-                        let document_object_vec = serde_json::from_str(request_string)?;
-                        index_documents_api(&index_arc_clone, document_object_vec).await
-                    };
-                    serde_json::to_vec(&status_object)
+                        let documents = serde_json::from_str(request_string).map_err(|e| e.to_string())?;
+                        index_documents_api(&index_arc_clone, documents).await
+                    }
                 })
             });
 
@@ -984,8 +986,8 @@ pub(crate) async fn http_request_handler(
                 Err(_) => return HttpServerError::InternalServerError.into(),
             };
             match join_result {
-                Ok(status_object_json) => Ok(Response::new(BoxBody::new(Full::new(
-                    status_object_json.into(),
+                Ok(count) => Ok(Response::new(BoxBody::new(Full::new(
+                    serde_json::to_vec(&Ok::<usize, String>(count)).unwrap().into(),
                 )))),
                 Err(e) => HttpServerError::BadRequest(e.to_string()).into(),
             }
@@ -1061,6 +1063,7 @@ pub(crate) async fn http_request_handler(
                 update_documents_api(&index_arc_clone, id_document_object_vec).await
             };
 
+            if let Err(error) = &status_object { return HttpServerError::BadRequest(error.clone()).into(); }
             let status_object_json = serde_json::to_vec(&status_object).unwrap();
             Ok(Response::new(BoxBody::new(Full::new(
                 status_object_json.into(),

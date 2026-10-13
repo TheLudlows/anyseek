@@ -4,7 +4,6 @@ use futures::future;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use memmap2::{Mmap, MmapMut, MmapOptions};
-use model2vec_rs::model::StaticModel;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
 
@@ -47,7 +46,7 @@ use crate::{
         self, read_u8_ref, read_u16, read_u16_ref, read_u32_ref, read_u64, read_u64_ref, write_f32,
         write_f64, write_i8, write_i16, write_i32, write_i64, write_u32, write_u64,
     },
-    vector::{Inference, Model, Precision, Quantization, VectorHeader, read_min_max},
+    vector::{Inference, Precision, Quantization, VectorHeader, read_min_max},
     vector_similarity::{TurboQuant, VectorSimilarity},
 };
 
@@ -134,11 +133,12 @@ pub struct Info {
 
 /// Search request object
 #[derive(Deserialize, Serialize, Clone, ToSchema, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct SearchRequestObject {
     /// Query string, search operators + - "" are recognized.
     #[serde(rename = "query")]
     pub query_string: String,
-    /// Optional query vector: If None, then the query vector is derived from the query string using the specified model. If Some, then the query vector is used for semantic search and the query string is only used for lexical search and highlighting.
+    /// External query vector, required for Vector and Hybrid search. No model inference is performed.
     #[serde(default)]
     pub query_vector: Option<Value>,
     #[serde(default)]
@@ -296,6 +296,7 @@ pub struct ApikeyObject {
 
 /// Create index request object
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateIndexRequest {
     /// Index name, used for informational purposes only.
     #[schema(example = "demo_index")]
@@ -362,7 +363,7 @@ pub struct CreateIndexRequest {
     #[serde(default)]
     /// Enable clustering for vector search.
     pub clustering: Clustering,
-    /// Enable inference for search and indexing. This can be used to create vector representations of documents and queries for semantic search, e.g. by using a model like PotionBase2M.
+    /// Configure external vector dimensions, precision, quantization and distance metric.
     #[serde(default)]
     pub inference: Inference,
 }
@@ -1108,7 +1109,7 @@ pub struct SchemaField {
     /// Even if index_lexical is true in the schema, the field in the actual document is optional. You can index documents without that field, but you cannot search for that field in those documents.
     pub index_lexical: bool,
     /// only indexed fields can be searched
-    /// Even if index_vector is true in the schema, the field in the actual document is optional. You can index documents without that field, but you cannot search for that field in those documents.
+    /// Vector fields are required and validated before the document is queued for indexing.
     #[serde(skip_serializing_if = "is_default_bool")]
     #[serde(default = "default_false")]
     pub index_vector: bool,
@@ -1414,7 +1415,7 @@ pub struct IndexMetaObject {
     #[serde(default)]
     pub clustering: Clustering,
 
-    /// vector source: External vectors field (Json array field or Base64 encoded text field) or internal vector generation from text field via model2vec
+    /// External vector source: a Json array field or a Binary field with Base64 network-order bytes.
     #[serde(default)]
     pub inference: Inference,
 }
@@ -1677,8 +1678,6 @@ pub struct Shard {
     pub(crate) is_simd: bool,
     pub(crate) is_vector_indexing: bool,
     pub(crate) is_lexical_indexing: bool,
-    pub(crate) chunks_meta: Vec<(u16, u32, u32)>,
-    pub(crate) chunks_string: Vec<String>,
     pub(crate) vector_file: File,
     pub(crate) vector_file_mmap: Mmap,
     pub(crate) block_vector_buffer: Vec<ParentMedoid>,
@@ -1687,7 +1686,6 @@ pub struct Shard {
     pub(crate) vector_precision: Precision,
     pub(crate) quantization: Quantization,
     pub(crate) vector_similarity: VectorSimilarity,
-    pub(crate) chunk_size: usize,
 
     pub(crate) min_vector_value: f32,
     pub(crate) max_vector_value: f32,
@@ -1747,7 +1745,6 @@ pub struct Index {
 
     pub(crate) frequent_hashset: AHashSet<String>,
 
-    pub(crate) embedding_model_option: Option<StaticModel>,
     /// The precision of the vectors: Float32 or Int8
     pub vector_precision: Precision,
     pub(crate) quantization: Quantization,
@@ -1768,7 +1765,6 @@ pub struct Index {
     pub(crate) is_vector_indexing: bool,
     /// Indicates whether the index contains lexical term indexing for lexical search.
     pub(crate) is_lexical_indexing: bool,
-    pub(crate) chunk_size: usize,
     pub(crate) turbo_quant: TurboQuant,
 }
 
@@ -1917,6 +1913,7 @@ pub(crate) async fn create_index_root(
     mute: bool,
     force_shard_number: Option<usize>,
 ) -> Result<IndexArc, String> {
+    crate::vector::validate_vector_schema(&meta.inference, schema)?;
     let frequent_hashset: AHashSet<String> = match &meta.frequent_words {
         FrequentwordType::None => AHashSet::new(),
         FrequentwordType::English => FREQUENT_EN.lines().map(|x| x.to_string()).collect(),
@@ -2064,154 +2061,12 @@ pub(crate) async fn create_index_root(
                 )
             };
 
-            let (
-                vector_dimensions,
-                embedding_model_option,
-                vector_precision,
-                chunk_size,
-                quantization,
-                vector_similarity,
-            ) = if is_vector_indexing {
-                let (
-                    dimensions,
-                    model_path,
-                    precision,
-                    chunk_size,
-                    quantization,
-                    vector_similarity,
-                ) = match &meta.inference {
-                    Inference::Model2Vec {
-                        model,
-                        chunk_size,
-                        quantization,
-                    } => {
-                        let chunk_size = *chunk_size.max(&10);
-                        match model {
-                            Model::PotionBase2M => (
-                                0,
-                                "minishlab/potion-base-2M",
-                                Precision::F32,
-                                chunk_size,
-                                *quantization,
-                                VectorSimilarity::Cosine,
-                            ),
-                            Model::PotionBase4M => (
-                                0,
-                                "minishlab/potion-base-4M",
-                                Precision::F32,
-                                chunk_size,
-                                *quantization,
-                                VectorSimilarity::Cosine,
-                            ),
-                            Model::PotionBase8M => (
-                                0,
-                                "minishlab/potion-base-8M",
-                                Precision::F32,
-                                chunk_size,
-                                *quantization,
-                                VectorSimilarity::Cosine,
-                            ),
-                            Model::PotionBase32M => (
-                                0,
-                                "minishlab/potion-base-32M",
-                                Precision::F32,
-                                chunk_size,
-                                *quantization,
-                                VectorSimilarity::Cosine,
-                            ),
-                            Model::PotionMultilingual128M => (
-                                0,
-                                "minishlab/potion-multilingual-128M",
-                                Precision::F32,
-                                chunk_size,
-                                *quantization,
-                                VectorSimilarity::Cosine,
-                            ),
-                            Model::PotionRetrieval32M => (
-                                0,
-                                "minishlab/potion-retrieval-32M",
-                                Precision::F32,
-                                chunk_size,
-                                *quantization,
-                                VectorSimilarity::Cosine,
-                            ),
-                            Model::PotionCode16MV2 => (
-                                0,
-                                "minishlab/potion-code-16M-v2",
-                                Precision::F32,
-                                chunk_size,
-                                *quantization,
-                                VectorSimilarity::Cosine,
-                            ),
-                        }
-                    }
-                    Inference::Model2VecCustom {
-                        path,
-                        chunk_size,
-                        quantization,
-                    } => (
-                        0,
-                        path.as_str(),
-                        Precision::F32,
-                        *chunk_size,
-                        *quantization,
-                        VectorSimilarity::Cosine,
-                    ),
-                    Inference::External {
-                        dimensions: vector_dimensions,
-                        precision: vector_precision,
-                        quantization: vector_quantization,
-                        similarity,
-                    } => (
-                        *vector_dimensions,
-                        "",
-                        *vector_precision,
-                        0,
-                        *vector_quantization,
-                        *similarity,
-                    ),
-                    Inference::None => (
-                        0,
-                        "",
-                        Precision::None,
-                        0,
-                        Quantization::None,
-                        VectorSimilarity::Cosine,
-                    ),
+            let (vector_dimensions, vector_precision, quantization, vector_similarity) =
+                match &meta.inference {
+                    Inference::External { dimensions, precision, quantization, similarity } =>
+                        (*dimensions, *precision, *quantization, *similarity),
+                    Inference::None => (0, Precision::None, Quantization::None, VectorSimilarity::Cosine),
                 };
-
-                if !model_path.is_empty() {
-                    let model =
-                        Some(StaticModel::from_pretrained(model_path, None, None, None).unwrap());
-                    let dimensions = model.as_ref().unwrap().encode(&["test".to_string()])[0].len();
-                    (
-                        dimensions,
-                        model,
-                        precision,
-                        chunk_size,
-                        quantization,
-                        VectorSimilarity::Cosine,
-                    )
-                } else {
-                    (
-                        dimensions,
-                        None,
-                        precision,
-                        chunk_size,
-                        quantization,
-                        vector_similarity,
-                    )
-                }
-            } else {
-                (
-                    0,
-                    None,
-                    Precision::None,
-                    0,
-                    Quantization::None,
-                    VectorSimilarity::Cosine,
-                )
-            };
 
             let turbo_quant = if quantization == Quantization::TurboQuantI8 {
                 TurboQuant::new(vector_dimensions, 1234)
@@ -2262,7 +2117,6 @@ pub(crate) async fn create_index_root(
                         shard.is_avx2 = *IS_AVX2;
                         shard.is_neon = *IS_NEON;
                         shard.is_simd = *IS_SIMD;
-                        shard.chunk_size = chunk_size;
                         shard.turbo_quant = turbo_quant_clone;
 
                         let shard_arc = Arc::new(RwLock::new(shard));
@@ -2332,7 +2186,6 @@ pub(crate) async fn create_index_root(
 
                 frequent_hashset,
 
-                embedding_model_option,
                 vector_dimensions,
                 vector_dimensions_original,
                 vector_precision,
@@ -2343,7 +2196,6 @@ pub(crate) async fn create_index_root(
                 is_simd: *IS_SIMD,
                 is_vector_indexing,
                 is_lexical_indexing,
-                chunk_size,
                 turbo_quant,
             };
 
@@ -2814,8 +2666,6 @@ pub(crate) fn create_shard(
                 level_terms: AHashMap::new(),
                 level_completions: Arc::new(RwLock::new(AHashMap::with_capacity(200_000))),
 
-                chunks_meta: Vec::new(),
-                chunks_string: Vec::new(),
                 vector_file,
                 vector_file_mmap,
                 indexed_vector_count: 0,
@@ -2831,7 +2681,6 @@ pub(crate) fn create_shard(
                 is_avx2: false,
                 is_neon: false,
                 is_simd: false,
-                chunk_size: 0,
                 min_vector_value: f32::MAX,
                 max_vector_value: f32::MIN,
                 turbo_quant: TurboQuant::new(0, 1234),
@@ -3274,11 +3123,13 @@ pub(crate) async fn open_shard(
 
     match File::open(Path::new(index_path).join(META_FILENAME)) {
         Ok(meta_file) => {
-            let meta: IndexMetaObject = serde_json::from_reader(BufReader::new(meta_file)).unwrap();
+            let meta: IndexMetaObject = serde_json::from_reader(BufReader::new(meta_file))
+                .map_err(|e| format!("unsupported or invalid index metadata: {e}"))?;
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
                 Ok(schema_file) => {
-                    let schema = serde_json::from_reader(BufReader::new(schema_file)).unwrap();
+                    let schema = serde_json::from_reader(BufReader::new(schema_file))
+                        .map_err(|e| format!("invalid index schema: {e}"))?;
 
                     let synonyms = if let Ok(synonym_file) =
                         File::open(Path::new(index_path).join(SYNONYMS_FILENAME))
@@ -3835,11 +3686,13 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
 
     match File::open(Path::new(index_path).join(META_FILENAME)) {
         Ok(meta_file) => {
-            let meta: IndexMetaObject = serde_json::from_reader(BufReader::new(meta_file)).unwrap();
+            let meta: IndexMetaObject = serde_json::from_reader(BufReader::new(meta_file))
+                .map_err(|e| format!("unsupported or invalid index metadata: {e}"))?;
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
                 Ok(schema_file) => {
-                    let schema = serde_json::from_reader(BufReader::new(schema_file)).unwrap();
+                    let schema = serde_json::from_reader(BufReader::new(schema_file))
+                        .map_err(|e| format!("invalid index schema: {e}"))?;
 
                     let synonyms = if let Ok(synonym_file) =
                         File::open(Path::new(index_path).join(SYNONYMS_FILENAME))
@@ -3951,8 +3804,6 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
                                 shard_arc.write().await.is_avx2 = index_arc.read().await.is_avx2;
                                 shard_arc.write().await.is_neon = index_arc.read().await.is_neon;
                                 shard_arc.write().await.is_simd = index_arc.read().await.is_simd;
-                                shard_arc.write().await.chunk_size =
-                                    index_arc.read().await.chunk_size;
 
                                 shard_arc.write().await.turbo_quant =
                                     index_arc.read().await.turbo_quant.clone();
@@ -5233,16 +5084,18 @@ pub trait UpdateDocument {
     /// Update document in index
     /// Update_document is a combination of delete_document and index_document.
     /// All current limitations of delete_document apply.
-    async fn update_document(&self, id_document: (u64, Document));
+    async fn update_document(&self, id_document: (u64, Document)) -> Result<(), String>;
 }
 
 /// Update document in index
 /// Update_document is a combination of delete_document and index_document.
 /// All current limitations of delete_document apply.
 impl UpdateDocument for IndexArc {
-    async fn update_document(&self, id_document: (u64, Document)) {
+    async fn update_document(&self, id_document: (u64, Document)) -> Result<(), String> {
+        crate::vector::validate_document_vectors(&*self.read().await, &id_document.1)?;
         self.delete_document(id_document.0).await;
-        self.index_document(id_document.1, FileType::None).await;
+        enqueue_document(self, id_document.1, FileType::None).await;
+        Ok(())
     }
 }
 
@@ -5254,17 +5107,22 @@ pub trait UpdateDocuments {
     /// Update documents in index
     /// Update_document is a combination of delete_document and index_document.
     /// All current limitations of delete_document apply.
-    async fn update_documents(&self, id_document_vec: Vec<(u64, Document)>);
+    async fn update_documents(&self, id_document_vec: Vec<(u64, Document)>) -> Result<(), String>;
 }
 
 /// Update documents in index
 /// Update_document is a combination of delete_document and index_document.
 /// All current limitations of delete_document apply.
 impl UpdateDocuments for IndexArc {
-    async fn update_documents(&self, id_document_vec: Vec<(u64, Document)>) {
+    async fn update_documents(&self, id_document_vec: Vec<(u64, Document)>) -> Result<(), String> {
         let (docid_vec, document_vec): (Vec<_>, Vec<_>) = id_document_vec.into_iter().unzip();
+        {
+            let index = self.read().await;
+            for document in &document_vec { crate::vector::validate_document_vectors(&index, document)?; }
+        }
         self.delete_documents(docid_vec).await;
-        self.index_documents(document_vec).await;
+        for document in document_vec { enqueue_document(self, document, FileType::None).await; }
+        Ok(())
     }
 }
 
@@ -5273,16 +5131,19 @@ impl UpdateDocuments for IndexArc {
 pub trait IndexDocuments {
     /// Indexes a list of documents
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_documents(&self, document_vec: Vec<Document>);
+    async fn index_documents(&self, document_vec: Vec<Document>) -> Result<(), String>;
 }
 
 impl IndexDocuments for IndexArc {
     /// Index list of documents (bulk)
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_documents(&self, document_vec: Vec<Document>) {
-        for document in document_vec {
-            self.index_document(document, FileType::None).await;
+    async fn index_documents(&self, document_vec: Vec<Document>) -> Result<(), String> {
+        {
+            let index = self.read().await;
+            for document in &document_vec { crate::vector::validate_document_vectors(&index, document)?; }
         }
+        for document in document_vec { enqueue_document(self, document, FileType::None).await; }
+        Ok(())
     }
 }
 
@@ -5291,20 +5152,27 @@ impl IndexDocuments for IndexArc {
 pub trait IndexDocument {
     /// Indexes a single document
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_document(&self, document: Document, file: FileType);
+    async fn index_document(&self, document: Document, file: FileType) -> Result<(), String>;
 }
 
 impl IndexDocument for IndexArc {
     /// Index document
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_document(&self, document: Document, file: FileType) {
-        let shard_number = self.read().await.shard_number;
-        let docid_global_arc = self.read().await.docid_global.clone();
+    async fn index_document(&self, document: Document, file: FileType) -> Result<(), String> {
+        crate::vector::validate_document_vectors(&*self.read().await, &document)?;
+        enqueue_document(self, document, file).await;
+        Ok(())
+    }
+}
+
+async fn enqueue_document(index_arc: &IndexArc, document: Document, file: FileType) {
+        let shard_number = index_arc.read().await.shard_number;
+        let docid_global_arc = index_arc.read().await.docid_global.clone();
         let mut docid_global = docid_global_arc.write().await;
         let docid_global_clone = *docid_global;
         let shard_id = *docid_global % shard_number;
 
-        let shard_arc = self.read().await.shard_vec[shard_id].clone();
+        let shard_arc = index_arc.read().await.shard_vec[shard_id].clone();
         let semaphore = shard_arc.read().await.semaphore.clone();
         let permit = semaphore.acquire_owned().await.unwrap();
 
@@ -5318,8 +5186,6 @@ impl IndexDocument for IndexArc {
             drop(permit);
         });
     }
-}
-
 /// Indexes a single document
 #[allow(async_fn_in_trait)]
 pub(crate) trait IndexDocumentShard {

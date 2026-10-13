@@ -74,7 +74,7 @@ async fn frequent_terms_topk_returns_results() {
             t.push_str("half ");
         }
         let doc: Document = serde_json::from_str(&format!(r#"{{"title":"{t}"}}"#)).unwrap();
-        index_arc.index_document(doc, FileType::None).await;
+        index_arc.index_document(doc, FileType::None).await.unwrap();
     }
     index_arc.commit().await;
 

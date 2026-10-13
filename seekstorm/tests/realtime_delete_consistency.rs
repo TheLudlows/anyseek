@@ -119,10 +119,10 @@ async fn settle_search(
 async fn realtime_single_count_excludes_deleted() {
     let index = fresh("tests/index_delete_realtime_single/").await;
     let docs: Vec<_> = (0..5).map(|i| doc(&format!("base doc{i}"))).collect();
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
     let docs: Vec<_> = (0..5).map(|i| doc(&format!("base extra{i}"))).collect();
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     settle_search(&index, "base", QueryType::Union, 10).await;
     index.delete_documents(vec![9, 0]).await;
 
@@ -151,7 +151,7 @@ async fn realtime_union_count_excludes_deleted() {
     for i in 0..10 {
         docs.push(doc(&format!("beta uniqb{i}")));
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     settle_search(&index, "alpha beta", QueryType::Union, 20).await;
     index.delete_documents(vec![0, 1, 10]).await;
 

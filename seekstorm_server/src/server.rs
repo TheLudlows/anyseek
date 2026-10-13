@@ -18,7 +18,7 @@ use seekstorm::{
     },
     search::{QueryRewriting, QueryType, ResultType, Search, SearchMode},
     utils::dir_size,
-    vector::{Embedding, Inference, Model, Quantization},
+    vector::{Embedding, Inference, Quantization},
     vector_similarity::{AnnMode, VectorSimilarity},
 };
 use sha2::{Digest, Sha256};
@@ -895,8 +895,8 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                             } else if apikey_object.index_list.is_empty() || !apikey_object.index_list.contains_key(&0) {
                                                     let indexname_schemajson = if md.is_file() && data_path.display().to_string().to_lowercase().ends_with(WIKIPEDIA_FILENAME)
                                                     {("wikipedia_demo",r#"
-                                                [{"field":"title","field_type":"Text","store":true,"index_lexical":true,"index_vector":true,"dictionary_source": false, "completion_source": false,"boost":10.0},
-                                                {"field":"body","field_type":"Text","store":true,"index_lexical":true,"index_vector":true,"longest":true,"dictionary_source": false},
+                                                [{"field":"title","field_type":"Text","store":true,"index_lexical":true,"index_vector":false,"dictionary_source": false, "completion_source": false,"boost":10.0},
+                                                {"field":"body","field_type":"Text","store":true,"index_lexical":true,"index_vector":false,"longest":true,"dictionary_source": false},
                                                 {"field":"url","field_type":"Text","store":true,"index_lexical":false}]"#,LexicalSimilarity::Bm25fProximity,TokenizerType::UnicodeAlphanumericFolded  )}
                                                     else if md.is_file() && data_path.display().to_string().to_lowercase().ends_with(MSMARCO_FILENAME)
                                                     {("msmarco_demo", r#"
@@ -928,8 +928,8 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                                         None,
                                                         false,
                                                         Clustering::Auto,
-                                                        Inference::Model2Vec { model: Model::PotionBase2M, chunk_size: 1000, quantization: Quantization::TurboQuantI8 },
-                                                    ).await
+                                                        Inference::None,
+                                                    ).await.expect("valid lexical demo configuration")
                                                 } else {
                                                     0
                                                 };

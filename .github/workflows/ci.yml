@@ -29,7 +29,21 @@ jobs:
           cargo --version
       - name: Build retained workspace
         run: cargo build --workspace
+      - name: Install browser test runtime
+        run: |
+          python3 -m pip install playwright
+          python3 -m playwright install --with-deps chromium
       - name: HTTP API and embedded UI smoke (no SDK)
+        env:
+          SEEKPOWER_BROWSER_TEST: "1"
         run: python3 scripts/http_smoke.py --server target/debug/seekstorm_server
       - name: Existing core and server tests
         run: cargo test --workspace --all-targets
+      - name: Generate API reference
+        run: target/debug/seekstorm_server generate_openapi=true > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: |
+            target/debug/openapi.json
+            target/debug/openapi.yml

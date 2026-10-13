@@ -184,6 +184,9 @@ pub(crate) struct SearchResult<'a> {
 /// Contains the results returned when searching the index.
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
 pub struct ResultObject {
+    /// Invalid query input. Callers must check this before consuming search results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// Search query string
     pub original_query: String,
     /// Search query string after any automatic query correction or completion
@@ -1173,6 +1176,16 @@ impl Search for IndexArc {
         query_rewriting: QueryRewriting,
     ) -> ResultObject {
         let index_ref = self.read().await;
+        if let Err(error) = crate::vector::validate_query_vector(
+            &index_ref.meta.inference, &search_mode, query_vector.as_ref(),
+        ) {
+            return ResultObject { error: Some(error), ..Default::default() };
+        }
+        if !matches!(search_mode, SearchMode::Lexical)
+            && (length == 0 || offset.checked_add(length).is_none())
+        {
+            return ResultObject { error: Some("vector search requires a positive, bounded result window".into()), ..Default::default() };
+        }
         let original_query = query_string.clone();
 
         let (edit_distance_max, term_length_threshold, correct, complete, suggestion_length) =
@@ -1463,7 +1476,7 @@ impl Search for IndexArc {
         let shard_number = index_ref.shard_number;
         let aggregate_results = result_type != ResultType::Count;
 
-        let query_vector = if index_ref.is_vector_indexing {
+        let query_vector = if index_ref.is_vector_indexing && !matches!(search_mode, SearchMode::Lexical) {
             Some(if let Some(mut qv) = query_vector {
                 if index_ref.vector_similarity == VectorSimilarity::Cosine
                     && matches!(index_ref.meta.inference, Inference::External { .. })
@@ -1609,30 +1622,8 @@ impl Search for IndexArc {
                 } else {
                     (qv, 0.0, 0.0, 0, 0)
                 }
-            } else if let Some(embedding_model) = index_ref.embedding_model_option.as_ref() {
-                let fvecs = embedding_model
-                    .encode(std::slice::from_ref(&query_string))
-                    .remove(0);
-                if index_ref.quantization == Quantization::ScalarQuantizationI8
-                    || index_ref.quantization == Quantization::TurboQuantI8
-                {
-                    (
-                        if index_ref.is_simd {
-                            unsafe { quantize_f32_to_i8_simd(&fvecs) }
-                        } else {
-                            quantize_f32_to_i8(&fvecs)
-                        },
-                        1.0,
-                        0.0,
-                        0,
-                        0,
-                    )
-                } else {
-                    (Embedding::F32(fvecs), 0.0, 0.0, 0, 0)
-                }
             } else {
-                let result_object: ResultObject = Default::default();
-                return result_object;
+                return ResultObject { error: Some("query_vector is required for Vector/Hybrid search".into()), ..Default::default() };
             })
         } else {
             None

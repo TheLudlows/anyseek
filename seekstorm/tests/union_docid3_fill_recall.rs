@@ -142,7 +142,7 @@ async fn docid3_disjoint_terms_fill_heap() {
             docs.push(doc(&format!("{w} uniq{} {pad}x", i)));
         }
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let total: usize = dfs.iter().sum();
@@ -191,7 +191,7 @@ async fn docid3_overlap_control() {
             .collect();
         docs.push(doc(&format!("{} uniq{i}", keep.join(" "))));
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     // Overlapping terms never approach the recursion cap, so the fast WAND
@@ -237,7 +237,7 @@ async fn docid3_topkcount_total_consistent() {
             docs.push(doc(&format!("{w} only{}{}", w, i)));
         }
     }
-    index.index_documents(docs).await;
+    index.index_documents(docs).await.unwrap();
     index.commit().await;
 
     let query = words.join(" ");

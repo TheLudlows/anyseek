@@ -18,7 +18,7 @@ use seekstorm::{
         AccessType, ApikeyObject, ApikeyQuotaObject, Close, Clustering, CreateIndexRequest,
         DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
         FileType, FrequentwordType, GetDocumentRequest, GetIteratorRequest, IS_AVX2, IS_NEON,
-        IS_SYSTEM_LE, IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
+        IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
         IndexResponseObject, LexicalSimilarity, QueryCompletion, SchemaField, SearchRequestObject,
         SearchResultObject, SpellingCorrection, StemmerType, StopwordType, Synonym, TokenizerType,
         UpdateDocument, UpdateDocuments, create_index, open_index,
@@ -26,7 +26,6 @@ use seekstorm::{
     ingest::IndexPdfBytes,
     iterator::{GetIterator, IteratorResult},
     search::{Search, SearchMode},
-    utils::decode_bytes_from_base64_string,
     vector::Inference,
 };
 
@@ -286,27 +285,27 @@ pub(crate) async fn open_all_apikeys(
 					"field_type": "Text", 
 					"store": true, 
 					"index_lexical": true,
-					"index_vector": true
+					"index_vector": false
 				},
 				{
 					"field": "body",
 					"field_type": "Text", 
 					"store": true, 
 					"index_lexical": true,
-					"index_vector": true
+					"index_vector": false
 				},
 					{
-					"field": "url", 
-					"field_type": "String32", 
+					"field": "vector",
+					"field_type": "Json",
 					"store": true, 
 					"index_lexical": false,
-					"index_vector": false
+					"index_vector": true
 				}],
 				"index_name": "wikipedia",
 				"similarity": "Bm25fProximity",
 				"tokenizer": "UnicodeAlphanumeric",
 				"clustering": "Auto",
-				"inference": {"Model2Vec": { "model": "PotionBase2M", "chunk_size": 1000, "quantization": "ScalarQuantizationI8" }}
+				"inference": {"External": { "dimensions": 3, "precision": "F32", "similarity": "Cosine", "quantization": "None" }}
 			}))),
             ("Example: Vector index" = (value = json!({
 				"schema":[
@@ -362,7 +361,8 @@ pub(crate) async fn create_index_api<'a>(
     mute: bool,
     clustering: Clustering,
     inference: Inference,
-) -> u64 {
+) -> Result<u64, String> {
+    seekstorm::vector::validate_vector_schema(&inference, &schema)?;
     let mut index_id: u64 = 0;
     for id in apikey_object.index_list.keys().sorted() {
         if *id == index_id {
@@ -375,7 +375,7 @@ pub(crate) async fn create_index_api<'a>(
     let index_id_path = Path::new(&index_path)
         .join(apikey_object.id.to_string())
         .join(index_id.to_string());
-    fs::create_dir_all(&index_id_path).unwrap();
+    fs::create_dir_all(&index_id_path).map_err(|e| e.to_string())?;
 
     let meta = IndexMetaObject {
         id: index_id,
@@ -403,12 +403,11 @@ pub(crate) async fn create_index_api<'a>(
         mute,
         force_shard_number,
     )
-    .await
-    .unwrap();
+    .await?;
 
     apikey_object.index_list.insert(index_id, index_arc);
 
-    index_id
+    Ok(index_id)
 }
 
 /// Delete Index
@@ -673,7 +672,7 @@ pub(crate) async fn index_document_api(
     index_arc: &IndexArc,
     document: Document,
 ) -> Result<usize, String> {
-    index_arc.index_document(document, FileType::None).await;
+    index_arc.index_document(document, FileType::None).await?;
 
     Ok(index_arc.read().await.indexed_doc_count().await)
 }
@@ -759,7 +758,7 @@ pub(crate) async fn index_documents_api(
     index_arc: &IndexArc,
     document_vec: Vec<Document>,
 ) -> Result<usize, String> {
-    index_arc.index_documents(document_vec).await;
+    index_arc.index_documents(document_vec).await?;
     Ok(index_arc.read().await.indexed_doc_count().await)
 }
 
@@ -866,7 +865,7 @@ pub(crate) async fn update_document_api(
     index_arc: &IndexArc,
     id_document: (u64, Document),
 ) -> Result<u64, String> {
-    index_arc.update_document(id_document).await;
+    index_arc.update_document(id_document).await?;
     Ok(index_arc.read().await.indexed_doc_count().await as u64)
 }
 
@@ -874,7 +873,7 @@ pub(crate) async fn update_documents_api(
     index_arc: &IndexArc,
     id_document_vec: Vec<(u64, Document)>,
 ) -> Result<u64, String> {
-    index_arc.update_documents(id_document_vec).await;
+    index_arc.update_documents(id_document_vec).await?;
     Ok(index_arc.read().await.indexed_doc_count().await as u64)
 }
 
@@ -1277,7 +1276,7 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
 pub(crate) async fn query_index_api_post(
     index_arc: &IndexArc,
     search_request: SearchRequestObject,
-) -> SearchResultObject {
+) -> Result<SearchResultObject, String> {
     query_index_api(index_arc, search_request).await
 }
 
@@ -1313,45 +1312,23 @@ pub(crate) async fn query_index_api_post(
 pub(crate) async fn query_index_api_get(
     index_arc: &IndexArc,
     search_request: SearchRequestObject,
-) -> SearchResultObject {
+) -> Result<SearchResultObject, String> {
     query_index_api(index_arc, search_request).await
 }
 
-use seekstorm::vector::{embedding_from_bytes_be, embedding_from_json};
+
 
 pub(crate) async fn query_index_api(
     index_arc: &IndexArc,
     search_request: SearchRequestObject,
-) -> SearchResultObject {
+) -> Result<SearchResultObject, String> {
     let start_time = Instant::now();
 
-    let query_vector = if let Some(value) = search_request.query_vector
-        && search_request.search_mode != SearchMode::Lexical
-    {
-        match &value {
-            Value::String(string_base64) => {
-                if let Ok(bytes) = decode_bytes_from_base64_string(string_base64)
-                    && let Some(embedding) = embedding_from_bytes_be(
-                        &bytes,
-                        index_arc.read().await.vector_precision,
-                        index_arc.read().await.vector_dimensions_original,
-                        *IS_SYSTEM_LE,
-                    )
-                {
-                    Some(embedding)
-                } else {
-                    None
-                }
-            }
-            Value::Array(_) => embedding_from_json(
-                &value,
-                index_arc.read().await.vector_precision,
-                index_arc.read().await.vector_dimensions_original,
-            ),
-            _ => None,
-        }
-    } else {
-        None
+    let query_vector = match search_request.query_vector.as_ref() {
+        Some(value) if search_request.search_mode != SearchMode::Lexical => Some(
+            seekstorm::vector::parse_external_embedding(value, &index_arc.read().await.meta.inference)?
+        ),
+        _ => None,
     };
 
     let result_object = index_arc
@@ -1373,6 +1350,7 @@ pub(crate) async fn query_index_api(
         )
         .await;
 
+    if let Some(error) = result_object.error { return Err(error); }
     let elapsed_time = start_time.elapsed().as_nanos();
 
     let mut results: Vec<Document> = Vec::new();
@@ -1418,7 +1396,7 @@ pub(crate) async fn query_index_api(
         }
     }
 
-    SearchResultObject {
+    Ok(SearchResultObject {
         original_query: result_object.original_query.to_owned(),
         query: result_object.query.to_owned(),
         time: elapsed_time,
@@ -1430,7 +1408,7 @@ pub(crate) async fn query_index_api(
         results,
         facets: result_object.facets,
         suggestions: result_object.suggestions,
-    }
+    })
 }
 
 #[derive(OpenApi, Default)]

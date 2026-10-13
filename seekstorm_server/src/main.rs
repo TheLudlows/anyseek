@@ -164,6 +164,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
 
+    if params.get("generate_openapi").is_some_and(|value| value == "true") {
+        api_endpoints::generate_openapi();
+        return Ok(());
+    }
     initialize(params).await;
 
     Ok(())
