@@ -239,13 +239,8 @@ pub enum Quantization {
     ScalarQuantizationI8,
     /// TurboQuant Quantization (TQ) f32 to i8 (8 bit per dimension).
     /// SeekStorms implementation uses Fast Walsh-Hadamard Transform (FWHT) instead of Gram-Schmidt orthogonalization, and Quantized Johnson-Lindenstrauss (QJL) transformation.
-    /// TurboQuant is generally considered superior to traditional Product Quantization (PQ) for high-dimensional, nearest neighbor search.
-    /// TurboQuant provides higher recall, faster (nearly zero) indexing time, and better compression ratios compared to standard PQ techniques.
-    /// PQ requires a costly "training" phase to generate codebooks, which is impractical for real-time search.
-    /// TurboQuant uses random rotations to achieve near-optimal scalar quantization on the fly, eliminating this training time.
-    /// &#x26A0; **CAUTION**: TurboQuant is NOT always better than Scalar Quantization.
-    /// For SIFT1M, SeekStorms affine scalar quantization (recall@10=100%) is better than TurboQuant (recall@10=97.26%).
-    /// Those vectors have less than 256 distinct values, which SeekStorms affine Scalar Quantization preserves distortionlessly, while TurboQuant introduces additional distortion due to the random rotations.
+    /// Random rotations and scalar quantization trade precision for a smaller representation.
+    /// Measure recall and latency on the application's vectors and queries when choosing a method.
     TurboQuantI8,
     /// no quantization, keep f32
     #[default]

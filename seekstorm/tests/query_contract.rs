@@ -45,7 +45,7 @@ async fn assert_query(index: &IndexArc, text: &str, expected: usize) {
 }
 
 #[tokio::test]
-async fn literal_queries_and_legacy_metadata() {
+async fn literal_queries_and_strict_metadata() {
     let path = Path::new("tests/index_query_contract"); let _ = fs::remove_dir_all(path);
     let meta = IndexMetaObject { id:0, name:"literal_queries".into(),
         lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::UnicodeAlphanumeric,
@@ -68,16 +68,17 @@ async fn literal_queries_and_legacy_metadata() {
     assert!(!path.join("completions.csv").exists());
     let meta_path=path.join("index.json");
     let mut saved: serde_json::Value=serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
-    saved["spelling_correction"]=json!(null); saved["query_completion"]=json!(null);
-    fs::write(&meta_path,serde_json::to_vec(&saved).unwrap()).unwrap();
     let reopened=open_index(path).await.unwrap(); assert_query(&reopened,"\"red apple\"",1).await;
     reopened.close().await;drop(reopened);
-    for field in ["spelling_correction","query_completion"] {
-        let mut enabled=saved.clone();enabled[field]=json!({});
-        fs::write(&meta_path,serde_json::to_vec(&enabled).unwrap()).unwrap();
-        match open_index(path).await {
-            Ok(_) => panic!("enabled retired metadata accepted"),
-            Err(error) => assert!(error.contains("has been removed"),"{error}"),
+    for field in ["spelling_correction","query_completion", "unknown_option"] {
+        for value in [json!(null), json!({})] {
+            saved[field]=value;
+            fs::write(&meta_path,serde_json::to_vec(&saved).unwrap()).unwrap();
+            match open_index(path).await {
+                Ok(_) => panic!("unknown metadata accepted"),
+                Err(error) => assert!(error.contains("unknown field"),"{error}"),
+            }
+            saved.as_object_mut().unwrap().remove(field);
         }
     }
     fs::remove_dir_all(path).unwrap();

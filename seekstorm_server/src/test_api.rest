@@ -715,7 +715,7 @@ content-type: application/json
         "index_lexical":false,
         "index_vector":false
     }] , 
-    "index_name": "sift1m_index",
+    "index_name": "vectors_index",
     "clustering": "None",
     "inference": {
         "External": { "dimensions": 128, "precision": "F32", "quantization": "ScalarQuantizationI8", "similarity": "Euclidean" }

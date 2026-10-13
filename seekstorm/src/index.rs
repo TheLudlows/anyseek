@@ -93,10 +93,10 @@ pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const VECTOR_FILENAME: &str = "vector.bin";
 
 const INDEX_HEADER_SIZE: u64 = 4;
-/// Incompatible index  format change: new library can't open old format, and old library can't open new format
-pub const INDEX_FORMAT_VERSION_MAJOR: u16 = 6;
-/// Backward compatible format change: new library can open old format, but old library can't open new format
-pub const INDEX_FORMAT_VERSION_MINOR: u16 = 1;
+/// Current on-disk format major version; opening requires an exact version match.
+pub const INDEX_FORMAT_VERSION_MAJOR: u16 = 7;
+/// Current on-disk format minor version; opening requires an exact version match.
+pub const INDEX_FORMAT_VERSION_MINOR: u16 = 0;
 
 /// Maximum processed positions per term per document: default=65_536. E.g. 65,536 * 'the' per document, exceeding positions are ignored for search.
 pub const MAX_POSITIONS_PER_TERM: usize = 65_536;
@@ -477,7 +477,6 @@ impl fmt::Display for LexicalSimilarity {
 
 /// Defines tokenizer behavior:
 /// AsciiAlphabetic
-/// - Mainly for for benchmark compatibility
 /// - Only ASCII alphabetic chars are recognized as token.
 ///
 /// UnicodeAlphanumeric
@@ -498,7 +497,7 @@ impl fmt::Display for LexicalSimilarity {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default)]
 #[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum TokenizerType {
-    /// Only ASCII alphabetic chars are recognized as token. Mainly for benchmark compatibility.
+    /// Only ASCII alphabetic chars are recognized as token.
     #[default]
     AsciiAlphabetic = 0,
     /// All Unicode alphanumeric chars are recognized as token.
@@ -510,9 +509,9 @@ pub enum TokenizerType {
     /// Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. "s" in "someone's").
     /// Tokenizing might be slower due to folding and apostroph processing.
     UnicodeAlphanumericFolded = 2,
-    /// Tokens are separated by whitespace. Mainly for benchmark compatibility.
+    /// Tokens are separated by whitespace.
     Whitespace = 3,
-    /// Tokens are separated by whitespace. Token are converted to lowercase. Mainly for benchmark compatibility.
+    /// Tokens are separated by whitespace. Token are converted to lowercase.
     WhitespaceLowercase = 4,
     /// Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
     /// Supports mixed Latin and Chinese texts
@@ -1182,6 +1181,7 @@ impl fmt::Display for Clustering {
 
 /// Specifies LexicalSimilarity, TokenizerType and AccessType when creating an new index
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct IndexMetaObject {
     /// unique index ID
     /// Only used in SeekStorm server, not by the SeekStorm library itself.
@@ -1253,40 +1253,17 @@ fn doc_store_compression_default() -> DocumentCompression {
 }
 
 /// Metadata dictionary used by filtering and sorting. Value IDs retain insertion order.
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct FacetField {
     /// Field name.
     pub name: String,
     /// String values or string sets, without occurrence counts.
-    #[serde(deserialize_with = "read_filter_dictionary")]
     pub values: IndexMap<String, Vec<String>>,
     #[serde(skip)]
     pub(crate) offset: usize,
     #[serde(skip)]
     pub(crate) field_type: FieldType,
-}
-
-// Read the historical dictionary representation, discarding retired statistics.
-fn read_filter_dictionary<'de, D>(deserializer: D) -> Result<IndexMap<String, Vec<String>>, D::Error>
-where D: serde::Deserializer<'de> {
-    let stored = IndexMap::<String, (Vec<String>, serde::de::IgnoredAny)>::deserialize(deserializer)?;
-    Ok(stored.into_iter().map(|(key, (values, _))| (key, values)).collect())
-}
-
-// Keep facet.json readable by the previous format without maintaining aggregates.
-// Counts and extrema are reserved compatibility slots, always zero/None on new writes.
-impl Serialize for FacetField {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::Serializer {
-        use serde::ser::SerializeStruct;
-        let values: IndexMap<_, _> = self.values.iter().map(|(key, value)| (key, (value, 0usize))).collect();
-        let mut stored = serializer.serialize_struct("FacetField", 4)?;
-        stored.serialize_field("name", &self.name)?;
-        stored.serialize_field("values", &values)?;
-        stored.serialize_field("min", "None")?;
-        stored.serialize_field("max", "None")?;
-        stored.end()
-    }
 }
 
 /// Shard wrapped in Arc and RwLock for concurrent read and write access.
@@ -1298,9 +1275,9 @@ pub type IndexArc = Arc<RwLock<Index>>;
 /// The shard object of the index. It contains all levels and all segments of the index.
 /// It also contains all properties that control indexing and intersection.
 pub struct Shard {
-    /// Incompatible index  format change: new library can't open old format, and old library can't open new format
+    /// Current on-disk format major version; opening requires an exact version match.
     pub index_format_version_major: u16,
-    /// Backward compatible format change: new library can open old format, but old library can't open new format
+    /// Current on-disk format minor version; opening requires an exact version match.
     pub index_format_version_minor: u16,
 
     /// Number of indexed documents
@@ -1439,9 +1416,9 @@ pub struct Shard {
 pub struct Index {
     pub(crate) docid_global: Arc<RwLock<usize>>,
 
-    /// Incompatible index  format change: new library can't open old format, and old library can't open new format
+    /// Current on-disk format major version; opening requires an exact version match.
     pub index_format_version_major: u16,
-    /// Backward compatible format change: new library can open old format, but old library can't open new format
+    /// Current on-disk format minor version; opening requires an exact version match.
     pub index_format_version_minor: u16,
 
     /// Number of indexed documents
@@ -1765,9 +1742,9 @@ pub(crate) async fn create_index_root(
 
             if !facets_vec.is_empty()
                 && let Ok(file) = File::open(Path::new(index_path).join(FACET_VALUES_FILENAME))
-                && let Ok(facets) = serde_json::from_reader(BufReader::new(file))
             {
-                let mut facets: Vec<FacetField> = facets;
+                let mut facets: Vec<FacetField> = serde_json::from_reader(BufReader::new(file))
+                    .map_err(|e| format!("invalid metadata dictionary: {e}"))?;
                 if facets_vec.len() == facets.len() {
                     for i in 0..facets.len() {
                         facets[i].offset = facets_vec[i].offset;
@@ -1930,15 +1907,14 @@ pub(crate) async fn create_index_root(
                 index.index_format_version_minor =
                     read_u16(&index.compressed_index_segment_block_buffer, 2);
 
-                if INDEX_FORMAT_VERSION_MAJOR != index.index_format_version_major {
-                    return Err("incompatible index format version ".to_string()
-                        + &INDEX_FORMAT_VERSION_MAJOR.to_string()
-                        + " "
-                        + &index.index_format_version_major.to_string());
-                };
-
-                if index.index_format_version_major == 6 && index.index_format_version_minor == 0 {
-                    index.meta.document_compression = DocumentCompression::Zstd;
+                if (index.index_format_version_major, index.index_format_version_minor)
+                    != (INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR)
+                {
+                    return Err(format!(
+                        "unsupported index format {}.{}; expected {}.{}",
+                        index.index_format_version_major, index.index_format_version_minor,
+                        INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR,
+                    ));
                 }
             }
 
@@ -2143,9 +2119,9 @@ pub(crate) fn create_shard(
 
             if !facets_vec.is_empty()
                 && let Ok(file) = File::open(Path::new(index_path).join(FACET_VALUES_FILENAME))
-                && let Ok(facets) = serde_json::from_reader(BufReader::new(file))
             {
-                let mut facets: Vec<FacetField> = facets;
+                let mut facets: Vec<FacetField> = serde_json::from_reader(BufReader::new(file))
+                    .map_err(|e| format!("invalid metadata dictionary: {e}"))?;
                 if facets_vec.len() == facets.len() {
                     for i in 0..facets.len() {
                         facets[i].offset = facets_vec[i].offset;
@@ -2408,15 +2384,14 @@ pub(crate) fn create_shard(
                 index.index_format_version_minor =
                     read_u16(&index.compressed_index_segment_block_buffer, 2);
 
-                if INDEX_FORMAT_VERSION_MAJOR != index.index_format_version_major {
-                    return Err("incompatible index format version ".to_string()
-                        + &INDEX_FORMAT_VERSION_MAJOR.to_string()
-                        + " "
-                        + &index.index_format_version_major.to_string());
-                };
-
-                if index.index_format_version_major == 6 && index.index_format_version_minor == 0 {
-                    index.meta.document_compression = DocumentCompression::Zstd;
+                if (index.index_format_version_major, index.index_format_version_minor)
+                    != (INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR)
+                {
+                    return Err(format!(
+                        "unsupported index format {}.{}; expected {}.{}",
+                        index.index_format_version_major, index.index_format_version_minor,
+                        INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR,
+                    ));
                 }
             }
 
@@ -2795,24 +2770,6 @@ pub(crate) fn update_list_max_impact_score(index: &mut Shard) {
     }
 }
 
-fn read_index_schema(file: File) -> Result<Vec<SchemaField>, String> {
-    let value: Value = serde_json::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
-    if value.as_array().is_some_and(|fields| fields.iter().any(|field| field.get("field_type").and_then(Value::as_str) == Some("Point"))) {
-        return Err("geographic Point fields have been removed; export the records with the previous version and rebuild without Point fields".into());
-    }
-    serde_json::from_value(value).map_err(|e| e.to_string())
-}
-
-fn read_index_meta(file: File) -> Result<IndexMetaObject, String> {
-    let value: Value = serde_json::from_reader(BufReader::new(file)).map_err(|e| e.to_string())?;
-    for field in ["spelling_correction", "query_completion"] {
-        if value.get(field).is_some_and(|v| !v.is_null()) {
-            return Err(format!("{field} has been removed; export the records and rebuild without query rewriting"));
-        }
-    }
-    serde_json::from_value(value).map_err(|e| e.to_string())
-}
-
 /// Loads the index from disk into RAM or MMAP.
 /// * `index_path` - index path.
 /// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).
@@ -2839,12 +2796,12 @@ pub(crate) async fn open_shard(
 
     match File::open(Path::new(index_path).join(META_FILENAME)) {
         Ok(meta_file) => {
-            let meta: IndexMetaObject = read_index_meta(meta_file)
+            let meta: IndexMetaObject = serde_json::from_reader(BufReader::new(meta_file))
                 .map_err(|e| format!("unsupported or invalid index metadata: {e}"))?;
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
                 Ok(schema_file) => {
-                    let schema = read_index_schema(schema_file)
+                    let schema: Vec<SchemaField> = serde_json::from_reader(BufReader::new(schema_file))
                         .map_err(|e| format!("invalid index schema: {e}"))?;
 
                     let synonyms = if let Ok(synonym_file) =
@@ -3402,12 +3359,12 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
 
     match File::open(Path::new(index_path).join(META_FILENAME)) {
         Ok(meta_file) => {
-            let meta: IndexMetaObject = read_index_meta(meta_file)
+            let meta: IndexMetaObject = serde_json::from_reader(BufReader::new(meta_file))
                 .map_err(|e| format!("unsupported or invalid index metadata: {e}"))?;
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
                 Ok(schema_file) => {
-                    let schema = read_index_schema(schema_file)
+                    let schema: Vec<SchemaField> = serde_json::from_reader(BufReader::new(schema_file))
                         .map_err(|e| format!("invalid index schema: {e}"))?;
 
                     let synonyms = if let Ok(synonym_file) =

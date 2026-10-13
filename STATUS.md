@@ -1,8 +1,8 @@
 # SeekPower 执行状态
 
-更新日期：2026-10-13（Asia/Shanghai）。[当前功能](FEATURES.md) · [后续计划](SEEKPOWER_PLAN.md) · [验证记录](VALIDATION.md) · [迁移说明](MIGRATION.md)
+更新日期：2026-10-14（Asia/Shanghai）。[当前功能](FEATURES.md) · [后续计划](SEEKPOWER_PLAN.md) · [验证记录](VALIDATION.md) · [迁移说明](MIGRATION.md)
 
-S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 已合入。PR #11 聚合裁剪已合入 `97bea80`。本分支实施 S2.1 的共享过滤，尚未合入。
+S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 已合入。PR #11 聚合裁剪已合入 `97bea80`。PR #12 共享过滤已合入 `ea32aa1`。本分支删除旧索引兼容与历史基准描述，尚未合入。
 
 | 批次 | 范围 | 状态 | 本批已通过测试数 |
 | --- | --- | --- | --- |
@@ -25,14 +25,14 @@ S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 �
 
 本次删除分面计数、直方图、范围聚合和字段 min/max，保留普通过滤、排序、命中总数及分页；UI 改为手动日期输入。[CI 38420880047](https://github.com/TheLudlows/seekpower/actions/runs/38420880047) 全部通过：独立核心构建、workspace 构建、58 个 Rust 测试、HTTP/Chromium、7 个 UI 资源、OpenAPI 精确对比；本地另有 44 项 doctest 通过。
 
-## 本次共享过滤
+## 已合入共享过滤
 
-三种模式复用 schema 校验与每分片元数据谓词。向量评分/Top-K 前排除不匹配和已删除记录；修复未提交集合成员映射及清空后的映射重用。API 和日期 UI 回归覆盖三种模式，详见 VALIDATION。本批尚未合入；稳定业务 ID/版本不在本批范围。
+三种模式复用 schema 校验与每分片元数据谓词。向量评分/Top-K 前排除不匹配和已删除记录；修复未提交集合成员映射及清空后的映射重用。API 和日期 UI 回归覆盖三种模式，详见 VALIDATION。PR #12 的 [CI 38425247167](https://github.com/TheLudlows/seekpower/actions/runs/38425247167) 已通过 60 项 Rust 测试、HTTP/Chromium 与 OpenAPI 精确对比；稳定业务 ID/版本不在该批范围。
 
 ## 下一步与边界
 
-1. 验证并审查本次共享过滤；三种模式复用谓词，向量评分/Top-K 前过滤。
+1. 本次删除旧索引兼容：仅支持格式 7.0，删除字典统计占位、6.0 压缩兜底和专用迁移逻辑；清除历史基准描述。
 2. 随后推进 S2.1 的稳定业务 ID/版本契约；其他裁剪项需另行确认。
 3. 单机可靠性验收后再推进分布式路由、复制恢复和弹性。
 
-保留 Rust 核心、HTTP 服务与 Web UI。三种模式现已在本分支支持元数据过滤；ANN 保留簇探测限制；稳定 ID、WAL/检查点、共同可见视图与生产可靠性验收尚未完成。完整现状统一维护在 [FEATURES.md](FEATURES.md)，不以路线图替代实现清单。
+保留 Rust 核心、HTTP 服务与 Web UI。三种模式现已在主干支持元数据过滤；ANN 保留簇探测限制；稳定 ID、WAL/检查点、共同可见视图与生产可靠性验收尚未完成。完整现状统一维护在 [FEATURES.md](FEATURES.md)，不以路线图替代实现清单。

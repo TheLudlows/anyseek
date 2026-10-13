@@ -53,11 +53,6 @@ pub enum AnnMode {
     /// Instead, you manually tune parameters that control the tradeoff between query latency and accuracy.
     /// Because recall depends heavily on the structure of your specific data (distribution, dimensionality, and clustering) and queries,
     /// there is always a trial-and-error (benchmarking) phase required to determine the right settings for your data.
-    /// Examples:
-    /// wikipedia, VectorSimilarity::Dot, dimensions: 64, Precision::F32, Clustering::Auto, Clustering::I8, recall@10=95% -> Nprobe(55)
-    /// wikipedia, VectorSimilarity::Dot, dimensions: 64, Precision::F32, Clustering::Auto, Clustering::I8, recall@10=99% -> Nprobe(140)
-    /// sift1m, VectorSimilarity::Euclidean, dimensions: 128, Precision::F32, Clustering::Auto, Quantization::None, recall@10=95% -> Nprobe(11)
-    /// sift1m, VectorSimilarity::Euclidean, dimensions: 128, Precision::F32, Clustering::Auto, Quantization::None, recall@10=99% -> Nprobe(22)
     Nprobe(usize),
     /// Search only in clusters with similarity scores to the query vector above the specified threshold.
     /// For dot product similarity, the similarity threshold should be between 0.0 and 1.0, where higher values indicate higher similarity (identical=1.0).
