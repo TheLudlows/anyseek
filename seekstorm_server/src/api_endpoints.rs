@@ -909,7 +909,7 @@ pub(crate) async fn delete_documents_by_query_api(
 /// - include_document: if true, the documents are also retrieved along with their document IDs.
 /// Next page:     take last  docid from previous result set, skip=1, take=+page_size
 /// Previous page: take first docid from previous result set, skip=1, take=-page_size
-/// Returns an IteratorResult, consisting of the number of actually skipped document IDs, and a list of taken document IDs and documents, sorted ascending).
+/// Returns an IteratorResult, consisting of the number of actually skipped document IDs, and a list of taken document IDs and documents, ordered in traversal direction (ascending for positive take, descending for negative take).
 /// Detect end/begin of index during iteration: if returned vec.len() < requested take || if returned skip <requested skip
 #[utoipa::path(
     post,

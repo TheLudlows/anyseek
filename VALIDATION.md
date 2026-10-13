@@ -309,3 +309,9 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - 同步 OpenAPI、HTTP 示例和说明；保持核心检索/迭代/存储代码不变，保留所有既有 Rust 测试。旧方法的 HTTP 断言迁移为拒绝契约，POST 的旧参数校验继续覆盖。新增 iterator 正向/反向分页、字段投影、旧协议退出与方法/鉴权回归。
 - 本地已执行：`python -m py_compile scripts/http_smoke.py`、`git diff --check`；OpenAPI JSON/YAML 解析结果相等，组件 schema 和其他路径相对基准保持一致。
 - 本地无 Rust/cargo，未执行或宣称本地构建、Rust/HTTP/Chromium 测试通过；PR CI 结果待回填。
+
+### 首次 CI 与测试修正
+
+- 代码 `5f621acad23964feb9fcece5f4cf0723d9321e94` 的 [CI 38409081606](https://github.com/TheLudlows/seekpower/actions/runs/38409081606)：独立核心构建、workspace 构建、依赖图、58 个 Rust 测试和 OpenAPI 精确对比通过；HTTP 在新增反向遍历断言失败，未执行后续浏览器场景，不能算整体验证通过。
+- 原因是本次新增测试误按旧文档“sorted ascending”比较正反向结果；核对未改动的 `iterator.rs::get_iterator`，负 take 分支按 docid 递减依次 push，实际返回降序。
+- 修正新增测试为与正向末页严格逆序比较，并同步服务接口/OpenAPI 描述。没有删除测试、放宽为无序集合比较或修改核心迭代行为。修复后的 CI 待执行。

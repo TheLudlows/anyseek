@@ -239,7 +239,8 @@ def exercise(binary, workdir):
                   f'POST iterator next page: {next_page}')
             last_page = api('POST', path + '/iterator', {'take': -2})
             check([item['doc_id'] for item in last_page['results']] ==
-                  [item['doc_id'] for item in next_page['results']], 'POST iterator reverse traversal')
+                  [item['doc_id'] for item in reversed(next_page['results'])],
+                  f'POST iterator reverse traversal: last={last_page}, next={next_page}')
             for suffix, body in [('/query', {'query': 'test'}), ('/iterator', {'take': 1})]:
                 for method in ('GET', 'QUERY'):
                     for ending in ('', '/', '?query=test'):
