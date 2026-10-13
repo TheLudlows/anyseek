@@ -1,5 +1,4 @@
 use hyper_util::server::conn::auto;
-use rkyv::rancor::Error;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -28,10 +27,7 @@ use seekstorm::index::{
     CreateIndexRequest, Document,
     GetDocumentRequest, GetIteratorRequest, SearchRequestObject, Synonym,
 };
-use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
 
-use seekstorm::vector::Embedding;
-use seekstorm::vector_similarity::AnnMode;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -53,9 +49,9 @@ use crate::api_endpoints::delete_index_api;
 use crate::api_endpoints::get_apikey_indices_info_api;
 use crate::api_endpoints::{get_document_api, get_synonyms_api};
 use crate::api_endpoints::{
-    get_iterator_api_get, get_iterator_api_post, live_api, update_document_api,
+    get_iterator_api_post, live_api, update_document_api,
 };
-use crate::api_endpoints::{index_document_api, query_index_api_get, query_index_api_post};
+use crate::api_endpoints::{index_document_api, query_index_api_post};
 use crate::multi_tenancy::{ApikeyObject, CreateApikeyRequest, DeleteApikeyRequest, get_apikey_hash};
 use crate::{MASTER_KEY_SECRET, VERSION};
 
@@ -150,16 +146,6 @@ pub(crate) async fn http_request_handler(
     _remote_addr: SocketAddr,
     force_shard_number: Option<usize>,
 ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
-    if req.method() == Method::OPTIONS {
-        return Ok(Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .header("Access-Control-Allow-Origin", "*")
-            .header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-            .header("Access-Control-Allow-Headers", "content-type, apikey")
-            .body(BoxBody::new(Full::new(Bytes::new())))
-            .unwrap());
-    }
-
     let apikey_header = req
         .headers()
         .get("apikey")
@@ -181,6 +167,34 @@ pub(crate) async fn http_request_handler(
         }
     }
 
+    // Retired binary protocol has no deserializer or execution path.
+    if parts[0..3] == ["api", "v2", "index"] && parts[4] == "query" {
+        return Ok(status(StatusCode::NOT_FOUND,
+            "binary query endpoint removed; use POST /api/v1/index/{index_id}/query with JSON".to_string()));
+    }
+    let post_json_endpoint = parts[0..3] == ["api", "v1", "index"]
+        && matches!(parts[4], "query" | "iterator") && parts[5].is_empty();
+    if req.method() == Method::OPTIONS {
+        return Ok(Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header("Access-Control-Allow-Origin", "*")
+            .header("Access-Control-Allow-Methods", if post_json_endpoint { "POST, OPTIONS" } else { "POST, GET, OPTIONS" })
+            .header("Access-Control-Allow-Headers", "content-type, apikey")
+            .body(BoxBody::new(Full::new(Bytes::new())))
+            .unwrap());
+    }
+    if post_json_endpoint {
+        if req.method() != Method::POST {
+            let mut response = status(StatusCode::METHOD_NOT_ALLOWED,
+                "use POST with a JSON request body for search and document iteration".to_string());
+            response.headers_mut().insert("Allow", HeaderValue::from_static("POST, OPTIONS"));
+            return Ok(response);
+        }
+        if req.uri().query().is_some_and(|query| !query.is_empty()) {
+            return HttpServerError::BadRequest("put all query/iterator parameters in the JSON request body, not the URL".to_string()).into();
+        }
+    }
+
     match (
         parts[0],
         parts[1],
@@ -195,89 +209,8 @@ pub(crate) async fn http_request_handler(
             Ok(Response::new(BoxBody::new(Full::new(live_message.into()))))
         }
 
-        ("api", "v2", "index", _, "query", _, method)
-            if *method == Method::POST || *method == Method::QUERY =>
-        {
-            let Some(apikey) = apikey_header else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            let Ok(index_id) = parts[3].parse() else {
-                return HttpServerError::IndexNotFound.into();
-            };
-
-            let apikey_list_ref = apikey_list.read().await;
-            let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            let Some(index_arc) = apikey_object.index_list.get(&index_id) else {
-                return HttpServerError::IndexNotFound.into();
-            };
-
-            let Ok(collected_body) = req.into_body().collect().await else {
-                return HttpServerError::BadRequest("failed to read request body".to_string())
-                    .into();
-            };
-            let request_bytes = collected_body.to_bytes();
-
-            let mut aligned = rkyv::util::AlignedVec::<16>::new();
-            aligned.extend_from_slice(&request_bytes);
-            let query_vector = match rkyv::from_bytes::<Vec<f32>, Error>(&aligned) {
-                Ok(vector) => vector,
-                Err(error) => return HttpServerError::BadRequest(format!("invalid binary vector: {error}")).into(),
-            };
-
-            let index_arc_clone = index_arc.clone();
-
-            let search_result = index_arc_clone
-                .search(
-                    String::new(),
-                    Some(Embedding::F32(query_vector)),
-                    QueryType::Intersection,
-                    SearchMode::Vector {
-                        similarity_threshold: None,
-                        ann_mode: AnnMode::Nprobe(15),
-                    },
-                    false,
-                    0,
-                    10,
-                    ResultType::Topk,
-                    false,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-                .await;
-
-            if let Some(error) = search_result.error { return HttpServerError::BadRequest(error).into(); }
-            let mut docid_vector: Vec<u64> = Vec::new();
-            for result in search_result.results.iter() {
-                docid_vector.push(result.doc_id as u64);
-            }
-
-            let response_bytes = rkyv::to_bytes::<Error>(&docid_vector).unwrap().into_vec();
-
-            match Ok::<Vec<u8>, String>(response_bytes) {
-                Ok(response_bytes) => {
-                    let response = Response::builder()
-                        .status(StatusCode::OK)
-                        .header("Content-Type", "application/octet-stream")
-                        .header("content-length", response_bytes.len())
-                        .body(BoxBody::new(Full::new(response_bytes.into())))
-                        .unwrap();
-                    Ok(response)
-                }
-                Err(e) => HttpServerError::BadRequest(e.to_string()).into(),
-            }
-        }
-
         ("api", "v1", "index", _, "query", _, method)
-            if *method == Method::POST || *method == Method::QUERY =>
+            if *method == Method::POST =>
         {
             let Some(apikey) = apikey_header else {
                 return HttpServerError::Unauthorized.into();
@@ -317,152 +250,6 @@ pub(crate) async fn http_request_handler(
             };
 
             let search_result_local = match query_index_api_post(&index_arc_clone, search_request).await {
-                Ok(result) => result,
-                Err(error) => return HttpServerError::BadRequest(error).into(),
-            };
-
-            let search_result_json = serde_json::to_vec(&search_result_local).unwrap();
-            Ok(Response::new(BoxBody::new(Full::new(
-                search_result_json.into(),
-            ))))
-        }
-
-        ("api", "v1", "index", _, "query", _, &Method::GET) => {
-            let Some(apikey) = apikey_header else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            let Ok(index_id) = parts[3].parse() else {
-                return HttpServerError::IndexNotFound.into();
-            };
-
-            let apikey_list_ref = apikey_list.read().await;
-            let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            let Some(index_arc) = apikey_object.index_list.get(&index_id) else {
-                return HttpServerError::IndexNotFound.into();
-            };
-
-            let index_arc_clone = index_arc.clone();
-            drop(apikey_list_ref);
-
-            let params: HashMap<String, String> = req
-                .uri()
-                .query()
-                .map(|v| {
-                    url::form_urlencoded::parse(v.as_bytes())
-                        .into_owned()
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            for name in params.keys() {
-                if !["query", "offset", "length", "realtime", "enable_empty_query"].contains(&name.as_str()) {
-                    return HttpServerError::BadRequest(format!("unsupported query URL parameter: {name}; use the JSON request body for supported advanced options")).into();
-                }
-            }
-            let search_request = if !params.is_empty() {
-                let query_string = if let Some(query_string) = params.get("query") {
-                    query_string.to_string()
-                } else {
-                    "".to_string()
-                };
-
-                let offset = if let Some(value) = params.get("offset") {
-                    let Ok(api_offset) = value.parse::<usize>() else {
-                        return HttpServerError::BadRequest(
-                            "offset invalid or missing".to_string(),
-                        )
-                        .into();
-                    };
-                    api_offset
-                } else {
-                    0
-                };
-
-                let length = if let Some(value) = params.get("length") {
-                    let Ok(api_length) = value.parse::<usize>() else {
-                        return HttpServerError::BadRequest(
-                            "length invalid or missing".to_string(),
-                        )
-                        .into();
-                    };
-                    api_length
-                } else {
-                    10
-                };
-
-                let realtime = if let Some(value) = params.get("realtime") {
-                    let Ok(realtime) = value.parse::<bool>() else {
-                        return HttpServerError::BadRequest(
-                            "realtime invalid or missing".to_string(),
-                        )
-                        .into();
-                    };
-                    realtime
-                } else {
-                    true
-                };
-
-                let enable_empty_query = if let Some(value) = params.get("enable_empty_query") {
-                    let Ok(enable_empty_query) = value.parse::<bool>() else {
-                        return HttpServerError::BadRequest(
-                            "enable_empty_query invalid or missing".to_string(),
-                        )
-                        .into();
-                    };
-                    enable_empty_query
-                } else {
-                    true
-                };
-
-                SearchRequestObject {
-                    query_string,
-                    query_vector: None,
-                    enable_empty_query,
-                    offset,
-                    length,
-                    result_type: ResultType::default(),
-                    realtime,
-                    field_filter: Vec::new(),
-                    fields: Vec::new(),
-                    query_facets: Vec::new(),
-                    facet_filter: Vec::new(),
-                    result_sort: Vec::new(),
-                    query_type_default: QueryType::Intersection,
-                    search_mode: SearchMode::Lexical,
-                }
-            } else {
-                let Ok(collected_body) = req.into_body().collect().await else {
-                    return HttpServerError::BadRequest("failed to read request body".to_string())
-                        .into();
-                };
-                let request_bytes = collected_body.to_bytes();
-
-                match request_bytes.is_empty() {
-                    true => {
-                        return HttpServerError::BadRequest("no query specified".to_string())
-                            .into();
-                    }
-                    false => {
-                        let search_request: SearchRequestObject =
-                            match serde_json::from_slice::<SearchRequestObject>(&request_bytes) {
-                                Ok(document_object) => document_object,
-                                Err(e) => {
-                                    return HttpServerError::BadRequest(e.to_string()).into();
-                                }
-                            };
-                        search_request
-                    }
-                }
-            };
-
-            let search_result_local = match query_index_api_get(&index_arc_clone, search_request).await {
                 Ok(result) => result,
                 Err(error) => return HttpServerError::BadRequest(error).into(),
             };
@@ -1085,7 +872,7 @@ pub(crate) async fn http_request_handler(
         }
 
         ("api", "v1", "index", _, "iterator", "", method)
-            if *method == Method::POST || *method == Method::QUERY =>
+            if *method == Method::POST =>
         {
             let Some(apikey) = apikey_header else {
                 return HttpServerError::Unauthorized.into();
@@ -1133,130 +920,6 @@ pub(crate) async fn http_request_handler(
                 get_iterator_request.include_deleted,
                 get_iterator_request.include_document,
                 get_iterator_request.fields.clone(),
-            )
-            .await;
-            drop(apikey_list_ref);
-
-            let status_object_json = serde_json::to_vec(&status_object).unwrap();
-            Ok(Response::new(BoxBody::new(Full::new(
-                status_object_json.into(),
-            ))))
-        }
-
-        ("api", "v1", "index", _, "iterator", "", &Method::GET) => {
-            let Some(apikey) = apikey_header else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            let Ok(index_id) = parts[3].parse() else {
-                return HttpServerError::BadRequest("index_id invalid or missing".to_string())
-                    .into();
-            };
-
-            let params: HashMap<String, String> = req
-                .uri()
-                .query()
-                .map(|v| {
-                    url::form_urlencoded::parse(v.as_bytes())
-                        .into_owned()
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            for name in params.keys() {
-                if !["document_id", "skip", "take", "include_deleted", "include_document", "fields"].contains(&name.as_str()) {
-                    return HttpServerError::BadRequest(format!("unsupported iterator URL parameter: {name}")).into();
-                }
-            }
-            let document_id = if let Some(doc_id) = params.get("document_id") {
-                match doc_id.parse::<u64>() {
-                    Ok(id) => Some(id),
-                    Err(_) => return HttpServerError::BadRequest("document_id is invalid".into()).into(),
-                }
-            } else {
-                None
-            };
-
-            let skip = if let Some(skip_str) = params.get("skip") {
-                match skip_str.parse::<usize>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        return HttpServerError::BadRequest("skip is invalid".to_string()).into();
-                    }
-                }
-            } else {
-                0
-            };
-
-            let take = if let Some(take_str) = params.get("take") {
-                match take_str.parse::<isize>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        return HttpServerError::BadRequest("take is invalid".to_string()).into();
-                    }
-                }
-            } else {
-                1
-            };
-
-            let include_deleted = if let Some(include_deleted_str) = params.get("include_deleted") {
-                match include_deleted_str.parse::<bool>() {
-                    Ok(value) => value,
-                    Err(_) => {
-                        return HttpServerError::BadRequest(
-                            "include_deleted is invalid".to_string(),
-                        )
-                        .into();
-                    }
-                }
-            } else {
-                false
-            };
-
-            let include_document =
-                if let Some(include_document_str) = params.get("include_document") {
-                    match include_document_str.parse::<bool>() {
-                        Ok(value) => value,
-                        Err(_) => {
-                            return HttpServerError::BadRequest(
-                                "include_document is invalid".to_string(),
-                            )
-                            .into();
-                        }
-                    }
-                } else {
-                    false
-                };
-
-            let fields = if let Some(fields_str) = params.get("fields") {
-                match serde_json::from_str::<Vec<String>>(fields_str) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        return HttpServerError::BadRequest("fields is invalid".to_string()).into();
-                    }
-                }
-            } else {
-                vec![]
-            };
-
-            let apikey_list_ref = apikey_list.read().await;
-            let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(index_arc) = apikey_object.index_list.get(&index_id) else {
-                return HttpServerError::IndexNotFound.into();
-            };
-            let status_object = get_iterator_api_get(
-                index_arc,
-                document_id,
-                skip,
-                take,
-                include_deleted,
-                include_document,
-                fields,
             )
             .await;
             drop(apikey_list_ref);

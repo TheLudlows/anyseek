@@ -300,3 +300,37 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - 尚有非阻塞 Rust 警告：未使用的字段/函数、导入/变量、无默认特性下的变量，以及既有 query_contract 测试文档缺失；不宣称构建零警告。未执行真实 IPv6 网络连接、AArch64、生产性能与恢复故障注入。
 - [PR #9](https://github.com/TheLudlows/seekpower/pull/9) 代码和本批验证完成，等待审查合入。此后仅回填三份 Markdown，运行代码与上述通过 CI 的 `7d5d20c` 相同；最新 head 的自动检查见 PR Checks。状态文档合并为当前里程碑视图，历史过程保留在本记录。
 - S1.5 清单暂不勾选，Issue #1 保持打开；合入后核对 S1 退出证据。两路共同过滤、稳定 ID/版本、日志/恢复和完整可靠性/性能验收仍属 S2。
+
+## B1/B2：二进制协议与重复方法裁剪（2026-10-13）
+
+- 基准：master `4df02a860d9cacf37a9265819294be4147b5a536`；用户确认仅 B1/B2。
+- 删除 v2 rkyv 解码/检索/编码实现与 rkyv/url 服务依赖；v2 查询返回 404。
+- v1 搜索和遍历统一 POST JSON；GET/QUERY 返回 405 + `Allow: POST, OPTIONS`；POST URL 参数返回 400，OPTIONS 保留。
+- 同步 OpenAPI、HTTP 示例和说明；保持核心检索/迭代/存储代码不变，保留所有既有 Rust 测试。旧方法的 HTTP 断言迁移为拒绝契约，POST 的旧参数校验继续覆盖。新增 iterator 正向/反向分页、字段投影、旧协议退出与方法/鉴权回归。
+- 本地已执行：`python -m py_compile scripts/http_smoke.py`、`git diff --check`；OpenAPI JSON/YAML 解析结果相等，组件 schema 和其他路径相对基准保持一致。
+- 本地无 Rust/cargo，未执行或宣称本地构建、Rust/HTTP/Chromium 测试通过；PR CI 结果待回填。
+
+### 首次 CI 与测试修正
+
+- 代码 `5f621acad23964feb9fcece5f4cf0723d9321e94` 的 [CI 38409081606](https://github.com/TheLudlows/seekpower/actions/runs/38409081606)：独立核心构建、workspace 构建、依赖图、58 个 Rust 测试和 OpenAPI 精确对比通过；HTTP 在新增反向遍历断言失败，未执行后续浏览器场景，不能算整体验证通过。
+- 原因是本次新增测试误按旧文档“sorted ascending”比较正反向结果；核对未改动的 `iterator.rs::get_iterator`，负 take 分支按 docid 递减依次 push，实际返回降序。
+- 修正新增测试为与正向末页严格逆序比较，并同步服务接口/OpenAPI 描述。没有删除测试、放宽为无序集合比较或修改核心迭代行为。修复后的 CI 待执行。
+
+### B1/B2 修复后验证通过
+
+- PR：[#10](https://github.com/TheLudlows/seekpower/pull/10)，尚未合入。
+- 裁剪提交：`5f621acad23964feb9fcece5f4cf0723d9321e94`；测试/说明修正提交：`f8d084abcfae4b1005cc2291cf4c51f70231529f`。
+- [CI 38410014728](https://github.com/TheLudlows/seekpower/actions/runs/38410014728) **success**：独立核心默认/无默认特性构建、workspace 构建、依赖图（无 rkyv）、58 tests（0 failed/ignored/filtered）、HTTP/UI 11 个资源、Chromium 交互及生成 OpenAPI JSON/YAML 与仓库文件精确一致。
+- 新契约验证：旧二进制 GET/POST/QUERY/OPTIONS 全部 404；搜索/遍历 GET/QUERY（含尾斜杠与 URL 参数）405 + Allow；POST 鉴权/非法 JSON/URL 参数校验；迭代正向分页、反向顺序和正向字段投影。
+- 保留路径验证：JSON CRUD、外部 JSON/base64 向量与 hybrid、普通过滤/日期排序、原文展示、鉴权隔离/重启/撤销。没有修改核心索引格式或检索实现，也没有删除/跳过既有 Rust 测试。
+- 此后仅回填计划/状态/验证文档，最新 head CI 见 PR Checks。本记录不替代 S2 的可靠性和性能验收。
+
+## 2026-10-13：当前功能清单与文档收敛
+
+基于 PR #10 的 `c25d169d86e7aea8fec363659526ce5c06d5338f`。该提交的 [CI 38410851269](https://github.com/TheLudlows/seekpower/actions/runs/38410851269) 已成功；主干仍为 `4df02a8`，B1/B2 尚未合入。
+
+- 新增 FEATURES：逐项核对核心配置/检索、实际 HTTP 路由、终端命令、Web UI 与构建特性。覆盖全部 15 个 OpenAPI 操作，另列 4 个未登记的 v1 操作（关闭索引及同义词 GET/POST/PUT）、version、静态资源和预检。
+- README 从 1177 行缩为 64 行，清除旧模型/切块/纠错宣传、旧性能数字、上游演示和重复教程入口；服务、架构、N-gram、分面、状态和计划同步收敛。迁移信息移至 MIGRATION。
+- 原 README 的 29 个 Rust 示例迁至 docs/library-examples.md，并更新 rustdoc include；保留 FACETED_SEARCH 的 11 个 Rust 示例。移除示例中的已删除 QueryRewriting 引用并修正旧 FacetFilter 名称；核心 rustdoc 修正 String15 拼写和误注释的 clustering 字段。服务 rustdoc 删除重复且过时的 curl 示例。
+- 本地检查通过：Markdown 文件链接/代码块完整性、JSON/shell 示例语法、API 清单覆盖、Rust 示例数量与允许的文本差异、git diff --check。剔除注释及 rustdoc include 路径后，两处修改的 Rust 文件可执行部分与父提交完全相同。
+- 本次仅改文档、文档示例和 rustdoc 引用；保留原有测试、验证历史及许可证。当前环境无 Rust 工具链，未声称本地执行 cargo 或 rustdoc 编译；本次提交的远端结果以 PR Checks 为准。现有 CI 的 all-targets 不包含 doctest，不将示例静态检查称作编译通过。

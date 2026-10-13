@@ -1,217 +1,70 @@
-> Build this SeekPower service from the repository; upstream registry packages and Docker images do not include the pruning changes. Quotas and built-in rate limiting are removed. Key creation accepts `{}` or `{"demo":true}` and requires the master key; scoped keys, old key files and index directories remain supported. See the [migration notes](../README.md).
+# SeekPower HTTP 服务
 
-> SeekPower S1.3: file parsing and local dataset import have been removed. Prepare text, vectors and metadata externally, then send a JSON object or array to `POST /api/v1/index/{index_id}/doc`. PDF/CSV parsing, directory scanning, local JSON/SIFT import and PDF attachment hosting are no longer engine responsibilities. No PDFium installation is needed. Existing indexed records remain readable; legacy PDF files are not deleted, but the service no longer serves them. Host source files externally and put their URL in a record.
+本服务托管 JSON API 与内嵌搜索 UI。完整路由及功能边界见 [FEATURES.md](../FEATURES.md)；请求字段见 [OpenAPI](openapi/openapi.yml) 和 [HTTP 示例](src/test_api.rest)。
 
-> SeekPower S1.2: model inference and automatic chunking have been removed. Supply external vectors through the HTTP API. The Web UI defaults to Lexical; Vector/Hybrid require a pasted JSON vector and display validation errors. See the [external vector contract](../README.md#external-vector-contract) for configuration, error handling and migration details.
+## 启动
 
-# SeekStorm server 
-
-SeekStorm open-source, multi-tenancy, vector & lexical search server
-
-<img src="assets/logo.png" width="450" alt="Logo"><br>
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/SeekStorm/SeekStorm?tab=Apache-2.0-1-ov-file#readme)
-[![Roadmap](https://img.shields.io/badge/Roadmap-2026-DA7F07.svg)](#roadmap)
-
-* The SeekStorm server is a standalone search server to be accessed via HTTP, while the SeekStorm crate/library can be embedded into your program.
-* Index and search via [RESTful API](#rest-api-endpoints) endpoints and via [Embedded  web UI](#open-embedded-web-ui-in-browser).
-* Multi-tenancy index management: multiple users, each with multiple indices
-* API-key management
-* Cross-platform: runs on Linux, Windows, and macOS (other OS untested)
-
-## Command line parameters
-
-* index_path   (default = "/seekstorm_index" in the path of the current running executable)
-* local_ip     (default = 0.0.0.0)
-* local_port   (default = 80)
-* generate_openapi (default = false): write JSON/YAML API descriptions beside the executable and exit.
-* force_shard_number (positive integer) : Set number of shards manually.
-    - not set: number of shards is set automatically = number of physical processor cores (default)
-    - small: slower indexing, higher latency, slightly higher throughput, faster realtime search, lower RAM consumption, more frequent auto-commit (docs round-robin distributed across shards, commit after 64k docs per shard)
-    - large: faster indexing, lower latency, slightly lower throughput, slower realtime search, higher RAM consumption, less frequent auto-commit (docs round-robin distributed across shards, commit after 64k docs per shard)
-
-```
-./seekstorm_server.exe local_ip="127.0.0.1" local_port=80 index_path="c:/seekstorm_index"
+```sh
+cargo build --workspace
+export MASTER_KEY_SECRET='replace-with-your-private-secret'
+target/debug/seekstorm_server local_ip=127.0.0.1 local_port=8080
 ```
 
-Unknown, malformed or duplicate startup options fail with exit code 2 before startup. Paths may contain `=`.
+| 参数 | 默认值/用途 |
+| --- | --- |
+| `index_path` | `seekstorm_index`；相对路径按可执行文件目录解析 |
+| `local_ip` | `0.0.0.0` |
+| `local_port` | `80` |
+| `force_shard_number` | 未设置时按物理 CPU 核数；显式设置须为正整数，是本机并行分片数 |
+| `generate_openapi` | `false`；设为 `true` 时生成 JSON/YAML 到可执行文件目录后退出 |
 
-## Console commands
+仅接受 `name=value`，未知、重复、非法参数返回退出码 2。`MASTER_KEY_SECRET` 用于派生主密钥；须配置私有值，源码默认值不适合部署使用。可使用仓库 [Dockerfile](../Dockerfile) 构建此分支。
 
-Use the HTTP document API for single-record and batch writes. File import commands (`ingest`, `ingestcsv`, `ingestsift`, `searchsift`) have been removed, and `ingest_path` is rejected at startup. Retained commands: `create`, `delete`, `info`, `search`, `openapi`, `help`, `quit`.
+## 创建 key、索引并检索
 
-```text
-search -v [1,0,0]
+以下为 POSIX shell 示例。将 `MASTER_KEY` 替换为启动日志显示的主密钥，再把创建响应的 key 填入 `API_KEY`。
+
+```sh
+BASE='http://127.0.0.1:8080'
+MASTER_KEY='paste-master-key'
+curl -X POST "$BASE/api/v1/apikey" -H "apikey: $MASTER_KEY" -H 'Content-Type: application/json' -d '{}'
+
+API_KEY='paste-created-key'
+curl -X POST "$BASE/api/v1/index" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"index_name":"example","schema":[{"field":"body","field_type":"Text","store":true,"index_lexical":true}]}'
 ```
 
-`search` is a vector diagnostic for demo index 0 and requires an external-vector index.
+将创建索引响应的 ID 填入 `INDEX_ID`，然后执行：
 
-The `create` command creates the demo API key. Create an index/schema through the HTTP API before writing records; see the examples below. The UI can display stored text and follow external source URLs, including PDF URLs, without an internal file endpoint.
-
-
-```
-delete
-```
-Delete the demo API key and all its indices.
-
-```
-quit
-```
-Exit server.
-
-```
-help
-```
-Show help.
-
-## Manual file manipulation
-
-While the server is not running, you may manually delete or backup API key and index directories or modify schema files in a text editor.  
-In the index.json file you also may change access_type":"Mmap" to access_type":"Ram" and vice versa, as the index file format is identical.
-
-## Open embedded Web UI in browser
-
-The embedded web UI allows to search and display results (document fields) from an index:  
-[http://127.0.0.1](http://127.0.0.1)
-
-The Web UI uses the demo API key and index 0 by default. Create and populate the index through the JSON API first; select another index with the `index_id` URL parameter.
-
-<img src="../assets/wikipedia_demo.png" width="800">
-<br><br>
-
-To overwrite the default **API key** and **index_id** use url parameters: [http://127.0.0.1/?api_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&index_id=0](http://127.0.0.1/?api_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&index_id=0).  
-This allows to open an web UI to multiple indices in different web browser tabs simultaneously.
-
-If the default names defined in [master.js](https://github.com/SeekStorm/SeekStorm/blob/main/src/seekstorm_server/web/js/master.js) for `TITLE_FIELD`, `TEXT_FIELD` and `URL_FIELD` do not exist in the schema of the selected index, then the first three fields (stored=true) from the index schema are automatically used for display in the web UI instead.
-
-To permanently change the default **API key** or **index_id** of the embedded Web UI modify `API_KEY` and `INDEX_ID` in [/src/seekstorm_server/web/js/master.js](https://github.com/SeekStorm/SeekStorm/blob/main/src/seekstorm_server/web/js/master.js) **before** building the seekstorm_server (html/css/js are embedded ressources).  
-To permanently change the default **field names** from the index schema that are used in the web UI modify `TITLE_FIELD`, `TEXT_FIELD` and `URL_FIELD` [/src/seekstorm_server/web/js/master.js](https://github.com/SeekStorm/SeekStorm/blob/main/src/seekstorm_server/web/js/master.js) **before** building the seekstorm_server.
-
-The embedded Web UI is intended for demonstration, test and debugging rather than for end customer use.
-
-## REST API endpoints
-
-See full [documentation of the REST API](openapi/openapi.yml).
-
-You can use a REST client like [Bruno](https://www.usebruno.com/) or the VSC extension [Rest client](https://marketplace.visualstudio.com/items?itemName=humao.rest-client) to execute API calls, inspect responses and generate code snippets in your language:  
-[**interactive API endpoint examples**](https://github.com/SeekStorm/SeekStorm/blob/master/src/seekstorm_server/test_api.rest)
-
-&#x26A0; **CAUTION**: If sending CURL commands from MS Windows Powershell use 'curl.exe' instead of 'curl' AND escape (\") all double quotes within the JSON request object!
-
-
-### create api key
-Use the **master API key** displayed in the server console at startup.
-WARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, otherwise your generated API keys will be compromised.
-```
-curl --request POST --url http://127.0.0.1:80/api/v1/apikey --header 'apikey: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=' --header 'content-type: application/json' --data '{}'
-```
-### delete api key
-```
-curl --request DELETE --url http://127.0.0.1/api/v1/apikey --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --header 'user-agent: vscode-restclient'
+```sh
+INDEX_ID=0
+curl -X POST "$BASE/api/v1/index/$INDEX_ID/doc" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '[{"body":"hello world"},{"body":"hello search"}]'
+curl -X PATCH "$BASE/api/v1/index/$INDEX_ID" -H "apikey: $API_KEY"
+curl -X POST "$BASE/api/v1/index/$INDEX_ID/query" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"query":"hello","search_mode":"Lexical"}'
+curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"take":10,"include_document":true,"fields":["body"]}'
 ```
 
----
+搜索与遍历仅接受 POST JSON；普通索引/文档读取仍为 GET。按 DocID 读取时，字段投影使用 JSON body `{"fields":["body"]}`。更新为完整记录替换。向量配置与示例见 [根 README](../README.md)。
 
-### create index
-```
-curl --request POST --url http://127.0.0.1:80/api/v1/index --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"schema":[{"field_type": "Text","store": true,"field": "title","index_lexical": true,"boost":10.0},{"field_type": "Text","store": true,"field": "body","index_lexical": true},{"field_type": "String","store": true,"field": "url","index_lexical": false}],"index_name": "test_index","similarity": "Bm25fProximity","tokenizer": "UnicodeAlphanumeric"}'
-```
-### get index
-```
-curl --request GET --url http://127.0.0.1/api/v1/index/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json'
-```
+撤销 key 需要主密钥，body 为 `{"apikey_base64":"要删除的key"}`；同时删除其索引。创建固定 demo key 使用 `{"demo":true}`。没有内置配额/限流。
 
-### delete index
-```
-curl --request DELETE --url http://127.0.0.1/api/v1/index/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json'
-```
+## Web UI
 
-### commit index
-```
-curl --request PATCH --url http://127.0.0.1/api/v1/index/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json'
-```
----
+访问 `http://127.0.0.1:8080/`。默认使用 demo key 与索引 0，或用 `/?api_key=KEY&index_id=ID` 选择；URL 中的 key 应编码（例如 `+` 为 `%2B`）。UI 默认 Lexical，Vector/Hybrid 需要手动粘贴 JSON 查询向量，文本变化后由调用方更新向量。
 
-### index document(s)
+保留结果分页、原文/外部链接预览、图片展示、日期直方图、词法日期过滤和排序。日期交互依赖配置好的时间字段；Vector/Hybrid 的元数据过滤会明确报错。创建索引、文档写入和 key 管理通过 API 完成。
 
-single document
-```
-curl --request POST --url http://127.0.0.1:80/api/v1/index/0/doc --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"title":"title1 test","body":"body1","url":"url1"}'
-```
+显示字段与默认 key/index 在 [web/js/master.js](web/js/master.js) 配置。静态资源嵌入可执行文件，修改后需重新构建。
 
-multiple documents
-```
-curl --request POST --url http://127.0.0.1:80/api/v1/index/0/doc --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --header 'user-agent: vscode-restclient' --data '[{"title":"title2","body":"body2 test","url":"url2"},{"title":"title3 test","body":"body3 test","url":"url3"}]'
-```
+## 终端命令与维护
 
-### get document 
+| 命令 | 作用 |
+| --- | --- |
+| `create` | 创建固定 demo key；索引仍通过 HTTP 创建 |
+| `delete` | 删除 demo key 及其所有索引 |
+| `info` | 显示当前索引信息 |
+| `search -v [1,0,0]` | 对 demo key 下索引 0 运行向量诊断，维度须匹配 |
+| `openapi` | 导出 OpenAPI |
+| `help` | 命令帮助 |
+| `quit` | 退出服务 |
 
-all stored fields
-```
-curl --request GET --url http://127.0.0.1/api/v1/index/0/doc/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json'
-```
-
-selected stored fields
-```
-curl --request GET --url http://127.0.0.1/api/v1/index/0/doc/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"fields": ["title", "body"]}'
-```
-### update document(s) 
-
-update document
-```
-curl --request PATCH --url http://127.0.0.1/api/v1/index/0/doc --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '[0,{"title":"title1 test","body":"body1","url":"url1"}]'
-```
-
-update documents
-```
-curl --request PATCH --url http://127.0.0.1/api/v1/index/0/doc --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '[[1,{"title":"title1 test","body":"body1","url":"url1"}],[2,{"title":"title3 test","body":"body3 test","url":"url3"}]]'
-```
-
-### delete document(s) 
-
-delete document, by single document ID in URL parameter
-```
-curl --request DELETE --url http://127.0.0.1/api/v1/index/0/doc/0 --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json'
-```
-
-delete document, by single document ID in JSON request object
-```
-curl --request DELETE --url http://127.0.0.1/api/v1/index/0/doc --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data 0
-```
-
-delete documents, by vector of document IDs in JSON request object
-```
-curl --request DELETE --url http://127.0.0.1/api/v1/index/0/doc --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '[0,1]'
-```
-
-delete documents, by query in JSON request object
-```
-curl --request DELETE --url http://127.0.0.1/api/v1/index/0/doc --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"query":"test","offset":0,"length":10,"realtime": true,"field_filter": ["title", "body"]}'
-```
-
---- 
-
-### query index (GET)
-
-wit URL parameter
-```
-curl --request GET --url 'http://127.0.0.1/api/v1/index/0/query?query=test&offset=0&length=10' --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json'
-```
-
-with JSON parameter
-```
-curl --request GET --url http://127.0.0.1/api/v1/index/0/query --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"query":"test","offset":0,"length":10,"realtime": true,"field_filter": ["title", "body"]}'
-```
-
-### query index (POST)
-
-```
-curl --request POST --url http://127.0.0.1/api/v1/index/0/query --header 'apikey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' --header 'content-type: application/json' --data '{"query":"test","offset":0,"length":10,"realtime": true,"field_filter": ["title", "body"]}'
-```
-
-## Building
-
-```
-cargo build --release
-```
-
-&#x26A0; **WARNING**: make sure to set the MASTER_KEY_SECRET environment variable to a secret, otherwise your generated API keys will be compromised.
+正常提交/关闭及本地索引文件仍保留；当前没有在线一致快照或崩溃恢复可靠性承诺。文件解析、SIFT 导入/评测等入口已删除，迁移细节见 [MIGRATION.md](../MIGRATION.md)。

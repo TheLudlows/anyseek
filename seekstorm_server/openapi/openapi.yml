@@ -363,125 +363,12 @@ paths:
         '404':
           description: API key does not exist
   /api/v1/index/{index_id}/iterator:
-    get:
-      tags:
-      - Iterator
-      summary: Document iterator
-      description: |-
-        Document iterator via GET and POST are identical, only the way parameters are passed differ.
-        The document iterator allows to iterate over all document IDs and documents in the entire index, forward or backward.
-        It enables efficient sequential access to every document, even in very large indexes, without running a search.
-        Paging through the index works without collecting document IDs to Min-heap in size-limited RAM first.
-        The iterator guarantees that only valid document IDs are returned, even though document IDs are not strictly continuous.
-        Document IDs can also be fetched in batches, reducing round trips and significantly improving performance, especially when using the REST API.
-        Typical use cases include index export, conversion, analytics, audits, and inspection.
-        Explanation of "eventually continuous" docid:
-        In SeekStorm, document IDs become continuous over time. In a multi-sharded index, each shard maintains its own document ID space.
-        Because documents are distributed across shards in a non-deterministic, load-dependent way, shard-local document IDs advance at different rates.
-        When these are mapped to global document IDs, temporary gaps can appear.
-        As a result, simply iterating from 0 to the total document count may encounter invalid IDs near the end.
-        The Document Iterator abstracts this complexity and reliably returns only valid document IDs.
-        # Parameters
-        - docid=None, take>0: **skip first s document IDs**, then **take next t document IDs** of an index.
-        - docid=None, take<0: **skip last s document IDs**, then **take previous t document IDs** of an index.
-        - docid=Some, take>0: **skip next s document IDs**, then **take next t document IDs** of an index, relative to a given document ID, with end-of-index indicator.
-        - docid=Some, take<0: **skip previous s document IDs**, then **take previous t document IDs**, relative to a given document ID, with start-of-index indicator.
-        - take=0: does not make sense, that defies the purpose of get_iterator.
-        - The sign of take indicates the direction of iteration: positive take for forward iteration, negative take for backward iteration.
-        - The skip parameter is always positive, indicating the number of document IDs to skip before taking document IDs. The skip direction is determined by the sign of take too.
-        - include_document: if true, the documents are also retrieved along with their document IDs.
-        Next page:     take last  docid from previous result set, skip=1, take=+page_size
-        Previous page: take first docid from previous result set, skip=1, take=-page_size
-        Returns an IteratorResult, consisting of the number of actually skipped document IDs, and a list of taken document IDs and documents, sorted ascending).
-        Detect end/begin of index during iteration: if returned vec.len() < requested take || if returned skip <requested skip
-      operationId: document_iterator_get
-      parameters:
-      - name: apikey
-        in: header
-        description: YOUR_SECRET_API_KEY
-        required: true
-        schema:
-          type: string
-        example: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-      - name: index_id
-        in: path
-        description: index id
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 0
-        example: 0
-      - name: document_id
-        in: query
-        description: document id
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 0
-      - name: skip
-        in: query
-        description: skip document IDs
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 0
-        example: 0
-      - name: take
-        in: query
-        description: take document IDs
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 0
-        example: -1
-      - name: include_deleted
-        in: query
-        description: include deleted document IDs in results
-        required: true
-        schema:
-          type: boolean
-        example: false
-      - name: include_document
-        in: query
-        description: include documents in results
-        required: true
-        schema:
-          type: boolean
-        example: false
-      - name: fields
-        in: query
-        description: fields to include in document. If not specified, all fields are included
-        required: true
-        schema:
-          type: array
-          items:
-            type: string
-        example:
-        - title
-        - body
-      responses:
-        '200':
-          description: Document ID found, returning an IteratorResult
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/IteratorResult'
-        '400':
-          description: Request object incorrect
-        '401':
-          description: api_key missing
-        '404':
-          description: api_key does not exists
     post:
       tags:
       - Iterator
       summary: Document iterator
       description: |-
-        Document iterator via GET and POST are identical, only the way parameters are passed differ.
+        Document iterator accepts a JSON request body via POST.
         The document iterator allows to iterate over all document IDs and documents in the entire index, forward or backward.
         It enables efficient sequential access to every document, even in very large indexes, without running a search.
         Paging through the index works without collecting document IDs to Min-heap in size-limited RAM first.
@@ -505,7 +392,7 @@ paths:
         - include_document: if true, the documents are also retrieved along with their document IDs.
         Next page:     take last  docid from previous result set, skip=1, take=+page_size
         Previous page: take first docid from previous result set, skip=1, take=-page_size
-        Returns an IteratorResult, consisting of the number of actually skipped document IDs, and a list of taken document IDs and documents, sorted ascending).
+        Returns an IteratorResult, consisting of the number of actually skipped document IDs, and a list of taken document IDs and documents, ordered in traversal direction (ascending for positive take, descending for negative take).
         Detect end/begin of index during iteration: if returned vec.len() < requested take || if returned skip <requested skip
       operationId: document_iterator_post
       parameters:
@@ -1238,85 +1125,6 @@ paths:
         '404':
           description: api_key does not exists
   /api/v1/index/{index_id}/query:
-    get:
-      tags:
-      - Query
-      summary: Query Index
-      description: |-
-        Query results from index with index_id.
-        Query index via GET is a convenience function, that **offers only a limited set of parameters compared to Query Index via POST**.
-        Always use Query Index via POST for the full set of parameters and maximum flexibility.
-        Query Index via GET is provided for simple queries and quick testing, and to be easily callable from browser address bar, but it is not intended for production use.
-      operationId: query_index_get
-      parameters:
-      - name: apikey
-        in: header
-        description: YOUR_SECRET_API_KEY
-        required: true
-        schema:
-          type: string
-        example: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-      - name: index_id
-        in: path
-        description: index id
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 0
-        example: 0
-      - name: query
-        in: query
-        description: query string
-        required: true
-        schema:
-          type: string
-        example: hello
-      - name: offset
-        in: query
-        description: result offset
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 0
-        example: 0
-      - name: length
-        in: query
-        description: result length
-        required: true
-        schema:
-          type: integer
-          format: int64
-          minimum: 1
-        example: 10
-      - name: realtime
-        in: query
-        description: include uncommitted documents
-        required: true
-        schema:
-          type: boolean
-        example: false
-      - name: enable_empty_query
-        in: query
-        description: allow empty query
-        required: true
-        schema:
-          type: boolean
-        example: false
-      responses:
-        '200':
-          description: Results found, returns the SearchResultObject
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SearchResultObject'
-        '400':
-          description: Invalid query, external vector, or unsupported vector facet filter
-        '401':
-          description: api_key missing
-        '404':
-          description: API key does not exist
     post:
       tags:
       - Query
