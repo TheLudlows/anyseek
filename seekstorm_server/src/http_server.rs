@@ -1402,9 +1402,7 @@ pub(crate) async fn http_server(
     local_port: &u16,
     force_shard_number: &Option<usize>,
 ) {
-    let local_address: SocketAddr = format!("{}:{}", local_ip, local_port)
-        .parse()
-        .expect("Unable to parse socket address");
+    let local_address = SocketAddr::new(local_ip.parse().expect("validated local_ip"), *local_port);
 
     match TcpListener::bind(local_address).await {
         Ok(listener) => {
