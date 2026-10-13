@@ -12,7 +12,6 @@ use utoipa::{OpenApi, openapi::OpenApiVersion};
 
 use seekstorm::{
     commit::Commit,
-    highlighter::highlighter,
     index::{
         AccessType, ApikeyObject, ApikeyQuotaObject, Close, Clustering, CreateIndexRequest,
         DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
@@ -685,12 +684,7 @@ pub(crate) async fn index_documents_api(
         ("document_id" = u64, Path, description = "document id"),
     ),
     request_body(content = GetDocumentRequest, example=json!({
-        "query_terms": ["test"],
-        "fields": ["title", "body"],
-        "highlights": [
-        { "field": "title", "fragment_number": 0, "fragment_size": 1000, "highlight_markup": true},
-        { "field": "body", "fragment_number": 2, "fragment_size": 160, "highlight_markup": true},
-        { "field": "body", "name": "body2", "fragment_number": 0, "fragment_size": 4000, "highlight_markup": true}]
+        "fields": ["title", "body"]
     })),
     responses(
         (status = 200, description = "Document found, returns the JSON document consisting of arbitrary key-value pairs", body = HashMap<String, Value>),
@@ -711,28 +705,12 @@ pub(crate) async fn get_document_api(
     get_document_request: GetDocumentRequest,
 ) -> Option<Document> {
     if !index_arc.read().await.stored_field_names.is_empty() {
-        let highlighter_option = if get_document_request.highlights.is_empty()
-            || get_document_request.query_terms.is_empty()
-        {
-            None
-        } else {
-            Some(
-                highlighter(
-                    index_arc,
-                    get_document_request.highlights,
-                    get_document_request.query_terms,
-                )
-                .await,
-            )
-        };
-
         index_arc
             .read()
             .await
             .get_document(
                 document_id,
                 true,
-                &highlighter_option,
                 &HashSet::from_iter(get_document_request.fields),
             )
             .await
@@ -1067,7 +1045,6 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
 /// - Realtime search
 /// - Field filter
 /// - Fields to include in search results
-/// - Highlights: keyword-in-context snippets and term highlighting
 /// - Query facets: which facets fields to calculate and return at query time
 /// - Facet filter: filter facets by field and value
 /// - Result sort: sort results by field and direction
@@ -1093,17 +1070,6 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
         "length": 10,
         "result_type": "TopkCount",
         "realtime": true,
-        "highlights": [
-            {
-                "field": "",
-                "name": "",
-                "fragment_number": 0,
-                "fragment_size": 0,
-                "highlight_markup": true,
-                "pre_tags": "",
-                "post_tags": ""
-            }
-        ],
         "field_filter": ["title"],
         "fields": [],
         "query_type_default": "Intersection",
@@ -1237,19 +1203,6 @@ pub(crate) async fn query_index_api(
     if !index_arc.read().await.stored_field_names.is_empty() {
         let return_fields_filter = HashSet::from_iter(search_request.fields);
 
-        let highlighter_option = if search_request.highlights.is_empty() {
-            None
-        } else {
-            Some(
-                highlighter(
-                    index_arc,
-                    search_request.highlights,
-                    result_object.query_terms.clone(),
-                )
-                .await,
-            )
-        };
-
         for result in result_object.results.iter() {
             match index_arc
                 .read()
@@ -1257,7 +1210,6 @@ pub(crate) async fn query_index_api(
                 .get_document(
                     result.doc_id,
                     search_request.realtime,
-                    &highlighter_option,
                     &return_fields_filter,
                 )
                 .await

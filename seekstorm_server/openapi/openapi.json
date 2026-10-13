@@ -1427,33 +1427,9 @@
                 "$ref": "#/components/schemas/GetDocumentRequest"
               },
               "example": {
-                "query_terms": [
-                  "test"
-                ],
                 "fields": [
                   "title",
                   "body"
-                ],
-                "highlights": [
-                  {
-                    "field": "title",
-                    "fragment_number": 0,
-                    "fragment_size": 1000,
-                    "highlight_markup": true
-                  },
-                  {
-                    "field": "body",
-                    "fragment_number": 2,
-                    "fragment_size": 160,
-                    "highlight_markup": true
-                  },
-                  {
-                    "field": "body",
-                    "name": "body2",
-                    "fragment_number": 0,
-                    "fragment_size": 4000,
-                    "highlight_markup": true
-                  }
                 ]
               }
             }
@@ -1664,7 +1640,7 @@
           "Query"
         ],
         "summary": "Query Index",
-        "description": "Query results from index with index_id\nThe following parameters are supported:\n- Result type\n- Result sorting\n- Realtime search\n- Field filter\n- Fields to include in search results\n- Highlights: keyword-in-context snippets and term highlighting\n- Query facets: which facets fields to calculate and return at query time\n- Facet filter: filter facets by field and value\n- Result sort: sort results by field and direction\n- Query type default: default query type, if not specified in query",
+        "description": "Query results from index with index_id\nThe following parameters are supported:\n- Result type\n- Result sorting\n- Realtime search\n- Field filter\n- Fields to include in search results\n- Query facets: which facets fields to calculate and return at query time\n- Facet filter: filter facets by field and value\n- Result sort: sort results by field and direction\n- Query type default: default query type, if not specified in query",
         "operationId": "query_index_post",
         "parameters": [
           {
@@ -1724,17 +1700,6 @@
                     "length": 10,
                     "result_type": "TopkCount",
                     "realtime": true,
-                    "highlights": [
-                      {
-                        "field": "",
-                        "name": "",
-                        "fragment_number": 0,
-                        "fragment_size": 0,
-                        "highlight_markup": true,
-                        "pre_tags": "",
-                        "post_tags": ""
-                      }
-                    ],
                     "field_filter": [
                       "title"
                     ],
@@ -2646,20 +2611,6 @@
         "type": "object",
         "description": "Specifies which document and which field to return",
         "properties": {
-          "query_terms": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "query terms for highlighting"
-          },
-          "highlights": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Highlight"
-            },
-            "description": "which fields to highlight: create keyword-in-context fragments and highlight terms"
-          },
           "fields": {
             "type": "array",
             "items": {
@@ -2706,45 +2657,6 @@
               "type": "string"
             },
             "description": "which fields to return (if include_document is true, if empty then return all stored fields)"
-          }
-        }
-      },
-      "Highlight": {
-        "type": "object",
-        "description": "Specifies the number and size of fragments (snippets, summaries) to generate from each specified field to provide a \"keyword in context\" (KWIC) functionality.\nWith highlight_markup the matching query terms within the fragments can be highlighted with HTML markup.",
-        "required": [
-          "field"
-        ],
-        "properties": {
-          "field": {
-            "type": "string",
-            "description": "Specifies the field from which the fragments  (snippets, summaries) are created."
-          },
-          "name": {
-            "type": "string",
-            "description": "Allows to specifiy multiple highlight result fields from the same source field, leaving the original field intact,\nDefault: if name is empty then field is used instead, i.e the original field is overwritten with the highlight."
-          },
-          "fragment_number": {
-            "type": "integer",
-            "description": "If 0/default then return the full original text without fragmenting.",
-            "minimum": 0
-          },
-          "fragment_size": {
-            "type": "integer",
-            "description": "Specifies the length of a highlight fragment.\nThe default 0 returns the full original text without truncating, but still with highlighting if highlight_markup is enabled.",
-            "minimum": 0
-          },
-          "highlight_markup": {
-            "type": "boolean",
-            "description": "if true, the matching query terms within the fragments are highlighted with HTML markup **\\<b\\>term\\<\\/b\\>**."
-          },
-          "pre_tags": {
-            "type": "string",
-            "description": "Specifies the markup tags to insert **before** each highlighted term (e.g. \\\"\\<b\\>\\\" or \\\"\\<em\\>\\\"). This can be any string, but is most often an HTML or XML tag.\nOnly used when **highlight_markup** is set to true."
-          },
-          "post_tags": {
-            "type": "string",
-            "description": "Specifies the markup tags to insert **after** each highlighted term. (e.g. \\\"\\<\\/b\\>\\\" or \\\"\\<\\/em\\>\\\"). This can be any string, but is most often an HTML or XML tag.\nOnly used when **highlight_markup** is set to true."
           }
         }
       },
@@ -4063,13 +3975,6 @@
             "type": "boolean",
             "description": "True realtime search: include indexed, but uncommitted documents into search results."
           },
-          "highlights": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Highlight"
-            },
-            "description": "Specify field names where to create keyword-in-context fragments and highlight query terms."
-          },
           "field_filter": {
             "type": "array",
             "items": {
@@ -4179,7 +4084,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Vector of search query terms. Can be used e.g. for custom highlighting."
+            "description": "Vector of lexical search query terms."
           },
           "results": {
             "type": "array",
@@ -4351,13 +4256,13 @@
           },
           "multiway": {
             "type": "boolean",
-            "description": "Creates alternative versions of documents where in each copy a term is replaced with one of its synonyms.\nDoesn't impact the query latency, but does increase the index size.\nMulti-way synonyms (default): all terms are synonyms of each other.\nOne-way synonyms: only the first term is a synonym of the following terms, but not vice versa.\nE.g. [street, avenue, road] will result in searches for street to return documents containing any of the terms street, avenue or road,\nbut searches for avenue will only return documents containing avenue, but not documents containing street or road.\nCurrently only single terms without spaces are supported.\nSynonyms are supported in result highlighting.\nThe synonyms that were created with the synonyms parameter in create_index are stored in synonyms.json in the index directory contains\nCan be manually modified, but becomes effective only after restart and only for newly indexed documents."
+            "description": "Creates alternative versions of documents where in each copy a term is replaced with one of its synonyms.\nDoesn't impact the query latency, but does increase the index size.\nMulti-way synonyms (default): all terms are synonyms of each other.\nOne-way synonyms: only the first term is a synonym of the following terms, but not vice versa.\nE.g. [street, avenue, road] will result in searches for street to return documents containing any of the terms street, avenue or road,\nbut searches for avenue will only return documents containing avenue, but not documents containing street or road.\nCurrently only single terms without spaces are supported.\nThe synonyms that were created with the synonyms parameter in create_index are stored in synonyms.json in the index directory contains\nCan be manually modified, but becomes effective only after restart and only for newly indexed documents."
           }
         }
       },
       "TokenizerType": {
         "type": "string",
-        "description": "Defines tokenizer behavior:\nAsciiAlphabetic\n- Mainly for for benchmark compatibility\n- Only ASCII alphabetic chars are recognized as token.\n\nUnicodeAlphanumeric\n- All Unicode alphanumeric chars are recognized as token.\n- Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.\n\nUnicodeAlphanumericFolded\n- All Unicode alphanumeric chars are recognized as token.\n- Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.\n- Diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters are converted into its basic representation.\n- Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. \"s\" in \"someone's\").\n- Tokenizing might be slower due to folding and apostroph processing.\n\nUnicodeAlphanumericZH\n- Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.\n- Supports mixed Latin and Chinese texts\n- Supports Chinese sentence boundary chars for KWIC snippets ahd highlighting.\n- Requires feature #[cfg(feature = \"zh\")]",
+        "description": "Defines tokenizer behavior:\nAsciiAlphabetic\n- Mainly for for benchmark compatibility\n- Only ASCII alphabetic chars are recognized as token.\n\nUnicodeAlphanumeric\n- All Unicode alphanumeric chars are recognized as token.\n- Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.\n\nUnicodeAlphanumericFolded\n- All Unicode alphanumeric chars are recognized as token.\n- Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.\n- Diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters are converted into its basic representation.\n- Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. \"s\" in \"someone's\").\n- Tokenizing might be slower due to folding and apostroph processing.\n\nUnicodeAlphanumericZH\n- Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.\n- Supports mixed Latin and Chinese texts\n- Requires feature #[cfg(feature = \"zh\")]",
         "enum": [
           "AsciiAlphabetic",
           "UnicodeAlphanumeric",

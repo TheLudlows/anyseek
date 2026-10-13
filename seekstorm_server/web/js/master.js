@@ -4,8 +4,6 @@ function debounce(func,wait,immediate){var timeout;return function(){var context
 function moveSplitter(y,hide=false){const[l1,l2,l3,l4]=[$("#l1"),$("#l2"),$("#l3"),$("#l4")];l1.attr("y2",y-70);l2.attr("y1",y-70);l2.attr("y2",y-30);l3.attr("y1",y-30);l3.attr("y2",y+10);l4.attr("y1",y+10);if(hide)$("#splitter").hide();else $("#splitter").show();}
 function updateTitle(useDefault=false){const title=query&&!useDefault?`${query}-SeekStorm Search`:"SeekStorm Search";if(document.title!=title){document.title=title;}}
 let active=null;function setHeader(xhr){xhr.setRequestHeader('apikey',API_KEY);}
-function truncate(input,len)
-{}
 function loadResults(page,sort,ignoreHistory=false){
 let queryVector;
 $("#searchError").text("");
@@ -19,17 +17,41 @@ if(!Array.isArray(queryVector)||queryVector.length===0||!queryVector.every(v=>ty
 }
 updateTitle();active=null;if((currPage!=page||currSort!=sort)&&!ignoreHistory){var newURL=updateURLParameter(window.location.href,"q",query);newURL=updateURLParameter(newURL,"page",page);newURL=updateURLParameter(newURL,"sort",sort);window.history.pushState("","",newURL);}
 currPage=page;currSort=sort;const contentBox=$("#contentBox");const prevUrl=$("#prevUrl");const prevTitle=$("#prevTitle");const prevText=$("#prevText");const prevText2=$("#prevText2");moveSplitter(-50,true);prevUrl.hide();prevTitle.text("");prevText2.text("");prevText.hide();if(!status_loaded)showStatus(false);var d_min=new Date(MIN_YEAR_FILTER,0,1,0,0,0,0);var timestamp_min=d_min.getTime()/1000;var d_max=new Date(MAX_YEAR_FILTER,0,1,0,0,0,0);var timestamp_max=d_max.getTime()/1000;
-$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:query,query_vector:queryVector,enable_empty_query:true,offset:(page-1)*10,length:10,realtime:true,highlights:[{field:TITLE_FIELD,fragment_number:0,fragment_size:1000,highlight_markup:true},{field:TEXT_FIELD,fragment_number:2,fragment_size:160,highlight_markup:true},{field:TEXT_FIELD,name:"body2",fragment_number:0,fragment_size:4000,highlight_markup:true}],result_sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],query_facets:ranges.length>0?[{Timestamp:{field:DATE_FIELD,range_type:"CountWithinRange",ranges:ranges}}]:[],facet_filter:IS_DATE_FIELD&&(MIN_YEAR!=MIN_YEAR_FILTER||MAX_YEAR+1!=MAX_YEAR_FILTER)?[{Timestamp:{field:DATE_FIELD,filter:{start:timestamp_min,end:timestamp_max}}}]:[],search_mode:search_mode}),traditional:true,cache:false,type:"POST",dataType:'json',success:function(data){contentBox.empty();
+$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:query,query_vector:queryVector,enable_empty_query:true,offset:(page-1)*10,length:10,realtime:true,result_sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],query_facets:ranges.length>0?[{Timestamp:{field:DATE_FIELD,range_type:"CountWithinRange",ranges:ranges}}]:[],facet_filter:IS_DATE_FIELD&&(MIN_YEAR!=MIN_YEAR_FILTER||MAX_YEAR+1!=MAX_YEAR_FILTER)?[{Timestamp:{field:DATE_FIELD,filter:{start:timestamp_min,end:timestamp_max}}}]:[],search_mode:search_mode}),traditional:true,cache:false,type:"POST",dataType:'json',success:function(data){contentBox.empty();
 if(IS_DATE_FIELD){var newEntry1=$(`<div id="chart"style="width:100%;"><div id="histogramSlider"style="width:100%"></div><table style="display: none;"><tr id="data"><th>Value</th><th>Running Count</th></tr></table></div>`);contentBox.append(newEntry1);var numBins=MAX_YEAR-MIN_YEAR+1;var histogram_data={"items":[]};if(data.facets[DATE_FIELD]){data.facets[DATE_FIELD].forEach(element=>{var index=parseInt(element[0])-MIN_YEAR
 var count=element[1];histogram_data.items.push({"index":index,"count":count});});}
 $("#histogramSlider").histogramSlider({data:histogram_data,sliderRange:[MIN_YEAR,MAX_YEAR+1],optimalRange:[-100,-10],selectedRange:[MIN_YEAR_FILTER,MAX_YEAR_FILTER],height:60,numberOfBins:numBins,showTooltips:true,showSelectedRange:true});renderData(histogram_data);function renderData(data){var dataArray=[];for(var i=0;i<data.items.length;i++){dataArray.push(data.items[i].value);}
 dataArray=dataArray.sort(function(a,b){return b-a;});var count=0,dataTable=$("#data");for(var i=0;i<dataArray.length;i++){count++;dataTable.after("<tr><td>"+dataArray[i]+"</td><td>"+count+"</td></tr>");if(round25000(dataArray[i])>round25000(dataArray[i+1])){count=0;dataTable.after("<tr><td>----------</td></tr>");}}}
 function round25000(x)
 {return Math.ceil(x/25000)*25000;}
-let newEntry=$(`<div id="sort"class="resultEntry col-xs-12"style="display:flex"><span id="sortBy">sort by</span><div id="score"class="${sort=='score' ? 'active' : ''}"><span>score</span></div><div class="${sort=='new' ? 'active' : ''}"id="new"><span>newest</span></div><div class="${sort=='old' ? 'active' : ''}"id="old"><span>oldest</span></div></div>`);contentBox.append(newEntry);$("#sort div").click(event=>{var target_id=event.currentTarget.id;$("#sort div").each(function(){if($(this).attr("id")===target_id){$(this).addClass("active");}else{$(this).removeClass("active");}});loadResults(1,target_id);});};data.results.forEach(element=>{var link_text=valid(element[URL_FIELD]);var title_text=valid(element[TITLE_FIELD]);var date_value=valid(element[DATE_FIELD]);var image_data=valid(element[IMAGE_FIELD]);var date_text=element.date?" - "+(new Date(date_value*1000)).toLocaleDateString("en-US",{year:'numeric',month:'numeric',day:'numeric'}):'';title_text=title_text+date_text;var is_link=link_text.toLowerCase().startsWith("http");var link_url=link_text;const iUrl=element.iurl;let newEntry=$(`<div class="resultEntry col-xs-12"><div class="row">${iUrl?`<div class="col-xs-2 imgPrev"style="background-image: url('${iUrl}')"></div>`:""}<div class="col-xs-${iUrl ? 10 : 12}"><h1 style="padding-bottom:4px;"><a href="${link_text}">${title_text}</a></h1><p class="kwic">${valid(element[TEXT_FIELD])}</p><p class="directLink"><a href="${link_url}"class="url">${link_text}</a></p></div></div></div>`);if(image_data.startsWith("data:image")){var image=new Image();image.src=image_data;image.height=100;newEntry[0].insertBefore(image,newEntry[0].firstChild);}
-contentBox.append(newEntry);if(is_link){newEntry.on("mouseenter",function(){moveSplitter(newEntry[0].getBoundingClientRect().y);prevUrl.html(link_text);prevUrl.show();prevTitle.html(title_text);document.getElementById("prevText").src=link_url;prevText.show();});}else{newEntry.on("mouseenter",function(){moveSplitter(newEntry[0].getBoundingClientRect().y);prevTitle.html(title_text);prevText2.html(valid(element.body2 || element[TEXT_FIELD]).replace(new RegExp("\r","gi"),"<br>"));});}});
+let newEntry=$(`<div id="sort"class="resultEntry col-xs-12"style="display:flex"><span id="sortBy">sort by</span><div id="score"class="${sort=='score' ? 'active' : ''}"><span>score</span></div><div class="${sort=='new' ? 'active' : ''}"id="new"><span>newest</span></div><div class="${sort=='old' ? 'active' : ''}"id="old"><span>oldest</span></div></div>`);contentBox.append(newEntry);$("#sort div").click(event=>{var target_id=event.currentTarget.id;$("#sort div").each(function(){if($(this).attr("id")===target_id){$(this).addClass("active");}else{$(this).removeClass("active");}});loadResults(1,target_id);});};data.results.forEach(element=>{
+const linkText=valid(element[URL_FIELD]);
+const linkUrl=httpUrl(linkText);
+const dateValue=element[DATE_FIELD];
+const dateText=dateValue!=null?" - "+(new Date(dateValue*1000)).toLocaleDateString("en-US",{year:'numeric',month:'numeric',day:'numeric'}):'';
+const titleText=valid(element[TITLE_FIELD])+dateText;
+const bodyText=valid(element[TEXT_FIELD]);
+const imageData=valid(element[IMAGE_FIELD]);
+const imageUrl=httpUrl(valid(element.iurl));
+const newEntry=$('<div class="resultEntry col-xs-12"><div class="row"><div class="record"><h1 style="padding-bottom:4px;"><a></a></h1><p class="recordText"></p><p class="directLink"><a class="url"></a></p></div></div></div>');
+newEntry.find('.record').addClass(imageUrl?'col-xs-10':'col-xs-12');
+newEntry.find('h1 a').text(titleText);
+newEntry.find('.recordText').text(bodyText);
+newEntry.find('a.url').text(linkText);
+if(linkUrl)newEntry.find('a').attr('href',linkUrl);
+if(imageUrl)$('<div class="col-xs-2 imgPrev"></div>').css('background-image','url('+JSON.stringify(imageUrl)+')').prependTo(newEntry.find('.row'));
+if(imageData.startsWith('data:image')){const image=new Image();image.src=imageData;image.height=100;newEntry.prepend(image);}
+contentBox.append(newEntry);
+newEntry.on('mouseenter',()=>{
+moveSplitter(newEntry[0].getBoundingClientRect().y);
+prevTitle.text(titleText);prevUrl.hide();prevText.hide();prevText2.text('');
+if(linkUrl){prevUrl.text(linkText).show();prevText.attr('src',linkUrl).show();}
+else{prevText2.text(bodyText);}
+});
+});
 setPage(page,data.count,data.count_total,data.time);},error:function(xhr){$("#contentBox").empty();$("#searchError").text(xhr.responseText||"Search request failed.");},beforeSend:setHeader});}
-function valid(element){return element?element:''}
+function valid(value){return value==null?'':typeof value==='object'?JSON.stringify(value):String(value);}
+function httpUrl(value){try{const url=new URL(value);return ['http:','https:'].includes(url.protocol)?url.href:null;}catch{return null;}}
 function showStatus(async=true)
 {$.ajax({url:STATUS_URL,data:{},traditional:true,cache:false,type:"GET",async:async,dataType:'json',success:function(data){$("#welcome").hide();$("#version").text(data.version);$("#indexName").text(data.name);$("#indexedDocs").text(data.indexed_doc_count.toLocaleString());let schema=new Map(Object.entries(data.schema).sort((a,b)=>a[1].field_id-b[1].field_id));for(let[key,value]of schema){if(value.field_type=="Timestamp"){IS_DATE_FIELD=true;}
 if(value.field_type=="Binary"&&value.stored){if(!data.schema[IMAGE_FIELD])IMAGE_FIELD=key;continue;}

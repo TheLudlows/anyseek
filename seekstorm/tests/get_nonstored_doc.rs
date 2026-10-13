@@ -66,7 +66,7 @@ async fn get0(index: &seekstorm::index::IndexArc) -> Result<seekstorm::index::Do
     index
         .read()
         .await
-        .get_document(0, false, &None, &HashSet::new())
+        .get_document(0, false, &HashSet::new())
         .await
 }
 

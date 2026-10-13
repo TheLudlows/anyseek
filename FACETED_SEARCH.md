@@ -286,7 +286,6 @@ where the ranges can be defined dynamically with different boundaries for each q
 # tokio_test::block_on(async {
 
 use seekstorm::search::{Search, SearchMode, QueryType, ResultType, QueryFacet};
-use seekstorm::highlighter::{Highlight, highlighter};
 use seekstorm::index::open_index;
 use std::path::Path;
 use std::collections::HashSet;
@@ -313,22 +312,10 @@ let result_object = index_arc.search(query, query_vector, query_type, search_mod
 
 // **display results**
 
-let highlights:Vec<Highlight>= vec![
-        Highlight {
-            field: "body".to_owned(),
-            name:String::new(),
-            fragment_number: 2,
-            fragment_size: 160,
-            highlight_markup: true,
-            ..Default::default()
-        },
-    ];    
-
-let highlighter=Some(highlighter(&index_arc,highlights, result_object.query_terms).await);
 let return_fields_filter= HashSet::new();
 let index=index_arc.read().await;
 for result in result_object.results.iter() {
-  let doc=index.get_document(result.doc_id,false,&highlighter,&return_fields_filter).await.unwrap();
+  let doc=index.get_document(result.doc_id,false,&return_fields_filter).await.unwrap();
   println!("result {} rank {} body field {:?}" , result.doc_id,result.score, doc.get("body"));
 }
 println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);

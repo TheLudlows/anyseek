@@ -191,9 +191,21 @@ def exercise(binary, workdir):
                   f'lexical query mismatch: {result}')
             doc_id = result['results'][0]['_id']
             document = api('GET', path + f'/doc/{doc_id}', {
-                'query_terms': [], 'highlights': [{'field': 'body', 'fragment_number': 2,
-                                                 'fragment_size': 160, 'highlight_markup': True}]})
+                'fields': ['body']})
             check(document == {'body': 'body2 test'}, f'stored document mismatch: {document}')
+            for highlights in ([], [{'field': 'body', 'highlight_markup': True}]):
+                for method in ('GET', 'POST'):
+                    request(method, path + '/query', {'query': 'test', 'highlights': highlights}, api_key, expected=400)
+                request('GET', path + '/query?' + urlencode({'query': 'test', 'highlights': json.dumps(highlights)}),
+                        key=api_key, expected=400)
+                request('GET', path + f'/doc/{doc_id}', {'highlights': highlights}, api_key, expected=400)
+            for name in ('highlights', 'query_terms'):
+                request('GET', path + f'/doc/{doc_id}?' + urlencode({name: '[]'}), key=api_key, expected=400)
+            request('GET', path + f'/doc/{doc_id}', {'query_terms': ['test']}, api_key, expected=400)
+            check(result['results'][0]['body'] == 'body2 test' and 'body2' not in result['results'][0],
+                  'search changed stored text or created a presentation field')
+            check(result['query_terms'], 'lexical query terms missing from search response')
+            print('PASS retired presentation options rejected; stored fields and response query terms retained')
             # The retired file endpoints must fail without adding a record.
             request('POST', path + '/file', b'%PDF-1.7 removed', api_key, expected=404)
             request('GET', path + '/file/0', key=api_key, expected=404)
@@ -296,6 +308,31 @@ def exercise(binary, workdir):
                     'result_sort': [{'field': 'date', 'order': order}]})
                 check([doc['title'] for doc in sorted_result['results']] == titles, 'ordinary date sorting')
             print('PASS ordinary string/set/number/timestamp filters and date sorting')
+            raw_id = api('POST', '/api/v1/index', {'index_name': 'raw_records', 'schema': [
+                {**field, 'store': True} for field in schema] + [
+                {'field': 'data', 'field_type': 'Json', 'store': True, 'index_lexical': True},
+                {'field': 'body2', 'field_type': 'Text', 'store': True, 'index_lexical': False}]})
+            rp = f'/api/v1/index/{raw_id}'
+            raw_record = {'title': '<b>Literal title 中文</b>',
+                'body': 'rawmarker <img src=x onerror="window.rawExecuted=true"> & 中文\r\n第二行\n' + '完整原文 ' * 1000 + 'END',
+                'url': 'javascript:window.rawExecuted=true',
+                'data': {'nested': ['<em>中文</em>', 0, False, None], 'line': 'a\nb'},
+                'body2': 'ordinary stored field, never the preview source'}
+            api('POST', rp + '/doc', raw_record)
+            api('PATCH', rp)
+            raw_result = api('POST', rp + '/query', {'query': 'rawmarker'})
+            check(raw_result['count_total'] == 1, 'raw text not searchable')
+            raw_doc = raw_result['results'][0]
+            raw_doc_id = raw_doc['_id']
+            check({k: v for k, v in raw_doc.items() if k not in ('_id', '_score')} == raw_record,
+                  'search altered stored text or nested JSON')
+            check(api('GET', rp + f'/doc/{raw_doc_id}') == raw_record, 'raw document changed')
+            check(api('GET', rp + f'/doc/{raw_doc_id}', {'fields': ['data', 'missing']}) == {'data': raw_record['data']},
+                  'projection changed nested JSON or returned missing fields')
+            projected = api('POST', rp + '/query', {'query': 'rawmarker', 'fields': ['body', 'data']})['results'][0]
+            check({k: v for k, v in projected.items() if k not in ('_id', '_score')} ==
+                  {k: raw_record[k] for k in ('body', 'data')}, 'search projection changed stored values')
+            print('PASS exact raw Unicode/multiline/HTML-like text, nested JSON and field projection')
             if os.environ.get('SEEKPOWER_BROWSER_TEST') == '1':
                 source_id = api('POST', '/api/v1/index', {
                     'index_name': 'source_links', 'schema': [
@@ -358,6 +395,35 @@ def exercise(binary, workdir):
                     check(search_input.input_value() == 'plaintxt', 'typed input was rewritten')
                     check(page.locator('#suggestions, #suggestionsMain, #did_you_mean').count() == 0,
                           'retired suggestions UI remains')
+                    with page.expect_response(lambda response: '/query' in response.url and
+                            response.request.method == 'POST') as raw_response:
+                        page.goto(base + f'/?index_id={raw_id}&q=rawmarker')
+                    response = raw_response.value
+                    check(response.status == 200 and 'highlights' not in response.request.post_data_json,
+                          'UI sent retired presentation options')
+                    page.locator('#contentBox .recordText').first.wait_for()
+                    check(page.locator('#contentBox h1 a').first.text_content() == raw_record['title'], 'UI title modified')
+                    check(page.locator('#contentBox .recordText').first.text_content() == raw_record['body'], 'UI body truncated or modified')
+                    check(page.locator('#contentBox a[href]').count() == 0, 'non-HTTP stored URL became an active link')
+                    page.locator('#contentBox .resultEntry h1').first.hover()
+                    check(page.locator('#prevText2').text_content() == raw_record['body'], 'full raw preview changed or used body2')
+                    check(page.locator('#prevTitle').text_content() == raw_record['title'], 'preview title modified')
+                    check(page.locator('#contentBox b, #contentBox img, #prevText2 img, #prevTitle b').count() == 0,
+                          'stored markup became HTML elements')
+                    check(page.evaluate('window.rawExecuted !== true'), 'stored markup executed')
+                    check(page.locator('#prevText2').evaluate('(el) => getComputedStyle(el).whiteSpace') == 'pre-wrap',
+                          'preview loses raw line breaks')
+                    check(page.locator('#prevText2').evaluate('(el) => el.scrollHeight > el.clientHeight'),
+                          'long raw preview has no scrollable viewport')
+                    page.locator('#prevText2').evaluate('(el) => { el.scrollTop = el.scrollHeight; }')
+                    check(page.locator('#prevText2').evaluate('(el) => el.scrollTop > 0'), 'long raw preview cannot scroll')
+                    # JSON fields use readable JSON text, including false and zero values.
+                    with page.expect_response(lambda response: '/query' in response.url and response.request.method == 'POST'):
+                        page.evaluate("TEXT_FIELD='data'; loadResults(1, 'score')")
+                    expected_json = json.dumps(raw_record['data'], ensure_ascii=False, separators=(',', ':'))
+                    page.wait_for_function('(value) => document.querySelector(".recordText").textContent === value', arg=expected_json)
+                    page.locator('#contentBox .resultEntry h1').first.hover()
+                    check(page.locator('#prevText2').text_content() == expected_json, 'nested JSON preview lost types')
                     page.goto(base + f'/?index_id={metadata_id}&q=ordinary')
                     page.locator('#new').wait_for()
                     for selector, title in [('#new', 'New record'), ('#old', 'Old record')]:
@@ -378,7 +444,7 @@ def exercise(binary, workdir):
                     check(response.json()['results'][0]['title'].startswith('New record'), 'UI timestamp result changed')
                     check(not errors, f'browser errors: {errors}')
                     browser.close()
-                print('PASS Chromium lexical/vector/hybrid, source/text preview, unchanged typed query and date sorting/filtering')
+                print('PASS Chromium lexical/vector/hybrid, source/text preview, literal raw/JSON preview, unchanged typed query and date sorting/filtering')
 
             check(api('DELETE', path + '/doc', b'clear') == 0, 'clear count mismatch')
             check(api('GET', path)['indexed_doc_count'] == 0, 'index not empty after clear')

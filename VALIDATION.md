@@ -236,3 +236,21 @@ S1.4a 最终 head `a5da5b9` 的 [CI 38387377669](https://github.com/TheLudlows/s
 新增 metadata_contract 三项测试耗时 0.48 秒，这是该小型功能夹具的总运行时间，不是吞吐/延迟基线。修正触及的是必须统计完整匹配集时的路径选择；无过滤/分面的原快速计数、索引编码、评分及 ANN 算法未改。未执行 AArch64、生产规模性能和故障恢复验证；完整性能/可靠性验收仍在 S2。
 
 PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue #1 保持打开。此后仅回填 Markdown 记录，最新提交自动检查见 PR Checks。
+
+## 2026-10-13：S1.4b 合入与 S1.4c 高亮/摘要裁剪
+
+- PR #6 最终文档 head `c33d160f6f29f27f5c22fd0545a9677e3d9d745b` 的 CI 38392170443（job 115278372125）全部通过；merge commit `fb90463d476871830deb24126684dee21a266e41`，作为 S1.4c 基点。
+- 删除 highlighter 模块及直接 aho-corasick 依赖，迁移所有 Rust 读取调用与示例；删除 HTTP 请求高亮选项和 OpenAPI Highlight，保留搜索响应 query_terms。regex 间接依赖仍保留，CI 只检查 core 不再直接引用 aho-corasick。
+- 存储格式、索引/搜索算法不变。新增两个 Rust 契约测试：旧参数拒绝，双分片 RAM/MMAP 提交前后/关闭重开完整原文与嵌套 JSON 投影。原 53 个测试保留，只迁移读取签名。
+- HTTP 增加 GET/POST/URL 旧高亮参数 400、原文/嵌套 JSON/投影一致性；Chromium 增加超过旧 4000 字符上限的中文/换行原文、HTML 字符按文本呈现、非 HTTP URL 不成为活动链接、普通 body2 字段不覆盖预览、JSON 类型保留。既有词法/向量/混合、日期排序/过滤与外部来源预览继续执行。
+- 本地 `node --check seekstorm_server/web/js/master.js`、Python 编译、`git diff --check`、OpenAPI JSON/YAML 语义一致性通过；本地没有 Rust 工具链，构建/测试/生成器精确对比等待 GitHub Actions，不记为已通过。
+- 完整可靠性、恢复/故障注入、性能和 ANN 质量验收仍留在 S2。
+
+### S1.4c 验证结果与本批结论
+
+- 首次代码提交 `c29b4b278fa3a7f3179c7ba5b428b607e0cad5bd` 的 [CI 38393632751](https://github.com/TheLudlows/seekpower/actions/runs/38393632751)（job 115283267172）全部通过；55 tests，0 failed/ignored/filtered。没有通过删除或跳过测试规避失败。
+- 审查长原文预览发现原页面没有可滚动文本区域；提交 `03da2f26fa9e780fd8174b259a32c68e813018b6` 增加 `max-height:60vh` 和 `overflow-y:auto`，并补充 Chromium 实际滚动断言。此前测试只验证完整文本保留，不能代表长文可读到底，此处补齐。
+- 最新代码 [CI 38394080671](https://github.com/TheLudlows/seekpower/actions/runs/38394080671)（job 115284782392）**全部通过**：`cargo build --workspace`；resolved dependency 检查；`SEEKPOWER_BROWSER_TEST=1 python3 scripts/http_smoke.py --server target/debug/seekstorm_server`；`cargo test --workspace --all-targets`，**55 passed / 0 failed / 0 ignored / 0 filtered out**；OpenAPI JSON 与 YAML 均和 Rust 生成器逐字节一致。
+- 首轮环境：Ubuntu x86_64、rustc 1.99.0 / cargo 1.99.0、AMD EPYC 9V74；实际 runner 环境与完整步骤输出见各运行日志。本地只做静态检查，没有把 CI 运行记作本地验证。
+- HTTP/Chromium 通过原文/嵌套 JSON/投影、旧参数拒绝、长文滚动及安全文本展示；现有词法/外部向量/混合、更新删除、认证、来源链接和日期排序过滤均通过。新增双分片 RAM/MMAP 提交前后/关闭重开契约通过，原 53 个测试全部保留。
+- [PR #7](https://github.com/TheLudlows/seekpower/pull/7) 代码和验证已完成，待审查合入。本次结果回填只修改计划/状态/验证文档，运行代码与上述已通过 CI 的 `03da2f2` 相同。S1.4 配额和 S1.5 尚待执行；不把本批测试等同完整可靠性、性能或生产恢复验收。

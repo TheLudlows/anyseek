@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fix inherited metadata aggregation omissions in realtime counts and committed ranked unions. Retain exact filters/facet totals through existing record/bitmap paths; preserve unconstrained counting shortcuts. Fix Web UI date Range request shape.
 
+- Remove core highlighter/KWIC generation and direct aho-corasick dependency. Remove HTTP highlights and document-read query_terms options, and the Rust get_document highlighter argument. Preserve lossless stored records/projection and lexical response query_terms. Render raw text/JSON safely in Web UI with full text previews.
+
 Entries below describe upstream releases before the SeekPower pruning and are retained as historical records, not current product capabilities.
 
 ## [3.4.1] - 2026-10-12

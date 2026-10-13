@@ -123,7 +123,7 @@ pub struct ResultObject {
     pub original_query: String,
     /// Search query string, unchanged from the caller input
     pub query: String,
-    /// Vector of search query terms. Can be used e.g. for custom highlighting.
+    /// Vector of lexical search query terms.
     pub query_terms: Vec<String>,
     /// Number of returned search results. Identical to results.len()
     pub result_count: usize,

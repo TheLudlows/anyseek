@@ -34,7 +34,6 @@ use crate::{
     add_result::{self, B, K, SIGMA},
     clustering::{ClusterHeader, ParentMedoid},
     commit::Commit,
-    highlighter::Highlight,
     search::{
         self, FacetFilter, QueryFacet, Ranges, ResultObject, ResultSort,
         ResultType, SearchLexicalShard, SearchMode,
@@ -156,9 +155,6 @@ pub struct SearchRequestObject {
     /// True realtime search: include indexed, but uncommitted documents into search results.
     #[serde(default)]
     pub realtime: bool,
-    /// Specify field names where to create keyword-in-context fragments and highlight query terms.
-    #[serde(default)]
-    pub highlights: Vec<Highlight>,
     /// Specify field names where to search at querytime, whereas SchemaField.indexed is set at indextime. If empty then all indexed fields are searched.
     #[schema(required = false, example = json!(["title"]))]
     #[serde(default)]
@@ -225,7 +221,7 @@ pub struct SearchResultObject {
     pub count: usize,
     /// Total number of search results matching the query
     pub count_total: usize,
-    /// Vector of search query terms. Can be used e.g. for custom highlighting.
+    /// Vector of lexical search query terms.
     pub query_terms: Vec<String>,
     #[schema(value_type=Vec<HashMap<String, serde_json::Value>>)]
     /// Vector of search result documents
@@ -393,12 +389,6 @@ fn default_1usize() -> isize {
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetDocumentRequest {
-    /// query terms for highlighting
-    #[serde(default)]
-    pub query_terms: Vec<String>,
-    /// which fields to highlight: create keyword-in-context fragments and highlight terms
-    #[serde(default)]
-    pub highlights: Vec<Highlight>,
     /// which fields to return
     #[serde(default)]
     pub fields: Vec<String>,
@@ -550,7 +540,6 @@ impl fmt::Display for LexicalSimilarity {
 /// UnicodeAlphanumericZH
 /// - Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
 /// - Supports mixed Latin and Chinese texts
-/// - Supports Chinese sentence boundary chars for KWIC snippets ahd highlighting.
 /// - Requires feature #[cfg(feature = "zh")]
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default, ToSchema)]
 pub enum TokenizerType {
@@ -572,7 +561,6 @@ pub enum TokenizerType {
     WhitespaceLowercase = 4,
     /// Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
     /// Supports mixed Latin and Chinese texts
-    /// Supports Chinese sentence boundary chars for KWIC snippets ahd highlighting.
     /// Requires feature #[cfg(feature = "zh")]
     #[cfg(feature = "zh")]
     UnicodeAlphanumericZH = 5,
@@ -1010,7 +998,6 @@ pub enum FieldType {
     /// The text is extracted from all levels of the JSON object and combined into a single text string (values only, not keys).
     /// In that respect, it is similar to combined fields in other search engines.
     /// Despite being indexed as a single text string, the hierarchical structure of an JSON object is preserved in the stored document, so that it can be retrieved in the search results.
-    /// When using search with highlighting, make sure to use a `name` different from `field`, otherwise the Json `field` in the results will be overwritten with the highlight (snippet) text.
     Json,
     /// Binary encodes and stores binary data in base64 format. This field type will not be tokenized and indexed.
     /// For embedding binary data, e.g. images, audio, video, pdf, … in JSON or CSV documents. A self-contained alternative to storing URLs to external resources.
@@ -1035,7 +1022,6 @@ pub struct Synonym {
     /// E.g. [street, avenue, road] will result in searches for street to return documents containing any of the terms street, avenue or road,
     /// but searches for avenue will only return documents containing avenue, but not documents containing street or road.
     /// Currently only single terms without spaces are supported.
-    /// Synonyms are supported in result highlighting.
     /// The synonyms that were created with the synonyms parameter in create_index are stored in synonyms.json in the index directory contains  
     /// Can be manually modified, but becomes effective only after restart and only for newly indexed documents.
     #[serde(default = "default_as_true")]
@@ -1421,7 +1407,7 @@ pub struct Shard {
 
     /// Defines a field in index schema: field, stored, indexed , field_type, facet, boost.
     pub schema_map: HashMap<String, SchemaField>,
-    /// List of stored fields in the index: get_document and highlighter work only with stored fields
+    /// List of stored fields in the index: get_document works only with stored fields
     pub stored_field_names: Vec<String>,
     /// Specifies LexicalSimilarity, TokenizerType and AccessType when creating an new index
     pub meta: IndexMetaObject,
@@ -1556,7 +1542,7 @@ pub struct Index {
     pub(crate) deleted_doc_count: usize,
     /// Defines a field in index schema: field, stored, indexed , field_type, facet, boost.
     pub schema_map: HashMap<String, SchemaField>,
-    /// List of stored fields in the index: get_document and highlighter work only with stored fields
+    /// List of stored fields in the index: get_document works only with stored fields
     pub stored_field_names: Vec<String>,
     /// Specifies LexicalSimilarity, TokenizerType and AccessType when creating an new index
     pub meta: IndexMetaObject,

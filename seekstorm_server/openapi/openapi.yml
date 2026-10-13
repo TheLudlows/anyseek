@@ -1189,25 +1189,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GetDocumentRequest'
             example:
-              query_terms:
-              - test
               fields:
               - title
               - body
-              highlights:
-              - field: title
-                fragment_number: 0
-                fragment_size: 1000
-                highlight_markup: true
-              - field: body
-                fragment_number: 2
-                fragment_size: 160
-                highlight_markup: true
-              - field: body
-                name: body2
-                fragment_number: 0
-                fragment_size: 4000
-                highlight_markup: true
         required: true
       responses:
         '200':
@@ -1369,7 +1353,6 @@ paths:
         - Realtime search
         - Field filter
         - Fields to include in search results
-        - Highlights: keyword-in-context snippets and term highlighting
         - Query facets: which facets fields to calculate and return at query time
         - Facet filter: filter facets by field and value
         - Result sort: sort results by field and direction
@@ -1420,14 +1403,6 @@ paths:
                   length: 10
                   result_type: TopkCount
                   realtime: true
-                  highlights:
-                  - field: ''
-                    name: ''
-                    fragment_number: 0
-                    fragment_size: 0
-                    highlight_markup: true
-                    pre_tags: ''
-                    post_tags: ''
                   field_filter:
                   - title
                   fields: []
@@ -2133,16 +2108,6 @@ components:
       type: object
       description: Specifies which document and which field to return
       properties:
-        query_terms:
-          type: array
-          items:
-            type: string
-          description: query terms for highlighting
-        highlights:
-          type: array
-          items:
-            $ref: '#/components/schemas/Highlight'
-          description: 'which fields to highlight: create keyword-in-context fragments and highlight terms'
         fields:
           type: array
           items:
@@ -2183,45 +2148,6 @@ components:
           items:
             type: string
           description: which fields to return (if include_document is true, if empty then return all stored fields)
-    Highlight:
-      type: object
-      description: |-
-        Specifies the number and size of fragments (snippets, summaries) to generate from each specified field to provide a "keyword in context" (KWIC) functionality.
-        With highlight_markup the matching query terms within the fragments can be highlighted with HTML markup.
-      required:
-      - field
-      properties:
-        field:
-          type: string
-          description: Specifies the field from which the fragments  (snippets, summaries) are created.
-        name:
-          type: string
-          description: |-
-            Allows to specifiy multiple highlight result fields from the same source field, leaving the original field intact,
-            Default: if name is empty then field is used instead, i.e the original field is overwritten with the highlight.
-        fragment_number:
-          type: integer
-          description: If 0/default then return the full original text without fragmenting.
-          minimum: 0
-        fragment_size:
-          type: integer
-          description: |-
-            Specifies the length of a highlight fragment.
-            The default 0 returns the full original text without truncating, but still with highlighting if highlight_markup is enabled.
-          minimum: 0
-        highlight_markup:
-          type: boolean
-          description: if true, the matching query terms within the fragments are highlighted with HTML markup **\<b\>term\<\/b\>**.
-        pre_tags:
-          type: string
-          description: |-
-            Specifies the markup tags to insert **before** each highlighted term (e.g. \"\<b\>\" or \"\<em\>\"). This can be any string, but is most often an HTML or XML tag.
-            Only used when **highlight_markup** is set to true.
-        post_tags:
-          type: string
-          description: |-
-            Specifies the markup tags to insert **after** each highlighted term. (e.g. \"\<\/b\>\" or \"\<\/em\>\"). This can be any string, but is most often an HTML or XML tag.
-            Only used when **highlight_markup** is set to true.
     IndexResponseObject:
       type: object
       description: Index response object
@@ -3197,11 +3123,6 @@ components:
         realtime:
           type: boolean
           description: 'True realtime search: include indexed, but uncommitted documents into search results.'
-        highlights:
-          type: array
-          items:
-            $ref: '#/components/schemas/Highlight'
-          description: Specify field names where to create keyword-in-context fragments and highlight query terms.
         field_filter:
           type: array
           items:
@@ -3296,7 +3217,7 @@ components:
           type: array
           items:
             type: string
-          description: Vector of search query terms. Can be used e.g. for custom highlighting.
+          description: Vector of lexical search query terms.
         results:
           type: array
           items:
@@ -3435,7 +3356,6 @@ components:
             E.g. [street, avenue, road] will result in searches for street to return documents containing any of the terms street, avenue or road,
             but searches for avenue will only return documents containing avenue, but not documents containing street or road.
             Currently only single terms without spaces are supported.
-            Synonyms are supported in result highlighting.
             The synonyms that were created with the synonyms parameter in create_index are stored in synonyms.json in the index directory contains
             Can be manually modified, but becomes effective only after restart and only for newly indexed documents.
     TokenizerType:
@@ -3460,7 +3380,6 @@ components:
         UnicodeAlphanumericZH
         - Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
         - Supports mixed Latin and Chinese texts
-        - Supports Chinese sentence boundary chars for KWIC snippets ahd highlighting.
         - Requires feature #[cfg(feature = "zh")]
       enum:
       - AsciiAlphabetic
