@@ -411,43 +411,6 @@ impl Shard {
         self.is_last_level_incomplete =
             !(self.committed_doc_count).is_multiple_of(ROARING_BLOCK_SIZE);
 
-        if let Some(root_index_arc) = &self.index_option {
-            let root_index = root_index_arc.read().await;
-
-            if let Some(root_completion_option) = root_index.completion_option.as_ref() {
-                let mut root_completions = root_completion_option.write().await;
-                for completion in self.level_completions.read().await.iter() {
-                    if root_completions.len() < root_index.max_completion_entries {
-                        root_completions.add_completion(&completion.0.join(" "), *completion.1);
-                    }
-                }
-
-                self.level_completions.write().await.clear();
-            }
-
-            if let Some(symspell) = root_index.symspell_option.as_ref() {
-                if symspell.read().await.get_dictionary_size() < root_index.max_dictionary_entries {
-                    for key0 in 0..self.segment_number1 {
-                        for key in self.segments_level0[key0].segment.keys() {
-                            let plo = self.segments_level0[key0].segment.get(key).unwrap();
-
-                            if self.meta.spelling_correction.is_some()
-                                && symspell.read().await.get_dictionary_size()
-                                    < root_index.max_dictionary_entries
-                                && key & 7 == 0
-                                && let Some(term) = self.level_terms.get(&((key >> 32) as u32))
-                            {
-                                let mut symspell = symspell.write().await;
-                                symspell.create_dictionary_entry(term.clone(), plo.posting_count);
-                                drop(symspell);
-                            };
-                        }
-                    }
-                }
-                self.level_terms.clear();
-            };
-        };
-
         self.compressed_index_segment_block_buffer = vec![0; 10_000_000];
         self.postings_buffer = vec![0; POSTING_BUFFER_SIZE];
 
@@ -1208,3 +1171,4 @@ impl Shard {
         }
     }
 }
+

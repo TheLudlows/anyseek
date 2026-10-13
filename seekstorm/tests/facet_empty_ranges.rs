@@ -9,7 +9,7 @@ use seekstorm::index::{
     TokenizerType, create_index,
 };
 use seekstorm::search::{
-    QueryFacet, QueryRewriting, QueryType, RangeType, ResultType, Search, SearchMode,
+    QueryFacet, QueryType, RangeType, ResultType, Search, SearchMode,
 };
 use seekstorm::vector::Inference;
 use std::{fs, path::Path};
@@ -34,8 +34,6 @@ async fn repro_range_facet_empty_ranges_no_panic() {
         ngram_indexing: NgramSet::SingleTerm as u8,
         document_compression: DocumentCompression::Snappy,
         access_type: AccessType::Mmap,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::None,
     };
@@ -69,7 +67,6 @@ async fn repro_range_facet_empty_ranges_no_panic() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
     assert_eq!(rlo.result_count_total, 2, "setup: Count without facets");
@@ -96,7 +93,6 @@ async fn repro_range_facet_empty_ranges_no_panic() {
             query_facets,
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
     assert_eq!(

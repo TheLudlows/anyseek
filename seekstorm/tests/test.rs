@@ -10,7 +10,7 @@ use seekstorm::index::{
 };
 use seekstorm::iterator::GetIterator;
 use seekstorm::search::{
-    FacetFilter, FacetValue, QueryFacet, QueryRewriting, QueryType, ResultSort, ResultType, Search,
+    FacetFilter, FacetValue, QueryFacet, QueryType, ResultSort, ResultType, Search,
     SearchMode, SortOrder,
 };
 use seekstorm::vector::{Embedding, Inference, Precision, Quantization};
@@ -41,8 +41,6 @@ async fn test_01_create_index() {
         ngram_indexing: NgramSet::NgramFF as u8 | NgramSet::NgramFFF as u8,
         document_compression: DocumentCompression::Snappy,
         access_type: AccessType::Mmap,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::None,
     };
@@ -164,7 +162,6 @@ async fn test_04_query_index() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -195,7 +192,6 @@ async fn test_04_query_index() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -238,7 +234,6 @@ async fn test_05_empty_query() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -277,7 +272,6 @@ async fn test_05_empty_query() {
             Vec::new(),
             Vec::new(),
             result_sort,
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -316,7 +310,6 @@ async fn test_05_empty_query() {
             Vec::new(),
             Vec::new(),
             result_sort,
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -380,7 +373,6 @@ async fn test_06_clear_index() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -450,7 +442,6 @@ async fn test_08_delete_document() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -479,7 +470,6 @@ async fn test_08_delete_document() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -515,8 +505,6 @@ async fn test_09_create_index_vector_supplied() {
         ngram_indexing: NgramSet::SingleTerm as u8,
         document_compression: DocumentCompression::Snappy,
         access_type: AccessType::Mmap,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::External {
             dimensions: 3,
@@ -598,7 +586,6 @@ async fn test_11_query_index_vector_supplied() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -636,8 +623,6 @@ async fn test_12_create_index_vector_external() {
         ngram_indexing: NgramSet::SingleTerm as u8,
         document_compression: DocumentCompression::Snappy,
         access_type: AccessType::Mmap,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::External {
             dimensions: 128,
@@ -732,7 +717,6 @@ async fn test_14_query_index_vector_external() {
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -769,8 +753,6 @@ async fn test_15_facet_scope() {
         ngram_indexing: NgramSet::SingleTerm as u8,
         document_compression: DocumentCompression::Snappy,
         access_type: AccessType::Mmap,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::None,
     };
@@ -817,7 +799,6 @@ async fn test_15_facet_scope() {
                 }],
                 facet_filter,
                 Vec::new(),
-                QueryRewriting::SearchOnly,
             )
             .await;
 

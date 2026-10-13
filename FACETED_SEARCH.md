@@ -144,8 +144,6 @@ let meta = IndexMetaObject {
     ngram_indexing: NgramSet::NgramFF as u8,
     document_compression: DocumentCompression::Snappy,
     access_type: AccessType::Mmap,
-    spelling_correction: None,
-    query_completion: None,
     clustering: Clustering::None,
     inference: Inference::None,
 };
@@ -287,7 +285,7 @@ where the ranges can be defined dynamically with different boundaries for each q
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::search::{Search, SearchMode, QueryType, ResultType, QueryFacet, QueryRewriting};
+use seekstorm::search::{Search, SearchMode, QueryType, ResultType, QueryFacet};
 use seekstorm::highlighter::{Highlight, highlighter};
 use seekstorm::index::open_index;
 use std::path::Path;
@@ -310,7 +308,7 @@ let query_facets = vec![QueryFacet::String16 {field: "age".into(),prefix: "".int
 let facet_filter=Vec::new();
 let result_sort=Vec::new();
 
-let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,QueryRewriting::SearchOnly).await;
+let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,).await;
 
 
 // **display results**
@@ -523,6 +521,7 @@ Numerical range & String value facet counting depend both on the query and on th
   }
 ]
 ```
+
 
 
 

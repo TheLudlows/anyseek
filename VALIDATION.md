@@ -164,3 +164,31 @@ CI 改用新的缓存命名空间且 `cache-targets: false`，只缓存可跨机
 | 本地静态检查 | Python AST、Node 脚本语法、git diff --check 通过 |
 
 本批首次完整 CI 即通过。此后的状态/验证回填仅修改 Markdown；最终 head 的检查结果见 PR Checks。PR 尚未合入，S1.3 清单暂不勾选，S1.4—S1.5 尚未实施。
+
+
+## S1.4a — 纠错补全与查询改写裁剪（2026-10-13）
+
+S1.3 最终 head `242815d` 的 CI 38384967519 已成功，PR #4 合入提交 `567d8a22908179236e239e4d82155a2546095273`。本批基于该提交，范围仅覆盖 S1.4 第一项；地理/高亮/配额保持待执行。
+
+删除查询改写及 SymSpell/PruningRadixTrie 词典生命周期；移除分词器中仅用于补全统计的分支，保留原有分词、中文字典、n-gram、布尔/短语匹配。保留 query/original_query 响应字段，两者均为调用方原文；suggestions 移除。HTTP 创建/查询/Schema 旧配置必须报错，Rust 搜索移除末尾 query_rewriting 参数。旧索引 null 元数据仍可读，启用已移除功能的元数据明确返回重建提示。
+
+验证待回填：原有 48 个测试保留，新增 2 个契约测试；HTTP 参数拒绝及未改写结果、Chromium 输入不被补全或替换、依赖图及 OpenAPI 一致性。本地无 Rust 工具链，Rust/浏览器结果以 CI 为准。没有执行生产性能、恢复或 AArch64 测试。
+
+
+首轮 `bc634a4` / [CI 38386035710](https://github.com/TheLudlows/seekpower/actions/runs/38386035710)，job `115257952954`：编译、依赖图、50 个 Rust 测试及 OpenAPI 一致性通过；HTTP 契约检查通过，但 Chromium 新增输入检查等待目标请求超时。排查发现继承 UI 将 JSON 请求体使用 jQuery 默认的 application/x-www-form-urlencoded 发送，Playwright 按声明的内容类型将其解析为表单，无法匹配 query 字段。本批将查询请求 Content-Type 显式设为 application/json，并增加内容类型断言；保留原浏览器断言，未跳过失败检查。修复后的结果见下方。
+
+
+**S1.4a 验证通过。** 修复提交 [`a652e6d069e91fa9d970785ee8a184affbf374f6`](https://github.com/TheLudlows/seekpower/commit/a652e6d069e91fa9d970785ee8a184affbf374f6)，[CI 38386749094](https://github.com/TheLudlows/seekpower/actions/runs/38386749094)，job `115260312309`。Ubuntu x86_64 / Rust、Cargo 1.99.0；native 目标不跨 runner 复用。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| `cargo build --workspace` | 通过 |
+| Cargo metadata 解析依赖图 | 无 symspell_complete_rs，亦无此前裁剪的 pdfium-render/csv/walkdir |
+| `cargo test --workspace --all-targets` | 50 passed，0 failed/ignored/filtered；既有 48 个测试保留，新增 2 个契约测试 |
+| 查询契约 | 原始 query/original_query 一致；错词不自动改写，短语、布尔、中文、标识符和 n-gram 路径通过；关闭重开兼容、旧 null 元数据可读、启用已移除配置返回错误 |
+| HTTP/UI | 鉴权、首页及 11 个资源、JSON 记录写/读/更新/删除、向量/混合及原过滤检查通过；旧创建/Schema/查询选项返回 400 |
+| Chromium | 输入查询的 JSON 请求头正确，错词保持原样且不产生建议面板；词法/向量/混合、外部来源和文本预览通过；0 pageerror |
+| OpenAPI | Rust 生成 JSON/YAML 与仓库一致；退役参数、类型及 suggestions 字段移除 |
+| 本地静态 | Node 语法、Python AST、JSON/YAML 语义对齐、git diff --check 通过 |
+
+不改变索引二进制编码或 ANN/评分/压缩算法。Rust 搜索与 schema 构造 API 存在显式签名变化，迁移说明已写入 README。未执行 AArch64、生产恢复/性能验证。PR #5 尚未合入；S1.4 其余三项及 S1.5 仍未实施。之后仅回填 Markdown 证据，最新提交的自动检查见 PR Checks。

@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | R0 原样代码导入 | 已完成 | `1986b14215c82a07fac77d7c5b169b90743d76a4`；与上游树完全相同 |
 | R0 计划文档 | 已提交并调整 | 已取消独立基线阶段，改为直接实施 S1 |
-| S1 外围裁剪 | S1.1—S1.2 已合入；S1.3 已验证、待合入 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 保留并按裁剪结果调整 |
+| S1 外围裁剪 | S1.1—S1.3 已合入；S1.4a 已验证、待合入 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 保留并按裁剪结果调整 |
 | S2 可靠单机 | 待执行 | ID/版本、可见性、日志/检查点/恢复、过滤和候选接口 |
 | D1 静态分布式 | 待执行 | 分片路由、全局两路候选、RRF、回表 |
 | D2 副本与恢复 | 待执行 | 有序复制、选主、fencing、快照追赶 |
@@ -24,7 +24,7 @@
 ## 已固定的边界
 
 - Web UI 保留并复用，不删除、不另起项目重写；后续按能力调整控件与 API。
-- workspace 已收敛为 `seekstorm`、`seekstorm_server`；S1.2 已移除模型/切块依赖，S1.3 分支已移除文件解析依赖，不代表 S1 全部完成。
+- workspace 已收敛为 `seekstorm`、`seekstorm_server`；S1.2 已移除模型/切块依赖，S1.3 已移除文件解析依赖，不代表 S1 全部完成。
 - 目标主分支继续使用 `master`；旧代码保存在导入提交的父历史中。
 - S1.1 未改保留 crate 的运行源码、UI 资源、检索算法或索引格式；只额外修正一个继承测试的数据前提，未引入分布式组件。
 - 删除独立 S0 不等于删除测试或宣称未执行测试已经通过；也不以另一个名称恢复全量基线前置要求。
@@ -55,9 +55,19 @@
 - 核心 Rust 单条写入改为 `index_document(document)`；控制台信息展示从 ingest 模块迁至 info 模块。
 - 扩展 HTTP/浏览器回归并同步 API 描述、使用说明。[PR #4](https://github.com/TheLudlows/seekpower/pull/4) / `dbd22c7` 的 [CI 38384079928](https://github.com/TheLudlows/seekpower/actions/runs/38384079928) 全部通过：构建、48 个测试、依赖图、HTTP/Chromium 与 OpenAPI 一致性。
 
+## 当前批次：S1.4a — 纠错、补全与改写
+
+S1.3 已通过最终 head CI 38384967519 并合入 master（PR #4，`567d8a22908179236e239e4d82155a2546095273`）。
+
+- 删除 SymSpell/补全词典生成、加载、保存与搜索改写分支，移除 symspell_complete_rs 依赖；保留中文分词字典及词法 n-gram 匹配。
+- 删除配置、Schema 字段和 Rust 搜索改写参数；HTTP 旧参数明确返回 400；旧索引启用纠错/补全时明确拒绝打开，null 配置继续兼容。
+- 删除 UI 自动补全脚本、建议面板、错词提示和查询改写请求，保留原输入、即时搜索及来源/文本预览。
+- 增加精确输入、短语/布尔、中文、标识符、关闭重开和旧元数据回归；[PR #5](https://github.com/TheLudlows/seekpower/pull/5) / `a652e6d` 的 [CI 38386749094](https://github.com/TheLudlows/seekpower/actions/runs/38386749094) 全部通过（50 tests、HTTP/Chromium、依赖图、OpenAPI）；首次浏览器检查失败及请求头修复见 VALIDATION。
+- S1.4 地理搜索、高亮与配额裁剪尚未实施，不将本子批次等同于整个 S1.4。
+
 ## 下一步
 
-1. 审查并合入 S1.3 [PR #4](https://github.com/TheLudlows/seekpower/pull/4)；本批代码与验证已完成，证据见 VALIDATION。
-2. S1.3 合入后按 S1.4—S1.5 顺序推进。
+1. 审查并合入 S1.4a [PR #5](https://github.com/TheLudlows/seekpower/pull/5)。
+2. 依次推进 S1.4 地理搜索、高亮、配额，再完成 S1.5 清理闭环。
 
 各批完成时同步 commit/PR、命令、环境、结果及未解决问题。完整可靠性和性能验收留在 S2。

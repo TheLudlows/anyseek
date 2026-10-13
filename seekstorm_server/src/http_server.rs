@@ -29,7 +29,7 @@ use seekstorm::index::{
     ApikeyObject, ApikeyQuotaObject, CreateIndexRequest, DeleteApikeyRequest, Document,
     GetDocumentRequest, GetIteratorRequest, SearchRequestObject, Synonym,
 };
-use seekstorm::search::{QueryRewriting, QueryType, ResultType, Search, SearchMode};
+use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
 
 use seekstorm::vector::Embedding;
 use seekstorm::vector_similarity::AnnMode;
@@ -64,7 +64,6 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const FLEXBOX_CSS: &str = include_str!("../web/css/flexboxgrid.min.css");
 const MASTER_CSS: &str = include_str!("../web/css/master.css");
 const MASTER_JS: &str = include_str!("../web/js/master.js");
-const AUTOCOMPLETE_JS: &str = include_str!("../web/js/autocomplete.js");
 const JQUERY_JS: &str = include_str!("../web/js/jquery-3.7.1.min.js");
 const LOGO_SVG: &[u8] = include_bytes!("../web/svg/logo.svg");
 const FAVICON_16: &[u8] = include_bytes!("../web/favicon-16x16.png");
@@ -290,7 +289,6 @@ pub(crate) async fn http_request_handler(
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
-                    QueryRewriting::SearchOnly,
                 )
                 .await;
 
@@ -409,6 +407,9 @@ pub(crate) async fn http_request_handler(
                 })
                 .unwrap_or_default();
 
+            if params.contains_key("query_rewriting") {
+                return HttpServerError::BadRequest("query_rewriting has been removed".into()).into();
+            }
             let search_request = if !params.is_empty() {
                 let query_string = if let Some(query_string) = params.get("query") {
                     query_string.to_string()
@@ -480,7 +481,6 @@ pub(crate) async fn http_request_handler(
                     facet_filter: Vec::new(),
                     result_sort: Vec::new(),
                     query_type_default: QueryType::Intersection,
-                    query_rewriting: QueryRewriting::SearchOnly,
                     search_mode: SearchMode::Lexical,
                 }
             } else {
@@ -563,8 +563,8 @@ pub(crate) async fn http_request_handler(
                 create_index_request_object.synonyms,
                 force_shard_number,
                 apikey_object,
-                create_index_request_object.spelling_correction,
-                create_index_request_object.query_completion,
+
+
                 true,
                 create_index_request_object.clustering,
                 create_index_request_object.inference,
@@ -1461,7 +1461,6 @@ pub(crate) async fn http_request_handler(
             "/css/flexboxgrid.min.css" => Ok(Response::new(BoxBody::new(FLEXBOX_CSS.to_string()))),
             "/css/master.css" => Ok(Response::new(BoxBody::new(MASTER_CSS.to_string()))),
             "/js/master.js" => Ok(Response::new(BoxBody::new(MASTER_JS.to_string()))),
-            "/js/autocomplete.js" => Ok(Response::new(BoxBody::new(AUTOCOMPLETE_JS.to_string()))),
             "/js/jquery-3.7.1.min.js" => Ok(Response::new(BoxBody::new(JQUERY_JS.to_string()))),
 
             "/css/bootstrap.histogram.slider.css" => {

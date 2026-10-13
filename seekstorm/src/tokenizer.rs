@@ -135,17 +135,6 @@ pub(crate) async fn tokenizer(
     indexed_field_id: usize,
     indexed_field_number: usize,
 ) {
-    let (max_completion_entries, completion_len) = if is_query {
-        (0, 0)
-    } else {
-        let root_index = &index.index_option.as_ref().unwrap().read().await;
-        if let Some(v) = root_index.completion_option.as_ref() {
-            (root_index.max_completion_entries, v.read().await.len())
-        } else {
-            (0, 0)
-        }
-    };
-
     let token_per_field_max_capped = cmp::max(token_per_field_max, 65_536);
 
     let text_normalized;
@@ -531,8 +520,6 @@ pub(crate) async fn tokenizer(
     let mut term_string_2 = "".to_string();
     let mut term_frequent_2 = false;
 
-    let mut term_len_1 = 0;
-    let mut term_len_2 = 0;
 
     let mut non_unique_terms_raw = Vec::new();
 
@@ -594,61 +581,6 @@ pub(crate) async fn tokenizer(
             let mut term_positions_len;
             let term_hash_0 = hash64(term_string_0.as_bytes());
             let term_frequent_0 = index.frequent_hashset.contains(&term_hash_0);
-
-            let term_number_0 = term_string_0.chars().next().unwrap().is_ascii_digit()
-                && term_string_0.chars().last().unwrap().is_ascii_digit();
-            let term_len_0 = term_string_0.chars().count();
-
-            if index.indexed_schema_vec[indexed_field_id].completion_source {
-                let mut level_completions = index.level_completions.write().await;
-
-                if !term_number_0 && term_len_0 > 1 {
-                    let unigram_string = vec![term_string_0.clone()];
-                    if completion_len < max_completion_entries {
-                        level_completions
-                            .entry(unigram_string)
-                            .and_modify(|v| {
-                                *v += 1;
-                            })
-                            .or_insert(1);
-                    }
-                }
-
-                if !term_string_1.is_empty() {
-                    if term_len_1 > 1 {
-                        let bigram_string = vec![term_string_1.clone(), term_string_0.clone()];
-                        if completion_len < max_completion_entries {
-                            level_completions
-                                .entry(bigram_string)
-                                .and_modify(|v| {
-                                    *v += 1;
-                                })
-                                .or_insert(1);
-                        }
-                    }
-
-                    if !term_string_2.is_empty() && term_len_2 > 1 {
-                        let trigram_string = vec![
-                            term_string_2.clone(),
-                            term_string_1.clone(),
-                            term_string_0.clone(),
-                        ];
-                        if completion_len < max_completion_entries {
-                            level_completions
-                                .entry(trigram_string)
-                                .and_modify(|v| {
-                                    *v += 1;
-                                })
-                                .or_insert(1);
-                        }
-                    }
-                }
-
-                drop(level_completions);
-
-                term_len_2 = term_len_1;
-                term_len_1 = term_len_0;
-            }
 
             let term_object = unique_terms
                 .entry(term_string_0.clone())
@@ -1666,3 +1598,4 @@ pub fn tokenizer_lite(
 
     non_unique_terms_raw
 }
+

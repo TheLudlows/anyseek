@@ -1,3 +1,5 @@
+> SeekPower S1.4a: query spelling correction, autocomplete and automatic rewriting have been removed. Search text is used as supplied. Remove `query_rewriting`, `spelling_correction`, `query_completion`, `dictionary_source` and `completion_source` from requests; retired fields return HTTP 400. Rust `Search::search` no longer takes the final rewriting argument. Boolean/phrase search, Chinese segmentation and metadata filtering remain. Existing indices with enabled retired options must be exported and rebuilt; indices with null options remain readable. No retired dictionary files are loaded or created.
+
 > SeekPower S1.3: file parsing and local dataset import have been removed. Prepare text, vectors and metadata externally, then send a JSON object or array to `POST /api/v1/index/{index_id}/doc`. PDF/CSV parsing, directory scanning, local JSON/SIFT import and PDF attachment hosting are no longer engine responsibilities. No PDFium installation is needed. Existing indexed records remain readable; legacy PDF files are not deleted, but the service no longer serves them. Host source files externally and put their URL in a record.
 
 # SeekPower
@@ -84,7 +86,6 @@ Blog Posts:
 - [SeekStorm gets Faceted search, Geo proximity search, Result sorting](https://seekstorm.com/blog/faceted_search-geo-proximity-search/)
 - [SeekStorm sharded index architecture - using a multi-core processor like a miniature data center](https://seekstorm.com/blog/SeekStorm-sharded-index-architecture/)
 - [N-gram index for faster phrase search: latency vs. size](https://seekstorm.com/blog/n-gram-indexing-for-faster-phrase-search/)
-- [Typo-tolerant Query auto-completion - derived from indexed documents](https://seekstorm.com/blog/query-auto-completion-(QAC)/)
 - [SeekStorm 3.0 adds vector search & hybrid search](https://seekstorm.com/blog/seekstorm-adds-vector_search-hybrid-search/)
 
 ### SeekStorm high-performance search library
@@ -148,7 +149,6 @@ Blog Posts:
 * Geo proximity search, filtering and sorting.
 * Iterator to iterate through all documents of an index, in both directions, e.g., for index export, conversion, analytics and inspection.  
 * Search with empty query, but query facets, facet filter, and result sort parameters, ascending and descending.
-* Typo tolerance / Fuzzy queries / Query spelling correction: return results if the query contains spelling errors.
 * Typo-tolerant Query Auto-Completion (QAC) and Instant search.
 * KWIC snippets, highlighting
 * One-way and multi-way synonyms
@@ -185,7 +185,7 @@ Blog Posts:
 * Multi-tenancy index management.
 * API-key management.
 * [Embedded web server and web UI](https://github.com/SeekStorm/SeekStorm/blob/main/src/seekstorm_server#open-embedded-web-ui-in-browser) to search and display results from any index without coding.
-* Web UI with query auto correction, query auto-completion, instant search, keyword highlighting, histogram, date filter, faceting, result sorting, document preview (as demo, for testing, as template).
+* Web UI with instant search, keyword highlighting, histogram, date filter, faceting, result sorting, document preview (as demo, for testing, as template).
 * Code first OpenAPI generated [REST API documentation](https://seekstorm.com/documentation/)
 * Cross-platform: runs on Linux, Windows, and macOS (other OS untested).
 * Docker file and container image at [Docker Hub](https://hub.docker.com/r/wolfgarbe/seekstorm_server)
@@ -479,7 +479,7 @@ create schema (from JSON)
 use seekstorm::index::SchemaField;
 
 let schema_json = r#"
-[{"field":"title","field_type":"Text","store":false,"index_lexical":false,"dictionary_source":true,"completion_source":true},
+[{"field":"title","field_type":"Text","store":false,"index_lexical":false},
 {"field":"body","field_type":"Text","store":true,"index_lexical":true},
 {"field":"url","field_type":"Text","store":false,"index_lexical":false}]"#;
 let schema:Vec<SchemaField>=serde_json::from_str(schema_json).unwrap();
@@ -501,7 +501,7 @@ create index
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekstorm::index::{IndexMetaObject, Clustering, LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,StemmerType,NgramSet,SchemaField,FieldType,SpellingCorrection,QueryCompletion,DocumentCompression,create_index};
+use seekstorm::index::{IndexMetaObject, Clustering, LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,StemmerType,NgramSet,SchemaField,FieldType,DocumentCompression,create_index};
 use seekstorm::vector::Inference;
 use seekstorm::vector_similarity::VectorSimilarity;
 
@@ -524,8 +524,6 @@ let meta = IndexMetaObject {
     ngram_indexing: NgramSet::NgramFF as u8,
     document_compression: DocumentCompression::Snappy,
     access_type: AccessType::Mmap,
-    spelling_correction: Some(SpellingCorrection { max_dictionary_edit_distance: 1, term_length_threshold: Some([2,8].into()),count_threshold: 20,max_dictionary_entries:500_000 }),
-    query_completion: Some(QueryCompletion{max_completion_entries:10_000_000}),
     clustering: Clustering::None,
     inference: Inference::None,
 };
@@ -612,7 +610,7 @@ search index
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::search::{Search, SearchMode, QueryType, ResultType, QueryRewriting};
+use seekstorm::search::{Search, SearchMode, QueryType, ResultType};
 use seekstorm::index::open_index;
 use std::path::Path;
 
@@ -632,8 +630,7 @@ let field_filter=Vec::new();
 let query_facets=Vec::new();
 let facet_filter=Vec::new();
 let result_sort=Vec::new();
-let query_rewriting= QueryRewriting::SearchRewrite { distance: 1, term_length_threshold: Some([2,8].into()), correct:Some(2),complete: Some(3), length: Some(5) };
-let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,query_rewriting).await;
+let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort).await;
 
 // ### display results
 
@@ -661,14 +658,6 @@ for result in result_object.results.iter() {
 }
 
 println!("result counts {} {} {}",result_object.results.len(), result_object.result_count, result_object.result_count_total);
-
-// ### display suggestions
-
-println!("original query string: {} query string after correction/completion {}",result_object.original_query, result_object.query);
-
-for suggesion in result_object.suggestions.iter() {
-    println!("suggestion: {}", suggesion);
-}
 
 # })
 ```
@@ -730,7 +719,7 @@ multi-threaded search
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::search::{QueryType, SearchMode, ResultType, QueryRewriting, Search};
+use seekstorm::search::{QueryType, SearchMode, ResultType, Search};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use seekstorm::index::open_index;
@@ -789,9 +778,7 @@ for query in query_vec {
                 field_filter_clone,
                 query_facets_clone,
                 facet_filter_clone,
-                result_sort_clone,
-                QueryRewriting::SearchOnly
-            )
+                result_sort_clone,)
             .await;
 
         println!("result count {}", rlo.result_count);
@@ -961,8 +948,6 @@ let meta = IndexMetaObject {
     ngram_indexing: NgramSet::NgramFF as u8,
     document_compression: DocumentCompression::Snappy,
     access_type: AccessType::Mmap,
-    spelling_correction: None,
-    query_completion: None,
     clustering: Clustering::None,
     inference: Inference::None,
 };
@@ -1028,7 +1013,7 @@ let facet_filter=Vec::new();
 //let facet_filter = vec![FacetFilter::String { field: "town".to_string(),filter: vec!["Berlin".to_string()],}];
 let result_sort=Vec::new();
 
-let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,QueryRewriting::SearchOnly).await;
+let result_object = index_arc.search(query, query_vector, query_type, search_mode, enable_empty_query, offset, length, result_type,include_uncommitted,field_filter,query_facets,facet_filter,result_sort,).await;
 
 // ### display results
 
@@ -1090,8 +1075,6 @@ create index
         ngram_indexing: NgramSet::SingleTerm as u8 ,
         document_compression: DocumentCompression::Snappy,
         access_type: AccessType::Mmap,
-        spelling_correction: None,
-        query_completion: None,
         clustering: Clustering::None,
         inference: Inference::External { dimensions: 128, precision: Precision::F32,  quantization: Quantization::None,similarity:VectorSimilarity::Euclidean },
     };
@@ -1173,7 +1156,6 @@ query documents/vectors
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            QueryRewriting::SearchOnly,
         )
         .await;
 
@@ -1212,13 +1194,8 @@ See roadmap below.
   - [What is faceted search?](https://seekstorm.com/blog/what-is-faceted-search/)
   - [SeekStorm is now Open Source](https://seekstorm.com/blog/sneak-peek-seekstorm-rust/)
   - [Tail latencies and percentiles](https://seekstorm.com/blog/tail-latencies-and-percentiles/)
-- Query auto-completion
-  - [Typo-tolerant Query auto-completion (QAC) - derived from indexed documents](https://seekstorm.com/blog/query-auto-completion-(QAC)/)
-  - [The Pruning Radix Trie — a Radix Trie on steroids](https://seekstorm.com/blog/pruning-radix-trie/)
-- Query spelling correction
-  - [Sub-millisecond compound aware automatic spelling correction](https://seekstorm.com/blog/sub-millisecond-compound-aware-automatic.spelling-correction/)
-  - [SymSpell vs. BK-tree: 100x faster fuzzy string search & spell checking](https://seekstorm.com/blog/symspell-vs-bk-tree/)
-  - [1000x Faster Spelling Correction algorithm](https://seekstorm.com/blog/1000x-spelling-correction/)
+
+
 - Chinese word segmentation
   - [Fast Word Segmentation of Noisy Text](https://seekstorm.com/blog/fast-word-segmentation-noisy-text/)
 

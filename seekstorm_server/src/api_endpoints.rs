@@ -18,8 +18,8 @@ use seekstorm::{
         DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
         FrequentwordType, GetDocumentRequest, GetIteratorRequest, IS_AVX2, IS_NEON,
         IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
-        IndexResponseObject, LexicalSimilarity, QueryCompletion, SchemaField, SearchRequestObject,
-        SearchResultObject, SpellingCorrection, StemmerType, StopwordType, Synonym, TokenizerType,
+        IndexResponseObject, LexicalSimilarity, SchemaField, SearchRequestObject,
+        SearchResultObject, StemmerType, StopwordType, Synonym, TokenizerType,
         UpdateDocument, UpdateDocuments, create_index, open_index,
     },
     iterator::{GetIterator, IteratorResult},
@@ -354,8 +354,6 @@ pub(crate) async fn create_index_api<'a>(
     synonyms: Vec<Synonym>,
     force_shard_number: Option<usize>,
     apikey_object: &'a mut ApikeyObject,
-    spelling_correction: Option<SpellingCorrection>,
-    query_completion: Option<QueryCompletion>,
     mute: bool,
     clustering: Clustering,
     inference: Inference,
@@ -386,8 +384,6 @@ pub(crate) async fn create_index_api<'a>(
         ngram_indexing,
         document_compression,
         access_type: AccessType::Mmap,
-        spelling_correction,
-        query_completion,
         clustering,
         inference,
     };
@@ -1113,7 +1109,6 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
         "field_filter": ["title"],
         "fields": [],
         "query_type_default": "Intersection",
-        "query_rewriting": "SearchOnly",
         "search_mode": "Lexical"
     }   ))),
 	("Example: Hybrid search" = (value = json!({
@@ -1232,7 +1227,7 @@ pub(crate) async fn query_index_api(
             search_request.query_facets,
             search_request.facet_filter,
             search_request.result_sort,
-            search_request.query_rewriting,
+
         )
         .await;
 
@@ -1293,7 +1288,7 @@ pub(crate) async fn query_index_api(
         query_terms: result_object.query_terms,
         results,
         facets: result_object.facets,
-        suggestions: result_object.suggestions,
+
     })
 }
 

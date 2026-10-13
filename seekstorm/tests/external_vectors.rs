@@ -4,7 +4,7 @@ use seekstorm::{
     index::{create_index, open_index, AccessType, Close, Clustering, Document, DocumentCompression,
         FrequentwordType, IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
         LexicalSimilarity, NgramSet, SchemaField, StemmerType, StopwordType, TokenizerType, UpdateDocument, UpdateDocuments},
-    search::{QueryRewriting, QueryType, ResultObject, ResultType, Search, SearchMode},
+    search::{QueryType, ResultObject, ResultType, Search, SearchMode},
     vector::{embedding_to_bytes_be, parse_external_embedding, validate_embedding, validate_vector_schema,
         Embedding, Inference, Precision, Quantization},
     vector_similarity::{AnnMode, VectorSimilarity},
@@ -31,12 +31,11 @@ fn meta() -> IndexMetaObject {
         tokenizer:TokenizerType::UnicodeAlphanumeric, stemmer:StemmerType::None,
         stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
         ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,
-        access_type:AccessType::Mmap, spelling_correction:None, query_completion:None,
-        clustering:Clustering::None, inference:inference() }
+        access_type:AccessType::Mmap, clustering:Clustering::None, inference:inference() }
 }
 async fn query(index: &IndexArc, mode: SearchMode, vector: Option<Embedding>) -> ResultObject {
     index.search("alpha".into(), vector, QueryType::Union, mode, false, 0, 10,
-        ResultType::TopkCount, false, vec![], vec![], vec![], vec![], QueryRewriting::SearchOnly).await
+        ResultType::TopkCount, false, vec![], vec![], vec![], vec![],).await
 }
 #[test]
 fn external_config_and_numeric_validation() {

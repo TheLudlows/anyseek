@@ -19,7 +19,7 @@ exclude = ["assets/*.png","assets/*.jpg"]
 default = ["zh","vb"]
 zh = []
 vb = []
-gxhash = ["dep:gxhash", "symspell_complete_rs/gxhash"] # Activate gxhash when you hardware supports AES/SSE2 and you want faster hash computation.
+gxhash = ["dep:gxhash"] # Activate gxhash when you hardware supports AES/SSE2 and you want faster hash computation.
 
 [lib]
 name = "seekstorm"
@@ -33,7 +33,6 @@ base64 = "0.23.1"
 num-format = "0.4.4"
 ahash ={ version = "0.8.12", features = ["serde"]}
 gxhash = { version = "3.5.0", features = ["deterministic"], optional = true }
-symspell_complete_rs = "0.0.4"
 rand = { version = "0.10.3", features = ["chacha"]}
 futures = "0.3.34"
 num = "0.4.3"

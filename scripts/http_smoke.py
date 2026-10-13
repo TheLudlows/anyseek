@@ -114,6 +114,8 @@ def exercise(binary, workdir):
                 body = request('GET', path)
                 check(body and not body.lstrip().lower().startswith(b'<!doctype html'),
                       f'asset missing or served HTML: {path}')
+            check('/js/autocomplete.js' not in assets.paths, 'retired autocomplete script referenced')
+            check('id=suggestions' not in html, 'retired suggestions control present')
             print(f'PASS UI HTML and {len(assets.paths)} local assets')
 
             request('GET', '/api/v1/index/0', expected=401)
@@ -143,6 +145,24 @@ def exercise(binary, workdir):
                 {'title': 'title2', 'body': 'body2 test', 'url': 'url2'},
                 {'title': 'title3 test', 'body': 'body3 test', 'url': 'url3'}])
             check(api('PATCH', path) == 4, 'commit must expose four documents')
+            for field in ('spelling_correction', 'query_completion'):
+                request('POST', '/api/v1/index', {'index_name': 'retired', 'schema': schema,
+                        field: {}}, api_key, expected=400)
+            for field in ('dictionary_source', 'completion_source'):
+                retired_schema = [{**item, field: True} for item in schema]
+                request('POST', '/api/v1/index', {'index_name': 'retired', 'schema': retired_schema},
+                        api_key, expected=400)
+            for mode in ('SearchOnly', {'SearchRewrite': {'distance': 1}}):
+                request('POST', path + '/query', {'query': 'test', 'query_rewriting': mode},
+                        api_key, expected=400)
+            request('GET', path + '/query?query=test&query_rewriting=SearchOnly',
+                    key=api_key, expected=400)
+            literal = api('POST', path + '/query', {'query': 'tset', 'search_mode': 'Lexical',
+                          'result_type': 'TopkCount'})
+            check(literal['query'] == literal['original_query'] == 'tset' and
+                  literal['count_total'] == 0 and 'suggestions' not in literal,
+                  f'query unexpectedly rewritten: {literal}')
+            print('PASS retired query options rejected and literal query preserved')
             result = api('POST', path + '/query', {
                 'query': '+body2 +test', 'result_type': 'TopkCount',
                 'search_mode': 'Lexical', 'realtime': False})
@@ -243,7 +263,7 @@ def exercise(binary, workdir):
                     browser = browser_driver.chromium.launch()
                     page = browser.new_page()
                     errors = []
-                    page.on('pageerror', lambda error: errors.append(str(error)))
+                    page.on('pageerror', lambda error: (errors.append(str(error)), print(f'BROWSER ERROR: {error}')))
                     page.goto(base + f'/?index_id={vector_id}&q=alpha')
                     page.locator('#contentBox .resultEntry').first.wait_for()
                     check(page.locator('input[value="Lexical"]').is_checked(), 'UI default mode')
@@ -275,9 +295,24 @@ def exercise(binary, workdir):
                     page.locator('#contentBox .resultEntry h1').first.hover()
                     page.wait_for_function("document.getElementById('prevText2').textContent.includes('plaintext')")
                     check(not file_requests, f'UI called removed file endpoints: {file_requests}')
+                    search_input = page.locator('#searchMain')
+                    with page.expect_response(lambda response: '/query' in response.url and
+                            response.request.method == 'POST' and
+                            response.request.post_data_json.get('query') == 'plaintxt') as typed:
+                        search_input.fill('plaintxt')
+                    typed_response = typed.value
+                    check(typed_response.status == 200, 'plain typing search failed')
+                    check(typed_response.request.headers.get('content-type', '').startswith('application/json'),
+                          'JSON query sent with an incorrect content type')
+                    check('query_rewriting' not in typed_response.request.post_data_json,
+                          'UI sent retired rewriting parameter')
+                    check(typed_response.json()['count_total'] == 0, 'typo silently corrected')
+                    check(search_input.input_value() == 'plaintxt', 'typed input was rewritten')
+                    check(page.locator('#suggestions, #suggestionsMain, #did_you_mean').count() == 0,
+                          'retired suggestions UI remains')
                     check(not errors, f'browser errors: {errors}')
                     browser.close()
-                print('PASS Chromium lexical/vector/hybrid, external PDF source and plain-record preview')
+                print('PASS Chromium lexical/vector/hybrid, source/text preview and unchanged typed query')
 
             check(api('DELETE', path + '/doc', b'clear') == 0, 'clear count mismatch')
             check(api('GET', path)['indexed_doc_count'] == 0, 'index not empty after clear')

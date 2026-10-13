@@ -12,7 +12,7 @@ use seekstorm::{
         ApikeyObject, ApikeyQuotaObject, Close, IS_AVX2, IS_NEON, Info,
     },
     info::display_index_info,
-    search::{QueryRewriting, QueryType, ResultType, Search, SearchMode},
+    search::{QueryType, ResultType, Search, SearchMode},
     utils::dir_size,
     vector_similarity::AnnMode,
 };
@@ -479,7 +479,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                         Vec::new(),
                                         Vec::new(),
                                         Vec::new(),
-                                        QueryRewriting::SearchOnly,
                                     )
                                     .await;
                                     if let Some(error) = &result_object_vector.error { eprintln!("search failed: {error}"); continue; }
@@ -534,7 +533,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                         Vec::new(),
                                         Vec::new(),
                                         Vec::new(),
-                                        QueryRewriting::SearchOnly,
                                     )
                                     .await;
                                     if let Some(error) = &result_object_vector.error { eprintln!("search failed: {error}"); continue; }
@@ -574,7 +572,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                         Vec::new(),
                                         Vec::new(),
                                         Vec::new(),
-                                        QueryRewriting::SearchOnly,
                                     )
                                     .await;
                                     if let Some(error) = &result_object_vector.error { eprintln!("search failed: {error}"); continue; }
