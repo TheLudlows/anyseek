@@ -7,3 +7,8 @@
 #searchError { color: #a32020; white-space: pre-wrap; }
 
 #prevText2{white-space:pre-wrap;overflow-wrap:anywhere;max-height:60vh;overflow-y:auto}
+
+#dateControls { margin: 12px 0; padding: 10px; border: 1px solid #ddd; }
+#dateControls input, #dateControls button { margin: 4px; padding: 5px; }
+#dateControls #sort { display: block; margin-top: 8px; }
+#dateControls button.active { color: #0e5ba3; font-weight: bold; }

@@ -56,7 +56,7 @@ async fn search(
             result_type,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -97,4 +97,3 @@ async fn union_topk_forty_terms() {
 
     index.close().await;
 }
-

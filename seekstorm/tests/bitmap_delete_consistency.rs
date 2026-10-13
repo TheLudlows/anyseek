@@ -74,7 +74,7 @@ async fn search(
             result_type,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -191,4 +191,3 @@ fn ground_truth(set_x: &HashSet<u64>, set_y: &HashSet<u64>) -> (HashSet<u64>, Ha
     let live_or: HashSet<u64> = live_x.union(&live_y).copied().collect();
     (live_and, live_or)
 }
-

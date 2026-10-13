@@ -55,7 +55,7 @@ async fn search(
             result_type,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -95,4 +95,3 @@ async fn union_count_overlap_same_block() {
 
     index.close().await;
 }
-

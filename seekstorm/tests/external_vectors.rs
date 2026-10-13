@@ -35,7 +35,7 @@ fn meta() -> IndexMetaObject {
 }
 async fn query(index: &IndexArc, mode: SearchMode, vector: Option<Embedding>) -> ResultObject {
     index.search("alpha".into(), vector, QueryType::Union, mode, false, 0, 10,
-        ResultType::TopkCount, false, vec![], vec![], vec![], vec![],).await
+        ResultType::TopkCount, false, vec![],  vec![], vec![],).await
 }
 #[test]
 fn external_config_and_numeric_validation() {

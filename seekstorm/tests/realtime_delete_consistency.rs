@@ -69,7 +69,7 @@ async fn search(
             result_type,
             uncommitted,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -173,4 +173,3 @@ async fn realtime_union_count_excludes_deleted() {
     assert_eq!(count.result_count_total, 17);
     index.close().await;
 }
-

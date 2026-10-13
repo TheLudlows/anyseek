@@ -132,6 +132,7 @@ def exercise(binary, workdir):
                       f'asset missing or served HTML: {path}')
             check('/js/autocomplete.js' not in assets.paths, 'retired autocomplete script referenced')
             check('id=suggestions' not in html, 'retired suggestions control present')
+            check(not any('histogram' in path or 'bootstrap-slider' in path for path in assets.paths), 'retired chart assets referenced')
             print(f'PASS UI HTML and {len(assets.paths)} local assets')
 
             request('GET', '/api/v1/index/0', expected=401)
@@ -357,7 +358,12 @@ def exercise(binary, workdir):
                 sorted_result = api('POST', mp + '/query', {'query': 'ordinary',
                     'result_sort': [{'field': 'date', 'order': order}]})
                 check([doc['title'] for doc in sorted_result['results']] == titles, 'ordinary date sorting')
-            print('PASS ordinary string/set/number/timestamp filters and date sorting')
+            for retired_facets in [[], [{'String16': {'field': 'category', 'prefix': '', 'length': 10}}], [{'F64': {'field': 'price', 'range_type': 'CountWithinRange', 'ranges': [['low', 0]]}}]]:
+                rejected = request('POST', mp + '/query', {'query': 'ordinary', 'query_facets': retired_facets}, api_key, expected=400)
+                check(b'query_facets' in rejected, 'retired aggregation was not rejected')
+            check('facets_minmax' not in api('GET', mp), 'retired min/max present')
+            check('facets' not in api('POST', mp + '/query', {'query': 'ordinary'}), 'retired counts present')
+            print('PASS retired aggregates rejected; ordinary string/set/number/timestamp filters and date sorting')
             raw_id = api('POST', '/api/v1/index', {'index_name': 'raw_records', 'schema': [
                 {**field, 'store': True} for field in schema] + [
                 {'field': 'data', 'field_type': 'Json', 'store': True, 'index_lexical': True},
@@ -485,13 +491,21 @@ def exercise(binary, workdir):
                         check(all('base' not in item for item in response.request.post_data_json['result_sort']),
                               'UI sent retired sort base')
                         check(response.json()['results'][0]['title'].startswith(title), 'UI date ordering changed')
+                    page.locator('#dateFrom').fill('2022-01-01')
+                    page.locator('#dateTo').fill('2022-12-31')
                     with page.expect_response(lambda response: '/query' in response.url and
                             response.request.method == 'POST') as filtered_response:
-                        page.evaluate('update_filter(2022, 2023)')
+                        page.locator('#dateApply').click()
                     response = filtered_response.value
                     check(response.status == 200 and response.json()['count_total'] == 1,
                           'UI timestamp filter failed')
                     check(response.json()['results'][0]['title'].startswith('New record'), 'UI timestamp result changed')
+                    with page.expect_response(lambda response: '/query' in response.url and
+                            response.request.method == 'POST') as cleared_response:
+                        page.locator('#dateClear').click()
+                    response = cleared_response.value
+                    check(response.status == 200 and response.json()['count_total'] == 2, 'UI clear dates failed')
+                    check(response.request.post_data_json['facet_filter'] == [], 'UI kept cleared date filter')
                     check(not errors, f'browser errors: {errors}')
                     browser.close()
                 print('PASS Chromium lexical/vector/hybrid, source/text preview, literal raw/JSON preview, unchanged typed query and date sorting/filtering')

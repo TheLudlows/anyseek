@@ -23,9 +23,9 @@ cargo run -p seekstorm_server -- local_ip=127.0.0.1 local_port=8080
 | 全文 | BM25F/邻近度评分、布尔/短语、多字段、中文分词、词干化、停用词、同义词、N-gram |
 | 向量 | 外部 JSON/base64 向量、多向量字段、F32/I8、三种距离、量化、全簇扫描与 IVF ANN |
 | 混合 | 全文/向量独立召回后 RRF 融合 |
-| 元数据与结果 | 词法过滤、分面/范围统计、多字段排序、计数、分页、字段投影、双向遍历 |
+| 元数据与结果 | 词法过滤、多字段排序、计数、分页、字段投影、双向遍历 |
 | 数据与服务 | JSON 单条/批量写入、读取、更新、删除；索引生命周期；API key 鉴权与数据作用域 |
-| Web UI | 三种检索模式、外部向量输入、分页、原文/链接预览、日期直方图和词法筛选 |
+| Web UI | 三种检索模式、外部向量输入、分页、原文/链接预览、日期输入过滤与排序 |
 
 完整接口、配置、外围功能及限制见 [FEATURES.md](FEATURES.md)。特别注意：Vector/Hybrid 暂不支持元数据 `facet_filter`；UI 尚无完整管理页面；内部 DocID 不是稳定业务 ID；实时可见不等于崩溃可恢复。分布式与可靠性补强属于后续阶段。
 
@@ -55,7 +55,7 @@ Vector/Hybrid 必须提供 `query_vector`；Lexical 仅需文本。写入必须�
 
 ## 开发与文档
 
-- [Rust 示例](docs/library-examples.md)、[分面说明](FACETED_SEARCH.md)、[N-gram 配置](NGRAM_SEARCH.md)。本地执行 `cargo doc --workspace --no-deps` 生成与当前源码一致的 Rust 文档。
+- [Rust 示例](docs/library-examples.md)、[元数据过滤与排序](FACETED_SEARCH.md)、[N-gram 配置](NGRAM_SEARCH.md)。本地执行 `cargo doc --workspace --no-deps` 生成与当前源码一致的 Rust 文档。
 - [HTTP 请求示例](seekstorm_server/src/test_api.rest)、[OpenAPI JSON](seekstorm_server/openapi/openapi.json) / [YAML](seekstorm_server/openapi/openapi.yml)。路由覆盖差异见功能清单。
 - 运行 `cargo test --workspace --all-targets`；HTTP 冒烟使用 `python3 scripts/http_smoke.py --server target/debug/seekstorm_server`。浏览器回归需安装 Python Playwright/Chromium，并设置 `SEEKPOWER_BROWSER_TEST=1`。
 - 核心默认 features：`zh`（中文分词）、`vb`（结果诊断信息）；`api-schema` 由服务开启；`gxhash` 可选。具体见 [Cargo.toml](seekstorm/Cargo.toml)。

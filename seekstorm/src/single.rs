@@ -40,7 +40,7 @@ pub(crate) async fn single_docid<'a>(
         || !field_filter_set.is_empty()
         || !shard.delete_hashset.is_empty()
         || !search_result.topk_candidates.result_sort.is_empty()
-        || (!search_result.query_facets.is_empty() || !facet_filter.is_empty())
+        || !facet_filter.is_empty()
             && result_type != &ResultType::Topk;
     if SPEEDUP_FLAG
         && (result_type == &ResultType::Count
@@ -308,7 +308,7 @@ pub(crate) async fn single_blockid<'a>(
         || !field_filter_set.is_empty()
         || !index.delete_hashset.is_empty()
         || !search_result.topk_candidates.result_sort.is_empty()
-        || (!search_result.query_facets.is_empty() || !facet_filter.is_empty())
+        || !facet_filter.is_empty()
             && result_type != &ResultType::Topk;
 
     if (index.enable_single_term_topk || (result_type == &ResultType::Count))

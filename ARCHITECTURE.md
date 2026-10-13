@@ -20,7 +20,7 @@ SeekPower 保留一个 Rust 核心库和一个 HTTP/Web UI 服务。当前是单
 
 调用方显式选择 Lexical、Vector 或 Hybrid。Lexical 使用倒排，Vector 使用外部查询向量；Hybrid 收集两路候选，汇总本机分片结果后按文档 ID 执行 RRF。融合参数目前固定在代码中，没有公开的多策略自动规划器。
 
-词法路径支持元数据过滤、分面、计数和字段排序；向量路径支持检索字段选择、聚类探测与相似度阈值。Vector/Hybrid 对非空元数据过滤明确报错。Hybrid 分面来自词法分支，默认按融合分数排序，也可按字段重排候选；候选截断后的重排不保证全库字段排序 Top-K。详见 [功能边界](FEATURES.md)。
+词法路径支持元数据过滤、文档命中计数和字段排序；向量路径支持检索字段选择、聚类探测与相似度阈值。Vector/Hybrid 对非空元数据过滤明确报错。Hybrid 默认按融合分数排序，也可按字段重排候选；候选截断后的重排不保证全库字段排序 Top-K。详见 [功能边界](FEATURES.md)。
 
 ## 数据与文件
 
@@ -33,7 +33,7 @@ SeekPower 保留一个 Rust 核心库和一个 HTTP/Web UI 服务。当前是单
 | `index.bin` | 词项 posting、文档 ID 与位置编码 |
 | `vector.bin` | 向量及聚类数据 |
 | `docstore.bin` | 压缩的已存储文档字段 |
-| `facet.bin`、`facet.json` | facet 值及词典 |
+| `facet.bin`、`facet.json` | 过滤/排序值及词典（不维护统计聚合） |
 | `delete.bin` | 删除标记 |
 | `synonyms.json` | 同义词配置 |
 
@@ -48,3 +48,5 @@ Rust 核心支持 Ram 与 Mmap；HTTP 创建索引使用 Mmap。文档压缩可�
 本实现来源及许可见 [UPSTREAM.md](UPSTREAM.md) 和 [LICENSE](LICENSE)。
 
 
+
+聚合查询类型、统计计算及输出已删除。`FacetField` 仅保留字段字典；磁盘旧统计槽由兼容序列化器写入 0/None，避免改变既有字典 ID 与文件布局。量化内部数值范围仍保留。

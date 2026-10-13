@@ -64,11 +64,6 @@ const LOGO_SVG: &[u8] = include_bytes!("../web/svg/logo.svg");
 const FAVICON_16: &[u8] = include_bytes!("../web/favicon-16x16.png");
 const FAVICON_32: &[u8] = include_bytes!("../web/favicon-32x32.png");
 
-const HISTOGRAM_CSS: &str = include_str!("../web/css/bootstrap.histogram.slider.css");
-const SLIDER_CSS: &str = include_str!("../web/css/histogram.slider.css");
-const HISTOGRAM_JS: &str = include_str!("../web/js/bootstrap.histogram.slider.js");
-const SLIDER_JS: &str = include_str!("../web/js/bootstrap-slider.js");
-
 pub(crate) fn calculate_hash<T: Hash>(t: &T) -> u64 {
     let mut s = DefaultHasher::new();
     t.hash(&mut s);
@@ -300,7 +295,6 @@ pub(crate) async fn http_request_handler(
                 create_index_request_object.synonyms,
                 force_shard_number,
                 apikey_object,
-
 
                 true,
                 create_index_request_object.clustering,
@@ -1030,15 +1024,6 @@ pub(crate) async fn http_request_handler(
             "/css/master.css" => Ok(Response::new(BoxBody::new(MASTER_CSS.to_string()))),
             "/js/master.js" => Ok(Response::new(BoxBody::new(MASTER_JS.to_string()))),
             "/js/jquery-3.7.1.min.js" => Ok(Response::new(BoxBody::new(JQUERY_JS.to_string()))),
-
-            "/css/bootstrap.histogram.slider.css" => {
-                Ok(Response::new(BoxBody::new(HISTOGRAM_CSS.to_string())))
-            }
-            "/css/histogram.slider.css" => Ok(Response::new(BoxBody::new(SLIDER_CSS.to_string()))),
-            "/js/bootstrap.histogram.slider.js" => {
-                Ok(Response::new(BoxBody::new(HISTOGRAM_JS.to_string())))
-            }
-            "/js/bootstrap-slider.js" => Ok(Response::new(BoxBody::new(SLIDER_JS.to_string()))),
 
             "/svg/logo.svg" => {
                 let response = Response::builder()

@@ -4,12 +4,12 @@ use std::cmp::Ordering;
 
 use crate::{
     index::{
-        AccessType, CompressionType, FIELD_STOP_BIT_1, FIELD_STOP_BIT_2, FieldType,
+        AccessType, CompressionType, FIELD_STOP_BIT_1, FIELD_STOP_BIT_2,
         LexicalSimilarity, NgramType, NonUniquePostingListObjectQuery, PostingListObjectQuery,
         SPEEDUP_FLAG, STOP_BIT, Shard, get_document_length_compressed_mmap,
     },
     min_heap,
-    search::{FilterSparse, Ranges, ResultType, SearchResult},
+    search::{FilterSparse, ResultType, SearchResult},
     utils::{
         read_f32, read_f64, read_i8, read_i16, read_i32, read_i64, read_u8, read_u16, read_u32,
         read_u64,
@@ -222,8 +222,6 @@ pub(crate) fn add_result_singleterm_multifield(
                 }
             }
 
-            facet_count(shard, search_result, docid);
-
             *result_count += 1;
 
             return;
@@ -284,8 +282,6 @@ pub(crate) fn add_result_singleterm_multifield(
                     }
                 }
             }
-
-            facet_count(shard, search_result, docid);
 
             *result_count += 1;
 
@@ -458,156 +454,10 @@ pub(crate) fn is_facet_filter(index: &Shard, facet_filter: &[FilterSparse], doci
                 }
             }
 
-
             FilterSparse::None => {}
         }
     }
     false
-}
-
-#[inline]
-pub(crate) fn facet_count(shard: &Shard, search_result: &mut SearchResult, docid: usize) {
-    if !search_result.query_facets.is_empty() && !search_result.skip_facet_count {
-        for (i, facet) in shard.facets.iter().enumerate() {
-            if search_result.query_facets[i].length == 0 {
-                continue;
-            }
-
-            let facet_value_id = match &search_result.query_facets[i].ranges {
-                Ranges::U8(_range_type, ranges) => {
-                    let facet_value =
-                        shard.facets_file_mmap[(shard.facets_size_sum * docid) + facet.offset];
-                    ranges
-                        .binary_search_by_key(&facet_value, |range| range.1)
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-                Ranges::U16(_range_type, ranges) => {
-                    let facet_value = read_u16(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by_key(&facet_value, |range| range.1)
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-                Ranges::U32(_range_type, ranges) => {
-                    let facet_value = read_u32(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by_key(&facet_value, |range| range.1)
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-                Ranges::U64(_range_type, ranges) => {
-                    let facet_value = read_u64(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by_key(&facet_value, |range| range.1)
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-                Ranges::I8(_range_type, ranges) => {
-                    let facet_value = read_i8(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by_key(&facet_value, |range| range.1)
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-                Ranges::I16(_range_type, ranges) => {
-                    let facet_value = read_i16(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by_key(&facet_value, |range| range.1)
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-                Ranges::I32(_range_type, ranges) => {
-                    let facet_value = read_i32(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by_key(&facet_value, |range| range.1)
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-
-                Ranges::I64(_range_type, ranges) => {
-                    let facet_value = read_i64(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by_key(&facet_value, |range| range.1)
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-                Ranges::Timestamp(_range_type, ranges) => {
-                    let facet_value = read_i64(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by_key(&facet_value, |range| range.1)
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-                Ranges::F32(_range_type, ranges) => {
-                    let facet_value = read_f32(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by(|range| range.1.partial_cmp(&facet_value).unwrap())
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-                Ranges::F64(_range_type, ranges) => {
-                    let facet_value = read_f64(
-                        &shard.facets_file_mmap,
-                        (shard.facets_size_sum * docid) + facet.offset,
-                    );
-                    ranges
-                        .binary_search_by(|range| range.1.partial_cmp(&facet_value).unwrap())
-                        .map_or_else(|idx| idx.saturating_sub(1) as u16, |idx| idx as u16)
-                        as u32
-                }
-
-
-                _ => {
-                    if facet.field_type == FieldType::String16
-                        || facet.field_type == FieldType::StringSet16
-                    {
-                        read_u16(
-                            &shard.facets_file_mmap,
-                            (shard.facets_size_sum * docid) + facet.offset,
-                        ) as u32
-                    } else {
-                        read_u32(
-                            &shard.facets_file_mmap,
-                            (shard.facets_size_sum * docid) + facet.offset,
-                        )
-                    }
-                }
-            };
-
-            *search_result.query_facets[i]
-                .values
-                .entry(facet_value_id)
-                .or_insert(0) += 1;
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -724,7 +574,6 @@ pub(crate) fn add_result_singleterm_singlefield(
                     }
                 }
             }
-            facet_count(shard, search_result, docid);
 
             *result_count += 1;
 
@@ -781,8 +630,6 @@ pub(crate) fn add_result_singleterm_singlefield(
                     }
                 }
             }
-
-            facet_count(shard, search_result, docid);
 
             *result_count += 1;
 
@@ -3036,7 +2883,6 @@ pub(crate) fn add_result_multiterm_multifield(
     match *result_type {
         ResultType::Count => {
             if !phrase_query && field_filter_set.is_empty() {
-                facet_count(shard, search_result, docid);
 
                 *result_count += 1;
                 return;
@@ -3061,7 +2907,6 @@ pub(crate) fn add_result_multiterm_multifield(
                 && search_result.topk_candidates.current_heap_size >= top_k
                 && block_score <= search_result.topk_candidates._elements[0].score
             {
-                facet_count(shard, search_result, docid);
 
                 *result_count += 1;
                 return;
@@ -3083,7 +2928,6 @@ pub(crate) fn add_result_multiterm_multifield(
             phrase_query,
             all_terms_frequent && field_filter_set.is_empty() && result_type == &ResultType::Count,
         ) {
-            facet_count(shard, search_result, docid);
 
             *result_count += 1;
             return;
@@ -3359,8 +3203,6 @@ pub(crate) fn add_result_multiterm_multifield(
         }
     }
 
-    facet_count(shard, search_result, docid);
-
     *result_count += 1;
     if result_type == &ResultType::Count {
         return;
@@ -3471,7 +3313,6 @@ pub(crate) fn add_result_multiterm_singlefield(
     match *result_type {
         ResultType::Count => {
             if !phrase_query && field_filter_set.is_empty() {
-                facet_count(shard, search_result, docid);
 
                 *result_count += 1;
                 return;
@@ -3496,7 +3337,6 @@ pub(crate) fn add_result_multiterm_singlefield(
                 && search_result.topk_candidates.current_heap_size >= top_k
                 && block_score <= search_result.topk_candidates._elements[0].score
             {
-                facet_count(shard, search_result, docid);
 
                 *result_count += 1;
                 return;
@@ -3517,7 +3357,6 @@ pub(crate) fn add_result_multiterm_singlefield(
             phrase_query,
             all_terms_frequent && field_filter_set.is_empty() && result_type == &ResultType::Count,
         ) {
-            facet_count(shard, search_result, docid);
 
             *result_count += 1;
             return;
@@ -3651,8 +3490,6 @@ pub(crate) fn add_result_multiterm_singlefield(
         }
     }
 
-    facet_count(shard, search_result, docid);
-
     *result_count += 1;
     if result_type == &ResultType::Count {
         return;
@@ -3672,4 +3509,3 @@ pub(crate) fn add_result_multiterm_singlefield(
         top_k,
     );
 }
-

@@ -73,7 +73,7 @@ async fn search(
             result_type,
             false,
             Vec::new(),
-            Vec::new(),
+
             Vec::new(),
             Vec::new(),
         )
@@ -246,4 +246,3 @@ async fn docid3_topkcount_total_consistent() {
 
     index.close().await;
 }
-

@@ -437,7 +437,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                         field_filter.clone(),
                                         Vec::new(),
                                         Vec::new(),
-                                        Vec::new(),
                                     )
                                     .await;
                                     if let Some(error) = &result_object_vector.error { eprintln!("search failed: {error}"); continue; }
@@ -491,7 +490,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                         field_filter.clone(),
                                         Vec::new(),
                                         Vec::new(),
-                                        Vec::new(),
                                     )
                                     .await;
                                     if let Some(error) = &result_object_vector.error { eprintln!("search failed: {error}"); continue; }
@@ -528,7 +526,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
                                         ResultType::Topk,
                                         false,
                                         field_filter.clone(),
-                                        Vec::new(),
                                         Vec::new(),
                                         Vec::new(),
                                     )

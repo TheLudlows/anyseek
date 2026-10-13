@@ -33,3 +33,12 @@
 - 核心统计使用 `info::collect_index_info`；终端表格与日期格式化位于服务。OpenAPI derive 通过可选 `api-schema` 启用。
 - 服务启动仅接受文档列出的 `name=value` 参数；未知、重复、非法值失败。文档读取的字段选择通过 JSON body `fields`，iterator 拒绝未知选项。
 
+
+## 统计聚合裁剪
+
+- 删除 `query_facets` 参数，旧请求即使传空数组也返回 400；删除响应 `facets` 和索引信息 `facets_minmax`。
+- Rust 删除 `QueryFacet/RangeType/Ranges/ResultFacet/MinMaxField/MinMaxFieldJson` 以及索引聚合方法；`Search::search` 删除 `query_facets` 参数。
+- 保留 `facet:true` 字段、`facet_filter`、`result_sort`、按文档读取元数据值、文档命中计数及分页。Vector/Hybrid 的过滤限制不变。
+- UI 删除直方图和滑块，改为 UTC 起止日期输入，保留日期过滤/排序；不再自动查询最早/最晚日期。
+- 旧字典的统计值读取时丢弃；保存时仅写兼容占位（计数 0、极值 None）。字典顺序和 facet.bin 的值/ID 编码不变。旧版本若重新打开此数据，不能把占位值当成准确统计；如需旧聚合结果，应重新构建。
+- 内部 ANN/量化所需的 min/max 数值范围不属于字段统计，不删除。

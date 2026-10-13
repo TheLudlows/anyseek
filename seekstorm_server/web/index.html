@@ -9,12 +9,8 @@
 <link rel=icon type=image/png sizes=16x16 href=favicon-16x16.png>
 <link rel=stylesheet type=text/css media=screen href=css/flexboxgrid.min.css>
 <link rel=stylesheet type=text/css media=screen href=css/master.css>
-<link rel=stylesheet type=text/css media=screen href=css/bootstrap.histogram.slider.css>
-<link rel=stylesheet type=text/css media=screen href=css/histogram.slider.css>
 <script src=js/jquery-3.7.1.min.js></script>
 <script src=js/master.js></script>
-<script src=js/bootstrap.histogram.slider.js></script>
-<script src=js/bootstrap-slider.js></script>
 </head>
 <body>
 <div id=welcome style="display:none;align-items:center;justify-content:center;height:100vh;font-style:normal;font-size:14px;font-family:'JetBrains Mono',Montserrat,sans-serif;color:#0e5ba3">
@@ -115,6 +111,12 @@ SeekStorm v<span id=version></span>
 <textarea id="queryVector" rows="3" placeholder="[0.1, 0.2, 0.3]" aria-describedby="vectorHelp searchError"></textarea>
 <p id="vectorHelp">Paste a vector from the same external model used to index your documents. Update it whenever your query changes.</p>
 <button id="vectorSearch" type="button">Search with vector</button>
+</div>
+<div id="dateControls" hidden>
+<label for="dateFrom">From (UTC)</label><input id="dateFrom" type="date">
+<label for="dateTo">Through (UTC)</label><input id="dateTo" type="date">
+<button id="dateApply" type="button">Apply dates</button><button id="dateClear" type="button">Clear dates</button>
+<div id="sort"><span>Sort by</span> <button id="score" type="button" class="active">Relevance</button> <button id="new" type="button">Newest</button> <button id="old" type="button">Oldest</button></div>
 </div>
 <p id="searchError" role="alert" aria-live="polite"></p>
 <div class="row offsetOnLarge" id=contentBox>

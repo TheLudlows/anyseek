@@ -366,16 +366,14 @@ pub(crate) fn result_ordering_root(
                     .values
                     .get_index((facet_id_1).into())
                     .unwrap()
-                    .1
-                    .0[0]
+                    .1[0]
                     .clone();
 
                 let facet_value_2 = shard2.facets[field.idx]
                     .values
                     .get_index((facet_id_2).into())
                     .unwrap()
-                    .1
-                    .0[0]
+                    .1[0]
                     .clone();
 
                 let order = if field.order == SortOrder::Descending {
@@ -405,16 +403,14 @@ pub(crate) fn result_ordering_root(
                     .values
                     .get_index((facet_id_1).into())
                     .unwrap()
-                    .1
-                    .0[0]
+                    .1[0]
                     .clone();
 
                 let facet_value_2 = shard2.facets[field.idx]
                     .values
                     .get_index((facet_id_2).into())
                     .unwrap()
-                    .1
-                    .0[0]
+                    .1[0]
                     .clone();
 
                 let order = if field.order == SortOrder::Descending {
@@ -444,16 +440,14 @@ pub(crate) fn result_ordering_root(
                     .values
                     .get_index(facet_id_1 as usize)
                     .unwrap()
-                    .1
-                    .0[0]
+                    .1[0]
                     .clone();
 
                 let facet_value_2 = shard2.facets[field.idx]
                     .values
                     .get_index(facet_id_2 as usize)
                     .unwrap()
-                    .1
-                    .0[0]
+                    .1[0]
                     .clone();
 
                 let order = if field.order == SortOrder::Descending {
@@ -483,16 +477,14 @@ pub(crate) fn result_ordering_root(
                     .values
                     .get_index(facet_id_1 as usize)
                     .unwrap()
-                    .1
-                    .0[0]
+                    .1[0]
                     .clone();
 
                 let facet_value_2 = shard2.facets[field.idx]
                     .values
                     .get_index(facet_id_2 as usize)
                     .unwrap()
-                    .1
-                    .0[0]
+                    .1[0]
                     .clone();
 
                 let order = if field.order == SortOrder::Descending {
@@ -505,7 +497,6 @@ pub(crate) fn result_ordering_root(
                     return order;
                 };
             }
-
 
             _ => {}
         }
@@ -853,16 +844,14 @@ impl<'a> MinHeap<'a> {
                         .values
                         .get_index((facet_id_1).into())
                         .unwrap()
-                        .1
-                        .0[0]
+                        .1[0]
                         .clone();
 
                     let facet_value_2 = self.index.facets[field.idx]
                         .values
                         .get_index((facet_id_2).into())
                         .unwrap()
-                        .1
-                        .0[0]
+                        .1[0]
                         .clone();
 
                     let order = if field.order == SortOrder::Descending {
@@ -892,16 +881,14 @@ impl<'a> MinHeap<'a> {
                         .values
                         .get_index((facet_id_1).into())
                         .unwrap()
-                        .1
-                        .0[0]
+                        .1[0]
                         .clone();
 
                     let facet_value_2 = self.index.facets[field.idx]
                         .values
                         .get_index((facet_id_2).into())
                         .unwrap()
-                        .1
-                        .0[0]
+                        .1[0]
                         .clone();
 
                     let order = if field.order == SortOrder::Descending {
@@ -931,16 +918,14 @@ impl<'a> MinHeap<'a> {
                         .values
                         .get_index(facet_id_1 as usize)
                         .unwrap()
-                        .1
-                        .0[0]
+                        .1[0]
                         .clone();
 
                     let facet_value_2 = self.index.facets[field.idx]
                         .values
                         .get_index(facet_id_2 as usize)
                         .unwrap()
-                        .1
-                        .0[0]
+                        .1[0]
                         .clone();
 
                     let order = if field.order == SortOrder::Descending {
@@ -970,16 +955,14 @@ impl<'a> MinHeap<'a> {
                         .values
                         .get_index(facet_id_1 as usize)
                         .unwrap()
-                        .1
-                        .0[0]
+                        .1[0]
                         .clone();
 
                     let facet_value_2 = self.index.facets[field.idx]
                         .values
                         .get_index(facet_id_2 as usize)
                         .unwrap()
-                        .1
-                        .0[0]
+                        .1[0]
                         .clone();
 
                     let order = if field.order == SortOrder::Descending {
@@ -992,7 +975,6 @@ impl<'a> MinHeap<'a> {
                         return order;
                     };
                 }
-
 
                 _ => {}
             }
@@ -1238,4 +1220,3 @@ impl<'a> MinHeap<'a> {
         }
     }
 }
-
