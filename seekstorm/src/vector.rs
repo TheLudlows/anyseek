@@ -1213,7 +1213,7 @@ impl SearchVectorShard for ShardArc {
 
         let query_embedding = query_vector.unwrap();
 
-        let query_simd = unsafe { QuerySimd::new(&query_embedding.0) };
+        let query_simd = QuerySimd::for_dispatch(&query_embedding.0, shard_ref.is_simd);
 
         // I8 cosine/dot records use the historical quantized score scale.
         // Unquantized F32 records already have floating-point similarity units.

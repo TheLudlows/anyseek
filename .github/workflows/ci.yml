@@ -28,6 +28,7 @@ jobs:
           rustc --version --verbose
           cargo --version
       - name: Build retained workspace
+        id: build
         run: cargo build --workspace
       - name: Install browser test runtime
         run: |
@@ -38,8 +39,10 @@ jobs:
           SEEKPOWER_BROWSER_TEST: "1"
         run: python3 scripts/http_smoke.py --server target/debug/seekstorm_server
       - name: Existing core and server tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --workspace --all-targets
       - name: Generate API reference
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           target/debug/seekstorm_server generate_openapi=true > /dev/null
           python3 -c 'import json; from pathlib import Path; print("OPENAPI_JSON=" + json.dumps(Path("target/debug/openapi.json").read_text())); print("OPENAPI_YAML=" + json.dumps(Path("target/debug/openapi.yml").read_text()))'

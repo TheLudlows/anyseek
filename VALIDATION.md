@@ -108,3 +108,5 @@ S1.1 首个提交时结论：代码已实施，等待构建和运行验证；未
 第三轮 CI [38371668492](https://github.com/TheLudlows/seekpower/actions/runs/38371668492) / job 115209891638：构建通过，既有 HTTP 冒烟在 commit 返回数量断言失败，后续测试未运行。定位到服务的 commit/close 端点在等待异步写入之前读取数量，因此响应可能落后一条。将计数读取移到 commit/close 完成之后；保留原四条文档断言，不增加睡眠或重试来掩盖竞争。核心提交屏障和持久化路径不改。
 
 第四轮 CI [38372039419](https://github.com/TheLudlows/seekpower/actions/runs/38372039419) / job 115211134080：构建和原 commit 数量断言通过；新增过滤测试误用继承文档中的 `String` 枚举，实际 API 为 `String16`，导致请求解码 400。修正测试 payload，并断言向量过滤拒绝响应包含具体原因，避免把反序列化失败误判为过滤保护通过。
+
+第五轮 CI [38372367599](https://github.com/TheLudlows/seekpower/actions/runs/38372367599) / job 115212236591：构建、完整 HTTP/Chromium 通过；3 维量化阈值回归触发 SIGABRT（malloc invalid next size）。源码定位到 SIMD 查询打包按整 lane 加载，以及小于 8 维的 TurboQuant AVX2 FWHT 按 8 元素写入。修复为按有效维度/精度选择原有标量路径，并在标量分派时不构建 SIMD query；不改 SIMD kernel、ANN 算法或数据格式。保留 3 维，追加 32 维覆盖 SIMD 路径。CI 中核心测试与文档生成在构建成功后独立执行，以便 HTTP 测试失败时仍取得诊断结果；失败仍使整个 job 失败。

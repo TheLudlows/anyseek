@@ -2084,6 +2084,13 @@ pub(crate) async fn create_index_root(
                 vector_dimensions
             };
 
+            // The native vector kernels consume complete SIMD lanes. Keep arbitrary
+            // external dimensions on the existing scalar path, including small TQ vectors.
+            let quantized = quantization != Quantization::None || vector_precision == Precision::I8;
+            let lane_width = if *IS_AVX2 { if quantized { 32 } else { 8 } }
+                else if *IS_NEON { if quantized { 16 } else { 4 } } else { 1 };
+            let is_simd = *IS_SIMD && vector_dimensions > 0 && vector_dimensions.is_multiple_of(lane_width);
+
             let mut shard_vec: Vec<Arc<RwLock<Shard>>> = Vec::new();
             if serialize_schema {
                 let mut result_object_list = Vec::new();
@@ -2117,7 +2124,7 @@ pub(crate) async fn create_index_root(
                         shard.vector_similarity = vector_similarity;
                         shard.is_avx2 = *IS_AVX2;
                         shard.is_neon = *IS_NEON;
-                        shard.is_simd = *IS_SIMD;
+                        shard.is_simd = is_simd;
                         shard.turbo_quant = turbo_quant_clone;
 
                         let shard_arc = Arc::new(RwLock::new(shard));
@@ -2194,7 +2201,7 @@ pub(crate) async fn create_index_root(
                 vector_similarity,
                 is_avx2: *IS_AVX2,
                 is_neon: *IS_NEON,
-                is_simd: *IS_SIMD,
+                is_simd,
                 is_vector_indexing,
                 is_lexical_indexing,
                 turbo_quant,

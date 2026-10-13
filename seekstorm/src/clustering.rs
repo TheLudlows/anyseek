@@ -283,7 +283,7 @@ impl Shard {
                 ),
             };
 
-            let query_simd = QuerySimd::new(&sum_vector);
+            let query_simd = QuerySimd::for_dispatch(&sum_vector, self.is_simd);
             let mut best_similarity = f32::MIN;
             for (i, medoid_candidate) in self.block_vector_buffer.iter().enumerate() {
                 let scale_norm = None;
@@ -312,11 +312,9 @@ impl Shard {
                 }
             }
 
-            let query_simd = QuerySimd::new(
-                &self.block_vector_buffer[medoid.medoid_index]
+            let query_simd = QuerySimd::for_dispatch(&self.block_vector_buffer[medoid.medoid_index]
                     .embedding
-                    .clone(),
-            );
+                    .clone(), self.is_simd);
             for i in 0..self.block_vector_buffer.len() {
                 if i != medoid.medoid_index {
                     let scale_norm = if enable_scale {
@@ -382,7 +380,7 @@ impl Shard {
                         continue;
                     }
 
-                    let record_outer_simd = QuerySimd::new(&self.block_vector_buffer[i].embedding);
+                    let record_outer_simd = QuerySimd::for_dispatch(&self.block_vector_buffer[i].embedding, self.is_simd);
                     let mut similarity_sum = 0.0;
 
                     for j in (0..vector_count_block)
@@ -459,11 +457,9 @@ impl Shard {
                         };
                         let similarity = if self.is_simd {
                             similarity_embedding_simd(
-                                &QuerySimd::new(
-                                    &self.block_vector_buffer[medoid.medoid_index]
+                                &QuerySimd::for_dispatch(&self.block_vector_buffer[medoid.medoid_index]
                                         .embedding
-                                        .clone(),
-                                ),
+                                        .clone(), self.is_simd),
                                 &self.block_vector_buffer[i].embedding,
                                 scale_norm,
                                 vector_similarity,
@@ -524,7 +520,7 @@ impl Shard {
                         child_count: cluster.child_count,
                         sum_vector: vec![0f32; self.vector_dimensions],
                         centroid: Embedding::I8(Vec::new()),
-                        query_simd: unsafe { QuerySimd::new(&Embedding::I8(Vec::new())) },
+                        query_simd: QuerySimd::for_dispatch(&Embedding::I8(Vec::new()), self.is_simd),
                         medoid_index_new: 0,
                         best_similarity: f32::MIN,
                         has_changed: false,
@@ -564,7 +560,7 @@ impl Shard {
                         ),
                     };
                     centroid.centroid = sum_vector;
-                    centroid.query_simd = QuerySimd::new(&centroid.centroid);
+                    centroid.query_simd = QuerySimd::for_dispatch(&centroid.centroid, self.is_simd);
                 }
 
                 for (i, medoid_candidate) in self.block_vector_buffer.iter().enumerate() {
@@ -619,11 +615,9 @@ impl Shard {
                             };
                             let similarity = if self.is_simd {
                                 similarity_embedding_simd(
-                                    &QuerySimd::new(
-                                        &self.block_vector_buffer[new_medoid_index]
+                                    &QuerySimd::for_dispatch(&self.block_vector_buffer[new_medoid_index]
                                             .embedding
-                                            .clone(),
-                                    ),
+                                            .clone(), self.is_simd),
                                     &self.block_vector_buffer[i].embedding,
                                     scale_norm,
                                     vector_similarity,
@@ -663,9 +657,7 @@ impl Shard {
                                 child_count: cluster.child_count,
                                 sum_vector: vec![0f32; self.vector_dimensions],
                                 centroid: Embedding::I8(Vec::new()),
-                                query_simd: QuerySimd::new(
-                                    &self.block_vector_buffer[cluster.medoid_index_new].embedding,
-                                ),
+                                query_simd: QuerySimd::for_dispatch(&self.block_vector_buffer[cluster.medoid_index_new].embedding, self.is_simd),
                                 medoid_index_new: 0,
                                 best_similarity: f32::MIN,
                                 has_changed: cluster.medoid_index != cluster.medoid_index_new,
@@ -777,3 +769,4 @@ impl Shard {
         medoids_vec
     }
 }
+

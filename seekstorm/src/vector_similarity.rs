@@ -1044,6 +1044,18 @@ pub(crate) enum QuerySimd {
 }
 
 impl QuerySimd {
+    /// Scalar dispatch must not pre-pack partial SIMD lanes or execute SIMD instructions.
+    pub(crate) fn for_dispatch(query: &Embedding, is_simd: bool) -> Self {
+        if is_simd {
+            unsafe { Self::new(query) }
+        } else {
+            match query {
+                Embedding::I8(_) => Self::I(Vec::new()),
+                Embedding::F32(_) => Self::F(Vec::new()),
+            }
+        }
+    }
+
     /// Pre-pack `query` into the platform-native SIMD lane layout.
     /// Dispatches at compile time to the AVX2 implementation on x86_64, the
     /// NEON implementation on aarch64, and a plain `Vec` clone everywhere
@@ -3144,3 +3156,4 @@ mod neon_parity_tests {
         }
     }
 }
+
