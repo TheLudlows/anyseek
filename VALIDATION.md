@@ -148,4 +148,19 @@ CI 改用新的缓存命名空间且 `cache-targets: false`，只缓存可跨机
 
 本批移除 PDF、CSV、目录扫描及本地 JSON/SIFT 导入、附件读写、HTTP 文件端点与 UI 内部文件请求。只保留已处理 JSON 记录的写入/查询/读取路径。`display_index_info` 原样迁入 info 模块；不改压缩、索引编码和检索内核。旧 files 目录不主动删除。
 
-验证计划：workspace 构建与既有 48 个测试、HTTP 单条/批量写入与更新/删除/读取、文件端点拒绝且无写入、CLI 旧配置拒绝、Chromium 外部 PDF URL 与纯文本预览、API 生成一致性、Cargo 解析依赖中无 pdfium-render/csv/walkdir。本地无 Rust 工具链，Rust/浏览器验证由 CI 执行。结果待回填；AArch64、Docker 镜像运行、质量/性能和故障恢复未验证，仍归后续阶段。
+验证计划：workspace 构建与既有 48 个测试、HTTP 单条/批量写入与更新/删除/读取、文件端点拒绝且无写入、CLI 旧配置拒绝、Chromium 外部 PDF URL 与纯文本预览、API 生成一致性、Cargo 解析依赖中无 pdfium-render/csv/walkdir。本地无 Rust 工具链，Rust/浏览器验证由 CI 执行。下方记录实际结果；AArch64、Docker 镜像运行、质量/性能和故障恢复未验证，仍归后续阶段。
+
+
+**本批结果：通过。** [PR #4](https://github.com/TheLudlows/seekpower/pull/4)，代码提交 [`dbd22c77f41f8c1ed17dc249419febefe659dc8f`](https://github.com/TheLudlows/seekpower/commit/dbd22c77f41f8c1ed17dc249419febefe659dc8f)，[CI 38384079928](https://github.com/TheLudlows/seekpower/actions/runs/38384079928)，job `115251391454`。Ubuntu x86_64，Rust/Cargo 1.99.0；依赖源码缓存沿用，native target 不跨 runner 复用。
+
+| 命令/检查 | 实际结果 |
+| --- | --- |
+| `cargo build --workspace` | 通过；核心库与 HTTP 服务完整编译 |
+| `cargo metadata --format-version 1` + 解析后的 packages 检查 | 无 pdfium-render、csv、walkdir（包括传递依赖） |
+| `SEEKPOWER_BROWSER_TEST=1 python3 scripts/http_smoke.py --server target/debug/seekstorm_server` | 通过；鉴权、首页及 12 个资源、JSON 单条/批量写入、更新/删除/读取/提交、外部向量/混合回归保留 |
+| 文件入口与 UI 定向检查 | ingest_path 返回退出码 2；旧 POST/GET 文件端点返回 404 且文档计数不变；新索引不创建 files 目录；Chromium 外部 PDF URL 未改写为内部接口，文本预览正常，0 pageerror |
+| `cargo test --workspace --all-targets` | 48 passed、0 failed、0 ignored、0 filtered；未删除或跳过既有测试，仅迁移单条写入签名 |
+| `generate_openapi=true` + JSON/YAML diff | 通过；保留操作未变，只删除两条 PDF 文件路径及标签 |
+| 本地静态检查 | Python AST、Node 脚本语法、git diff --check 通过 |
+
+本批首次完整 CI 即通过。此后的状态/验证回填仅修改 Markdown；最终 head 的检查结果见 PR Checks。PR 尚未合入，S1.3 清单暂不勾选，S1.4—S1.5 尚未实施。
