@@ -75,12 +75,18 @@ async fn check_metadata(index: &IndexArc, realtime: bool) {
     ]}),realtime,&[30.]).await;
     check_prices(index,json!({"result_sort":[{"field":"date","order":"Descending"}]}),realtime,&[40.,30.,20.,10.]).await;
     check_prices(index,json!({"result_sort":[{"field":"category","order":"Ascending"},{"field":"price","order":"Descending"}]}),realtime,&[30.,10.,40.,20.]).await;
-    // Count-only union and ranked searches exercise both range-aggregation paths.
-    for result_type in ["Count", "TopkCount"] {
-        let result = search(index,json!({"query":"alpha beta","query_type_default":"Union","result_type":result_type,
-            "query_facets":[{"F64":{"field":"price","range_type":"CountWithinRange","ranges":[["low",0.],["high",25.]]}}]}),realtime).await;
-        assert_eq!(result.result_count_total,4);
-        assert_eq!(result.facets["price"],vec![("low".into(),2),("high".into(),2)]);
+    // Cover both single-term-per-shard and multi-term-per-shard union paths.
+    for query in ["alpha beta", "north south"] {
+        for result_type in ["Count", "TopkCount"] {
+            for filtered in [false, true] {
+                let result = search(index,json!({"query":query,"query_type_default":"Union","result_type":result_type,
+                    "facet_filter": if filtered { json!([{"String16":{"field":"category","filter":["a"]}}]) } else { json!([]) },
+                    "query_facets":[{"F64":{"field":"price","range_type":"CountWithinRange","ranges":[["low",0.],["high",25.]]}}]}),realtime).await;
+                let per_bin = if filtered {1} else {2};
+                assert_eq!(result.result_count_total,2 * per_bin,"{query} {result_type} realtime={realtime}");
+                assert_eq!(result.facets["price"],vec![("low".into(),per_bin),("high".into(),per_bin)],"{query} {result_type} realtime={realtime}");
+            }
+        }
     }
 }
 
@@ -108,10 +114,10 @@ async fn ordinary_metadata_survives_geo_removal() {
         let path_buf = format!("tests/index_metadata_{name}"); let path = Path::new(&path_buf);
         let index = create(path, access).await;
         for doc in [
-            json!({"body":"common alpha","category":"a","tags":["green","blue"],"price":30.,"date":300}),
-            json!({"body":"common beta","category":"b","tags":["red"],"price":20.,"date":200}),
-            json!({"body":"common alpha","category":"a","tags":["red"],"price":10.,"date":100}),
-            json!({"body":"common beta","category":"b","tags":["blue"],"price":40.,"date":400}),
+            json!({"body":"common alpha north","category":"a","tags":["green","blue"],"price":30.,"date":300}),
+            json!({"body":"common beta north","category":"b","tags":["red"],"price":20.,"date":200}),
+            json!({"body":"common alpha south","category":"a","tags":["red"],"price":10.,"date":100}),
+            json!({"body":"common beta south","category":"b","tags":["blue"],"price":40.,"date":400}),
         ] {
             let doc: Document = serde_json::from_value(doc).unwrap();
             index.index_document(doc).await.unwrap();

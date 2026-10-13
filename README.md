@@ -1213,7 +1213,6 @@ Are you missing something? Let us know via issue or discussions.
 * ✅ Native vector search
 * ✅ TurboQuant (TQ) for vector search
 * Late Interaction Multimodal Retrieval
-* Geocoding, reverse geocoding, GeoJSON
 * **Split of storage and compute**
   * Use S3 object storage as index backend
   * Use Distributed Key-Value store as index backend

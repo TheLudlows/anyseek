@@ -96,7 +96,8 @@ pub(crate) fn add_result_singleterm_uncommitted(
     let filtered = !not_query_list.is_empty()
         || !field_filter_set.is_empty()
         || !shard.delete_hashset.is_empty()
-        || !facet_filter.is_empty();
+        || !facet_filter.is_empty()
+        || !search_result.query_facets.is_empty();
 
     shard.decode_positions_uncommitted(plo_single, false);
 
@@ -1244,7 +1245,8 @@ impl Shard {
         let filtered = !not_query_list.is_empty()
             || !field_filter_set.is_empty()
             || !self.delete_hashset.is_empty()
-            || !facet_filter.is_empty();
+            || !facet_filter.is_empty()
+            || !search_result.query_facets.is_empty();
 
         if (self.enable_single_term_topk || (result_type == &ResultType::Count))
             && (non_unique_query_list.len() <= 1 && !filtered)
@@ -1283,7 +1285,8 @@ impl Shard {
             let filtered = !not_query_list.is_empty()
                 || !field_filter_set.is_empty()
                 || !self.delete_hashset.is_empty()
-                || !facet_filter.is_empty();
+                || !facet_filter.is_empty()
+            || !search_result.query_facets.is_empty();
             result_count_arc.fetch_add(
                 if filtered {
                     result_count_local as usize
@@ -1930,7 +1933,13 @@ impl Shard {
     ) {
         let mut result_count: i32 = 0;
 
-        if result_type == &ResultType::Count {
+        // Bitmap totals cannot apply filters or populate requested facet counts.
+        if result_type == &ResultType::Count
+            && search_result.query_facets.is_empty()
+            && facet_filter.is_empty()
+            && field_filter_set.is_empty()
+            && not_query_list.is_empty()
+        {
             self.union_count_uncommitted(&mut result_count, query_list, block_id);
             result_count_arc.fetch_add(result_count as usize, Ordering::Relaxed);
             return;
@@ -2032,7 +2041,12 @@ impl Shard {
                 }
             }
 
-            if result_type != &ResultType::Count {
+            if result_type != &ResultType::Count
+                || !search_result.query_facets.is_empty()
+                || !facet_filter.is_empty()
+                || !field_filter_set.is_empty()
+                || !not_query_list.is_empty()
+            {
                 let mut term_match_count = 0;
                 let mut term_index = 0;
                 for (i, plo) in query_list.iter_mut().enumerate() {
@@ -2062,6 +2076,7 @@ impl Shard {
                         && field_filter_set.is_empty()
                         && self.delete_hashset.is_empty()
                         && facet_filter.is_empty()
+                        && search_result.query_facets.is_empty()
                         && result_type != &ResultType::Topk
                     {
                         *result_count += 1;
@@ -2109,3 +2124,4 @@ impl Shard {
         }
     }
 }
+
