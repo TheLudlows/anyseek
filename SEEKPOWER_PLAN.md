@@ -2,7 +2,7 @@
 
 更新日期：2026-10-13（Asia/Singapore）
 
-状态：S1.1 已合入；S1.2 外置模型/切块已通过验证并合入（PR #3，fc47cf83）；S1.3 已通过最终检查并合入（PR #4，567d8a2）；S1.4a 纠错补全裁剪已合入（PR #5，e5e0850）；S1.4b 地理裁剪已在 PR #6 通过验证（53 tests）并合入（fb90463）；S1.4c 高亮/摘要裁剪已在 PR #7 合入（8026d37）；S1.4d 配额裁剪已在 PR #8 合入（ff79175）；S1.5 已在 PR #9 合入（4df02a8），Issue #1 已关闭。用户另行确认 B1/B2 接口裁剪，当前分支实施后等待 CI 和审查。分布式开发尚未执行。
+状态：S1.1 已合入；S1.2 外置模型/切块已通过验证并合入（PR #3，fc47cf83）；S1.3 已通过最终检查并合入（PR #4，567d8a2）；S1.4a 纠错补全裁剪已合入（PR #5，e5e0850）；S1.4b 地理裁剪已在 PR #6 通过验证（53 tests）并合入（fb90463）；S1.4c 高亮/摘要裁剪已在 PR #7 合入（8026d37）；S1.4d 配额裁剪已在 PR #8 合入（ff79175）；S1.5 已在 PR #9 合入（4df02a8），Issue #1 已关闭。用户另行确认 B1/B2 接口裁剪，[PR #10](https://github.com/TheLudlows/seekpower/pull/10) 代码 CI 全部通过，等待审查合入。分布式开发尚未执行。
 
 相关文档：[上游基线](UPSTREAM.md) · [执行状态](STATUS.md) · [验证记录](VALIDATION.md)
 
@@ -350,3 +350,5 @@ S1.5 [PR #9](https://github.com/TheLudlows/seekpower/pull/9) 已合入，[Issue 
 - 同步移除不再使用的服务 `url` 直接依赖；POST URL 参数不得静默忽略。
 - 验收：旧入口拒绝、鉴权、合法/非法 POST、迭代分页/投影、全文/向量/混合与 UI、依赖图及 OpenAPI 精确一致性。
 - 其他裁剪候选 B3—B8、控制台、demo key、默认 vb 等均未在本次授权范围内。
+
+B1/B2 验证：代码 `f8d084a` 的 [CI 38410014728](https://github.com/TheLudlows/seekpower/actions/runs/38410014728) 通过构建、58 个既有 Rust 测试、HTTP/Chromium、依赖图和 OpenAPI 精确一致性；PR #10 尚未合入，其他候选项未实施。

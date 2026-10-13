@@ -315,3 +315,12 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - 代码 `5f621acad23964feb9fcece5f4cf0723d9321e94` 的 [CI 38409081606](https://github.com/TheLudlows/seekpower/actions/runs/38409081606)：独立核心构建、workspace 构建、依赖图、58 个 Rust 测试和 OpenAPI 精确对比通过；HTTP 在新增反向遍历断言失败，未执行后续浏览器场景，不能算整体验证通过。
 - 原因是本次新增测试误按旧文档“sorted ascending”比较正反向结果；核对未改动的 `iterator.rs::get_iterator`，负 take 分支按 docid 递减依次 push，实际返回降序。
 - 修正新增测试为与正向末页严格逆序比较，并同步服务接口/OpenAPI 描述。没有删除测试、放宽为无序集合比较或修改核心迭代行为。修复后的 CI 待执行。
+
+### B1/B2 修复后验证通过
+
+- PR：[#10](https://github.com/TheLudlows/seekpower/pull/10)，尚未合入。
+- 裁剪提交：`5f621acad23964feb9fcece5f4cf0723d9321e94`；测试/说明修正提交：`f8d084abcfae4b1005cc2291cf4c51f70231529f`。
+- [CI 38410014728](https://github.com/TheLudlows/seekpower/actions/runs/38410014728) **success**：独立核心默认/无默认特性构建、workspace 构建、依赖图（无 rkyv）、58 tests（0 failed/ignored/filtered）、HTTP/UI 11 个资源、Chromium 交互及生成 OpenAPI JSON/YAML 与仓库文件精确一致。
+- 新契约验证：旧二进制 GET/POST/QUERY/OPTIONS 全部 404；搜索/遍历 GET/QUERY（含尾斜杠与 URL 参数）405 + Allow；POST 鉴权/非法 JSON/URL 参数校验；迭代正向分页、反向顺序和正向字段投影。
+- 保留路径验证：JSON CRUD、外部 JSON/base64 向量与 hybrid、普通过滤/日期排序、原文展示、鉴权隔离/重启/撤销。没有修改核心索引格式或检索实现，也没有删除/跳过既有 Rust 测试。
+- 此后仅回填计划/状态/验证文档，最新 head CI 见 PR Checks。本记录不替代 S2 的可靠性和性能验收。

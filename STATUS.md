@@ -6,7 +6,7 @@
 
 ## 当前阶段
 
-**S1.1—S1.5 已合入主干（PR #9 合并提交 `4df02a8`）；Issue #1 已关闭。用户另行确认 B1/B2 接口裁剪，本分支已实施，CI 待验证，尚未合入。**
+**S1.1—S1.5 已合入主干（PR #9 合并提交 `4df02a8`）；Issue #1 已关闭。用户另行确认 B1/B2 接口裁剪，[PR #10](https://github.com/TheLudlows/seekpower/pull/10) 已实施且代码 CI 全部通过，尚未合入。**
 
 R0 原样导入完成（`1986b14215c82a07fac77d7c5b169b90743d76a4`），导入树与固定上游一致。独立 S0 已取消；编译、受影响功能和 UI 回归随每批裁剪执行，完整可靠性、故障注入与性能发布验收留在 S2。
 
@@ -52,4 +52,4 @@ R0 原样导入完成（`1986b14215c82a07fac77d7c5b169b90743d76a4`），导入�
 - 移除 rkyv 二进制查询实现及服务 rkyv/url 直接依赖；旧 v2 路由返回 404。
 - 搜索与 iterator 仅接受 POST JSON；旧 GET/QUERY 返回 405 + Allow，POST URL 参数返回 400，OPTIONS 正确声明方法。
 - 保留普通 GET、外部 JSON/base64 向量、鉴权、Web UI、内核检索/迭代/存储及原 58 个 Rust 测试；扩展 HTTP 契约和迭代器分页/投影回归。
-- 本地 Python 语法、OpenAPI JSON/YAML 结构一致性和差异检查通过；当前环境无 Rust 工具链，编译/运行验证由 PR CI 执行，尚未宣称通过。
+- 本地 Python 语法、OpenAPI JSON/YAML 结构一致性和差异检查通过；代码 `f8d084a` 的 [CI 38410014728](https://github.com/TheLudlows/seekpower/actions/runs/38410014728) 全部通过：独立核心/服务构建、依赖图、58 tests、HTTP/Chromium、11 个 UI 资源及 OpenAPI 精确对比。首次新增反向遍历断言错误及修正见 VALIDATION。此后仅回填文档，最新 head 检查见 PR Checks。
