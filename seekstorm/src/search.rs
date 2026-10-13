@@ -579,25 +579,7 @@ pub enum FacetFilter {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
-pub(crate) enum FilterSparse {
-    U8(Range<u8>),
-    U16(Range<u16>),
-    U32(Range<u32>),
-    U64(Range<u64>),
-    I8(Range<i8>),
-    I16(Range<i16>),
-    I32(Range<i32>),
-    I64(Range<i64>),
-    /// Unix timestamp: the number of seconds since 1 January 1970
-    Timestamp(Range<i64>),
-    F32(Range<f32>),
-    F64(Range<f64>),
-    String16(Vec<u16>),
-    String32(Vec<u32>),
-    #[default]
-    None,
-}
+pub(crate) use crate::metadata_filter::FilterSparse;
 
 /// Specifies the sort order for the search results.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -828,8 +810,8 @@ impl Search for IndexArc {
         result_sort: Vec<ResultSort>,
     ) -> ResultObject {
         let index_ref = self.read().await;
-        if !matches!(search_mode, SearchMode::Lexical) && !facet_filter.is_empty() {
-            return ResultObject { error: Some("facet_filter is currently supported only in Lexical mode; vector candidate filtering is not implemented".into()), ..Default::default() };
+        if let Err(error) = crate::metadata_filter::validate_filters(&index_ref.schema_map, &facet_filter) {
+            return ResultObject { error: Some(error), ..Default::default() };
         }
         if let Err(error) = crate::vector::validate_query_vector(
             &index_ref.meta.inference, &search_mode, query_vector.as_ref(),
@@ -1093,6 +1075,7 @@ impl Search for IndexArc {
                                 similarity_threshold,
                                 cluster_search,
                                 field_filter_clone,
+                                facet_filter_clone,
                             )
                             .await;
 
@@ -1118,7 +1101,7 @@ impl Search for IndexArc {
                                 include_uncommitted,
                                 field_filter_clone.clone(),
 
-                                facet_filter_clone,
+                                facet_filter_clone.clone(),
                                 result_sort_clone,
                             )
                             .await;
@@ -1136,6 +1119,7 @@ impl Search for IndexArc {
                                 similarity_threshold,
                                 ann_mode,
                                 field_filter_clone,
+                                facet_filter_clone,
                             )
                             .await;
 
@@ -1782,177 +1766,10 @@ impl SearchLexicalShard for ShardArc {
 
         };
 
-        let mut facet_filter_sparse: Vec<FilterSparse> = Vec::new();
-        if !facet_filter.is_empty() {
-            facet_filter_sparse = vec![FilterSparse::None; shard_ref.facets.len()];
-            for facet_filter_item in facet_filter.iter() {
-                match &facet_filter_item {
-                    FacetFilter::U8 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::U8
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::U8(filter.clone())
-                        }
-                    }
-                    FacetFilter::U16 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::U16
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::U16(filter.clone())
-                        }
-                    }
-                    FacetFilter::U32 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::U32
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::U32(filter.clone())
-                        }
-                    }
-                    FacetFilter::U64 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::U64
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::U64(filter.clone())
-                        }
-                    }
-                    FacetFilter::I8 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::I8
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::I8(filter.clone())
-                        }
-                    }
-                    FacetFilter::I16 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::I16
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::I16(filter.clone())
-                        }
-                    }
-                    FacetFilter::I32 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::I32
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::I32(filter.clone())
-                        }
-                    }
-                    FacetFilter::I64 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::I64
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::I64(filter.clone())
-                        }
-                    }
-                    FacetFilter::Timestamp { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::Timestamp
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::Timestamp(filter.clone())
-                        }
-                    }
-                    FacetFilter::F32 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::F32
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::F32(filter.clone())
-                        }
-                    }
-                    FacetFilter::F64 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field)
-                            && shard_ref.facets[*idx].field_type == FieldType::F64
-                        {
-                            facet_filter_sparse[*idx] = FilterSparse::F64(filter.clone())
-                        }
-                    }
-                    FacetFilter::String16 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field) {
-                            let facet = &shard_ref.facets[*idx];
-                            if shard_ref.facets[*idx].field_type == FieldType::String16 {
-                                let mut string_id_vec = Vec::new();
-                                for value in filter.iter() {
-                                    let key = [value.clone()];
-                                    if let Some(facet_value_id) = facet.values.get_index_of(&key[0])
-                                    {
-                                        string_id_vec.push(facet_value_id as u16);
-                                    }
-                                }
-                                facet_filter_sparse[*idx] = FilterSparse::String16(string_id_vec);
-                            }
-                        }
-                    }
-
-                    FacetFilter::StringSet16 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field) {
-                            let facet = &shard_ref.facets[*idx];
-                            if shard_ref.facets[*idx].field_type == FieldType::StringSet16 {
-                                let mut string_id_vec = Vec::new();
-                                for value in filter.iter() {
-                                    let key = [value.clone()];
-                                    if let Some(facet_value_id) =
-                                        facet.values.get_index_of(&key.join("_"))
-                                    {
-                                        string_id_vec.push(facet_value_id as u16);
-                                    }
-                                    if let Some(facet_value_ids) = shard_ref
-                                        .string_set_to_single_term_id_vec[*idx]
-                                        .get(&value.clone())
-                                    {
-                                        for code in facet_value_ids.iter() {
-                                            string_id_vec.push(*code as u16);
-                                        }
-                                    }
-                                }
-                                facet_filter_sparse[*idx] = FilterSparse::String16(string_id_vec);
-                            }
-                        }
-                    }
-                    FacetFilter::String32 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field) {
-                            let facet = &shard_ref.facets[*idx];
-
-                            if shard_ref.facets[*idx].field_type == FieldType::String32 {
-                                let mut string_id_vec = Vec::new();
-                                for value in filter.iter() {
-                                    let key = [value.clone()];
-                                    if let Some(facet_value_id) = facet.values.get_index_of(&key[0])
-                                    {
-                                        string_id_vec.push(facet_value_id as u32);
-                                    }
-                                }
-                                facet_filter_sparse[*idx] = FilterSparse::String32(string_id_vec);
-                            }
-                        }
-                    }
-
-                    FacetFilter::StringSet32 { field, filter } => {
-                        if let Some(idx) = shard_ref.facets_map.get(field) {
-                            let facet = &shard_ref.facets[*idx];
-                            if shard_ref.facets[*idx].field_type == FieldType::StringSet32 {
-                                let mut string_id_vec = Vec::new();
-                                for value in filter.iter() {
-                                    let key = [value.clone()];
-                                    if let Some(facet_value_id) =
-                                        facet.values.get_index_of(&key.join("_"))
-                                    {
-                                        string_id_vec.push(facet_value_id as u32);
-                                    }
-                                    if let Some(facet_value_ids) = shard_ref
-                                        .string_set_to_single_term_id_vec[*idx]
-                                        .get(&value.clone())
-                                    {
-                                        for code in facet_value_ids.iter() {
-                                            string_id_vec.push(*code);
-                                        }
-                                    }
-                                }
-                                facet_filter_sparse[*idx] = FilterSparse::String32(string_id_vec);
-                            }
-                        }
-                    }
-
-                }
-            }
-        }
+        let facet_filter_sparse = match crate::metadata_filter::compile_filters(&shard_ref, &facet_filter) {
+            Ok(filters) => filters,
+            Err(error) => return ResultObject { error: Some(error), ..Default::default() },
+        };
 
         let result_count_arc = Arc::new(AtomicUsize::new(0));
         let result_count_uncommitted_arc = Arc::new(AtomicUsize::new(0));
@@ -2514,4 +2331,9 @@ impl SearchLexicalShard for ShardArc {
 
         result_object
     }
+}
+
+/// Validate metadata filter field names, schema types and range bounds without executing a query.
+pub async fn validate_metadata_filters(index: &IndexArc, filters: &[FacetFilter]) -> std::result::Result<(), String> {
+    crate::metadata_filter::validate_filters(&index.read().await.schema_map, filters)
 }

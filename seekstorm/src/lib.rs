@@ -73,3 +73,5 @@ pub mod vector_similarity;
 #[cfg(feature = "zh")]
 pub(crate) mod word_segmentation;
 
+
+mod metadata_filter;

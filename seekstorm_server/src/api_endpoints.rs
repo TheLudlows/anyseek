@@ -865,6 +865,7 @@ pub(crate) async fn delete_documents_by_query_api(
     index_arc: &IndexArc,
     search_request: SearchRequestObject,
 ) -> Result<u64, String> {
+    seekstorm::search::validate_metadata_filters(index_arc, &search_request.facet_filter).await?;
     index_arc
         .delete_documents_by_query(
             search_request.query_string.to_owned(),

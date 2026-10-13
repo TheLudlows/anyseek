@@ -11,8 +11,7 @@ use crate::{
     min_heap,
     search::{FilterSparse, ResultType, SearchResult},
     utils::{
-        read_f32, read_f64, read_i8, read_i16, read_i32, read_i64, read_u8, read_u16, read_u32,
-        read_u64,
+        read_u16, read_u32,
     },
 };
 
@@ -332,133 +331,7 @@ pub(crate) fn add_result_singleterm_multifield(
     );
 }
 
-#[inline]
-pub(crate) fn is_facet_filter(index: &Shard, facet_filter: &[FilterSparse], docid: usize) -> bool {
-    for (i, facet) in index.facets.iter().enumerate() {
-        match &facet_filter[i] {
-            FilterSparse::U8(range) => {
-                let facet_value_id = read_u8(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::U16(range) => {
-                let facet_value_id = read_u16(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::U32(range) => {
-                let facet_value_id = read_u32(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::U64(range) => {
-                let facet_value_id = read_u64(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::I8(range) => {
-                let facet_value_id = read_i8(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::I16(range) => {
-                let facet_value_id = read_i16(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::I32(range) => {
-                let facet_value_id = read_i32(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::I64(range) => {
-                let facet_value_id = read_i64(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::Timestamp(range) => {
-                let facet_value_id = read_i64(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::F32(range) => {
-                let facet_value_id = read_f32(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::F64(range) => {
-                let facet_value_id = read_f64(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !range.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::String16(values) => {
-                let facet_value_id = read_u16(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !values.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-            FilterSparse::String32(values) => {
-                let facet_value_id = read_u32(
-                    &index.facets_file_mmap,
-                    (index.facets_size_sum * docid) + facet.offset,
-                );
-                if !values.contains(&facet_value_id) {
-                    return true;
-                }
-            }
-
-            FilterSparse::None => {}
-        }
-    }
-    false
-}
+pub(crate) use crate::metadata_filter::is_facet_filter;
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
