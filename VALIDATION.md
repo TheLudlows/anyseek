@@ -104,3 +104,5 @@ S1.1 首个提交时结论：代码已实施，等待构建和运行验证；未
 第二轮 CI [38370931173](https://github.com/TheLudlows/seekpower/actions/runs/38370931173) / job 115207441554：workspace 构建、HTTP 与 Chromium 全部通过；新增关闭重开回归失败。定位到继承的 TopK 阈值换算对 F32 也使用 I8 的 1/16129 系数，0.7 阈值错误排除了相同 F32 向量。最小修复按实际存储精度选缩放系数（同时用于结果与 medoid 阈值、调试分数），保留 I8 公式、SIMD/距离计算、候选算法与格式；保留失败断言，不降低阈值规避。
 
 调用链复查发现上游 vector 分支根本不接收 facet_filter，Hybrid 仅过滤词法分支。S1.2 明确拒绝 Vector/Hybrid 非空 facet_filter（HTTP 400），避免无声返回未过滤数据；词法元数据过滤保留并增加回归。共同向量候选过滤仍归 S2，本批不宣称三种模式已具有共同过滤语义。追加 Binary/base64 写入查询和旧模型元数据拒绝测试。
+
+第三轮 CI [38371668492](https://github.com/TheLudlows/seekpower/actions/runs/38371668492) / job 115209891638：构建通过，既有 HTTP 冒烟在 commit 返回数量断言失败，后续测试未运行。定位到服务的 commit/close 端点在等待异步写入之前读取数量，因此响应可能落后一条。将计数读取移到 commit/close 完成之后；保留原四条文档断言，不增加睡眠或重试来掩盖竞争。核心提交屏障和持久化路径不改。

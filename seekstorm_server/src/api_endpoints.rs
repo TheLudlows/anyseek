@@ -485,21 +485,13 @@ pub(crate) async fn delete_index_api(
     operation_id = "commit_index",
 )]
 pub(crate) async fn commit_index_api(index_arc: &IndexArc) -> Result<u64, String> {
-    let index_arc_clone = index_arc.clone();
-    let index_ref = index_arc.read().await;
-    let indexed_doc_count = index_ref.indexed_doc_count().await;
-
-    drop(index_ref);
-    index_arc_clone.commit().await;
-
-    Ok(indexed_doc_count as u64)
+    index_arc.commit().await;
+    Ok(index_arc.read().await.indexed_doc_count().await as u64)
 }
 
 pub(crate) async fn close_index_api(index_arc: &IndexArc) -> Result<u64, String> {
-    let indexed_doc_count = index_arc.read().await.indexed_doc_count().await;
     index_arc.close().await;
-
-    Ok(indexed_doc_count as u64)
+    Ok(index_arc.read().await.indexed_doc_count().await as u64)
 }
 
 pub(crate) async fn set_synonyms_api(
