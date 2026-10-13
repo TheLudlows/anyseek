@@ -138,3 +138,5 @@ PR #3 完成代码及本批验证，待审查合入；Issue #1 保持打开，S1
 [CI 38374281458](https://github.com/TheLudlows/seekpower/actions/runs/38374281458) / job 115218635945，文档提交 `d53f48b`：构建和 OpenAPI 一致性通过，但 HTTP 在首次创建词法索引时进程断连，既有 bitmap 测试收到 SIGILL。该轮命中上一成功轮保存的完整 target 缓存，仅重编 workspace。仓库使用 `target-cpu=native`，跨异构 runner 复用依赖机器码不具备指令集兼容保证，是本次缓存命中后故障的首要原因；此前源码不变的成功证据保留，不把失败称为通过。
 
 CI 改用新的缓存命名空间且 `cache-targets: false`，只缓存可跨机器复用的依赖源码/工具下载；每台 runner 本地重编全部 native 目标，继续保留生产构建参数。增加 lscpu 记录。PR 暂回草稿，待无旧目标产物的完整复跑通过。
+
+缓存修正后的提交 `9a82532b534db87395971469120937b233ef824e` 已在 [CI 38374841361](https://github.com/TheLudlows/seekpower/actions/runs/38374841361) / job `115220524747` **完整通过**：从无目标产物的状态全量构建、48 个测试（0 failed/ignored/filtered）、HTTP/Chromium 和 OpenAPI 一致性均通过。日志确认 `cache-targets: false`，缓存路径不再包含仓库 target。之前成功代码的功能结论保持，CI 跨 runner native 目标缓存问题已处理；PR 恢复可审查，仍待合入。
