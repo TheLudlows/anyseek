@@ -1099,7 +1099,7 @@ pub struct SchemaField {
 /// - store: only stored fields are returned in the search results
 /// - index_lexical: index field into lexical index, only indexed fields can be searched.
 /// - index_vector: index field into vector index, only indexed fields can be searched.
-/// - field_type: type of a field: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, point
+/// - field_type: type of a field: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, text, strings, JSON
 /// - facet: enable faceting for a field: for sorting results by field values, for range filtering, for result count per field value or range
 /// - `longest`: This allows to annotate (manually set) the longest field in schema.  
 ///   Otherwise the longest field will be automatically detected in first index_document.

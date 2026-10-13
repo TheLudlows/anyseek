@@ -205,3 +205,6 @@ S1.4a 最终 head `a5da5b9` 的 [CI 38387377669](https://github.com/TheLudlows/s
 新增 3 个 Rust 契约测试：旧地理请求拒绝；字符串/集合/数值/时间过滤、多字段排序、空查询/Union/Intersection、数值分面在双分片 RAM/MMAP、实时/提交/重开场景下的结果；根和分片旧 Point schema 明确报错且不改写。原有 50 个测试保留。HTTP 检查旧 GET/POST 参数/Schema 返回 400、普通元数据过滤/排序；Chromium 检查日期排序无 base、时间范围过滤。验证结果待 CI 回填。
 
 本地 Python 语法、Node 语法、JSON/YAML 语义一致和 git diff --check 已通过。无本地 Rust 工具链，编译和实际测试由 CI 执行；没有把静态检查当作运行验证。完整质量/性能及故障恢复仍归 S2。
+
+
+首轮 `4e12a148` 的 [CI 38388969948](https://github.com/TheLudlows/seekpower/actions/runs/38388969948)，job `115267692631`：workspace 构建、依赖、OpenAPI 一致性及 HTTP 地理旧参数拒绝通过；新增测试夹具有误，普通元数据 HTTP schema 缺失必填 index_lexical，Rust 测试误把 Option<Value> 传给需要 Option<Embedding> 的内核。修正夹具显式关闭非文本字段词法索引，纯词法测试传 None；没有删测试或放宽断言。修复后的运行结果另行回填。

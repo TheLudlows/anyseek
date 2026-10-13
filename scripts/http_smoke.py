@@ -164,7 +164,7 @@ def exercise(binary, workdir):
                   f'query unexpectedly rewritten: {literal}')
             print('PASS retired query options rejected and literal query preserved')
             request('POST', '/api/v1/index', {'index_name': 'geo', 'schema': [
-                {'field': 'location', 'field_type': 'Point', 'facet': True}]}, api_key, expected=400)
+                {'field': 'location', 'field_type': 'Point', 'store': True, 'index_lexical': False, 'facet': True}]}, api_key, expected=400)
             geo_options = [
                 {'distance_fields': []},
                 {'facet_filter': [{'Point': {'field': 'location', 'filter': [[0, 0], {'start': 0, 'end': 10}, 'Kilometers']}}]},
@@ -271,10 +271,10 @@ def exercise(binary, workdir):
             print('PASS external vector/hybrid, invalid input, batch and update atomic validation')
             metadata_id = api('POST', '/api/v1/index', {'index_name': 'metadata', 'schema': [
                 {**field, 'store': True} for field in schema] + [
-                {'field': 'category', 'field_type': 'String16', 'store': True, 'facet': True},
-                {'field': 'price', 'field_type': 'F64', 'store': True, 'facet': True},
-                {'field': 'tags', 'field_type': 'StringSet32', 'store': True, 'facet': True},
-                {'field': 'date', 'field_type': 'Timestamp', 'store': True, 'facet': True}]})
+                {'field': 'category', 'field_type': 'String16', 'store': True, 'index_lexical': False, 'facet': True},
+                {'field': 'price', 'field_type': 'F64', 'store': True, 'index_lexical': False, 'facet': True},
+                {'field': 'tags', 'field_type': 'StringSet32', 'store': True, 'index_lexical': False, 'facet': True},
+                {'field': 'date', 'field_type': 'Timestamp', 'store': True, 'index_lexical': False, 'facet': True}]})
             mp = f'/api/v1/index/{metadata_id}'
             api('POST', mp + '/doc', [
                 {'title': 'Old record', 'body': 'ordinary metadata', 'url': '', 'category': 'a',

@@ -14,10 +14,10 @@ use std::{collections::HashSet, fs, path::Path, time::Duration};
 fn schema() -> Vec<SchemaField> {
     serde_json::from_value(json!([
         {"field":"body","field_type":"Text","store":true,"index_lexical":true},
-        {"field":"category","field_type":"String16","store":true,"facet":true},
-        {"field":"tags","field_type":"StringSet32","store":true,"facet":true},
-        {"field":"price","field_type":"F64","store":true,"facet":true},
-        {"field":"date","field_type":"Timestamp","store":true,"facet":true}
+        {"field":"category","field_type":"String16","store":true,"index_lexical":false,"facet":true},
+        {"field":"tags","field_type":"StringSet32","store":true,"index_lexical":false,"facet":true},
+        {"field":"price","field_type":"F64","store":true,"index_lexical":false,"facet":true},
+        {"field":"date","field_type":"Timestamp","store":true,"index_lexical":false,"facet":true}
     ])).unwrap()
 }
 
@@ -36,7 +36,7 @@ async fn search(index: &IndexArc, options: Value, realtime: bool) -> ResultObjec
         "result_type":"TopkCount", "result_sort":[{"field":"price","order":"Ascending"}]});
     value.as_object_mut().unwrap().extend(options.as_object().unwrap().clone());
     let r: SearchRequestObject = serde_json::from_value(value).unwrap();
-    let result = index.search(r.query_string, r.query_vector, r.query_type_default,
+    let result = index.search(r.query_string, None, r.query_type_default,
         r.search_mode, r.enable_empty_query, r.offset, r.length, r.result_type, realtime,
         r.field_filter, r.query_facets, r.facet_filter, r.result_sort).await;
     assert!(result.error.is_none(), "{:?}", result.error);
@@ -86,7 +86,7 @@ async fn check_metadata(index: &IndexArc, realtime: bool) {
 
 #[test]
 fn retired_geo_requests_are_rejected() {
-    assert!(serde_json::from_value::<CreateIndexRequest>(json!({"index_name":"geo","schema":[{"field":"location","field_type":"Point","facet":true}]})).is_err());
+    assert!(serde_json::from_value::<CreateIndexRequest>(json!({"index_name":"geo","schema":[{"field":"location","field_type":"Point","store":true,"index_lexical":false,"facet":true}]})).is_err());
     for options in [
         json!({"distance_fields":[]}),
         json!({"facet_filter":[{"Point":{"field":"location","filter":[[0.,0.],{"start":0.,"end":10.},"Kilometers"]}}]}),
