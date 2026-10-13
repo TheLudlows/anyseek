@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Remove core highlighter/KWIC generation and direct aho-corasick dependency. Remove HTTP highlights and document-read query_terms options, and the Rust get_document highlighter argument. Preserve lossless stored records/projection and lexical response query_terms. Render raw text/JSON safely in Web UI with full text previews.
 
+- Remove API key quota fields, built-in rate limiting and quota percentages. Move key identity and requests to the HTTP service, preserve existing key scopes/directories and read legacy quota metadata without rewriting it. Reject retired creation options; repeated demo-key creation preserves existing indices.
+
 Entries below describe upstream releases before the SeekPower pruning and are retained as historical records, not current product capabilities.
 
 ## [3.4.1] - 2026-10-12

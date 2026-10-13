@@ -86,22 +86,28 @@ def exercise(binary, workdir):
 
     log_path = workdir / 'server.log'
     with log_path.open('wb') as log:
-        process = subprocess.Popen(
-            [str(binary), 'local_ip=127.0.0.1', f'local_port={port}',
-             f'index_path={workdir / "index"}', 'force_shard_number=1'],
-            cwd=workdir, env={**os.environ, 'MASTER_KEY_SECRET': secret},
-            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-        try:
+        def launch():
+            return subprocess.Popen(
+                [str(binary), 'local_ip=127.0.0.1', f'local_port={port}',
+                 f'index_path={workdir / "index"}', 'force_shard_number=1'],
+                cwd=workdir, env={**os.environ, 'MASTER_KEY_SECRET': secret},
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+
+        def ready(process):
             deadline = time.monotonic() + 30
             while True:
                 check(process.poll() is None, 'server exited before becoming ready')
                 try:
                     request('GET', '/api/v1/live')
-                    break
+                    return
                 except (URLError, TimeoutError, ConnectionError):
                     if time.monotonic() >= deadline:
                         raise RuntimeError('server did not become ready within 30 seconds')
                     time.sleep(0.1)
+
+        process = launch()
+        try:
+            ready(process)
             print('PASS health')
 
             html = request('GET', '/').decode()
@@ -120,10 +126,11 @@ def exercise(binary, workdir):
 
             request('GET', '/api/v1/index/0', expected=401)
             request('POST', '/api/v1/apikey', {}, key='invalid', expected=401)
-            quota = {'indices_max': 10, 'indices_size_max': 100000000,
-                     'documents_max': 10000, 'operations_max': 100000,
-                     'rate_limit': None, 'demo': True}
-            api_key = request('POST', '/api/v1/apikey', quota, master).decode()
+            api_key = request('POST', '/api/v1/apikey', {'demo': True}, master).decode()
+            for field in ('indices_max', 'indices_size_max', 'documents_max', 'operations_max', 'rate_limit', 'quota'):
+                request('POST', '/api/v1/apikey', {field: 0}, master, expected=400)
+                request('POST', '/api/v1/apikey?' + urlencode({field: 0}), {}, master, expected=400)
+            request('POST', '/api/v1/apikey', {'demo': True}, api_key, expected=401)
             check(api_key == base64.b64encode(bytes(32)).decode(), 'demo key mismatch')
             print('PASS authentication and key creation')
 
@@ -445,6 +452,72 @@ def exercise(binary, workdir):
                     check(not errors, f'browser errors: {errors}')
                     browser.close()
                 print('PASS Chromium lexical/vector/hybrid, source/text preview, literal raw/JSON preview, unchanged typed query and date sorting/filtering')
+
+            # Key creation, revocation and scopes remain independent of retired quotas.
+            def scoped(key, method, path, data=None):
+                value = json.loads(request(method, path, data, key))
+                check(not isinstance(value, dict) or 'Err' not in value, f'scoped request failed: {value}')
+                return value['Ok'] if isinstance(value, dict) and set(value) == {'Ok'} else value
+
+            key_file = workdir / 'index' / '0' / 'apikey.json'
+            key_bytes = key_file.read_bytes()
+            key_record = json.loads(key_bytes)
+            check(set(key_record) == {'id', 'apikey_hash'}, 'new key persisted quota or runtime scope')
+            original_doc = api('GET', path + '/doc/0')
+            check(request('POST', '/api/v1/apikey', {'demo': True}, master).decode() == api_key,
+                  'repeated demo creation changed key')
+            check(key_file.read_bytes() == key_bytes and api('GET', path + '/doc/0') == original_doc,
+                  'repeated demo creation replaced identity or lost scope')
+            other_key = request('POST', '/api/v1/apikey', {}, master).decode()
+            check(other_key != api_key and len(base64.b64decode(other_key)) == 32, 'random API key invalid')
+            other_id = scoped(other_key, 'POST', '/api/v1/index', {'index_name': 'isolated', 'schema': schema})
+            check(other_id == 0, 'new key should have its own index ID namespace')
+            other_path = f'/api/v1/index/{other_id}'
+            scoped(other_key, 'POST', other_path + '/doc', {'body': 'private_other_key'})
+            scoped(other_key, 'PATCH', other_path)
+
+            def assert_scopes():
+                check(api('GET', path + '/doc/0') == original_doc, 'first key document changed')
+                check(scoped(other_key, 'GET', other_path + '/doc/0') == {'body': 'private_other_key'},
+                      'second key document changed')
+                check(api('POST', path + '/query', {'query': 'private_other_key'})['count_total'] == 0,
+                      'query leaked other key results')
+                check(scoped(other_key, 'POST', other_path + '/query', {'query': 'body1'})['count_total'] == 0,
+                      'query leaked first key results')
+                for method, suffix, body in [('GET', '', None), ('GET', '/doc/0', None),
+                        ('POST', '/query', {'query': 'rawmarker'}),
+                        ('POST', '/doc', {'body': 'cross_scope_write'}),
+                        ('DELETE', '', None)]:
+                    request(method, rp + suffix, body, other_key, expected=404)
+                request('GET', path, key=master, expected=401)
+                request('GET', path, key='not-base64!', expected=401)
+                request('POST', '/api/v1/apikey', {}, other_key, expected=401)
+                request('DELETE', '/api/v1/apikey', {'apikey_base64': api_key}, other_key, expected=401)
+
+            assert_scopes()
+            # Simulate an existing installation, keeping its identity and data paths unchanged.
+            process.terminate()
+            process.wait(timeout=10)
+            key_record['quota'] = {'indices_max': 0, 'indices_size_max': 0, 'documents_max': 0,
+                                   'operations_max': 0, 'rate_limit': 0, 'demo': True}
+            legacy_bytes = json.dumps(key_record).encode()
+            key_file.write_bytes(legacy_bytes)
+            persisted_files = {str(file.relative_to(workdir / 'index')) for file in (workdir / 'index').rglob('apikey.json')}
+            process = launch()
+            ready(process)
+            assert_scopes()
+            check(key_file.read_bytes() == legacy_bytes, 'startup rewrote legacy key identity/configuration')
+            check({str(file.relative_to(workdir / 'index')) for file in (workdir / 'index').rglob('apikey.json')} == persisted_files,
+                  'restart moved key directories')
+            for _ in range(12):
+                api('GET', path)
+            request('DELETE', '/api/v1/apikey', {'apikey_base64': other_key}, api_key, expected=401)
+            request('DELETE', '/api/v1/apikey', {'apikey_base64': other_key}, master)
+            request('GET', other_path, key=other_key, expected=401)
+            request('POST', other_path + '/doc', {'body': 'revoked'}, other_key, expected=401)
+            check(api('GET', path + '/doc/0') == original_doc, 'revocation affected another key')
+            check(api('GET', rp + f'/doc/{raw_doc_id}') == raw_record, 'restart changed retained raw records')
+            print('PASS strict key creation, idempotent demo key, cross-key isolation, legacy restart and revocation')
 
             check(api('DELETE', path + '/doc', b'clear') == 0, 'clear count mismatch')
             check(api('GET', path)['indexed_doc_count'] == 0, 'index not empty after clear')

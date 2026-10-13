@@ -82,38 +82,12 @@ paths:
           application/json:
             schema:
               type: object
-              description: Quota per API key
-              required:
-              - indices_max
-              - indices_size_max
-              - documents_max
-              - operations_max
+              description: API key creation options
               properties:
-                indices_max:
-                  type: integer
-                  description: number of indices per API key
-                  minimum: 0
-                indices_size_max:
-                  type: integer
-                  description: combined index size per API key in MB
-                  minimum: 0
-                documents_max:
-                  type: integer
-                  description: combined number of documents in all indices per API key
-                  minimum: 0
-                operations_max:
-                  type: integer
-                  description: 'operations per month per API key: index/update/delete/query doc'
-                  minimum: 0
-                rate_limit:
-                  type:
-                  - integer
-                  - 'null'
-                  description: queries per sec per API key
-                  minimum: 0
                 demo:
                   type: boolean
-                  description: create fixed demo api key instead of random api key for demonstration, example, and documentation purposes (default=false)
+                  description: Create the fixed demonstration key instead of a random key (default=false).
+              additionalProperties: false
         required: true
       responses:
         '200':
@@ -122,6 +96,8 @@ paths:
             text/plain:
               schema:
                 type: string
+        '400':
+          description: Invalid or retired API key creation options
         '401':
           description: master_apikey missing
     delete:
@@ -2221,7 +2197,7 @@ components:
         query_count:
           type: integer
           format: int64
-          description: Number of queries, for quotas and billing
+          description: Number of queries (informational)
           minimum: 0
         version:
           type: string

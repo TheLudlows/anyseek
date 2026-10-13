@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | R0 原样代码导入 | 已完成 | `1986b14215c82a07fac77d7c5b169b90743d76a4`；与上游树完全相同 |
 | R0 计划文档 | 已提交并调整 | 已取消独立基线阶段，改为直接实施 S1 |
-| S1 外围裁剪 | S1.1—S1.4b 已合入；S1.4c 高亮裁剪已验证、待合入 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 保留并按裁剪结果调整 |
+| S1 外围裁剪 | S1.1—S1.4c 已合入；S1.4d 配额裁剪已验证、待合入 | [#1](https://github.com/TheLudlows/seekpower/issues/1)；仅保留核心与服务两个 member，Web UI 保留并按裁剪结果调整 |
 | S2 可靠单机 | 待执行 | ID/版本、可见性、日志/检查点/恢复、过滤和候选接口 |
 | D1 静态分布式 | 待执行 | 分片路由、全局两路候选、RRF、回表 |
 | D2 副本与恢复 | 待执行 | 有序复制、选主、fencing、快照追赶 |
@@ -83,9 +83,17 @@ S1.3 已通过最终 head CI 38384967519 并合入 master（PR #4，`567d8a22908
 - 保留 53 个既有测试并迁移读取签名，新增 2 个契约测试及 HTTP/Chromium 原文回归；[PR #7](https://github.com/TheLudlows/seekpower/pull/7) / `03da2f2` 的 [CI 38394080671](https://github.com/TheLudlows/seekpower/actions/runs/38394080671) 全部通过：55 tests、构建、依赖图、HTTP/Chromium 和 OpenAPI 精确一致性；完整原文支持滚动。
 - 本批不修改索引格式、检索算法和普通元数据能力；配额与 S1.5 仍待执行。
 
+## 当前批次：S1.4d — 配额产品逻辑裁剪
+
+- PR #7 已由用户合入 master（`8026d378eb6169749924aeceed66406aa1d88d62`）。
+- 删除配额字段、限流计时/违规计数和各路由限流分支；控制台只显示实际索引数、文档数与磁盘使用量。
+- key 身份/创建/删除请求移到服务层，保留 master 管理权限、scoped key 数据访问、key ID/hash 和原目录布局；旧 quota 仅在历史文件读取时忽略，启动不回写，新文件不保存 quota。
+- 创建 key 使用 `{}` 或显式 `{"demo":true}`；旧字段/URL 参数返回 400。重复创建 demo key 复用已有身份和索引列表，避免覆盖。
+- 保留既有 55 个测试，新增两个请求/历史身份契约测试，HTTP 增加双 key 同 ID 隔离、越权拒绝、旧配置重启和撤销回归；[PR #8](https://github.com/TheLudlows/seekpower/pull/8) / `b60d9f6` 的 [CI 38396745382](https://github.com/TheLudlows/seekpower/actions/runs/38396745382) 全部通过：57 tests、构建、依赖图、HTTP/Chromium、OpenAPI 精确一致性。
+
 ## 下一步
 
-1. 审查并合入 S1.4c [PR #7](https://github.com/TheLudlows/seekpower/pull/7)。
-2. 推进配额，再完成 S1.5 清理闭环。
+1. 审查并合入 S1.4d [PR #8](https://github.com/TheLudlows/seekpower/pull/8)。
+2. 完成 S1.5 依赖、接口、文档与 UI 清理闭环。
 
 各批完成时同步 commit/PR、命令、环境、结果及未解决问题。完整可靠性和性能验收留在 S2。

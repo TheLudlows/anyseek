@@ -10,18 +10,14 @@ POST http://127.0.0.1:80/api/v1/apikey HTTP/1.1
 apikey: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
 content-type: application/json
 
-{
-    "indices_max": 10,
-    "indices_size_max":100000, 
-    "documents_max":10000000, 
-    "operations_max":10000000, 
-    "rate_limit": 100000
-}
+{}
 
-### delete api key
+### delete api key (requires master key)
 DELETE http://127.0.0.1/api/v1/apikey HTTP/1.1
-apikey: {{api_key}}
+apikey: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
 content-type: application/json
+
+{"apikey_base64":"{{api_key}}"}
 
 ### create index
 POST http://127.0.0.1:80/api/v1/index HTTP/1.1
