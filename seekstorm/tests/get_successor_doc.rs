@@ -3,7 +3,7 @@
 //! Matrix: Ram/Mmap x None/Snappy. Public API only.
 use seekstorm::commit::Commit;
 use seekstorm::index::{
-    AccessType, Close, Clustering, Document, DocumentCompression, FileType, FrequentwordType,
+    AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
     IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType,
     TokenizerType, create_index,
 };
@@ -55,7 +55,7 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
         r#"{"title":"mixed successor"}"#,
     ] {
         let doc: Document = serde_json::from_str(json).unwrap();
-        index_arc.index_document(doc, FileType::None).await.unwrap();
+        index_arc.index_document(doc).await.unwrap();
     }
     index_arc.commit().await;
 
@@ -115,3 +115,4 @@ async fn successor_after_empty_matrix() {
     }
     assert_eq!(fails, 0, "BUG: {fails} combos panic/unreadable");
 }
+

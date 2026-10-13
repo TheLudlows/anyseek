@@ -73,11 +73,10 @@
 //! # let index_path=Path::new("C:/index/");
 //! # let index_arc=open_index(index_path).await.unwrap();
 //! use seekstorm::index::IndexDocument;
-//! use seekstorm::index::FileType;
 //! let document_json = r#"
 //! {"title":"title1 test","body":"body1","url":"url1"}"#;
 //! let document=serde_json::from_str(document_json).unwrap();
-//! index_arc.index_document(document,FileType::None).await.unwrap();
+//! index_arc.index_document(document).await.unwrap();
 //! # });
 //! ```
 //! ### index documents
@@ -206,105 +205,6 @@
 //! let distance_fields=Vec::new();
 //! let index=index_arc.read().await;
 //! let doc=index.get_document(doc_id,false,&highlighter,&return_fields_filter,&distance_fields).await.unwrap();
-//! # });
-//! ```
-//! ### index JSON file in JSON, Newline-delimited JSON and Concatenated JSON format
-//! ```no_run
-//! # tokio_test::block_on(async {
-//! # use seekstorm::index::open_index;
-//! # let index_path=Path::new("C:/index/");
-//! # let mut index_arc=open_index(index_path).await.unwrap();
-//! use seekstorm::ingest::IngestJson;
-//! use std::path::Path;
-//! let file_path=Path::new("wiki-articles.json");
-//! let _ =index_arc.ingest_json(file_path).await;
-//! # });
-//! ```
-//! ### index all PDF files in directory and sub-directories
-//! - converts pdf to text and indexes it
-//! - extracts title from metatag, or first line of text, or from filename
-//! - extracts creation date from metatag, or from file creation date (Unix timestamp: the number of seconds since 1 January 1970)
-//! - copies all ingested pdf files to "files" subdirectory in index
-//! - the following index schema is required (and automatically created by the console `ingest` command):
-//! ```no_run
-//! let schema_json = r#"
-//! [
-//!   {
-//!     "field": "title",
-//!     "store": true,
-//!     "index_lexical": true,
-//!     "field_type": "Text",
-//!     "boost": 10
-//!   },
-//!   {
-//!     "field": "body",
-//!     "store": true,
-//!     "index_lexical": true,
-//!     "field_type": "Text"
-//!   },
-//!   {
-//!     "field": "url",
-//!     "store": true,
-//!     "index_lexical": false,
-//!     "field_type": "Text"
-//!   },
-//!   {
-//!     "field": "date",
-//!     "store": true,
-//!     "index_lexical": false,
-//!     "field_type": "Timestamp",
-//!     "facet": true
-//!   }
-//! ]"#;
-//! ```
-//! ```no_run
-//! # tokio_test::block_on(async {
-//! # use seekstorm::index::open_index;
-//! # let index_path=Path::new("C:/index/");
-//! # let mut index_arc=open_index(index_path).await.unwrap();
-//! use std::path::Path;
-//! use seekstorm::ingest::IngestPdf;
-//! let file_path=Path::new("C:/Users/johndoe/Downloads");
-//! let _ =index_arc.ingest_pdf(file_path).await;
-//! # });
-//! ```
-//! ### index PDF file
-//! ```no_run
-//! # tokio_test::block_on(async {
-//! # use seekstorm::index::open_index;
-//! # let index_path=Path::new("C:/index/");
-//! # let mut index_arc=open_index(index_path).await.unwrap();
-//! use std::path::Path;
-//! use seekstorm::ingest::IndexPdfFile;
-//! let file_path=Path::new("C:/test.pdf");
-//! let _ =index_arc.index_pdf_file(file_path).await;
-//! # });
-//! ```
-//! ### index PDF file bytes
-//! ```no_run
-//! # tokio_test::block_on(async {
-//! # use seekstorm::index::open_index;
-//! # let index_path=Path::new("C:/index/");
-//! # let mut index_arc=open_index(index_path).await.unwrap();
-//! use std::path::Path;
-//! use std::fs;
-//! use chrono::Utc;
-//! use seekstorm::ingest::IndexPdfBytes;
-//! let file_date=Utc::now().timestamp();
-//! let file_path=Path::new("C:/test.pdf");
-//! let document = fs::read(file_path).unwrap();
-//! let _ =index_arc.index_pdf_bytes(file_path, file_date, &document).await;
-//! # });
-//! ```
-//! ### get PDF file bytes
-//! ```no_run
-//! # tokio_test::block_on(async {
-//! # use seekstorm::index::open_index;
-//! # use std::path::Path;
-//! # let index_path=Path::new("C:/index/");
-//! # let mut index_arc=open_index(index_path).await.unwrap();
-//! let doc_id=0;
-//! let _file=index_arc.read().await.get_file(doc_id).await.unwrap();
 //! # });
 //! ```
 //! ### clear index
@@ -504,8 +404,8 @@ pub mod highlighter;
 /// Operate the index: reate_index, open_index, clear_index, close_index, delete_index, index_document(s)
 pub mod index;
 pub(crate) mod index_posting;
-/// Ingest JSON, Newline-delimited JSON, Concatenated JSON files, and PDF files into the index.
-pub mod ingest;
+/// Display index information in the console.
+pub mod info;
 pub(crate) mod intersection;
 pub(crate) mod intersection_simd;
 /// Iterator over all documents, also for search with empty query.
@@ -527,3 +427,4 @@ pub mod vector;
 pub mod vector_similarity;
 #[cfg(feature = "zh")]
 pub(crate) mod word_segmentation;
+

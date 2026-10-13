@@ -2,7 +2,7 @@
 
 更新日期：2026-10-13（Asia/Singapore）
 
-状态：S1.1 已合入；S1.2 外置模型/切块已在 PR #3 实施并通过本批验证，待合入。分布式开发尚未执行。
+状态：S1.1 已合入；S1.2 外置模型/切块已通过验证并合入（PR #3，fc47cf83）；S1.3 已实施，验证中。分布式开发尚未执行。
 
 相关文档：[上游基线](UPSTREAM.md) · [执行状态](STATUS.md) · [验证记录](VALIDATION.md)
 
@@ -43,7 +43,7 @@ SeekPower 基于 SeekStorm，先得到职责清晰、可恢复、可独立部署
 
 R0 导入时上游 workspace 包含 `seekstorm`、`seekstorm_server`、`seekstorm_mcp_server`、`seekstorm_client`。Web UI 位于 `seekstorm_server/web/`，HTTP 路由在服务层。首次导入全部保留这些目录；S1.1 已将工作分支 workspace 收敛为 `seekstorm` 与 `seekstorm_server`，MCP/SDK 工程已移除，[PR #2](https://github.com/TheLudlows/seekpower/pull/2) 的构建、HTTP/UI 冒烟和 45 个既有测试已通过，已合入主干（61f11306）。
 
-当前核心库并非只含检索：依赖与代码还涉及 PDF 解析、模型推理、切块、纠错补全、地理搜索、高亮、分面统计和接口展示。需要按依赖关系拆分，不能仅靠关闭 default features 或直接删文件。
+上游核心库并非只含检索：S1.2 已移除模型推理/切块，S1.3 裁剪 PDF 等文件导入；其余依赖与代码仍涉及纠错补全、地理搜索、高亮、分面统计和接口展示。需要按依赖关系拆分，不能仅靠关闭 default features 或直接删文件。
 
 源码核查入口：
 
@@ -299,8 +299,8 @@ D2 采用复制日志时统一其与本地日志的提交定义，不维护两�
 ### S1 建议拆分
 
 - [x] S1.1：已合入（PR #2，45 个既有测试及 HTTP/UI 冒烟通过）；workspace 仅保留核心与服务，HTTP/UI 原样保留，SDK 测试迁为直接 HTTP 冒烟。
-- [ ] S1.2：PR #3 已实施外置推理与切块，贯通文本+外部向量的 API/UI；48 个测试、HTTP/Chromium 和 OpenAPI 检查通过，待审查合入。
-- [ ] S1.3：外置文件导入与 PDF 运行时；保留 JSON 结构化写入。
+- [x] S1.2：PR #3 已实施外置推理与切块，贯通文本+外部向量的 API/UI；48 个测试、HTTP/Chromium 和 OpenAPI 检查通过，已合入（fc47cf83）。
+- [ ] S1.3：外置文件导入与 PDF 运行时；保留 JSON 结构化写入。代码已实施，验证中，合入后勾选。
 - [ ] S1.4：移除纠错、补全、地理和高亮生成等旁支；同步 UI、配置、文档与测试。
 - [ ] S1.5：梳理依赖和服务边界，验证 UI 资源无 404，受影响功能回归通过。
 
@@ -341,4 +341,4 @@ D2 采用复制日志时统一其与本地日志的提交定义，不维护两�
 
 新格式发布前定义版本与错误行为，不静默用错误格式打开旧数据。无需立即承诺兼容覆盖前 seekpower 的私有格式，迁移需求单独评审。
 
-下一步完成 [Issue #1](https://github.com/TheLudlows/seekpower/issues/1) 的 S1.2 PR #3 审查与合入，再推进 S1.3。没有独立基线前置阶段，不直接进入分布式开发。
+下一步完成 [Issue #1](https://github.com/TheLudlows/seekpower/issues/1) 的 S1.3 验证与合入，再推进 S1.4。没有独立基线前置阶段，不直接进入分布式开发。

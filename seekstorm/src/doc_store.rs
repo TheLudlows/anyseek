@@ -1,32 +1,18 @@
 use memmap2::Mmap;
 use serde_json::json;
 use std::collections::{HashSet, VecDeque};
-use std::fs;
-use std::io::{self, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::io::{Seek, SeekFrom, Write};
 
 use crate::geo_search::euclidian_distance;
 use crate::highlighter::{Highlighter, top_fragments_from_field};
 use crate::index::{
-    AccessType, DistanceField, Document, DocumentCompression, FILE_PATH, FieldType, Index,
+    AccessType, DistanceField, Document, DocumentCompression, FieldType, Index,
     ROARING_BLOCK_SIZE, Shard,
 };
 use crate::search::FacetValue;
 use crate::utils::{read_u32, write_u32};
 
 impl Shard {
-    pub(crate) fn get_file_shard(&self, doc_id: usize) -> Result<Vec<u8>, String> {
-        let file_path = Path::new(&self.index_path_string)
-            .join(FILE_PATH)
-            .join(doc_id.to_string() + ".pdf");
-
-        if let Ok(data) = fs::read(file_path) {
-            Ok(data)
-        } else {
-            Err("not found".into())
-        }
-    }
-
     pub(crate) fn get_document_shard(
         &self,
         doc_id: usize,
@@ -196,34 +182,6 @@ impl Shard {
         Ok(doc)
     }
 
-    pub(crate) fn copy_file(&self, source_path: &Path, doc_id: usize) -> io::Result<u64> {
-        let dir_path = Path::new(&self.index_path_string).join(FILE_PATH);
-        if !dir_path.exists() {
-            fs::create_dir_all(&dir_path).unwrap();
-        }
-
-        let file_path = dir_path.join(doc_id.to_string() + ".pdf");
-        fs::copy(source_path, file_path)
-    }
-
-    pub(crate) fn write_file(&self, file_bytes: &[u8], doc_id: usize) -> io::Result<u64> {
-        let dir_path = Path::new(&self.index_path_string).join(FILE_PATH);
-        if !dir_path.exists() {
-            fs::create_dir_all(&dir_path).unwrap();
-        }
-
-        let file_path = dir_path.join(doc_id.to_string() + ".pdf");
-
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(file_path)?;
-
-        let _ = file.write_all(file_bytes);
-        Ok(file_bytes.len() as u64)
-    }
-
     pub(crate) fn store_document(&mut self, doc_id: usize, document: Document) {
         let mut document = document;
 
@@ -365,24 +323,6 @@ impl Shard {
 }
 
 impl Index {
-    /// Get file for document id
-    ///
-    /// Arguments:
-    /// * `doc_id`: Document ID that specifies which file to load from the document store of the index.
-    ///   ⚠️ Use search or get_iterator first to obtain a valid doc_id. Document IDs are not guaranteed to be continuous and gapless!
-    ///
-    /// Returns:
-    /// * `Vec<u8>`: The file content as a byte vector.
-    pub async fn get_file(&self, doc_id: usize) -> Result<Vec<u8>, String> {
-        let shard_id = doc_id % self.shard_number;
-        let doc_id_shard = doc_id / self.shard_number;
-
-        self.shard_vec[shard_id]
-            .read()
-            .await
-            .get_file_shard(doc_id_shard)
-    }
-
     /// Get document for document id
     ///
     /// Arguments:
@@ -414,3 +354,4 @@ impl Index {
         )
     }
 }
+

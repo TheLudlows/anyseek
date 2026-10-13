@@ -35,6 +35,17 @@ jobs:
       - name: Build retained workspace
         id: build
         run: cargo build --workspace
+      - name: Verify file parser dependencies removed
+        run: |
+          cargo metadata --format-version 1 > /tmp/seekpower-metadata.json
+          python3 - <<'PYCODE'
+          import json
+          with open('/tmp/seekpower-metadata.json') as source:
+              names = {package['name'] for package in json.load(source)['packages']}
+          forbidden = names & {'pdfium-render', 'csv', 'walkdir'}
+          assert not forbidden, f'file parser dependencies remain: {forbidden}'
+          print('PASS no PDF/CSV/directory parser dependencies in resolved graph')
+          PYCODE
       - name: Install browser test runtime
         run: |
           python3 -m pip install playwright

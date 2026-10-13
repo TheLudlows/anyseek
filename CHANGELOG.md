@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read HTTP commit/close document counts after pending writes finish.
 - Reject unsupported Vector/Hybrid facet filters explicitly; retain lexical metadata filtering pending shared vector filtering in S2.
 
+- Remove file/dataset importers, PDF attachment APIs/storage helpers, and pdfium-render/csv/walkdir dependencies; preserve JSON record APIs and Web UI source links.
+- Remove `FileType` from the Rust single-record write API; reject retired `ingest_path` configuration. Existing index encoding and stored records are unchanged.
+
 Entries below describe upstream releases before the SeekPower pruning and are retained as historical records, not current product capabilities.
 
 ## [3.4.1] - 2026-10-12

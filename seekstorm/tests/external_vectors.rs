@@ -2,7 +2,7 @@
 use seekstorm::{
     commit::Commit,
     index::{create_index, open_index, AccessType, Close, Clustering, Document, DocumentCompression,
-        FileType, FrequentwordType, IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
+        FrequentwordType, IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
         LexicalSimilarity, NgramSet, SchemaField, StemmerType, StopwordType, TokenizerType, UpdateDocument, UpdateDocuments},
     search::{QueryRewriting, QueryType, ResultObject, ResultType, Search, SearchMode},
     vector::{embedding_to_bytes_be, parse_external_embedding, validate_embedding, validate_vector_schema,
@@ -70,7 +70,7 @@ async fn external_write_query_reopen_contract() {
     let path = Path::new("tests/index_external_contract"); let _ = fs::remove_dir_all(path);
     let index = create_index(path, meta(), &schema(), &vec![], 11, true, Some(1)).await.unwrap();
     let missing: Document = serde_json::from_value(json!({"body":"missing"})).unwrap();
-    assert!(index.index_document(missing.clone(), FileType::None).await.is_err());
+    assert!(index.index_document(missing.clone()).await.is_err());
     assert!(index.index_documents(vec![document("partial",json!([1,0,0])), missing.clone()]).await.is_err());
     index.commit().await;
     assert_eq!(index.read().await.indexed_doc_count().await, 0);

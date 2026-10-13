@@ -140,3 +140,12 @@ PR #3 完成代码及本批验证，待审查合入；Issue #1 保持打开，S1
 CI 改用新的缓存命名空间且 `cache-targets: false`，只缓存可跨机器复用的依赖源码/工具下载；每台 runner 本地重编全部 native 目标，继续保留生产构建参数。增加 lscpu 记录。PR 暂回草稿，待无旧目标产物的完整复跑通过。
 
 缓存修正后的提交 `9a82532b534db87395971469120937b233ef824e` 已在 [CI 38374841361](https://github.com/TheLudlows/seekpower/actions/runs/38374841361) / job `115220524747` **完整通过**：从无目标产物的状态全量构建、48 个测试（0 failed/ignored/filtered）、HTTP/Chromium 和 OpenAPI 一致性均通过。日志确认 `cache-targets: false`，缓存路径不再包含仓库 target。之前成功代码的功能结论保持，CI 跨 runner native 目标缓存问题已处理；PR 恢复可审查，仍待合入。
+
+
+## S1.3 — 文件导入外置（2026-10-13）
+
+基线：S1.2 已合入 master，PR #3 / `fc47cf83a1482f18e249c8f9c6f8e8ec87e47acc`。该 PR 最终 head `55fb315` 的 CI 38375267442 全部通过；这不是本批验证结果。
+
+本批移除 PDF、CSV、目录扫描及本地 JSON/SIFT 导入、附件读写、HTTP 文件端点与 UI 内部文件请求。只保留已处理 JSON 记录的写入/查询/读取路径。`display_index_info` 原样迁入 info 模块；不改压缩、索引编码和检索内核。旧 files 目录不主动删除。
+
+验证计划：workspace 构建与既有 48 个测试、HTTP 单条/批量写入与更新/删除/读取、文件端点拒绝且无写入、CLI 旧配置拒绝、Chromium 外部 PDF URL 与纯文本预览、API 生成一致性、Cargo 解析依赖中无 pdfium-render/csv/walkdir。本地无 Rust 工具链，Rust/浏览器验证由 CI 执行。结果待回填；AArch64、Docker 镜像运行、质量/性能和故障恢复未验证，仍归后续阶段。

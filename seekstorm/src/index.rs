@@ -82,7 +82,6 @@ use gxhash::{gxhash32, gxhash64};
 )))]
 use ahash::RandomState;
 
-pub(crate) const FILE_PATH: &str = "files";
 pub(crate) const INDEX_FILENAME: &str = "index.bin";
 pub(crate) const DOCSTORE_FILENAME: &str = "docstore.bin";
 pub(crate) const DELETE_FILENAME: &str = "delete.bin";
@@ -499,17 +498,6 @@ pub struct IndexResponseObject {
 
 /// A document is a flattened, single level of key-value pairs, where key is an arbitrary string, and value represents any valid JSON value.
 pub type Document = IndexMap<String, Value>;
-
-/// File type for storing documents: Path, Bytes, None.
-#[derive(Clone, PartialEq)]
-pub enum FileType {
-    /// File path
-    Path(Box<Path>),
-    /// File bytes
-    Bytes(Box<Path>, Box<[u8]>),
-    /// No file
-    None,
-}
 
 /// Compression type for document store
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, ToSchema)]
@@ -1937,11 +1925,6 @@ pub(crate) async fn create_index_root(
         fs::create_dir_all(index_path).unwrap();
     }
 
-    let file_path = Path::new(index_path_string).join(FILE_PATH);
-    if !file_path.exists() {
-        fs::create_dir_all(file_path).unwrap();
-    }
-
     match File::options()
         .read(true)
         .write(true)
@@ -2304,11 +2287,6 @@ pub(crate) fn create_shard(
 
     if !index_path.exists() {
         fs::create_dir_all(index_path).unwrap();
-    }
-
-    let file_path = Path::new(index_path_string).join(FILE_PATH);
-    if !file_path.exists() {
-        fs::create_dir_all(file_path).unwrap();
     }
 
     match File::options()
@@ -5102,7 +5080,7 @@ impl UpdateDocument for IndexArc {
     async fn update_document(&self, id_document: (u64, Document)) -> Result<(), String> {
         crate::vector::validate_document_vectors(&*self.read().await, &id_document.1)?;
         self.delete_document(id_document.0).await;
-        enqueue_document(self, id_document.1, FileType::None).await;
+        enqueue_document(self, id_document.1).await;
         Ok(())
     }
 }
@@ -5129,7 +5107,7 @@ impl UpdateDocuments for IndexArc {
             for document in &document_vec { crate::vector::validate_document_vectors(&index, document)?; }
         }
         self.delete_documents(docid_vec).await;
-        for document in document_vec { enqueue_document(self, document, FileType::None).await; }
+        for document in document_vec { enqueue_document(self, document).await; }
         Ok(())
     }
 }
@@ -5150,7 +5128,7 @@ impl IndexDocuments for IndexArc {
             let index = self.read().await;
             for document in &document_vec { crate::vector::validate_document_vectors(&index, document)?; }
         }
-        for document in document_vec { enqueue_document(self, document, FileType::None).await; }
+        for document in document_vec { enqueue_document(self, document).await; }
         Ok(())
     }
 }
@@ -5160,20 +5138,20 @@ impl IndexDocuments for IndexArc {
 pub trait IndexDocument {
     /// Indexes a single document
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_document(&self, document: Document, file: FileType) -> Result<(), String>;
+    async fn index_document(&self, document: Document) -> Result<(), String>;
 }
 
 impl IndexDocument for IndexArc {
     /// Index document
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_document(&self, document: Document, file: FileType) -> Result<(), String> {
+    async fn index_document(&self, document: Document) -> Result<(), String> {
         crate::vector::validate_document_vectors(&*self.read().await, &document)?;
-        enqueue_document(self, document, file).await;
+        enqueue_document(self, document).await;
         Ok(())
     }
 }
 
-async fn enqueue_document(index_arc: &IndexArc, document: Document, file: FileType) {
+async fn enqueue_document(index_arc: &IndexArc, document: Document) {
         let shard_number = index_arc.read().await.shard_number;
         let docid_global_arc = index_arc.read().await.docid_global.clone();
         let mut docid_global = docid_global_arc.write().await;
@@ -5189,7 +5167,7 @@ async fn enqueue_document(index_arc: &IndexArc, document: Document, file: FileTy
 
         INDEX_RUNTIME.handle().spawn(async move {
             shard_arc
-                .index_document_shard(document, file, docid_global_clone)
+                .index_document_shard(document, docid_global_clone)
                 .await;
             drop(permit);
         });
@@ -5199,7 +5177,7 @@ async fn enqueue_document(index_arc: &IndexArc, document: Document, file: FileTy
 pub(crate) trait IndexDocumentShard {
     /// Indexes a single document
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_document_shard(&self, document: Document, file: FileType, docid_global: usize);
+    async fn index_document_shard(&self, document: Document, docid_global: usize);
 }
 
 /// Recursively extract strings from a serde_json::Value and append them to a vector of Strings.
@@ -5224,7 +5202,7 @@ pub(crate) fn object_values_to_string_vec_recursive(value: &Value, out: &mut Vec
 impl IndexDocumentShard for ShardArc {
     /// Index document
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_document_shard(&self, document: Document, file: FileType, docid_global: usize) {
+    async fn index_document_shard(&self, document: Document, docid_global: usize) {
         let shard_arc_clone = self.clone();
         let shard_ref = self.read().await;
         let schema = shard_ref.indexed_schema_vec.clone();
@@ -5377,7 +5355,7 @@ impl IndexDocumentShard for ShardArc {
         };
 
         shard_arc_clone
-            .index_document_shard_2(document_item, file, docid_global)
+            .index_document_shard_2(document_item, docid_global)
             .await;
     }
 }
@@ -5387,7 +5365,6 @@ pub(crate) trait IndexDocumentShard2 {
     async fn index_document_shard_2(
         &self,
         document_item: DocumentItem,
-        file: FileType,
         docid_global: usize,
     );
 }
@@ -5396,7 +5373,6 @@ impl IndexDocumentShard2 for ShardArc {
     async fn index_document_shard_2(
         &self,
         document_item: DocumentItem,
-        file: FileType,
         docid_global: usize,
     ) {
         let mut shard_mut = self.write().await;
@@ -5793,22 +5769,6 @@ impl IndexDocumentShard2 for ShardArc {
 
         for term in unique_terms {
             shard_mut.index_posting(term.1, docid_local, false, 0, 0, 0);
-        }
-
-        match file {
-            FileType::Path(file_path) => {
-                if let Err(e) = shard_mut.copy_file(&file_path, docid_local) {
-                    println!("can't copy PDF {} {}", file_path.display(), e);
-                }
-            }
-
-            FileType::Bytes(file_path, file_bytes) => {
-                if let Err(e) = shard_mut.write_file(&file_bytes, docid_local) {
-                    println!("can't copy PDF {} {}", file_path.display(), e);
-                }
-            }
-
-            _ => {}
         }
 
         if !shard_mut.stored_field_names.is_empty() {

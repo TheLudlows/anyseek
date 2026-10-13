@@ -78,6 +78,12 @@ def exercise(binary, workdir):
                 return value['Ok']
         return value
 
+    retired = subprocess.run([str(binary), 'ingest_path=unused'], cwd=workdir,
+                             capture_output=True, timeout=10)
+    check(retired.returncode == 2 and b'ingest_path has been removed' in retired.stderr,
+          'retired import configuration was silently accepted')
+    print('PASS retired import configuration rejected')
+
     log_path = workdir / 'server.log'
     with log_path.open('wb') as log:
         process = subprocess.Popen(
@@ -147,7 +153,24 @@ def exercise(binary, workdir):
                 'query_terms': [], 'highlights': [{'field': 'body', 'fragment_number': 2,
                                                  'fragment_size': 160, 'highlight_markup': True}]})
             check(document == {'body': 'body2 test'}, f'stored document mismatch: {document}')
-            print('PASS create, single/batch write, commit, lexical query and get')
+            # The retired file endpoints must fail without adding a record.
+            request('POST', path + '/file', b'%PDF-1.7 removed', api_key, expected=404)
+            request('GET', path + '/file/0', key=api_key, expected=404)
+            check(api('PATCH', path) == 4, 'retired PDF endpoint mutated index')
+            check(not list((workdir / 'index').rglob('files')), 'created PDF attachment directory')
+            # Keep update/delete/get covered when the core attachment parameter is removed.
+            api('PATCH', path + '/doc', [doc_id, {'body': 'updated unique_record'}])
+            check(api('PATCH', path) == 5, 'update did not finish')
+            updated = api('POST', path + '/query', {
+                'query': 'unique_record', 'search_mode': 'Lexical', 'result_type': 'TopkCount'})
+            check(updated['count_total'] == 1, 'updated record not searchable')
+            updated_id = updated['results'][0]['_id']
+            check(api('GET', path + f'/doc/{updated_id}')['body'] == 'updated unique_record',
+                  'updated record not readable')
+            api('DELETE', path + f'/doc/{updated_id}')
+            check(api('POST', path + '/query', {'query': 'unique_record', 'search_mode': 'Lexical',
+                  'result_type': 'TopkCount'})['count_total'] == 0, 'deleted record still visible')
+            print('PASS JSON create/write/commit/query/get/update/delete; PDF endpoints removed')
 
             vector_schema = [schema[1], {'field': 'category', 'field_type': 'String16', 'store': True,
                                         'index_lexical': False, 'facet': True}, {'field': 'vector', 'field_type': 'Json', 'store': True,
@@ -206,6 +229,15 @@ def exercise(binary, workdir):
             check(result['results'][0]['body'] == 'binary', 'base64 vector query')
             print('PASS external vector/hybrid, invalid input, batch and update atomic validation')
             if os.environ.get('SEEKPOWER_BROWSER_TEST') == '1':
+                source_id = api('POST', '/api/v1/index', {
+                    'index_name': 'source_links', 'schema': [
+                        {**field, 'store': True} for field in schema]})
+                sp = f'/api/v1/index/{source_id}'
+                api('POST', sp + '/doc', [
+                    {'title': 'External source', 'body': 'source document',
+                     'url': 'https://source.example/report.pdf'},
+                    {'title': 'Plain record', 'body': 'plaintext preview', 'url': ''}])
+                api('PATCH', sp)
                 from playwright.sync_api import sync_playwright
                 with sync_playwright() as browser_driver:
                     browser = browser_driver.chromium.launch()
@@ -226,9 +258,26 @@ def exercise(binary, workdir):
                     with page.expect_response(lambda response: '/query' in response.url and response.status == 400):
                         page.locator('#vectorSearch').click()
                     page.wait_for_function("document.getElementById('searchError').textContent.length > 0")
+                    # A PDF source is an ordinary external URL, never an internal /file call.
+                    file_requests = []
+                    page.on('request', lambda req: file_requests.append(req.url)
+                            if '/api/v1/index/' in req.url and '/file' in req.url else None)
+                    page.route('https://source.example/**', lambda route: route.fulfill(
+                        content_type='text/html', body='<p>External source</p>'))
+                    page.goto(base + f'/?index_id={source_id}&q=source')
+                    source = page.locator('#contentBox a.url').first
+                    source.wait_for()
+                    check(source.get_attribute('href') == 'https://source.example/report.pdf',
+                          'PDF URL rewritten to internal endpoint')
+                    source.hover()
+                    page.wait_for_function("document.getElementById('prevText').src === 'https://source.example/report.pdf'")
+                    page.goto(base + f'/?index_id={source_id}&q=plaintext')
+                    page.locator('#contentBox .resultEntry h1').first.hover()
+                    page.wait_for_function("document.getElementById('prevText2').textContent.includes('plaintext')")
+                    check(not file_requests, f'UI called removed file endpoints: {file_requests}')
                     check(not errors, f'browser errors: {errors}')
                     browser.close()
-                print('PASS Chromium lexical/vector/hybrid interaction and validation feedback')
+                print('PASS Chromium lexical/vector/hybrid, external PDF source and plain-record preview')
 
             check(api('DELETE', path + '/doc', b'clear') == 0, 'clear count mismatch')
             check(api('GET', path)['indexed_doc_count'] == 0, 'index not empty after clear')

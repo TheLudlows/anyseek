@@ -4,7 +4,7 @@
 
 use seekstorm::commit::Commit;
 use seekstorm::index::{
-    AccessType, Close, Clustering, Document, DocumentCompression, FileType, FrequentwordType,
+    AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
     IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType,
     TokenizerType, create_index,
 };
@@ -48,7 +48,7 @@ async fn repro_range_facet_empty_ranges_no_panic() {
     {"title":"hello there","age":30}]"#;
     let documents_vec: Vec<Document> = serde_json::from_str(documents_json).unwrap();
     for document in documents_vec {
-        index_arc.index_document(document, FileType::None).await.unwrap();
+        index_arc.index_document(document).await.unwrap();
     }
     // commit() drains in-flight index tasks via the shard semaphore.
     index_arc.commit().await;
@@ -107,3 +107,4 @@ async fn repro_range_facet_empty_ranges_no_panic() {
     index_arc.close().await;
     let _ = fs::remove_dir_all(index_path);
 }
+
