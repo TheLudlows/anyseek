@@ -416,3 +416,5 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 定向 Rust 回归覆盖 RAM/MMAP、3 分片、2,400 条多字段记录、嵌入/非嵌入位置与 n-gram、真实扩容、提交释放、未满块恢复合并、重开、短语查询与清空。通过直接检查分配容量及检索结果验证按需分配，不将其当作吞吐/内存峰值基准。完整 workspace 64 项 Rust 测试通过；本地构建缓存曾出现 E0463，清理服务 crate 构建缓存后重建通过。
 
 浏览器回归增加三种模式的 JSON 批量/文件写入、客户端和向量校验错误、文档计数、即时查询与原文展示，以及模拟提交失败后只重试 PATCH 的检查。最终 HTTP/静态资源、Chromium 与 OpenAPI 精确对比结果记录在 PR CI。
+
+首次 CI [38503384500](https://github.com/TheLudlows/seekpower/actions/runs/38503384500) 的构建、边界、64 项 Rust 测试和 OpenAPI 对比通过；浏览器全文写入/提交失败重试/搜索通过。向量非法输入实际正确返回 `expected 3 values with precision F32`，测试误等 `dimensions` 导致失败；修正断言并显式检查 HTTP 400，没有修改生产校验或跳过测试。

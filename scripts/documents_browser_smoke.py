@@ -24,8 +24,10 @@ def exercise_documents(page, mode):
         records[0]['vector'] = [1, 0, 0]
         records[1]['vector'] = [0.9, 0.1, 0]
         page.locator('#documentJson').fill(json.dumps({'body': marker, 'vector': [1]}))
-        page.locator('#submitDocuments').click()
-        expect(page.locator('#documentError')).to_contain_text('dimensions')
+        with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/doc')) as rejected:
+            page.locator('#submitDocuments').click()
+        assert rejected.value.status == 400
+        expect(page.locator('#documentError')).to_contain_text('expected 3 values')
         expect(page.locator('#submitDocuments')).to_be_enabled()
 
     page.locator('#documentJson').fill(json.dumps(records))
