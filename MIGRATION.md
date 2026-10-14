@@ -7,12 +7,12 @@
 | MCP 服务、独立 SDK 工程 | 使用 HTTP JSON 或从本仓库嵌入 Rust 核心；上游包不包含本分支修改 |
 | 内置模型、Embedding 与自动切块 | 应用解析/切块/生成向量；索引使用 `Inference::External`，Vector/Hybrid 显式传 `query_vector` |
 | PDF/CSV/目录、本地 JSON/SIFT 导入及 SIFT 评测 | 外部准备记录，通过 JSON 文档 API 单条/批量写入 |
-| PDF 附件托管 | 源文件由外部服务托管，记录存 URL；历史附件不自动删除，旧文件路由返回 404 |
+| PDF 附件托管 | 源文件由外部服务托管，记录存 URL；历史附件不自动删除，旧文件路由按未知路径返回 501 |
 | 纠错、补全、自动改写 | 删除 `query_rewriting/spelling_correction/query_completion/dictionary_source/completion_source`；旧选项返回 400 |
 | 地理字段/过滤/排序 | 删除 Point、`distance_fields`、`result_sort[].base`（包括 None）；旧请求返回 400；经纬度可作为普通数据保存 |
 | 高亮与摘要 | 删除 `highlights`；文档读取也删除 `query_terms`；返回存储原文，搜索响应的 `query_terms` 保留 |
 | 配额与内置限流 | 创建 key 使用 `{}`；删除 quota 参数，创建 key URL 参数返回 400；限流由外层承担 |
-| v2 二进制查询（B1） | 改为 v1 POST JSON；`/api/v2/index/{id}/query` 返回 404 |
+| v2 二进制查询（B1） | 改为 v1 POST JSON；旧路径按未知路径返回 501，OPTIONS 仅返回通用预检 204 |
 | GET/HTTP QUERY 搜索与遍历（B2） | query/iterator 使用 POST JSON；旧方法返回 405 + `Allow: POST, OPTIONS`；POST URL 非空参数返回 400 |
 
 普通资源 GET、JSON/base64 外部向量、API key 数据隔离和 Web UI 保留。Binary/base64 是 JSON 中的字段编码，不是被删除的整包二进制查询协议。
@@ -72,3 +72,9 @@
 创建索引 JSON 删除 `synonyms`、`stemmer` 字段（包括空数组、null 和 `None`）；传入旧字段返回 400。GET/POST/PUT `/api/v1/index/{id}/synonyms` 已删除。Rust `create_index` 不再接收同义词参数，`IndexMetaObject` 不再含 `stemmer`，相关类型和管理方法已删除。索引信息不再返回同义词计数。
 
 含旧 `stemmer` 元数据的索引不能打开，应从原始文档重建；不提供兼容读取或转换。新索引不写 `synonyms.json`。查询与写入保留分词和大小写等规范化，但不再做同义词扩展或词干化。停用词、高频词和词级 N-gram 保留。
+
+## 固定哈希实现与旧路由清理（E1/E2）
+
+删除核心 gxhash feature、依赖及服务侧显式启用配置，统一使用 AHash，保留原 AHash seeds 与词项掩码。此前实际使用 gxhash 的索引必须从源文档重建，不提供哈希格式检测或转换。
+
+删除旧 v2 查询和文件路由的专用迁移报错，统一走未知路由处理；通用 OPTIONS 预检不表示该路径可执行。现行 v1 query/iterator 的 POST JSON、405/Allow 和 URL 参数校验保留。

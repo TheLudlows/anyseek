@@ -288,8 +288,8 @@ def exercise(binary, workdir):
             print('PASS explicit document/iterator option handling')
 
             # The retired file endpoints must fail without adding a record.
-            request('POST', path + '/file', b'%PDF-1.7 removed', api_key, expected=404)
-            request('GET', path + '/file/0', key=api_key, expected=404)
+            request('POST', path + '/file', b'%PDF-1.7 removed', api_key, expected=501)
+            request('GET', path + '/file/0', key=api_key, expected=501)
             check(api('PATCH', path) == 4, 'retired PDF endpoint mutated index')
             check(not list((workdir / 'index').rglob('files')), 'created PDF attachment directory')
             # Keep update/delete/get covered when the core attachment parameter is removed.
@@ -370,7 +370,11 @@ def exercise(binary, workdir):
             lexical = api('POST', vp + '/query', {'query': 'alpha', 'search_mode': 'Lexical'})
             check(lexical['results'][0]['body'] == 'alpha', 'failed update lost original')
             for method in ('GET', 'POST', 'QUERY', 'OPTIONS'):
-                request(method, f'/api/v2/index/{vector_id}/query', b'retired binary payload', api_key, expected=404)
+                retired_response = request(method, f'/api/v2/index/{vector_id}/query', b'retired binary payload', api_key,
+                                           expected=204 if method == 'OPTIONS' else 501)
+                unknown_response = request(method, '/unknown-route', b'retired binary payload', api_key,
+                                           expected=204 if method == 'OPTIONS' else 501)
+                check(retired_response == unknown_response, 'retired path still has a dedicated response')
             print('PASS retired binary query protocol is unavailable')
             for inference in ({'Model2Vec': {'model': 'PotionBase2M', 'chunk_size': 1000}},
                               {'External': {'dimensions': 0, 'precision': 'F32', 'quantization': 'None', 'similarity': 'Cosine'}},

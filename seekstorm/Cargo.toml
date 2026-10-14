@@ -14,12 +14,11 @@ edition = "2024"
 publish = false # Build this fork from source; do not publish under upstream crate names.
 
 [features]
-# comment out the default features below you don't need: zh=Chinese word segmentation, gxhash=GXHash instead of AHash for faster hash computation.
+# Optional features: zh=Chinese word segmentation, vb=result diagnostics.
 # You can also disable all default features and re-enable them case-wise in your toml with: seekstorm = { path = "../seekstorm", default-features = false, features = ["zh"] }
 default = ["zh","vb"]
 zh = []
 vb = []
-gxhash = ["dep:gxhash"] # Activate gxhash when you hardware supports AES/SSE2 and you want faster hash computation.
 
 [lib]
 name = "seekstorm"
@@ -32,7 +31,6 @@ serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tokio = { version = "1.53.2", features = ["full"] }
 base64 = "0.23.1"
 ahash ={ version = "0.8.12", features = ["serde"]}
-gxhash = { version = "3.5.0", features = ["deterministic"], optional = true }
 rand = { version = "0.10.3", features = ["chacha"]}
 futures = "0.3.34"
 num = "0.4.3"

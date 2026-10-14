@@ -458,3 +458,11 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 本地通过 `cargo test --workspace --all-targets`（68 项）、`cargo test --workspace --doc`（44 项）和 `python3 scripts/http_smoke.py --server target/debug/seekstorm_server`。扩展现有 query_contract 覆盖旧参数拒绝、词形/同义词不扩展、大小写规范化、提交后重开及不生成同义词文件；HTTP 覆盖旧字段 400、删除路由 501。其余回归覆盖 N-gram、中文、短语、元数据过滤及向量/混合检索。本地 HTTP 未启用 Chromium，浏览器回归由 CI 执行。
 
 本地采用 `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_CODEGEN_UNITS=1` 和 `-j2`。首次依赖编译遇到空对象归档错误，清理 syn 构建缓存并重新编译后通过。历史索引需重建，不提供兼容转换。
+
+## E1/E2：统一 AHash 与旧路由清理（2026-10-14）
+
+基于主干 `d1254da`。删除 gxhash feature、依赖、CPU 条件分支以及服务显式启用配置；AHash 种子与词项低位掩码保持原样。删除旧 v2 查询及文件路径的专用迁移响应，统一走未知路由（501），OPTIONS 走通用预检（204）。现行 v1 POST JSON 契约不变。
+
+本地验证通过：68 项 workspace Rust 测试；独立核心默认/无默认特性构建与依赖边界；HTTP 冒烟；生成 OpenAPI JSON/YAML 与仓库完全一致。HTTP 回归增加旧 v2 路径与未知路径响应一致性，确认已删除文件入口不会写入文档；原有 N-gram、全文、向量/混合、提交与重开回归通过。CI 增加 gxhash 依赖禁入检查。本地 HTTP 不启用 Chromium，浏览器回归由 CI 执行。
+
+命令使用 `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_CODEGEN_UNITS=1` 与 `-j2`。此前实际使用 gxhash 的索引需从原始文档重建，不提供旧哈希格式转换。
