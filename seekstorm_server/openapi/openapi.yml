@@ -67,7 +67,6 @@ paths:
         Use the **master API key displayed** in the server console at startup.
 
         WARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, otherwise your generated API keys will be compromised.
-        For development purposes you may also use the SeekStorm server console command 'create' to create an demo API key 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='.
       operationId: create_api_key
       parameters:
       - name: apikey
@@ -82,11 +81,7 @@ paths:
           application/json:
             schema:
               type: object
-              description: API key creation options
-              properties:
-                demo:
-                  type: boolean
-                  description: Create the fixed demonstration key instead of a random key (default=false).
+              description: Create a random API key. The request body must be an empty JSON object.
               additionalProperties: false
         required: true
       responses:

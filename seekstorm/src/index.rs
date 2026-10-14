@@ -1027,11 +1027,6 @@ pub struct Shard {
     pub(crate) segments_index: Vec<SegmentIndex>,
     pub(crate) segments_level0: Vec<SegmentLevel0>,
 
-    pub(crate) enable_fallback: bool,
-    pub(crate) enable_single_term_topk: bool,
-    pub(crate) enable_search_quality_test: bool,
-    pub(crate) enable_inter_query_threading: bool,
-    pub(crate) enable_inter_query_threading_auto: bool,
 
     pub(crate) segment_number_mask1: u32,
 
@@ -1151,7 +1146,6 @@ pub struct Index {
     pub(crate) shard_number: usize,
     pub(crate) shard_vec: Vec<Arc<RwLock<Shard>>>,
 
-    pub(crate) frequent_hashset: AHashSet<String>,
 
     /// The precision of the vectors: Float32 or Int8
     pub vector_precision: Precision,
@@ -1322,15 +1316,6 @@ pub(crate) async fn create_index_root(
     force_shard_number: Option<usize>,
 ) -> Result<IndexArc, String> {
     crate::vector::validate_vector_schema(&meta.inference, schema)?;
-    let frequent_hashset: AHashSet<String> = match &meta.frequent_words {
-        FrequentwordType::None => AHashSet::new(),
-        FrequentwordType::English => FREQUENT_EN.lines().map(|x| x.to_string()).collect(),
-        FrequentwordType::German => FREQUENT_EN.lines().map(|x| x.to_string()).collect(),
-        FrequentwordType::French => FREQUENT_FR.lines().map(|x| x.to_string()).collect(),
-        FrequentwordType::Spanish => FREQUENT_ES.lines().map(|x| x.to_string()).collect(),
-        FrequentwordType::Custom { terms } => terms.iter().map(|x| x.to_string()).collect(),
-    };
-
     let segment_number1 = 1usize << segment_number_bits1;
     let segment_number_mask1 = (1u32 << segment_number_bits1) - 1;
 
@@ -1563,7 +1548,6 @@ pub(crate) async fn create_index_root(
                 shard_number,
                 shard_vec,
 
-                frequent_hashset,
 
                 vector_dimensions,
                 vector_dimensions_original,
@@ -1982,11 +1966,6 @@ pub(crate) fn create_shard(
 
                 uncommitted: false,
                 modified: false,
-                enable_fallback: false,
-                enable_single_term_topk: false,
-                enable_search_quality_test: false,
-                enable_inter_query_threading: false,
-                enable_inter_query_threading_auto: false,
                 schema_map,
                 indexed_field_id_bits,
                 indexed_field_id_mask: (1usize << indexed_field_id_bits) - 1,

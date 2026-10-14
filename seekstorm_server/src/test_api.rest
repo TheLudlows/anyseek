@@ -1,7 +1,7 @@
 // use with VSC extension "Rest client" to execute API calls and inspect responses
 
 ### individual API key (use create api key below to generate)
-@api_key = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+@api_key = YOUR_API_KEY
 
 // WARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, 
 // otherwise your generated API keys will be compromised.

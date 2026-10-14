@@ -1644,7 +1644,7 @@ impl SearchLexicalShard for ShardArc {
         let result_count_arc = Arc::new(AtomicUsize::new(0));
         let result_count_uncommitted_arc = Arc::new(AtomicUsize::new(0));
 
-        'fallback: loop {
+        'search_blocks: {
             let mut unique_terms: AHashMap<String, TermObject> = AHashMap::new();
             let mut non_unique_terms: Vec<NonUniqueTermObject> = Vec::new();
             let mut nonunique_terms_count = 0u32;
@@ -1918,7 +1918,7 @@ impl SearchLexicalShard for ShardArc {
                                     if non_unique_term.op == QueryType::Intersection
                                         || non_unique_term.op == QueryType::Phrase
                                     {
-                                        break 'fallback;
+                                        break 'search_blocks;
                                     }
                                     not_found_terms_hashset.insert(key_hash);
                                     found = false;
@@ -2154,15 +2154,7 @@ impl SearchLexicalShard for ShardArc {
                     query_term_count,
                 )
                 .await;
-
-                if shard_ref.enable_fallback
-                    && (result_count_arc.load(Ordering::Relaxed) < offset + length)
-                {
-                    continue 'fallback;
-                }
             }
-
-            break;
         }
 
         result_object.result_count = search_result.topk_candidates.current_heap_size;

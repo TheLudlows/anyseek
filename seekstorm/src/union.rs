@@ -1,5 +1,4 @@
 use crate::{
-    INDEX_RUNTIME,
     add_result::{add_result_multiterm_multifield, is_facet_filter},
     compatible::{_blsr_u64, _mm_tzcnt_64},
     index::{
@@ -279,15 +278,6 @@ pub(crate) async fn union_blockid<'a>(
     field_filter_set: &AHashSet<u16>,
     facet_filter: &[FilterSparse],
 ) {
-    let item_0 = &query_list[0];
-    let enable_inter_query_threading_multi =
-        if !shard.enable_search_quality_test && shard.enable_inter_query_threading_auto {
-            item_0.posting_count / item_0.p_block_max as u32 > 10
-        } else {
-            shard.enable_inter_query_threading
-        };
-    let mut task_list = Vec::new();
-
     loop {
         let mut break_loop = true;
         let mut block_id_min = usize::MAX;
@@ -302,85 +292,64 @@ pub(crate) async fn union_blockid<'a>(
             }
         }
 
-        if !enable_inter_query_threading_multi {
-            if shard.meta.access_type == AccessType::Mmap {
-                for query_list_item_mut in query_list.iter_mut() {
-                    let segment = &shard.segments_index[query_list_item_mut.key0 as usize];
-                    query_list_item_mut.byte_array =
-                        &shard.index_file_mmap[segment.byte_array_blocks_pointer[block_id_min].0
-                            ..segment.byte_array_blocks_pointer[block_id_min].0
-                                + segment.byte_array_blocks_pointer[block_id_min].1];
-                }
-                for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
-                    let segment =
-                        &shard.segments_index[nonunique_query_list_item_mut.key0 as usize];
-                    nonunique_query_list_item_mut.byte_array =
-                        &shard.index_file_mmap[segment.byte_array_blocks_pointer[block_id_min].0
-                            ..segment.byte_array_blocks_pointer[block_id_min].0
-                                + segment.byte_array_blocks_pointer[block_id_min].1];
-                }
-                for not_query_list_item_mut in not_query_list.iter_mut() {
-                    let segment = &shard.segments_index[not_query_list_item_mut.key0 as usize];
-                    not_query_list_item_mut.byte_array =
-                        &shard.index_file_mmap[segment.byte_array_blocks_pointer[block_id_min].0
-                            ..segment.byte_array_blocks_pointer[block_id_min].0
-                                + segment.byte_array_blocks_pointer[block_id_min].1];
-                }
-            } else {
-                for query_list_item_mut in query_list.iter_mut() {
-                    query_list_item_mut.byte_array = &shard.segments_index
-                        [query_list_item_mut.key0 as usize]
-                        .byte_array_blocks[block_id_min];
-                }
-                for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
-                    nonunique_query_list_item_mut.byte_array = &shard.segments_index
-                        [nonunique_query_list_item_mut.key0 as usize]
-                        .byte_array_blocks[block_id_min];
-                }
-                for not_query_list_item_mut in not_query_list.iter_mut() {
-                    not_query_list_item_mut.byte_array = &shard.segments_index
-                        [not_query_list_item_mut.key0 as usize]
-                        .byte_array_blocks[block_id_min];
-                }
+        if shard.meta.access_type == AccessType::Mmap {
+            for query_list_item_mut in query_list.iter_mut() {
+                let segment = &shard.segments_index[query_list_item_mut.key0 as usize];
+                query_list_item_mut.byte_array =
+                    &shard.index_file_mmap[segment.byte_array_blocks_pointer[block_id_min].0
+                        ..segment.byte_array_blocks_pointer[block_id_min].0
+                            + segment.byte_array_blocks_pointer[block_id_min].1];
             }
-
-            let mut result_count_local = 0;
-            union_docid(
-                shard,
-                non_unique_query_list,
-                query_list,
-                not_query_list,
-                block_id_min,
-                &mut result_count_local,
-                search_result,
-                top_k,
-                result_type,
-                field_filter_set,
-                facet_filter,
-            )
-            .await;
-
-            result_count_arc.fetch_add(result_count_local as usize, Ordering::Relaxed);
+            for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
+                let segment =
+                    &shard.segments_index[nonunique_query_list_item_mut.key0 as usize];
+                nonunique_query_list_item_mut.byte_array =
+                    &shard.index_file_mmap[segment.byte_array_blocks_pointer[block_id_min].0
+                        ..segment.byte_array_blocks_pointer[block_id_min].0
+                            + segment.byte_array_blocks_pointer[block_id_min].1];
+            }
+            for not_query_list_item_mut in not_query_list.iter_mut() {
+                let segment = &shard.segments_index[not_query_list_item_mut.key0 as usize];
+                not_query_list_item_mut.byte_array =
+                    &shard.index_file_mmap[segment.byte_array_blocks_pointer[block_id_min].0
+                        ..segment.byte_array_blocks_pointer[block_id_min].0
+                            + segment.byte_array_blocks_pointer[block_id_min].1];
+            }
         } else {
-            let mut query_list_copy: Vec<PostingListObjectQuery> = Vec::new();
-            let mut non_unique_query_list_copy: Vec<NonUniquePostingListObjectQuery> = Vec::new();
-
-            for x in &mut *query_list {
-                query_list_copy.push(x.clone());
+            for query_list_item_mut in query_list.iter_mut() {
+                query_list_item_mut.byte_array = &shard.segments_index
+                    [query_list_item_mut.key0 as usize]
+                    .byte_array_blocks[block_id_min];
             }
-
-            for x in &mut *non_unique_query_list {
-                let y = x.clone();
-                non_unique_query_list_copy.push(y);
+            for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
+                nonunique_query_list_item_mut.byte_array = &shard.segments_index
+                    [nonunique_query_list_item_mut.key0 as usize]
+                    .byte_array_blocks[block_id_min];
             }
-
-            let result_count_clone = result_count_arc.clone();
-
-            task_list.push(INDEX_RUNTIME.handle().spawn(async move {
-                let result_count_local = 1;
-                result_count_clone.fetch_add(result_count_local, Ordering::Relaxed);
-            }));
+            for not_query_list_item_mut in not_query_list.iter_mut() {
+                not_query_list_item_mut.byte_array = &shard.segments_index
+                    [not_query_list_item_mut.key0 as usize]
+                    .byte_array_blocks[block_id_min];
+            }
         }
+
+        let mut result_count_local = 0;
+        union_docid(
+            shard,
+            non_unique_query_list,
+            query_list,
+            not_query_list,
+            block_id_min,
+            &mut result_count_local,
+            search_result,
+            top_k,
+            result_type,
+            field_filter_set,
+            facet_filter,
+        )
+        .await;
+
+        result_count_arc.fetch_add(result_count_local as usize, Ordering::Relaxed);
 
         for plo in query_list.iter_mut() {
             if !plo.end_flag_block {

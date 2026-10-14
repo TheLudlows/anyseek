@@ -311,7 +311,7 @@ pub(crate) async fn single_blockid<'a>(
         || !facet_filter.is_empty()
             && result_type != &ResultType::Topk;
 
-    if (index.enable_single_term_topk || (result_type == &ResultType::Count))
+    if (result_type == &ResultType::Count)
         && (non_unique_query_list.len() <= 1)
         && !filtered
     {
@@ -325,48 +325,39 @@ pub(crate) async fn single_blockid<'a>(
 
     let mut result_count_local = 0;
 
-    let enable_inter_query_threading_single =
-        if !index.enable_search_quality_test && index.enable_inter_query_threading_auto {
-            query_list[term_index].posting_count / query_list[term_index].p_block_max as u32 > 10
-        } else {
-            index.enable_inter_query_threading
-        };
-
     let mut block_vec: Vec<BlockObject> = Vec::new();
 
     for (p_block, blo) in query_list[term_index].blocks.iter().enumerate() {
-        if !enable_inter_query_threading_single {
-            let block_score = blo.max_block_score;
+        let block_score = blo.max_block_score;
 
-            if SPEEDUP_FLAG && SORT_FLAG {
-                let p_block_vec: Vec<i32> = vec![p_block as i32];
-                let block_object = BlockObject {
-                    block_id: blo.block_id as usize,
-                    block_score,
-                    p_block_vec,
-                };
+        if SPEEDUP_FLAG && SORT_FLAG {
+            let p_block_vec: Vec<i32> = vec![p_block as i32];
+            let block_object = BlockObject {
+                block_id: blo.block_id as usize,
+                block_score,
+                p_block_vec,
+            };
 
-                block_vec.push(block_object);
-            } else if !SPEEDUP_FLAG
-                || (filtered && result_type != &ResultType::Topk)
-                || search_result.topk_candidates.current_heap_size < top_k
-                || block_score > search_result.topk_candidates._elements[0].score
-            {
-                single_docid(
-                    index,
-                    query_list,
-                    not_query_list,
-                    blo,
-                    term_index,
-                    &mut result_count_local,
-                    search_result,
-                    top_k,
-                    result_type,
-                    field_filter_set,
-                    facet_filter,
-                )
-                .await;
-            }
+            block_vec.push(block_object);
+        } else if !SPEEDUP_FLAG
+            || (filtered && result_type != &ResultType::Topk)
+            || search_result.topk_candidates.current_heap_size < top_k
+            || block_score > search_result.topk_candidates._elements[0].score
+        {
+            single_docid(
+                index,
+                query_list,
+                not_query_list,
+                blo,
+                term_index,
+                &mut result_count_local,
+                search_result,
+                top_k,
+                result_type,
+                field_filter_set,
+                facet_filter,
+            )
+            .await;
         }
     }
 

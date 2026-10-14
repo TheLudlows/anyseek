@@ -45,7 +45,7 @@ jobs:
           with open('/tmp/seekpower-metadata.json') as source:
               packages = json.load(source)['packages']
               names = {package['name'] for package in packages}
-          forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs', 'rkyv'}
+          forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs', 'rkyv', 'tabled', 'colored', 'num-format', 'crossbeam-channel', 'ctrlc'}
           assert not forbidden, f'retired dependencies remain: {forbidden}'
           core = next(package for package in packages if package['name'] == 'seekstorm')
           assert not any(dependency['name'] == 'aho-corasick' for dependency in core['dependencies']), 'direct highlighter dependency remains'

@@ -14,6 +14,7 @@ import os
 import re
 from pathlib import Path
 import secrets
+import signal
 import socket
 import subprocess
 import tempfile
@@ -159,12 +160,16 @@ def exercise(binary, workdir):
 
             request('GET', '/api/v1/index/0', expected=401)
             request('POST', '/api/v1/apikey', {}, key='invalid', expected=401)
-            api_key = request('POST', '/api/v1/apikey', {'demo': True}, master).decode()
-            for field in ('indices_max', 'indices_size_max', 'documents_max', 'operations_max', 'rate_limit', 'quota'):
+            api_key = request('POST', '/api/v1/apikey', {}, master).decode()
+            for field in ('indices_max', 'indices_size_max', 'documents_max', 'operations_max', 'rate_limit', 'quota', 'demo'):
                 request('POST', '/api/v1/apikey', {field: 0}, master, expected=400)
                 request('POST', '/api/v1/apikey?' + urlencode({field: 0}), {}, master, expected=400)
             request('POST', '/api/v1/apikey', {'demo': True}, api_key, expected=401)
-            check(api_key == base64.b64encode(bytes(32)).decode(), 'demo key mismatch')
+            check(len(base64.b64decode(api_key)) == 32 and api_key not in (initial_key, master, base64.b64encode(bytes(32)).decode()), 'random key invalid')
+            request('GET', '/api/v1/apikey', key=base64.b64encode(bytes(32)).decode(), expected=401)
+            request('GET', '/version', expected=501)
+            for invalid in (b'[]', b'null', b'false', b'""', b'{"demo":false}', b'{"demo":true}'):
+                request('POST', '/api/v1/apikey', invalid, master, expected=400)
             print('PASS authentication and key creation')
 
             schema = [
@@ -452,7 +457,17 @@ def exercise(binary, workdir):
                     page = browser.new_page()
                     errors = []
                     page.on('pageerror', lambda error: (errors.append(str(error)), print(f'BROWSER ERROR: {error}')))
-                    page.goto(base + '/?' + urlencode({'api_key': api_key, 'index_id': vector_id, 'q': 'alpha'}))
+                    # URL credentials must not authenticate a fresh browser session.
+                    from playwright.sync_api import expect
+                    page.goto(base + '/?' + urlencode({'api_key': api_key, 'index_id': vector_id}))
+                    expect(page.locator('#welcome')).to_be_visible()
+                    check(page.evaluate("sessionStorage.getItem('seekpower.apiKey')") is None,
+                          'URL credential was persisted')
+                    check(page.evaluate('API_KEY') == '', 'URL credential authenticated the UI')
+                    page.locator('#setupKey').fill(api_key)
+                    page.locator('#connectForm button[type="submit"]').click()
+                    expect(page.locator('#openIndex')).to_be_enabled()
+                    page.goto(base + '/?' + urlencode({'index_id': vector_id, 'q': 'alpha'}))
                     page.locator('#contentBox .resultEntry').first.wait_for()
                     check(page.locator('input[value="Lexical"]').is_checked(), 'UI default mode')
                     page.locator('label[data-index="0"]').click()
@@ -569,6 +584,25 @@ def exercise(binary, workdir):
                     browser.close()
                 print('PASS Chromium lexical/vector/hybrid, source/text preview, literal raw/JSON preview, unchanged typed query and date sorting/filtering')
 
+            # Removed close/version routes follow the existing unknown-route response.
+            request('PUT', path, key=api_key, expected=501)
+            api('POST', path + '/query', {'query': 'body1'})
+            # Both process signals must commit accepted writes without an explicit PATCH.
+            shutdown_id = api('POST', '/api/v1/index', {'index_name': 'shutdown', 'schema': schema})
+            shutdown_path = f'/api/v1/index/{shutdown_id}'
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                marker = f'shutdownsignal{signum}'
+                api('POST', shutdown_path + '/doc', {'body': marker})
+                process.send_signal(signum)
+                process.wait(timeout=30)
+                check(process.returncode == 0, f'unclean signal shutdown: {signum}')
+                process = launch()
+                ready(process)
+                result = api('POST', shutdown_path + '/query', {'query': marker, 'realtime': False})
+                check(result['count_total'] == 1, f'shutdown lost accepted write: {signum}')
+            api('DELETE', shutdown_path)
+            print('PASS removed close/version routes and SIGTERM/SIGINT commit before exit')
+
             # Key creation, revocation and scopes remain independent of retired quotas.
             def scoped(key, method, path, data=None):
                 value = json.loads(request(method, path, data, key))
@@ -580,12 +614,10 @@ def exercise(binary, workdir):
             key_record = json.loads(key_bytes)
             check(set(key_record) == {'id', 'apikey_hash'}, 'new key persisted quota or runtime scope')
             original_doc = api('GET', path + '/doc/0')
-            check(request('POST', '/api/v1/apikey', {'demo': True}, master).decode() == api_key,
-                  'repeated demo creation changed key')
-            check(key_file.read_bytes() == key_bytes and api('GET', path + '/doc/0') == original_doc,
-                  'repeated demo creation replaced identity or lost scope')
             other_key = request('POST', '/api/v1/apikey', {}, master).decode()
             check(other_key != api_key and len(base64.b64decode(other_key)) == 32, 'random API key invalid')
+            check(key_file.read_bytes() == key_bytes and api('GET', path + '/doc/0') == original_doc,
+                  'creating a second key changed the existing identity or scope')
             other_id = scoped(other_key, 'POST', '/api/v1/index', {'index_name': 'isolated', 'schema': schema})
             check(other_id == 0, 'new key should have its own index ID namespace')
             other_path = f'/api/v1/index/{other_id}'
@@ -634,7 +666,7 @@ def exercise(binary, workdir):
             request('POST', other_path + '/doc', {'body': 'revoked'}, other_key, expected=401)
             check(api('GET', path + '/doc/0') == original_doc, 'revocation affected another key')
             check(api('GET', rp + f'/doc/{raw_doc_id}') == raw_record, 'restart changed retained raw records')
-            print('PASS strict key creation, idempotent demo key, cross-key isolation, legacy restart and revocation')
+            print('PASS strict random key creation, cross-key isolation, legacy restart and revocation')
 
             check(api('DELETE', path + '/doc', b'clear') == 0, 'clear count mismatch')
             check(api('GET', path)['indexed_doc_count'] == 0, 'index not empty after clear')

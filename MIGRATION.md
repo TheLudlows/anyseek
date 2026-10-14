@@ -11,7 +11,7 @@
 | 纠错、补全、自动改写 | 删除 `query_rewriting/spelling_correction/query_completion/dictionary_source/completion_source`；旧选项返回 400 |
 | 地理字段/过滤/排序 | 删除 Point、`distance_fields`、`result_sort[].base`（包括 None）；旧请求返回 400；经纬度可作为普通数据保存 |
 | 高亮与摘要 | 删除 `highlights`；文档读取也删除 `query_terms`；返回存储原文，搜索响应的 `query_terms` 保留 |
-| 配额与内置限流 | 创建 key 使用 `{}` 或 `{"demo":true}`；删除 quota 参数，创建 key URL 参数返回 400；限流由外层承担 |
+| 配额与内置限流 | 创建 key 使用 `{}`；删除 quota 参数，创建 key URL 参数返回 400；限流由外层承担 |
 | v2 二进制查询（B1） | 改为 v1 POST JSON；`/api/v2/index/{id}/query` 返回 404 |
 | GET/HTTP QUERY 搜索与遍历（B2） | query/iterator 使用 POST JSON；旧方法返回 405 + `Allow: POST, OPTIONS`；POST URL 非空参数返回 400 |
 
@@ -40,7 +40,7 @@
 
 - `collect_index_info(&index).await` 返回 `IndexInfo`，不再接收展示标签/耗时字符串；旧 `Info { entry, value }` 与 `entries` 删除。读取 `indexed_documents`、`index_size_bytes` 等数值字段，在调用方格式化。
 - 统计采集不触发 commit/fsync。持久化成功与错误语义仍以提交接口实际实现为准。
-- 核心只使用 `log` 门面，调用方安装 logger 后才输出；保留 `mute` 对进度日志的控制。服务默认 info，可用 `RUST_LOG=seekstorm=warn` 或 `RUST_LOG=off` 控制日志；终端交互、表格及启动提示仍由服务展示。
+- 核心只使用 `log` 门面，调用方安装 logger 后才输出；保留 `mute` 对进度日志的控制。服务默认 info，可用 `RUST_LOG=seekstorm=warn` 或 `RUST_LOG=off` 控制日志；启动与索引概况改用普通日志；主密钥和首次普通 key 保留直接输出。
 
 ## 统计聚合裁剪
 
@@ -50,3 +50,11 @@
 - UI 删除直方图和滑块，改为 UTC 起止日期输入，保留日期过滤/排序；不再自动查询最早/最晚日期。
 - 字典仅保存过滤/排序需要的值；旧聚合字典格式不再读取。
 - 内部 ANN/量化所需的 min/max 数值范围不属于字段统计，不删除。
+
+## C1～C5 服务与代码收敛
+
+- 创建 API key 只接受空 JSON 对象 `{}`，始终随机生成；`demo` 字段/URL 参数返回 400。已有 key 身份文件与数据作用域不变。
+- 删除 stdin 的 create/delete/info/search/openapi/help/quit；通过 REST、Web UI 和启动参数 `generate_openapi=true` 操作。Ctrl-C/SIGINT、SIGTERM 正常结束连接后提交并关闭索引。
+- 删除 HTTP PUT `/api/v1/index/{id}` 关闭入口和 `/version`，使用 PATCH 提交、GET `/api/v1/live` 存活检查。这两个旧入口按未知路由返回 501。
+- Web UI 不再从 URL `api_key` 登录；在连接表单输入普通 key，当前标签页的 sessionStorage 保留。`index_id` URL 参数继续支持。
+- 删除未使用的 tokenizer、根索引高频词字符串集合、恒关闭的实验分支、彩色表格依赖及无引用的根目录历史图片。正常全文/向量/混合检索、核心 close 与词法 Count 优化保留。

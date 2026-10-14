@@ -418,3 +418,15 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 浏览器回归增加三种模式的 JSON 批量/文件写入、客户端和向量校验错误、文档计数、即时查询与原文展示，以及模拟提交失败后只重试 PATCH 的检查。最终 HTTP/静态资源、Chromium 与 OpenAPI 精确对比结果记录在 PR CI。
 
 首次 CI [38503384500](https://github.com/TheLudlows/seekpower/actions/runs/38503384500) 的构建、边界、64 项 Rust 测试和 OpenAPI 对比通过；浏览器全文写入/提交失败重试/搜索通过。向量非法输入实际正确返回 `expected 3 values with precision F32`，测试误等 `dimensions` 导致失败；修正断言并显式检查 HTTP 400，没有修改生产校验或跳过测试。
+
+## 2026-10-14：C1～C5 裁剪
+
+基点 master `4a459f9fb8cf3bc1158523a546d4ca77155c727a`（PR #16 已合入），范围由用户一次确认。
+
+- C1：删除未调用的 tokenizer_lite、根 Index 的未读字符串集合、5 个恒关闭的 Shard 开关及对应实验分支；保留活跃的 u64 高频词集合、Count 快速路径、Block-max/MaxScore 和分片并行检索。全文 fallback 的单次循环改为可提前退出的代码块。
+- C2：删除固定 demo key 生成、stdin 命令及专用通道/信号依赖。创建 key 只接受 `{}`，严格拒绝 demo、未知字段、数组和 null；已有身份不变。Tokio 信号处理 SIGINT/SIGTERM，HTTP 停止接收并结束已有连接后 close 全部索引。
+- C3：删除彩色表格和服务 info 格式化模块；以普通日志记录启动、作用域和索引概要，保留主密钥/首次普通 key 输出。移除服务的 colored、chrono、crossbeam-channel、ctrlc、num-format、tabled 直接依赖；CI 阻止已裁剪专用依赖回流。
+- C4：删除根 assets 下 13 个无引用的历史图片（约 5.16 MB），保留 Web UI 图标、核心字典与归属/许可；更新功能清单、状态、计划、架构和使用文档。
+- C5：删除 PUT 关闭索引路由、/version 和浏览器 URL key 登录。核心 close、PATCH 提交、GET live、sessionStorage 与 index_id URL 参数保留。两个旧 HTTP 入口遵循原未知路由的 501 响应。
+
+本地构建通过；完整 workspace 64 项 Rust 测试通过。HTTP 回归通过，包含 SIGINT/SIGTERM 下未手动提交的写入在重启后可搜索、随机 key 不覆盖既有身份、已移除路由失效、9 个 UI 静态资源。独立核心的默认与无默认 feature 构建/依赖边界通过；中文专用临时集合仅在 zh 启用时声明。空对象请求的 OpenAPI JSON/YAML 已重新生成。浏览器回归改为通过连接表单登录，新增 URL 凭证不生效断言；真实 Chromium 由 PR CI 验证。
