@@ -2,7 +2,7 @@
 
 更新日期：2026-10-14（Asia/Shanghai）。[当前功能](FEATURES.md) · [后续计划](SEEKPOWER_PLAN.md) · [验证记录](VALIDATION.md) · [迁移说明](MIGRATION.md)
 
-S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 已合入。PR #11 聚合裁剪已合入 `97bea80`。PR #12 共享过滤已合入 `ea32aa1`。本分支删除旧索引兼容与历史基准描述，尚未合入。
+S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 已合入。PR #11 聚合裁剪已合入 `97bea80`。PR #12 共享过滤已合入 `ea32aa1`。PR #13 已合入 `7bd1602`；本分支整理 HTTP/OpenAPI 与结构化信息/日志边界，尚未合入。
 
 | 批次 | 范围 | 状态 | 本批已通过测试数 |
 | --- | --- | --- | --- |
@@ -16,6 +16,8 @@ S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 �
 | S1.5 / [#9](https://github.com/TheLudlows/seekpower/pull/9) | 依赖、参数、文档与 UI 闭环 | 已合入 `4df02a8` | 58 |
 | B1/B2 / [#10](https://github.com/TheLudlows/seekpower/pull/10) | 删除二进制查询；搜索/遍历统一 POST JSON | 已合入 `af56be6` | 58 |
 | 聚合裁剪 / [#11](https://github.com/TheLudlows/seekpower/pull/11) | 删除统计聚合；保留过滤/排序和日期输入 | 已合入 `97bea80` | 58 |
+| 共享过滤 / [#12](https://github.com/TheLudlows/seekpower/pull/12) | 三种检索模式共享元数据过滤 | 已合入 `ea32aa1` | 60 |
+| 兼容清理 / [#13](https://github.com/TheLudlows/seekpower/pull/13) | 删除旧索引兼容与历史基准描述 | 已合入 `7bd1602` | 62 |
 
 ## 上一批验证
 
@@ -29,9 +31,13 @@ S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 �
 
 三种模式复用 schema 校验与每分片元数据谓词。向量评分/Top-K 前排除不匹配和已删除记录；修复未提交集合成员映射及清空后的映射重用。API 和日期 UI 回归覆盖三种模式，详见 VALIDATION。PR #12 的 [CI 38425247167](https://github.com/TheLudlows/seekpower/actions/runs/38425247167) 已通过 60 项 Rust 测试、HTTP/Chromium 与 OpenAPI 精确对比；稳定业务 ID/版本不在该批范围。
 
+## 已合入兼容清理
+
+PR #13 删除旧索引兼容，只接受格式 7.0。[CI 38487453561](https://github.com/TheLudlows/seekpower/actions/runs/38487453561) 通过 62 项 Rust 测试、HTTP/Chromium 与 OpenAPI 精确对比。
+
 ## 下一步与边界
 
-1. 本次删除旧索引兼容：仅支持格式 7.0，删除字典统计占位、6.0 压缩兜底和专用迁移逻辑；清除历史基准描述。
+1. 本次完成 HTTP/OpenAPI 定义下移服务、结构化 IndexInfo 和调用方可配置日志；执行边界检查与完整回归。
 2. 随后推进 S2.1 的稳定业务 ID/版本契约；其他裁剪项需另行确认。
 3. 单机可靠性验收后再推进分布式路由、复制恢复和弹性。
 

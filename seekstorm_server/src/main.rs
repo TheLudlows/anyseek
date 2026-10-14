@@ -27,6 +27,7 @@ pub static MASTER_KEY_SECRET: LazyLock<String> =
 
 #[doc(hidden)]
 mod api_endpoints;
+use seekstorm_server::{api_types, api_schema};
 mod info;
 #[doc(hidden)]
 mod http_server;
@@ -54,6 +55,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         api_endpoints::generate_openapi();
         return Ok(());
     }
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .init();
     initialize(params).await;
 
     Ok(())

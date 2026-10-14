@@ -1,9 +1,10 @@
 //! Stored records remain lossless when presentation leaves the search core.
+use seekstorm_server::api_types::{SearchRequestObject, GetDocumentRequest};
 use seekstorm::{
     commit::Commit,
     index::{AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
-        GetDocumentRequest, IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet,
-        SchemaField, SearchRequestObject, StemmerType, StopwordType, TokenizerType,
+        IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet,
+        SchemaField, StemmerType, StopwordType, TokenizerType,
         create_index, open_index},
     vector::Inference,
 };

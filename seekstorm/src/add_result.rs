@@ -1417,7 +1417,7 @@ pub(crate) fn decode_positions_multiterm_multifield(
 
                 (_, _) => {
                     if phrase_query {
-                        println!("unsupported 2 byte pointer embedded");
+                        log::warn!("unsupported 2 byte pointer embedded");
                         plo.embedded_positions = [0, 0, 0, 0]
                     };
                 }
@@ -1701,7 +1701,7 @@ pub(crate) fn decode_positions_multiterm_multifield(
 
                 (_, _) => {
                     if phrase_query {
-                        println!(
+                        log::warn!(
                             "unsupported 3 byte pointer embedded {} {:032b}",
                             shard.indexed_field_vec.len() == 1,
                             (rank_position_pointer & 0b11111111_11111111_11111111) >> 19
@@ -1814,7 +1814,7 @@ pub(crate) fn decode_positions_multiterm_singlefield(
 
                 _ => {
                     if phrase_query {
-                        println!("unsupported 2 byte pointer embedded");
+                        log::warn!("unsupported 2 byte pointer embedded");
                         plo.embedded_positions = [0, 0, 0, 0]
                     };
                     positions_count = 0;
@@ -1869,7 +1869,7 @@ pub(crate) fn decode_positions_multiterm_singlefield(
 
                 _ => {
                     if phrase_query {
-                        println!("unsupported 3 byte pointer embedded");
+                        log::warn!("unsupported 3 byte pointer embedded");
                         plo.embedded_positions = [0, 0, 0, 0]
                     };
                     positions_count = 0;
@@ -2137,7 +2137,7 @@ pub(crate) fn decode_positions_singleterm_multifield(
                 }
 
                 (_, _) => {
-                    println!(
+                    log::warn!(
                         "unsupported single 2 byte pointer embedded {} {:032b}",
                         shard.indexed_field_vec.len() == 1,
                         rank_position_pointer >> 12
@@ -2257,7 +2257,7 @@ pub(crate) fn decode_positions_singleterm_multifield(
                 }
 
                 (_, _) => {
-                    println!(
+                    log::warn!(
                         "unsupported single 3 byte pointer embedded {} {:032b}",
                         shard.indexed_field_vec.len() == 1,
                         (rank_position_pointer & 0b11111111_11111111_11111111) >> 19
@@ -2356,7 +2356,7 @@ pub(crate) fn decode_positions_singleterm_singlefield(
                 }
 
                 _ => {
-                    println!(
+                    log::warn!(
                         "unsupported single 2 byte pointer embedded {:032b}",
                         rank_position_pointer >> 14
                     );
@@ -2378,7 +2378,7 @@ pub(crate) fn decode_positions_singleterm_singlefield(
                 }
 
                 _ => {
-                    println!(
+                    log::warn!(
                         "unsupported single 3 byte pointer embedded {:032b}",
                         (rank_position_pointer & 0b11111111_11111111_11111111) >> 21
                     );
@@ -2526,7 +2526,7 @@ pub(crate) fn decode_positions_commit(
                 }
 
                 (_, _) => {
-                    println!(
+                    log::warn!(
                         "unsupported single 2 byte pointer embedded commit {} {:032b}",
                         indexed_field_vec_len == 1,
                         rank_position_pointer >> 12
@@ -2632,7 +2632,7 @@ pub(crate) fn decode_positions_commit(
                 }
 
                 (_, _) => {
-                    println!(
+                    log::warn!(
                         "unsupported single 3 byte pointer embedded commit {} {:032b}",
                         indexed_field_vec_len == 1,
                         (rank_position_pointer & 0b11111111_11111111_11111111) >> 19

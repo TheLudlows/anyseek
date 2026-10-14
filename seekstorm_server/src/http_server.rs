@@ -1,3 +1,4 @@
+use crate::api_types::{SearchRequestObject, CreateIndexRequest, GetIteratorRequest, GetDocumentRequest};
 use hyper_util::server::conn::auto;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -24,8 +25,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 
 use seekstorm::INDEX_RUNTIME;
 use seekstorm::index::{
-    CreateIndexRequest, Document,
-    GetDocumentRequest, GetIteratorRequest, SearchRequestObject, Synonym,
+    Document,
+    Synonym,
 };
 
 use sha2::Digest;

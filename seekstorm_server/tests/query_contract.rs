@@ -1,8 +1,9 @@
+use seekstorm_server::api_types::{SearchRequestObject, CreateIndexRequest};
 use seekstorm::{
     commit::Commit,
-    index::{AccessType, Close, Clustering, CreateIndexRequest, Document, DocumentCompression,
+    index::{AccessType, Close, Clustering, Document, DocumentCompression,
         FrequentwordType, IndexArc, IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet,
-        SchemaField, SearchRequestObject, StemmerType, StopwordType, TokenizerType, create_index, open_index},
+        SchemaField, StemmerType, StopwordType, TokenizerType, create_index, open_index},
     search::{QueryType, ResultType, Search, SearchMode},
     vector::Inference,
 };

@@ -387,3 +387,12 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 删除源码中的 SIFT/Wikipedia 历史召回数字与量化优越性描述，同步 API 示例、OpenAPI、格式说明和 PR #12 合入状态。
 
 验证覆盖：RAM/MMAP 的根索引和分片拒绝旧 major/不匹配 minor；新格式字段形状与旧统计槽拒绝；元数据未知字段拒绝；正常提交/关闭重开后的过滤与排序。当前执行环境没有 Rust 工具链，本地仅做差异/静态检查；编译、全量测试、HTTP/Chromium 和 OpenAPI 精确对比由本 PR 的 CI 执行，结果记录在 PR。
+
+
+## HTTP/OpenAPI 与信息输出边界（2026-10-14）
+
+- HTTP 请求/响应 DTO 移到服务 `api_types.rs`，仅用于 OpenAPI 的 Range 类型也移出核心；删除核心 utoipa 依赖、api-schema feature 及全部 OpenAPI 注解。核心 schema/过滤/向量值仍直接用于运行时，服务通过 `api_schema.rs` 描述它们，不增加请求转换层。公共类型的 remote Serialize derive 提供字段/变体编译校验；SchemaField 的私有内部 ID 不进入接口描述。
+- 核心 `IndexInfo` 返回数字、枚举和 SystemTime；服务负责标签、千分位、单位、日期和表格。统计采集不再执行 fsync。核心直接打印改为 log 门面；调用方决定输出器，服务用 env_logger 初始化并支持 RUST_LOG，保留 mute 对进度日志的控制。
+- 五份依赖 HTTP DTO 的契约/检索回归移到服务 integration tests，既有用例保留。新增测试验证结构化统计、采集不隐式提交，以及调用方启用/关闭日志。CI 边界脚本增加源码和 manifest 检查，阻止 HTTP DTO、OpenAPI、终端依赖和直接打印回流。
+- 本地通过：独立核心默认/无默认 feature 构建及依赖边界；workspace 构建；63 项 Rust 测试（0 failed/ignored）；44 项 doctest；HTTP API 和 7 项 UI 静态资源冒烟；重新生成的 OpenAPI JSON/YAML 与现有文件精确一致。浏览器回归由 PR CI 执行，最终提交/run 结果记录在 PR。
+- 本批不改变线程/分片运行时配置、DocID、索引格式 7.0 或提交 Result 契约；日志输出可配置不代表提交错误已正确传播。

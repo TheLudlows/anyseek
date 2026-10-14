@@ -1,237 +1,112 @@
-use std::{fs::metadata, path::Path, sync::Arc};
-use num_format::{Locale, ToFormattedString};
-use tokio::sync::RwLock;
-use crate::{index::{INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR, Index, Info, META_FILENAME}, utils::dir_size, vector::Quantization, vector_similarity::VectorSimilarity};
+//! Typed index statistics, independent of HTTP and terminal presentation.
+use crate::{
+    index::{IndexArc, IndexMetaObject, META_FILENAME},
+    utils::dir_size,
+    vector::{Precision, Quantization},
+    vector_similarity::VectorSimilarity,
+};
+use std::{fs::metadata, path::Path, time::SystemTime};
 
-/// Information collected independently of terminal rendering.
+/// A snapshot of index configuration and counters. Collection does not commit or sync files.
+#[derive(Debug, Clone)]
 pub struct IndexInfo {
-    /// Labels and values for index statistics.
-    pub entries: Vec<Info>,
-    /// Creation time, when the filesystem supports it.
-    pub creation_time: Option<std::time::SystemTime>,
+    /// Index identity and configuration.
+    pub meta: IndexMetaObject,
+    /// Stored major and minor format versions.
+    pub format_version: (u16, u16),
+    /// Indexed document count.
+    pub indexed_documents: usize,
+    /// Deleted document count.
+    pub deleted_documents: usize,
+    /// Schema field count.
+    pub fields: usize,
+    /// Indexed field count.
+    pub indexed_fields: usize,
+    /// Stored field count.
+    pub stored_fields: usize,
+    /// Internal shard count.
+    pub shards: usize,
+    /// Index level count.
+    pub levels: usize,
+    /// Size of the index directory in bytes.
+    pub index_size_bytes: u64,
+    /// Filesystem creation time, if supported.
+    pub creation_time: Option<SystemTime>,
     /// Whether lexical indexing is enabled.
     pub lexical: bool,
     /// Whether vector indexing is enabled.
     pub vector: bool,
+    /// Lexical segment count.
+    pub segments: usize,
+    /// Filter/sort metadata field count.
+    pub metadata_fields: usize,
+    /// Stop-word count.
+    pub stop_words: usize,
+    /// Frequent-word count.
+    pub frequent_words: usize,
+    /// Synonym map entry count.
+    pub synonyms: usize,
+    /// Indexed vector count.
+    pub indexed_vectors: usize,
+    /// Indexed cluster count.
+    pub indexed_clusters: usize,
+    /// Original vector dimensionality.
+    pub vector_dimensions: usize,
+    /// Internal vector dimensionality, including padding.
+    pub padded_dimensions: usize,
+    /// Vector precision.
+    pub precision: Precision,
+    /// Vector quantization method.
+    pub quantization: Quantization,
+    /// Whether Euclidean scalar quantization uses an affine mapping; otherwise None.
+    pub scalar_affine: Option<bool>,
+    /// Vector similarity metric.
+    pub vector_similarity: VectorSimilarity,
 }
 
-/// Collect index statistics without printing or depending on a terminal renderer.
-pub async fn collect_index_info(
-    index_arc: &Arc<RwLock<Index>>,
-    time_label: &'static str,
-    time_value: String,
-) -> IndexInfo {
-    let index_ref = index_arc.read().await;
-
-    let non_affine_string = if index_ref.quantization == Quantization::ScalarQuantizationI8
-        && index_ref.vector_similarity == VectorSimilarity::Euclidean
-    {
-        let non_affine = index_ref.shard_vec[0].read().await.max_vector_value == f32::MIN;
-        if non_affine {
-            " (non-affine)".to_string()
-        } else {
-            " (affine)".to_string()
-        }
-    } else {
-        "".to_string()
-    };
-
-    let index_path = index_ref.index_path_string.clone();
-    let level_count = index_ref.level_count().await;
-    let file_date = metadata(Path::new(&index_path).join(META_FILENAME))
-        .ok().and_then(|metadata| metadata.created().ok());
-
-    for shard in index_ref.shard_vec.iter() {
-        shard.read().await.index_file.sync_all().unwrap();
-        shard.read().await.vector_file.sync_all().unwrap();
-        shard.read().await.facets_file.sync_all().unwrap();
-        shard.read().await.docstore_file.sync_all().unwrap();
-    }
-    let index_size = dir_size(Path::new(&index_ref.index_path_string)).unwrap_or(0);
-
-    let dimensions_label = if index_ref.vector_dimensions != index_ref.vector_dimensions_original {
-        " (".to_owned()
-            + &index_ref.shard_vec[0]
-                .read()
-                .await
-                .vector_dimensions
-                .to_formatted_string(&Locale::en)
-            + " padded)"
-    } else {
-        "".to_string()
-    };
-
-    let info_entries = vec![
-        Info {
-            entry: "Index",
-            value: "".to_string(),
-        },
-        Info {
-            entry: "index id, name",
-            value: index_ref.meta.id.to_string() + " " + &index_ref.meta.name,
-        },
-        Info {
-            entry: "index format version",
-            value: index_ref.index_format_version_major.to_string()
-                + "."
-                + &index_ref.index_format_version_minor.to_string()
-                + " "
-                + &INDEX_FORMAT_VERSION_MAJOR.to_string()
-                + "."
-                + &INDEX_FORMAT_VERSION_MINOR.to_string(),
-        },
-        Info {
-            entry: "indexed documents",
-            value: index_ref
-                .indexed_doc_count()
-                .await
-                .to_formatted_string(&Locale::en),
-        },
-        Info {
-            entry: "deleted documents",
-            value: index_ref.deleted_doc_count.to_formatted_string(&Locale::en),
-        },
-        Info {
-            entry: "fields",
-            value: index_ref.schema_map.len().to_string()
-                + " ("
-                + &index_ref.indexed_field_vec.len().to_string()
-                + " indexed, "
-                + &index_ref.stored_field_names.len().to_string()
-                + " stored)",
-        },
-        Info {
-            entry: "shards",
-            value: index_ref.shard_count().await.to_string(),
-        },
-        Info {
-            entry: "levels",
-            value: level_count.to_string(),
-        },
-        Info {
-            entry: "document compression",
-            value: index_ref.meta.document_compression.to_string(),
-        },
-        Info {
-            entry: "index size",
-            value: index_size.to_formatted_string(&Locale::en) + " bytes",
-        },
-        Info {
-            entry: "creation date",
-            value: String::new(),
-        },
-        Info {
-            entry: time_label,
-            value: time_value,
-        },
-        Info {
-            entry: "Lexical",
-            value: index_ref.is_lexical_indexing.to_string(),
-        },
-        Info {
-            entry: "segments",
-            value: index_ref.segment_number1.to_string(),
-        },
-        Info {
-            entry: "n-grams",
-            value: format!("{:08b}", index_ref.meta.ngram_indexing),
-        },
-        Info {
-            entry: "facets",
-            value: index_ref.facets.len().to_string(),
-        },
-        Info {
-            entry: "tokenizer",
-            value: index_ref.meta.tokenizer.to_string(),
-        },
-        Info {
-            entry: "stemmer",
-            value: index_ref.meta.stemmer.to_string(),
-        },
-        Info {
-            entry: "stop words",
-            value: index_ref.shard_vec[0]
-                .read()
-                .await
-                .stop_words
-                .len()
-                .to_string(),
-        },
-        Info {
-            entry: "frequent words",
-            value: index_ref.shard_vec[0]
-                .read()
-                .await
-                .frequent_words
-                .len()
-                .to_string(),
-        },
-        Info {
-            entry: "synonyms",
-            value: index_ref.synonyms_map.len().to_string(),
-        },
-        Info {
-            entry: "similarity",
-            value: index_ref.meta.lexical_similarity.to_string(),
-        },
-        Info {
-            entry: "Vector",
-            value: index_ref.is_vector_indexing.to_string(),
-        },
-        Info {
-            entry: "indexed vectors",
-            value: index_ref
-                .indexed_vector_count()
-                .await
-                .to_formatted_string(&Locale::en)
-                + " ("
-                + &(index_ref.indexed_vector_count().await / level_count.max(1))
-                    .to_formatted_string(&Locale::en)
-                + " per level)",
-        },
-        Info {
-            entry: "indexed clusters",
-            value: index_ref
-                .indexed_cluster_count()
-                .await
-                .to_formatted_string(&Locale::en)
-                + " ("
-                + &(index_ref.indexed_cluster_count().await / level_count.max(1))
-                    .to_formatted_string(&Locale::en)
-                + " per level)",
-        },
-        Info {
-            entry: "dimensions",
-            value: index_ref
-                .vector_dimensions_original
-                .to_formatted_string(&Locale::en)
-                + &dimensions_label,
-        },
-        Info {
-            entry: "precision, quantization",
-            value: index_ref.vector_precision.to_string()
-                + ", "
-                + &index_ref.quantization.to_string()
-                + &non_affine_string,
-        },
-        Info {
-            entry: "inference",
-            value: index_ref.meta.inference.to_string(),
-        },
-        Info {
-            entry: "clustering",
-            value: index_ref.meta.clustering.to_string(),
-        },
-        Info {
-            entry: "similarity",
-            value: index_ref.vector_similarity.to_string(),
-        },
-    ];
-
+/// Collect typed statistics without formatting, printing, committing or syncing index files.
+pub async fn collect_index_info(index: &IndexArc) -> IndexInfo {
+    let index = index.read().await;
+    let indexed_documents = index.indexed_doc_count().await;
+    let indexed_vectors = index.indexed_vector_count().await;
+    let indexed_clusters = index.indexed_cluster_count().await;
+    let levels = index.level_count().await;
+    let shards = index.shard_count().await;
+    let shard = index.shard_vec[0].read().await;
+    let scalar_affine = (index.quantization == Quantization::ScalarQuantizationI8
+        && index.vector_similarity == VectorSimilarity::Euclidean)
+        .then_some(shard.max_vector_value != f32::MIN);
     IndexInfo {
-        entries: info_entries,
-        creation_time: file_date,
-        lexical: index_ref.is_lexical_indexing,
-        vector: index_ref.is_vector_indexing,
+        meta: index.meta.clone(),
+        format_version: (
+            index.index_format_version_major,
+            index.index_format_version_minor,
+        ),
+        indexed_documents,
+        deleted_documents: index.deleted_doc_count,
+        fields: index.schema_map.len(),
+        indexed_fields: index.indexed_field_vec.len(),
+        stored_fields: index.stored_field_names.len(),
+        shards,
+        levels,
+        index_size_bytes: dir_size(Path::new(&index.index_path_string)).unwrap_or(0),
+        creation_time: metadata(Path::new(&index.index_path_string).join(META_FILENAME))
+            .ok()
+            .and_then(|metadata| metadata.created().ok()),
+        lexical: index.is_lexical_indexing,
+        vector: index.is_vector_indexing,
+        segments: index.segment_number1,
+        metadata_fields: index.facets.len(),
+        stop_words: shard.stop_words.len(),
+        frequent_words: shard.frequent_words.len(),
+        synonyms: index.synonyms_map.len(),
+        indexed_vectors,
+        indexed_clusters,
+        vector_dimensions: index.vector_dimensions_original,
+        padded_dimensions: index.vector_dimensions,
+        precision: index.vector_precision,
+        quantization: index.quantization,
+        scalar_affine,
+        vector_similarity: index.vector_similarity,
     }
 }

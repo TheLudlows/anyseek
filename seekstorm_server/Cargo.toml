@@ -23,8 +23,10 @@ name = "seekstorm_server"
 path = "src/main.rs"
 
 [dependencies]
+log = "0.4"
+env_logger = "0.11"
 # This forces the library to compile WITH gxhash when building the server binary
-seekstorm = { version = "3.4.1", path = "../seekstorm" , features = ["gxhash", "api-schema"], default-features = false}
+seekstorm = { version = "3.4.1", path = "../seekstorm" , features = ["gxhash"], default-features = false}
 base64 = "0.23.1"
 colored = "3.1.1"
 chrono = "0.4.45"

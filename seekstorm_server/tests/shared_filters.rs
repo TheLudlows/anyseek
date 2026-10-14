@@ -1,10 +1,11 @@
 //! A closer excluded vector must not consume the filtered result window.
+use seekstorm_server::api_types::SearchRequestObject;
 use seekstorm::{
     commit::Commit,
     index::{
         AccessType, Close, Clustering, DeleteDocument, Document, DocumentCompression,
         FrequentwordType, IndexArc, IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet,
-        SchemaField, SearchRequestObject, StemmerType, StopwordType, TokenizerType, UpdateDocument,
+        SchemaField, StemmerType, StopwordType, TokenizerType, UpdateDocument,
         create_index, open_index,
     },
     search::{ResultObject, Search},

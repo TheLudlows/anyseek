@@ -523,7 +523,7 @@ pub(crate) fn docid_iterator(
             );
         }
     } else {
-        println!("postingPointerSize exceeded: {}", posting_pointer_size);
+        log::warn!("postingPointerSize exceeded: {}", posting_pointer_size);
     }
 
     if plo.ngram_type == NgramType::SingleTerm

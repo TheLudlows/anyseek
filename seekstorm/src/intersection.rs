@@ -1992,7 +1992,7 @@ pub(crate) async fn intersection_docid(
             },
 
             _ => {
-                println!(
+                log::warn!(
                     "invalid compression combination:  block: {}  t1: {} {} {} {:?}   t2: {} {} {} {:?} {} ",
                     block_id,
                     t1,

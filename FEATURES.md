@@ -80,9 +80,9 @@ UI 默认使用 demo key 和索引 0；初始化 key/索引及写入使用 API�
 - API key 鉴权、按 key 的索引/数据目录隔离、随机 key 与固定 demo key；无内置配额或限流。
 - 启动参数：`index_path`、`local_ip`、`local_port`、`force_shard_number`、`generate_openapi`；未知、重复、非法参数启动失败。
 - 终端命令：`create`、`delete`、`info`、`search`、`openapi`、`help`、`quit`。`search -v [1,0,0]` 是 demo key/索引 0 的向量诊断入口。
-- 生成 OpenAPI JSON/YAML；服务端终端状态表；核心库 `info::collect_index_info` 统计采集。
+- 生成 OpenAPI JSON/YAML；服务端终端状态表；核心库 `info::collect_index_info` 返回结构化统计，采集不提交或同步文件。核心日志由调用方配置；服务支持 `RUST_LOG`。
 - Rust 核心库可嵌入应用；HTTP 服务内嵌静态 UI；保留 Dockerfile 从源码构建。两个 crate 均 `publish=false`。
-- 核心默认 features 为 `zh`、`vb`。`vb` 提供来源、两路分数及 shard/level/cluster 等诊断字段；这些字段不表示保留自动切块。`api-schema` 可选、服务开启；`gxhash` 可选。
+- 核心默认 features 为 `zh`、`vb`。`vb` 提供来源、两路分数及 shard/level/cluster 等诊断字段；这些字段不表示保留自动切块。`gxhash` 可选。HTTP DTO 与 OpenAPI 全部位于服务，核心不提供 `api-schema` feature。
 - CI 保留独立核心构建/依赖边界、workspace 构建与测试、HTTP/Chromium、静态资源及生成 OpenAPI 一致性检查。
 
 ## 5. 已移除与尚未实现
