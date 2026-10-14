@@ -211,6 +211,17 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
 
     let start_time = Instant::now();
     open_all_apikeys(&index_path, &mut apikey_list_mut).await;
+    match crate::bootstrap::initialize_key(&index_path, &mut apikey_list_mut) {
+        Ok(Some(key)) => {
+            println!("Initial API key: {key}");
+            println!("Save this key now; it will not be displayed again. Open the Web UI to connect and create an index.");
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("API key initialization failed: {error}");
+            std::process::exit(1);
+        }
+    }
     let elapsed_time = start_time.elapsed().as_nanos();
 
     let tenants_count = apikey_list_mut.len();
