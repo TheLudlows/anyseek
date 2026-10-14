@@ -11,6 +11,7 @@ import hashlib
 from html.parser import HTMLParser
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import socket
@@ -119,8 +120,29 @@ def exercise(binary, workdir):
         try:
             ready(process)
             print('PASS health')
+            initial_keys = re.findall(r'^Initial API key: (.+)$', log_path.read_text(), re.MULTILINE)
+            check(len(initial_keys) == 1, 'first startup did not generate exactly one key')
+            initial_key = initial_keys[0]
+            check(len(base64.b64decode(initial_key)) == 32 and initial_key != master,
+                  'initial key is not an independent 256-bit ordinary credential')
+            check(json.loads(request('GET', '/api/v1/apikey', key=initial_key)) == {'Ok': []},
+                  'initial key must have an empty index scope')
+            request('POST', '/api/v1/apikey', {}, initial_key, expected=401)
+            initial_identity = (workdir / 'index' / '0' / 'apikey.json').read_bytes()
+            check(initial_key.encode() not in initial_identity, 'plaintext key persisted in identity')
+            process.terminate()
+            process.wait(timeout=10)
+            process = launch()
+            ready(process)
+            request('GET', '/api/v1/apikey', key=initial_key)
+            check((workdir / 'index' / '0' / 'apikey.json').read_bytes() == initial_identity,
+                  'restart changed initial identity')
+            check(len(re.findall(r'^Initial API key:', log_path.read_text(), re.MULTILINE)) == 1,
+                  'restart generated or redisplayed an initial key')
+            print('PASS first-run random key, ordinary authorization and restart idempotency')
 
             html = request('GET', '/').decode()
+            check(initial_key not in html and master not in html, 'credentials leaked into public HTML')
             check('searchInput' in html and 'searchMain' in html, 'search UI missing')
             assets = Assets()
             assets.feed(html)
@@ -425,10 +447,12 @@ def exercise(binary, workdir):
                 from playwright.sync_api import sync_playwright
                 with sync_playwright() as browser_driver:
                     browser = browser_driver.chromium.launch()
+                    from setup_browser_smoke import exercise_setup
+                    exercise_setup(browser, base, initial_key, master)
                     page = browser.new_page()
                     errors = []
                     page.on('pageerror', lambda error: (errors.append(str(error)), print(f'BROWSER ERROR: {error}')))
-                    page.goto(base + f'/?index_id={vector_id}&q=alpha')
+                    page.goto(base + '/?' + urlencode({'api_key': api_key, 'index_id': vector_id, 'q': 'alpha'}))
                     page.locator('#contentBox .resultEntry').first.wait_for()
                     check(page.locator('input[value="Lexical"]').is_checked(), 'UI default mode')
                     page.locator('label[data-index="0"]').click()
@@ -551,7 +575,7 @@ def exercise(binary, workdir):
                 check(not isinstance(value, dict) or 'Err' not in value, f'scoped request failed: {value}')
                 return value['Ok'] if isinstance(value, dict) and set(value) == {'Ok'} else value
 
-            key_file = workdir / 'index' / '0' / 'apikey.json'
+            key_file = workdir / 'index' / '1' / 'apikey.json'
             key_bytes = key_file.read_bytes()
             key_record = json.loads(key_bytes)
             check(set(key_record) == {'id', 'apikey_hash'}, 'new key persisted quota or runtime scope')
@@ -595,6 +619,7 @@ def exercise(binary, workdir):
             legacy_bytes = json.dumps(key_record).encode()
             key_file.write_bytes(legacy_bytes)
             persisted_files = {str(file.relative_to(workdir / 'index')) for file in (workdir / 'index').rglob('apikey.json')}
+            (workdir / 'index' / 'bootstrap.complete').unlink()  # Existing install before bootstrap support.
             process = launch()
             ready(process)
             assert_scopes()
@@ -614,6 +639,19 @@ def exercise(binary, workdir):
             check(api('DELETE', path + '/doc', b'clear') == 0, 'clear count mismatch')
             check(api('GET', path)['indexed_doc_count'] == 0, 'index not empty after clear')
             print('PASS clear and index info')
+            request('DELETE', '/api/v1/apikey', {'apikey_base64': initial_key}, master)
+            request('DELETE', '/api/v1/apikey', {'apikey_base64': api_key}, master)
+            check(not list((workdir / 'index').rglob('apikey.json')), 'revocation did not remove identities')
+            process.terminate()
+            process.wait(timeout=10)
+            process = launch()
+            ready(process)
+            request('GET', '/api/v1/apikey', key=initial_key, expected=401)
+            request('GET', '/api/v1/apikey', key=api_key, expected=401)
+            check(not list((workdir / 'index').rglob('apikey.json')), 'revoked keys were regenerated')
+            check(len(re.findall(r'^Initial API key:', log_path.read_text(), re.MULTILINE)) == 1,
+                  'revocation/restart created an unsolicited credential')
+            print('PASS existing installation unchanged and all-keys-revoked restart')
         except BaseException:
             log.flush()
             print(log_path.read_text(errors='replace'))

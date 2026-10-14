@@ -396,3 +396,12 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - 五份依赖 HTTP DTO 的契约/检索回归移到服务 integration tests，既有用例保留。新增测试验证结构化统计、采集不隐式提交，以及调用方启用/关闭日志。CI 边界脚本增加源码和 manifest 检查，阻止 HTTP DTO、OpenAPI、终端依赖和直接打印回流。
 - 本地通过：独立核心默认/无默认 feature 构建及依赖边界；workspace 构建；63 项 Rust 测试（0 failed/ignored）；44 项 doctest；HTTP API 和 7 项 UI 静态资源冒烟；重新生成的 OpenAPI JSON/YAML 与现有文件精确一致。浏览器回归由 PR CI 执行，最终提交/run 结果记录在 PR。
 - 本批不改变线程/分片运行时配置、DocID、索引格式 7.0 或提交 Result 契约；日志输出可配置不代表提交错误已正确传播。
+
+
+## 首次初始化与索引创建界面（2026-10-14）
+
+基点为已合入 PR #14 的 `74d5012`。全新空数据目录初始化随机普通 key，仅首次日志显示；持久化身份仍只保存哈希。初始化标记独立于 key 目录，已有安装不会增建 key，撤销全部 key 后重启不会重新生成。新增界面复用 GET /api/v1/apikey 和 POST /api/v1/index，支持 key 连接、当前作用域索引列表、三种创建预设、向量维度、schema JSON、切换和忘记凭证；sessionStorage 保存当前标签页连接状态。
+
+本地 workspace 构建、63 项 Rust 测试、HTTP/8 个静态资源、首次/重复启动/已有安装/全部撤销后启动、鉴权和作用域回归通过。OpenAPI JSON/YAML 与仓库精确一致，未增加业务 API。Python/JavaScript 语法与 diff 检查通过。
+
+浏览器脚本增加错误 key/主密钥拒绝、空索引、三模式创建、客户端/服务端校验、作用域列表、索引切换、刷新恢复、忘记凭证及移动端溢出检查；本地 Chromium 下载失败，实际浏览器结果以本 PR 的 CI 为准。核心与索引格式未改变；本批不提供故障恢复或文档导入界面。

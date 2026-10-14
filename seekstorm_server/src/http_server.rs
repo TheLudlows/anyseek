@@ -59,6 +59,7 @@ use crate::{MASTER_KEY_SECRET, VERSION};
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const FLEXBOX_CSS: &str = include_str!("../web/css/flexboxgrid.min.css");
 const MASTER_CSS: &str = include_str!("../web/css/master.css");
+const SETUP_JS: &str = include_str!("../web/js/setup.js");
 const MASTER_JS: &str = include_str!("../web/js/master.js");
 const JQUERY_JS: &str = include_str!("../web/js/jquery-3.7.1.min.js");
 const LOGO_SVG: &[u8] = include_bytes!("../web/svg/logo.svg");
@@ -1026,6 +1027,7 @@ pub(crate) async fn http_request_handler(
             "/" => Ok(Response::new(BoxBody::new(INDEX_HTML.to_string()))),
             "/css/flexboxgrid.min.css" => Ok(Response::new(BoxBody::new(FLEXBOX_CSS.to_string()))),
             "/css/master.css" => Ok(Response::new(BoxBody::new(MASTER_CSS.to_string()))),
+            "/js/setup.js" => Ok(Response::new(BoxBody::new(SETUP_JS.to_string()))),
             "/js/master.js" => Ok(Response::new(BoxBody::new(MASTER_JS.to_string()))),
             "/js/jquery-3.7.1.min.js" => Ok(Response::new(BoxBody::new(JQUERY_JS.to_string()))),
 

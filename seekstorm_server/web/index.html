@@ -11,24 +11,39 @@
 <link rel=stylesheet type=text/css media=screen href=css/master.css>
 <script src=js/jquery-3.7.1.min.js></script>
 <script src=js/master.js></script>
+<script src=js/setup.js></script>
 </head>
 <body>
-<div id=welcome style="display:none;align-items:center;justify-content:center;height:100vh;font-style:normal;font-size:14px;font-family:'JetBrains Mono',Montserrat,sans-serif;color:#0e5ba3">
-<div style=width:50%;height:50%>
-<p style=font-size:16px><b>Welcome to the SeekStorm 🌱 open-source ⚡ sub-millisecond 🔍 search server in 🦀 Rust!</b></p>
-<p>&nbsp;</p>
-<p>Please create an <b>API key</b> and <b>index</b> first via <b>REST API</b>: See <a href=https://seekstorm.com/documentation/>REST API documentation</a>.</p>
-<p>You find the required <b>master API key</b> in the <b>console</b> or in the <b>docker desktop</b> / view details / logs.</p>
-<p>Alternatively, you may create a demo API key also with the <b>search server console</b> command <b>"create"</b>.</p>
-<p>&nbsp;</p>
-<p>Then, reload the page to see the embedded search UI.</p>
-<p>Per default the search UI uses the demo API key and index_id 0.</p>
-<p>To overwrite the default API key and index_id use URL parameters:
-<p>http://127.0.0.1/?api_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=&index_id=0</p>
-<p>&nbsp;</p>
-<p>For more information visit <a href=https://github.com/SeekStorm/SeekStorm>https://github.com/SeekStorm/SeekStorm</a>.</p>
+<button id="manageIndexes" class="manage-indexes" type="button">Indexes / API key</button>
+<section id="welcome" class="setup-panel" style="display:none" aria-labelledby="setupTitle">
+<h1 id="setupTitle">Connect &amp; create an index</h1>
+<p>On first startup, the server prints an <strong>Initial API key</strong> in its console or Docker logs. Paste that key below (not the master key).</p>
+<form id="connectForm">
+<label for="setupKey">API key</label>
+<div class="setup-inline"><input id="setupKey" type="password" required autocomplete="off" spellcheck="false"><button type="submit">Connect</button></div>
+<p class="setup-help">Saved only in this browser tab's session. Use “Forget key” on a shared computer.</p>
+<button id="forgetKey" type="button">Forget key</button>
+</form>
+<p id="setupError" role="alert"></p>
+<div id="indexManager" hidden>
+<form id="selectIndexForm">
+<label for="indexList">Existing indexes</label>
+<div class="setup-inline"><select id="indexList"></select><button id="openIndex" type="submit">Open index</button></div>
+<p id="indexListStatus" role="status"></p>
+</form>
+<hr>
+<form id="createIndexForm">
+<h2>Create index</h2>
+<label for="newIndexName">Index name</label><input id="newIndexName" required maxlength="200" placeholder="my-index">
+<label for="indexMode">Search mode</label><select id="indexMode"><option value="Lexical">Lexical — text search</option><option value="Vector">Vector — external embeddings</option><option value="Hybrid">Hybrid — text and embeddings</option></select>
+<div id="dimensionControl" hidden><label for="vectorDimensions">Vector dimensions</label><input id="vectorDimensions" type="number" min="1" max="65535" step="1" value="384"><p class="setup-help">Must match your external embedding model. Vectors are supplied in the “vector” document field; this server does not generate embeddings.</p></div>
+<p class="setup-help">Default fields: title, body and url. Vector/Hybrid also include vector (F32, cosine similarity).</p>
+<details><summary>Advanced: field schema (JSON)</summary><p class="setup-help">Edit field names, storage, lexical/vector indexing and filter/sort metadata. Changing search mode resets this schema.</p><label for="indexSchema">Schema</label><textarea id="indexSchema" rows="12" spellcheck="false"></textarea></details>
+<button type="submit">Create &amp; open index</button>
+<p class="setup-help">Creates an empty index. Add records through POST /api/v1/index/{id}/doc.</p>
+</form>
 </div>
-</div>
+</section>
 <div class=h100 id=landingSearch>
 <div class="row center-xs middle-xs h100">
 <div class="col-xs-10 col-md-8 col-lg-6 content">

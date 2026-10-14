@@ -20,11 +20,22 @@ target/debug/seekstorm_server local_ip=127.0.0.1 local_port=8080
 
 仅接受 `name=value`，未知、重复、非法参数返回退出码 2。`MASTER_KEY_SECRET` 用于派生主密钥；须配置私有值，源码默认值不适合部署使用。可使用仓库 [Dockerfile](../Dockerfile) 构建此分支。
 
-## 创建 key、索引并检索
+## 首次启动与界面创建索引
+
+全新、空的数据目录首次启动时，服务自动生成一个随机普通 API key，日志中显示 `Initial API key: ...`。保存这个 key；明文只在初始化时显示一次，磁盘身份文件仅保存哈希。
+
+1. 打开 `http://127.0.0.1:8080/`，输入这个普通 key 并点击 **Connect**。
+2. 填写索引名称，选择 **Lexical / Vector / Hybrid**。向量模式填写外部模型维度；默认 F32、Cosine，向量字段名为 `vector`。
+3. 可展开高级选项编辑字段 schema，然后点击 **Create & open index**。
+4. 通过下面的 JSON API 写入文档；右上角 **Indexes / API key** 可重新连接、创建或切换索引。
+
+重启复用已持久化的 key/索引。已有 key 的安装不会额外创建新 key。数据根目录的 `bootstrap.complete` 记录初始化已完成，应与整个数据目录一同保存；撤销全部 key 后重启也不会重新生成凭证。丢失首次输出的 key 时，用主密钥调用创建 key API 获取新 key。新 key 是独立的数据作用域，不会自动接管旧 key 下的索引。
+
+## API 创建 key、索引并检索
 
 服务默认输出 info 级别日志，可通过 `RUST_LOG=seekstorm=warn` 限制核心日志，或 `RUST_LOG=off` 关闭日志。终端交互/状态表由服务单独展示。
 
-以下为 POSIX shell 示例。将 `MASTER_KEY` 替换为启动日志显示的主密钥，再把创建响应的 key 填入 `API_KEY`。
+以下为 POSIX shell 示例。已有首次初始化的 key 时可直接填入 `API_KEY`，跳过创建 key 步骤。需要额外 key 时，将 `MASTER_KEY` 替换为启动日志显示的主密钥，再保存创建响应。
 
 ```sh
 BASE='http://127.0.0.1:8080'
@@ -51,17 +62,17 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 
 ## Web UI
 
-访问 `http://127.0.0.1:8080/`。默认使用 demo key 与索引 0，或用 `/?api_key=KEY&index_id=ID` 选择；URL 中的 key 应编码（例如 `+` 为 `%2B`）。UI 默认 Lexical，Vector/Hybrid 需要手动粘贴 JSON 查询向量，文本变化后由调用方更新向量。
+访问 `http://127.0.0.1:8080/`，通过连接表单输入普通 API key。密钥和选中的索引仅保存在当前标签页的 sessionStorage；点击 **Forget key** 清除本标签页凭证，但不会撤销服务端 key。仍接受 `/?api_key=KEY&index_id=ID`（key 须 URL 编码，例如 `+` 为 `%2B`）；读取后从地址栏移除 key，推荐直接使用连接表单。UI 默认 Lexical，Vector/Hybrid 需要手动粘贴 JSON 查询向量，文本变化后由调用方更新向量。
 
-保留结果分页、原文/外部链接预览、图片展示、UTC 日期起止输入、三种检索模式日期过滤和排序。日期交互依赖配置好的时间字段；Vector/Hybrid 需要有效查询向量；非法过滤条件明确报错。ANN 过滤受簇探测范围限制。创建索引、文档写入和 key 管理通过 API 完成。
+保留结果分页、原文/外部链接预览、图片展示、UTC 日期起止输入、三种检索模式日期过滤和排序。日期交互依赖配置好的时间字段；Vector/Hybrid 需要有效查询向量；非法过滤条件明确报错。ANN 过滤受簇探测范围限制。索引创建/选择有界面入口；文档写入、索引删除和 key 创建/撤销仍通过 API 完成。
 
-显示字段与默认 key/index 在 [web/js/master.js](web/js/master.js) 配置。静态资源嵌入可执行文件，修改后需重新构建。
+搜索逻辑在 [web/js/master.js](web/js/master.js)，连接与索引创建在 [web/js/setup.js](web/js/setup.js)。静态资源嵌入可执行文件，修改后需重新构建。
 
 ## 终端命令与维护
 
 | 命令 | 作用 |
 | --- | --- |
-| `create` | 创建固定 demo key；索引仍通过 HTTP 创建 |
+| `create` | 创建固定 demo key；索引通过界面或 HTTP 创建 |
 | `delete` | 删除 demo key 及其所有索引 |
 | `info` | 显示当前索引信息 |
 | `search -v [1,0,0]` | 对 demo key 下索引 0 运行向量诊断，维度须匹配 |
