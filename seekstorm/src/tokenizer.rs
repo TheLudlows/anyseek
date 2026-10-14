@@ -560,11 +560,7 @@ pub(crate) async fn tokenizer(
                 continue;
             }
 
-            let term_string = if let Some(stemmer) = index.stemmer.as_ref() {
-                stemmer.stem(term_string).to_string()
-            } else {
-                term_string.to_string()
-            };
+            let term_string = term_string.to_string();
 
             non_unique_terms_raw.push((term_string, query_type_term));
         } else {
@@ -572,11 +568,7 @@ pub(crate) async fn tokenizer(
                 continue;
             }
 
-            let term_string_0 = if let Some(stemmer) = index.stemmer.as_ref() {
-                stemmer.stem(term_string).to_string()
-            } else {
-                term_string.to_string()
-            };
+            let term_string_0 = term_string.to_string();
 
             let mut term_positions_len;
             let term_hash_0 = hash64(term_string_0.as_bytes());

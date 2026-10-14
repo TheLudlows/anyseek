@@ -4,7 +4,7 @@
 use seekstorm::commit::Commit;
 use seekstorm::index::{
     AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
-    IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType,
+    IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
     TokenizerType, create_index,
 };
 use seekstorm::vector::Inference;
@@ -25,7 +25,6 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
         name: "succ".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -34,7 +33,7 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    let index_arc = create_index(index_path, meta, &schema, &Vec::new(), 11, false, Some(1))
+    let index_arc = create_index(index_path, meta, &schema, 11, false, Some(1))
         .await
         .unwrap();
     // doc 0: indexed-only field -> no stored content -> slot stays 0.

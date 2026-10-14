@@ -44,8 +44,6 @@ pub struct IndexInfo {
     pub stop_words: usize,
     /// Frequent-word count.
     pub frequent_words: usize,
-    /// Synonym map entry count.
-    pub synonyms: usize,
     /// Indexed vector count.
     pub indexed_vectors: usize,
     /// Indexed cluster count.
@@ -99,7 +97,6 @@ pub async fn collect_index_info(index: &IndexArc) -> IndexInfo {
         metadata_fields: index.facets.len(),
         stop_words: shard.stop_words.len(),
         frequent_words: shard.frequent_words.len(),
-        synonyms: index.synonyms_map.len(),
         indexed_vectors,
         indexed_clusters,
         vector_dimensions: index.vector_dimensions_original,

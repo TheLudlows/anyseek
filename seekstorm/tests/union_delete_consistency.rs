@@ -11,7 +11,7 @@
 use seekstorm::commit::Commit;
 use seekstorm::index::{
     AccessType, Close, Clustering, DeleteDocuments, DocumentCompression, FrequentwordType,
-    IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType,
+    IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
     TokenizerType, create_index,
 };
 use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
@@ -24,7 +24,6 @@ fn meta() -> IndexMetaObject {
         name: "union_delete_consistency".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -73,7 +72,7 @@ async fn search(
 async fn fresh(dir: &str) -> seekstorm::index::IndexArc {
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
-    create_index(path, meta(), &schema(), &Vec::new(), 11, true, None)
+    create_index(path, meta(), &schema(), 11, true, None)
         .await
         .unwrap()
 }

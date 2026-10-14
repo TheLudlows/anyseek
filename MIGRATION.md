@@ -66,3 +66,9 @@
 - 核心 `AccessType` 仅保留 `Mmap`，删除 `Ram` 全量加载实现及 RAM 专用索引副本。Rust 调用方指定 `AccessType::Mmap`；旧 `Ram` 元数据直接拒绝。保留实时写入缓冲，Mmap 不表示零内存使用。
 - 格式版本仍为 7.0，保留的 Mmap + None/Snappy 文件布局不变；不扩大任何旧格式读取范围。
 - 删除未使用的 `half` 直接依赖。Web UI、向量精度/量化、BM25F Proximity、N-gram、普通过滤/排序继续保留。
+
+## 同义词与词干器删除（D5）
+
+创建索引 JSON 删除 `synonyms`、`stemmer` 字段（包括空数组、null 和 `None`）；传入旧字段返回 400。GET/POST/PUT `/api/v1/index/{id}/synonyms` 已删除。Rust `create_index` 不再接收同义词参数，`IndexMetaObject` 不再含 `stemmer`，相关类型和管理方法已删除。索引信息不再返回同义词计数。
+
+含旧 `stemmer` 元数据的索引不能打开，应从原始文档重建；不提供兼容读取或转换。新索引不写 `synonyms.json`。查询与写入保留分词和大小写等规范化，但不再做同义词扩展或词干化。停用词、高频词和词级 N-gram 保留。

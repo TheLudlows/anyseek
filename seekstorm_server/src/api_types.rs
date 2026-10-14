@@ -3,7 +3,7 @@ use crate::api_schema;
 use seekstorm::{
     index::{
         Clustering, Document, DocumentCompression, FrequentwordType, LexicalSimilarity, NgramSet,
-        SchemaField, StemmerType, StopwordType, Synonym, TokenizerType,
+        SchemaField, StopwordType, TokenizerType,
     },
     search::{FacetFilter, QueryType, ResultSort, ResultType, SearchMode},
     vector::Inference,
@@ -145,10 +145,6 @@ pub struct CreateIndexRequest {
     #[serde(default = "tokenizer_type_api")]
     #[schema(value_type = api_schema::TokenizerType)]
     pub tokenizer: TokenizerType,
-    #[serde(default)]
-    /// Specify stemmer
-    #[schema(value_type = api_schema::StemmerType)]
-    pub stemmer: StemmerType,
     /// Specify stop words for the index. Stop words are not indexed and not searched for. This can be used to reduce index size and improve search performance by excluding high-frequency, low-information terms from the index.
     #[serde(default)]
     #[schema(value_type = api_schema::StopwordType)]
@@ -179,11 +175,6 @@ pub struct CreateIndexRequest {
     #[serde(default = "document_compression_api")]
     #[schema(value_type = api_schema::DocumentCompression)]
     pub document_compression: DocumentCompression,
-    /// Specify synonyms for the index. Synonyms are used to expand search queries with additional terms that have the same or similar meaning, improving recall and search relevance. The multiway option specifies whether the synonym relationship is multiway (if true, all terms in the synonym set are considered synonyms of each other) or one-way (if false, only the first term in the synonym set is considered the main term, and the other terms are considered synonyms of the main term).
-    #[schema(required = false, example = json!([{"terms":["berry","lingonberry","blueberry","gooseberry"],"multiway":false}]))]
-    #[serde(default)]
-    #[schema(value_type = Vec<api_schema::Synonym>)]
-    pub synonyms: Vec<Synonym>,
     #[serde(default)]
     /// Enable clustering for vector search.
     #[schema(value_type = api_schema::Clustering)]

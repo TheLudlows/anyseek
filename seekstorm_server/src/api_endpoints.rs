@@ -19,7 +19,7 @@ use seekstorm::{
         AccessType, Clustering, DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
         FrequentwordType, IS_AVX2, IS_NEON,
         IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
-        LexicalSimilarity, SchemaField, StemmerType, StopwordType, Synonym, TokenizerType,
+        LexicalSimilarity, SchemaField, StopwordType, TokenizerType,
         UpdateDocument, UpdateDocuments, create_index, open_index,
     },
     iterator::{GetIterator, IteratorResult},
@@ -347,12 +347,10 @@ pub(crate) async fn create_index_api<'a>(
     schema: Vec<SchemaField>,
     lexical_similarity: LexicalSimilarity,
     tokenizer: TokenizerType,
-    stemmer: StemmerType,
     stop_words: StopwordType,
     frequent_words: FrequentwordType,
     ngram_indexing: u8,
     document_compression: DocumentCompression,
-    synonyms: Vec<Synonym>,
     force_shard_number: Option<usize>,
     apikey_object: &'a mut ApikeyObject,
     mute: bool,
@@ -379,7 +377,6 @@ pub(crate) async fn create_index_api<'a>(
         name: index_name,
         lexical_similarity,
         tokenizer,
-        stemmer,
         stop_words,
         frequent_words,
         ngram_indexing,
@@ -393,7 +390,6 @@ pub(crate) async fn create_index_api<'a>(
         &index_id_path,
         meta,
         &schema,
-        &synonyms,
         11,
         mute,
         force_shard_number,
@@ -483,27 +479,6 @@ pub(crate) async fn delete_index_api(
 pub(crate) async fn commit_index_api(index_arc: &IndexArc) -> Result<u64, String> {
     index_arc.commit().await;
     Ok(index_arc.read().await.indexed_doc_count().await as u64)
-}
-
-pub(crate) async fn set_synonyms_api(
-    index_arc: &IndexArc,
-    synonyms: Vec<Synonym>,
-) -> Result<usize, String> {
-    let mut index_mut = index_arc.write().await;
-    index_mut.set_synonyms(&synonyms)
-}
-
-pub(crate) async fn add_synonyms_api(
-    index_arc: &IndexArc,
-    synonyms: Vec<Synonym>,
-) -> Result<usize, String> {
-    let mut index_mut = index_arc.write().await;
-    index_mut.add_synonyms(&synonyms)
-}
-
-pub(crate) async fn get_synonyms_api(index_arc: &IndexArc) -> Result<Vec<Synonym>, String> {
-    let index_ref = index_arc.read().await;
-    index_ref.get_synonyms()
 }
 
 /// Get Index Info

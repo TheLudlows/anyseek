@@ -49,7 +49,6 @@ finl_unicode = "1.4.0"
 num_cpus = "1.17.0"
 snap = "1.1.2"
 bytemuck = { version = "1.25.2", features = ["derive","extern_crate_alloc"] }
-snowball_stemmers_rs = "1.0.1"
 
 [dev-dependencies]
 tokio-test = "0.4.6"

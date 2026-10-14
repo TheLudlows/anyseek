@@ -54,7 +54,7 @@ create index
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekstorm::index::{IndexMetaObject, Clustering, LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,StemmerType,NgramSet,SchemaField,FieldType,DocumentCompression,create_index};
+use seekstorm::index::{IndexMetaObject, Clustering, LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,SchemaField,FieldType,DocumentCompression,create_index};
 use seekstorm::vector::Inference;
 use seekstorm::vector_similarity::VectorSimilarity;
 
@@ -71,7 +71,6 @@ let meta = IndexMetaObject {
     name: "test_index".into(),
     lexical_similarity: LexicalSimilarity::Bm25f,
     tokenizer: TokenizerType::UnicodeAlphanumeric,
-    stemmer: StemmerType::None,
     stop_words: StopwordType::None,
     frequent_words: FrequentwordType::English,
     ngram_indexing: NgramSet::NgramFF as u8,
@@ -82,7 +81,7 @@ let meta = IndexMetaObject {
 };
 
 let segment_number_bits1=11;
-let index_arc=create_index(index_path,meta,&schema,&Vec::new(),segment_number_bits1,false,None).await.unwrap();
+let index_arc=create_index(index_path,meta,&schema, segment_number_bits1,false,None).await.unwrap();
 
 # });
 ```
@@ -459,7 +458,7 @@ create index
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use seekstorm::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,StemmerType,NgramSet,DocumentCompression,create_index};
+use seekstorm::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
 use seekstorm::vector::Inference;
 use seekstorm::vector_similarity::VectorSimilarity;
 
@@ -477,7 +476,6 @@ let meta = IndexMetaObject {
     name: "test_index".into(),
     lexical_similarity: LexicalSimilarity::Bm25f,
     tokenizer: TokenizerType::AsciiAlphabetic,
-    stemmer: StemmerType::None,
     stop_words: StopwordType::None,
     frequent_words: FrequentwordType::English,
     ngram_indexing: NgramSet::NgramFF as u8,
@@ -487,10 +485,9 @@ let meta = IndexMetaObject {
     inference: Inference::None,
 };
 
-let synonyms=Vec::new();
 
 let segment_number_bits1=11;
-let index_arc=create_index(index_path,meta,&schema,&synonyms,segment_number_bits1,false,None).await.unwrap();
+let index_arc=create_index(index_path,meta,&schema, segment_number_bits1,false,None).await.unwrap();
 
 # });
 ```
@@ -572,7 +569,7 @@ create index
 
     use std::path::Path;
     use std::sync::{Arc, RwLock};
-    use seekstorm::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,StemmerType,NgramSet,DocumentCompression,create_index};
+    use seekstorm::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
     use seekstorm::vector::{Embedding, Inference, Precision, Quantization};
     use seekstorm::vector_similarity::VectorSimilarity;
 
@@ -588,7 +585,6 @@ create index
         name: "test_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None ,
         frequent_words: FrequentwordType::English,
         ngram_indexing: NgramSet::SingleTerm as u8 ,
@@ -599,7 +595,7 @@ create index
     };
 
     let segment_number_bits1=11;
-    let index_arc=create_index(index_path,meta,&schema,&Vec::new(),segment_number_bits1,false,None).await.unwrap();
+    let index_arc=create_index(index_path,meta,&schema, segment_number_bits1,false,None).await.unwrap();
     let index=index_arc.read().await;
 
     let result=index.meta.id;

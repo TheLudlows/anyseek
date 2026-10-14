@@ -36,7 +36,6 @@ SeekPower 保留一个 Rust 核心库和一个 HTTP/Web UI 服务。当前是单
 | `docstore.bin` | 压缩的已存储文档字段 |
 | `facet.bin`、`facet.json` | 过滤/排序值及词典（不维护统计聚合） |
 | `delete.bin` | 删除标记 |
-| `synonyms.json` | 同义词配置 |
 
 Rust 核心与 HTTP 均使用 Mmap 访问已提交的数据，由操作系统管理驻留页；未提交写入和计算缓存仍在内存。文档压缩可选 None、Snappy，默认 Snappy。分词、高频词、N-gram、SIMD 和 posting 压缩仍保留。
 

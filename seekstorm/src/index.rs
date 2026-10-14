@@ -9,7 +9,6 @@ use search::{QueryType, Search};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use smallvec::SmallVec;
-use snowball_stemmers_rs::{Algorithm, Stemmer};
 use std::{
     cmp,
     collections::HashMap,
@@ -79,7 +78,6 @@ pub(crate) const INDEX_FILENAME: &str = "index.bin";
 pub(crate) const DOCSTORE_FILENAME: &str = "docstore.bin";
 pub(crate) const DELETE_FILENAME: &str = "delete.bin";
 pub(crate) const SCHEMA_FILENAME: &str = "schema.json";
-pub(crate) const SYNONYMS_FILENAME: &str = "synonyms.json";
 pub(crate) const META_FILENAME: &str = "index.json";
 pub(crate) const FACET_FILENAME: &str = "facet.bin";
 pub(crate) const FACET_VALUES_FILENAME: &str = "facet.json";
@@ -212,137 +210,6 @@ impl fmt::Display for TokenizerType {
             TokenizerType::WhitespaceLowercase => write!(f, "WhitespaceLowercase"),
             #[cfg(feature = "zh")]
             TokenizerType::UnicodeAlphanumericZH => write!(f, "UnicodeAlphanumericZH"),
-        }
-    }
-}
-
-/// Defines stemming behavior, reducing inflected words to their word stem, base or root form.
-/// Stemming increases recall, but decreases precision. It can introduce false positive results.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default)]
-pub enum StemmerType {
-    /// No stemming
-    #[default]
-    None = 0,
-    /// Arabic stemmer
-    Arabic = 1,
-    /// Armenian stemmer
-    Armenian = 2,
-    /// Basque stemmer
-    Basque = 3,
-    /// Catalan stemmer
-    Catalan = 4,
-    /// Czech stemmer
-    Czech = 5,
-    /// Danish stemmer
-    Danish = 6,
-    /// Dutch stemmer
-    Dutch = 7,
-    /// Dutch porter stemmer
-    DutchPorter = 8,
-    /// English stemmer
-    English = 9,
-    /// Esperanto stemmer
-    Esperanto = 10,
-    /// Estonian stemmer
-    Estonian = 11,
-    /// Finnish stemmer
-    Finnish = 12,
-    /// French stemmer
-    French = 13,
-    /// German stemmer
-    German = 14,
-    /// Greek stemmer
-    Greek = 15,
-    /// Hindi stemmer
-    Hindi = 16,
-    /// Hungarian stemmer
-    Hungarian = 17,
-    /// Indonesian stemmer
-    Indonesian = 18,
-    /// Irish stemmer
-    Irish = 19,
-    /// Italian stemmer
-    Italian = 20,
-    /// Lithuanian stemmer
-    Lithuanian = 21,
-    /// Lovins stemmer
-    Lovins = 22,
-    /// Nepali stemmer
-    Nepali = 23,
-    /// Norwegian stemmer
-    Norwegian = 24,
-    /// Persian stemmer
-    Persian = 25,
-    /// Polish stemmer
-    Polish = 26,
-    /// Porter stemmer
-    Porter = 27,
-    /// Portuguese stemmer
-    Portuguese = 28,
-    /// Romanian stemmer
-    Romanian = 29,
-    /// Russian stemmer
-    Russian = 30,
-    /// Serbian stemmer
-    Serbian = 31,
-    /// Sesotho stemmer
-    Sesotho = 32,
-    /// Spanish stemmer
-    Spanish = 33,
-    /// Swedish stemmer
-    Swedish = 34,
-    /// Tamil stemmer
-    Tamil = 35,
-    /// Turkish stemmer
-    Turkish = 36,
-    /// Ukrainian stemmer
-    Ukrainian = 37,
-    /// Yiddish stemmer
-    Yiddish = 38,
-}
-
-impl fmt::Display for StemmerType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            StemmerType::None => write!(f, "None"),
-            StemmerType::Arabic => write!(f, "Arabic"),
-            StemmerType::Armenian => write!(f, "Armenian"),
-            StemmerType::Basque => write!(f, "Basque"),
-            StemmerType::Catalan => write!(f, "Catalan"),
-            StemmerType::Czech => write!(f, "Czech"),
-            StemmerType::Danish => write!(f, "Danish"),
-            StemmerType::Dutch => write!(f, "Dutch"),
-            StemmerType::DutchPorter => write!(f, "DutchPorter"),
-            StemmerType::English => write!(f, "English"),
-            StemmerType::Esperanto => write!(f, "Esperanto"),
-            StemmerType::Estonian => write!(f, "Estonian"),
-            StemmerType::Finnish => write!(f, "Finnish"),
-            StemmerType::French => write!(f, "French"),
-            StemmerType::German => write!(f, "German"),
-            StemmerType::Greek => write!(f, "Greek"),
-            StemmerType::Hindi => write!(f, "Hindi"),
-            StemmerType::Hungarian => write!(f, "Hungarian"),
-            StemmerType::Indonesian => write!(f, "Indonesian"),
-            StemmerType::Irish => write!(f, "Irish"),
-            StemmerType::Italian => write!(f, "Italian"),
-            StemmerType::Lithuanian => write!(f, "Lithuanian"),
-            StemmerType::Lovins => write!(f, "Lovins"),
-            StemmerType::Nepali => write!(f, "Nepali"),
-            StemmerType::Norwegian => write!(f, "Norwegian"),
-            StemmerType::Persian => write!(f, "Persian"),
-            StemmerType::Polish => write!(f, "Polish"),
-            StemmerType::Porter => write!(f, "Porter"),
-            StemmerType::Portuguese => write!(f, "Portuguese"),
-            StemmerType::Romanian => write!(f, "Romanian"),
-            StemmerType::Russian => write!(f, "Russian"),
-            StemmerType::Serbian => write!(f, "Serbian"),
-            StemmerType::Sesotho => write!(f, "Sesotho"),
-            StemmerType::Spanish => write!(f, "Spanish"),
-            StemmerType::Swedish => write!(f, "Swedish"),
-            StemmerType::Tamil => write!(f, "Tamil"),
-            StemmerType::Turkish => write!(f, "Turkish"),
-            StemmerType::Ukrainian => write!(f, "Ukrainian"),
-            StemmerType::Yiddish => write!(f, "Yiddish"),
         }
     }
 }
@@ -636,28 +503,6 @@ pub enum FieldType {
     Binary,
 }
 
-/// Defines synonyms for terms per index.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Synonym {
-    /// List of terms that are synonyms.
-    pub terms: Vec<String>,
-    /// Creates alternative versions of documents where in each copy a term is replaced with one of its synonyms.
-    /// Doesn't impact the query latency, but does increase the index size.
-    /// Multi-way synonyms (default): all terms are synonyms of each other.
-    /// One-way synonyms: only the first term is a synonym of the following terms, but not vice versa.
-    /// E.g. [street, avenue, road] will result in searches for street to return documents containing any of the terms street, avenue or road,
-    /// but searches for avenue will only return documents containing avenue, but not documents containing street or road.
-    /// Currently only single terms without spaces are supported.
-    /// The synonyms that were created with the synonyms parameter in create_index are stored in synonyms.json in the index directory contains
-    /// Can be manually modified, but becomes effective only after restart and only for newly indexed documents.
-    #[serde(default = "default_as_true")]
-    pub multiway: bool,
-}
-
-fn default_as_true() -> bool {
-    true
-}
-
 /// Defines a field in index schema: field, stored, indexed , field_type, facet, boost.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -857,8 +702,6 @@ pub struct IndexMetaObject {
     pub lexical_similarity: LexicalSimilarity,
     /// TokenizerType defines the tokenizer behavior: AsciiAlphabetic, UnicodeAlphanumeric, UnicodeAlphanumericFolded, UnicodeAlphanumericZH
     pub tokenizer: TokenizerType,
-    /// StemmerType defines the stemming behavior: None, Arabic, Armenian, Danish, Dutch, English, French, German, Greek, Hungarian, Italian, Norwegian, Portuguese, Romanian, Russian, Spanish, Swedish, Tamil, Turkish
-    pub stemmer: StemmerType,
 
     /// StopwordType defines the stopword behavior: None, English, German, French, Spanish, Custom.
     /// Stopwords are removed, both from index and query: for compact index size and faster queries.
@@ -1031,14 +874,11 @@ pub struct Shard {
 
     pub(crate) string_set_to_single_term_id_vec: Vec<AHashMap<String, AHashSet<u32>>>,
 
-    pub(crate) synonyms_map: AHashMap<u64, SynonymItem>,
-
     #[cfg(feature = "zh")]
     pub(crate) word_segmentation_option: Option<WordSegmentationTM>,
 
     pub(crate) shard_number: usize,
     pub(crate) index_option: Option<Arc<RwLock<Index>>>,
-    pub(crate) stemmer: Option<Stemmer>,
 
     pub(crate) stop_words: AHashSet<String>,
     pub(crate) frequent_words: Vec<String>,
@@ -1108,8 +948,6 @@ pub struct Index {
 
     pub(crate) facets: Vec<FacetField>,
 
-    pub(crate) synonyms_map: AHashMap<u64, SynonymItem>,
-
     pub(crate) shard_number: usize,
     pub(crate) shard_vec: Vec<Arc<RwLock<Shard>>>,
 
@@ -1136,60 +974,9 @@ pub struct Index {
     pub(crate) turbo_quant: TurboQuant,
 }
 
-///SynonymItem is a vector of tuples: (synonym term, (64-bit synonym term hash, 64-bit synonym term hash))
-pub type SynonymItem = Vec<(String, (u64, u32))>;
-
 /// Get the version of the SeekStorm search library
 pub fn version() -> &'static str {
     VERSION
-}
-
-pub(crate) fn get_synonyms_map(
-    synonyms: &[Synonym],
-    segment_number_mask1: u32,
-) -> AHashMap<u64, SynonymItem> {
-    let mut synonyms_map: AHashMap<u64, SynonymItem> = AHashMap::new();
-    for synonym in synonyms.iter() {
-        if synonym.terms.len() > 1 {
-            let mut hashes: Vec<(String, (u64, u32))> = Vec::new();
-            for term in synonym.terms.iter() {
-                let term_bytes = term.to_lowercase();
-                hashes.push((
-                    term.to_string(),
-                    (
-                        hash64(term_bytes.as_bytes()),
-                        hash32(term_bytes.as_bytes()) & segment_number_mask1,
-                    ),
-                ));
-            }
-            if synonym.multiway {
-                for (i, hash) in hashes.iter().enumerate() {
-                    let new_synonyms = if i == 0 {
-                        hashes[1..].to_vec()
-                    } else if i == hashes.len() - 1 {
-                        hashes[..hashes.len() - 1].to_vec()
-                    } else {
-                        [&hashes[..i], &hashes[(i + 1)..]].concat()
-                    };
-
-                    if let Some(item) = synonyms_map.get_mut(&hash.1.0) {
-                        *item = item
-                            .clone()
-                            .into_iter()
-                            .chain(new_synonyms)
-                            .collect::<HashMap<String, (u64, u32)>>()
-                            .into_iter()
-                            .collect();
-                    } else {
-                        synonyms_map.insert(hash.1.0, new_synonyms);
-                    }
-                }
-            } else {
-                synonyms_map.insert(hashes[0].1.0, hashes[1..].to_vec());
-            }
-        }
-    }
-    synonyms_map
 }
 
 /// N-gram indexing: n-grams are indexed in addition to single terms, for faster phrase search, at the cost of higher index size
@@ -1241,7 +1028,6 @@ pub(crate) enum NgramType {
 /// * `index_path` - index path.
 /// * `meta` - index meta object.
 /// * `schema` - schema.
-/// * `synonyms` - vector of synonyms.
 /// * `segment_number_bits1` - number of index segments: e.g. 11 bits for 2048 segments.
 /// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).
 /// * `force_shard_number` - set number of shards manually or automatically.
@@ -1252,7 +1038,6 @@ pub async fn create_index(
     index_path: &Path,
     meta: IndexMetaObject,
     schema: &Vec<SchemaField>,
-    synonyms: &Vec<Synonym>,
     segment_number_bits1: usize,
     mute: bool,
     force_shard_number: Option<usize>,
@@ -1262,7 +1047,6 @@ pub async fn create_index(
         meta,
         schema,
         true,
-        synonyms,
         segment_number_bits1,
         mute,
         force_shard_number,
@@ -1276,7 +1060,6 @@ pub(crate) async fn create_index_root(
     meta: IndexMetaObject,
     #[allow(clippy::ptr_arg)] schema: &Vec<SchemaField>,
     serialize_schema: bool,
-    synonyms: &Vec<Synonym>,
     segment_number_bits1: usize,
     mute: bool,
     force_shard_number: Option<usize>,
@@ -1400,8 +1183,6 @@ pub(crate) async fn create_index_root(
                 facets_vec = facets;
             }
 
-            let synonyms_map = get_synonyms_map(synonyms, segment_number_mask1);
-
             let shard_number = if let Some(shard_number) = force_shard_number {
                 shard_number
             } else {
@@ -1476,7 +1257,6 @@ pub(crate) async fn create_index_root(
                             &shard_meta,
                             &schema_clone,
                             serialize_schema,
-                            &Vec::new(),
                             segment_number_bits1,
                             mute,
                             longest_field_id_option,
@@ -1524,7 +1304,6 @@ pub(crate) async fn create_index_root(
                 meta: meta.clone(),
                 mute,
                 facets: facets_vec,
-                synonyms_map,
 
                 shard_number,
                 shard_vec,
@@ -1591,14 +1370,6 @@ pub(crate) async fn create_index_root(
                 )
                 .unwrap();
 
-                if !synonyms.is_empty() {
-                    serde_json::to_writer(
-                        &File::create(Path::new(index_path).join(SYNONYMS_FILENAME)).unwrap(),
-                        &synonyms,
-                    )
-                    .unwrap();
-                }
-
                 serde_json::to_writer(
                     &File::create(Path::new(index_path).join(META_FILENAME)).unwrap(),
                     &index.meta,
@@ -1629,7 +1400,6 @@ pub(crate) fn create_shard(
     meta: &IndexMetaObject,
     schema: &Vec<SchemaField>,
     serialize_schema: bool,
-    synonyms: &Vec<Synonym>,
     segment_number_bits1: usize,
     mute: bool,
     longest_field_id_option: Option<usize>,
@@ -1796,8 +1566,6 @@ pub(crate) fn create_shard(
             let vector_file_mmap =
                 unsafe { Mmap::map(&vector_file).expect("Unable to create Mmap") };
 
-            let synonyms_map = get_synonyms_map(synonyms, segment_number_mask1);
-
             let facets_len = facets_vec.len();
 
             #[cfg(feature = "zh")]
@@ -1811,48 +1579,6 @@ pub(crate) fn create_shard(
             };
 
             let shard_number = 1;
-
-            let stemmer = match meta.stemmer {
-                StemmerType::Arabic => Some(Stemmer::create(Algorithm::Arabic)),
-                StemmerType::Armenian => Some(Stemmer::create(Algorithm::Armenian)),
-                StemmerType::Basque => Some(Stemmer::create(Algorithm::Basque)),
-                StemmerType::Catalan => Some(Stemmer::create(Algorithm::Catalan)),
-                StemmerType::Czech => Some(Stemmer::create(Algorithm::Czech)),
-                StemmerType::Danish => Some(Stemmer::create(Algorithm::Danish)),
-                StemmerType::Dutch => Some(Stemmer::create(Algorithm::Dutch)),
-                StemmerType::DutchPorter => Some(Stemmer::create(Algorithm::DutchPorter)),
-                StemmerType::English => Some(Stemmer::create(Algorithm::English)),
-                StemmerType::Esperanto => Some(Stemmer::create(Algorithm::Esperanto)),
-                StemmerType::Estonian => Some(Stemmer::create(Algorithm::Estonian)),
-                StemmerType::Finnish => Some(Stemmer::create(Algorithm::Finnish)),
-                StemmerType::French => Some(Stemmer::create(Algorithm::French)),
-                StemmerType::German => Some(Stemmer::create(Algorithm::German)),
-                StemmerType::Greek => Some(Stemmer::create(Algorithm::Greek)),
-                StemmerType::Hindi => Some(Stemmer::create(Algorithm::Hindi)),
-                StemmerType::Hungarian => Some(Stemmer::create(Algorithm::Hungarian)),
-                StemmerType::Indonesian => Some(Stemmer::create(Algorithm::Indonesian)),
-                StemmerType::Irish => Some(Stemmer::create(Algorithm::Irish)),
-                StemmerType::Italian => Some(Stemmer::create(Algorithm::Italian)),
-                StemmerType::Lithuanian => Some(Stemmer::create(Algorithm::Lithuanian)),
-                StemmerType::Lovins => Some(Stemmer::create(Algorithm::Lovins)),
-                StemmerType::Nepali => Some(Stemmer::create(Algorithm::Nepali)),
-                StemmerType::Norwegian => Some(Stemmer::create(Algorithm::Norwegian)),
-                StemmerType::Persian => Some(Stemmer::create(Algorithm::Persian)),
-                StemmerType::Polish => Some(Stemmer::create(Algorithm::Polish)),
-                StemmerType::Porter => Some(Stemmer::create(Algorithm::Porter)),
-                StemmerType::Portuguese => Some(Stemmer::create(Algorithm::Portuguese)),
-                StemmerType::Romanian => Some(Stemmer::create(Algorithm::Romanian)),
-                StemmerType::Russian => Some(Stemmer::create(Algorithm::Russian)),
-                StemmerType::Serbian => Some(Stemmer::create(Algorithm::Serbian)),
-                StemmerType::Sesotho => Some(Stemmer::create(Algorithm::Sesotho)),
-                StemmerType::Spanish => Some(Stemmer::create(Algorithm::Spanish)),
-                StemmerType::Swedish => Some(Stemmer::create(Algorithm::Swedish)),
-                StemmerType::Tamil => Some(Stemmer::create(Algorithm::Tamil)),
-                StemmerType::Turkish => Some(Stemmer::create(Algorithm::Turkish)),
-                StemmerType::Ukrainian => Some(Stemmer::create(Algorithm::Ukrainian)),
-                StemmerType::Yiddish => Some(Stemmer::create(Algorithm::Yiddish)),
-                _ => None,
-            };
 
             let stop_words: AHashSet<String> = match &meta.stop_words {
                 StopwordType::None => AHashSet::new(),
@@ -1966,13 +1692,11 @@ pub(crate) fn create_shard(
                 facets_file_mmap,
                 string_set_to_single_term_id_vec: vec![AHashMap::new(); facets_len],
                 bm25_component_cache: [0.0; 256],
-                synonyms_map,
                 #[cfg(feature = "zh")]
                 word_segmentation_option,
 
                 shard_number,
                 index_option: None,
-                stemmer,
                 stop_words,
                 frequent_words,
                 frequent_hashset,
@@ -2066,14 +1790,6 @@ pub(crate) fn create_shard(
                     &schema,
                 )
                 .unwrap();
-
-                if !synonyms.is_empty() {
-                    serde_json::to_writer(
-                        &File::create(Path::new(index_path).join(SYNONYMS_FILENAME)).unwrap(),
-                        &synonyms,
-                    )
-                    .unwrap();
-                }
 
                 serde_json::to_writer(
                     &File::create(Path::new(index_path).join(META_FILENAME)).unwrap(),
@@ -2371,15 +2087,7 @@ pub(crate) async fn open_shard(
                         serde_json::from_reader(BufReader::new(schema_file))
                             .map_err(|e| format!("invalid index schema: {e}"))?;
 
-                    let synonyms = if let Ok(synonym_file) =
-                        File::open(Path::new(index_path).join(SYNONYMS_FILENAME))
-                    {
-                        serde_json::from_reader(BufReader::new(synonym_file)).unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-
-                    match create_shard(index_path, &meta, &schema, false, &synonyms, 11, mute, None)
+                    match create_shard(index_path, &meta, &schema, false, 11, mute, None)
                     {
                         Ok(mut shard) => {
                             let file_len = { shard.index_file_mmap.len() as u64 };
@@ -2600,14 +2308,6 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
                         serde_json::from_reader(BufReader::new(schema_file))
                             .map_err(|e| format!("invalid index schema: {e}"))?;
 
-                    let synonyms = if let Ok(synonym_file) =
-                        File::open(Path::new(index_path).join(SYNONYMS_FILENAME))
-                    {
-                        serde_json::from_reader(BufReader::new(synonym_file)).unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-
                     let shard_number = index_path
                         .join("shards")
                         .read_dir()
@@ -2623,7 +2323,6 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
                         meta,
                         &schema,
                         false,
-                        &synonyms,
                         11,
                         false,
                         Some(shard_number),
@@ -3250,56 +2949,6 @@ impl Index {
         let _ = fs::remove_dir_all(index_path);
     }
 
-    /// Get synonyms from index
-    pub fn get_synonyms(&self) -> Result<Vec<Synonym>, String> {
-        if let Ok(synonym_file) =
-            File::open(Path::new(&self.index_path_string).join(SYNONYMS_FILENAME))
-        {
-            if let Ok(synonyms) = serde_json::from_reader(BufReader::new(synonym_file)) {
-                Ok(synonyms)
-            } else {
-                Err("not found".into())
-            }
-        } else {
-            Err("not found".into())
-        }
-    }
-
-    /// Set/replace/overwrite synonyms in index
-    /// Affects only subsequently indexed documents
-    pub fn set_synonyms(&mut self, synonyms: &Vec<Synonym>) -> Result<usize, String> {
-        serde_json::to_writer(
-            &File::create(Path::new(&self.index_path_string).join(SYNONYMS_FILENAME)).unwrap(),
-            &synonyms,
-        )
-        .unwrap();
-
-        self.synonyms_map = get_synonyms_map(synonyms, self.segment_number_mask1);
-        Ok(synonyms.len())
-    }
-
-    /// Add/append/update/merge synonyms in index
-    /// Affects only subsequently indexed documents
-    pub fn add_synonyms(&mut self, synonyms: &[Synonym]) -> Result<usize, String> {
-        let mut merged_synonyms = if let Ok(synonym_file) =
-            File::open(Path::new(&self.index_path_string).join(SYNONYMS_FILENAME))
-        {
-            serde_json::from_reader(BufReader::new(synonym_file)).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        merged_synonyms.extend(synonyms.iter().cloned());
-
-        serde_json::to_writer(
-            &File::create(Path::new(&self.index_path_string).join(SYNONYMS_FILENAME)).unwrap(),
-            &merged_synonyms,
-        )
-        .unwrap();
-
-        self.synonyms_map = get_synonyms_map(&merged_synonyms, self.segment_number_mask1);
-        Ok(merged_synonyms.len())
-    }
 }
 
 /// Commit pending changes and flush index files
@@ -3983,36 +3632,7 @@ impl IndexDocumentShard2 for ShardArc {
             }
         }
 
-        let mut unique_terms = document_item.unique_terms;
-        if !shard_mut.synonyms_map.is_empty() {
-            let unique_terms_clone = unique_terms.clone();
-            for term in unique_terms_clone.iter() {
-                if term.1.ngram_type == NgramType::SingleTerm {
-                    let synonym = shard_mut.synonyms_map.get(&term.1.key_hash).cloned();
-                    if let Some(synonym) = synonym {
-                        for synonym_term in synonym {
-                            let mut term_clone = term.1.clone();
-                            term_clone.key_hash = synonym_term.1.0;
-                            term_clone.key0 = synonym_term.1.1;
-                            term_clone.term = synonym_term.0.clone();
-
-                            if let Some(existing) = unique_terms.get_mut(&synonym_term.0) {
-                                existing
-                                    .field_positions_vec
-                                    .iter_mut()
-                                    .zip(term_clone.field_positions_vec.iter())
-                                    .for_each(|(x1, x2)| {
-                                        x1.extend_from_slice(x2);
-                                        x1.sort_unstable();
-                                    });
-                            } else {
-                                unique_terms.insert(synonym_term.0.clone(), term_clone);
-                            };
-                        }
-                    }
-                }
-            }
-        }
+        let unique_terms = document_item.unique_terms;
 
         for term in unique_terms {
             shard_mut.index_posting(term.1, docid_local, false, 0, 0, 0);

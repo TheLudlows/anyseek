@@ -4,7 +4,7 @@ use seekstorm::{
     commit::Commit,
     index::{AccessType, Close, Clustering, Document, DocumentCompression,
         FrequentwordType, IndexArc, IndexDocument, IndexMetaObject,
-        LexicalSimilarity, NgramSet, SchemaField, StemmerType, StopwordType,
+        LexicalSimilarity, NgramSet, SchemaField, StopwordType,
         TokenizerType, create_index, open_index},
     search::{ResultObject, Search},
     vector::Inference,
@@ -26,10 +26,10 @@ async fn create(path: &Path, access_type: AccessType) -> IndexArc {
     let _ = fs::remove_dir_all(path);
     let meta = IndexMetaObject { id:0, name:"metadata_contract".into(),
         lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::UnicodeAlphanumeric,
-        stemmer:StemmerType::None, stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
+        stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
         ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,
         access_type, clustering:Clustering::None, inference:Inference::None };
-    create_index(path, meta, &schema(), &vec![], 11, true, Some(2)).await.unwrap()
+    create_index(path, meta, &schema(), 11, true, Some(2)).await.unwrap()
 }
 
 async fn search(index: &IndexArc, options: Value, realtime: bool) -> ResultObject {

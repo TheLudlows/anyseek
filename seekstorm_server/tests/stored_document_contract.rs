@@ -4,7 +4,7 @@ use seekstorm::{
     commit::Commit,
     index::{AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
         IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet,
-        SchemaField, StemmerType, StopwordType, TokenizerType,
+        SchemaField, StopwordType, TokenizerType,
         create_index, open_index},
     vector::Inference,
 };
@@ -39,10 +39,10 @@ async fn stored_records_and_projection_survive_reopen() {
         ])).unwrap();
         let meta=IndexMetaObject { id:0, name:"raw_document".into(),
             lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::UnicodeAlphanumeric,
-            stemmer:StemmerType::None, stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
+            stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
             ngram_indexing:NgramSet::SingleTerm as u8, document_compression,
             access_type:AccessType::Mmap, clustering:Clustering::None, inference:Inference::None };
-        let index=create_index(path,meta,&schema,&vec![],11,true,Some(2)).await.unwrap();
+        let index=create_index(path,meta,&schema, 11,true,Some(2)).await.unwrap();
         let body=format!("raw <b>literal</b> & 中文\r\n第二行\n{}END", "完整原文 ".repeat(1000));
         let expected: Document=serde_json::from_value(json!({"body":body,
             "data":{"nested":["<em>中文</em>",0,false,null],"line":"a\nb"}})).unwrap();

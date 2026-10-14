@@ -9,7 +9,7 @@ import tomllib
 
 core = Path(__file__).resolve().parents[1] / 'seekstorm'
 manifest = tomllib.loads((core / 'Cargo.toml').read_text())
-assert not ({'utoipa', 'num-format', 'tabled', 'chrono', 'colored', 'env_logger', 'half', 'lz4_flex', 'zstd'} & set(manifest['dependencies']))
+assert not ({'utoipa', 'num-format', 'tabled', 'chrono', 'colored', 'env_logger', 'half', 'lz4_flex', 'zstd', 'snowball_stemmers_rs'} & set(manifest['dependencies']))
 assert 'api-schema' not in manifest.get('features', {})
 for source in (core / 'src').glob('*.rs'):
     text = source.read_text()
@@ -36,7 +36,7 @@ seekstorm = {{ path = {json.dumps(str(core))}, default-features = false }}
         tree = subprocess.check_output(['cargo', 'tree', *args, '-e', 'normal,build', '--prefix', 'none'], text=True)
         names = {line.split()[0] for line in tree.splitlines() if line.strip()}
         forbidden = names & {'utoipa', 'utoipa-gen', 'num-format', 'env_logger', 'tabled', 'chrono', 'colored', 'tokio-test',
-                             'seekstorm_server', 'hyper', 'hyper-util', 'http-body-util', 'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs'}
+                             'snowball_stemmers_rs', 'seekstorm_server', 'hyper', 'hyper-util', 'http-body-util', 'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs'}
         assert not forbidden, f'core runtime dependency leak: {forbidden}'
         subprocess.run(['cargo', 'check', *args], check=True)
         print(f'PASS isolated core dependency graph and build: {flags or "default features"}', flush=True)

@@ -4,7 +4,7 @@
 use seekstorm::commit::Commit;
 use seekstorm::index::{
     AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-    IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType, TokenizerType,
+    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
     create_index,
 };
 use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
@@ -17,7 +17,6 @@ fn meta() -> IndexMetaObject {
         name: "union_topk_many_terms".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -69,7 +68,7 @@ async fn union_topk_forty_terms() {
     let dir = "tests/index_union_topk_many_terms/";
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
-    let index = create_index(path, meta(), &schema(), &Vec::new(), 11, true, Some(1))
+    let index = create_index(path, meta(), &schema(), 11, true, Some(1))
         .await
         .unwrap();
 
