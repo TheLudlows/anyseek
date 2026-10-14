@@ -6,7 +6,7 @@ use seekstorm::commit::Commit;
 use seekstorm::index::{
     AccessType, Close, Clustering, DeleteDocument, DocumentCompression, FrequentwordType,
     IndexArc, IndexDocument, IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet,
-    StemmerType, StopwordType, TokenizerType, create_index, open_index,
+    StopwordType, TokenizerType, create_index, open_index,
 };
 use seekstorm::iterator::GetIterator;
 use seekstorm::search::{
@@ -35,7 +35,6 @@ async fn test_01_create_index() {
         name: "test_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::English,
         ngram_indexing: NgramSet::NgramFF as u8 | NgramSet::NgramFFF as u8,
@@ -49,9 +48,7 @@ async fn test_01_create_index() {
     let index_arc = create_index(
         index_path,
         meta,
-        &schema,
-        &Vec::new(),
-        segment_number_bits1,
+        &schema, segment_number_bits1,
         false,
         None,
     )
@@ -492,7 +489,6 @@ async fn test_09_create_index_vector_supplied() {
         name: "test_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::English,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -511,9 +507,7 @@ async fn test_09_create_index_vector_supplied() {
     let index_arc = create_index(
         index_path,
         meta,
-        &schema,
-        &Vec::new(),
-        segment_number_bits1,
+        &schema, segment_number_bits1,
         false,
         None,
     )
@@ -610,7 +604,6 @@ async fn test_12_create_index_vector_external() {
         name: "test_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::English,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -629,9 +622,7 @@ async fn test_12_create_index_vector_external() {
     let index_arc = create_index(
         index_path,
         meta,
-        &schema,
-        &Vec::new(),
-        segment_number_bits1,
+        &schema, segment_number_bits1,
         false,
         Some(2),
     )
@@ -740,7 +731,6 @@ async fn test_15_filter_scope() {
         name: "test_facet_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -751,7 +741,7 @@ async fn test_15_filter_scope() {
     };
 
     // 3 shards: the 3 documents are distributed round-robin, one document per shard
-    let index_arc = create_index(index_path, meta, &schema, &Vec::new(), 11, false, Some(3))
+    let index_arc = create_index(index_path, meta, &schema, 11, false, Some(3))
         .await
         .unwrap();
 

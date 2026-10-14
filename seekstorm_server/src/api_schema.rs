@@ -9,9 +9,6 @@ use serde_json::Value;
 use std::ops::Range;
 use utoipa::ToSchema;
 
-fn default_as_true() -> bool {
-    true
-}
 fn default_false() -> bool {
     false
 }
@@ -589,91 +586,6 @@ pub enum SortOrder {
     Descending = 1,
 }
 
-/// Defines stemming behavior, reducing inflected words to their word stem, base or root form.
-/// Stemming increases recall, but decreases precision. It can introduce false positive results.
-#[derive(ToSchema, Serialize)]
-#[serde(remote = "seekstorm::index::StemmerType")]
-pub enum StemmerType {
-    /// No stemming
-    None = 0,
-    /// Arabic stemmer
-    Arabic = 1,
-    /// Armenian stemmer
-    Armenian = 2,
-    /// Basque stemmer
-    Basque = 3,
-    /// Catalan stemmer
-    Catalan = 4,
-    /// Czech stemmer
-    Czech = 5,
-    /// Danish stemmer
-    Danish = 6,
-    /// Dutch stemmer
-    Dutch = 7,
-    /// Dutch porter stemmer
-    DutchPorter = 8,
-    /// English stemmer
-    English = 9,
-    /// Esperanto stemmer
-    Esperanto = 10,
-    /// Estonian stemmer
-    Estonian = 11,
-    /// Finnish stemmer
-    Finnish = 12,
-    /// French stemmer
-    French = 13,
-    /// German stemmer
-    German = 14,
-    /// Greek stemmer
-    Greek = 15,
-    /// Hindi stemmer
-    Hindi = 16,
-    /// Hungarian stemmer
-    Hungarian = 17,
-    /// Indonesian stemmer
-    Indonesian = 18,
-    /// Irish stemmer
-    Irish = 19,
-    /// Italian stemmer
-    Italian = 20,
-    /// Lithuanian stemmer
-    Lithuanian = 21,
-    /// Lovins stemmer
-    Lovins = 22,
-    /// Nepali stemmer
-    Nepali = 23,
-    /// Norwegian stemmer
-    Norwegian = 24,
-    /// Persian stemmer
-    Persian = 25,
-    /// Polish stemmer
-    Polish = 26,
-    /// Porter stemmer
-    Porter = 27,
-    /// Portuguese stemmer
-    Portuguese = 28,
-    /// Romanian stemmer
-    Romanian = 29,
-    /// Russian stemmer
-    Russian = 30,
-    /// Serbian stemmer
-    Serbian = 31,
-    /// Sesotho stemmer
-    Sesotho = 32,
-    /// Spanish stemmer
-    Spanish = 33,
-    /// Swedish stemmer
-    Swedish = 34,
-    /// Tamil stemmer
-    Tamil = 35,
-    /// Turkish stemmer
-    Turkish = 36,
-    /// Ukrainian stemmer
-    Ukrainian = 37,
-    /// Yiddish stemmer
-    Yiddish = 38,
-}
-
 /// StopwordType defines the stopword behavior: None, English, German, French, Spanish, Custom.
 /// Stopwords are removed, both from index and query: for compact index size and faster queries.
 /// Stopword removal has drawbacks: “The Who”, “Take That”, “Let it be”, “To be or not to be”, "The The", "End of days", "What might have been" are all valid queries for bands, songs, movies, literature,
@@ -697,25 +609,6 @@ pub enum StopwordType {
         ///List of stopwords.
         terms: Vec<String>,
     },
-}
-
-/// Defines synonyms for terms per index.
-#[derive(ToSchema, Serialize)]
-#[serde(remote = "seekstorm::index::Synonym")]
-pub struct Synonym {
-    /// List of terms that are synonyms.
-    pub terms: Vec<String>,
-    /// Creates alternative versions of documents where in each copy a term is replaced with one of its synonyms.
-    /// Doesn't impact the query latency, but does increase the index size.
-    /// Multi-way synonyms (default): all terms are synonyms of each other.
-    /// One-way synonyms: only the first term is a synonym of the following terms, but not vice versa.
-    /// E.g. [street, avenue, road] will result in searches for street to return documents containing any of the terms street, avenue or road,
-    /// but searches for avenue will only return documents containing avenue, but not documents containing street or road.
-    /// Currently only single terms without spaces are supported.
-    /// The synonyms that were created with the synonyms parameter in create_index are stored in synonyms.json in the index directory contains
-    /// Can be manually modified, but becomes effective only after restart and only for newly indexed documents.
-    #[serde(default = "default_as_true")]
-    pub multiway: bool,
 }
 
 /// Defines tokenizer behavior:

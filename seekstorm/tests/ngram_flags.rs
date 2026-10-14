@@ -3,7 +3,7 @@ use seekstorm::{
     commit::Commit,
     index::{
         AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexArc,
-        IndexDocuments, IndexMetaObject, LexicalSimilarity, SchemaField, StemmerType, StopwordType,
+        IndexDocuments, IndexMetaObject, LexicalSimilarity, SchemaField, StopwordType,
         TokenizerType, create_index, open_index,
     },
     search::{QueryType, ResultType, Search, SearchMode},
@@ -102,7 +102,6 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
         name: "ngram_flags".into(),
         lexical_similarity: similarity,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::Custom {
             terms: vec!["of".into(), "the".into(), "and".into()],
@@ -113,7 +112,7 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    let index = create_index(&path, meta, &schema, &vec![], 11, true, Some(1))
+    let index = create_index(&path, meta, &schema, 11, true, Some(1))
         .await
         .unwrap();
     index

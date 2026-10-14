@@ -1,6 +1,6 @@
 # 当前功能清单
 
-核查日期：2026-10-14（Asia/Shanghai）。基于主干 `ebe7151`（PR #17 已合入），本分支修复 N-gram 并执行 D1～D3。主干与本分支的合入状态见 [STATUS.md](STATUS.md)。本文按本分支实现列举功能，不将路线图视为已实现能力。
+核查日期：2026-10-14（Asia/Shanghai）。基于主干 `3c3de11`（PR #18、#19 已合入），本分支删除同义词与词干器（D5）。主干与本分支的合入状态见 [STATUS.md](STATUS.md)。本文按本分支实现列举功能，不将路线图视为已实现能力。
 
 ## 1. 检索与数据能力
 
@@ -9,8 +9,7 @@
 | 全文检索 | AND/OR/NOT、短语、查询中的 `+`/`-`/双引号、多字段检索、字段权重 | 默认 `Intersection`；显式选择 `Lexical` |
 | 相关性 | `Bm25f`、`Bm25fProximity` | 尚未收缩为单一评分方式 |
 | 分词 | `AsciiAlphabetic`、`UnicodeAlphanumeric`、`UnicodeAlphanumericFolded`、`Whitespace`、`WhitespaceLowercase`、`UnicodeAlphanumericZH` | 中文分词依赖默认启用的 `zh`；Folded 支持字符规范化 |
-| 文本配置 | 词干化、停用词、高频词、词级二元/三元 N-gram 索引 | N-gram 默认位掩码 9，不提供字符前缀/子串匹配；38 个非 None 词干器枚举；停用词/高频词支持英德法西预设及自定义 |
-| 同义词 | 单向/多向同义词；创建索引时设置；运行时读取、追加、替换 | 仅单词级同义词，索引时展开；变更不会自动重建历史文档 |
+| 文本配置 | 停用词、高频词、词级二元/三元 N-gram 索引 | N-gram 默认位掩码 9，不提供字符前缀/子串匹配；停用词/高频词支持英德法西预设及自定义 |
 | 向量输入 | 外部向量、多个向量字段、JSON 数组或 Binary/base64 | `Inference::External`；所有向量字段共享索引级配置；应用负责模型和切块 |
 | 向量校验 | 维度、精度、有限数值/范围、非零余弦范数、base64 格式 | 非法请求显式报错；批次入队前校验输入不等于事务 |
 | 向量检索 | 全簇扫描、Leveled IVF ANN、K-Medoid 聚类 | `AnnMode::All/Nprobe/Similaritythreshold/NprobeSimilaritythreshold`；全簇扫描仍使用配置的存储精度/量化，不等于原始 F32 精确评分 |
@@ -52,13 +51,10 @@
 | DELETE | `/api/v1/index/{id}/doc/{doc}` | 删除单条文档 | 已登记 |
 | POST | `/api/v1/index/{id}/query` | Lexical/Vector/Hybrid JSON 查询 | 已登记 |
 | POST | `/api/v1/index/{id}/iterator` | 双向文档遍历 | 已登记 |
-| GET | `/api/v1/index/{id}/synonyms` | 读取同义词 | 未登记 |
-| POST | `/api/v1/index/{id}/synonyms` | 追加同义词 | 未登记 |
-| PUT | `/api/v1/index/{id}/synonyms` | 替换同义词，空数组可清空 | 未登记 |
 | GET | `/` 及固定静态资源路径 | 内嵌 Web UI、CSS/JS、图标 | 不作为数据 API 登记 |
 | OPTIONS | 服务路由 | CORS 预检；query/iterator 声明 `POST, OPTIONS` | 不作为数据 API 登记 |
 
-以上为 18 个 `/api/v1` 业务/存活操作，加 UI/静态资源和预检。B1/B2 后 query/iterator 的 GET 与 HTTP QUERY 返回 405；POST URL 非空参数返回 400；旧 `/api/v2/index/{id}/query` 返回 404。旧 `/file` 路由仅返回 404 迁移提示。
+以上为 15 个 `/api/v1` 业务/存活操作，加 UI/静态资源和预检。B1/B2 后 query/iterator 的 GET 与 HTTP QUERY 返回 405；POST URL 非空参数返回 400；旧 `/api/v2/index/{id}/query` 返回 404。旧 `/file` 路由仅返回 404 迁移提示。
 
 ## 3. Web UI
 
@@ -88,10 +84,10 @@
 
 ## 5. 已移除与尚未实现
 
-已移除：RAM 全量加载模式、LZ4/Zstd 文档压缩及未引用的 half 依赖；固定 demo key、终端交互、彩色状态表、HTTP 关闭索引入口、`/version` 和 URL key 登录；未使用 tokenizer/状态字段/恒关闭分支及历史图片；分面计数、直方图、范围聚合、字段 min/max；MCP 服务、独立客户端/SDK 工程、内置模型/下载/Embedding、自动切块、PDF/CSV/目录和本地 JSON/SIFT 导入及 SIFT 评测、PDF 附件服务、拼写纠错/自动补全/自动改写、地理检索/距离排序、高亮/摘要、内置配额/限流，以及 B1/B2 的旧查询协议。迁移方式见 [MIGRATION.md](MIGRATION.md)。
+已移除：同义词及其 REST 管理接口、词干器及 Snowball 依赖；RAM 全量加载模式、LZ4/Zstd 文档压缩及未引用的 half 依赖；固定 demo key、终端交互、彩色状态表、HTTP 关闭索引入口、`/version` 和 URL key 登录；未使用 tokenizer/状态字段/恒关闭分支及历史图片；分面计数、直方图、范围聚合、字段 min/max；MCP 服务、独立客户端/SDK 工程、内置模型/下载/Embedding、自动切块、PDF/CSV/目录和本地 JSON/SIFT 导入及 SIFT 评测、PDF 附件服务、拼写纠错/自动补全/自动改写、地理检索/距离排序、高亮/摘要、内置配额/限流，以及 B1/B2 的旧查询协议。迁移方式见 [MIGRATION.md](MIGRATION.md)。
 
 尚未实现或验收：稳定业务 ID/版本/upsert 契约、可恢复 WAL/检查点/一致快照、共同可见视图、完整资源约束和生产可靠性验收、分布式路由/复制/弹性、对象存储。
 
-多字段排序、命中计数、分页、多向量、同义词、词干器、量化选项、N-gram 和 `vb` **仍保留**。
+多字段排序、命中计数、分页、多向量、量化选项、N-gram 和 `vb` **仍保留**。
 
 核查入口：[数据类型](seekstorm/src/index.rs)、[检索执行](seekstorm/src/search.rs)、[向量配置](seekstorm/src/vector.rs)、[ANN 模式](seekstorm/src/vector_similarity.rs)、[服务路由](seekstorm_server/src/http_server.rs)、[启动与退出](seekstorm_server/src/server.rs)、[UI](seekstorm_server/web/js/master.js)、[构建特性](seekstorm/Cargo.toml)。

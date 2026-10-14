@@ -2,7 +2,7 @@ use seekstorm::{
     commit::Commit,
     index::{
         AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocument,
-        IndexMetaObject, LexicalSimilarity, NgramSet, SchemaField, StemmerType, StopwordType,
+        IndexMetaObject, LexicalSimilarity, NgramSet, SchemaField, StopwordType,
         TokenizerType, create_index,
     },
     info::collect_index_info,
@@ -41,7 +41,6 @@ async fn typed_snapshot_does_not_commit_and_caller_controls_logging() {
         name: "typed info".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -54,7 +53,7 @@ async fn typed_snapshot_does_not_commit_and_caller_controls_logging() {
         {"field":"body", "field_type":"Text", "store":true, "index_lexical":true}
     ]))
     .unwrap();
-    let index = create_index(path, meta, &schema, &vec![], 11, false, Some(1))
+    let index = create_index(path, meta, &schema, 11, false, Some(1))
         .await
         .unwrap();
     assert!(

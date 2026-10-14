@@ -10,7 +10,7 @@
 use seekstorm::commit::Commit;
 use seekstorm::index::{
     AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-    IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType, TokenizerType,
+    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
     create_index,
 };
 use seekstorm::vector::Inference;
@@ -22,7 +22,6 @@ fn meta(access_type: AccessType) -> IndexMetaObject {
         name: "get_nonstored_doc".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -46,9 +45,7 @@ async fn fresh(dir: &str, access_type: AccessType) -> seekstorm::index::IndexArc
     create_index(
         path,
         meta(access_type),
-        &schema(),
-        &Vec::new(),
-        11,
+        &schema(), 11,
         true,
         None,
     )
@@ -78,8 +75,6 @@ async fn get_nonstored_only_mmap() {
     assert!(get0(&index).await.is_err());
     index.close().await;
 }
-
-
 
 /// Control: a normal stored document still reads back.
 #[tokio::test]

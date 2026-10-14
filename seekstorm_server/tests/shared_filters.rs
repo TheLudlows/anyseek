@@ -5,7 +5,7 @@ use seekstorm::{
     index::{
         AccessType, Close, Clustering, DeleteDocument, Document, DocumentCompression,
         FrequentwordType, IndexArc, IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet,
-        SchemaField, StemmerType, StopwordType, TokenizerType, UpdateDocument,
+        SchemaField, StopwordType, TokenizerType, UpdateDocument,
         create_index, open_index,
     },
     search::{ResultObject, Search},
@@ -221,7 +221,6 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             name: "shared_filters".into(),
             lexical_similarity: LexicalSimilarity::Bm25f,
             tokenizer: TokenizerType::UnicodeAlphanumeric,
-            stemmer: StemmerType::None,
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::None,
             ngram_indexing: NgramSet::SingleTerm as u8,
@@ -235,7 +234,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
                 similarity: VectorSimilarity::Cosine,
             },
         };
-        let index = create_index(&path, meta, &schema(), &vec![], 11, true, Some(shards))
+        let index = create_index(&path, meta, &schema(), 11, true, Some(shards))
             .await
             .unwrap();
         index
@@ -315,7 +314,6 @@ fn meta() -> IndexMetaObject {
         name: "shared_filters".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -359,7 +357,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             };
             let mut vector_schema = schema();
             vector_schema.push(serde_json::from_value(json!({"field":"other_vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true})).unwrap());
-            let index = create_index(&path, config, &vector_schema, &vec![], 11, true, Some(1))
+            let index = create_index(&path, config, &vector_schema, 11, true, Some(1))
                 .await
                 .unwrap();
             let mut docs: Vec<_> = (0..24).map(doc).collect();

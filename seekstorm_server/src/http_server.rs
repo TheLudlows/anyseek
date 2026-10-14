@@ -26,8 +26,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use seekstorm::INDEX_RUNTIME;
 use seekstorm::index::{
     Document,
-    Synonym,
-};
+    };
 
 use sha2::Digest;
 use sha2::Sha256;
@@ -39,7 +38,7 @@ use base64::{Engine as _, engine::general_purpose};
 use crate::api_endpoints::create_index_api;
 use crate::api_endpoints::delete_apikey_api;
 use crate::api_endpoints::update_documents_api;
-use crate::api_endpoints::{add_synonyms_api, get_index_info_api, set_synonyms_api};
+use crate::api_endpoints::{get_index_info_api};
 use crate::api_endpoints::clear_index_api;
 use crate::api_endpoints::{commit_index_api, create_apikey_api};
 use crate::api_endpoints::{
@@ -48,7 +47,7 @@ use crate::api_endpoints::{
 use crate::api_endpoints::{delete_documents_by_object_api, delete_documents_by_query_api};
 use crate::api_endpoints::delete_index_api;
 use crate::api_endpoints::get_apikey_indices_info_api;
-use crate::api_endpoints::{get_document_api, get_synonyms_api};
+use crate::api_endpoints::{get_document_api};
 use crate::api_endpoints::{
     get_iterator_api_post, live_api, update_document_api,
 };
@@ -95,7 +94,6 @@ fn with_cors_headers(
 enum HttpServerError {
     IndexNotFound,
     ApiKeyNotFound,
-    SynonymsNotFound,
     Unauthorized,
     BadRequest(String),
     InternalServerError,
@@ -112,9 +110,7 @@ impl From<HttpServerError> for Result<Response<BoxBody<Bytes, Infallible>>, Infa
             HttpServerError::ApiKeyNotFound => {
                 status(StatusCode::NOT_FOUND, "apikey does not exist".to_string())
             }
-            HttpServerError::SynonymsNotFound => {
-                status(StatusCode::NOT_FOUND, "synonyms not found".to_string())
-            }
+
             HttpServerError::Unauthorized => status(
                 StatusCode::UNAUTHORIZED,
                 "apikey invalid or missing".to_string(),
@@ -290,12 +286,10 @@ pub(crate) async fn http_request_handler(
                 create_index_request_object.schema,
                 create_index_request_object.similarity,
                 create_index_request_object.tokenizer,
-                create_index_request_object.stemmer,
                 create_index_request_object.stop_words,
                 create_index_request_object.frequent_words,
                 create_index_request_object.ngram_indexing,
                 create_index_request_object.document_compression,
-                create_index_request_object.synonyms,
                 force_shard_number,
                 apikey_object,
 
@@ -429,122 +423,6 @@ pub(crate) async fn http_request_handler(
                 }
                 Err(_e) => HttpServerError::IndexNotFound.into(),
             }
-        }
-
-        ("api", "v1", "index", _, "synonyms", _, &Method::POST) => {
-            let Some(apikey) = apikey_header else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            let apikey_list_ref = apikey_list.read().await;
-            let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Ok(index_id) = parts[3].parse::<u64>() else {
-                return HttpServerError::BadRequest("index_id invalid or missing".to_string())
-                    .into();
-            };
-            let Some(index_arc) = apikey_object.index_list.get(&index_id) else {
-                return HttpServerError::IndexNotFound.into();
-            };
-            let index_arc_clone = index_arc.clone();
-            drop(apikey_list_ref);
-
-            let Ok(collected_body) = req.into_body().collect().await else {
-                return HttpServerError::BadRequest("failed to read request body".to_string())
-                    .into();
-            };
-            let request_bytes = collected_body.to_bytes();
-            let synonyms = match serde_json::from_slice::<Vec<Synonym>>(&request_bytes) {
-                Ok(create_index_request_object) => create_index_request_object,
-                Err(e) => {
-                    return HttpServerError::BadRequest(e.to_string()).into();
-                }
-            };
-
-            if let Ok(result) = add_synonyms_api(&index_arc_clone, synonyms).await {
-                let status_object_json = serde_json::to_vec(&result).unwrap();
-                Ok(Response::new(BoxBody::new(Full::new(
-                    status_object_json.into(),
-                ))))
-            } else {
-                HttpServerError::SynonymsNotFound.into()
-            }
-        }
-
-        ("api", "v1", "index", _, "synonyms", _, &Method::PUT) => {
-            let Some(apikey) = apikey_header else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            let apikey_list_ref = apikey_list.read().await;
-            let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Ok(index_id) = parts[3].parse::<u64>() else {
-                return HttpServerError::BadRequest("index_id invalid or missing".to_string())
-                    .into();
-            };
-            let Some(index_arc) = apikey_object.index_list.get(&index_id) else {
-                return HttpServerError::IndexNotFound.into();
-            };
-            let index_arc_clone = index_arc.clone();
-            drop(apikey_list_ref);
-
-            let Ok(collected_body) = req.into_body().collect().await else {
-                return HttpServerError::BadRequest("failed to read request body".to_string())
-                    .into();
-            };
-            let request_bytes = collected_body.to_bytes();
-            let synonyms = match serde_json::from_slice::<Vec<Synonym>>(&request_bytes) {
-                Ok(create_index_request_object) => create_index_request_object,
-                Err(e) => {
-                    return HttpServerError::BadRequest(e.to_string()).into();
-                }
-            };
-
-            if let Ok(result) = set_synonyms_api(&index_arc_clone, synonyms).await {
-                let status_object_json = serde_json::to_vec(&result).unwrap();
-                Ok(Response::new(BoxBody::new(Full::new(
-                    status_object_json.into(),
-                ))))
-            } else {
-                HttpServerError::SynonymsNotFound.into()
-            }
-        }
-
-        ("api", "v1", "index", _, "synonyms", _, &Method::GET) => {
-            let Some(apikey) = apikey_header else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            let apikey_list_ref = apikey_list.read().await;
-            let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Ok(index_id) = parts[3].parse::<u64>() else {
-                return HttpServerError::BadRequest("index_id invalid or missing".to_string())
-                    .into();
-            };
-            let Some(index_arc) = apikey_object.index_list.get(&index_id) else {
-                return HttpServerError::IndexNotFound.into();
-            };
-            let index_arc_clone = index_arc.clone();
-            drop(apikey_list_ref);
-            let result = get_synonyms_api(&index_arc_clone).await;
-            let status_object_json = serde_json::to_vec(&result).unwrap();
-            Ok(Response::new(BoxBody::new(Full::new(
-                status_object_json.into(),
-            ))))
         }
 
         ("api", "v1", "index", _, "doc", _, &Method::POST) => {

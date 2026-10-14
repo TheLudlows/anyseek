@@ -33,10 +33,10 @@ async fn retired_disk_metadata_is_not_silently_reinterpreted() {
     .unwrap();
     let meta = serde_json::from_value(json!({
         "id":0,"name":"storage_contract", "access_type":"Mmap",
-        "lexical_similarity":"Bm25f", "tokenizer":"UnicodeAlphanumeric", "stemmer":"None"
+        "lexical_similarity":"Bm25f", "tokenizer":"UnicodeAlphanumeric"
     }))
     .unwrap();
-    let index = create_index(path, meta, &schema, &vec![], 11, true, Some(1))
+    let index = create_index(path, meta, &schema, 11, true, Some(1))
         .await
         .unwrap();
     index.close().await;

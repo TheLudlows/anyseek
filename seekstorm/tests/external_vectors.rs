@@ -3,7 +3,7 @@ use seekstorm::{
     commit::Commit,
     index::{create_index, open_index, AccessType, Close, Clustering, Document, DocumentCompression,
         FrequentwordType, IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
-        LexicalSimilarity, NgramSet, SchemaField, StemmerType, StopwordType, TokenizerType, UpdateDocument, UpdateDocuments},
+        LexicalSimilarity, NgramSet, SchemaField, StopwordType, TokenizerType, UpdateDocument, UpdateDocuments},
     search::{QueryType, ResultObject, ResultType, Search, SearchMode},
     vector::{embedding_to_bytes_be, parse_external_embedding, validate_embedding, validate_vector_schema,
         Embedding, Inference, Precision, Quantization},
@@ -28,8 +28,7 @@ fn document(body: &str, vector: serde_json::Value) -> Document {
 }
 fn meta() -> IndexMetaObject {
     IndexMetaObject { id:0, name:"external_contract".into(), lexical_similarity:LexicalSimilarity::Bm25f,
-        tokenizer:TokenizerType::UnicodeAlphanumeric, stemmer:StemmerType::None,
-        stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
+        tokenizer:TokenizerType::UnicodeAlphanumeric, stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
         ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,
         access_type:AccessType::Mmap, clustering:Clustering::None, inference:inference() }
 }
@@ -67,7 +66,7 @@ fn external_config_and_numeric_validation() {
 #[tokio::test]
 async fn external_write_query_reopen_contract() {
     let path = Path::new("tests/index_external_contract"); let _ = fs::remove_dir_all(path);
-    let index = create_index(path, meta(), &schema(), &vec![], 11, true, Some(1)).await.unwrap();
+    let index = create_index(path, meta(), &schema(), 11, true, Some(1)).await.unwrap();
     let missing: Document = serde_json::from_value(json!({"body":"missing"})).unwrap();
     assert!(index.index_document(missing.clone()).await.is_err());
     assert!(index.index_documents(vec![document("partial",json!([1,0,0])), missing.clone()]).await.is_err());
@@ -112,7 +111,7 @@ async fn external_f32_and_quantized_thresholds() {
         if let Inference::External { quantization: q, dimensions: d, similarity: metric, .. } = &mut config.inference { *q = quantization; *d = dimensions; *metric = similarity; }
         let mut alpha = vec![0.0; dimensions]; alpha[0] = 1.0;
         let mut beta = vec![0.0; dimensions]; beta[1] = 1.0;
-        let index = create_index(&path, config, &schema(), &vec![], 11, true, Some(1)).await.unwrap();
+        let index = create_index(&path, config, &schema(), 11, true, Some(1)).await.unwrap();
         index.index_documents(vec![document("alpha",json!(alpha.clone())), document("beta",json!(beta))]).await.unwrap();
         index.commit().await;
         for ann_mode in [AnnMode::All, AnnMode::Nprobe(1)] {

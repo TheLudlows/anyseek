@@ -4,7 +4,7 @@
 use seekstorm::commit::Commit;
 use seekstorm::index::{
     AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
-    IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType,
+    IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
     TokenizerType, create_index,
 };
 use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
@@ -49,7 +49,6 @@ async fn frequent_terms_topk_returns_results() {
         name: "repro".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -59,7 +58,7 @@ async fn frequent_terms_topk_returns_results() {
         inference: Inference::None,
     };
     // NOTE: keep on the single-shard fast path; multi-shard covered by suite.
-    let index_arc = create_index(index_path, meta, &schema, &Vec::new(), 11, false, Some(1))
+    let index_arc = create_index(index_path, meta, &schema, 11, false, Some(1))
         .await
         .unwrap();
 

@@ -179,7 +179,7 @@ def exercise(binary, workdir):
                 {'field': 'url', 'field_type': 'Text', 'store': False, 'index_lexical': False}]
             index_id = api('POST', '/api/v1/index', {
                 'index_name': 'http_smoke', 'schema': schema, 'similarity': 'Bm25f',
-                'tokenizer': 'UnicodeAlphanumeric', 'stemmer': 'None', 'stop_words': 'None',
+                'tokenizer': 'UnicodeAlphanumeric', 'stop_words': 'None',
                 'frequent_words': 'English', 'ngram_indexing': 9,
                 'document_compression': 'Snappy', 'inference': 'None', 'clustering': 'None'})
             check(index_id == 0, f'first index ID mismatch: {index_id}')
@@ -190,6 +190,11 @@ def exercise(binary, workdir):
                 {'title': 'title2', 'body': 'body2 test', 'url': 'url2'},
                 {'title': 'title3 test', 'body': 'body3 test', 'url': 'url3'}])
             check(api('PATCH', path) == 4, 'commit must expose four documents')
+            for method in ('GET', 'POST', 'PUT'):
+                request(method, path + '/synonyms', key=api_key, expected=501)
+            for field, value in [('stemmer', 'None'), ('stemmer', 'English'), ('synonyms', []), ('synonyms', None)]:
+                request('POST', '/api/v1/index', {'index_name': 'retired', 'schema': schema, field: value},
+                        api_key, expected=400)
             for field in ('spelling_correction', 'query_completion'):
                 request('POST', '/api/v1/index', {'index_name': 'retired', 'schema': schema,
                         field: {}}, api_key, expected=400)

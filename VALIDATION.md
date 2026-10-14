@@ -450,3 +450,11 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - 实际 Chromium 回归与生成 OpenAPI 精确对比由本 PR CI 执行，结果记录在 PR。未执行生产规模性能基准，不将本次裁剪解释为性能提升保证。
 
 索引格式仍为 7.0，保留的 Mmap + None/Snappy 布局不变。旧 Ram/Lz4/Zstd 配置不转换；受 FFR/FRF 错误影响的索引须重建以补齐 posting。D4～D6 未执行。
+
+## D5：删除同义词与词干器（2026-10-14）
+
+基于 master `3c3de11`。删除核心类型、索引扩展与词干化、JSON 配置、同义词 GET/POST/PUT 路由、统计字段及 Snowball 依赖，同步生成 OpenAPI 与 Rust 调用示例。
+
+本地通过 `cargo test --workspace --all-targets`（68 项）、`cargo test --workspace --doc`（44 项）和 `python3 scripts/http_smoke.py --server target/debug/seekstorm_server`。扩展现有 query_contract 覆盖旧参数拒绝、词形/同义词不扩展、大小写规范化、提交后重开及不生成同义词文件；HTTP 覆盖旧字段 400、删除路由 501。其余回归覆盖 N-gram、中文、短语、元数据过滤及向量/混合检索。本地 HTTP 未启用 Chromium，浏览器回归由 CI 执行。
+
+本地采用 `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_CODEGEN_UNITS=1` 和 `-j2`。首次依赖编译遇到空对象归档错误，清理 syn 构建缓存并重新编译后通过。历史索引需重建，不提供兼容转换。

@@ -12,7 +12,7 @@
 use seekstorm::commit::Commit;
 use seekstorm::index::{
     AccessType, Close, Clustering, DeleteDocuments, DocumentCompression, FrequentwordType,
-    IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType,
+    IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
     TokenizerType, create_index,
 };
 use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
@@ -38,7 +38,6 @@ fn meta() -> IndexMetaObject {
         name: "bitmap_delete_consistency".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -87,7 +86,7 @@ async fn setup() -> (seekstorm::index::IndexArc, HashSet<u64>, HashSet<u64>) {
     let _ = fs::remove_dir_all(path);
     // Single shard: per-shard postings stay >= 4096 scattered docs, which
     // forces Bitmap encoding (RLE aborts past 2048 runs).
-    let index = create_index(path, meta(), &schema(), &Vec::new(), 11, true, Some(1))
+    let index = create_index(path, meta(), &schema(), 11, true, Some(1))
         .await
         .unwrap();
     let mut rng = Rng(0xabc);

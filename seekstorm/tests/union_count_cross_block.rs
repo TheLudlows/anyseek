@@ -7,7 +7,7 @@
 use seekstorm::commit::Commit;
 use seekstorm::index::{
     AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-    IndexMetaObject, LexicalSimilarity, NgramSet, StemmerType, StopwordType, TokenizerType,
+    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
     create_index,
 };
 use seekstorm::search::{QueryType, ResultType, Search, SearchMode};
@@ -20,7 +20,6 @@ fn meta() -> IndexMetaObject {
         name: "union_count_cross_block".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-        stemmer: StemmerType::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
@@ -71,7 +70,7 @@ async fn fresh(dir: &str) -> seekstorm::index::IndexArc {
     let _ = fs::remove_dir_all(path);
     // Single shard so terms span multiple blocks (with default sharding each
     // shard holds a single block and the bug is unreachable).
-    create_index(path, meta(), &schema(), &Vec::new(), 11, true, Some(1))
+    create_index(path, meta(), &schema(), 11, true, Some(1))
         .await
         .unwrap()
 }

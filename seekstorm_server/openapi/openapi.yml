@@ -1466,9 +1466,6 @@ components:
         tokenizer:
           $ref: '#/components/schemas/TokenizerType'
           description: 'Specify tokenizer type for the index: (default=UnicodeAlphanumeric). The tokenizer is used to split text into tokens for indexing and searching. The choice of tokenizer can affect search performance and relevance, depending on the language and characteristics of the text being indexed.'
-        stemmer:
-          $ref: '#/components/schemas/StemmerType'
-          description: Specify stemmer
         stop_words:
           $ref: '#/components/schemas/StopwordType'
           description: Specify stop words for the index. Stop words are not indexed and not searched for. This can be used to reduce index size and improve search performance by excluding high-frequency, low-information terms from the index.
@@ -1500,18 +1497,6 @@ components:
         document_compression:
           $ref: '#/components/schemas/DocumentCompression'
           description: 'Enable document compression for the index. This can reduce the index size on disk and in memory, but may increase indexing and search latency. Default: Snappy compression.'
-        synonyms:
-          type: array
-          items:
-            $ref: '#/components/schemas/Synonym'
-          description: Specify synonyms for the index. Synonyms are used to expand search queries with additional terms that have the same or similar meaning, improving recall and search relevance. The multiway option specifies whether the synonym relationship is multiway (if true, all terms in the synonym set are considered synonyms of each other) or one-way (if false, only the first term in the synonym set is considered the main term, and the other terms are considered synonyms of the main term).
-          example:
-          - terms:
-            - berry
-            - lingonberry
-            - blueberry
-            - gooseberry
-            multiway: false
         clustering:
           $ref: '#/components/schemas/Clustering'
           description: Enable clustering for vector search.
@@ -2535,51 +2520,6 @@ components:
       enum:
       - Ascending
       - Descending
-    StemmerType:
-      type: string
-      description: |-
-        Defines stemming behavior, reducing inflected words to their word stem, base or root form.
-        Stemming increases recall, but decreases precision. It can introduce false positive results.
-      enum:
-      - None
-      - Arabic
-      - Armenian
-      - Basque
-      - Catalan
-      - Czech
-      - Danish
-      - Dutch
-      - DutchPorter
-      - English
-      - Esperanto
-      - Estonian
-      - Finnish
-      - French
-      - German
-      - Greek
-      - Hindi
-      - Hungarian
-      - Indonesian
-      - Irish
-      - Italian
-      - Lithuanian
-      - Lovins
-      - Nepali
-      - Norwegian
-      - Persian
-      - Polish
-      - Porter
-      - Portuguese
-      - Romanian
-      - Russian
-      - Serbian
-      - Sesotho
-      - Spanish
-      - Swedish
-      - Tamil
-      - Turkish
-      - Ukrainian
-      - Yiddish
     StopwordType:
       oneOf:
       - type: string
@@ -2624,29 +2564,6 @@ components:
         Stopword removal has drawbacks: “The Who”, “Take That”, “Let it be”, “To be or not to be”, "The The", "End of days", "What might have been" are all valid queries for bands, songs, movies, literature,
         but become impossible when stopwords are removed.
         The lists of stop_words and frequent_words should not overlap.
-    Synonym:
-      type: object
-      description: Defines synonyms for terms per index.
-      required:
-      - terms
-      properties:
-        terms:
-          type: array
-          items:
-            type: string
-          description: List of terms that are synonyms.
-        multiway:
-          type: boolean
-          description: |-
-            Creates alternative versions of documents where in each copy a term is replaced with one of its synonyms.
-            Doesn't impact the query latency, but does increase the index size.
-            Multi-way synonyms (default): all terms are synonyms of each other.
-            One-way synonyms: only the first term is a synonym of the following terms, but not vice versa.
-            E.g. [street, avenue, road] will result in searches for street to return documents containing any of the terms street, avenue or road,
-            but searches for avenue will only return documents containing avenue, but not documents containing street or road.
-            Currently only single terms without spaces are supported.
-            The synonyms that were created with the synonyms parameter in create_index are stored in synonyms.json in the index directory contains
-            Can be manually modified, but becomes effective only after restart and only for newly indexed documents.
     TokenizerType:
       type: string
       description: |-

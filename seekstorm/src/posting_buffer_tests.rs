@@ -3,7 +3,7 @@ use crate::{
     commit::Commit,
     index::{
         AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocument,
-        IndexMetaObject, LexicalSimilarity, SchemaField, StemmerType, StopwordType, TokenizerType,
+        IndexMetaObject, LexicalSimilarity, SchemaField, StopwordType, TokenizerType,
         create_index, open_index,
     },
     search::{QueryType, ResultType, Search, SearchMode},
@@ -23,7 +23,6 @@ async fn lazy_buffers_grow_commit_restore_and_clear() {
             name: "buffers".into(),
             lexical_similarity: LexicalSimilarity::Bm25fProximity,
             tokenizer: TokenizerType::UnicodeAlphanumeric,
-            stemmer: StemmerType::None,
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::English,
             ngram_indexing: 9,
@@ -37,7 +36,7 @@ async fn lazy_buffers_grow_commit_restore_and_clear() {
             {"field":"body","field_type":"Text","store":true,"index_lexical":true}
         ]))
         .unwrap();
-        let index = create_index(&directory, meta, &schema, &vec![], 11, true, Some(3))
+        let index = create_index(&directory, meta, &schema, 11, true, Some(3))
             .await
             .unwrap();
         for shard in &index.read().await.shard_vec {
