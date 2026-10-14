@@ -161,11 +161,6 @@ pub(crate) async fn http_request_handler(
         }
     }
 
-    // Retired binary protocol has no deserializer or execution path.
-    if parts[0..3] == ["api", "v2", "index"] && parts[4] == "query" {
-        return Ok(status(StatusCode::NOT_FOUND,
-            "binary query endpoint removed; use POST /api/v1/index/{index_id}/query with JSON".to_string()));
-    }
     let post_json_endpoint = parts[0..3] == ["api", "v1", "index"]
         && matches!(parts[4], "query" | "iterator") && parts[5].is_empty();
     if req.method() == Method::OPTIONS {
@@ -865,11 +860,6 @@ pub(crate) async fn http_request_handler(
                 Err(_) => HttpServerError::ApiKeyNotFound.into(),
             }
         }
-
-        ("api", "v1", "index", _, "file", _, _) => Ok(status(
-            StatusCode::NOT_FOUND,
-            "file endpoints have been removed; use the JSON document API and external source URLs".to_string(),
-        )),
 
         (_, _, _, _, _, _, &Method::GET) => match path {
             "/" => Ok(Response::new(BoxBody::new(INDEX_HTML.to_string()))),

@@ -42,36 +42,6 @@ use crate::{
     vector_similarity::{TurboQuant, VectorSimilarity},
 };
 
-#[cfg(any(
-    all(
-        feature = "gxhash",
-        target_arch = "x86_64",
-        target_feature = "aes",
-        target_feature = "sse2"
-    ),
-    all(
-        feature = "gxhash",
-        target_arch = "aarch64",
-        target_feature = "aes",
-        target_feature = "neon"
-    )
-))]
-use gxhash::{gxhash32, gxhash64};
-
-#[cfg(not(any(
-    all(
-        feature = "gxhash",
-        target_arch = "x86_64",
-        target_feature = "aes",
-        target_feature = "sse2"
-    ),
-    all(
-        feature = "gxhash",
-        target_arch = "aarch64",
-        target_feature = "aes",
-        target_feature = "neon"
-    )
-)))]
 use ahash::RandomState;
 
 pub(crate) const INDEX_FILENAME: &str = "index.bin";
@@ -2518,112 +2488,18 @@ pub static IS_NEON: LazyLock<bool> = LazyLock::new(|| {
 /// the SIMD path; on archs without a backend this is always `false`.
 pub static IS_SIMD: LazyLock<bool> = LazyLock::new(|| *IS_AVX2 || *IS_NEON);
 
-#[cfg(not(any(
-    all(
-        feature = "gxhash",
-        target_arch = "x86_64",
-        target_feature = "aes",
-        target_feature = "sse2"
-    ),
-    all(
-        feature = "gxhash",
-        target_arch = "aarch64",
-        target_feature = "aes",
-        target_feature = "neon"
-    )
-)))]
 pub(crate) static HASHER_32: LazyLock<RandomState> =
     LazyLock::new(|| RandomState::with_seeds(805272099, 242851902, 646123436, 591410655));
 
-#[cfg(not(any(
-    all(
-        feature = "gxhash",
-        target_arch = "x86_64",
-        target_feature = "aes",
-        target_feature = "sse2"
-    ),
-    all(
-        feature = "gxhash",
-        target_arch = "aarch64",
-        target_feature = "aes",
-        target_feature = "neon"
-    )
-)))]
 pub(crate) static HASHER_64: LazyLock<RandomState> =
     LazyLock::new(|| RandomState::with_seeds(808259318, 750368348, 84901999, 789810389));
 
 #[inline]
-#[cfg(any(
-    all(
-        feature = "gxhash",
-        target_arch = "x86_64",
-        target_feature = "aes",
-        target_feature = "sse2"
-    ),
-    all(
-        feature = "gxhash",
-        target_arch = "aarch64",
-        target_feature = "aes",
-        target_feature = "neon"
-    )
-))]
-pub(crate) fn hash32(term_bytes: &[u8]) -> u32 {
-    gxhash32(term_bytes, 1234)
-}
-
-#[inline]
-#[cfg(any(
-    all(
-        feature = "gxhash",
-        target_arch = "x86_64",
-        target_feature = "aes",
-        target_feature = "sse2"
-    ),
-    all(
-        feature = "gxhash",
-        target_arch = "aarch64",
-        target_feature = "aes",
-        target_feature = "neon"
-    )
-))]
-pub(crate) fn hash64(term_bytes: &[u8]) -> u64 {
-    gxhash64(term_bytes, 1234) & 0b1111111111111111111111111111111111111111111111111111111111111000
-}
-
-#[inline]
-#[cfg(not(any(
-    all(
-        feature = "gxhash",
-        target_arch = "x86_64",
-        target_feature = "aes",
-        target_feature = "sse2"
-    ),
-    all(
-        feature = "gxhash",
-        target_arch = "aarch64",
-        target_feature = "aes",
-        target_feature = "neon"
-    )
-)))]
 pub(crate) fn hash32(term_bytes: &[u8]) -> u32 {
     HASHER_32.hash_one(term_bytes) as u32
 }
 
 #[inline]
-#[cfg(not(any(
-    all(
-        feature = "gxhash",
-        target_arch = "x86_64",
-        target_feature = "aes",
-        target_feature = "sse2"
-    ),
-    all(
-        feature = "gxhash",
-        target_arch = "aarch64",
-        target_feature = "aes",
-        target_feature = "neon"
-    )
-)))]
 pub(crate) fn hash64(term_bytes: &[u8]) -> u64 {
     HASHER_64.hash_one(term_bytes)
         & 0b1111111111111111111111111111111111111111111111111111111111111000

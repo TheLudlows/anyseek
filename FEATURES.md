@@ -1,6 +1,6 @@
 # 当前功能清单
 
-核查日期：2026-10-14（Asia/Shanghai）。基于主干 `3c3de11`（PR #18、#19 已合入），本分支删除同义词与词干器（D5）。主干与本分支的合入状态见 [STATUS.md](STATUS.md)。本文按本分支实现列举功能，不将路线图视为已实现能力。
+核查日期：2026-10-14（Asia/Shanghai）。基于主干 `d1254da`（D5 已合入），本分支执行 E1/E2。主干与本分支的合入状态见 [STATUS.md](STATUS.md)。本文按本分支实现列举功能，不将路线图视为已实现能力。
 
 ## 1. 检索与数据能力
 
@@ -54,7 +54,7 @@
 | GET | `/` 及固定静态资源路径 | 内嵌 Web UI、CSS/JS、图标 | 不作为数据 API 登记 |
 | OPTIONS | 服务路由 | CORS 预检；query/iterator 声明 `POST, OPTIONS` | 不作为数据 API 登记 |
 
-以上为 15 个 `/api/v1` 业务/存活操作，加 UI/静态资源和预检。B1/B2 后 query/iterator 的 GET 与 HTTP QUERY 返回 405；POST URL 非空参数返回 400；旧 `/api/v2/index/{id}/query` 返回 404。旧 `/file` 路由仅返回 404 迁移提示。
+以上为 15 个 `/api/v1` 业务/存活操作，加 UI/静态资源和预检。B1/B2 后 query/iterator 的 GET 与 HTTP QUERY 返回 405；POST URL 非空参数返回 400；旧 `/api/v2/index/{id}/query` 与 `/file` 路由无专用处理，和其他未知路径一样返回 501；OPTIONS 使用通用 CORS 预检返回 204。
 
 ## 3. Web UI
 
@@ -79,7 +79,7 @@
 - Ctrl-C/SIGINT 或 SIGTERM 停止接收请求、结束已有连接，再提交并关闭全部索引；无 stdin 交互命令。
 - 启动参数 `generate_openapi=true` 生成 OpenAPI JSON/YAML；启动/索引概况使用普通日志；核心库 `info::collect_index_info` 返回结构化统计，采集不提交或同步文件。核心日志由调用方配置；服务支持 `RUST_LOG`。
 - Rust 核心库可嵌入应用；HTTP 服务内嵌静态 UI；保留 Dockerfile 从源码构建。两个 crate 均 `publish=false`。
-- 核心默认 features 为 `zh`、`vb`。`vb` 提供来源、两路分数及 shard/level/cluster 等诊断字段；这些字段不表示保留自动切块。`gxhash` 可选。HTTP DTO 与 OpenAPI 全部位于服务，核心不提供 `api-schema` feature。
+- 核心默认 features 为 `zh`、`vb`。`vb` 提供来源、两路分数及 shard/level/cluster 等诊断字段；这些字段不表示保留自动切块。哈希实现固定使用 AHash。HTTP DTO 与 OpenAPI 全部位于服务，核心不提供 `api-schema` feature。
 - CI 保留独立核心构建/依赖边界、workspace 构建与测试、HTTP/Chromium、静态资源及生成 OpenAPI 一致性检查。
 
 ## 5. 已移除与尚未实现
