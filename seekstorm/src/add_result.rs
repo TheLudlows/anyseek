@@ -4,15 +4,13 @@ use std::cmp::Ordering;
 
 use crate::{
     index::{
-        AccessType, CompressionType, FIELD_STOP_BIT_1, FIELD_STOP_BIT_2,
-        LexicalSimilarity, NgramType, NonUniquePostingListObjectQuery, PostingListObjectQuery,
-        SPEEDUP_FLAG, STOP_BIT, Shard, get_document_length_compressed_mmap,
+        CompressionType, FIELD_STOP_BIT_1, FIELD_STOP_BIT_2, LexicalSimilarity, NgramType,
+        NonUniquePostingListObjectQuery, PostingListObjectQuery, SPEEDUP_FLAG, STOP_BIT, Shard,
+        get_document_length_compressed_mmap,
     },
     min_heap,
     search::{FilterSparse, ResultType, SearchResult},
-    utils::{
-        read_u16, read_u32,
-    },
+    utils::{read_u16, read_u32},
 };
 
 pub(crate) const K: f32 = 1.2;
@@ -566,13 +564,9 @@ pub(crate) fn get_bm25f_singleterm_multifield(
     let block_id = docid >> 16;
 
     if shard.indexed_field_vec.len() == 1 {
-        let bm25_component =
-            shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111)
-            } else {
-                shard.level_index[block_id].document_length_compressed_array[0]
-                    [docid & 0b11111111_11111111]
-            } as usize];
+        let bm25_component = shard.bm25_component_cache[{
+            get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111)
+        } as usize];
 
         match plo_single.ngram_type {
             NgramType::SingleTerm => {
@@ -608,18 +602,14 @@ pub(crate) fn get_bm25f_singleterm_multifield(
         for field in field_vec.iter() {
             let field_id = field.0 as usize;
 
-            let bm25_component =
-                shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                    get_document_length_compressed_mmap(
-                        shard,
-                        field_id,
-                        block_id,
-                        docid & 0b11111111_11111111,
-                    )
-                } else {
-                    shard.level_index[block_id].document_length_compressed_array[field_id]
-                        [docid & 0b11111111_11111111]
-                } as usize];
+            let bm25_component = shard.bm25_component_cache[{
+                get_document_length_compressed_mmap(
+                    shard,
+                    field_id,
+                    block_id,
+                    docid & 0b11111111_11111111,
+                )
+            } as usize];
 
             let tf = field.1 as f32;
 
@@ -634,18 +624,14 @@ pub(crate) fn get_bm25f_singleterm_multifield(
         for field in field_vec_ngram1.iter() {
             let field_id = field.0 as usize;
 
-            let bm25_component =
-                shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                    get_document_length_compressed_mmap(
-                        shard,
-                        field_id,
-                        block_id,
-                        docid & 0b11111111_11111111,
-                    )
-                } else {
-                    shard.level_index[block_id].document_length_compressed_array[field_id]
-                        [docid & 0b11111111_11111111]
-                } as usize];
+            let bm25_component = shard.bm25_component_cache[{
+                get_document_length_compressed_mmap(
+                    shard,
+                    field_id,
+                    block_id,
+                    docid & 0b11111111_11111111,
+                )
+            } as usize];
 
             let tf_ngram1 = field.1 as f32;
 
@@ -659,18 +645,14 @@ pub(crate) fn get_bm25f_singleterm_multifield(
         for field in field_vec_ngram2.iter() {
             let field_id = field.0 as usize;
 
-            let bm25_component =
-                shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                    get_document_length_compressed_mmap(
-                        shard,
-                        field_id,
-                        block_id,
-                        docid & 0b11111111_11111111,
-                    )
-                } else {
-                    shard.level_index[block_id].document_length_compressed_array[field_id]
-                        [docid & 0b11111111_11111111]
-                } as usize];
+            let bm25_component = shard.bm25_component_cache[{
+                get_document_length_compressed_mmap(
+                    shard,
+                    field_id,
+                    block_id,
+                    docid & 0b11111111_11111111,
+                )
+            } as usize];
 
             let tf_ngram2 = field.1 as f32;
 
@@ -684,18 +666,14 @@ pub(crate) fn get_bm25f_singleterm_multifield(
         for field in field_vec_ngram1.iter() {
             let field_id = field.0 as usize;
 
-            let bm25_component =
-                shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                    get_document_length_compressed_mmap(
-                        shard,
-                        field_id,
-                        block_id,
-                        docid & 0b11111111_11111111,
-                    )
-                } else {
-                    shard.level_index[block_id].document_length_compressed_array[field_id]
-                        [docid & 0b11111111_11111111]
-                } as usize];
+            let bm25_component = shard.bm25_component_cache[{
+                get_document_length_compressed_mmap(
+                    shard,
+                    field_id,
+                    block_id,
+                    docid & 0b11111111_11111111,
+                )
+            } as usize];
 
             let tf_ngram1 = field.1 as f32;
 
@@ -709,18 +687,14 @@ pub(crate) fn get_bm25f_singleterm_multifield(
         for field in field_vec_ngram2.iter() {
             let field_id = field.0 as usize;
 
-            let bm25_component =
-                shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                    get_document_length_compressed_mmap(
-                        shard,
-                        field_id,
-                        block_id,
-                        docid & 0b11111111_11111111,
-                    )
-                } else {
-                    shard.level_index[block_id].document_length_compressed_array[field_id]
-                        [docid & 0b11111111_11111111]
-                } as usize];
+            let bm25_component = shard.bm25_component_cache[{
+                get_document_length_compressed_mmap(
+                    shard,
+                    field_id,
+                    block_id,
+                    docid & 0b11111111_11111111,
+                )
+            } as usize];
 
             let tf_ngram2 = field.1 as f32;
 
@@ -734,18 +708,14 @@ pub(crate) fn get_bm25f_singleterm_multifield(
         for field in field_vec_ngram3.iter() {
             let field_id = field.0 as usize;
 
-            let bm25_component =
-                shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                    get_document_length_compressed_mmap(
-                        shard,
-                        field_id,
-                        block_id,
-                        docid & 0b11111111_11111111,
-                    )
-                } else {
-                    shard.level_index[block_id].document_length_compressed_array[field_id]
-                        [docid & 0b11111111_11111111]
-                } as usize];
+            let bm25_component = shard.bm25_component_cache[{
+                get_document_length_compressed_mmap(
+                    shard,
+                    field_id,
+                    block_id,
+                    docid & 0b11111111_11111111,
+                )
+            } as usize];
 
             let tf_ngram3 = field.1 as f32;
 
@@ -774,13 +744,9 @@ pub(crate) fn get_bm25f_singleterm_singlefield(
     let block_id = docid >> 16;
 
     if shard.indexed_field_vec.len() == 1 {
-        let bm25_component =
-            shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111)
-            } else {
-                shard.level_index[block_id].document_length_compressed_array[0]
-                    [docid & 0b11111111_11111111]
-            } as usize];
+        let bm25_component = shard.bm25_component_cache[{
+            get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111)
+        } as usize];
 
         match plo_single.ngram_type {
             NgramType::SingleTerm => {
@@ -811,18 +777,14 @@ pub(crate) fn get_bm25f_singleterm_singlefield(
     } else {
         let field_id = 0;
 
-        let bm25_component =
-            shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                get_document_length_compressed_mmap(
-                    shard,
-                    field_id,
-                    block_id,
-                    docid & 0b11111111_11111111,
-                )
-            } else {
-                shard.level_index[block_id].document_length_compressed_array[field_id]
-                    [docid & 0b11111111_11111111]
-            } as usize];
+        let bm25_component = shard.bm25_component_cache[{
+            get_document_length_compressed_mmap(
+                shard,
+                field_id,
+                block_id,
+                docid & 0b11111111_11111111,
+            )
+        } as usize];
 
         match plo_single.ngram_type {
             NgramType::SingleTerm => {
@@ -865,13 +827,9 @@ pub(crate) fn get_bm25f_multiterm_multifield(
     let block_id = docid >> 16;
 
     if shard.indexed_field_vec.len() == 1 {
-        let bm25_component =
-            shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
-                get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111)
-            } else {
-                shard.level_index[block_id].document_length_compressed_array[0]
-                    [docid & 0b11111111_11111111]
-            } as usize];
+        let bm25_component = shard.bm25_component_cache[{
+            get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111)
+        } as usize];
 
         for plo in query_list.iter() {
             if !plo.bm25_flag {
@@ -923,21 +881,15 @@ pub(crate) fn get_bm25f_multiterm_multifield(
                     for field in plo.field_vec.iter() {
                         let field_id = field.0 as usize;
                         if bm25_component_vec[field_id] == 0.0 {
-                            bm25_component_vec[field_id] =
-                                shard.bm25_component_cache[if shard.meta.access_type
-                                    == AccessType::Mmap
-                                {
-                                    get_document_length_compressed_mmap(
-                                        shard,
-                                        field_id,
-                                        block_id,
-                                        docid & 0b11111111_11111111,
-                                    )
-                                } else {
-                                    shard.level_index[block_id].document_length_compressed_array
-                                        [field_id][docid & 0b11111111_11111111]
-                                }
-                                    as usize];
+                            bm25_component_vec[field_id] = shard.bm25_component_cache[{
+                                get_document_length_compressed_mmap(
+                                    shard,
+                                    field_id,
+                                    block_id,
+                                    docid & 0b11111111_11111111,
+                                )
+                            }
+                                as usize];
                         }
 
                         let tf = field.1 as f32;
@@ -953,21 +905,15 @@ pub(crate) fn get_bm25f_multiterm_multifield(
                     for field in plo.field_vec_ngram1.iter() {
                         let field_id = field.0 as usize;
                         if bm25_component_vec[field_id] == 0.0 {
-                            bm25_component_vec[field_id] =
-                                shard.bm25_component_cache[if shard.meta.access_type
-                                    == AccessType::Mmap
-                                {
-                                    get_document_length_compressed_mmap(
-                                        shard,
-                                        field_id,
-                                        block_id,
-                                        docid & 0b11111111_11111111,
-                                    )
-                                } else {
-                                    shard.level_index[block_id].document_length_compressed_array
-                                        [field_id][docid & 0b11111111_11111111]
-                                }
-                                    as usize];
+                            bm25_component_vec[field_id] = shard.bm25_component_cache[{
+                                get_document_length_compressed_mmap(
+                                    shard,
+                                    field_id,
+                                    block_id,
+                                    docid & 0b11111111_11111111,
+                                )
+                            }
+                                as usize];
                         }
 
                         let tf_ngram1 = field.1 as f32;
@@ -984,21 +930,15 @@ pub(crate) fn get_bm25f_multiterm_multifield(
                     for field in plo.field_vec_ngram2.iter() {
                         let field_id = field.0 as usize;
                         if bm25_component_vec[field_id] == 0.0 {
-                            bm25_component_vec[field_id] =
-                                shard.bm25_component_cache[if shard.meta.access_type
-                                    == AccessType::Mmap
-                                {
-                                    get_document_length_compressed_mmap(
-                                        shard,
-                                        field_id,
-                                        block_id,
-                                        docid & 0b11111111_11111111,
-                                    )
-                                } else {
-                                    shard.level_index[block_id].document_length_compressed_array
-                                        [field_id][docid & 0b11111111_11111111]
-                                }
-                                    as usize];
+                            bm25_component_vec[field_id] = shard.bm25_component_cache[{
+                                get_document_length_compressed_mmap(
+                                    shard,
+                                    field_id,
+                                    block_id,
+                                    docid & 0b11111111_11111111,
+                                )
+                            }
+                                as usize];
                         }
 
                         let tf_ngram2 = field.1 as f32;
@@ -1016,21 +956,15 @@ pub(crate) fn get_bm25f_multiterm_multifield(
                     for field in plo.field_vec_ngram1.iter() {
                         let field_id = field.0 as usize;
                         if bm25_component_vec[field_id] == 0.0 {
-                            bm25_component_vec[field_id] =
-                                shard.bm25_component_cache[if shard.meta.access_type
-                                    == AccessType::Mmap
-                                {
-                                    get_document_length_compressed_mmap(
-                                        shard,
-                                        field_id,
-                                        block_id,
-                                        docid & 0b11111111_11111111,
-                                    )
-                                } else {
-                                    shard.level_index[block_id].document_length_compressed_array
-                                        [field_id][docid & 0b11111111_11111111]
-                                }
-                                    as usize];
+                            bm25_component_vec[field_id] = shard.bm25_component_cache[{
+                                get_document_length_compressed_mmap(
+                                    shard,
+                                    field_id,
+                                    block_id,
+                                    docid & 0b11111111_11111111,
+                                )
+                            }
+                                as usize];
                         }
 
                         let tf_ngram1 = field.1 as f32;
@@ -1047,21 +981,15 @@ pub(crate) fn get_bm25f_multiterm_multifield(
                     for field in plo.field_vec_ngram2.iter() {
                         let field_id = field.0 as usize;
                         if bm25_component_vec[field_id] == 0.0 {
-                            bm25_component_vec[field_id] =
-                                shard.bm25_component_cache[if shard.meta.access_type
-                                    == AccessType::Mmap
-                                {
-                                    get_document_length_compressed_mmap(
-                                        shard,
-                                        field_id,
-                                        block_id,
-                                        docid & 0b11111111_11111111,
-                                    )
-                                } else {
-                                    shard.level_index[block_id].document_length_compressed_array
-                                        [field_id][docid & 0b11111111_11111111]
-                                }
-                                    as usize];
+                            bm25_component_vec[field_id] = shard.bm25_component_cache[{
+                                get_document_length_compressed_mmap(
+                                    shard,
+                                    field_id,
+                                    block_id,
+                                    docid & 0b11111111_11111111,
+                                )
+                            }
+                                as usize];
                         }
 
                         let tf_ngram2 = field.1 as f32;
@@ -1078,21 +1006,15 @@ pub(crate) fn get_bm25f_multiterm_multifield(
                     for field in plo.field_vec_ngram3.iter() {
                         let field_id = field.0 as usize;
                         if bm25_component_vec[field_id] == 0.0 {
-                            bm25_component_vec[field_id] =
-                                shard.bm25_component_cache[if shard.meta.access_type
-                                    == AccessType::Mmap
-                                {
-                                    get_document_length_compressed_mmap(
-                                        shard,
-                                        field_id,
-                                        block_id,
-                                        docid & 0b11111111_11111111,
-                                    )
-                                } else {
-                                    shard.level_index[block_id].document_length_compressed_array
-                                        [field_id][docid & 0b11111111_11111111]
-                                }
-                                    as usize];
+                            bm25_component_vec[field_id] = shard.bm25_component_cache[{
+                                get_document_length_compressed_mmap(
+                                    shard,
+                                    field_id,
+                                    block_id,
+                                    docid & 0b11111111_11111111,
+                                )
+                            }
+                                as usize];
                         }
 
                         let tf_ngram3 = field.1 as f32;
@@ -1122,10 +1044,8 @@ pub(crate) fn get_bm25f_multiterm_singlefield(
     let mut bm25f = 0.0;
     let block_id = docid >> 16;
 
-    let bm25_component = shard.bm25_component_cache[if shard.meta.access_type == AccessType::Mmap {
+    let bm25_component = shard.bm25_component_cache[{
         get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111)
-    } else {
-        shard.level_index[block_id].document_length_compressed_array[0][docid & 0b11111111_11111111]
     } as usize];
 
     for plo in query_list.iter() {
@@ -2756,7 +2676,6 @@ pub(crate) fn add_result_multiterm_multifield(
     match *result_type {
         ResultType::Count => {
             if !phrase_query && field_filter_set.is_empty() {
-
                 *result_count += 1;
                 return;
             }
@@ -2780,7 +2699,6 @@ pub(crate) fn add_result_multiterm_multifield(
                 && search_result.topk_candidates.current_heap_size >= top_k
                 && block_score <= search_result.topk_candidates._elements[0].score
             {
-
                 *result_count += 1;
                 return;
             }
@@ -2801,7 +2719,6 @@ pub(crate) fn add_result_multiterm_multifield(
             phrase_query,
             all_terms_frequent && field_filter_set.is_empty() && result_type == &ResultType::Count,
         ) {
-
             *result_count += 1;
             return;
         }
@@ -3186,7 +3103,6 @@ pub(crate) fn add_result_multiterm_singlefield(
     match *result_type {
         ResultType::Count => {
             if !phrase_query && field_filter_set.is_empty() {
-
                 *result_count += 1;
                 return;
             }
@@ -3210,7 +3126,6 @@ pub(crate) fn add_result_multiterm_singlefield(
                 && search_result.topk_candidates.current_heap_size >= top_k
                 && block_score <= search_result.topk_candidates._elements[0].score
             {
-
                 *result_count += 1;
                 return;
             }
@@ -3230,7 +3145,6 @@ pub(crate) fn add_result_multiterm_singlefield(
             phrase_query,
             all_terms_frequent && field_filter_set.is_empty() && result_type == &ResultType::Count,
         ) {
-
             *result_count += 1;
             return;
         }

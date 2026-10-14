@@ -210,7 +210,7 @@ async fn check(index: &IndexArc, realtime: bool, removed: &[usize]) {
 
 #[tokio::test]
 async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
-    for (tag, access, shards) in [("mmap1", AccessType::Mmap, 1), ("ram3", AccessType::Ram, 3)] {
+    for (tag, access, shards) in [("mmap1", AccessType::Mmap, 1), ("mmap3", AccessType::Mmap, 3)] {
         let path = std::env::temp_dir().join(format!(
             "seekpower-shared-filters-{}-{tag}",
             std::process::id()

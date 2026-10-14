@@ -1,8 +1,5 @@
 use crate::INDEX_RUNTIME;
-use crate::index::{
-    DOCUMENT_LENGTH_COMPRESSION, FieldType, NgramType, Shard,
-    ShardArc,
-};
+use crate::index::{DOCUMENT_LENGTH_COMPRESSION, FieldType, NgramType, Shard, ShardArc};
 use crate::iterator::{search_iterator_index, search_iterator_shard};
 use crate::min_heap::{Result, result_ordering_root};
 use crate::tokenizer::tokenizer;
@@ -20,7 +17,7 @@ use crate::vector_similarity::{
 };
 use crate::{
     index::{
-        AccessType, BlockObjectIndex, DUMMY_VEC, DUMMY_VEC_8, Index, IndexArc, LexicalSimilarity,
+        BlockObjectIndex, DUMMY_VEC, DUMMY_VEC_8, Index, IndexArc, LexicalSimilarity,
         MAX_POSITIONS_PER_TERM, NonUniquePostingListObjectQuery, NonUniqueTermObject,
         PostingListObjectIndex, PostingListObjectQuery, QueueObject, SPEEDUP_FLAG, SegmentIndex,
         TermObject, get_max_score,
@@ -107,7 +104,6 @@ pub enum ResultType {
 
 pub(crate) struct SearchResult<'a> {
     pub topk_candidates: MinHeap<'a>,
-
 }
 
 /// Contains the results returned when searching the index.
@@ -137,7 +133,6 @@ pub struct ResultObject {
 
     /// List of search results: doc ID and BM25 score
     pub results: Vec<Result>,
-
 }
 
 /// FacetValue: Facet field value types
@@ -680,25 +675,37 @@ impl Search for IndexArc {
         result_sort: Vec<ResultSort>,
     ) -> ResultObject {
         let index_ref = self.read().await;
-        if let Err(error) = crate::metadata_filter::validate_filters(&index_ref.schema_map, &facet_filter) {
-            return ResultObject { error: Some(error), ..Default::default() };
+        if let Err(error) =
+            crate::metadata_filter::validate_filters(&index_ref.schema_map, &facet_filter)
+        {
+            return ResultObject {
+                error: Some(error),
+                ..Default::default()
+            };
         }
         if let Err(error) = crate::vector::validate_query_vector(
-            &index_ref.meta.inference, &search_mode, query_vector.as_ref(),
+            &index_ref.meta.inference,
+            &search_mode,
+            query_vector.as_ref(),
         ) {
-            return ResultObject { error: Some(error), ..Default::default() };
+            return ResultObject {
+                error: Some(error),
+                ..Default::default()
+            };
         }
         if !matches!(search_mode, SearchMode::Lexical)
             && (length == 0 || offset.checked_add(length).is_none())
         {
-            return ResultObject { error: Some("vector search requires a positive, bounded result window".into()), ..Default::default() };
+            return ResultObject {
+                error: Some("vector search requires a positive, bounded result window".into()),
+                ..Default::default()
+            };
         }
         let original_query = query_string.clone();
 
         if enable_empty_query
             && query_string.is_empty()
             && query_vector.is_none()
-
             && facet_filter.is_empty()
             && (result_sort.is_empty()
                 || (result_sort.len() == 1
@@ -727,7 +734,6 @@ impl Search for IndexArc {
                     result_type,
                     include_uncommitted,
                     field_filter,
-
                     facet_filter,
                     result_sort,
                 )
@@ -741,7 +747,9 @@ impl Search for IndexArc {
         let shard_number = index_ref.shard_number;
         let aggregate_results = result_type != ResultType::Count;
 
-        let query_vector = if index_ref.is_vector_indexing && !matches!(search_mode, SearchMode::Lexical) {
+        let query_vector = if index_ref.is_vector_indexing
+            && !matches!(search_mode, SearchMode::Lexical)
+        {
             Some(if let Some(mut qv) = query_vector {
                 if index_ref.vector_similarity == VectorSimilarity::Cosine
                     && matches!(index_ref.meta.inference, Inference::External { .. })
@@ -888,7 +896,10 @@ impl Search for IndexArc {
                     (qv, 0.0, 0.0, 0, 0)
                 }
             } else {
-                return ResultObject { error: Some("query_vector is required for Vector/Hybrid search".into()), ..Default::default() };
+                return ResultObject {
+                    error: Some("query_vector is required for Vector/Hybrid search".into()),
+                    ..Default::default()
+                };
             })
         } else {
             None
@@ -920,7 +931,6 @@ impl Search for IndexArc {
                                 result_type_clone,
                                 include_uncommitted,
                                 field_filter_clone,
-
                                 facet_filter_clone,
                                 result_sort_clone,
                             )
@@ -970,7 +980,6 @@ impl Search for IndexArc {
                                 result_type_clone,
                                 include_uncommitted,
                                 field_filter_clone.clone(),
-
                                 facet_filter_clone.clone(),
                                 result_sort_clone,
                             )
@@ -1063,7 +1072,6 @@ impl Search for IndexArc {
                     };
                 }
             };
-
         }
         if aggregate_results {
             match search_mode {
@@ -1517,7 +1525,6 @@ pub(crate) fn decode_posting_list_object(
             posting_count_ngram_3,
             max_list_score,
             blocks: blocks_owned,
-            position_range_previous: 0,
             ..Default::default()
         };
 
@@ -1633,13 +1640,18 @@ impl SearchLexicalShard for ShardArc {
                 query_string.is_empty(),
                 &result_sort_index,
             ),
-
         };
 
-        let facet_filter_sparse = match crate::metadata_filter::compile_filters(&shard_ref, &facet_filter) {
-            Ok(filters) => filters,
-            Err(error) => return ResultObject { error: Some(error), ..Default::default() },
-        };
+        let facet_filter_sparse =
+            match crate::metadata_filter::compile_filters(&shard_ref, &facet_filter) {
+                Ok(filters) => filters,
+                Err(error) => {
+                    return ResultObject {
+                        error: Some(error),
+                        ..Default::default()
+                    };
+                }
+            };
 
         let result_count_arc = Arc::new(AtomicUsize::new(0));
         let result_count_uncommitted_arc = Arc::new(AtomicUsize::new(0));
@@ -1714,7 +1726,7 @@ impl SearchLexicalShard for ShardArc {
                         let max_list_score;
                         let blocks;
                         let blocks_len;
-                        let found_plo = if shard_ref.meta.access_type == AccessType::Mmap {
+                        let found_plo = {
                             let posting_list_object_index_option = decode_posting_list_object(
                                 &shard_ref.segments_index[key0 as usize],
                                 &shard_ref,
@@ -1727,24 +1739,6 @@ impl SearchLexicalShard for ShardArc {
                                 blocks = &DUMMY_VEC;
                                 blocks_len = plo.blocks.len();
                                 blocks_vec.push(plo.blocks);
-                                true
-                            } else {
-                                posting_count = 0;
-                                max_list_score = 0.0;
-                                blocks = &DUMMY_VEC;
-                                blocks_len = 0;
-                                false
-                            }
-                        } else {
-                            let posting_list_object_index_option = shard_ref.segments_index
-                                [key0 as usize]
-                                .segment
-                                .get(&key_hash);
-                            if let Some(plo) = posting_list_object_index_option {
-                                posting_count = plo.posting_count;
-                                max_list_score = plo.max_list_score;
-                                blocks_len = plo.blocks.len();
-                                blocks = &plo.blocks;
                                 true
                             } else {
                                 posting_count = 0;
@@ -1790,7 +1784,7 @@ impl SearchLexicalShard for ShardArc {
                                 let max_list_score;
                                 let blocks;
                                 let blocks_len;
-                                let found_plo = if shard_ref.meta.access_type == AccessType::Mmap {
+                                let found_plo = {
                                     let posting_list_object_index_option =
                                         decode_posting_list_object(
                                             &shard_ref.segments_index[key0 as usize],
@@ -1807,30 +1801,6 @@ impl SearchLexicalShard for ShardArc {
                                         blocks = &DUMMY_VEC;
                                         blocks_len = plo.blocks.len();
                                         blocks_vec.push(plo.blocks);
-                                        true
-                                    } else {
-                                        posting_count = 0;
-                                        posting_count_ngram_1 = 0;
-                                        posting_count_ngram_2 = 0;
-                                        posting_count_ngram_3 = 0;
-                                        max_list_score = 0.0;
-                                        blocks = &DUMMY_VEC;
-                                        blocks_len = 0;
-                                        false
-                                    }
-                                } else {
-                                    let posting_list_object_index_option = shard_ref.segments_index
-                                        [key0 as usize]
-                                        .segment
-                                        .get(&key_hash);
-                                    if let Some(plo) = posting_list_object_index_option {
-                                        posting_count = plo.posting_count;
-                                        posting_count_ngram_1 = plo.posting_count_ngram_1;
-                                        posting_count_ngram_2 = plo.posting_count_ngram_2;
-                                        posting_count_ngram_3 = plo.posting_count_ngram_3;
-                                        max_list_score = plo.max_list_score;
-                                        blocks_len = plo.blocks.len();
-                                        blocks = &plo.blocks;
                                         true
                                     } else {
                                         posting_count = 0;
@@ -1987,7 +1957,7 @@ impl SearchLexicalShard for ShardArc {
             not_query_list = not_query_list_map.into_values().collect();
             query_list = query_list_map.into_values().collect();
 
-            if shard_ref.meta.access_type == AccessType::Mmap {
+            {
                 for plo in query_list.iter_mut() {
                     plo.blocks = &blocks_vec[plo.blocks_index - 1]
                 }
@@ -2061,7 +2031,6 @@ impl SearchLexicalShard for ShardArc {
                 )
                 .await;
             } else if query_type_mut == QueryType::Union {
-
                 if result_type == ResultType::Count && query_list_len != 2 {
                     union_blockid(
                         &shard_ref,
@@ -2078,7 +2047,6 @@ impl SearchLexicalShard for ShardArc {
                     .await;
                 } else if SPEEDUP_FLAG
                     && query_list_len == 2
-
                     && facet_filter_sparse.is_empty()
                     && search_result.topk_candidates.result_sort.is_empty()
                 {
@@ -2196,6 +2164,9 @@ impl SearchLexicalShard for ShardArc {
 }
 
 /// Validate metadata filter field names, schema types and range bounds without executing a query.
-pub async fn validate_metadata_filters(index: &IndexArc, filters: &[FacetFilter]) -> std::result::Result<(), String> {
+pub async fn validate_metadata_filters(
+    index: &IndexArc,
+    filters: &[FacetFilter],
+) -> std::result::Result<(), String> {
     crate::metadata_filter::validate_filters(&index.read().await.schema_map, filters)
 }

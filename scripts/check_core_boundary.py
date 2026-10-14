@@ -9,7 +9,7 @@ import tomllib
 
 core = Path(__file__).resolve().parents[1] / 'seekstorm'
 manifest = tomllib.loads((core / 'Cargo.toml').read_text())
-assert not ({'utoipa', 'num-format', 'tabled', 'chrono', 'colored', 'env_logger'} & set(manifest['dependencies']))
+assert not ({'utoipa', 'num-format', 'tabled', 'chrono', 'colored', 'env_logger', 'half', 'lz4_flex', 'zstd'} & set(manifest['dependencies']))
 assert 'api-schema' not in manifest.get('features', {})
 for source in (core / 'src').glob('*.rs'):
     text = source.read_text()

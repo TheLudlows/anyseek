@@ -6,8 +6,8 @@ use smallvec::SmallVec;
 use crate::{
     compress_postinglist::compress_positions,
     index::{
-        AccessType, CompressionType, FIELD_STOP_BIT_1, FIELD_STOP_BIT_2, NgramType,
-        PostingListObject0, ROARING_BLOCK_SIZE, STOP_BIT, Shard, TermObject,
+        CompressionType, FIELD_STOP_BIT_1, FIELD_STOP_BIT_2, NgramType, PostingListObject0,
+        ROARING_BLOCK_SIZE, STOP_BIT, Shard, TermObject,
     },
     search::binary_search,
     utils::{block_copy_mut, read_u16, read_u32, write_u16_ref, write_u32},
@@ -53,7 +53,8 @@ impl Shard {
             + term.field_vec_ngram1.len()
             + term.field_vec_ngram2.len()
             + term.field_vec_ngram3.len();
-        let required = self.postings_buffer_pointer + 8 + 3 * (positions_count_sum + field_entries) + 3;
+        let required =
+            self.postings_buffer_pointer + 8 + 3 * (positions_count_sum + field_entries) + 3;
         ensure_posting_capacity(&mut self.postings_buffer, required);
 
         let strip_object0 = self.segments_level0.get_mut(term.key0 as usize).unwrap();
@@ -70,7 +71,7 @@ impl Shard {
         let exists: bool = value.posting_count > 0;
 
         if self.is_last_level_incomplete && !exists && !restore {
-            if self.meta.access_type == AccessType::Mmap {
+            {
                 let pointer = self.segments_index[term.key0 as usize]
                     .byte_array_blocks_pointer
                     .last()
@@ -153,21 +154,6 @@ impl Shard {
                     value.size_compressed_positions_key =
                         (rank_position_pointer_range - position_range_previous) as usize;
                 }
-            } else {
-                let posting_list_object_index_option = self.segments_index[term.key0 as usize]
-                    .segment
-                    .get(&term.key_hash);
-
-                if let Some(plo) = posting_list_object_index_option {
-                    let block = plo.blocks.last().unwrap();
-                    if block.block_id as usize == self.level_index.len() - 1 {
-                        let rank_position_pointer_range: u32 = block.compression_type_pointer
-                            & 0b0011_1111_1111_1111_1111_1111_1111_1111;
-
-                        value.size_compressed_positions_key =
-                            (rank_position_pointer_range - plo.position_range_previous) as usize;
-                    }
-                };
             }
         }
 

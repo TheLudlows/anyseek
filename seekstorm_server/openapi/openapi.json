@@ -1782,7 +1782,9 @@
           "ngram_indexing": {
             "type": "integer",
             "format": "int32",
-            "description": "Specify n-gram indexing for the index. N-gram indexing can improve search performance for certain types of queries.\nThe n-gram set is defined as a bitwise combination of the following values:\n- NgramSet::SingleTerm = 0b00000000,,\n- NgramSet::NgramFF = 0b00000001, (Ngram frequent frequent)\n- NgramSet::NgramFR = 0b00000010, (Ngram frequent rare)\n- NgramSet::NgramRF = 0b00000011, (Ngram rare frequent)\n- NgramSet::NgramFFF = 0b00000100, (Ngram frequent frequent frequent)\n- NgramSet::NgramRFF = 0b00000101, (Ngram rare frequent frequent)\n- NgramSet::NgramFFR = 0b00000110, (Ngram frequent frequent rare)\n- NgramSet::NgramFRF = 0b00000111, (Ngram frequent rare frequent)\n\nFor example, to enable both NgramFF and NgramFFF, set ngram_indexing to 5 (1 | 4).\nNote: enabling n-gram indexing (ngram_indexing>0) will increase index size and indexing time, but improves search performance of phrase queries with frequent terms.",
+            "description": "Word-level bigram/trigram indexing for faster phrase queries with frequent terms.\nF means a configured frequent word; R means another word. This does not enable\ncharacter substring or prefix search. Single terms are always indexed.\nCombine these independent flags with bitwise OR:\n- SingleTerm = 0: no additional n-grams.\n- NgramFF = 1 (0b00000001): frequent + frequent.\n- NgramFR = 2 (0b00000010): frequent + rare.\n- NgramRF = 4 (0b00000100): rare + frequent.\n- NgramFFF = 8 (0b00001000): frequent + frequent + frequent.\n- NgramRFF = 16 (0b00010000): rare + frequent + frequent.\n- NgramFFR = 32 (0b00100000): frequent + frequent + rare.\n- NgramFRF = 64 (0b01000000): frequent + rare + frequent.\nThe default is 9 (1 | 8), enabling NgramFF and NgramFFF.\nAdditional n-grams increase index size and indexing work. Changing flags\nrequires rebuilding the index; it does not change existing postings.",
+            "default": 9,
+            "example": 9,
             "minimum": 0
           },
           "document_compression": {
@@ -1823,9 +1825,7 @@
         "description": "Compression type for document store",
         "enum": [
           "None",
-          "Lz4",
-          "Snappy",
-          "Zstd"
+          "Snappy"
         ]
       },
       "FacetFilter": {

@@ -157,20 +157,23 @@ pub struct CreateIndexRequest {
     #[serde(default)]
     #[schema(value_type = api_schema::FrequentwordType)]
     pub frequent_words: FrequentwordType,
-    /// Specify n-gram indexing for the index. N-gram indexing can improve search performance for certain types of queries.
-    /// The n-gram set is defined as a bitwise combination of the following values:
-    /// - NgramSet::SingleTerm = 0b00000000,,
-    /// - NgramSet::NgramFF = 0b00000001, (Ngram frequent frequent)
-    /// - NgramSet::NgramFR = 0b00000010, (Ngram frequent rare)
-    /// - NgramSet::NgramRF = 0b00000011, (Ngram rare frequent)
-    /// - NgramSet::NgramFFF = 0b00000100, (Ngram frequent frequent frequent)
-    /// - NgramSet::NgramRFF = 0b00000101, (Ngram rare frequent frequent)
-    /// - NgramSet::NgramFFR = 0b00000110, (Ngram frequent frequent rare)
-    /// - NgramSet::NgramFRF = 0b00000111, (Ngram frequent rare frequent)
-    ///
-    /// For example, to enable both NgramFF and NgramFFF, set ngram_indexing to 5 (1 | 4).
-    /// Note: enabling n-gram indexing (ngram_indexing>0) will increase index size and indexing time, but improves search performance of phrase queries with frequent terms.
+    /// Word-level bigram/trigram indexing for faster phrase queries with frequent terms.
+    /// F means a configured frequent word; R means another word. This does not enable
+    /// character substring or prefix search. Single terms are always indexed.
+    /// Combine these independent flags with bitwise OR:
+    /// - SingleTerm = 0: no additional n-grams.
+    /// - NgramFF = 1 (0b00000001): frequent + frequent.
+    /// - NgramFR = 2 (0b00000010): frequent + rare.
+    /// - NgramRF = 4 (0b00000100): rare + frequent.
+    /// - NgramFFF = 8 (0b00001000): frequent + frequent + frequent.
+    /// - NgramRFF = 16 (0b00010000): rare + frequent + frequent.
+    /// - NgramFFR = 32 (0b00100000): frequent + frequent + rare.
+    /// - NgramFRF = 64 (0b01000000): frequent + rare + frequent.
+    /// The default is 9 (1 | 8), enabling NgramFF and NgramFFF.
+    /// Additional n-grams increase index size and indexing work. Changing flags
+    /// requires rebuilding the index; it does not change existing postings.
     #[serde(default = "ngram_indexing_api")]
+    #[schema(default = 9, example = 9)]
     pub ngram_indexing: u8,
     /// Enable document compression for the index. This can reduce the index size on disk and in memory, but may increase indexing and search latency. Default: Snappy compression.
     #[serde(default = "document_compression_api")]

@@ -2,10 +2,7 @@ use memmap2::Mmap;
 use std::collections::HashSet;
 use std::io::{Seek, SeekFrom, Write};
 
-use crate::index::{
-    AccessType, Document, DocumentCompression, Index,
-    ROARING_BLOCK_SIZE, Shard,
-};
+use crate::index::{Document, DocumentCompression, Index, ROARING_BLOCK_SIZE, Shard};
 use crate::utils::{read_u32, write_u32};
 
 impl Shard {
@@ -22,7 +19,6 @@ impl Shard {
         if doc_id >= self.indexed_doc_count {
             return Err("not found".to_owned());
         }
-        let block_id = doc_id >> 16;
 
         let is_uncommitted = doc_id >= self.committed_doc_count;
         if is_uncommitted && !(include_uncommitted && self.uncommitted) {
@@ -35,12 +31,8 @@ impl Shard {
 
         let doc_id_local = doc_id & 0b11111111_11111111;
 
-        let mut doc = if self.meta.access_type == AccessType::Ram || is_uncommitted {
-            let docstore_pointer_docs = if is_uncommitted {
-                &self.compressed_docstore_segment_block_buffer
-            } else {
-                &self.level_index[block_id].docstore_pointer_docs
-            };
+        let mut doc = if is_uncommitted {
+            let docstore_pointer_docs = &self.compressed_docstore_segment_block_buffer;
 
             let position = doc_id_local * 4;
             let pointer = read_u32(docstore_pointer_docs, position) as usize;
@@ -66,17 +58,6 @@ impl Shard {
                     let decompressed_doc = snap::raw::Decoder::new()
                         .decompress_vec(compressed_doc)
                         .unwrap();
-                    let doc: Document = serde_json::from_slice(&decompressed_doc).unwrap();
-                    doc
-                }
-                DocumentCompression::Lz4 => {
-                    let decompressed_doc =
-                        lz4_flex::decompress_size_prepended(compressed_doc).unwrap();
-                    let doc: Document = serde_json::from_slice(&decompressed_doc).unwrap();
-                    doc
-                }
-                DocumentCompression::Zstd => {
-                    let decompressed_doc = zstd::decode_all(compressed_doc).unwrap();
                     let doc: Document = serde_json::from_slice(&decompressed_doc).unwrap();
                     doc
                 }
@@ -112,17 +93,6 @@ impl Shard {
                     let decompressed_doc = snap::raw::Decoder::new()
                         .decompress_vec(compressed_doc)
                         .unwrap();
-                    let doc: Document = serde_json::from_slice(&decompressed_doc).unwrap();
-                    doc
-                }
-                DocumentCompression::Lz4 => {
-                    let decompressed_doc =
-                        lz4_flex::decompress_size_prepended(compressed_doc).unwrap();
-                    let doc: Document = serde_json::from_slice(&decompressed_doc).unwrap();
-                    doc
-                }
-                DocumentCompression::Zstd => {
-                    let decompressed_doc = zstd::decode_all(compressed_doc).unwrap();
                     let doc: Document = serde_json::from_slice(&decompressed_doc).unwrap();
                     doc
                 }
@@ -164,14 +134,6 @@ impl Shard {
             DocumentCompression::Snappy => {
                 let serialized = serde_json::to_vec(&document).unwrap();
                 snap::raw::Encoder::new().compress_vec(&serialized).unwrap()
-            }
-            DocumentCompression::Lz4 => {
-                let serialized = serde_json::to_vec(&document).unwrap();
-                lz4_flex::compress_prepend_size(&serialized)
-            }
-            DocumentCompression::Zstd => {
-                let serialized = serde_json::to_vec(&document).unwrap();
-                zstd::encode_all(serialized.as_slice(), 1).unwrap()
             }
         };
 
@@ -234,20 +196,6 @@ impl Shard {
             let _ = self
                 .docstore_file
                 .write(&self.compressed_docstore_segment_block_buffer[4 * ROARING_BLOCK_SIZE..]);
-
-            if self.meta.access_type == AccessType::Ram {
-                self.level_index[level]
-                    .docstore_pointer_docs
-                    .extend_from_slice(
-                        &self.compressed_docstore_segment_block_buffer[4 * ROARING_BLOCK_SIZE..],
-                    );
-                self.level_index[level].docstore_pointer_docs
-                    [committed_doc_count * 4..ROARING_BLOCK_SIZE * 4]
-                    .copy_from_slice(
-                        &self.compressed_docstore_segment_block_buffer
-                            [committed_doc_count * 4..ROARING_BLOCK_SIZE * 4],
-                    );
-            }
         } else {
             let _ = self
                 .docstore_file
@@ -259,21 +207,13 @@ impl Shard {
             let _ = self
                 .docstore_file
                 .write(&self.compressed_docstore_segment_block_buffer);
-
-            if self.meta.access_type == AccessType::Ram {
-                self.level_index[level]
-                    .docstore_pointer_docs
-                    .append(&mut std::mem::take(
-                        &mut self.compressed_docstore_segment_block_buffer,
-                    ));
-            }
         }
 
         let _ = self.docstore_file.flush();
 
         self.compressed_docstore_segment_block_buffer = vec![0; ROARING_BLOCK_SIZE * 4];
 
-        if self.meta.access_type == AccessType::Mmap {
+        {
             self.docstore_file_mmap =
                 unsafe { Mmap::map(&self.docstore_file).expect("Unable to create Mmap") };
         }
@@ -305,4 +245,3 @@ impl Index {
         )
     }
 }
-

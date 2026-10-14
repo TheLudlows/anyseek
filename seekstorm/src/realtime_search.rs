@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use crate::{
     add_result::{B, K, SIGMA, is_facet_filter, read_multifield_vec},
     index::{
-        AccessType, DOCUMENT_LENGTH_COMPRESSION, DUMMY_VEC_8, LexicalSimilarity, NgramType,
+        DOCUMENT_LENGTH_COMPRESSION, DUMMY_VEC_8, LexicalSimilarity, NgramType,
         NonUniquePostingListObjectQuery, NonUniqueTermObject, PostingListObjectQuery, STOP_BIT,
         Shard, TermObject, hash32, hash64,
     },
@@ -117,7 +117,6 @@ pub(crate) fn add_result_singleterm_uncommitted(
     match *result_type {
         ResultType::Count => {
             if filtered {
-
                 *result_count += 1;
             }
             return;
@@ -125,7 +124,6 @@ pub(crate) fn add_result_singleterm_uncommitted(
         ResultType::Topk => {}
         ResultType::TopkCount => {
             if filtered {
-
                 *result_count += 1;
             }
         }
@@ -196,7 +194,6 @@ pub(crate) fn add_result_multiterm_uncommitted(
         || !facet_filter.is_empty();
 
     if !filtered && result_type == &ResultType::Count {
-
         *result_count += 1;
         return;
     }
@@ -474,13 +471,11 @@ pub(crate) fn add_result_multiterm_uncommitted(
 
     match *result_type {
         ResultType::Count => {
-
             *result_count += 1;
             return;
         }
         ResultType::Topk => {}
         ResultType::TopkCount => {
-
             *result_count += 1;
         }
     }
@@ -962,23 +957,12 @@ impl Shard {
                     let mut idf_ngram2 = 0.0;
                     let mut idf_ngram3 = 0.0;
                     if result_type != &ResultType::Count {
-                        let posting_counts_option = if self.meta.access_type == AccessType::Mmap {
+                        let posting_counts_option = {
                             decode_posting_list_counts(
                                 &self.segments_index[key0 as usize],
                                 self,
                                 key_hash,
                             )
-                        } else {
-                            let posting_list_object_index_option =
-                                self.segments_index[key0 as usize].segment.get(&key_hash);
-                            posting_list_object_index_option.map(|plo| {
-                                (
-                                    plo.posting_count,
-                                    plo.posting_count_ngram_1,
-                                    plo.posting_count_ngram_2,
-                                    plo.posting_count_ngram_3,
-                                )
-                            })
                         };
 
                         if non_unique_term.ngram_type == NgramType::SingleTerm
@@ -1241,9 +1225,7 @@ impl Shard {
             || !self.delete_hashset.is_empty()
             || !facet_filter.is_empty();
 
-        if (result_type == &ResultType::Count)
-            && (non_unique_query_list.len() <= 1 && !filtered)
-        {
+        if (result_type == &ResultType::Count) && (non_unique_query_list.len() <= 1 && !filtered) {
             result_count_arc.fetch_add(
                 query_list[term_index].posting_count as usize,
                 Ordering::Relaxed,
@@ -1927,7 +1909,6 @@ impl Shard {
 
         // Bitmap totals cannot apply metadata filters.
         if result_type == &ResultType::Count
-
             && facet_filter.is_empty()
             && field_filter_set.is_empty()
             && not_query_list.is_empty()
@@ -2034,7 +2015,7 @@ impl Shard {
             }
 
             if result_type != &ResultType::Count
-                                || !facet_filter.is_empty()
+                || !facet_filter.is_empty()
                 || !field_filter_set.is_empty()
                 || !not_query_list.is_empty()
             {
@@ -2067,7 +2048,6 @@ impl Shard {
                         && field_filter_set.is_empty()
                         && self.delete_hashset.is_empty()
                         && facet_filter.is_empty()
-
                         && result_type != &ResultType::Topk
                     {
                         *result_count += 1;

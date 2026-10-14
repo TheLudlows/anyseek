@@ -58,3 +58,11 @@
 - 删除 HTTP PUT `/api/v1/index/{id}` 关闭入口和 `/version`，使用 PATCH 提交、GET `/api/v1/live` 存活检查。这两个旧入口按未知路由返回 501。
 - Web UI 不再从 URL `api_key` 登录；在连接表单输入普通 key，当前标签页的 sessionStorage 保留。`index_id` URL 参数继续支持。
 - 删除未使用的 tokenizer、根索引高频词字符串集合、恒关闭的实验分支、彩色表格依赖及无引用的根目录历史图片。正常全文/向量/混合检索、核心 close 与词法 Count 优化保留。
+
+## N-gram 修复与 D1～D3
+
+- `ngram_indexing` 是独立位掩码：0/1/2/4/8/16/32/64；默认 FF | FFF = 9。FFR 和 FRF 修复为检查自己的开关。旧有受影响索引须从原始数据重建，不自动修补 postings。
+- 文档压缩仅保留 `None`、`Snappy`（默认）；删除 `Lz4`、`Zstd` 和编解码依赖。创建请求及索引元数据中的旧枚举值直接拒绝；相关旧索引需要重建，不提供转换。
+- 核心 `AccessType` 仅保留 `Mmap`，删除 `Ram` 全量加载实现及 RAM 专用索引副本。Rust 调用方指定 `AccessType::Mmap`；旧 `Ram` 元数据直接拒绝。保留实时写入缓冲，Mmap 不表示零内存使用。
+- 格式版本仍为 7.0，保留的 Mmap + None/Snappy 文件布局不变；不扩大任何旧格式读取范围。
+- 删除未使用的 `half` 直接依赖。Web UI、向量精度/量化、BM25F Proximity、N-gram、普通过滤/排序继续保留。
