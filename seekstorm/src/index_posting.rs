@@ -7,7 +7,7 @@ use crate::{
     compress_postinglist::compress_positions,
     index::{
         AccessType, CompressionType, FIELD_STOP_BIT_1, FIELD_STOP_BIT_2, NgramType,
-        POSTING_BUFFER_SIZE, PostingListObject0, ROARING_BLOCK_SIZE, STOP_BIT, Shard, TermObject,
+        PostingListObject0, ROARING_BLOCK_SIZE, STOP_BIT, Shard, TermObject,
     },
     search::binary_search,
     utils::{block_copy_mut, read_u16, read_u32, write_u16_ref, write_u32},
@@ -45,10 +45,16 @@ impl Shard {
             return;
         }
 
-        if self.postings_buffer_pointer > self.postings_buffer.len() - (POSTING_BUFFER_SIZE >> 4) {
-            self.postings_buffer
-                .resize(self.postings_buffer.len() + (POSTING_BUFFER_SIZE >> 2), 0);
-        }
+        // One posting has an 8-byte header, up to three bytes per position,
+        // and up to three bytes per field/count entry (including each n-gram).
+        // Reserve for this posting instead of a fixed 400 MB per shard. The
+        // bound also covers the at-most-three-byte embedded representation.
+        let field_entries = field_positions_vec.len()
+            + term.field_vec_ngram1.len()
+            + term.field_vec_ngram2.len()
+            + term.field_vec_ngram3.len();
+        let required = self.postings_buffer_pointer + 8 + 3 * (positions_count_sum + field_entries) + 3;
+        ensure_posting_capacity(&mut self.postings_buffer, required);
 
         let strip_object0 = self.segments_level0.get_mut(term.key0 as usize).unwrap();
 
@@ -543,6 +549,12 @@ impl Shard {
         let positions_stack = if embed_flag {
             0
         } else {
+            // Only the segment actually encoding nonembedded positions needs
+            // scratch space; each u16 delta encodes to at most three bytes.
+            let required = positions_count_sum * 3;
+            if strip_object0.positions_compressed.len() < required {
+                strip_object0.positions_compressed.resize(required, 0);
+            }
             for field_positions in field_positions_vec.iter() {
                 compress_positions(
                     field_positions,
@@ -915,3 +927,14 @@ pub(crate) fn write_field_vec(
         }
     }
 }
+
+/// All posting links are offsets, so growing the backing allocation keeps them valid.
+fn ensure_posting_capacity(buffer: &mut Vec<u8>, required: usize) {
+    if required > buffer.len() {
+        buffer.resize(required.next_power_of_two().max(64 * 1024), 0);
+    }
+}
+
+#[cfg(test)]
+#[path = "posting_buffer_tests.rs"]
+mod tests;

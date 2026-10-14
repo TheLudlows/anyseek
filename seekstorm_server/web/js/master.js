@@ -75,6 +75,7 @@ if(IS_DATE_FIELD&&!dateFields.includes(DATE_FIELD))DATE_FIELD=dateFields[0];
 for(const [key,value] of schema){if(value.field_type==='Binary'&&value.store&&!data.schema[IMAGE_FIELD]){IMAGE_FIELD=key;break;}}
 document.getElementById('dateControls').hidden=!IS_DATE_FIELD;
 status_loaded=true;
+CURRENT_SCHEMA=data.schema;$('#writeDocuments').prop('disabled',false);
 },error:function(){if(!setupOpen&&API_KEY===requestKey&&INDEX_ID===requestIndex)showSetup();},beforeSend:setHeader});
 }
 function setPage(page,results,count_total,statsTime){maxPages=Math.ceil(count_total/10);let vars=$("#footer").children();const[from,to,count,stats]=[$("#from"),$("#to"),$("#count"),$("#stats")];from.text(((page-1)*10+1).toLocaleString());to.text(Math.min(page*10,count_total).toLocaleString());count.text(count_total.toLocaleString());stats.attr("title",`${count_total.toLocaleString()} results in ${(statsTime/1000_000).toLocaleString(undefined,{minimumFractionDigits:0,maximumFractionDigits:3})}ms`);for(const element of vars){const elem=$(element);elem.removeClass("active");elem.show();}

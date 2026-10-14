@@ -26,7 +26,7 @@ def exercise_setup(browser, base, initial_key, master):
     page.on('request', lambda request: creates.append(request.post_data_json)
             if request.method == 'POST' and request.url.endswith('/api/v1/index') else None)
     page.locator('#newIndexName').fill('invalid')
-    page.locator('summary').click()
+    page.locator('#createIndexForm summary').click()
     page.locator('#indexSchema').fill('[]')
     page.locator('#createIndexForm button').click()
     expect(page.locator('#setupError')).to_contain_text('nonempty JSON array')
@@ -55,6 +55,8 @@ def exercise_setup(browser, base, initial_key, master):
             assert any(field.get('index_vector') for field in payload['schema'])
         else:
             assert 'inference' not in payload
+        from documents_browser_smoke import exercise_documents
+        exercise_documents(page, mode)
 
     page.reload()
     expect(page.locator('#indexName')).to_have_text('ui-Hybrid')
@@ -68,7 +70,7 @@ def exercise_setup(browser, base, initial_key, master):
     expect(page.locator('#newIndexName')).to_be_enabled()
     page.locator('#indexMode').select_option('Lexical')
     page.locator('#newIndexName').fill('server-rejected')
-    page.locator('details').evaluate("element => element.open = true")
+    page.locator('#createIndexForm details').evaluate("element => element.open = true")
     page.locator('#indexSchema').fill(json.dumps([
         {'field': 'body', 'field_type': 'InvalidType', 'store': True, 'index_lexical': True}]))
     page.locator('#createIndexForm button').click()

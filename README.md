@@ -14,7 +14,7 @@ export MASTER_KEY_SECRET='replace-with-your-private-secret'
 cargo run -p seekstorm_server -- local_ip=127.0.0.1 local_port=8080
 ```
 
-打开 `http://127.0.0.1:8080/`。空数据目录首次启动会自动生成普通 API key，在日志中显示 `Initial API key`；将它填入页面的连接表单，即可在界面创建和选择索引。重启不会重复生成 key。文档通过 JSON API 写入；由 `MASTER_KEY_SECRET` 派生的主密钥用于额外 key 的创建/撤销。完整流程见 [服务使用](seekstorm_server/README.md)。
+打开 `http://127.0.0.1:8080/`。空数据目录首次启动会自动生成普通 API key，在日志中显示 `Initial API key`；将它填入页面的连接表单，即可在界面创建和选择索引。重启不会重复生成 key。文档可通过界面的 **Write data** 或 JSON API 写入；由 `MASTER_KEY_SECRET` 派生的主密钥用于额外 key 的创建/撤销。完整流程见 [服务使用](seekstorm_server/README.md)。
 
 ## 当前能力
 
@@ -25,7 +25,7 @@ cargo run -p seekstorm_server -- local_ip=127.0.0.1 local_port=8080
 | 混合 | 全文/向量独立召回后 RRF 融合 |
 | 元数据与结果 | 全文/向量/混合元数据过滤、多字段排序、计数、分页、字段投影、双向遍历 |
 | 数据与服务 | JSON 单条/批量写入、读取、更新、删除；索引生命周期；API key 鉴权与数据作用域 |
-| Web UI | 密钥连接、索引创建/选择、字段 schema 配置、三种检索模式、外部向量输入、分页、原文/链接预览、日期输入过滤与排序 |
+| Web UI | 密钥连接、索引创建/选择、字段 schema 配置、JSON 粘贴/文件写入与提交、三种检索模式、外部向量输入、分页、原文/链接预览、日期输入过滤与排序 |
 
 完整接口、配置、外围功能及限制见 [FEATURES.md](FEATURES.md)。特别注意：ANN 过滤仍受簇探测范围影响；UI 尚无完整管理页面；内部 DocID 不是稳定业务 ID；实时可见不等于崩溃可恢复。分布式与可靠性补强属于后续阶段。
 

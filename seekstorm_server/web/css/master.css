@@ -14,7 +14,8 @@
 #dateControls button.active { color: #0e5ba3; font-weight: bold; }
 
 /* Authenticated index setup, shared by welcome and the index switcher. */
-.manage-indexes { position: fixed; top: 12px; right: 16px; z-index: 30; padding: 8px 12px; border: 1px solid #b6c9db; border-radius: 6px; background: white; color: #0e5ba3; cursor: pointer; }
+.service-actions { position: fixed; top: 12px; right: 16px; z-index: 30; display: flex; gap: 8px; }
+.manage-indexes { padding: 8px 12px; border: 1px solid #b6c9db; border-radius: 6px; background: white; color: #0e5ba3; cursor: pointer; }
 .setup-panel { height: 100%; overflow-y: auto; box-sizing: border-box; max-width: 760px; margin: 0 auto; padding: 64px 24px 36px; font-family: sans-serif; color: #263849; line-height: 1.5; }
 .setup-panel h1 { font-size: 26px; } .setup-panel h2 { font-size: 20px; }
 .setup-panel label { display: block; font-weight: 600; margin: 16px 0 6px; }
@@ -30,3 +31,8 @@
 #setupError { color: #a32020; overflow-wrap: anywhere; }
 .setup-panel [hidden] { display: none !important; }
 @media (max-width: 480px) { .setup-panel { padding: 60px 16px 24px; } .setup-inline { flex-wrap: wrap; } }
+
+#documentSchema { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+#documentError { color: #a32020; overflow-wrap: anywhere; }
+#documentStatus { color: #215d38; }
+.manage-indexes:disabled { opacity: .5; cursor: default; }

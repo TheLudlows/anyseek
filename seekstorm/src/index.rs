@@ -107,7 +107,6 @@ pub const ROARING_BLOCK_SIZE: usize = 65_536;
 pub(crate) const SPEEDUP_FLAG: bool = true;
 pub(crate) const SORT_FLAG: bool = true;
 
-pub(crate) const POSTING_BUFFER_SIZE: usize = 400_000_000;
 pub(crate) const MAX_QUERY_TERM_NUMBER: usize = 100;
 pub(crate) const SEGMENT_KEY_CAPACITY: usize = 1000;
 
@@ -2001,7 +2000,7 @@ pub(crate) fn create_shard(
 
                 block_id: 0,
                 strip_compressed_sum: 0,
-                postings_buffer: vec![0; POSTING_BUFFER_SIZE],
+                postings_buffer: Vec::new(),
                 postings_buffer_pointer: 0,
 
                 docid_count: 0,
@@ -3592,6 +3591,7 @@ impl Shard {
         self.key_count_sum = 0;
         self.block_id = 0;
         self.strip_compressed_sum = 0;
+        self.postings_buffer = Vec::new();
         self.postings_buffer_pointer = 0;
         self.docid_count = 0;
         self.size_compressed_docid_index = 0;
@@ -4409,14 +4409,7 @@ impl IndexDocumentShard2 for ShardArc {
             }
         }
 
-        if !shard_mut.uncommitted {
-            if shard_mut.segments_level0[0].positions_compressed.is_empty() {
-                for strip0 in shard_mut.segments_level0.iter_mut() {
-                    strip0.positions_compressed = vec![0; MAX_POSITIONS_PER_TERM * 2];
-                }
-            }
-            shard_mut.uncommitted = true;
-        }
+        shard_mut.uncommitted = true;
 
         let mut longest_field_id: usize = 0;
         let mut longest_field_length: u32 = 0;

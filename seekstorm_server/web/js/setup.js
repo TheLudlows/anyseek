@@ -17,7 +17,9 @@ if (savedIndex !== null && /^\d+$/.test(savedIndex)) {
     QUERY_URL = `${STATUS_URL}/query`;
 }
 function resetSearch() {
+    resetDocumentEditor();
     status_loaded = false;
+    $('#writeDocuments').prop('disabled', true);
     query = '';
     currPage = 1;
     currSort = 'score';
@@ -42,11 +44,11 @@ async function setupApi(method, path, key, body) {
     });
     const text = await response.text();
     if (!response.ok) {
-        if (response.status === 401) throw new Error('Invalid API key. Use an ordinary API key, not the master key.');
-        throw new Error(text || `Request failed (${response.status}).`);
+        if (response.status === 401) throw Object.assign(new Error('Invalid API key. Use an ordinary API key, not the master key.'), {status: response.status});
+        throw Object.assign(new Error(text || `Request failed (${response.status}).`), {status: response.status});
     }
     const value = JSON.parse(text);
-    if (value && typeof value === 'object' && 'Err' in value) throw new Error(value.Err);
+    if (value && typeof value === 'object' && 'Err' in value) throw Object.assign(new Error(value.Err), {status: response.status});
     return value && typeof value === 'object' && 'Ok' in value ? value.Ok : value;
 }
 function setSetupBusy(busy) {
@@ -83,7 +85,8 @@ async function connectKey(key) {
 }
 function showSetup(connect = true) {
     setupOpen = true;
-    $('#landingSearch,#landingMain').hide();
+    $('#landingSearch,#landingMain,#documentPanel').hide();
+    $('#writeDocuments').prop('disabled', true);
     $('#welcome').show();
     $('#setupKey').val(API_KEY);
     if (connect) connectKey(API_KEY);
@@ -99,7 +102,7 @@ function openSelectedIndex(id) {
     url.searchParams.set('index_id', String(INDEX_ID));
     history.replaceState(null, '', url);
     setupOpen = false;
-    $('#welcome,#landingMain').hide();
+    $('#welcome,#landingMain,#documentPanel').hide();
     $('#landingSearch').show();
     showStatus();
     $('#searchInput').trigger('focus');
