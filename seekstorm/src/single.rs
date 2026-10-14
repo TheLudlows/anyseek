@@ -7,8 +7,8 @@ use crate::{
     add_result::{PostingListObjectSingle, add_result_singleterm_multifield},
     compatible::{_blsr_u64, _mm_tzcnt_64},
     index::{
-        AccessType, BlockObjectIndex, CompressionType, NonUniquePostingListObjectQuery,
-        PostingListObjectQuery, SORT_FLAG, SPEEDUP_FLAG, Shard,
+        BlockObjectIndex, CompressionType, NonUniquePostingListObjectQuery, PostingListObjectQuery,
+        SORT_FLAG, SPEEDUP_FLAG, Shard,
     },
     intersection::{BlockObject, bitpacking32_get_delta},
     search::{FilterSparse, ResultType, SearchResult},
@@ -40,8 +40,7 @@ pub(crate) async fn single_docid<'a>(
         || !field_filter_set.is_empty()
         || !shard.delete_hashset.is_empty()
         || !search_result.topk_candidates.result_sort.is_empty()
-        || !facet_filter.is_empty()
-            && result_type != &ResultType::Topk;
+        || !facet_filter.is_empty() && result_type != &ResultType::Topk;
     if SPEEDUP_FLAG
         && (result_type == &ResultType::Count
             || (search_result.topk_candidates.current_heap_size == top_k
@@ -85,16 +84,12 @@ pub(crate) async fn single_docid<'a>(
         query_list_item_mut.compressed_doc_id_range =
             query_list_item_mut.rank_position_pointer_range as usize + posting_pointer_size_sum;
 
-        if shard.meta.access_type == AccessType::Mmap {
+        {
             let segment = &shard.segments_index[query_list_item_mut.key0 as usize];
             query_list_item_mut.byte_array =
                 &shard.index_file_mmap[segment.byte_array_blocks_pointer[blo.block_id as usize].0
                     ..segment.byte_array_blocks_pointer[blo.block_id as usize].0
                         + segment.byte_array_blocks_pointer[blo.block_id as usize].1];
-        } else {
-            query_list_item_mut.byte_array = &shard.segments_index
-                [query_list_item_mut.key0 as usize]
-                .byte_array_blocks[blo.block_id as usize];
         }
 
         query_list_item_mut.p_docid = 0;
@@ -140,14 +135,11 @@ pub(crate) async fn single_docid<'a>(
 
     let query_list_item_mut = &mut query_list[term_index];
 
-    let byte_array = if shard.meta.access_type == AccessType::Mmap {
+    let byte_array = {
         let segment = &shard.segments_index[query_list_item_mut.key0 as usize];
         &shard.index_file_mmap[segment.byte_array_blocks_pointer[blo.block_id as usize].0
             ..segment.byte_array_blocks_pointer[blo.block_id as usize].0
                 + segment.byte_array_blocks_pointer[blo.block_id as usize].1]
-    } else {
-        &shard.segments_index[query_list_item_mut.key0 as usize].byte_array_blocks
-            [blo.block_id as usize]
     };
 
     let mut plo = PostingListObjectSingle {
@@ -308,13 +300,9 @@ pub(crate) async fn single_blockid<'a>(
         || !field_filter_set.is_empty()
         || !index.delete_hashset.is_empty()
         || !search_result.topk_candidates.result_sort.is_empty()
-        || !facet_filter.is_empty()
-            && result_type != &ResultType::Topk;
+        || !facet_filter.is_empty() && result_type != &ResultType::Topk;
 
-    if (result_type == &ResultType::Count)
-        && (non_unique_query_list.len() <= 1)
-        && !filtered
-    {
+    if (result_type == &ResultType::Count) && (non_unique_query_list.len() <= 1) && !filtered {
         result_count_arc.fetch_add(
             query_list[term_index].posting_count as usize,
             Ordering::Relaxed,

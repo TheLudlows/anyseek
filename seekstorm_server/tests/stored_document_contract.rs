@@ -28,7 +28,7 @@ fn retired_presentation_options_are_rejected() {
 
 #[tokio::test]
 async fn stored_records_and_projection_survive_reopen() {
-    for (name, access_type) in [("ram",AccessType::Ram),("mmap",AccessType::Mmap)] {
+    for (name, document_compression) in [("none", DocumentCompression::None), ("snappy", DocumentCompression::Snappy)] {
         let directory=format!("tests/index_raw_document_{name}");
         let path=Path::new(&directory);
         let _=fs::remove_dir_all(path);
@@ -40,8 +40,8 @@ async fn stored_records_and_projection_survive_reopen() {
         let meta=IndexMetaObject { id:0, name:"raw_document".into(),
             lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::UnicodeAlphanumeric,
             stemmer:StemmerType::None, stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
-            ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,
-            access_type, clustering:Clustering::None, inference:Inference::None };
+            ngram_indexing:NgramSet::SingleTerm as u8, document_compression,
+            access_type:AccessType::Mmap, clustering:Clustering::None, inference:Inference::None };
         let index=create_index(path,meta,&schema,&vec![],11,true,Some(2)).await.unwrap();
         let body=format!("raw <b>literal</b> & 中文\r\n第二行\n{}END", "完整原文 ".repeat(1000));
         let expected: Document=serde_json::from_value(json!({"body":body,

@@ -79,14 +79,7 @@ async fn get_nonstored_only_mmap() {
     index.close().await;
 }
 
-/// Same for the RAM branch.
-#[tokio::test]
-async fn get_nonstored_only_ram() {
-    let index = fresh("tests/index_get_nonstored_ram/", AccessType::Ram).await;
-    index_one(&index, r#"{"nostore":"only indexed content"}"#).await;
-    assert!(get0(&index).await.is_err());
-    index.close().await;
-}
+
 
 /// Control: a normal stored document still reads back.
 #[tokio::test]
@@ -96,4 +89,3 @@ async fn get_stored_control() {
     assert!(get0(&index).await.is_ok());
     index.close().await;
 }
-

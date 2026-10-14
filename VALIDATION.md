@@ -430,3 +430,23 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 - C5：删除 PUT 关闭索引路由、/version 和浏览器 URL key 登录。核心 close、PATCH 提交、GET live、sessionStorage 与 index_id URL 参数保留。两个旧 HTTP 入口遵循原未知路由的 501 响应。
 
 本地构建通过；完整 workspace 64 项 Rust 测试通过。HTTP 回归通过，包含 SIGINT/SIGTERM 下未手动提交的写入在重启后可搜索、随机 key 不覆盖既有身份、已移除路由失效、9 个 UI 静态资源。独立核心的默认与无默认 feature 构建/依赖边界通过；中文专用临时集合仅在 zh 启用时声明。空对象请求的 OpenAPI JSON/YAML 已重新生成。浏览器回归改为通过连接表单登录，新增 URL 凭证不生效断言；真实 Chromium 由 PR CI 验证。
+
+
+## 2026-10-14：N-gram 修复与 D1～D3 收敛
+
+基点 master `ebe71513dba02ccf86d3aecca5ee48d85711179c`（PR #17 已合入）。用户确认 N-gram 两处问题和 D1，授权技术核查 D2/D3 后执行。核查结果：half 无调用；默认文档压缩一直是 Snappy，HTTP 创建索引一直使用 Mmap。删除额外压缩与全量 RAM 读取不影响这条默认路径；遵循此前不保留旧配置兼容的决定。
+
+- N-gram：API/OpenAPI 标志改为 0/1/2/4/8/16/32/64，默认 FF|FFF=9；修复写入 FFR、FRF 错用 RFF 开关的问题，独立启用 32/64 不再漏掉对应短语。不是字符 N-gram 或前缀搜索。
+- D1：删除未使用的 half 直接依赖。
+- D2：文档存储只保留 None/Snappy，删除 Lz4/Zstd 读写及依赖。
+- D3：只保留 Mmap 读取已提交数据，删除 Ram 枚举、复制的整索引数据结构及读取/提交/评分分支；实时写入缓冲和未提交查询保留。AccessType 在元数据中仅接受 Mmap。
+
+验证：
+
+- 新 N-gram 回归在修复前为 1 通过、2 失败（32/64），修复后 3 通过。覆盖全部独立标志及 0/9/112/127 组合、精确文档集合、Count/TopkCount、实时/提交/重开；32/64 同时验证 BM25F 与 Proximity。
+- 完整 workspace 构建和 68 项 Rust 测试通过，0 failed/ignored。None/Snappy 原文与投影跨实时/提交/重开保持一致；旧 Ram/Lz4/Zstd 元数据明确拒绝，恢复有效元数据可重新打开。既有多分片过滤、向量/混合、写入缓冲扩容/提交/恢复/清空回归通过。
+- 独立核心默认与无默认 feature 的构建和依赖边界通过；本地解析已解析的 Cargo.lock 确认 half、lz4_flex、zstd、zstd-safe、zstd-sys 均不存在，CI 对完整依赖图再次检查。
+- HTTP/9 个 UI 静态资源冒烟通过，新增默认/32/64 的建索引、写入、提交、短语查询，以及 Lz4/Zstd 请求返回 400、字符片段/前缀不产生匹配。OpenAPI JSON/YAML 已重新生成；diff 检查通过。
+- 实际 Chromium 回归与生成 OpenAPI 精确对比由本 PR CI 执行，结果记录在 PR。未执行生产规模性能基准，不将本次裁剪解释为性能提升保证。
+
+索引格式仍为 7.0，保留的 Mmap + None/Snappy 布局不变。旧 Ram/Lz4/Zstd 配置不转换；受 FFR/FRF 错误影响的索引须重建以补齐 posting。D4～D6 未执行。

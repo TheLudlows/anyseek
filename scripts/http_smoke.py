@@ -180,7 +180,7 @@ def exercise(binary, workdir):
             index_id = api('POST', '/api/v1/index', {
                 'index_name': 'http_smoke', 'schema': schema, 'similarity': 'Bm25f',
                 'tokenizer': 'UnicodeAlphanumeric', 'stemmer': 'None', 'stop_words': 'None',
-                'frequent_words': 'English', 'ngram_indexing': 5,
+                'frequent_words': 'English', 'ngram_indexing': 9,
                 'document_compression': 'Snappy', 'inference': 'None', 'clustering': 'None'})
             check(index_id == 0, f'first index ID mismatch: {index_id}')
             path = f'/api/v1/index/{index_id}'
@@ -602,6 +602,31 @@ def exercise(binary, workdir):
                 check(result['count_total'] == 1, f'shutdown lost accepted write: {signum}')
             api('DELETE', shutdown_path)
             print('PASS removed close/version routes and SIGTERM/SIGINT commit before exit')
+
+            for codec in ('Lz4', 'Zstd'):
+                request('POST', '/api/v1/index', {'index_name': 'retired_codec', 'schema': schema,
+                        'document_compression': codec}, api_key, expected=400)
+            print('PASS removed document codecs rejected by HTTP')
+
+            # N-gram masks are independent; FFR and FRF must not require RFF.
+            for mask in (None, 32, 64):
+                options = {'index_name': f'ngram_{mask}', 'schema': schema,
+                           'frequent_words': {'Custom': {'terms': ['of', 'the']}}}
+                if mask is not None:
+                    options['ngram_indexing'] = mask
+                ng_id = api('POST', '/api/v1/index', options)
+                ng_path = f'/api/v1/index/{ng_id}'
+                api('POST', ng_path + '/doc', [{'body': 'of the art'}, {'body': 'of art the'}, {'body': 'rust'}])
+                api('PATCH', ng_path)
+                for phrase in ('of the art', 'of art the'):
+                    result = api('POST', ng_path + '/query', {'query': f'"{phrase}"', 'realtime': False})
+                    check(result['count_total'] == 1 and result['results'][0]['body'] == phrase,
+                          f'N-gram mask {mask} lost or changed phrase matches: {phrase}')
+                for query in ('r', 'ru', 'us', 'r*'):
+                    check(api('POST', ng_path + '/query', {'query': query})['count_total'] == 0,
+                          'word N-grams must not introduce character prefix/substring search')
+                api('DELETE', ng_path)
+            print('PASS default/independent N-gram flags and word-level query contract')
 
             # Key creation, revocation and scopes remain independent of retired quotas.
             def scoped(key, method, path, data=None):

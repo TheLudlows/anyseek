@@ -2,8 +2,8 @@ use crate::{
     add_result::add_result_multiterm_multifield,
     compatible::{_blsr_u64, _mm_tzcnt_64},
     index::{
-        AccessType, CompressionType, NonUniquePostingListObjectQuery, PostingListObjectQuery,
-        SORT_FLAG, SPEEDUP_FLAG, Shard,
+        CompressionType, NonUniquePostingListObjectQuery, PostingListObjectQuery, SORT_FLAG,
+        SPEEDUP_FLAG, Shard,
     },
     intersection_simd::intersection_vector16,
     search::{FilterSparse, ResultType, SearchResult},
@@ -958,23 +958,7 @@ pub(crate) async fn intersection_docid(
                             break;
                         }
 
-                        if false {
-                            let mut bound: i32 = 2;
-                            while (query_list[t2].p_run + bound < query_list[t2].p_run_count)
-                                && (read_u16(
-                                    &query_list[t2].byte_array
-                                        [query_list[t2].compressed_doc_id_range..],
-                                    (1 + ((query_list[t2].p_run + bound) << 1) as usize) * 2,
-                                ) + read_u16(
-                                    &query_list[t2].byte_array
-                                        [query_list[t2].compressed_doc_id_range..],
-                                    (2 + ((query_list[t2].p_run + bound) << 1) as usize) * 2,
-                                ) < doc_id1)
-                            {
-                                query_list[t2].p_run += bound;
-                                bound <<= 1;
-                            }
-                        }
+                        {}
 
                         run_start2 = read_u16(
                             &query_list[t2].byte_array[query_list[t2].compressed_doc_id_range..],
@@ -1878,7 +1862,7 @@ pub(crate) async fn intersection_docid(
                             break;
                         }
 
-                        if true {
+                        {
                             let mut bound = 2;
                             while (query_list[t2].p_docid + bound < query_list[t2].p_docid_count)
                                 && (read_u16(
@@ -2100,52 +2084,31 @@ pub(crate) async fn intersection_blockid<'a>(
                     || search_result.topk_candidates.current_heap_size < top_k
                     || block_score > search_result.topk_candidates._elements[0].score
                 {
-                    if shard.meta.access_type == AccessType::Mmap {
+                    {
                         for query_list_item_mut in query_list.iter_mut() {
-                            let segment =
-                                &shard.segments_index[query_list_item_mut.key0 as usize];
+                            let segment = &shard.segments_index[query_list_item_mut.key0 as usize];
                             query_list_item_mut.byte_array = &shard.index_file_mmap[segment
-                                .byte_array_blocks_pointer
-                                [block_id1 as usize]
+                                .byte_array_blocks_pointer[block_id1 as usize]
                                 .0
                                 ..segment.byte_array_blocks_pointer[block_id1 as usize].0
                                     + segment.byte_array_blocks_pointer[block_id1 as usize].1];
                         }
                         for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
-                            let segment = &shard.segments_index
-                                [nonunique_query_list_item_mut.key0 as usize];
+                            let segment =
+                                &shard.segments_index[nonunique_query_list_item_mut.key0 as usize];
                             nonunique_query_list_item_mut.byte_array = &shard.index_file_mmap
                                 [segment.byte_array_blocks_pointer[block_id1 as usize].0
                                     ..segment.byte_array_blocks_pointer[block_id1 as usize].0
-                                        + segment.byte_array_blocks_pointer
-                                            [block_id1 as usize]
-                                            .1];
+                                        + segment.byte_array_blocks_pointer[block_id1 as usize].1];
                         }
                         for not_query_list_item_mut in not_query_list.iter_mut() {
                             let segment =
                                 &shard.segments_index[not_query_list_item_mut.key0 as usize];
                             not_query_list_item_mut.byte_array = &shard.index_file_mmap[segment
-                                .byte_array_blocks_pointer
-                                [block_id1 as usize]
+                                .byte_array_blocks_pointer[block_id1 as usize]
                                 .0
                                 ..segment.byte_array_blocks_pointer[block_id1 as usize].0
                                     + segment.byte_array_blocks_pointer[block_id1 as usize].1];
-                        }
-                    } else {
-                        for query_list_item_mut in query_list.iter_mut() {
-                            query_list_item_mut.byte_array = &shard.segments_index
-                                [query_list_item_mut.key0 as usize]
-                                .byte_array_blocks[block_id1 as usize];
-                        }
-                        for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
-                            nonunique_query_list_item_mut.byte_array = &shard.segments_index
-                                [nonunique_query_list_item_mut.key0 as usize]
-                                .byte_array_blocks[block_id1 as usize];
-                        }
-                        for not_query_list_item_mut in not_query_list.iter_mut() {
-                            not_query_list_item_mut.byte_array = &shard.segments_index
-                                [not_query_list_item_mut.key0 as usize]
-                                .byte_array_blocks[block_id1 as usize];
                         }
                     }
 
@@ -2204,7 +2167,7 @@ pub(crate) async fn intersection_blockid<'a>(
                 item.p_block = block.p_block_vec[item.term_index_unique];
             }
 
-            if shard.meta.access_type == AccessType::Mmap {
+            {
                 for query_list_item_mut in query_list.iter_mut() {
                     let segment = &shard.segments_index[query_list_item_mut.key0 as usize];
                     query_list_item_mut.byte_array =
@@ -2226,22 +2189,6 @@ pub(crate) async fn intersection_blockid<'a>(
                         &shard.index_file_mmap[segment.byte_array_blocks_pointer[block.block_id].0
                             ..segment.byte_array_blocks_pointer[block.block_id].0
                                 + segment.byte_array_blocks_pointer[block.block_id].1];
-                }
-            } else {
-                for query_list_item_mut in query_list.iter_mut() {
-                    query_list_item_mut.byte_array = &shard.segments_index
-                        [query_list_item_mut.key0 as usize]
-                        .byte_array_blocks[block.block_id];
-                }
-                for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
-                    nonunique_query_list_item_mut.byte_array = &shard.segments_index
-                        [nonunique_query_list_item_mut.key0 as usize]
-                        .byte_array_blocks[block.block_id];
-                }
-                for not_query_list_item_mut in not_query_list.iter_mut() {
-                    not_query_list_item_mut.byte_array = &shard.segments_index
-                        [not_query_list_item_mut.key0 as usize]
-                        .byte_array_blocks[block.block_id];
                 }
             }
 

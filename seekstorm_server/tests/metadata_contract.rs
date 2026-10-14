@@ -110,7 +110,7 @@ fn retired_geo_requests_are_rejected() {
 
 #[tokio::test]
 async fn ordinary_metadata_survives_aggregate_removal() {
-    for (name, access) in [("mmap",AccessType::Mmap),("ram",AccessType::Ram)] {
+    for (name, access) in [("mmap",AccessType::Mmap)] {
         let path_buf = format!("tests/index_metadata_{name}"); let path = Path::new(&path_buf);
         let index = create(path, access).await;
         for doc in [
@@ -173,7 +173,7 @@ async fn unknown_schema_type_is_rejected() {
 #[tokio::test]
 async fn only_current_index_format_is_opened() {
     use seekstorm::index::{INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR};
-    for (name, access) in [("mmap", AccessType::Mmap), ("ram", AccessType::Ram)] {
+    for (name, access) in [("mmap", AccessType::Mmap)] {
         let path_buf = format!("tests/index_format_{name}");
         let path = Path::new(&path_buf);
         let index = create(path, access).await;

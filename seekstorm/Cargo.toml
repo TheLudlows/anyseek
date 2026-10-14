@@ -40,7 +40,6 @@ num-derive = "0.5.1"
 num-traits = "0.2.19"
 itertools = "0.15.0"
 async-recursion = "1.2.0"
-zstd = "0.14.2"
 smallvec = "1.16.3"
 memmap2 = "0.9.11"
 regex-syntax = "0.8.11"
@@ -49,10 +48,8 @@ unicode-normalization = "0.1.25"
 finl_unicode = "1.4.0"
 num_cpus = "1.17.0"
 snap = "1.1.2"
-lz4_flex = "0.14.0"
 bytemuck = { version = "1.25.2", features = ["derive","extern_crate_alloc"] }
 snowball_stemmers_rs = "1.0.1"
-half = { version = "2.7.1", features = ["bytemuck","serde"] }
 
 [dev-dependencies]
 tokio-test = "0.4.6"

@@ -66,12 +66,8 @@ pub enum Clustering {
 pub enum DocumentCompression {
     /// No compression (fastest, largest size)
     None,
-    /// lz4 compression (fast compression/decompression (faster than snappy), medium size (larger than snappy))
-    Lz4,
-    /// snappy compression (fast compression/decompression (slower than lz4), medium size (smaller than lz4))
+    /// Snappy document compression (default).
     Snappy,
-    /// zstd compression level 1 (slowest compression/decompression, smallest size)
-    Zstd,
 }
 
 /// FacetFilter:

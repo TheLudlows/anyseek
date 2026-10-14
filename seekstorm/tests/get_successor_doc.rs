@@ -1,6 +1,6 @@
 //! Repro: get_document on a valid doc following doc(s) with no stored fields.
 //! Stale-zero predecessor slots made it slice from 0 and panic.
-//! Matrix: Ram/Mmap x None/Snappy. Public API only.
+//! Matrix: Mmap x None/Snappy. Public API only.
 use seekstorm::commit::Commit;
 use seekstorm::index::{
     AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
@@ -94,8 +94,6 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
 async fn successor_after_empty_matrix() {
     let mut fails = 0;
     for (access, compression, tag) in [
-        (AccessType::Ram, DocumentCompression::None, "ram-none"),
-        (AccessType::Ram, DocumentCompression::Snappy, "ram-snappy"),
         (AccessType::Mmap, DocumentCompression::None, "mmap-none"),
         (AccessType::Mmap, DocumentCompression::Snappy, "mmap-snappy"),
     ] {
@@ -113,4 +111,3 @@ async fn successor_after_empty_matrix() {
     }
     assert_eq!(fails, 0, "BUG: {fails} combos panic/unreadable");
 }
-

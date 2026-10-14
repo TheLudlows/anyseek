@@ -1,6 +1,6 @@
 # 当前功能清单
 
-核查日期：2026-10-14（Asia/Shanghai）。基于主干 `4a459f9`（PR #16 已合入），本分支执行 C1～C5 裁剪。主干与本分支的合入状态见 [STATUS.md](STATUS.md)。本文按本分支实现列举功能，不将路线图视为已实现能力。
+核查日期：2026-10-14（Asia/Shanghai）。基于主干 `ebe7151`（PR #17 已合入），本分支修复 N-gram 并执行 D1～D3。主干与本分支的合入状态见 [STATUS.md](STATUS.md)。本文按本分支实现列举功能，不将路线图视为已实现能力。
 
 ## 1. 检索与数据能力
 
@@ -9,7 +9,7 @@
 | 全文检索 | AND/OR/NOT、短语、查询中的 `+`/`-`/双引号、多字段检索、字段权重 | 默认 `Intersection`；显式选择 `Lexical` |
 | 相关性 | `Bm25f`、`Bm25fProximity` | 尚未收缩为单一评分方式 |
 | 分词 | `AsciiAlphabetic`、`UnicodeAlphanumeric`、`UnicodeAlphanumericFolded`、`Whitespace`、`WhitespaceLowercase`、`UnicodeAlphanumericZH` | 中文分词依赖默认启用的 `zh`；Folded 支持字符规范化 |
-| 文本配置 | 词干化、停用词、高频词、N-gram 索引 | 38 个非 None 词干器枚举；停用词/高频词支持英德法西预设及自定义 |
+| 文本配置 | 词干化、停用词、高频词、词级二元/三元 N-gram 索引 | N-gram 默认位掩码 9，不提供字符前缀/子串匹配；38 个非 None 词干器枚举；停用词/高频词支持英德法西预设及自定义 |
 | 同义词 | 单向/多向同义词；创建索引时设置；运行时读取、追加、替换 | 仅单词级同义词，索引时展开；变更不会自动重建历史文档 |
 | 向量输入 | 外部向量、多个向量字段、JSON 数组或 Binary/base64 | `Inference::External`；所有向量字段共享索引级配置；应用负责模型和切块 |
 | 向量校验 | 维度、精度、有限数值/范围、非零余弦范数、base64 格式 | 非法请求显式报错；批次入队前校验输入不等于事务 |
@@ -21,13 +21,13 @@
 | 排序 | 相关性、facet 字段升降序、多字段组合、`_score`/`_id` | Vector/Hybrid 也会对已召回候选排序，但向量召回先按相似度截断，不保证全库字段排序 Top-K |
 | 结果与分页 | `Topk/Count/TopkCount`、`offset/length`、显式空查询浏览 | 完整计数/空查询能力主要在词法路径；ANN 和 Hybrid 的 `count_total` 不应作为全库精确去重命中数 |
 | 实时可见性 | 搜索 `realtime:true` 可包含尚未提交的数据 | 可搜索不等于已持久化；异常退出可能丢失未提交数据 |
-| 索引生命周期 | 创建、打开、查看、提交、关闭、删除；核心库清空索引 | HTTP 服务启动加载磁盘索引；Rust 库支持 Ram/Mmap；HTTP 创建索引使用 Mmap |
+| 索引生命周期 | 创建、打开、查看、提交、关闭、删除；核心库清空索引 | HTTP 服务启动加载磁盘索引；Rust 库与 HTTP 统一使用 Mmap；实时写入缓冲仍在内存 |
 | 文档写入 | JSON 单条/批量写入、按内部 DocID 单条/批量替换更新 | 当前更新不是业务 ID upsert，也不是字段局部合并；内部 DocID 不提供稳定业务 ID/版本契约 |
 | 文档读取 | 按 DocID 读存储字段、字段投影、保留原文 | 不生成摘要或高亮；非存储字段不能作为原文返回 |
 | 文档删除 | 单个/多个 DocID 删除、按查询选取文档删除 | 按查询删除仍保留；没有跨记录事务承诺 |
 | 遍历 | 双向 iterator、起点、skip/take、字段投影、可选文档内容 | 正 take 向前、负 take 向后；`include_deleted` 可返回删除 ID，不代表恢复原文 |
 | 本地存储 | 倒排、向量、facet、文档存储、删除标记；增量提交及重新打开 | RAM 缓冲、本机 shard/level、mmap；没有集群复制或已验收的 WAL/检查点恢复协议 |
-| 压缩与执行 | None/Lz4/Snappy/Zstd 文档压缩；posting 编码、SIMD、Block-max WAND、MaxScore | 默认文档压缩 Snappy；不是已完成当前版本性能认证 |
+| 压缩与执行 | None/Snappy 文档压缩；posting 编码、SIMD、Block-max WAND、MaxScore | 默认文档压缩 Snappy；不是已完成当前版本性能认证 |
 
 字段类型：`U8/U16/U32/U64`、`I8/I16/I32/I64`、`Timestamp`、`F32/F64`、`Bool`、`String16/String32`、`StringSet16/StringSet32`、`Text`、`Json`、`Binary`。字段类型存在不代表每种类型都支持元数据过滤、全文或向量索引。向量使用 `Json` 或 `Binary` 加 `index_vector:true`，没有独立的 `FieldType::Vector`。
 
@@ -88,7 +88,7 @@
 
 ## 5. 已移除与尚未实现
 
-已移除：固定 demo key、终端交互、彩色状态表、HTTP 关闭索引入口、`/version` 和 URL key 登录；未使用 tokenizer/状态字段/恒关闭分支及历史图片；分面计数、直方图、范围聚合、字段 min/max；MCP 服务、独立客户端/SDK 工程、内置模型/下载/Embedding、自动切块、PDF/CSV/目录和本地 JSON/SIFT 导入及 SIFT 评测、PDF 附件服务、拼写纠错/自动补全/自动改写、地理检索/距离排序、高亮/摘要、内置配额/限流，以及 B1/B2 的旧查询协议。迁移方式见 [MIGRATION.md](MIGRATION.md)。
+已移除：RAM 全量加载模式、LZ4/Zstd 文档压缩及未引用的 half 依赖；固定 demo key、终端交互、彩色状态表、HTTP 关闭索引入口、`/version` 和 URL key 登录；未使用 tokenizer/状态字段/恒关闭分支及历史图片；分面计数、直方图、范围聚合、字段 min/max；MCP 服务、独立客户端/SDK 工程、内置模型/下载/Embedding、自动切块、PDF/CSV/目录和本地 JSON/SIFT 导入及 SIFT 评测、PDF 附件服务、拼写纠错/自动补全/自动改写、地理检索/距离排序、高亮/摘要、内置配额/限流，以及 B1/B2 的旧查询协议。迁移方式见 [MIGRATION.md](MIGRATION.md)。
 
 尚未实现或验收：稳定业务 ID/版本/upsert 契约、可恢复 WAL/检查点/一致快照、共同可见视图、完整资源约束和生产可靠性验收、分布式路由/复制/弹性、对象存储。
 

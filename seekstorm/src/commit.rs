@@ -15,16 +15,11 @@ use crate::{
     compatible::{_blsr_u64, _mm_tzcnt_64},
     compress_postinglist::compress_postinglist,
     index::{
-        AccessType, BlockObjectIndex, CompressionType, DOCUMENT_LENGTH_COMPRESSION,
-        FACET_VALUES_FILENAME, IndexArc, LevelIndex, NgramType,
-        NonUniquePostingListObjectQuery, PostingListObjectIndex,
-        PostingListObjectQuery, ROARING_BLOCK_SIZE, Shard, TermObject,
-        update_list_max_impact_score, warmup,
+        CompressionType, DOCUMENT_LENGTH_COMPRESSION, FACET_VALUES_FILENAME, IndexArc, LevelIndex,
+        NgramType, NonUniquePostingListObjectQuery, PostingListObjectQuery, ROARING_BLOCK_SIZE,
+        Shard, TermObject, warmup,
     },
-    utils::{
-        block_copy, block_copy_mut, read_u8, read_u16, read_u32, read_u64, write_u16, write_u32,
-        write_u64,
-    },
+    utils::{block_copy, read_u8, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64},
 };
 
 /// Commit moves indexed documents from the intermediate uncompressed data structure (array lists/HashMap, queryable by realtime search) in RAM
@@ -208,7 +203,9 @@ impl Shard {
             {
                 log::error!(
                     "Unable to index_file.set_len in commit_lexical_shard {} {} {:?}",
-                    self.index_path_string, self.indexed_doc_count, e
+                    self.index_path_string,
+                    self.indexed_doc_count,
+                    e
                 )
             };
             let _ = self
@@ -216,7 +213,7 @@ impl Shard {
                 .seek(SeekFrom::Start(self.last_level_index_file_start_pos));
 
             let idx = self.level_index.len() - 1;
-            if self.meta.access_type == AccessType::Mmap {
+            {
                 self.index_file_mmap =
                     unsafe { Mmap::map(&self.index_file).expect("Unable to create Mmap") };
 
@@ -224,26 +221,6 @@ impl Shard {
                     if idx == segment.byte_array_blocks_pointer.len() - 1 {
                         segment.byte_array_blocks_pointer.remove(idx);
                     }
-                }
-            } else {
-                for segment in self.segments_index.iter_mut() {
-                    if idx == segment.byte_array_blocks.len() - 1 {
-                        segment.byte_array_blocks.remove(idx);
-                    }
-                }
-
-                for key0 in 0..self.segment_number1 {
-                    for item in self.segments_index[key0].segment.iter_mut() {
-                        if let Some(block) = item.1.blocks.last()
-                            && block.block_id as usize == idx
-                        {
-                            item.1.posting_count -= block.posting_count as u32 + 1;
-                            item.1.blocks.remove(idx);
-                        }
-                    }
-                    self.segments_index[key0]
-                        .segment
-                        .retain(|_key, value| !value.blocks.is_empty())
                 }
             }
         } else {
@@ -320,19 +297,8 @@ impl Shard {
         }
 
         if !is_last_level_incomplete {
-            let mut document_length_compressed_array: Vec<[u8; ROARING_BLOCK_SIZE]> = Vec::new();
-            if self.meta.access_type != AccessType::Mmap {
-                for document_length_compressed_array_item in
-                    self.document_length_compressed_array.iter_mut()
-                {
-                    document_length_compressed_array.push(*document_length_compressed_array_item);
-                }
-            }
-
             self.level_index.push(LevelIndex {
-                document_length_compressed_array,
                 document_length_compressed_array_pointer,
-                docstore_pointer_docs: Vec::new(),
                 docstore_pointer_docs_pointer: 0,
             });
         }
@@ -361,7 +327,7 @@ impl Shard {
             self.commit_docstore(indexed_doc_count, is_last_level_incomplete);
         }
 
-        if self.meta.access_type == AccessType::Mmap {
+        {
             self.index_file.flush().expect("Unable to flush Mmap");
 
             self.index_file_mmap =
@@ -394,8 +360,6 @@ impl Shard {
 
         self.string_set_to_single_term_id();
 
-        update_list_max_impact_score(self);
-
         self.committed_doc_count = indexed_doc_count;
         self.is_last_level_incomplete =
             !(self.committed_doc_count).is_multiple_of(ROARING_BLOCK_SIZE);
@@ -417,8 +381,6 @@ impl Shard {
 
     /// Flush a single segment from the key hash range partitioned level to RAM and disk
     pub(crate) fn commit_segment(&mut self, key0: usize) -> usize {
-        let block_id = self.block_id as u32;
-
         let mut key_head_pointer_w: usize = 0;
         let segment_head_position = self.compressed_index_segment_block_buffer.len()
             - (self.segment_number1 * 8)
@@ -496,137 +458,12 @@ impl Shard {
             .index_file
             .write(&self.compressed_index_segment_block_buffer[0..compressed_segment_block_size]);
 
-        if self.meta.access_type == AccessType::Mmap {
+        {
             self.segments_index[key0].byte_array_blocks_pointer.push((
                 file_position + key_body_pointer_wstart,
                 (compressed_segment_block_size - key_body_pointer_wstart),
                 key_list.len() as u32,
             ));
-        } else {
-            let mut byte_array_docid: Vec<u8> =
-                vec![0; compressed_segment_block_size - key_body_pointer_wstart];
-            block_copy_mut(
-                &mut self.compressed_index_segment_block_buffer,
-                key_body_pointer_wstart,
-                &mut byte_array_docid,
-                0,
-                compressed_segment_block_size - key_body_pointer_wstart,
-            );
-
-            let mut posting_count_previous = 0;
-            let mut pointer_pivot_p_docid_previous = 0;
-            let mut compression_type_pointer_previous = 0;
-
-            for (key_index, key) in key_list.iter().enumerate() {
-                let plo = self.segments_level0[key0].segment.get_mut(key).unwrap();
-
-                let value = self.segments_index[key0].segment.entry(*key).or_insert(
-                    PostingListObjectIndex {
-                        ..Default::default()
-                    },
-                );
-                let exists: bool = value.posting_count > 0;
-
-                if !self.indexed_doc_count.is_multiple_of(ROARING_BLOCK_SIZE)
-                    && self.meta.access_type == AccessType::Ram
-                {
-                    let position_range_previous = if key_index == 0 {
-                        0
-                    } else {
-                        let posting_pointer_size_sum_previous = pointer_pivot_p_docid_previous
-                            as usize
-                            * 2
-                            + if (pointer_pivot_p_docid_previous as usize) < posting_count_previous
-                            {
-                                (posting_count_previous - pointer_pivot_p_docid_previous as usize)
-                                    * 3
-                            } else {
-                                0
-                            };
-
-                        let rank_position_pointer_range_previous = compression_type_pointer_previous
-                            & 0b0011_1111_1111_1111_1111_1111_1111_1111;
-                        let compression_type_previous: CompressionType =
-                            FromPrimitive::from_u32(compression_type_pointer_previous >> 30)
-                                .unwrap();
-
-                        let compressed_docid_previous = match compression_type_previous {
-                            CompressionType::Array => posting_count_previous * 2,
-                            CompressionType::Bitmap => 8192,
-                            CompressionType::Rle => {
-                                4 * read_u16(
-                                    &byte_array_docid,
-                                    rank_position_pointer_range_previous as usize
-                                        + posting_pointer_size_sum_previous,
-                                ) as usize
-                                    + 2
-                            }
-                            _ => 0,
-                        };
-
-                        rank_position_pointer_range_previous
-                            + (posting_pointer_size_sum_previous + compressed_docid_previous) as u32
-                    };
-
-                    value.position_range_previous = position_range_previous;
-
-                    posting_count_previous = plo.posting_count;
-                    pointer_pivot_p_docid_previous = plo.pointer_pivot_p_docid;
-                    compression_type_pointer_previous = plo.compression_type_pointer;
-                };
-
-                if exists {
-                    value.posting_count += plo.posting_count as u32;
-                    if self.meta.access_type != AccessType::Mmap {
-                        value.blocks.push(BlockObjectIndex {
-                            block_id,
-                            posting_count: (plo.posting_count - 1) as u16,
-                            max_block_score: plo.max_block_score,
-                            max_docid: plo.max_docid,
-                            max_p_docid: plo.max_p_docid,
-                            pointer_pivot_p_docid: plo.pointer_pivot_p_docid,
-                            compression_type_pointer: plo.compression_type_pointer,
-                        });
-                    }
-                } else {
-                    value.posting_count = plo.posting_count as u32;
-                    value.max_list_score = 0.0;
-
-                    match plo.ngram_type {
-                        NgramType::SingleTerm => {}
-                        NgramType::NgramFF | NgramType::NgramRF | NgramType::NgramFR => {
-                            value.posting_count_ngram_1_compressed =
-                                plo.posting_count_ngram_1_compressed;
-                            value.posting_count_ngram_2_compressed =
-                                plo.posting_count_ngram_2_compressed;
-                        }
-                        _ => {
-                            value.posting_count_ngram_1_compressed =
-                                plo.posting_count_ngram_1_compressed;
-                            value.posting_count_ngram_2_compressed =
-                                plo.posting_count_ngram_2_compressed;
-                            value.posting_count_ngram_3_compressed =
-                                plo.posting_count_ngram_3_compressed;
-                        }
-                    }
-
-                    if self.meta.access_type != AccessType::Mmap {
-                        value.blocks = vec![BlockObjectIndex {
-                            block_id,
-                            posting_count: (plo.posting_count - 1) as u16,
-                            max_block_score: plo.max_block_score,
-                            max_docid: plo.max_docid,
-                            max_p_docid: plo.max_p_docid,
-                            pointer_pivot_p_docid: plo.pointer_pivot_p_docid,
-                            compression_type_pointer: plo.compression_type_pointer,
-                        }]
-                    }
-                }
-            }
-
-            self.segments_index[key0]
-                .byte_array_blocks
-                .push(byte_array_docid);
         }
 
         compressed_segment_block_size
@@ -821,14 +658,12 @@ impl Shard {
             };
         let compressed_doc_id_range: u32 = rank_position_pointer_range + posting_pointer_size_sum;
 
-        let byte_array = if self.meta.access_type == AccessType::Mmap {
+        let byte_array = {
             let segment = &self.segments_index[key0];
             let byte_array = &self.index_file_mmap[segment.byte_array_blocks_pointer[block_id].0
                 ..segment.byte_array_blocks_pointer[block_id].0
                     + segment.byte_array_blocks_pointer[block_id].1];
             byte_array.to_owned()
-        } else {
-            self.segments_index[key0].byte_array_blocks[block_id].to_owned()
         };
 
         let mut plo = PostingListObjectQuery {
@@ -938,7 +773,7 @@ impl Shard {
         let committed_doc_count = ((self.committed_doc_count - 1) % ROARING_BLOCK_SIZE) + 1;
 
         for i in 0..self.indexed_field_vec.len() {
-            if self.meta.access_type == AccessType::Mmap {
+            {
                 block_copy(
                     &self.index_file_mmap[self.level_index[block_id]
                         .document_length_compressed_array_pointer
@@ -948,19 +783,11 @@ impl Shard {
                     0,
                     committed_doc_count,
                 );
-            } else {
-                block_copy(
-                    &self.level_index[block_id].document_length_compressed_array[i],
-                    0,
-                    &mut self.document_length_compressed_array[i],
-                    0,
-                    committed_doc_count,
-                );
             }
         }
 
         for key0 in 0..self.segment_number1 {
-            if self.meta.access_type == AccessType::Mmap {
+            {
                 let pointer = self.segments_index[key0].byte_array_blocks_pointer[block_id];
 
                 let key_count = pointer.2 as usize;
@@ -1058,85 +885,6 @@ impl Shard {
                             pointer_pivot_p_docid_old + pointer_pivot_p_docid_new
                         };
 
-                        plo0.size_compressed_positions_key = size_compressed_positions_key_new;
-
-                        let pointer_last_old = plo0.pointer_last;
-                        plo0.pointer_first = pointer_first_old;
-                        plo0.pointer_last = pointer_last_new;
-
-                        write_u32(
-                            pointer_first_new as u32,
-                            &mut self.postings_buffer,
-                            pointer_last_old,
-                        );
-                    }
-                }
-            } else {
-                let keys: Vec<u64> = self.segments_index[key0].segment.keys().cloned().collect();
-
-                for key_hash in keys {
-                    let plo = &self.segments_index[key0].segment[&key_hash];
-                    let last_block = plo.blocks.last().unwrap();
-                    if last_block.block_id as usize != self.level_index.len() - 1 {
-                        continue;
-                    }
-
-                    let posting_count = last_block.posting_count;
-
-                    let posting_count_ngram_1_compressed = plo.posting_count_ngram_1_compressed;
-                    let posting_count_ngram_2_compressed = plo.posting_count_ngram_2_compressed;
-                    let posting_count_ngram_3_compressed = plo.posting_count_ngram_3_compressed;
-
-                    let pointer_pivot_p_docid = last_block.pointer_pivot_p_docid;
-                    let compression_type_pointer = last_block.compression_type_pointer;
-
-                    let mut pointer_pivot_p_docid_new = 0;
-                    let mut size_compressed_positions_key_new = 0;
-                    let mut pointer_first_new = 0;
-                    let mut pointer_last_new = 0;
-                    let mut pointer_first_old = 0;
-                    let merge = match self.segments_level0[key0].segment.get_mut(&key_hash) {
-                        Some(plo0) => {
-                            pointer_pivot_p_docid_new = plo0.pointer_pivot_p_docid;
-                            size_compressed_positions_key_new = plo0.size_compressed_positions_key;
-                            plo0.pointer_pivot_p_docid = 0;
-                            plo0.size_compressed_positions_key = 0;
-
-                            pointer_first_new = plo0.pointer_first;
-                            pointer_last_new = plo0.pointer_last;
-                            pointer_first_old = self.postings_buffer_pointer;
-                            true
-                        }
-                        None => false,
-                    };
-
-                    let ngram_type =
-                        FromPrimitive::from_u64(key_hash & 0b111).unwrap_or(NgramType::SingleTerm);
-
-                    self.iterate_docid(
-                        compression_type_pointer,
-                        pointer_pivot_p_docid,
-                        posting_count,
-                        block_id,
-                        key0,
-                        key_hash,
-                        ngram_type,
-                        posting_count_ngram_1_compressed,
-                        posting_count_ngram_2_compressed,
-                        posting_count_ngram_3_compressed,
-                    );
-
-                    if merge {
-                        let plo0 = self.segments_level0[key0]
-                            .segment
-                            .get_mut(&key_hash)
-                            .unwrap();
-
-                        plo0.pointer_pivot_p_docid = if pointer_pivot_p_docid_new == 0 {
-                            pointer_pivot_p_docid
-                        } else {
-                            pointer_pivot_p_docid + pointer_pivot_p_docid_new
-                        };
                         plo0.size_compressed_positions_key = size_compressed_positions_key_new;
 
                         let pointer_last_old = plo0.pointer_last;

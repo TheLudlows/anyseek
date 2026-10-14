@@ -61,12 +61,6 @@ pub(crate) fn write_f64(value: f64, vec8: &mut [u8], pos: usize) {
 }
 
 #[inline]
-pub(crate) fn read_u8_ref(vec8: &[u8], pos: &mut usize) -> u8 {
-    *pos += 1;
-    vec8[*pos - 1]
-}
-
-#[inline]
 pub(crate) fn read_u16_ref(vec8: &[u8], pos: &mut usize) -> u16 {
     *pos += 2;
     u16::from_le_bytes(vec8[*pos - 2..*pos].try_into().unwrap())

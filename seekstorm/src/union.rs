@@ -2,16 +2,13 @@ use crate::{
     add_result::{add_result_multiterm_multifield, is_facet_filter},
     compatible::{_blsr_u64, _mm_tzcnt_64},
     index::{
-        AccessType, CompressionType, NonUniquePostingListObjectQuery,
-        PostingListObjectQuery, QueueObject, ROARING_BLOCK_SIZE, Shard,
+        CompressionType, NonUniquePostingListObjectQuery, PostingListObjectQuery, QueueObject,
+        ROARING_BLOCK_SIZE, Shard,
     },
     intersection::intersection_blockid,
     search::{FilterSparse, ResultType, SearchResult},
     single::{single_blockid, single_docid},
-    utils::{
-        read_u16, read_u64,
-        write_u64,
-    },
+    utils::{read_u16, read_u64, write_u64},
 };
 
 use ahash::AHashSet;
@@ -173,7 +170,6 @@ pub(crate) async fn union_docid<'a>(
         if result_type == &ResultType::Count {
             *result_count += query_list[single_term_index].p_docid_count as i32;
         } else {
-
             single_docid(
                 shard,
                 query_list,
@@ -189,7 +185,6 @@ pub(crate) async fn union_docid<'a>(
                 facet_filter,
             )
             .await;
-
         }
         return;
     };
@@ -212,8 +207,7 @@ pub(crate) async fn union_docid<'a>(
     // for document hit counts when filters or large disjunctions require it.
     let count_before = *result_count;
     let exact_metadata_count = result_type == &ResultType::TopkCount
-        && (query_list.len() > 32
-                        || !facet_filter.is_empty());
+        && (query_list.len() > 32 || !facet_filter.is_empty());
 
     if query_list.len() <= 8 {
         union_scan_8(
@@ -245,7 +239,6 @@ pub(crate) async fn union_docid<'a>(
             facet_filter,
         )
         .await;
-
     }
     if exact_metadata_count {
         let mut exact_count = count_before;
@@ -260,9 +253,7 @@ pub(crate) async fn union_docid<'a>(
         )
         .await;
         *result_count = exact_count;
-
     }
-
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -292,7 +283,7 @@ pub(crate) async fn union_blockid<'a>(
             }
         }
 
-        if shard.meta.access_type == AccessType::Mmap {
+        {
             for query_list_item_mut in query_list.iter_mut() {
                 let segment = &shard.segments_index[query_list_item_mut.key0 as usize];
                 query_list_item_mut.byte_array =
@@ -301,8 +292,7 @@ pub(crate) async fn union_blockid<'a>(
                             + segment.byte_array_blocks_pointer[block_id_min].1];
             }
             for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
-                let segment =
-                    &shard.segments_index[nonunique_query_list_item_mut.key0 as usize];
+                let segment = &shard.segments_index[nonunique_query_list_item_mut.key0 as usize];
                 nonunique_query_list_item_mut.byte_array =
                     &shard.index_file_mmap[segment.byte_array_blocks_pointer[block_id_min].0
                         ..segment.byte_array_blocks_pointer[block_id_min].0
@@ -314,22 +304,6 @@ pub(crate) async fn union_blockid<'a>(
                     &shard.index_file_mmap[segment.byte_array_blocks_pointer[block_id_min].0
                         ..segment.byte_array_blocks_pointer[block_id_min].0
                             + segment.byte_array_blocks_pointer[block_id_min].1];
-            }
-        } else {
-            for query_list_item_mut in query_list.iter_mut() {
-                query_list_item_mut.byte_array = &shard.segments_index
-                    [query_list_item_mut.key0 as usize]
-                    .byte_array_blocks[block_id_min];
-            }
-            for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
-                nonunique_query_list_item_mut.byte_array = &shard.segments_index
-                    [nonunique_query_list_item_mut.key0 as usize]
-                    .byte_array_blocks[block_id_min];
-            }
-            for not_query_list_item_mut in not_query_list.iter_mut() {
-                not_query_list_item_mut.byte_array = &shard.segments_index
-                    [not_query_list_item_mut.key0 as usize]
-                    .byte_array_blocks[block_id_min];
             }
         }
 
@@ -953,7 +927,6 @@ pub(crate) async fn union_count<'a>(
                     result_count_local -= 1;
                     continue 'next;
                 }
-
             }
         }
     }

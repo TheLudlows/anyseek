@@ -14,7 +14,7 @@ use std::{fs, time::Duration};
 
 #[tokio::test]
 async fn lazy_buffers_grow_commit_restore_and_clear() {
-    for (name, access_type) in [("ram", AccessType::Ram), ("mmap", AccessType::Mmap)] {
+    for (name, access_type) in [("mmap", AccessType::Mmap)] {
         let directory =
             std::env::temp_dir().join(format!("seekpower-postings-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);

@@ -521,7 +521,6 @@ pub(crate) async fn tokenizer(
     let mut term_string_2 = "".to_string();
     let mut term_frequent_2 = false;
 
-
     let mut non_unique_terms_raw = Vec::new();
 
     for term_string in non_unique_terms_line.iter_mut() {
@@ -747,7 +746,7 @@ pub(crate) async fn tokenizer(
 
             if !term_string_2.is_empty()
                 && !term_string_1.is_empty()
-                && (ngram_indexing & NgramSet::NgramRFF as u8 != 0
+                && (ngram_indexing & NgramSet::NgramFFR as u8 != 0
                     && term_frequent_2
                     && term_frequent_1
                     && !term_frequent_0)
@@ -780,7 +779,7 @@ pub(crate) async fn tokenizer(
 
             if !term_string_2.is_empty()
                 && !term_string_1.is_empty()
-                && (ngram_indexing & NgramSet::NgramRFF as u8 != 0
+                && (ngram_indexing & NgramSet::NgramFRF as u8 != 0
                     && term_frequent_2
                     && !term_frequent_1
                     && term_frequent_0)

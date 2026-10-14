@@ -3,7 +3,6 @@ use ahash::{AHashMap, AHashSet};
 use futures::future;
 use indexmap::IndexMap;
 use memmap2::{Mmap, MmapMut, MmapOptions};
-use num::FromPrimitive;
 use num_derive::FromPrimitive;
 
 use search::{QueryType, Search};
@@ -33,13 +32,12 @@ use crate::{
     clustering::{ClusterHeader, ParentMedoid},
     commit::Commit,
     search::{
-        self, FacetFilter, ResultObject, ResultSort,
-        ResultType, SearchLexicalShard, SearchMode,
+        self, FacetFilter, ResultObject, ResultSort, ResultType, SearchLexicalShard, SearchMode,
     },
     tokenizer::tokenizer,
     utils::{
-        self, read_u8_ref, read_u16, read_u16_ref, read_u32_ref, read_u64, read_u64_ref, write_f32,
-        write_f64, write_i8, write_i16, write_i32, write_i64, write_u32, write_u64,
+        self, read_u16, read_u16_ref, read_u32_ref, read_u64, read_u64_ref, write_f32, write_f64,
+        write_i8, write_i16, write_i32, write_i64, write_u32, write_u64,
     },
     vector::{Inference, Precision, Quantization, VectorHeader, read_min_max},
     vector_similarity::{TurboQuant, VectorSimilarity},
@@ -118,43 +116,24 @@ pub type Document = IndexMap<String, Value>;
 pub enum DocumentCompression {
     /// No compression (fastest, largest size)
     None,
-    /// lz4 compression (fast compression/decompression (faster than snappy), medium size (larger than snappy))
-    Lz4,
-    /// snappy compression (fast compression/decompression (slower than lz4), medium size (smaller than lz4))
+    /// Snappy document compression (default).
     Snappy,
-    /// zstd compression level 1 (slowest compression/decompression, smallest size)
-    Zstd,
 }
 
 impl fmt::Display for DocumentCompression {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             DocumentCompression::None => write!(f, "None"),
-            DocumentCompression::Lz4 => write!(f, "Lz4"),
             DocumentCompression::Snappy => write!(f, "Snappy"),
-            DocumentCompression::Zstd => write!(f, "Zstd"),
         }
     }
 }
 
-/// Defines where the index resides during search:
-/// - Ram (the complete index is preloaded to Ram when opening the index)
-/// - Mmap (the index is accessed via memory-mapped files). See architecture.md for details.
-/// - At commit the data is serialized to disk for persistence both in Ram and Mmap mode.
-/// - The serialization format is identical for Ram and Mmap mode, allowing to change it retrospectively.
+/// Committed index data is accessed through memory-mapped files.
+/// Uncommitted writes remain in memory until commit.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub enum AccessType {
-    /// Ram (the complete index is preloaded to Ram when opening the index).
-    /// - Index size is limited by available RAM size.
-    /// - Slightly fastesr search speed.
-    /// - Higher index loading time.
-    /// - Higher RAM usage.
-    Ram = 0,
-    /// Mmap (the index is accessed via memory-mapped files). See architecture.md for details.
-    /// - Enables index size scaling beyond RAM size.
-    /// - Slightly slower search speed compared to Ram.
-    /// - Faster index loading time compared to Ram.
-    /// - Lower RAM usage.
+    /// Memory-map committed index data; the OS manages resident pages.
     Mmap = 1,
 }
 
@@ -369,9 +348,6 @@ impl fmt::Display for StemmerType {
 }
 
 pub(crate) struct LevelIndex {
-    pub document_length_compressed_array: Vec<[u8; ROARING_BLOCK_SIZE]>,
-
-    pub docstore_pointer_docs: Vec<u8>,
     pub docstore_pointer_docs_pointer: usize,
     pub document_length_compressed_array_pointer: usize,
 }
@@ -396,13 +372,8 @@ pub(crate) struct PostingListObjectIndex {
     pub posting_count_ngram_1: u32,
     pub posting_count_ngram_2: u32,
     pub posting_count_ngram_3: u32,
-    pub posting_count_ngram_1_compressed: u8,
-    pub posting_count_ngram_2_compressed: u8,
-    pub posting_count_ngram_3_compressed: u8,
     pub max_list_score: f32,
     pub blocks: Vec<BlockObjectIndex>,
-
-    pub position_range_previous: u32,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
@@ -590,9 +561,7 @@ pub(crate) struct NonUniquePostingListObjectQuery<'a> {
 /// for each strip (key hash range) a separate dictionary (key hash - posting list) is maintained.
 /// The index hash multiple segments, each segments contains multiple terms, each term has a postinglist, each postinglist has multiple blocks.
 pub(crate) struct SegmentIndex {
-    pub byte_array_blocks: Vec<Vec<u8>>,
     pub byte_array_blocks_pointer: Vec<(usize, usize, u32)>,
-    pub segment: AHashMap<u64, PostingListObjectIndex>,
 }
 
 /// StripObject0 defines a strip (key hash range) within level 0. Level 0 is the mutable level where all writes are taking place.
@@ -923,11 +892,11 @@ pub struct IndexMetaObject {
     #[serde(default = "ngram_indexing_default")]
     pub ngram_indexing: u8,
 
-    /// Compression algorithm for document store: None, Snappy, Lz4,Zstd
+    /// Compression algorithm for document store: None, Snappy
     #[serde(default = "doc_store_compression_default")]
     pub document_compression: DocumentCompression,
 
-    /// AccessType defines where the index resides during search: Ram or Mmap
+    /// AccessType defines where the index resides during search: Mmap
     pub access_type: AccessType,
 
     /// clustering defines the clustering behavior for approximate nearest neighbor (ANN) search: None, Auto, Fixed(usize).
@@ -1018,7 +987,6 @@ pub struct Shard {
     pub(crate) compressed_docstore_segment_block_buffer: Vec<u8>,
 
     pub(crate) segment_number1: usize,
-    pub(crate) segment_number_bits1: usize,
 
     pub(crate) document_length_normalized_average: f32,
     pub(crate) positions_sum_normalized: u64,
@@ -1026,7 +994,6 @@ pub struct Shard {
     pub(crate) level_index: Vec<LevelIndex>,
     pub(crate) segments_index: Vec<SegmentIndex>,
     pub(crate) segments_level0: Vec<SegmentLevel0>,
-
 
     pub(crate) segment_number_mask1: u32,
 
@@ -1145,7 +1112,6 @@ pub struct Index {
 
     pub(crate) shard_number: usize,
     pub(crate) shard_vec: Vec<Arc<RwLock<Shard>>>,
-
 
     /// The precision of the vectors: Float32 or Int8
     pub vector_precision: Precision,
@@ -1270,7 +1236,7 @@ pub(crate) enum NgramType {
     NgramFRF = 7,
 }
 
-/// Create index in RAM.
+/// Create an index with memory-mapped committed data.
 /// Inner data structures for create index and open_index
 /// * `index_path` - index path.
 /// * `meta` - index meta object.
@@ -1449,9 +1415,18 @@ pub(crate) async fn create_index_root(
 
             let (vector_dimensions, vector_precision, quantization, vector_similarity) =
                 match &meta.inference {
-                    Inference::External { dimensions, precision, quantization, similarity } =>
-                        (*dimensions, *precision, *quantization, *similarity),
-                    Inference::None => (0, Precision::None, Quantization::None, VectorSimilarity::Cosine),
+                    Inference::External {
+                        dimensions,
+                        precision,
+                        quantization,
+                        similarity,
+                    } => (*dimensions, *precision, *quantization, *similarity),
+                    Inference::None => (
+                        0,
+                        Precision::None,
+                        Quantization::None,
+                        VectorSimilarity::Cosine,
+                    ),
                 };
 
             let turbo_quant = if quantization == Quantization::TurboQuantI8 {
@@ -1472,9 +1447,15 @@ pub(crate) async fn create_index_root(
             // The native vector kernels consume complete SIMD lanes. Keep arbitrary
             // external dimensions on the existing scalar path, including small TQ vectors.
             let quantized = quantization != Quantization::None || vector_precision == Precision::I8;
-            let lane_width = if *IS_AVX2 { if quantized { 32 } else { 8 } }
-                else if *IS_NEON { if quantized { 16 } else { 4 } } else { 1 };
-            let is_simd = *IS_SIMD && vector_dimensions > 0 && vector_dimensions.is_multiple_of(lane_width);
+            let lane_width = if *IS_AVX2 {
+                if quantized { 32 } else { 8 }
+            } else if *IS_NEON {
+                if quantized { 16 } else { 4 }
+            } else {
+                1
+            };
+            let is_simd =
+                *IS_SIMD && vector_dimensions > 0 && vector_dimensions.is_multiple_of(lane_width);
 
             let mut shard_vec: Vec<Arc<RwLock<Shard>>> = Vec::new();
             if serialize_schema {
@@ -1548,7 +1529,6 @@ pub(crate) async fn create_index_root(
                 shard_number,
                 shard_vec,
 
-
                 vector_dimensions,
                 vector_dimensions_original,
                 vector_precision,
@@ -1586,13 +1566,17 @@ pub(crate) async fn create_index_root(
                 index.index_format_version_minor =
                     read_u16(&index.compressed_index_segment_block_buffer, 2);
 
-                if (index.index_format_version_major, index.index_format_version_minor)
-                    != (INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR)
+                if (
+                    index.index_format_version_major,
+                    index.index_format_version_minor,
+                ) != (INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR)
                 {
                     return Err(format!(
                         "unsupported index format {}.{}; expected {}.{}",
-                        index.index_format_version_major, index.index_format_version_minor,
-                        INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR,
+                        index.index_format_version_major,
+                        index.index_format_version_minor,
+                        INDEX_FORMAT_VERSION_MAJOR,
+                        INDEX_FORMAT_VERSION_MINOR,
                     ));
                 }
             }
@@ -1778,22 +1762,9 @@ pub(crate) fn create_shard(
                 (usize::BITS - (indexed_field_vec.len() - 1).leading_zeros()) as usize;
 
             let index_file_mmap;
-            let docstore_file_mmap = if meta.access_type == AccessType::Mmap {
+            let docstore_file_mmap = {
                 index_file_mmap = unsafe { Mmap::map(&index_file).expect("Unable to create Mmap") };
                 unsafe { Mmap::map(&docstore_file).expect("Unable to create Mmap") }
-            } else {
-                index_file_mmap = unsafe {
-                    MmapOptions::new()
-                        .len(0)
-                        .map(&index_file)
-                        .expect("Unable to create Mmap")
-                };
-                unsafe {
-                    MmapOptions::new()
-                        .len(0)
-                        .map(&docstore_file)
-                        .expect("Unable to create Mmap")
-                }
             };
 
             if !facets_vec.is_empty()
@@ -1958,7 +1929,6 @@ pub(crate) fn create_shard(
                 last_level_vector_file_start_pos: 0,
                 positions_sum_normalized: 0,
                 segment_number1: 0,
-                segment_number_bits1,
                 segment_number_mask1: 0,
                 level_index: Vec::new(),
                 segments_index: Vec::new(),
@@ -2058,13 +2028,17 @@ pub(crate) fn create_shard(
                 index.index_format_version_minor =
                     read_u16(&index.compressed_index_segment_block_buffer, 2);
 
-                if (index.index_format_version_major, index.index_format_version_minor)
-                    != (INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR)
+                if (
+                    index.index_format_version_major,
+                    index.index_format_version_minor,
+                ) != (INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR)
                 {
                     return Err(format!(
                         "unsupported index format {}.{}; expected {}.{}",
-                        index.index_format_version_major, index.index_format_version_minor,
-                        INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR,
+                        index.index_format_version_major,
+                        index.index_format_version_minor,
+                        INDEX_FORMAT_VERSION_MAJOR,
+                        INDEX_FORMAT_VERSION_MINOR,
                     ));
                 }
             }
@@ -2082,9 +2056,7 @@ pub(crate) fn create_shard(
             index.segments_index = Vec::new();
             for _i in 0..index.segment_number1 {
                 index.segments_index.push(SegmentIndex {
-                    byte_array_blocks: Vec::new(),
                     byte_array_blocks_pointer: Vec::new(),
-                    segment: AHashMap::new(),
                 });
             }
 
@@ -2146,12 +2118,10 @@ pub(crate) fn get_max_score(
     compression_type_pointer: u32,
     ngram_type: &NgramType,
 ) -> f32 {
-    let byte_array = if index.meta.access_type == AccessType::Mmap {
+    let byte_array = {
         &index.index_file_mmap[segment.byte_array_blocks_pointer[block_id].0
             ..segment.byte_array_blocks_pointer[block_id].0
                 + segment.byte_array_blocks_pointer[block_id].1]
-    } else {
-        &segment.byte_array_blocks[block_id]
     };
 
     let mut bm25f = 0.0;
@@ -2223,13 +2193,8 @@ pub(crate) fn get_max_score(
             .ln();
 
         for field in field_vec.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[if index.meta.access_type
-                == AccessType::Mmap
-            {
+            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
                 get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } else {
-                index.level_index[block_id].document_length_compressed_array[field.0 as usize]
-                    [max_docid]
             } as usize] as f32;
 
             let document_length_quotient =
@@ -2259,13 +2224,8 @@ pub(crate) fn get_max_score(
             .ln();
 
         for field in field_vec_ngram1.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[if index.meta.access_type
-                == AccessType::Mmap
-            {
+            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
                 get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } else {
-                index.level_index[block_id].document_length_compressed_array[field.0 as usize]
-                    [max_docid]
             } as usize] as f32;
 
             let document_length_quotient =
@@ -2283,13 +2243,8 @@ pub(crate) fn get_max_score(
         }
 
         for field in field_vec_ngram2.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[if index.meta.access_type
-                == AccessType::Mmap
-            {
+            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
                 get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } else {
-                index.level_index[block_id].document_length_compressed_array[field.0 as usize]
-                    [max_docid]
             } as usize] as f32;
 
             let document_length_quotient =
@@ -2322,13 +2277,8 @@ pub(crate) fn get_max_score(
             .ln();
 
         for field in field_vec_ngram1.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[if index.meta.access_type
-                == AccessType::Mmap
-            {
+            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
                 get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } else {
-                index.level_index[block_id].document_length_compressed_array[field.0 as usize]
-                    [max_docid]
             } as usize] as f32;
 
             let document_length_quotient =
@@ -2346,13 +2296,8 @@ pub(crate) fn get_max_score(
         }
 
         for field in field_vec_ngram2.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[if index.meta.access_type
-                == AccessType::Mmap
-            {
+            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
                 get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } else {
-                index.level_index[block_id].document_length_compressed_array[field.0 as usize]
-                    [max_docid]
             } as usize] as f32;
 
             let document_length_quotient =
@@ -2370,13 +2315,8 @@ pub(crate) fn get_max_score(
         }
 
         for field in field_vec_ngram3.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[if index.meta.access_type
-                == AccessType::Mmap
-            {
+            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
                 get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } else {
-                index.level_index[block_id].document_length_compressed_array[field.0 as usize]
-                    [max_docid]
             } as usize] as f32;
 
             let document_length_quotient =
@@ -2396,55 +2336,7 @@ pub(crate) fn get_max_score(
     bm25f
 }
 
-pub(crate) fn update_list_max_impact_score(index: &mut Shard) {
-    if index.meta.access_type == AccessType::Mmap {
-        return;
-    }
-
-    for key0 in 0..index.segment_number1 {
-        let keys: Vec<u64> = index.segments_index[key0].segment.keys().cloned().collect();
-        for key in keys {
-            let ngram_type = FromPrimitive::from_u64(key & 0b111).unwrap_or(NgramType::SingleTerm);
-
-            let blocks_len = index.segments_index[key0].segment[&key].blocks.len();
-            let mut max_list_score = 0.0;
-            for block_index in 0..blocks_len {
-                let segment = &index.segments_index[key0];
-                let posting_list = &segment.segment[&key];
-                let block = &posting_list.blocks[block_index];
-                let max_block_score = get_max_score(
-                    index,
-                    segment,
-                    posting_list.posting_count_ngram_1,
-                    posting_list.posting_count_ngram_2,
-                    posting_list.posting_count_ngram_3,
-                    posting_list.posting_count,
-                    block.block_id as usize,
-                    block.max_docid as usize,
-                    block.max_p_docid as usize,
-                    block.pointer_pivot_p_docid as usize,
-                    block.compression_type_pointer,
-                    &ngram_type,
-                );
-
-                index.segments_index[key0]
-                    .segment
-                    .get_mut(&key)
-                    .unwrap()
-                    .blocks[block_index]
-                    .max_block_score = max_block_score;
-                max_list_score = f32::max(max_list_score, max_block_score);
-            }
-            index.segments_index[key0]
-                .segment
-                .get_mut(&key)
-                .unwrap()
-                .max_list_score = max_list_score;
-        }
-    }
-}
-
-/// Loads the index from disk into RAM or MMAP.
+/// Opens the index using memory-mapped files.
 /// * `index_path` - index path.
 /// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).
 pub(crate) async fn open_shard(
@@ -2475,8 +2367,9 @@ pub(crate) async fn open_shard(
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
                 Ok(schema_file) => {
-                    let schema: Vec<SchemaField> = serde_json::from_reader(BufReader::new(schema_file))
-                        .map_err(|e| format!("invalid index schema: {e}"))?;
+                    let schema: Vec<SchemaField> =
+                        serde_json::from_reader(BufReader::new(schema_file))
+                            .map_err(|e| format!("invalid index schema: {e}"))?;
 
                     let synonyms = if let Ok(synonym_file) =
                         File::open(Path::new(index_path).join(SYNONYMS_FILENAME))
@@ -2489,53 +2382,23 @@ pub(crate) async fn open_shard(
                     match create_shard(index_path, &meta, &schema, false, &synonyms, 11, mute, None)
                     {
                         Ok(mut shard) => {
-                            let mut block_count_sum = 0;
+                            let file_len = { shard.index_file_mmap.len() as u64 };
 
-                            let is_mmap = shard.meta.access_type == AccessType::Mmap;
-
-                            let file_len = if is_mmap {
-                                shard.index_file_mmap.len() as u64
-                            } else {
-                                shard.index_file.metadata().unwrap().len()
-                            };
-
-                            while if is_mmap {
-                                index_mmap_position as u64
-                            } else {
-                                shard.index_file.stream_position().unwrap()
-                            } < file_len
-                            {
+                            while (index_mmap_position as u64) < file_len {
                                 let mut segment_head_vec: Vec<(u32, u32)> = Vec::new();
                                 for key0 in 0..shard.segment_number1 {
                                     if key0 == 0 {
-                                        shard.last_level_index_file_start_pos = if is_mmap {
-                                            index_mmap_position as u64
-                                        } else {
-                                            shard.index_file.stream_position().unwrap()
-                                        };
+                                        shard.last_level_index_file_start_pos =
+                                            index_mmap_position as u64;
 
-                                        shard.last_level_docstore_file_start_pos = if is_mmap {
-                                            docstore_mmap_position as u64
-                                        } else {
-                                            shard.docstore_file.stream_position().unwrap()
-                                        };
+                                        shard.last_level_docstore_file_start_pos =
+                                            docstore_mmap_position as u64;
 
                                         if shard.level_index.is_empty() {
-                                            let longest_field_id = if is_mmap {
+                                            let longest_field_id = {
                                                 read_u16_ref(
                                                     &shard.index_file_mmap,
                                                     &mut index_mmap_position,
-                                                )
-                                                    as usize
-                                            } else {
-                                                let _ = shard.index_file.read(
-                                                    &mut shard
-                                                        .compressed_index_segment_block_buffer
-                                                        [0..2],
-                                                );
-                                                read_u16(
-                                                    &shard.compressed_index_segment_block_buffer,
-                                                    0,
                                                 )
                                                     as usize
                                             };
@@ -2552,36 +2415,18 @@ pub(crate) async fn open_shard(
                                             }
                                         }
 
-                                        let mut document_length_compressed_array_vec: Vec<
-                                            [u8; ROARING_BLOCK_SIZE],
-                                        > = Vec::new();
-
-                                        let document_length_compressed_array_pointer = if is_mmap {
-                                            index_mmap_position
-                                        } else {
-                                            shard.index_file.stream_position().unwrap() as usize
-                                        };
+                                        let document_length_compressed_array_pointer =
+                                            { index_mmap_position };
 
                                         for _i in 0..shard.indexed_field_vec.len() {
-                                            if is_mmap {
+                                            {
                                                 index_mmap_position += ROARING_BLOCK_SIZE;
-                                            } else {
-                                                let mut document_length_compressed_array_item =
-                                                    [0u8; ROARING_BLOCK_SIZE];
-
-                                                let _ = shard.index_file.read(
-                                                    &mut document_length_compressed_array_item,
-                                                );
-                                                document_length_compressed_array_vec
-                                                    .push(document_length_compressed_array_item);
                                             }
                                         }
 
-                                        let mut docstore_pointer_docs: Vec<u8> = Vec::new();
-
                                         let mut docstore_pointer_docs_pointer = 0;
                                         if !shard.stored_field_names.is_empty() {
-                                            if is_mmap {
+                                            {
                                                 let docstore_pointer_docs_size = read_u32_ref(
                                                     &shard.docstore_file_mmap,
                                                     &mut docstore_mmap_position,
@@ -2591,31 +2436,10 @@ pub(crate) async fn open_shard(
                                                     docstore_mmap_position;
                                                 docstore_mmap_position +=
                                                     docstore_pointer_docs_size;
-                                            } else {
-                                                let _ = shard.docstore_file.read(
-                                                    &mut shard
-                                                        .compressed_index_segment_block_buffer
-                                                        [0..4],
-                                                );
-
-                                                let docstore_pointer_docs_size = read_u32(
-                                                    &shard.compressed_index_segment_block_buffer,
-                                                    0,
-                                                )
-                                                    as usize;
-
-                                                docstore_pointer_docs_pointer =
-                                                    shard.docstore_file.stream_position().unwrap()
-                                                        as usize;
-                                                docstore_pointer_docs =
-                                                    vec![0; docstore_pointer_docs_size];
-                                                let _ = shard
-                                                    .docstore_file
-                                                    .read(&mut docstore_pointer_docs);
                                             }
                                         }
 
-                                        if is_mmap {
+                                        {
                                             let _previous_indexed_doc_count =
                                                 shard.indexed_doc_count;
                                             shard.indexed_doc_count = read_u64_ref(
@@ -2640,40 +2464,6 @@ pub(crate) async fn open_shard(
 
                                                 segment_head_vec.push((block_length, key_count));
                                             }
-                                        } else {
-                                            let _ = shard.index_file.read(
-                                                &mut shard.compressed_index_segment_block_buffer
-                                                    [0..16],
-                                            );
-
-                                            shard.indexed_doc_count = read_u64(
-                                                &shard.compressed_index_segment_block_buffer,
-                                                0,
-                                            )
-                                                as usize;
-
-                                            shard.positions_sum_normalized = read_u64(
-                                                &shard.compressed_index_segment_block_buffer,
-                                                8,
-                                            );
-
-                                            for _key0 in 0..shard.segment_number1 {
-                                                let _ = shard.index_file.read(
-                                                    &mut shard
-                                                        .compressed_index_segment_block_buffer
-                                                        [0..8],
-                                                );
-
-                                                let block_length = read_u32(
-                                                    &shard.compressed_index_segment_block_buffer,
-                                                    0,
-                                                );
-                                                let key_count = read_u32(
-                                                    &shard.compressed_index_segment_block_buffer,
-                                                    4,
-                                                );
-                                                segment_head_vec.push((block_length, key_count));
-                                            }
                                         }
 
                                         shard.document_length_normalized_average =
@@ -2681,9 +2471,6 @@ pub(crate) async fn open_shard(
                                                 / shard.indexed_doc_count as f32;
 
                                         shard.level_index.push(LevelIndex {
-                                            document_length_compressed_array:
-                                                document_length_compressed_array_vec,
-                                            docstore_pointer_docs,
                                             docstore_pointer_docs_pointer,
                                             document_length_compressed_array_pointer,
                                         });
@@ -2692,14 +2479,10 @@ pub(crate) async fn open_shard(
                                     let block_length = segment_head_vec[key0].0;
                                     let key_count = segment_head_vec[key0].1;
 
-                                    let block_id =
-                                        (block_count_sum >> shard.segment_number_bits1) as u32;
-                                    block_count_sum += 1;
-
                                     let key_body_pointer_write_start: u32 =
                                         key_count * shard.key_head_size as u32;
 
-                                    if is_mmap {
+                                    {
                                         index_mmap_position +=
                                             key_count as usize * shard.key_head_size;
                                         shard.segments_index[key0].byte_array_blocks_pointer.push(
@@ -2713,229 +2496,6 @@ pub(crate) async fn open_shard(
 
                                         index_mmap_position +=
                                             (block_length - key_body_pointer_write_start) as usize;
-                                    } else {
-                                        let _ = shard.index_file.read(
-                                            &mut shard.compressed_index_segment_block_buffer
-                                                [0..(key_count as usize * shard.key_head_size)],
-                                        );
-                                        let compressed_index_segment_block_buffer = &shard
-                                            .compressed_index_segment_block_buffer
-                                            [0..(key_count as usize * shard.key_head_size)];
-
-                                        let mut block_array: Vec<u8> = vec![
-                                            0;
-                                            (block_length - key_body_pointer_write_start)
-                                                as usize
-                                        ];
-
-                                        let _ = shard.index_file.read(&mut block_array);
-                                        shard.segments_index[key0]
-                                            .byte_array_blocks
-                                            .push(block_array);
-
-                                        let mut read_pointer = 0;
-
-                                        let mut posting_count_previous = 0;
-                                        let mut pointer_pivot_p_docid_previous = 0;
-                                        let mut compression_type_pointer_previous = 0;
-
-                                        for key_index in 0..key_count {
-                                            let key_hash = read_u64_ref(
-                                                compressed_index_segment_block_buffer,
-                                                &mut read_pointer,
-                                            );
-
-                                            let posting_count = read_u16_ref(
-                                                compressed_index_segment_block_buffer,
-                                                &mut read_pointer,
-                                            );
-
-                                            let max_docid = read_u16_ref(
-                                                compressed_index_segment_block_buffer,
-                                                &mut read_pointer,
-                                            );
-
-                                            let max_p_docid = read_u16_ref(
-                                                compressed_index_segment_block_buffer,
-                                                &mut read_pointer,
-                                            );
-
-                                            let mut posting_count_ngram_1 = 0;
-                                            let mut posting_count_ngram_2 = 0;
-                                            let mut posting_count_ngram_3 = 0;
-                                            match shard.key_head_size {
-                                                20 => {}
-                                                22 => {
-                                                    let posting_count_ngram_1_compressed =
-                                                        read_u8_ref(
-                                                            compressed_index_segment_block_buffer,
-                                                            &mut read_pointer,
-                                                        );
-                                                    posting_count_ngram_1 =
-                                                        DOCUMENT_LENGTH_COMPRESSION
-                                                            [posting_count_ngram_1_compressed
-                                                                as usize];
-
-                                                    let posting_count_ngram_2_compressed =
-                                                        read_u8_ref(
-                                                            compressed_index_segment_block_buffer,
-                                                            &mut read_pointer,
-                                                        );
-                                                    posting_count_ngram_2 =
-                                                        DOCUMENT_LENGTH_COMPRESSION
-                                                            [posting_count_ngram_2_compressed
-                                                                as usize];
-                                                }
-                                                _ => {
-                                                    let posting_count_ngram_1_compressed =
-                                                        read_u8_ref(
-                                                            compressed_index_segment_block_buffer,
-                                                            &mut read_pointer,
-                                                        );
-                                                    posting_count_ngram_1 =
-                                                        DOCUMENT_LENGTH_COMPRESSION
-                                                            [posting_count_ngram_1_compressed
-                                                                as usize];
-
-                                                    let posting_count_ngram_2_compressed =
-                                                        read_u8_ref(
-                                                            compressed_index_segment_block_buffer,
-                                                            &mut read_pointer,
-                                                        );
-                                                    posting_count_ngram_2 =
-                                                        DOCUMENT_LENGTH_COMPRESSION
-                                                            [posting_count_ngram_2_compressed
-                                                                as usize];
-
-                                                    let posting_count_ngram_3_compressed =
-                                                        read_u8_ref(
-                                                            compressed_index_segment_block_buffer,
-                                                            &mut read_pointer,
-                                                        );
-                                                    posting_count_ngram_3 =
-                                                        DOCUMENT_LENGTH_COMPRESSION
-                                                            [posting_count_ngram_3_compressed
-                                                                as usize];
-                                                }
-                                            }
-
-                                            let pointer_pivot_p_docid = read_u16_ref(
-                                                compressed_index_segment_block_buffer,
-                                                &mut read_pointer,
-                                            );
-
-                                            let compression_type_pointer = read_u32_ref(
-                                                compressed_index_segment_block_buffer,
-                                                &mut read_pointer,
-                                            );
-
-                                            if let Some(value) = shard.segments_index[key0]
-                                                .segment
-                                                .get_mut(&key_hash)
-                                            {
-                                                value.posting_count += posting_count as u32 + 1;
-
-                                                value.blocks.push(BlockObjectIndex {
-                                                    max_block_score: 0.0,
-                                                    block_id,
-                                                    posting_count,
-                                                    max_docid,
-                                                    max_p_docid,
-                                                    pointer_pivot_p_docid,
-                                                    compression_type_pointer,
-                                                });
-                                            } else {
-                                                let value = PostingListObjectIndex {
-                                                    posting_count: posting_count as u32 + 1,
-                                                    posting_count_ngram_1,
-                                                    posting_count_ngram_2,
-                                                    posting_count_ngram_3,
-                                                    max_list_score: 0.0,
-                                                    position_range_previous: 0,
-                                                    blocks: vec![BlockObjectIndex {
-                                                        max_block_score: 0.0,
-                                                        block_id,
-                                                        posting_count,
-                                                        max_docid,
-                                                        max_p_docid,
-                                                        pointer_pivot_p_docid,
-                                                        compression_type_pointer,
-                                                    }],
-                                                    ..Default::default()
-                                                };
-                                                shard.segments_index[key0]
-                                                    .segment
-                                                    .insert(key_hash, value);
-                                            };
-
-                                            if !shard
-                                                .indexed_doc_count
-                                                .is_multiple_of(ROARING_BLOCK_SIZE)
-                                                && block_id as usize
-                                                    == shard.indexed_doc_count / ROARING_BLOCK_SIZE
-                                                && shard.meta.access_type == AccessType::Ram
-                                            {
-                                                let position_range_previous = if key_index == 0 {
-                                                    0
-                                                } else {
-                                                    let posting_pointer_size_sum_previous =
-                                                        pointer_pivot_p_docid_previous as usize * 2
-                                                            + if (pointer_pivot_p_docid_previous
-                                                                as usize)
-                                                                < posting_count_previous
-                                                            {
-                                                                (posting_count_previous
-                                                                    - pointer_pivot_p_docid_previous
-                                                                        as usize)
-                                                                    * 3
-                                                            } else {
-                                                                0
-                                                            };
-
-                                                    let rank_position_pointer_range_previous= compression_type_pointer_previous & 0b0011_1111_1111_1111_1111_1111_1111_1111;
-                                                    let compression_type_previous: CompressionType =
-                                                        FromPrimitive::from_u32(
-                                                            compression_type_pointer_previous >> 30,
-                                                        )
-                                                        .unwrap();
-
-                                                    let compressed_docid_previous =
-                                                        match compression_type_previous {
-                                                            CompressionType::Array => {
-                                                                posting_count_previous * 2
-                                                            }
-                                                            CompressionType::Bitmap => 8192,
-                                                            CompressionType::Rle => {
-                                                                let byte_array_docid = &shard
-                                                                    .segments_index[key0]
-                                                                    .byte_array_blocks
-                                                                    [block_id as usize];
-                                                                4 * read_u16( byte_array_docid, rank_position_pointer_range_previous as usize +posting_pointer_size_sum_previous) as usize + 2
-                                                            }
-                                                            _ => 0,
-                                                        };
-
-                                                    rank_position_pointer_range_previous
-                                                        + (posting_pointer_size_sum_previous
-                                                            + compressed_docid_previous)
-                                                            as u32
-                                                };
-
-                                                let plo = shard.segments_index[key0]
-                                                    .segment
-                                                    .get_mut(&key_hash)
-                                                    .unwrap();
-
-                                                plo.position_range_previous =
-                                                    position_range_previous;
-
-                                                posting_count_previous = posting_count as usize + 1;
-                                                pointer_pivot_p_docid_previous =
-                                                    pointer_pivot_p_docid;
-                                                compression_type_pointer_previous =
-                                                    compression_type_pointer;
-                                            };
-                                        }
                                     }
                                 }
                             }
@@ -2992,8 +2552,6 @@ pub(crate) async fn open_shard(
 
                             shard.string_set_to_single_term_id();
 
-                            update_list_max_impact_score(&mut shard);
-
                             let mut reader = BufReader::with_capacity(8192, &shard.delete_file);
                             while let Ok(buffer) = reader.fill_buf() {
                                 let length = buffer.len();
@@ -3025,7 +2583,7 @@ pub(crate) async fn open_shard(
     }
 }
 
-/// Loads the index from disk into RAM or MMAP.
+/// Opens the index using memory-mapped files.
 /// * `index_path` - index path.
 /// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).
 pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
@@ -3038,8 +2596,9 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
 
             match File::open(Path::new(index_path).join(SCHEMA_FILENAME)) {
                 Ok(schema_file) => {
-                    let schema: Vec<SchemaField> = serde_json::from_reader(BufReader::new(schema_file))
-                        .map_err(|e| format!("invalid index schema: {e}"))?;
+                    let schema: Vec<SchemaField> =
+                        serde_json::from_reader(BufReader::new(schema_file))
+                            .map_err(|e| format!("invalid index schema: {e}"))?;
 
                     let synonyms = if let Ok(synonym_file) =
                         File::open(Path::new(index_path).join(SYNONYMS_FILENAME))
@@ -3100,12 +2659,15 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
                                 shard_handle_vec.push(tokio::spawn(async move {
                                     let path = index_path_clone2.join("shards").join(i.to_string());
 
-                                    open_shard(&path, true, vector_type_clone, dimensions_clone).await
+                                    open_shard(&path, true, vector_type_clone, dimensions_clone)
+                                        .await
                                 }));
                             }
 
                             for shard_handle in shard_handle_vec {
-                                let shard_arc = shard_handle.await.map_err(|e| format!("failed to open shard: {e}"))??;
+                                let shard_arc = shard_handle
+                                    .await
+                                    .map_err(|e| format!("failed to open shard: {e}"))??;
                                 shard_arc.write().await.index_option = Some(index_arc.clone());
 
                                 shard_arc.write().await.quantization =
@@ -3189,7 +2751,6 @@ pub(crate) async fn warmup(shard_object_arc: &ShardArc) {
                 ResultType::TopkCount,
                 false,
                 Vec::new(),
-
                 Vec::new(),
                 Vec::new(),
             )
@@ -3456,7 +3017,9 @@ impl Shard {
         if let Err(e) = self.index_file.set_len(0) {
             log::error!(
                 "Unable to index_file.set_len in clear_index {} {} {:?}",
-                self.index_path_string, self.indexed_doc_count, e
+                self.index_path_string,
+                self.indexed_doc_count,
+                e
             )
         };
 
@@ -3529,7 +3092,7 @@ impl Shard {
             members.clear();
         }
 
-        if !self.stored_field_names.is_empty() && self.meta.access_type == AccessType::Mmap {
+        if !self.stored_field_names.is_empty() {
             self.docstore_file_mmap =
                 unsafe { Mmap::map(&self.docstore_file).expect("Unable to create Mmap") };
         }
@@ -3558,9 +3121,7 @@ impl Shard {
         self.level_index = Vec::new();
 
         for segment in self.segments_index.iter_mut() {
-            segment.byte_array_blocks.clear();
             segment.byte_array_blocks_pointer.clear();
-            segment.segment.clear();
         }
 
         for segment in self.segments_level0.iter_mut() {
@@ -3582,7 +3143,6 @@ impl Shard {
 
         drop(permit);
     }
-
 }
 
 impl Index {
@@ -3742,16 +3302,16 @@ impl Index {
     }
 }
 
-/// Remove index from RAM (Reverse of open_index)
+/// Commit pending changes and flush index files
 #[allow(async_fn_in_trait)]
 pub trait Close {
-    /// Remove index from RAM (Reverse of open_index)
+    /// Commit pending changes and flush index files
     async fn close(&self);
 }
 
-/// Remove index from RAM (Reverse of open_index)
+/// Commit pending changes and flush index files
 impl Close for IndexArc {
-    /// Remove index from RAM (Reverse of open_index)
+    /// Commit pending changes and flush index files
     async fn close(&self) {
         self.commit().await;
 
@@ -3899,7 +3459,6 @@ impl DeleteDocumentsByQuery for IndexArc {
                 ResultType::Topk,
                 include_uncommitted,
                 field_filter,
-
                 facet_filter,
                 result_sort,
             )
@@ -3956,10 +3515,14 @@ impl UpdateDocuments for IndexArc {
         let (docid_vec, document_vec): (Vec<_>, Vec<_>) = id_document_vec.into_iter().unzip();
         {
             let index = self.read().await;
-            for document in &document_vec { crate::vector::validate_document_vectors(&index, document)?; }
+            for document in &document_vec {
+                crate::vector::validate_document_vectors(&index, document)?;
+            }
         }
         self.delete_documents(docid_vec).await;
-        for document in document_vec { enqueue_document(self, document).await; }
+        for document in document_vec {
+            enqueue_document(self, document).await;
+        }
         Ok(())
     }
 }
@@ -3978,9 +3541,13 @@ impl IndexDocuments for IndexArc {
     async fn index_documents(&self, document_vec: Vec<Document>) -> Result<(), String> {
         {
             let index = self.read().await;
-            for document in &document_vec { crate::vector::validate_document_vectors(&index, document)?; }
+            for document in &document_vec {
+                crate::vector::validate_document_vectors(&index, document)?;
+            }
         }
-        for document in document_vec { enqueue_document(self, document).await; }
+        for document in document_vec {
+            enqueue_document(self, document).await;
+        }
         Ok(())
     }
 }
@@ -4004,26 +3571,26 @@ impl IndexDocument for IndexArc {
 }
 
 async fn enqueue_document(index_arc: &IndexArc, document: Document) {
-        let shard_number = index_arc.read().await.shard_number;
-        let docid_global_arc = index_arc.read().await.docid_global.clone();
-        let mut docid_global = docid_global_arc.write().await;
-        let docid_global_clone = *docid_global;
-        let shard_id = *docid_global % shard_number;
+    let shard_number = index_arc.read().await.shard_number;
+    let docid_global_arc = index_arc.read().await.docid_global.clone();
+    let mut docid_global = docid_global_arc.write().await;
+    let docid_global_clone = *docid_global;
+    let shard_id = *docid_global % shard_number;
 
-        let shard_arc = index_arc.read().await.shard_vec[shard_id].clone();
-        let semaphore = shard_arc.read().await.semaphore.clone();
-        let permit = semaphore.acquire_owned().await.unwrap();
+    let shard_arc = index_arc.read().await.shard_vec[shard_id].clone();
+    let semaphore = shard_arc.read().await.semaphore.clone();
+    let permit = semaphore.acquire_owned().await.unwrap();
 
-        *docid_global += 1;
-        drop(docid_global);
+    *docid_global += 1;
+    drop(docid_global);
 
-        INDEX_RUNTIME.handle().spawn(async move {
-            shard_arc
-                .index_document_shard(document, docid_global_clone)
-                .await;
-            drop(permit);
-        });
-    }
+    INDEX_RUNTIME.handle().spawn(async move {
+        shard_arc
+            .index_document_shard(document, docid_global_clone)
+            .await;
+        drop(permit);
+    });
+}
 /// Indexes a single document
 #[allow(async_fn_in_trait)]
 pub(crate) trait IndexDocumentShard {
@@ -4214,19 +3781,11 @@ impl IndexDocumentShard for ShardArc {
 
 #[allow(async_fn_in_trait)]
 pub(crate) trait IndexDocumentShard2 {
-    async fn index_document_shard_2(
-        &self,
-        document_item: DocumentItem,
-        docid_global: usize,
-    );
+    async fn index_document_shard_2(&self, document_item: DocumentItem, docid_global: usize);
 }
 
 impl IndexDocumentShard2 for ShardArc {
-    async fn index_document_shard_2(
-        &self,
-        document_item: DocumentItem,
-        docid_global: usize,
-    ) {
+    async fn index_document_shard_2(&self, document_item: DocumentItem, docid_global: usize) {
         let mut shard_mut = self.write().await;
 
         let docid_local = docid_global / shard_mut.shard_number;
@@ -4341,7 +3900,9 @@ impl IndexDocumentShard2 for ShardArc {
                             if is_new {
                                 for term in terms {
                                     shard_mut.string_set_to_single_term_id_vec[i]
-                                        .entry(term).or_default().insert(facet_value_id as u32);
+                                        .entry(term)
+                                        .or_default()
+                                        .insert(facet_value_id as u32);
                                 }
                             }
                             write_u16(facet_value_id, &mut shard_mut.facets_file_mmap, address)
@@ -4376,7 +3937,9 @@ impl IndexDocumentShard2 for ShardArc {
                             if is_new {
                                 for term in terms {
                                     shard_mut.string_set_to_single_term_id_vec[i]
-                                        .entry(term).or_default().insert(facet_value_id);
+                                        .entry(term)
+                                        .or_default()
+                                        .insert(facet_value_id);
                                 }
                             }
                             write_u32(facet_value_id, &mut shard_mut.facets_file_mmap, address)
