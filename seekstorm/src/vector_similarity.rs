@@ -8,12 +8,9 @@ use crate::vector::Quantization;
 use crate::vector::{Embedding, EmbeddingView};
 use rand::rngs::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "api-schema")]
-use utoipa::ToSchema;
 
 /// Similarity measure for comparing vector embeddings.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum VectorSimilarity {
     /// Cosine Similarity
     /// Cosine similarity measures only the direction (angle) between vectors.
@@ -42,7 +39,6 @@ impl fmt::Display for VectorSimilarity {
 
 ///Specifies in which cluster to search for ANN results.
 #[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum AnnMode {
     /// Search in all clusters (default)
     #[default]
@@ -935,7 +931,6 @@ pub(crate) unsafe fn euclidean_f32_avx2(query: &QuerySimd, b: &[f32]) -> f32 {
         let query = match query {
             QuerySimd::F(e) => e,
             _ => {
-                println!("{:?}", query);
                 panic!("euclidean_avx2_f32 only supports f32 embeddings")
             }
         };
@@ -966,7 +961,6 @@ pub(crate) unsafe fn euclidean_i8_avx2(query: &QuerySimd, b: &[i8]) -> i32 {
         let query = match query {
             QuerySimd::I(e) => e,
             _ => {
-                println!("{:?}", query);
                 panic!("euclidean_avx2_i8 only supports i8 embeddings")
             }
         };
@@ -1132,7 +1126,6 @@ pub(crate) unsafe fn dot_f32_avx2(query: &QuerySimd, emb: &[f32]) -> f32 {
         let query = match query {
             QuerySimd::F(e) => e,
             _ => {
-                println!("{:?}", query);
                 panic!("dot_f32 only supports f32 embeddings")
             }
         };
@@ -1158,7 +1151,6 @@ pub(crate) unsafe fn dot_i8_avx2(query: &QuerySimd, emb: &[i8]) -> i32 {
         let query = match query {
             QuerySimd::I(e) => e,
             _ => {
-                println!("{:?}", query);
                 panic!("dot_i8 only supports i8 embeddings3")
             }
         };

@@ -1,5 +1,5 @@
 //! Retired aggregation options must fail deserialization, including empty options.
-use seekstorm::index::SearchRequestObject;
+use seekstorm_server::api_types::SearchRequestObject;
 use serde_json::json;
 
 #[test]

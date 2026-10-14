@@ -1,9 +1,10 @@
 //! Aggregate removal must retain metadata dictionaries, filters and sort heaps.
+use seekstorm_server::api_types::{SearchRequestObject, CreateIndexRequest, GetDocumentRequest};
 use seekstorm::{
     commit::Commit,
-    index::{AccessType, Close, Clustering, CreateIndexRequest, Document, DocumentCompression,
-        FrequentwordType, GetDocumentRequest, IndexArc, IndexDocument, IndexMetaObject,
-        LexicalSimilarity, NgramSet, SchemaField, SearchRequestObject, StemmerType, StopwordType,
+    index::{AccessType, Close, Clustering, Document, DocumentCompression,
+        FrequentwordType, IndexArc, IndexDocument, IndexMetaObject,
+        LexicalSimilarity, NgramSet, SchemaField, StemmerType, StopwordType,
         TokenizerType, create_index, open_index},
     search::{ResultObject, Search},
     vector::Inference,

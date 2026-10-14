@@ -32,9 +32,15 @@
 - 写入/更新检查 `Result<(), String>`；检索检查 `ResultObject.error`。
 - `index_document(document)` 不再接收附件参数；`get_file` 删除。
 - `get_document(doc_id, include_uncommitted, &fields)` 不再接收高亮、query_terms 或地理距离参数；`Search::search` 不再接收最终的 rewriting 参数。
-- 核心统计使用 `info::collect_index_info`；终端表格与日期格式化位于服务。OpenAPI derive 通过可选 `api-schema` 启用。
+- HTTP 请求/响应对象移至 `seekstorm_server::api_types`，从核心删除 `api-schema` feature；嵌入核心继续使用 `Search`、`create_index` 等操作及其核心参数类型。
 - 服务启动仅接受文档列出的 `name=value` 参数；未知、重复、非法值失败。文档读取的字段选择通过 JSON body `fields`，iterator 拒绝未知选项。
 
+
+## 内核信息与日志
+
+- `collect_index_info(&index).await` 返回 `IndexInfo`，不再接收展示标签/耗时字符串；旧 `Info { entry, value }` 与 `entries` 删除。读取 `indexed_documents`、`index_size_bytes` 等数值字段，在调用方格式化。
+- 统计采集不触发 commit/fsync。持久化成功与错误语义仍以提交接口实际实现为准。
+- 核心只使用 `log` 门面，调用方安装 logger 后才输出；保留 `mute` 对进度日志的控制。服务默认 info，可用 `RUST_LOG=seekstorm=warn` 或 `RUST_LOG=off` 控制日志；终端交互、表格及启动提示仍由服务展示。
 
 ## 统计聚合裁剪
 

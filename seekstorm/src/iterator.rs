@@ -7,8 +7,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use tokio::sync::RwLock;
-#[cfg(feature = "api-schema")]
-use utoipa::ToSchema;
 
 #[cfg(feature = "vb")]
 use crate::vector::ResultSource;
@@ -21,7 +19,6 @@ use crate::{
 
 /// Iterator result
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct IteratorResultItem {
     /// document ID
     pub doc_id: u64,
@@ -31,7 +28,6 @@ pub struct IteratorResultItem {
 
 /// Iterator
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct IteratorResult {
     /// number of actually skipped documents
     pub skip: usize,

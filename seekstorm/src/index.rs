@@ -24,8 +24,6 @@ use std::{
 };
 use tokio::sync::{RwLock, Semaphore};
 use utils::{read_u32, write_u16};
-#[cfg(feature = "api-schema")]
-use utoipa::ToSchema;
 
 #[cfg(feature = "zh")]
 use crate::word_segmentation::WordSegmentationTM;
@@ -113,303 +111,11 @@ pub(crate) const POSTING_BUFFER_SIZE: usize = 400_000_000;
 pub(crate) const MAX_QUERY_TERM_NUMBER: usize = 100;
 pub(crate) const SEGMENT_KEY_CAPACITY: usize = 1000;
 
-/// Information about the index, such as number of documents, number of terms, index size, etc. Displayed in the console.
-#[derive(Clone)]
-pub struct Info {
-    /// Label
-    pub entry: &'static str,
-    /// Value
-    pub value: String,
-}
-
-/// Search request object
-#[derive(Deserialize, Serialize, Clone, Debug)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct SearchRequestObject {
-    /// Query string, search operators + - "" are recognized.
-    #[serde(rename = "query")]
-    pub query_string: String,
-    /// External query vector, required for Vector and Hybrid search. No model inference is performed.
-    #[serde(default)]
-    pub query_vector: Option<Value>,
-    #[serde(default)]
-    #[cfg_attr(feature = "api-schema", schema(required = false, default = false, example = false))]
-    /// Enable empty queries to browse all documents with pagination, filtering and sorting.
-    /// Otherwise an empty query string returns no results.
-    /// Typical use cases include index browsing, index export, conversion, analytics, audits, and inspection.
-    pub enable_empty_query: bool,
-    #[serde(default)]
-    #[cfg_attr(feature = "api-schema", schema(required = false, minimum = 0, default = 0, example = 0))]
-    /// Offset of search results to return.
-    pub offset: usize,
-    /// Number of search results to return.
-    #[serde(default = "length_api")]
-    #[cfg_attr(feature = "api-schema", schema(required = false, minimum = 1, default = 10, example = 10))]
-    pub length: usize,
-    #[serde(default)]
-    /// Specify the type of search result.
-    pub result_type: ResultType,
-    /// True realtime search: include indexed, but uncommitted documents into search results.
-    #[serde(default)]
-    pub realtime: bool,
-    /// Specify field names where to search at querytime, whereas SchemaField.indexed is set at indextime. If empty then all indexed fields are searched.
-    #[cfg_attr(feature = "api-schema", schema(required = false, example = json!(["title"])))]
-    #[serde(default)]
-    pub field_filter: Vec<String>,
-    /// Specify names of fields to return in the search results, where SchemaField.store is set at indextime. If empty then all stored fields are returned.
-    #[serde(default)]
-    pub fields: Vec<String>,
-
-    /// Metadata filters apply to Lexical, Vector and Hybrid search and require facet:true fields.
-    /// Predicates are ANDed; values within a string/set predicate are ORed. Ranges are start-inclusive, end-exclusive.
-    /// Vector candidates are filtered before scoring and Top-K; ANN still scans only the configured clusters.
-    /// Unknown fields, type mismatches and invalid range bounds return an explicit error.
-    #[serde(default)]
-    pub facet_filter: Vec<FacetFilter>,
-    /// Sort field and order:
-    /// Search results are sorted by the specified facet field, either in ascending or descending order.
-    /// If no sort field is specified, then the search results are sorted by rank in descending order per default.
-    /// Multiple sort fields are combined by a "sort by, then sort by"-method ("tie-breaking"-algorithm).
-    /// The results are sorted by the first field, and only for those results where the first field value is identical (tie) the results are sub-sorted by the second field,
-    /// until the n-th field value is either not equal or the last field is reached.
-    /// A special _score field (BM25x), reflecting how relevant the result is for a given search query (phrase match, match in title etc.) can be combined with any of the other sort fields as primary, secondary or n-th search criterium.
-    /// Sort is only enabled on facet fields that are defined in schema at create_index!
-    /// Examples:
-    /// - result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending},ResultSort {field: "language".into(), order: SortOrder::Ascending}];
-    #[cfg_attr(feature = "api-schema", schema(required = false, example = json!([{"field": "date", "order": "Ascending" }])))]
-    #[serde(default)]
-    pub result_sort: Vec<ResultSort>,
-    /// Specify default query type: (default=Intersection). This can be overwritten by search operator within the query string (+-"").
-    #[cfg_attr(feature = "api-schema", schema(required = false, example = QueryType::Intersection))]
-    #[serde(default = "query_type_api")]
-    pub query_type_default: QueryType,
-    /// Specify search mode: (default=Lexical).
-    #[cfg_attr(feature = "api-schema", schema(required = false, example = SearchMode::Lexical))]
-    #[serde(default = "search_mode_api")]
-    pub search_mode: SearchMode,
-}
-
-fn search_mode_api() -> SearchMode {
-    SearchMode::Lexical
-}
-
-fn query_type_api() -> QueryType {
-    QueryType::Intersection
-}
-
-fn length_api() -> usize {
-    10
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-/// Search result object
-pub struct SearchResultObject {
-    /// Time taken to execute the search query in nanoseconds
-    pub time: u128,
-    /// Search query string
-    pub original_query: String,
-    /// Search query string, unchanged from the caller input
-    pub query: String,
-    /// Offset of the returned search results
-    pub offset: usize,
-    /// Number of requested search results
-    pub length: usize,
-    /// Number of returned search results matching the query
-    pub count: usize,
-    /// Total number of search results matching the query
-    pub count_total: usize,
-    /// Vector of lexical search query terms.
-    pub query_terms: Vec<String>,
-    #[cfg_attr(feature = "api-schema", schema(value_type=Vec<HashMap<String, serde_json::Value>>))]
-    /// Vector of search result documents
-    pub results: Vec<Document>,
-
-}
-
-/// Create index request object
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CreateIndexRequest {
-    /// Index name, used for informational purposes only.
-    #[cfg_attr(feature = "api-schema", schema(example = "demo_index"))]
-    pub index_name: String,
-    #[cfg_attr(feature = "api-schema", schema(required = true, example = json!([
-    {"field":"title","field_type":"Text","store":true,"index_lexical":true,"boost":10.0},
-    {"field":"body","field_type":"Text","store":true,"index_lexical":true,"longest":true},
-    {"field":"url","field_type":"Text","store":true,"index_lexical":false},
-    {"field":"date","field_type":"Timestamp","store":true,"index_lexical":false,"facet":true}])))]
-    /// Schema definition for the index: field name, field type, and indexing options. The schema defines how documents are indexed and searched. It specifies the fields that are indexed, stored, and used for faceting, as well as the field types and their properties. It also defines whether lexical, hybrid, or vector search is enabled for each field.
-    #[serde(default)]
-    pub schema: Vec<SchemaField>,
-    /// Specify similarity measure for the index: (default=Bm25fProximity). The similarity function is used to calculate the relevance score of search results for a given search query. The choice of similarity function can affect search performance and relevance, depending on the characteristics of the text being indexed and the search queries being executed.
-    #[serde(default = "similarity_type_api")]
-    pub similarity: LexicalSimilarity,
-    /// Specify tokenizer type for the index: (default=UnicodeAlphanumeric). The tokenizer is used to split text into tokens for indexing and searching. The choice of tokenizer can affect search performance and relevance, depending on the language and characteristics of the text being indexed.
-    #[serde(default = "tokenizer_type_api")]
-    pub tokenizer: TokenizerType,
-    #[serde(default)]
-    /// Specify stemmer
-    pub stemmer: StemmerType,
-    /// Specify stop words for the index. Stop words are not indexed and not searched for. This can be used to reduce index size and improve search performance by excluding high-frequency, low-information terms from the index.
-    #[serde(default)]
-    pub stop_words: StopwordType,
-    /// Specify frequent words for the index. Frequent words are used to optimize search performance for high-frequency terms.
-    #[serde(default)]
-    pub frequent_words: FrequentwordType,
-    /// Specify n-gram indexing for the index. N-gram indexing can improve search performance for certain types of queries.
-    /// The n-gram set is defined as a bitwise combination of the following values:
-    /// - NgramSet::SingleTerm = 0b00000000,,
-    /// - NgramSet::NgramFF = 0b00000001, (Ngram frequent frequent)
-    /// - NgramSet::NgramFR = 0b00000010, (Ngram frequent rare)
-    /// - NgramSet::NgramRF = 0b00000011, (Ngram rare frequent)
-    /// - NgramSet::NgramFFF = 0b00000100, (Ngram frequent frequent frequent)
-    /// - NgramSet::NgramRFF = 0b00000101, (Ngram rare frequent frequent)
-    /// - NgramSet::NgramFFR = 0b00000110, (Ngram frequent frequent rare)
-    /// - NgramSet::NgramFRF = 0b00000111, (Ngram frequent rare frequent)
-    ///
-    /// For example, to enable both NgramFF and NgramFFF, set ngram_indexing to 5 (1 | 4).
-    /// Note: enabling n-gram indexing (ngram_indexing>0) will increase index size and indexing time, but improves search performance of phrase queries with frequent terms.
-    #[serde(default = "ngram_indexing_api")]
-    pub ngram_indexing: u8,
-    /// Enable document compression for the index. This can reduce the index size on disk and in memory, but may increase indexing and search latency. Default: Snappy compression.
-    #[serde(default = "document_compression_api")]
-    pub document_compression: DocumentCompression,
-    /// Specify synonyms for the index. Synonyms are used to expand search queries with additional terms that have the same or similar meaning, improving recall and search relevance. The multiway option specifies whether the synonym relationship is multiway (if true, all terms in the synonym set are considered synonyms of each other) or one-way (if false, only the first term in the synonym set is considered the main term, and the other terms are considered synonyms of the main term).
-    #[cfg_attr(feature = "api-schema", schema(required = false, example = json!([{"terms":["berry","lingonberry","blueberry","gooseberry"],"multiway":false}])))]
-    #[serde(default)]
-    pub synonyms: Vec<Synonym>,
-    #[serde(default)]
-    /// Enable clustering for vector search.
-    pub clustering: Clustering,
-    /// Configure external vector dimensions, precision, quantization and distance metric.
-    #[serde(default)]
-    pub inference: Inference,
-}
-
-fn similarity_type_api() -> LexicalSimilarity {
-    LexicalSimilarity::Bm25fProximity
-}
-
-fn tokenizer_type_api() -> TokenizerType {
-    TokenizerType::UnicodeAlphanumeric
-}
-
-fn ngram_indexing_api() -> u8 {
-    NgramSet::NgramFF as u8 | NgramSet::NgramFFF as u8
-}
-
-fn document_compression_api() -> DocumentCompression {
-    DocumentCompression::Snappy
-}
-
-/// Specifies which document ID to return
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct GetIteratorRequest {
-    /// base document ID to start the iteration from
-    /// Use None to start from the beginning (take>0) or the end (take<0) of the index
-    /// In JSON use null for None
-    #[serde(default)]
-    pub document_id: Option<u64>,
-    /// the number of document IDs to skip
-    #[serde(default)]
-    pub skip: usize,
-    /// the number of document IDs to return
-    /// take>0: take next t document IDs, take<0: take previous t document IDs
-    #[serde(default = "default_1usize")]
-    pub take: isize,
-    /// if true, also deleted document IDs are included in the result
-    #[serde(default)]
-    pub include_deleted: bool,
-    /// if true, the documents are also retrieved along with their document IDs
-    #[serde(default)]
-    pub include_document: bool,
-    /// which fields to return (if include_document is true, if empty then return all stored fields)
-    #[serde(default)]
-    pub fields: Vec<String>,
-}
-
-fn default_1usize() -> isize {
-    1
-}
-
-/// Specifies which document and which field to return
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct GetDocumentRequest {
-    /// which fields to return
-    #[serde(default)]
-    pub fields: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
-/// Index response object
-pub struct IndexResponseObject {
-    /// Index ID
-    pub id: u64,
-    /// Index name
-    #[cfg_attr(feature = "api-schema", schema(example = "demo_index"))]
-    pub name: String,
-    #[cfg_attr(feature = "api-schema", schema(example = json!({
-        "title":{
-            "field":"title",
-            "store":true,
-            "index_lexical":true,
-            "field_type":"Text",
-            "boost":10.0,
-            "field_id":0
-        },
-        "body":{
-            "field":"body",
-            "store":true,
-            "index_lexical":true,
-            "field_type":"Text",
-            "field_id":1
-        },
-        "url":{
-           "field":"url",
-           "store":true,
-           "index_lexical":false,
-           "field_type":"Text",
-           "field_id":2
-        },
-        "date":{
-           "field":"date",
-           "store":true,
-           "index_lexical":false,
-           "field_type":"Timestamp",
-           "facet":true,
-           "field_id":3
-        }
-     })))]
-    /// Schema definition for the index
-    pub schema: HashMap<String, SchemaField>,
-    /// Number of indexed documents
-    pub indexed_doc_count: usize,
-    /// Number of committed documents
-    pub committed_doc_count: usize,
-    /// Number of operations: index, update, delete, queries
-    pub operations_count: u64,
-    /// Number of queries (informational)
-    pub query_count: u64,
-    /// SeekStorm version the index was created with
-    #[cfg_attr(feature = "api-schema", schema(example = "0.11.1"))]
-    pub version: String,
-
-}
-
 /// A document is a flattened, single level of key-value pairs, where key is an arbitrary string, and value represents any valid JSON value.
 pub type Document = IndexMap<String, Value>;
 
 /// Compression type for document store
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum DocumentCompression {
     /// No compression (fastest, largest size)
     None,
@@ -457,7 +163,6 @@ pub enum AccessType {
 /// - Bm25f: considers documents composed from several fields, with different field lengths and importance
 /// - Bm25fProximity: considers term proximity, e.g. for implicit phrase search with improved relevancy
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum LexicalSimilarity {
     /// Bm25f considers documents composed from several fields, with different field lengths and importance
     Bm25f = 0,
@@ -495,7 +200,6 @@ impl fmt::Display for LexicalSimilarity {
 /// - Supports mixed Latin and Chinese texts
 /// - Requires feature #[cfg(feature = "zh")]
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum TokenizerType {
     /// Only ASCII alphabetic chars are recognized as token.
     #[default]
@@ -537,7 +241,6 @@ impl fmt::Display for TokenizerType {
 /// Defines stemming behavior, reducing inflected words to their word stem, base or root form.
 /// Stemming increases recall, but decreases precision. It can introduce false positive results.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum StemmerType {
     /// No stemming
     #[default]
@@ -903,7 +606,6 @@ pub(crate) struct SegmentLevel0 {
 
 /// FieldType defines the type of a field in the document: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, point, string, stringset, text.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum FieldType {
     /// Unsigned 8-bit integer
     U8,
@@ -968,7 +670,6 @@ pub enum FieldType {
 
 /// Defines synonyms for terms per index.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub struct Synonym {
     /// List of terms that are synonyms.
     pub terms: Vec<String>,
@@ -991,7 +692,6 @@ fn default_as_true() -> bool {
 
 /// Defines a field in index schema: field, stored, indexed , field_type, facet, boost.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SchemaField {
     /// unique name of a field
@@ -1030,7 +730,6 @@ pub struct SchemaField {
     #[serde(skip)]
     pub(crate) indexed_field_id: usize,
     #[serde(default)]
-    #[cfg_attr(feature = "api-schema", schema(ignore))]
     pub(crate) field_id: usize,
 }
 
@@ -1112,7 +811,6 @@ pub(crate) struct IndexedField {
 /// but become impossible when stopwords are removed.
 /// The lists of stop_words and frequent_words should not overlap.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum StopwordType {
     /// No stopwords
     #[default]
@@ -1136,7 +834,6 @@ pub enum StopwordType {
 /// Adjacent frequent terms are combined to bi-grams, both in index and query: for shorter posting lists and faster phrase queries (only for bi-grams of frequent terms).
 /// The lists of stop_words and frequent_words should not overlap.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum FrequentwordType {
     /// No frequent words
     None,
@@ -1158,7 +855,6 @@ pub enum FrequentwordType {
 
 /// Clustering defines the clustering behavior for approximate nearest neighbor (ANN) search: None, Auto, Fixed(usize).
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Default)]
-#[cfg_attr(feature = "api-schema", derive(ToSchema))]
 pub enum Clustering {
     /// Exhaustive vector search, no clustering/ANN.
     None,
@@ -1644,7 +1340,7 @@ pub(crate) async fn create_index_root(
 
     if !index_path.exists() {
         if !mute {
-            println!("index path created: {} ", index_path_string);
+            log::info!("index path created: {} ", index_path_string);
         }
         fs::create_dir_all(index_path).unwrap();
     }
@@ -1954,7 +1650,7 @@ pub(crate) async fn create_index_root(
             Ok(index_arc)
         }
         Err(e) => {
-            println!("file opening error");
+            log::warn!("file opening error");
             Err(e.to_string())
         }
     }
@@ -2439,7 +2135,7 @@ pub(crate) fn create_shard(
             Ok(index)
         }
         Err(e) => {
-            println!("file opening error");
+            log::warn!("file opening error");
             Err(e.to_string())
         }
     }
@@ -2780,7 +2476,7 @@ pub(crate) async fn open_shard(
     vector_dimensions: usize,
 ) -> Result<ShardArc, String> {
     if !mute {
-        println!("opening index ...");
+        log::info!("opening index ...");
     }
 
     let mut index_mmap_position = INDEX_HEADER_SIZE as usize;
@@ -3780,7 +3476,7 @@ impl Shard {
 
         let _ = self.index_file.rewind();
         if let Err(e) = self.index_file.set_len(0) {
-            println!(
+            log::error!(
                 "Unable to index_file.set_len in clear_index {} {} {:?}",
                 self.index_path_string, self.indexed_doc_count, e
             )
@@ -3818,13 +3514,13 @@ impl Shard {
 
         let _ = self.docstore_file.rewind();
         if let Err(e) = self.docstore_file.set_len(0) {
-            println!("Unable to docstore_file.set_len in clear_index {:?}", e)
+            log::error!("Unable to docstore_file.set_len in clear_index {:?}", e)
         };
         let _ = self.docstore_file.flush();
 
         let _ = self.delete_file.rewind();
         if let Err(e) = self.delete_file.set_len(0) {
-            println!("Unable to delete_file.set_len in clear_index {:?}", e)
+            log::error!("Unable to delete_file.set_len in clear_index {:?}", e)
         };
         let _ = self.delete_file.flush();
         self.delete_hashset.clear();
@@ -3840,7 +3536,7 @@ impl Shard {
             .facets_file
             .set_len((self.facets_size_sum * ROARING_BLOCK_SIZE) as u64)
         {
-            println!("Unable to facets_file.set_len in clear_index {:?}", e)
+            log::error!("Unable to facets_file.set_len in clear_index {:?}", e)
         };
         let _ = self.facets_file.flush();
 
@@ -3868,7 +3564,7 @@ impl Shard {
         };
         let _ = self.vector_file.rewind();
         if let Err(e) = self.vector_file.set_len(0) {
-            println!("Unable to vector_file.set_len in clear_index {:?}", e)
+            log::error!("Unable to vector_file.set_len in clear_index {:?}", e)
         };
         let _ = self.vector_file.flush();
         self.vector_file_mmap =
@@ -4743,7 +4439,7 @@ impl IndexDocumentShard2 for ShardArc {
             shard_mut.longest_field_id = longest_field_id;
             shard_mut.indexed_field_vec[longest_field_id].is_longest_field = true;
             if shard_mut.longest_field_auto && shard_mut.indexed_field_vec.len() > 1 {
-                println!(
+                log::debug!(
                     "detect longest field id {} name {} length {}",
                     longest_field_id,
                     shard_mut.indexed_field_vec[longest_field_id].schema_field_name,

@@ -1,6 +1,5 @@
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use num::FromPrimitive;
-use num_format::{Locale, ToFormattedString};
 use std::{
     fs::File,
     io::{Seek, SeekFrom, Write},
@@ -160,7 +159,7 @@ impl Commit for IndexArc {
                     uncommitted_vec_count += vec_delta;
                 }
                 Err(e) => {
-                    eprintln!("commit shard task failed: {:?}", e);
+                    log::error!("commit shard task failed: {:?}", e);
                 }
             }
         }
@@ -169,29 +168,20 @@ impl Commit for IndexArc {
 
         if !index_ref.mute {
             if uncommitted_doc_count == 0 && uncommitted_vec_count == 0 {
-                println!(
+                log::info!(
                     "commit index {} level {} no uncommitted documents and vectors, skipping commit",
                     index_ref.meta.id,
                     index_ref.level_count().await,
                 );
             } else {
-                println!(
+                log::info!(
                     "commit index {} level {} committed documents {} {} committed vectors {} {}",
                     index_ref.meta.id,
-                    index_ref
-                        .level_count()
-                        .await
-                        .to_formatted_string(&Locale::en),
-                    uncommitted_doc_count.to_formatted_string(&Locale::en),
-                    index_ref
-                        .indexed_doc_count()
-                        .await
-                        .to_formatted_string(&Locale::en),
-                    uncommitted_vec_count.to_formatted_string(&Locale::en),
-                    index_ref
-                        .indexed_vector_count()
-                        .await
-                        .to_formatted_string(&Locale::en)
+                    index_ref.level_count().await,
+                    uncommitted_doc_count,
+                    index_ref.indexed_doc_count().await,
+                    uncommitted_vec_count,
+                    index_ref.indexed_vector_count().await
                 );
             }
         }
@@ -216,7 +206,7 @@ impl Shard {
                 .index_file
                 .set_len(self.last_level_index_file_start_pos)
             {
-                println!(
+                log::error!(
                     "Unable to index_file.set_len in commit_lexical_shard {} {} {:?}",
                     self.index_path_string, self.indexed_doc_count, e
                 )
@@ -281,17 +271,16 @@ impl Shard {
         }
 
         if !self.mute {
-            println!(
+            log::info!(
                 "commit shard {} level {} indexed documents {} ({})",
                 self.meta.id,
                 self.level_index.len(),
-                indexed_doc_count.to_formatted_string(&Locale::en),
+                indexed_doc_count,
                 (if indexed_doc_count == 0 {
                     0
                 } else {
                     ((indexed_doc_count - 1) % 65_536) + 1
                 })
-                .to_formatted_string(&Locale::en)
             );
         }
 
@@ -388,7 +377,7 @@ impl Shard {
                     (self.facets_size_sum * (self.level_index.len() + 1) * ROARING_BLOCK_SIZE)
                         as u64,
                 ) {
-                    println!("Unable to facets_file.set_len in commit {:?}", e)
+                    log::error!("Unable to facets_file.set_len in commit {:?}", e)
                 };
 
                 self.facets_file_mmap =
@@ -1171,4 +1160,3 @@ impl Shard {
         }
     }
 }
-

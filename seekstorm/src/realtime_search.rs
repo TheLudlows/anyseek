@@ -1510,7 +1510,7 @@ impl Shard {
 
                     (_, _) => {
                         if phrase_query {
-                            println!("unsupported 2 byte pointer embedded");
+                            log::warn!("unsupported 2 byte pointer embedded");
                             plo.embedded_positions = [0, 0, 0, 0]
                         };
                     }
@@ -1805,7 +1805,7 @@ impl Shard {
 
                     (_, _) => {
                         if phrase_query {
-                            println!("unsupported 3 byte pointer embedded");
+                            log::warn!("unsupported 3 byte pointer embedded");
                             plo.embedded_positions = [0, 0, 0, 0]
                         };
                     }

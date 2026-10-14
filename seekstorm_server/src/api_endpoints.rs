@@ -1,3 +1,4 @@
+use crate::api_types::{SearchRequestObject, SearchResultObject, CreateIndexRequest, GetIteratorRequest, GetDocumentRequest, IndexResponseObject};
 use std::{
     collections::HashMap,
     env::current_exe,
@@ -15,12 +16,10 @@ use crate::multi_tenancy::{ApikeyObject, CreateApikeyRequest};
 use seekstorm::{
     commit::Commit,
     index::{
-        AccessType, Close, Clustering, CreateIndexRequest,
-        DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
-        FrequentwordType, GetDocumentRequest, GetIteratorRequest, IS_AVX2, IS_NEON,
+        AccessType, Close, Clustering, DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
+        FrequentwordType, IS_AVX2, IS_NEON,
         IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
-        IndexResponseObject, LexicalSimilarity, SchemaField, SearchRequestObject,
-        SearchResultObject, StemmerType, StopwordType, Synonym, TokenizerType,
+        LexicalSimilarity, SchemaField, StemmerType, StopwordType, Synonym, TokenizerType,
         UpdateDocument, UpdateDocuments, create_index, open_index,
     },
     iterator::{GetIterator, IteratorResult},
@@ -924,7 +923,7 @@ pub(crate) async fn delete_documents_by_query_api(
         "take": -1,
     })),
     responses(
-        (status = 200, description = "Document ID found, returning an IteratorResult", body = IteratorResult),
+        (status = 200, description = "Document ID found, returning an IteratorResult", body = crate::api_schema::IteratorResult),
         (status = BAD_REQUEST, description = "index_id invalid or missing"),
         (status = BAD_REQUEST, description = "Request object incorrect"),
         (status = NOT_FOUND, description = "Index id does not exist"),

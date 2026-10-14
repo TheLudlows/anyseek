@@ -15,7 +15,7 @@ SeekPower 保留一个 Rust 核心库和一个 HTTP/Web UI 服务。当前是单
 | 过滤 | `metadata_filter.rs` | 共享 schema 校验、每分片字典编译、候选元数据判定 |
 | 统计 | `info.rs` | 收集索引信息；终端渲染位于服务 |
 
-源码路径分别相对于 [核心目录](seekstorm/src) 或 [服务目录](seekstorm_server/src)。核心 OpenAPI derive 通过可选 `api-schema` 启用，核心不依赖终端表格、模型运行时或文件解析器。
+源码路径分别相对于 [核心目录](seekstorm/src) 或 [服务目录](seekstorm_server/src)。HTTP 请求/响应对象位于服务的 `api_types.rs`；`api_schema.rs` 为核心值提供 OpenAPI 描述，运行时直接使用核心类型。核心不再依赖 utoipa 或数字/终端格式化库。`info::collect_index_info` 返回数字、枚举和时间组成的 `IndexInfo`；服务负责标签、千分位、单位和表格。核心使用 `log` 门面，不安装日志输出器，默认静默；服务初始化日志输出并支持 `RUST_LOG`。模型运行时与文件解析器仍在应用侧。
 
 ## 查询执行
 

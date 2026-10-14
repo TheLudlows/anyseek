@@ -41,7 +41,7 @@ impl Shard {
         }
 
         if positions_count_sum == 0 {
-            println!("empty posting {} docid {}", term.term, doc_id);
+            log::warn!("empty posting {} docid {}", term.term, doc_id);
             return;
         }
 
@@ -784,14 +784,14 @@ impl Shard {
         );
 
         if positions_compressed_pointer + 2 > ROARING_BLOCK_SIZE {
-            println!(
+            log::warn!(
                 "compressed positions size exceeded: {}",
                 positions_compressed_pointer + 2
             )
         };
 
         if !embed_flag && positions_stack != compressed_position_size {
-            println!(
+            log::warn!(
                 "size conflict: embed {} term {} ngram_type {:?} frequent {} pos_count {} : positions_stack {} compressed_position_size {} : positions_compressed_pointer {} posting_pointer_size {} docid {}",
                 embed_flag,
                 term.term,
@@ -848,7 +848,7 @@ pub(crate) fn write_field_vec(
                 postings_buffer[*write_pointer] = (field.1 & 0b01111111) as u8 | STOP_BIT;
                 *write_pointer += 1;
             } else {
-                println!("positionCount exceeded1: {}", field.1);
+                log::warn!("positionCount exceeded1: {}", field.1);
             }
         } else if only_longest_field {
             if field.1 < 64 {
@@ -868,7 +868,7 @@ pub(crate) fn write_field_vec(
                 postings_buffer[*write_pointer] = (field.1 & 0b01111111) as u8 | STOP_BIT;
                 *write_pointer += 1;
             } else {
-                println!("positionCount exceeded2: {}", field.1);
+                log::warn!("positionCount exceeded2: {}", field.1);
             }
         } else {
             let field_stop_bit = if i == nonempty_field_count as usize - 1 {
@@ -910,9 +910,8 @@ pub(crate) fn write_field_vec(
                     (field_id_position_count & 0b01111111) as u8 | STOP_BIT;
                 *write_pointer += 1;
             } else {
-                println!("positionCount exceeded3: {} ", field_id_position_count);
+                log::warn!("positionCount exceeded3: {} ", field_id_position_count);
             }
         }
     }
 }
-

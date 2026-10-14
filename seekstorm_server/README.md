@@ -22,6 +22,8 @@ target/debug/seekstorm_server local_ip=127.0.0.1 local_port=8080
 
 ## 创建 key、索引并检索
 
+服务默认输出 info 级别日志，可通过 `RUST_LOG=seekstorm=warn` 限制核心日志，或 `RUST_LOG=off` 关闭日志。终端交互/状态表由服务单独展示。
+
 以下为 POSIX shell 示例。将 `MASTER_KEY` 替换为启动日志显示的主密钥，再把创建响应的 key 填入 `API_KEY`。
 
 ```sh
