@@ -129,21 +129,17 @@ async fn ordinary_metadata_survives_aggregate_removal() {
         index.commit().await;
         check_metadata(&index,false).await;
         index.close().await; drop(index);
-        // Emulate a legacy dictionary with real aggregates; IDs/order must survive loading.
+        // The current dictionary contains only names and ordered string/set values.
         for shard in 0..2 {
             let file=path.join(format!("shards/{shard}/facet.json"));
-            let mut fields: Value=serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-            for field in fields.as_array_mut().unwrap() {
-                assert_eq!(field["min"],json!("None"));
-                assert_eq!(field["max"],json!("None"));
-                for entry in field["values"].as_object_mut().unwrap().values_mut() {
-                    assert_eq!(entry[1],json!(0));
-                    entry[1]=json!(42);
+            let fields: Value=serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+            for field in fields.as_array().unwrap() {
+                assert_eq!(field.as_object().unwrap().len(), 2);
+                assert!(field.get("min").is_none() && field.get("max").is_none());
+                for entry in field["values"].as_object().unwrap().values() {
+                    assert!(entry.as_array().unwrap().iter().all(Value::is_string));
                 }
-                field["min"]=json!({"F64":-999.});
-                field["max"]=json!({"F64":999.});
             }
-            fs::write(&file,serde_json::to_vec(&fields).unwrap()).unwrap();
         }
         let reopened=open_index(path).await.unwrap();
         check_metadata(&reopened,false).await;
@@ -153,8 +149,8 @@ async fn ordinary_metadata_survives_aggregate_removal() {
 }
 
 #[tokio::test]
-async fn legacy_point_schema_fails_with_rebuild_message() {
-    let path=Path::new("tests/index_legacy_point");
+async fn unknown_schema_type_is_rejected() {
+    let path=Path::new("tests/index_unknown_schema");
     let index=create(path,AccessType::Mmap).await;
     index.close().await;drop(index);
     for schema_path in [path.join("schema.json"),path.join("shards/0/schema.json")] {
@@ -165,10 +161,57 @@ async fn legacy_point_schema_fails_with_rebuild_message() {
         fs::write(&schema_path,&legacy).unwrap();
         match open_index(path).await {
             Ok(_) => panic!("retired Point schema accepted"),
-            Err(error) => assert!(error.contains("Point fields have been removed") && error.contains("rebuild"),"{error}"),
+            Err(error) => assert!(error.contains("unknown variant") && error.contains("Point"),"{error}"),
         }
         assert_eq!(fs::read(&schema_path).unwrap(),legacy,"legacy schema was modified");
         fs::write(&schema_path,original).unwrap();
     }
     fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn only_current_index_format_is_opened() {
+    use seekstorm::index::{INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR};
+    for (name, access) in [("mmap", AccessType::Mmap), ("ram", AccessType::Ram)] {
+        let path_buf = format!("tests/index_format_{name}");
+        let path = Path::new(&path_buf);
+        let index = create(path, access).await;
+        index.close().await;
+        drop(index);
+        for file in [path.join("index.bin"), path.join("shards/0/index.bin")] {
+            let original = fs::read(&file).unwrap();
+            assert_eq!(u16::from_le_bytes(original[0..2].try_into().unwrap()), INDEX_FORMAT_VERSION_MAJOR);
+            assert_eq!(u16::from_le_bytes(original[2..4].try_into().unwrap()), INDEX_FORMAT_VERSION_MINOR);
+            for (major, minor) in [(6u16, 0u16), (6, 1), (INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR + 1)] {
+                let mut bytes = original.clone();
+                bytes[0..2].copy_from_slice(&major.to_le_bytes());
+                bytes[2..4].copy_from_slice(&minor.to_le_bytes());
+                fs::write(&file, &bytes).unwrap();
+                match open_index(path).await {
+                    Ok(_) => panic!("unsupported format {major}.{minor} accepted"),
+                    Err(error) => assert!(error.contains("unsupported index format"), "{error}"),
+                }
+                assert_eq!(fs::read(&file).unwrap(), bytes);
+                fs::write(&file, &original).unwrap();
+            }
+        }
+        let reopened = open_index(path).await.unwrap();
+        reopened.close().await;
+        drop(reopened);
+        fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[test]
+fn metadata_dictionary_has_no_statistics_slots() {
+    use seekstorm::index::FacetField;
+    for value in [
+        json!({"name":"tags","values":{"red":[["red"],42]}}),
+        json!({"name":"price","values":{},"min":"None","max":"None"}),
+    ] {
+        assert!(serde_json::from_value::<FacetField>(value).is_err());
+    }
+    let value = json!({"name":"tags","values":{"red":["red"]}});
+    let field: FacetField = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(field).unwrap(), value);
 }

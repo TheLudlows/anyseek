@@ -29,6 +29,6 @@ ANN 仍只搜索 ann_mode 配置选中的簇；过滤不自动扩大 Nprobe，�
 
 旧 `query_facets` 请求（包括空数组）返回 400；查询响应不再有 `facets`，索引信息不再有 `facets_minmax`。文档命中总数 `count_total`、分页和字段排序保留。
 
-原有 `facet.bin` 的值和 ID 编码保留；`facet.json` 的旧计数与极值读取时被丢弃。为保持磁盘结构兼容，重写时旧计数槽为 0、min/max 槽为 None；它们仅是格式占位，不参与计算或 API 输出。向量量化的内部数值范围与本次删除的字段统计无关。
+索引格式 7.0 的 `facet.json` 仅保存字段名和有序值字典；计数、min/max 和兼容占位均已删除。`facet.bin` 仍保存过滤/排序使用的值与 ID。仅支持当前格式，不读取或升级旧索引。向量量化的内部数值范围与字段统计无关。
 
 接口与限制见 [FEATURES.md](FEATURES.md)、[服务文档](seekstorm_server/README.md)。

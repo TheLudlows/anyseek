@@ -294,7 +294,7 @@
                         "index_vector": false
                       }
                     ],
-                    "index_name": "sift1m",
+                    "index_name": "vectors",
                     "clustering": "Auto",
                     "inference": {
                       "External": {
@@ -1636,14 +1636,14 @@
           },
           {
             "type": "object",
-            "description": "Search only in the clusters with the highest similarity scores to the query vector.\nThe number of clusters to search is specified by the n-probe parameter.\nYou cannot directly set a specific, guaranteed recall number (e.g., \"always give me 95% recall@10\"). There is no one-fits-all, there is no automatism.\nInstead, you manually tune parameters that control the tradeoff between query latency and accuracy.\nBecause recall depends heavily on the structure of your specific data (distribution, dimensionality, and clustering) and queries,\nthere is always a trial-and-error (benchmarking) phase required to determine the right settings for your data.\nExamples:\nwikipedia, VectorSimilarity::Dot, dimensions: 64, Precision::F32, Clustering::Auto, Clustering::I8, recall@10=95% -> Nprobe(55)\nwikipedia, VectorSimilarity::Dot, dimensions: 64, Precision::F32, Clustering::Auto, Clustering::I8, recall@10=99% -> Nprobe(140)\nsift1m, VectorSimilarity::Euclidean, dimensions: 128, Precision::F32, Clustering::Auto, Quantization::None, recall@10=95% -> Nprobe(11)\nsift1m, VectorSimilarity::Euclidean, dimensions: 128, Precision::F32, Clustering::Auto, Quantization::None, recall@10=99% -> Nprobe(22)",
+            "description": "Search only in the clusters with the highest similarity scores to the query vector.\nThe number of clusters to search is specified by the n-probe parameter.\nYou cannot directly set a specific, guaranteed recall number (e.g., \"always give me 95% recall@10\"). There is no one-fits-all, there is no automatism.\nInstead, you manually tune parameters that control the tradeoff between query latency and accuracy.\nBecause recall depends heavily on the structure of your specific data (distribution, dimensionality, and clustering) and queries,\nthere is always a trial-and-error (benchmarking) phase required to determine the right settings for your data.",
             "required": [
               "Nprobe"
             ],
             "properties": {
               "Nprobe": {
                 "type": "integer",
-                "description": "Search only in the clusters with the highest similarity scores to the query vector.\nThe number of clusters to search is specified by the n-probe parameter.\nYou cannot directly set a specific, guaranteed recall number (e.g., \"always give me 95% recall@10\"). There is no one-fits-all, there is no automatism.\nInstead, you manually tune parameters that control the tradeoff between query latency and accuracy.\nBecause recall depends heavily on the structure of your specific data (distribution, dimensionality, and clustering) and queries,\nthere is always a trial-and-error (benchmarking) phase required to determine the right settings for your data.\nExamples:\nwikipedia, VectorSimilarity::Dot, dimensions: 64, Precision::F32, Clustering::Auto, Clustering::I8, recall@10=95% -> Nprobe(55)\nwikipedia, VectorSimilarity::Dot, dimensions: 64, Precision::F32, Clustering::Auto, Clustering::I8, recall@10=99% -> Nprobe(140)\nsift1m, VectorSimilarity::Euclidean, dimensions: 128, Precision::F32, Clustering::Auto, Quantization::None, recall@10=95% -> Nprobe(11)\nsift1m, VectorSimilarity::Euclidean, dimensions: 128, Precision::F32, Clustering::Auto, Quantization::None, recall@10=99% -> Nprobe(22)",
+                "description": "Search only in the clusters with the highest similarity scores to the query vector.\nThe number of clusters to search is specified by the n-probe parameter.\nYou cannot directly set a specific, guaranteed recall number (e.g., \"always give me 95% recall@10\"). There is no one-fits-all, there is no automatism.\nInstead, you manually tune parameters that control the tradeoff between query latency and accuracy.\nBecause recall depends heavily on the structure of your specific data (distribution, dimensionality, and clustering) and queries,\nthere is always a trial-and-error (benchmarking) phase required to determine the right settings for your data.",
                 "minimum": 0
               }
             }
@@ -3282,7 +3282,7 @@
       },
       "TokenizerType": {
         "type": "string",
-        "description": "Defines tokenizer behavior:\nAsciiAlphabetic\n- Mainly for for benchmark compatibility\n- Only ASCII alphabetic chars are recognized as token.\n\nUnicodeAlphanumeric\n- All Unicode alphanumeric chars are recognized as token.\n- Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.\n\nUnicodeAlphanumericFolded\n- All Unicode alphanumeric chars are recognized as token.\n- Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.\n- Diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters are converted into its basic representation.\n- Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. \"s\" in \"someone's\").\n- Tokenizing might be slower due to folding and apostroph processing.\n\nUnicodeAlphanumericZH\n- Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.\n- Supports mixed Latin and Chinese texts\n- Requires feature #[cfg(feature = \"zh\")]",
+        "description": "Defines tokenizer behavior:\nAsciiAlphabetic\n- Only ASCII alphabetic chars are recognized as token.\n\nUnicodeAlphanumeric\n- All Unicode alphanumeric chars are recognized as token.\n- Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.\n\nUnicodeAlphanumericFolded\n- All Unicode alphanumeric chars are recognized as token.\n- Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.\n- Diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters are converted into its basic representation.\n- Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. \"s\" in \"someone's\").\n- Tokenizing might be slower due to folding and apostroph processing.\n\nUnicodeAlphanumericZH\n- Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.\n- Supports mixed Latin and Chinese texts\n- Requires feature #[cfg(feature = \"zh\")]",
         "enum": [
           "AsciiAlphabetic",
           "UnicodeAlphanumeric",

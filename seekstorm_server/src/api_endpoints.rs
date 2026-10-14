@@ -324,7 +324,7 @@ pub(crate) async fn open_all_apikeys(
 					"index_lexical":false,
 					"index_vector":false
 				}],
-				"index_name": "sift1m",
+				"index_name": "vectors",
 				"clustering": "Auto",
 				"inference": {
 					"External": { "dimensions": 128, "precision": "F32", "quantization": "ScalarQuantizationI8", "similarity": "Euclidean" }
