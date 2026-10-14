@@ -1,6 +1,6 @@
 # 当前功能清单
 
-核查日期：2026-10-13（Asia/Shanghai）。基于主干 `97bea80`（PR #11 聚合裁剪已合入），本分支实现共享元数据过滤。主干与本分支的合入状态见 [STATUS.md](STATUS.md)。本文按本分支实现列举功能，不将路线图视为已实现能力。
+核查日期：2026-10-14（Asia/Shanghai）。基于主干 `4a459f9`（PR #16 已合入），本分支执行 C1～C5 裁剪。主干与本分支的合入状态见 [STATUS.md](STATUS.md)。本文按本分支实现列举功能，不将路线图视为已实现能力。
 
 ## 1. 检索与数据能力
 
@@ -38,14 +38,12 @@
 | 方法 | 路径 | 功能 | OpenAPI |
 | --- | --- | --- | --- |
 | GET | `/api/v1/live` | 存活检查 | 已登记 |
-| GET | `/version` | 版本字符串，无鉴权 | 未登记 |
-| POST | `/api/v1/apikey` | 创建随机 key；`{"demo":true}` 创建固定 demo key，需主密钥 | 已登记 |
+| POST | `/api/v1/apikey` | 使用 `{}` 创建随机 key，需主密钥 | 已登记 |
 | DELETE | `/api/v1/apikey` | 撤销指定 key 及其索引；主密钥 + `apikey_base64` JSON | 已登记 |
 | GET | `/api/v1/apikey` | 查看当前 key 下的索引信息，不是全站密钥列表 | 已登记 |
 | POST | `/api/v1/index` | 创建索引/schema | 已登记 |
 | GET | `/api/v1/index/{id}` | 索引信息、schema、文档计数 | 已登记 |
 | PATCH | `/api/v1/index/{id}` | 提交索引 | 已登记 |
-| PUT | `/api/v1/index/{id}` | 关闭索引（遗留维护入口） | 未登记 |
 | DELETE | `/api/v1/index/{id}` | 删除索引 | 已登记 |
 | POST | `/api/v1/index/{id}/doc` | 单条/批量写入 | 已登记 |
 | PATCH | `/api/v1/index/{id}/doc` | 单条/批量完整替换更新 | 已登记 |
@@ -60,7 +58,7 @@
 | GET | `/` 及固定静态资源路径 | 内嵌 Web UI、CSS/JS、图标 | 不作为数据 API 登记 |
 | OPTIONS | 服务路由 | CORS 预检；query/iterator 声明 `POST, OPTIONS` | 不作为数据 API 登记 |
 
-以上为 19 个 `/api/v1` 业务/存活操作，加 `/version`、UI/静态资源和预检。B1/B2 后 query/iterator 的 GET 与 HTTP QUERY 返回 405；POST URL 非空参数返回 400；旧 `/api/v2/index/{id}/query` 返回 404。旧 `/file` 路由仅返回 404 迁移提示。
+以上为 18 个 `/api/v1` 业务/存活操作，加 UI/静态资源和预检。B1/B2 后 query/iterator 的 GET 与 HTTP QUERY 返回 405；POST URL 非空参数返回 400；旧 `/api/v2/index/{id}/query` 返回 404。旧 `/file` 路由仅返回 404 迁移提示。
 
 ## 3. Web UI
 
@@ -74,26 +72,26 @@
 | 连接与索引 | 普通 key 连接；列出/切换当前 key 的索引；Lexical/Vector/Hybrid 创建预设、向量维度、创建时 schema JSON 编辑；名称/版本/文档数 |
 | 错误展示 | 非法向量、过滤字段/类型/范围和服务端错误显示在输入区域 |
 
-首次使用在表单输入普通 key。凭证与选中索引使用标签页 sessionStorage，支持忘记凭证；URL 的 `api_key/index_id` 仍可读取，读取后移除地址栏 key。创建调用已有 REST API。当前没有删除索引、修改已有索引 schema、文档更新/删除、服务端密钥管理或集群管理页面。
+首次使用在表单输入普通 key。凭证与选中索引使用标签页 sessionStorage，支持忘记凭证；URL 仅支持选择 `index_id`，不读取 `api_key` 作为凭证。创建调用已有 REST API。当前没有删除索引、修改已有索引 schema、文档更新/删除、服务端密钥管理或集群管理页面。
 
 ## 4. 服务、构建与维护
 
 - 倒排写入缓冲区按需增长，提交/清空后释放；位置压缩缓存按实际使用的词项分段分配，不再为每个分片固定预分配 400 MB。
 - 新空数据目录自动初始化随机普通 key（仅首次日志显示）；已有安装和重启不重复创建，初始化标记在撤销 key 后保留。
-- API key 鉴权、按 key 的索引/数据目录隔离、随机 key 与固定 demo key；无内置配额或限流。
+- API key 鉴权、按 key 的索引/数据目录隔离、随机 key；无内置配额或限流。
 - 启动参数：`index_path`、`local_ip`、`local_port`、`force_shard_number`、`generate_openapi`；未知、重复、非法参数启动失败。
-- 终端命令：`create`、`delete`、`info`、`search`、`openapi`、`help`、`quit`。`search -v [1,0,0]` 是 demo key/索引 0 的向量诊断入口。
-- 生成 OpenAPI JSON/YAML；服务端终端状态表；核心库 `info::collect_index_info` 返回结构化统计，采集不提交或同步文件。核心日志由调用方配置；服务支持 `RUST_LOG`。
+- Ctrl-C/SIGINT 或 SIGTERM 停止接收请求、结束已有连接，再提交并关闭全部索引；无 stdin 交互命令。
+- 启动参数 `generate_openapi=true` 生成 OpenAPI JSON/YAML；启动/索引概况使用普通日志；核心库 `info::collect_index_info` 返回结构化统计，采集不提交或同步文件。核心日志由调用方配置；服务支持 `RUST_LOG`。
 - Rust 核心库可嵌入应用；HTTP 服务内嵌静态 UI；保留 Dockerfile 从源码构建。两个 crate 均 `publish=false`。
 - 核心默认 features 为 `zh`、`vb`。`vb` 提供来源、两路分数及 shard/level/cluster 等诊断字段；这些字段不表示保留自动切块。`gxhash` 可选。HTTP DTO 与 OpenAPI 全部位于服务，核心不提供 `api-schema` feature。
 - CI 保留独立核心构建/依赖边界、workspace 构建与测试、HTTP/Chromium、静态资源及生成 OpenAPI 一致性检查。
 
 ## 5. 已移除与尚未实现
 
-已移除：分面计数、直方图、范围聚合、字段 min/max；MCP 服务、独立客户端/SDK 工程、内置模型/下载/Embedding、自动切块、PDF/CSV/目录和本地 JSON/SIFT 导入及 SIFT 评测、PDF 附件服务、拼写纠错/自动补全/自动改写、地理检索/距离排序、高亮/摘要、内置配额/限流，以及 B1/B2 的旧查询协议。迁移方式见 [MIGRATION.md](MIGRATION.md)。
+已移除：固定 demo key、终端交互、彩色状态表、HTTP 关闭索引入口、`/version` 和 URL key 登录；未使用 tokenizer/状态字段/恒关闭分支及历史图片；分面计数、直方图、范围聚合、字段 min/max；MCP 服务、独立客户端/SDK 工程、内置模型/下载/Embedding、自动切块、PDF/CSV/目录和本地 JSON/SIFT 导入及 SIFT 评测、PDF 附件服务、拼写纠错/自动补全/自动改写、地理检索/距离排序、高亮/摘要、内置配额/限流，以及 B1/B2 的旧查询协议。迁移方式见 [MIGRATION.md](MIGRATION.md)。
 
 尚未实现或验收：稳定业务 ID/版本/upsert 契约、可恢复 WAL/检查点/一致快照、共同可见视图、完整资源约束和生产可靠性验收、分布式路由/复制/弹性、对象存储。
 
-多字段排序、命中计数、分页、多向量、同义词、词干器、量化选项、N-gram、控制台、demo key 和 `vb` **仍保留**；本次聚合裁剪不删除这些能力。
+多字段排序、命中计数、分页、多向量、同义词、词干器、量化选项、N-gram 和 `vb` **仍保留**。
 
-核查入口：[数据类型](seekstorm/src/index.rs)、[检索执行](seekstorm/src/search.rs)、[向量配置](seekstorm/src/vector.rs)、[ANN 模式](seekstorm/src/vector_similarity.rs)、[服务路由](seekstorm_server/src/http_server.rs)、[终端命令](seekstorm_server/src/server.rs)、[UI](seekstorm_server/web/js/master.js)、[构建特性](seekstorm/Cargo.toml)。
+核查入口：[数据类型](seekstorm/src/index.rs)、[检索执行](seekstorm/src/search.rs)、[向量配置](seekstorm/src/vector.rs)、[ANN 模式](seekstorm/src/vector_similarity.rs)、[服务路由](seekstorm_server/src/http_server.rs)、[启动与退出](seekstorm_server/src/server.rs)、[UI](seekstorm_server/web/js/master.js)、[构建特性](seekstorm/Cargo.toml)。

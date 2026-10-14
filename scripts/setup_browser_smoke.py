@@ -9,7 +9,7 @@ def exercise_setup(browser, base, initial_key, master):
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(base)
-    # The existing demo scope may be available; enter setup explicitly.
+    # Enter setup explicitly to exercise the connection form.
     page.locator('#manageIndexes').click()
     expect(page.locator('#setupKey')).to_be_enabled()
     page.locator('#setupKey').fill(master)

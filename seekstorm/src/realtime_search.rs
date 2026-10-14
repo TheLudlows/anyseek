@@ -1241,7 +1241,7 @@ impl Shard {
             || !self.delete_hashset.is_empty()
             || !facet_filter.is_empty();
 
-        if (self.enable_single_term_topk || (result_type == &ResultType::Count))
+        if (result_type == &ResultType::Count)
             && (non_unique_query_list.len() <= 1 && !filtered)
         {
             result_count_arc.fetch_add(

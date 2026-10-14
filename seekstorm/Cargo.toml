@@ -12,7 +12,6 @@ readme = "../README.md"
 keywords = ["search", "information", "retrieval"]
 edition = "2024"
 publish = false # Build this fork from source; do not publish under upstream crate names.
-exclude = ["assets/*.png","assets/*.jpg"]
 
 [features]
 # comment out the default features below you don't need: zh=Chinese word segmentation, gxhash=GXHash instead of AHash for faster hash computation.

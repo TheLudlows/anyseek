@@ -92,7 +92,7 @@
           "API Key"
         ],
         "summary": "Create API Key",
-        "description": "Creates an API key and returns the Base64 encoded API key.\nExpects the Base64 encoded master API key in the header.\nUse the **master API key displayed** in the server console at startup.\n\nWARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, otherwise your generated API keys will be compromised.\nFor development purposes you may also use the SeekStorm server console command 'create' to create an demo API key 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='.",
+        "description": "Creates an API key and returns the Base64 encoded API key.\nExpects the Base64 encoded master API key in the header.\nUse the **master API key displayed** in the server console at startup.\n\nWARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, otherwise your generated API keys will be compromised.",
         "operationId": "create_api_key",
         "parameters": [
           {
@@ -111,13 +111,7 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "description": "API key creation options",
-                "properties": {
-                  "demo": {
-                    "type": "boolean",
-                    "description": "Create the fixed demonstration key instead of a random key (default=false)."
-                  }
-                },
+                "description": "Create a random API key. The request body must be an empty JSON object.",
                 "additionalProperties": false
               }
             }

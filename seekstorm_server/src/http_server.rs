@@ -40,7 +40,7 @@ use crate::api_endpoints::create_index_api;
 use crate::api_endpoints::delete_apikey_api;
 use crate::api_endpoints::update_documents_api;
 use crate::api_endpoints::{add_synonyms_api, get_index_info_api, set_synonyms_api};
-use crate::api_endpoints::{clear_index_api, close_index_api};
+use crate::api_endpoints::clear_index_api;
 use crate::api_endpoints::{commit_index_api, create_apikey_api};
 use crate::api_endpoints::{
     delete_document_by_object_api, delete_document_by_parameter_api, index_documents_api,
@@ -54,7 +54,7 @@ use crate::api_endpoints::{
 };
 use crate::api_endpoints::{index_document_api, query_index_api_post};
 use crate::multi_tenancy::{ApikeyObject, CreateApikeyRequest, DeleteApikeyRequest, get_apikey_hash};
-use crate::{MASTER_KEY_SECRET, VERSION};
+use crate::MASTER_KEY_SECRET;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const FLEXBOX_CSS: &str = include_str!("../web/css/flexboxgrid.min.css");
@@ -377,35 +377,6 @@ pub(crate) async fn http_request_handler(
                 )))),
                 Err(e) => HttpServerError::BadRequest(e.to_string()).into(),
             }
-        }
-
-        ("api", "v1", "index", _, "", "", &Method::PUT) => {
-            let Some(apikey) = apikey_header else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(apikey_hash) = get_apikey_hash(apikey, &apikey_list).await else {
-                return HttpServerError::Unauthorized.into();
-            };
-
-            let Ok(index_id) = parts[3].parse() else {
-                return HttpServerError::IndexNotFound.into();
-            };
-
-            let apikey_list_ref = apikey_list.read().await;
-            let Some(apikey_object) = apikey_list_ref.get(&apikey_hash) else {
-                return HttpServerError::Unauthorized.into();
-            };
-            let Some(index_arc) = apikey_object.index_list.get(&index_id) else {
-                return HttpServerError::IndexNotFound.into();
-            };
-
-            let index_arc_clone = index_arc.clone();
-            drop(apikey_list_ref);
-            let result = close_index_api(&index_arc_clone).await;
-
-            Ok(Response::new(BoxBody::new(Full::new(
-                result.unwrap().to_string().into(),
-            ))))
         }
 
         ("api", "v1", "apikey", "", "", "", &Method::GET) => {
@@ -943,14 +914,14 @@ pub(crate) async fn http_request_handler(
                 return HttpServerError::Unauthorized.into();
             };
             if req.uri().query().is_some_and(|query| !query.is_empty()) {
-                return HttpServerError::BadRequest("API key creation accepts only a JSON body with optional demo".into()).into();
+                return HttpServerError::BadRequest("API key creation accepts only an empty JSON object".into()).into();
             }
             let Ok(collected_body) = req.into_body().collect().await else {
                 return HttpServerError::BadRequest("failed to read request body".to_string())
                     .into();
             };
             let request_bytes = collected_body.to_bytes();
-            let create_request: CreateApikeyRequest =
+            let _: CreateApikeyRequest =
                 match serde_json::from_slice(&request_bytes) {
                     Ok(create_request) => create_request,
                     Err(e) => {
@@ -959,9 +930,7 @@ pub(crate) async fn http_request_handler(
                 };
 
             let mut apikey = [0u8; 32];
-            if !create_request.demo {
-                SysRng.try_fill_bytes(&mut apikey).unwrap();
-            }
+            SysRng.try_fill_bytes(&mut apikey).unwrap();
             let api_key_base64 = general_purpose::STANDARD.encode(apikey);
 
             let mut apikey_list_mut = apikey_list.write().await;
@@ -1044,7 +1013,6 @@ pub(crate) async fn http_request_handler(
 
             "/favicon-16x16.png" => Ok(Response::new(BoxBody::new(Full::new(FAVICON_16.into())))),
             "/favicon-32x32.png" => Ok(Response::new(BoxBody::new(Full::new(FAVICON_32.into())))),
-            "/version" => Ok(Response::new(BoxBody::new(Full::new(VERSION.into())))),
             _ => HttpServerError::NotImplemented.into(),
         },
         _ => HttpServerError::NotImplemented.into(),
@@ -1068,8 +1036,21 @@ pub(crate) async fn http_server(
 
             let auto_server = auto::Builder::new(TokioExecutor::new());
 
+            let shutdown = crate::server::shutdown_signal();
+            tokio::pin!(shutdown);
+            let (stop, _) = tokio::sync::watch::channel(false);
+            let mut connections = tokio::task::JoinSet::new();
             loop {
-                let (stream, remote_address) = listener.accept().await.unwrap();
+                let accepted = tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break,
+                    Some(result) = connections.join_next(), if !connections.is_empty() => {
+                        if let Err(error) = result { log::error!("HTTP connection task failed: {error}"); }
+                        continue;
+                    }
+                    accepted = listener.accept() => accepted,
+                };
+                let (stream, remote_address) = accepted.expect("accept connection");
 
                 match stream.nodelay() {
                     Ok(false) => {
@@ -1091,33 +1072,45 @@ pub(crate) async fn http_server(
                 let apikey_list = apikey_list.clone();
                 let force_shard_number = *force_shard_number;
 
-                tokio::spawn(async move {
-                    if let Err(err) = server
-                        .serve_connection(
-                            io,
-                            service_fn(move |request: Request<Incoming>| {
-                                let index_path = index_path.clone();
-                                let apikey_list = apikey_list.clone();
-                                let force_shard_number = force_shard_number;
-                                async move {
-                                    let response = http_request_handler(
-                                        index_path,
-                                        apikey_list,
-                                        request,
-                                        remote_address,
-                                        force_shard_number,
-                                    )
-                                    .await?;
+                let mut stopping = stop.subscribe();
+                connections.spawn(async move {
+                    let connection = server.serve_connection(
+                        io,
+                        service_fn(move |request: Request<Incoming>| {
+                            let index_path = index_path.clone();
+                            let apikey_list = apikey_list.clone();
+                            let force_shard_number = force_shard_number;
+                            async move {
+                                let response = http_request_handler(
+                                    index_path,
+                                    apikey_list,
+                                    request,
+                                    remote_address,
+                                    force_shard_number,
+                                )
+                                .await?;
 
-                                    Ok::<_, Infallible>(with_cors_headers(response))
-                                }
-                            }),
-                        )
-                        .await
-                    {
-                        eprintln!("Error processing connection {}: {:?}", remote_address, err);
+                                Ok::<_, Infallible>(with_cors_headers(response))
+                            }
+                        }),
+                    );
+                    tokio::pin!(connection);
+                    let result = tokio::select! {
+                        result = &mut connection => result,
+                        _ = stopping.changed() => {
+                            connection.as_mut().graceful_shutdown();
+                            connection.await
+                        }
+                    };
+                    if let Err(error) = result {
+                        log::error!("Error processing connection {remote_address}: {error}");
                     }
                 });
+            }
+            drop(listener);
+            let _ = stop.send(true);
+            while let Some(result) = connections.join_next().await {
+                if let Err(error) = result { log::error!("HTTP connection task failed: {error}"); }
             }
         }
 

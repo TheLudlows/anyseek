@@ -16,7 +16,7 @@ use crate::multi_tenancy::{ApikeyObject, CreateApikeyRequest};
 use seekstorm::{
     commit::Commit,
     index::{
-        AccessType, Close, Clustering, DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
+        AccessType, Clustering, DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
         FrequentwordType, IS_AVX2, IS_NEON,
         IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
         LexicalSimilarity, SchemaField, StemmerType, StopwordType, Synonym, TokenizerType,
@@ -81,7 +81,6 @@ pub(crate) fn live_api() -> String {
 /// Use the **master API key displayed** in the server console at startup.
 ///
 /// WARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, otherwise your generated API keys will be compromised.
-/// For development purposes you may also use the SeekStorm server console command 'create' to create an demo API key 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='.
 #[utoipa::path(
     tag = "API Key",
     post,
@@ -104,7 +103,7 @@ pub(crate) fn create_apikey_api<'a>(
     apikey_list: &'a mut HashMap<u128, ApikeyObject>,
 ) -> &'a mut ApikeyObject {
     let apikey_hash_u128 = calculate_hash(&apikey) as u128;
-    // Recreating the fixed demo key must not replace its scope or orphan indices.
+    // A repeated identity must not replace its scope or orphan indices.
     if apikey_list.contains_key(&apikey_hash_u128) {
         return apikey_list.get_mut(&apikey_hash_u128).unwrap();
     }
@@ -483,11 +482,6 @@ pub(crate) async fn delete_index_api(
 )]
 pub(crate) async fn commit_index_api(index_arc: &IndexArc) -> Result<u64, String> {
     index_arc.commit().await;
-    Ok(index_arc.read().await.indexed_doc_count().await as u64)
-}
-
-pub(crate) async fn close_index_api(index_arc: &IndexArc) -> Result<u64, String> {
-    index_arc.close().await;
     Ok(index_arc.read().await.indexed_doc_count().await as u64)
 }
 

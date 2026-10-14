@@ -1,5 +1,4 @@
 use crate::{
-    INDEX_RUNTIME,
     add_result::add_result_multiterm_multifield,
     compatible::{_blsr_u64, _mm_tzcnt_64},
     index::{
@@ -2035,16 +2034,6 @@ pub(crate) async fn intersection_blockid<'a>(
     phrase_query: bool,
     query_term_count: usize,
 ) {
-    let item_0 = &query_list[0];
-    let enable_inter_query_threading_multi =
-        if !shard.enable_search_quality_test && shard.enable_inter_query_threading_auto {
-            item_0.posting_count / item_0.p_block_max as u32 > 10
-        } else {
-            shard.enable_inter_query_threading
-        };
-
-    let mut task_list = Vec::new();
-
     let t1: i32 = 0;
     let mut t2: i32 = 1;
 
@@ -2086,120 +2075,99 @@ pub(crate) async fn intersection_blockid<'a>(
                     continue;
                 }
 
-                if !enable_inter_query_threading_multi {
-                    let mut block_score = 0.0;
-                    if SPEEDUP_FLAG && result_type != &ResultType::Count {
+                let mut block_score = 0.0;
+                if SPEEDUP_FLAG && result_type != &ResultType::Count {
+                    for query_list_item_mut in query_list.iter_mut() {
+                        block_score += query_list_item_mut.blocks
+                            [query_list_item_mut.p_block as usize]
+                            .max_block_score;
+                    }
+                }
+
+                if SPEEDUP_FLAG && SORT_FLAG && result_type != &ResultType::Count {
+                    let mut p_block_vec: Vec<i32> = vec![0; query_term_count];
+                    for i in 0..query_list.len() {
+                        p_block_vec[query_list[i].term_index_unique] = query_list[i].p_block
+                    }
+                    let block_object = BlockObject {
+                        block_id: block_id1 as usize,
+                        block_score,
+                        p_block_vec,
+                    };
+                    block_vec.push(block_object);
+                } else if !SPEEDUP_FLAG
+                    || result_type == &ResultType::Count
+                    || search_result.topk_candidates.current_heap_size < top_k
+                    || block_score > search_result.topk_candidates._elements[0].score
+                {
+                    if shard.meta.access_type == AccessType::Mmap {
                         for query_list_item_mut in query_list.iter_mut() {
-                            block_score += query_list_item_mut.blocks
-                                [query_list_item_mut.p_block as usize]
-                                .max_block_score;
+                            let segment =
+                                &shard.segments_index[query_list_item_mut.key0 as usize];
+                            query_list_item_mut.byte_array = &shard.index_file_mmap[segment
+                                .byte_array_blocks_pointer
+                                [block_id1 as usize]
+                                .0
+                                ..segment.byte_array_blocks_pointer[block_id1 as usize].0
+                                    + segment.byte_array_blocks_pointer[block_id1 as usize].1];
                         }
-                    }
-
-                    if SPEEDUP_FLAG && SORT_FLAG && result_type != &ResultType::Count {
-                        let mut p_block_vec: Vec<i32> = vec![0; query_term_count];
-                        for i in 0..query_list.len() {
-                            p_block_vec[query_list[i].term_index_unique] = query_list[i].p_block
-                        }
-                        let block_object = BlockObject {
-                            block_id: block_id1 as usize,
-                            block_score,
-                            p_block_vec,
-                        };
-                        block_vec.push(block_object);
-                    } else if !SPEEDUP_FLAG
-                        || result_type == &ResultType::Count
-                        || search_result.topk_candidates.current_heap_size < top_k
-                        || block_score > search_result.topk_candidates._elements[0].score
-                    {
-                        if shard.meta.access_type == AccessType::Mmap {
-                            for query_list_item_mut in query_list.iter_mut() {
-                                let segment =
-                                    &shard.segments_index[query_list_item_mut.key0 as usize];
-                                query_list_item_mut.byte_array = &shard.index_file_mmap[segment
-                                    .byte_array_blocks_pointer
-                                    [block_id1 as usize]
-                                    .0
+                        for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
+                            let segment = &shard.segments_index
+                                [nonunique_query_list_item_mut.key0 as usize];
+                            nonunique_query_list_item_mut.byte_array = &shard.index_file_mmap
+                                [segment.byte_array_blocks_pointer[block_id1 as usize].0
                                     ..segment.byte_array_blocks_pointer[block_id1 as usize].0
-                                        + segment.byte_array_blocks_pointer[block_id1 as usize].1];
-                            }
-                            for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
-                                let segment = &shard.segments_index
-                                    [nonunique_query_list_item_mut.key0 as usize];
-                                nonunique_query_list_item_mut.byte_array = &shard.index_file_mmap
-                                    [segment.byte_array_blocks_pointer[block_id1 as usize].0
-                                        ..segment.byte_array_blocks_pointer[block_id1 as usize].0
-                                            + segment.byte_array_blocks_pointer
-                                                [block_id1 as usize]
-                                                .1];
-                            }
-                            for not_query_list_item_mut in not_query_list.iter_mut() {
-                                let segment =
-                                    &shard.segments_index[not_query_list_item_mut.key0 as usize];
-                                not_query_list_item_mut.byte_array = &shard.index_file_mmap[segment
-                                    .byte_array_blocks_pointer
-                                    [block_id1 as usize]
-                                    .0
-                                    ..segment.byte_array_blocks_pointer[block_id1 as usize].0
-                                        + segment.byte_array_blocks_pointer[block_id1 as usize].1];
-                            }
-                        } else {
-                            for query_list_item_mut in query_list.iter_mut() {
-                                query_list_item_mut.byte_array = &shard.segments_index
-                                    [query_list_item_mut.key0 as usize]
-                                    .byte_array_blocks[block_id1 as usize];
-                            }
-                            for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
-                                nonunique_query_list_item_mut.byte_array = &shard.segments_index
-                                    [nonunique_query_list_item_mut.key0 as usize]
-                                    .byte_array_blocks[block_id1 as usize];
-                            }
-                            for not_query_list_item_mut in not_query_list.iter_mut() {
-                                not_query_list_item_mut.byte_array = &shard.segments_index
-                                    [not_query_list_item_mut.key0 as usize]
-                                    .byte_array_blocks[block_id1 as usize];
-                            }
+                                        + segment.byte_array_blocks_pointer
+                                            [block_id1 as usize]
+                                            .1];
                         }
-
-                        let mut result_count_local = 0;
-                        intersection_docid(
-                            shard,
-                            non_unique_query_list,
-                            query_list,
-                            not_query_list,
-                            block_id1 as usize,
-                            &mut result_count_local,
-                            search_result,
-                            top_k,
-                            result_type,
-                            field_filter_set,
-                            facet_filter,
-                            phrase_query,
-                            block_score,
-                        )
-                        .await;
-
-                        result_count_arc.fetch_add(result_count_local as usize, Ordering::Relaxed);
-                    }
-                } else {
-                    let mut query_list_copy: Vec<PostingListObjectQuery> = Vec::new();
-                    let mut non_unique_query_list_copy: Vec<NonUniquePostingListObjectQuery> =
-                        Vec::new();
-
-                    for x in &mut *query_list {
-                        query_list_copy.push(x.clone());
+                        for not_query_list_item_mut in not_query_list.iter_mut() {
+                            let segment =
+                                &shard.segments_index[not_query_list_item_mut.key0 as usize];
+                            not_query_list_item_mut.byte_array = &shard.index_file_mmap[segment
+                                .byte_array_blocks_pointer
+                                [block_id1 as usize]
+                                .0
+                                ..segment.byte_array_blocks_pointer[block_id1 as usize].0
+                                    + segment.byte_array_blocks_pointer[block_id1 as usize].1];
+                        }
+                    } else {
+                        for query_list_item_mut in query_list.iter_mut() {
+                            query_list_item_mut.byte_array = &shard.segments_index
+                                [query_list_item_mut.key0 as usize]
+                                .byte_array_blocks[block_id1 as usize];
+                        }
+                        for nonunique_query_list_item_mut in non_unique_query_list.iter_mut() {
+                            nonunique_query_list_item_mut.byte_array = &shard.segments_index
+                                [nonunique_query_list_item_mut.key0 as usize]
+                                .byte_array_blocks[block_id1 as usize];
+                        }
+                        for not_query_list_item_mut in not_query_list.iter_mut() {
+                            not_query_list_item_mut.byte_array = &shard.segments_index
+                                [not_query_list_item_mut.key0 as usize]
+                                .byte_array_blocks[block_id1 as usize];
+                        }
                     }
 
-                    for x in &mut *non_unique_query_list {
-                        let y = x.clone();
-                        non_unique_query_list_copy.push(y);
-                    }
+                    let mut result_count_local = 0;
+                    intersection_docid(
+                        shard,
+                        non_unique_query_list,
+                        query_list,
+                        not_query_list,
+                        block_id1 as usize,
+                        &mut result_count_local,
+                        search_result,
+                        top_k,
+                        result_type,
+                        field_filter_set,
+                        facet_filter,
+                        phrase_query,
+                        block_score,
+                    )
+                    .await;
 
-                    let result_count_clone = result_count_arc.clone();
-                    task_list.push(INDEX_RUNTIME.handle().spawn(async move {
-                        let result_count_local = 1;
-                        result_count_clone.fetch_add(result_count_local, Ordering::Relaxed);
-                    }));
+                    result_count_arc.fetch_add(result_count_local as usize, Ordering::Relaxed);
                 }
 
                 *matching_blocks += 1;

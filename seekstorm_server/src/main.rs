@@ -28,7 +28,6 @@ pub static MASTER_KEY_SECRET: LazyLock<String> =
 #[doc(hidden)]
 mod api_endpoints;
 use seekstorm_server::{api_types, api_schema};
-mod info;
 #[doc(hidden)]
 mod http_server;
 #[doc(hidden)]

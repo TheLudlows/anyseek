@@ -27,13 +27,21 @@ pub(crate) async fn get_apikey_hash(
 }
 
 
-/// API key creation options
+/// Create a random API key. The request body must be an empty JSON object.
 #[derive(Default, Debug, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct CreateApikeyRequest {
-    /// Create the fixed demonstration key instead of a random key (default=false).
-    #[serde(default)]
-    pub demo: bool,
+#[serde(deny_unknown_fields, try_from = "serde_json::Value")]
+pub(crate) struct CreateApikeyRequest {}
+
+impl TryFrom<serde_json::Value> for CreateApikeyRequest {
+    type Error = &'static str;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        if value.as_object().is_some_and(|object| object.is_empty()) {
+            Ok(Self {})
+        } else {
+            Err("API key creation requires an empty JSON object")
+        }
+    }
 }
 
 /// Persisted key identity and its in-memory index scope. Legacy quota is ignored
@@ -58,9 +66,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn creation_rejects_retired_quota_options() {
-        assert!(!serde_json::from_value::<CreateApikeyRequest>(json!({})).unwrap().demo);
-        assert!(serde_json::from_value::<CreateApikeyRequest>(json!({"demo":true})).unwrap().demo);
+    fn creation_rejects_retired_options() {
+        assert!(serde_json::from_value::<CreateApikeyRequest>(json!({})).is_ok());
+        assert!(serde_json::from_value::<CreateApikeyRequest>(json!({"demo":true})).is_err());
+        for value in [json!([]), json!(null), json!(false), json!(""), json!({"demo":false})] {
+            assert!(serde_json::from_value::<CreateApikeyRequest>(value).is_err());
+        }
         for field in ["indices_max", "indices_size_max", "documents_max", "operations_max", "rate_limit", "quota"] {
             assert!(serde_json::from_value::<CreateApikeyRequest>(json!({field:0})).is_err(), "{field}");
         }

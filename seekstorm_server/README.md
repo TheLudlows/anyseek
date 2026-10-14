@@ -33,7 +33,7 @@ target/debug/seekstorm_server local_ip=127.0.0.1 local_port=8080
 
 ## API 创建 key、索引并检索
 
-服务默认输出 info 级别日志，可通过 `RUST_LOG=seekstorm=warn` 限制核心日志，或 `RUST_LOG=off` 关闭日志。终端交互/状态表由服务单独展示。
+服务默认输出 info 级别日志，可通过 `RUST_LOG=seekstorm=warn` 限制核心日志，或 `RUST_LOG=off` 关闭日志。启动与索引概况使用普通日志；首次 key 和主密钥仍会输出。
 
 以下为 POSIX shell 示例。已有首次初始化的 key 时可直接填入 `API_KEY`，跳过创建 key 步骤。需要额外 key 时，将 `MASTER_KEY` 替换为启动日志显示的主密钥，再保存创建响应。
 
@@ -58,27 +58,19 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 
 搜索与遍历仅接受 POST JSON；普通索引/文档读取仍为 GET。按 DocID 读取时，字段投影使用 JSON body `{"fields":["body"]}`。更新为完整记录替换。向量配置与示例见 [根 README](../README.md)。
 
-撤销 key 需要主密钥，body 为 `{"apikey_base64":"要删除的key"}`；同时删除其索引。创建固定 demo key 使用 `{"demo":true}`。没有内置配额/限流。
+撤销 key 需要主密钥，body 为 `{"apikey_base64":"要删除的key"}`；同时删除其索引。创建 key 只接受 `{}` 并生成随机密钥；`demo` 参数返回 400。没有内置配额/限流。
 
 ## Web UI
 
-访问 `http://127.0.0.1:8080/`，通过连接表单输入普通 API key。密钥和选中的索引仅保存在当前标签页的 sessionStorage；点击 **Forget key** 清除本标签页凭证，但不会撤销服务端 key。仍接受 `/?api_key=KEY&index_id=ID`（key 须 URL 编码，例如 `+` 为 `%2B`）；读取后从地址栏移除 key，推荐直接使用连接表单。UI 默认 Lexical，Vector/Hybrid 需要手动粘贴 JSON 查询向量，文本变化后由调用方更新向量。
+访问 `http://127.0.0.1:8080/`，通过连接表单输入普通 API key。密钥和选中的索引仅保存在当前标签页的 sessionStorage；点击 **Forget key** 清除本标签页凭证，但不会撤销服务端 key。URL 可指定 `index_id`，不接受 `api_key` 登录。UI 默认 Lexical，Vector/Hybrid 需要手动粘贴 JSON 查询向量，文本变化后由调用方更新向量。
 
 保留结果分页、原文/外部链接预览、图片展示、UTC 日期起止输入、三种检索模式日期过滤和排序。日期交互依赖配置好的时间字段；Vector/Hybrid 需要有效查询向量；非法过滤条件明确报错。ANN 过滤受簇探测范围限制。索引创建/选择及 JSON 文档写入有界面入口。写入会调用文档 POST，再调用索引 PATCH 提交，展示数量并可返回搜索；若 POST 已接受但 PATCH 失败，提供只重试提交的按钮，避免重复写入。索引删除、文档更新/删除及 key 创建/撤销仍通过 API 完成。JSON 文件仅在浏览器读取后发送普通 JSON 请求，不是服务端文件解析/目录导入。
 
 搜索逻辑在 [web/js/master.js](web/js/master.js)，连接与索引创建在 [web/js/setup.js](web/js/setup.js)，JSON 写入在 [web/js/documents.js](web/js/documents.js)。静态资源嵌入可执行文件，修改后需重新构建。
 
-## 终端命令与维护
+## 维护与退出
 
-| 命令 | 作用 |
-| --- | --- |
-| `create` | 创建固定 demo key；索引通过界面或 HTTP 创建 |
-| `delete` | 删除 demo key 及其所有索引 |
-| `info` | 显示当前索引信息 |
-| `search -v [1,0,0]` | 对 demo key 下索引 0 运行向量诊断，维度须匹配 |
-| `openapi` | 导出 OpenAPI |
-| `help` | 命令帮助 |
-| `quit` | 退出服务 |
+使用 Ctrl-C（SIGINT）或 SIGTERM 退出：先停止接收请求、结束已有连接，再提交并关闭全部索引。服务不读取 stdin 命令。导出接口文档使用启动参数 `generate_openapi=true`。索引信息通过 Web UI 或 GET `/api/v1/index/{id}` 查看；提交使用 PATCH 同一路径。HTTP 关闭索引入口和 `/version` 已删除，存活检查使用 GET `/api/v1/live`。
 
 正常提交/关闭及本地索引文件仍保留；当前没有在线一致快照或崩溃恢复可靠性承诺。文件解析、SIFT 导入/评测等入口已删除，迁移细节见 [MIGRATION.md](../MIGRATION.md)。
 
