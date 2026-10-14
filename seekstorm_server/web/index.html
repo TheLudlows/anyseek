@@ -12,9 +12,13 @@
 <script src=js/jquery-3.7.1.min.js></script>
 <script src=js/master.js></script>
 <script src=js/setup.js></script>
+<script src=js/documents.js></script>
 </head>
 <body>
+<nav class="service-actions" aria-label="Index actions">
 <button id="manageIndexes" class="manage-indexes" type="button">Indexes / API key</button>
+<button id="writeDocuments" class="manage-indexes" type="button" disabled>Write data</button>
+</nav>
 <section id="welcome" class="setup-panel" style="display:none" aria-labelledby="setupTitle">
 <h1 id="setupTitle">Connect &amp; create an index</h1>
 <p>On first startup, the server prints an <strong>Initial API key</strong> in its console or Docker logs. Paste that key below (not the master key).</p>
@@ -40,9 +44,26 @@
 <p class="setup-help">Default fields: title, body and url. Vector/Hybrid also include vector (F32, cosine similarity).</p>
 <details><summary>Advanced: field schema (JSON)</summary><p class="setup-help">Edit field names, storage, lexical/vector indexing and filter/sort metadata. Changing search mode resets this schema.</p><label for="indexSchema">Schema</label><textarea id="indexSchema" rows="12" spellcheck="false"></textarea></details>
 <button type="submit">Create &amp; open index</button>
-<p class="setup-help">Creates an empty index. Add records through POST /api/v1/index/{id}/doc.</p>
+<p class="setup-help">Creates an empty index. Then choose “Write data” to add JSON records.</p>
 </form>
 </div>
+</section>
+<section id="documentPanel" class="setup-panel" style="display:none" aria-labelledby="documentTitle">
+<h1 id="documentTitle">Write JSON data</h1>
+<p>Index: <strong id="documentIndex"></strong></p>
+<p>Paste one JSON object or an array of objects. Records are added as new documents. Field names and types must match the index schema; vector indexes require externally generated vectors.</p>
+<details><summary>Index fields</summary><pre id="documentSchema"></pre></details>
+<form id="documentsForm">
+<label for="documentFile">Load JSON from a file (optional)</label>
+<input id="documentFile" type="file" accept=".json,application/json">
+<label for="documentJson">JSON records</label>
+<textarea id="documentJson" rows="14" required spellcheck="false" placeholder='[{"title":"Example","body":"Hello search","url":""}]'></textarea>
+<button id="submitDocuments" type="submit">Write &amp; commit</button>
+</form>
+<p id="documentError" role="alert"></p>
+<p id="documentStatus" role="status" aria-live="polite"></p>
+<button id="retryDocumentCommit" type="button" hidden>Retry commit only</button>
+<button id="backToSearch" type="button">Back to search</button>
 </section>
 <div class=h100 id=landingSearch>
 <div class="row center-xs middle-xs h100">

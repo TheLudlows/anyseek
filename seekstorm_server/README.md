@@ -27,7 +27,7 @@ target/debug/seekstorm_server local_ip=127.0.0.1 local_port=8080
 1. 打开 `http://127.0.0.1:8080/`，输入这个普通 key 并点击 **Connect**。
 2. 填写索引名称，选择 **Lexical / Vector / Hybrid**。向量模式填写外部模型维度；默认 F32、Cosine，向量字段名为 `vector`。
 3. 可展开高级选项编辑字段 schema，然后点击 **Create & open index**。
-4. 通过下面的 JSON API 写入文档；右上角 **Indexes / API key** 可重新连接、创建或切换索引。
+4. 点击右上角 **Write data**，粘贴单条 JSON/对象数组或选择 JSON 文件，再点击 **Write & commit**。也可使用下面的 JSON API；右上角 **Indexes / API key** 可重新连接、创建或切换索引。
 
 重启复用已持久化的 key/索引。已有 key 的安装不会额外创建新 key。数据根目录的 `bootstrap.complete` 记录初始化已完成，应与整个数据目录一同保存；撤销全部 key 后重启也不会重新生成凭证。丢失首次输出的 key 时，用主密钥调用创建 key API 获取新 key。新 key 是独立的数据作用域，不会自动接管旧 key 下的索引。
 
@@ -64,9 +64,9 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 
 访问 `http://127.0.0.1:8080/`，通过连接表单输入普通 API key。密钥和选中的索引仅保存在当前标签页的 sessionStorage；点击 **Forget key** 清除本标签页凭证，但不会撤销服务端 key。仍接受 `/?api_key=KEY&index_id=ID`（key 须 URL 编码，例如 `+` 为 `%2B`）；读取后从地址栏移除 key，推荐直接使用连接表单。UI 默认 Lexical，Vector/Hybrid 需要手动粘贴 JSON 查询向量，文本变化后由调用方更新向量。
 
-保留结果分页、原文/外部链接预览、图片展示、UTC 日期起止输入、三种检索模式日期过滤和排序。日期交互依赖配置好的时间字段；Vector/Hybrid 需要有效查询向量；非法过滤条件明确报错。ANN 过滤受簇探测范围限制。索引创建/选择有界面入口；文档写入、索引删除和 key 创建/撤销仍通过 API 完成。
+保留结果分页、原文/外部链接预览、图片展示、UTC 日期起止输入、三种检索模式日期过滤和排序。日期交互依赖配置好的时间字段；Vector/Hybrid 需要有效查询向量；非法过滤条件明确报错。ANN 过滤受簇探测范围限制。索引创建/选择及 JSON 文档写入有界面入口。写入会调用文档 POST，再调用索引 PATCH 提交，展示数量并可返回搜索；若 POST 已接受但 PATCH 失败，提供只重试提交的按钮，避免重复写入。索引删除、文档更新/删除及 key 创建/撤销仍通过 API 完成。JSON 文件仅在浏览器读取后发送普通 JSON 请求，不是服务端文件解析/目录导入。
 
-搜索逻辑在 [web/js/master.js](web/js/master.js)，连接与索引创建在 [web/js/setup.js](web/js/setup.js)。静态资源嵌入可执行文件，修改后需重新构建。
+搜索逻辑在 [web/js/master.js](web/js/master.js)，连接与索引创建在 [web/js/setup.js](web/js/setup.js)，JSON 写入在 [web/js/documents.js](web/js/documents.js)。静态资源嵌入可执行文件，修改后需重新构建。
 
 ## 终端命令与维护
 
@@ -83,3 +83,5 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 正常提交/关闭及本地索引文件仍保留；当前没有在线一致快照或崩溃恢复可靠性承诺。文件解析、SIFT 导入/评测等入口已删除，迁移细节见 [MIGRATION.md](../MIGRATION.md)。
 
 统计聚合已移除：`query_facets`（包括空数组）返回 400，查询不再返回 `facets`，索引信息不再返回 `facets_minmax`。UI 不再依赖自动计算的数据日期范围，起止日期由用户输入，结束日期包含当天。
+
+倒排写入缓冲区从空开始，按每条 posting 所需空间增长，提交/清空后释放；位置压缩缓存只为使用到的词项分段按需分配。已删除每个分片固定预分配 400 MB 的策略。实际内存仍随分片、字段、未提交记录与向量数量增长；`force_shard_number=1` 可限制新建索引的本机分片数，不会改变磁盘已有索引的分片布局。

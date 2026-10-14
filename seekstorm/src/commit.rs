@@ -16,8 +16,8 @@ use crate::{
     compress_postinglist::compress_postinglist,
     index::{
         AccessType, BlockObjectIndex, CompressionType, DOCUMENT_LENGTH_COMPRESSION,
-        FACET_VALUES_FILENAME, IndexArc, LevelIndex, MAX_POSITIONS_PER_TERM, NgramType,
-        NonUniquePostingListObjectQuery, POSTING_BUFFER_SIZE, PostingListObjectIndex,
+        FACET_VALUES_FILENAME, IndexArc, LevelIndex, NgramType,
+        NonUniquePostingListObjectQuery, PostingListObjectIndex,
         PostingListObjectQuery, ROARING_BLOCK_SIZE, Shard, TermObject,
         update_list_max_impact_score, warmup,
     },
@@ -401,7 +401,7 @@ impl Shard {
             !(self.committed_doc_count).is_multiple_of(ROARING_BLOCK_SIZE);
 
         self.compressed_index_segment_block_buffer = vec![0; 10_000_000];
-        self.postings_buffer = vec![0; POSTING_BUFFER_SIZE];
+        self.postings_buffer = Vec::new();
 
         self.postings_buffer_pointer = 0;
         self.strip_compressed_sum = 0;
@@ -934,12 +934,6 @@ impl Shard {
     }
 
     pub(crate) fn merge_incomplete_index_level_to_level0(self: &mut Shard) {
-        for strip0 in self.segments_level0.iter_mut() {
-            if strip0.positions_compressed.is_empty() {
-                strip0.positions_compressed = vec![0; MAX_POSITIONS_PER_TERM * 2];
-            }
-        }
-
         let block_id = self.level_index.len() - 1;
         let committed_doc_count = ((self.committed_doc_count - 1) % ROARING_BLOCK_SIZE) + 1;
 

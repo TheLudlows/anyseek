@@ -70,13 +70,15 @@
 | 结果浏览 | 文本输入即时搜索、分页、键盘/触摸翻页、结果数量与耗时 |
 | 文档展示 | 存储的标题/正文、原文预览、外部 URL/iframe、图片 URL 或内嵌 data:image |
 | 日期交互 | 通过日期起止输入进行时间范围过滤，保留最新/最旧排序；依赖对应 schema，支持 Lexical/Vector/Hybrid |
+| 数据写入 | 粘贴 JSON 对象/数组或浏览器读取 JSON 文件；复用 POST 写入与 PATCH 提交；显示数量，失败时可只重试提交 |
 | 连接与索引 | 普通 key 连接；列出/切换当前 key 的索引；Lexical/Vector/Hybrid 创建预设、向量维度、创建时 schema JSON 编辑；名称/版本/文档数 |
 | 错误展示 | 非法向量、过滤字段/类型/范围和服务端错误显示在输入区域 |
 
-首次使用在表单输入普通 key。凭证与选中索引使用标签页 sessionStorage，支持忘记凭证；URL 的 `api_key/index_id` 仍可读取，读取后移除地址栏 key。创建调用已有 REST API。当前没有删除索引、修改已有索引 schema、文档 CRUD、服务端密钥管理或集群管理页面。
+首次使用在表单输入普通 key。凭证与选中索引使用标签页 sessionStorage，支持忘记凭证；URL 的 `api_key/index_id` 仍可读取，读取后移除地址栏 key。创建调用已有 REST API。当前没有删除索引、修改已有索引 schema、文档更新/删除、服务端密钥管理或集群管理页面。
 
 ## 4. 服务、构建与维护
 
+- 倒排写入缓冲区按需增长，提交/清空后释放；位置压缩缓存按实际使用的词项分段分配，不再为每个分片固定预分配 400 MB。
 - 新空数据目录自动初始化随机普通 key（仅首次日志显示）；已有安装和重启不重复创建，初始化标记在撤销 key 后保留。
 - API key 鉴权、按 key 的索引/数据目录隔离、随机 key 与固定 demo key；无内置配额或限流。
 - 启动参数：`index_path`、`local_ip`、`local_port`、`force_shard_number`、`generate_openapi`；未知、重复、非法参数启动失败。
