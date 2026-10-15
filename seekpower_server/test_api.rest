@@ -1,26 +1,29 @@
 // use with VSC extension "Rest client" to execute API calls and inspect responses
 
-### individual API key (use create api key below to generate)
-@api_key = YOUR_API_KEY
+@base_url = http://127.0.0.1:8080
+@master_key = PASTE_MASTER_API_KEY
+@api_key = {{master_key}}
+@key_to_revoke = PASTE_ORDINARY_API_KEY
+@index_id = 0
 
 // WARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, 
 // otherwise your generated API keys will be compromised.
 ### create api key (use master API key displayed in the server console at startup)
-POST http://127.0.0.1:80/api/v1/apikey HTTP/1.1
-apikey: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
+POST {{base_url}}/api/v1/apikey HTTP/1.1
+apikey: {{master_key}}
 content-type: application/json
 
 {}
 
 ### delete api key (requires master key)
-DELETE http://127.0.0.1/api/v1/apikey HTTP/1.1
-apikey: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=
+DELETE {{base_url}}/api/v1/apikey HTTP/1.1
+apikey: {{master_key}}
 content-type: application/json
 
-{"apikey_base64":"{{api_key}}"}
+{"apikey_base64":"{{key_to_revoke}}"}
 
 ### create index
-POST http://127.0.0.1:80/api/v1/index HTTP/1.1
+POST {{base_url}}/api/v1/index HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -51,7 +54,7 @@ content-type: application/json
 }
 
 ### get index
-GET http://127.0.0.1/api/v1/index/0 HTTP/1.1
+GET {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -60,17 +63,17 @@ content-type: application/json
 ### get all indices (per server - requires master apikey)
 
 ### delete index
-DELETE http://127.0.0.1/api/v1/index/0 HTTP/1.1
+DELETE {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
 ### commit index
-PATCH http://127.0.0.1/api/v1/index/0 HTTP/1.1
+PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
 ### index document
-POST http://127.0.0.1:80/api/v1/index/0/doc HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -81,7 +84,7 @@ content-type: application/json
 }
 
 ### index documents
-POST http://127.0.0.1:80/api/v1/index/0/doc HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -99,7 +102,7 @@ content-type: application/json
 ]
 
 ### get documents with selected fields
-GET http://127.0.0.1/api/v1/index/0/doc/0 
+GET {{base_url}}/api/v1/index/{{index_id}}/doc/0
 apikey: {{api_key}}
 content-type: application/json
 
@@ -109,25 +112,25 @@ content-type: application/json
 }
 
 ### get document with stored fields
-GET http://127.0.0.1/api/v1/index/0/doc/0
+GET {{base_url}}/api/v1/index/{{index_id}}/doc/0
 apikey: {{api_key}}
 content-type: application/json
 
 ### delete document, by single document ID in URL parameter
-DELETE  http://127.0.0.1/api/v1/index/0/doc/0 HTTP/1.1
+DELETE  {{base_url}}/api/v1/index/{{index_id}}/doc/0 HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
 
 ### delete document, by single document ID in JSON request object
-DELETE  http://127.0.0.1/api/v1/index/0/doc HTTP/1.1
+DELETE  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
 0
 
 ### delete documents, by vector of document IDs in JSON request object
-DELETE  http://127.0.0.1/api/v1/index/0/doc HTTP/1.1
+DELETE  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -137,7 +140,7 @@ content-type: application/json
 ]
 
 ### delete documents, by query in JSON request object
-DELETE  http://127.0.0.1/api/v1/index/0/doc HTTP/1.1
+DELETE  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -150,14 +153,14 @@ content-type: application/json
 }
 
 ### update document
-PATCH  http://127.0.0.1/api/v1/index/0/doc HTTP/1.1
+PATCH  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
 [0,{"title":"title1 test","body":"body1","url":"url1"}]
 
 ### update documents
-PATCH  http://127.0.0.1/api/v1/index/0/doc HTTP/1.1
+PATCH  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -165,7 +168,7 @@ content-type: application/json
 [2,{"title":"title3 test","body":"body3 test","url":"url3"}]]
 
 ### query index POST
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -179,7 +182,7 @@ content-type: application/json
 }
 
 ### query index POST with stored fields
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -191,7 +194,7 @@ content-type: application/json
 }
 
 ### create index NUMBER
-POST http://127.0.0.1:80/api/v1/index HTTP/1.1
+POST {{base_url}}/api/v1/index HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -227,7 +230,7 @@ content-type: application/json
 }
 
 ### index doc NUMBER
-POST http://127.0.0.1:80/api/v1/index/0/doc HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -239,7 +242,7 @@ content-type: application/json
 }
 
 ### query index POST with numeric fields
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -251,7 +254,7 @@ content-type: application/json
 }
 
 ### query index POST with metadata filter (Lexical, Vector or Hybrid)
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -267,7 +270,7 @@ content-type: application/json
 
 
 ### iterator: get first 2 documents
-POST http://127.0.0.1/api/v1/index/0/iterator/
+POST {{base_url}}/api/v1/index/{{index_id}}/iterator/
 apikey: {{api_key}}
 content-type: application/json
 
@@ -281,7 +284,7 @@ content-type: application/json
 }
 
 ### iterator: get last 2 documents
-POST http://127.0.0.1/api/v1/index/0/iterator/
+POST {{base_url}}/api/v1/index/{{index_id}}/iterator/
 apikey: {{api_key}}
 content-type: application/json
 
@@ -295,7 +298,7 @@ content-type: application/json
 }
 
 ### iterator: get next document
-POST http://127.0.0.1/api/v1/index/0/iterator/
+POST {{base_url}}/api/v1/index/{{index_id}}/iterator/
 apikey: {{api_key}}
 content-type: application/json
 
@@ -309,7 +312,7 @@ content-type: application/json
 }
 
 ### iterator: get previous document
-POST http://127.0.0.1/api/v1/index/0/iterator/
+POST {{base_url}}/api/v1/index/{{index_id}}/iterator/
 apikey: {{api_key}}
 content-type: application/json
 
@@ -323,7 +326,7 @@ content-type: application/json
 }
 
 ### search enable_empty_query: default (descending)
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -336,7 +339,7 @@ content-type: application/json
 } 
 
 ### search enable_empty_query: descending 
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -350,7 +353,7 @@ content-type: application/json
 } 
 
 ### search enable_empty_query: ascending 
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -366,7 +369,7 @@ content-type: application/json
 //---- JSON Object field
 
 ### create index
-POST http://127.0.0.1:80/api/v1/index HTTP/1.1
+POST {{base_url}}/api/v1/index HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -396,7 +399,7 @@ content-type: application/json
 }
 
 ### index document
-POST http://127.0.0.1:80/api/v1/index/0/doc HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -417,12 +420,12 @@ content-type: application/json
 }
 
 ### commit index
-PATCH http://127.0.0.1/api/v1/index/0 HTTP/1.1
+PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
 ### query index POST
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -437,7 +440,7 @@ content-type: application/json
 // Structured product records
 
 ### create index
-POST http://127.0.0.1:80/api/v1/index HTTP/1.1
+POST {{base_url}}/api/v1/index HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -506,7 +509,7 @@ content-type: application/json
 // realtime vector search
 
 ### create index
-POST http://127.0.0.1:80/api/v1/index HTTP/1.1
+POST {{base_url}}/api/v1/index HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -538,7 +541,7 @@ content-type: application/json
 }
 
 ### index document
-POST http://127.0.0.1:80/api/v1/index/0/doc HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -549,7 +552,7 @@ content-type: application/json
 ]
 
 ### query index POST
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -566,7 +569,7 @@ content-type: application/json
 // commit incomplete levels
 
 ### create index
-POST http://127.0.0.1:80/api/v1/index HTTP/1.1
+POST {{base_url}}/api/v1/index HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -598,7 +601,7 @@ content-type: application/json
 }
 
 ### index document
-POST http://127.0.0.1:80/api/v1/index/0/doc HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -630,12 +633,12 @@ content-type: application/json
 ]
 
 ### commit index
-PATCH http://127.0.0.1/api/v1/index/0 HTTP/1.1
+PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
 ### index document
-POST http://127.0.0.1:80/api/v1/index/0/doc HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -667,12 +670,12 @@ content-type: application/json
 ]
 
 ### commit index
-PATCH http://127.0.0.1/api/v1/index/0 HTTP/1.1
+PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
 ### query index POST
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -690,7 +693,7 @@ content-type: application/json
 // vector search
 
 ### create index
-POST http://127.0.0.1:80/api/v1/index HTTP/1.1
+POST {{base_url}}/api/v1/index HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -718,7 +721,7 @@ content-type: application/json
 }
 
 ### index document
-POST http://127.0.0.1:80/api/v1/index/0/doc HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -729,12 +732,12 @@ content-type: application/json
 ]
 
 ### commit index
-PATCH http://127.0.0.1/api/v1/index/0 HTTP/1.1
+PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
 ### query index POST
-POST http://127.0.0.1/api/v1/index/0/query HTTP/1.1
+POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 
@@ -770,7 +773,7 @@ content-type: application/json
 //create in console
 
 ### create index
-POST http://127.0.0.1:80/api/v1/index HTTP/1.1
+POST {{base_url}}/api/v1/index HTTP/1.1
 apikey: {{api_key}}
 content-type: application/json
 

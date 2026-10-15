@@ -7,7 +7,7 @@ Seekpower 保留一个 Rust 核心库和一个 HTTP/Web UI 服务。当前是单
 | 层 | 代码 | 职责 |
 | --- | --- | --- |
 | UI | `seekpower_server/web/` | 搜索、分页、原文/链接预览、日期交互 |
-| 服务 | `http_server.rs`、`api_endpoints.rs`、`multi_tenancy.rs`、`server.rs` | HTTP 参数、API key、索引作用域、启动、日志与退出 |
+| 服务 | `http_server.rs`、`operations.rs`、`keys.rs`、`server.rs` | HTTP 参数、API key、索引作用域、启动、日志与退出 |
 | 核心入口 | `index.rs`、`search.rs`、`iterator.rs` | schema、文档操作、三类查询与遍历 |
 | 全文 | `tokenizer.rs`、`index_posting.rs`、`intersection*.rs`、`union.rs` | 分词、倒排、布尔/短语、BM25 与剪枝 |
 | 向量 | `vector.rs`、`vector_similarity.rs`、`clustering.rs` | 外部向量校验、量化、相似度、聚类与 IVF 检索 |

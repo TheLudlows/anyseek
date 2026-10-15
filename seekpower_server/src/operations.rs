@@ -1,4 +1,6 @@
-use crate::api_types::{SearchRequestObject, SearchResultObject, GetDocumentRequest, IndexResponseObject};
+use crate::api_types::{
+    GetDocumentRequest, IndexResponseObject, SearchRequestObject, SearchResultObject,
+};
 use std::{
     collections::HashMap,
     fs,
@@ -9,45 +11,22 @@ use std::{
 use itertools::Itertools;
 use std::collections::HashSet;
 
-use crate::multi_tenancy::ApikeyObject;
+use crate::keys::ApikeyObject;
 
 use seekpower::{
     commit::Commit,
     index::{
-        AccessType, Clustering, DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document, DocumentCompression,
-        FrequentwordType, IS_AVX2, IS_NEON,
-        IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
-        LexicalSimilarity, SchemaField, StopwordType, TokenizerType,
-        UpdateDocument, UpdateDocuments, create_index, open_index,
+        AccessType, Clustering, DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document,
+        DocumentCompression, FrequentwordType, IS_AVX2, IS_NEON, IndexArc, IndexDocument,
+        IndexDocuments, IndexMetaObject, LexicalSimilarity, SchemaField, StopwordType,
+        TokenizerType, UpdateDocument, UpdateDocuments, create_index,
     },
     iterator::{GetIterator, IteratorResult},
     search::{Search, SearchMode},
     vector::Inference,
 };
 
-use crate::{VERSION, multi_tenancy::calculate_hash};
-
-const APIKEY_PATH: &str = "apikey.json";
-
-/// Save file atomically
-pub(crate) fn save_file_atomically(path: &PathBuf, content: String) {
-    let mut temp_path = path.clone();
-    temp_path.set_extension("bak");
-    fs::write(&temp_path, content).unwrap();
-    match fs::rename(temp_path, path) {
-        Ok(_) => {}
-        Err(e) => println!("error: {e:?}"),
-    }
-}
-
-pub(crate) fn save_apikey_data(apikey: &ApikeyObject, index_path: &PathBuf) {
-    let apikey_id: u64 = apikey.id;
-
-    let apikey_id_path = Path::new(&index_path).join(apikey_id.to_string());
-    let apikey_persistence_json = serde_json::to_string(&apikey).unwrap();
-    let apikey_persistence_path = Path::new(&apikey_id_path).join(APIKEY_PATH);
-    save_file_atomically(&apikey_persistence_path, apikey_persistence_json);
-}
+use crate::VERSION;
 
 pub(crate) fn live_api() -> String {
     let simd = if *IS_AVX2 {
@@ -58,129 +37,6 @@ pub(crate) fn live_api() -> String {
         " (SIMD disabled)"
     };
     "Seekpower server ".to_owned() + VERSION + simd
-}
-
-pub(crate) fn create_apikey_api<'a>(
-    index_path: &'a PathBuf,
-    apikey: &[u8],
-    apikey_list: &'a mut HashMap<u128, ApikeyObject>,
-) -> &'a mut ApikeyObject {
-    let apikey_hash_u128 = calculate_hash(&apikey) as u128;
-    // A repeated identity must not replace its scope or orphan indices.
-    if apikey_list.contains_key(&apikey_hash_u128) {
-        return apikey_list.get_mut(&apikey_hash_u128).unwrap();
-    }
-
-    let mut apikey_id: u64 = 0;
-    let mut apikey_list_vec: Vec<(&u128, &ApikeyObject)> = apikey_list.iter().collect();
-    apikey_list_vec.sort_by_key(|a| a.1.id);
-    for value in apikey_list_vec {
-        if value.1.id == apikey_id {
-            apikey_id = value.1.id + 1;
-        } else {
-            break;
-        }
-    }
-
-    let apikey_object = ApikeyObject {
-        id: apikey_id,
-        apikey_hash: apikey_hash_u128,
-        index_list: HashMap::new(),
-    };
-
-    let apikey_id_path = Path::new(&index_path).join(apikey_id.to_string());
-    fs::create_dir_all(apikey_id_path).unwrap();
-
-    save_apikey_data(&apikey_object, index_path);
-
-    apikey_list.insert(apikey_hash_u128, apikey_object);
-    apikey_list.get_mut(&apikey_hash_u128).unwrap()
-}
-
-pub(crate) fn delete_apikey_api(
-    index_path: &PathBuf,
-    apikey_list: &mut HashMap<u128, ApikeyObject>,
-    apikey_hash: u128,
-) -> Result<u64, String> {
-    if let Some(apikey_object) = apikey_list.get(&apikey_hash) {
-        let apikey_id_path = Path::new(&index_path).join(apikey_object.id.to_string());
-        println!("delete path {}", apikey_id_path.to_string_lossy());
-        fs::remove_dir_all(&apikey_id_path).unwrap();
-
-        apikey_list.remove(&apikey_hash);
-        Ok(apikey_list.len() as u64)
-    } else {
-        Err("not found".to_string())
-    }
-}
-
-/// Open all indices below a single apikey
-pub(crate) async fn open_all_indices(
-    index_path: &PathBuf,
-    index_list: &mut HashMap<u64, IndexArc>,
-) {
-    if !Path::exists(index_path) {
-        fs::create_dir_all(index_path).unwrap();
-    }
-
-    for result in fs::read_dir(index_path).unwrap() {
-        let path = result.unwrap();
-        if path.path().is_dir() {
-            let single_index_path = path.path();
-
-            let index_arc = match open_index(&single_index_path).await {
-                Ok(index_arc) => index_arc,
-                Err(err) => {
-                    println!("{} {}", err, single_index_path.display());
-                    continue;
-                }
-            };
-
-            let index_id = index_arc.read().await.meta.id;
-
-            index_list.insert(index_id, index_arc);
-        }
-    }
-}
-
-/// Open api key
-pub(crate) async fn open_apikey(
-    index_path: &PathBuf,
-    apikey_list: &mut HashMap<u128, ApikeyObject>,
-) -> bool {
-    let apikey_path = Path::new(&index_path).join(APIKEY_PATH);
-    match fs::read_to_string(apikey_path) {
-        Ok(apikey_string) => {
-            let mut apikey_object: ApikeyObject = serde_json::from_str(&apikey_string).unwrap();
-
-            open_all_indices(index_path, &mut apikey_object.index_list).await;
-            apikey_list.insert(apikey_object.apikey_hash, apikey_object);
-
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-/// Open all apikeys in the specified path
-pub(crate) async fn open_all_apikeys(
-    index_path: &PathBuf,
-    apikey_list: &mut HashMap<u128, ApikeyObject>,
-) -> bool {
-    let mut test_index_flag = false;
-    if !Path::exists(index_path) {
-        println!("index path not found: {} ", index_path.to_string_lossy());
-        fs::create_dir_all(index_path).unwrap();
-    }
-
-    for result in fs::read_dir(index_path).unwrap() {
-        let path = result.unwrap();
-        if path.path().is_dir() {
-            let single_index_path = path.path();
-            test_index_flag |= open_apikey(&single_index_path, apikey_list).await;
-        }
-    }
-    test_index_flag
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -229,15 +85,8 @@ pub(crate) async fn create_index_api<'a>(
         inference,
     };
 
-    let index_arc = create_index(
-        &index_id_path,
-        meta,
-        &schema,
-        11,
-        mute,
-        force_shard_number,
-    )
-    .await?;
+    let index_arc =
+        create_index(&index_id_path, meta, &schema, 11, mute, force_shard_number).await?;
 
     apikey_object.index_list.insert(index_id, index_arc);
 
@@ -265,50 +114,36 @@ pub(crate) async fn commit_index_api(index_arc: &IndexArc) -> Result<u64, String
     Ok(index_arc.read().await.indexed_doc_count().await as u64)
 }
 
-pub(crate) async fn get_index_info_api(
-    index_id: u64,
-    index_list: &HashMap<u64, IndexArc>,
-) -> Result<IndexResponseObject, String> {
-    if let Some(index_arc) = index_list.get(&index_id) {
-        let index_ref = index_arc.read().await;
-
-        Ok(IndexResponseObject {
-            version: VERSION.to_string(),
-            schema: index_ref.schema_map.clone(),
-            id: index_ref.meta.id,
-            name: index_ref.meta.name.clone(),
-            indexed_doc_count: index_ref.indexed_doc_count().await,
-            committed_doc_count: index_ref.committed_doc_count().await,
-            operations_count: 0,
-            query_count: 0,
-
-        })
-    } else {
-        Err("index_id not found".to_string())
+async fn index_info(index: &IndexArc) -> IndexResponseObject {
+    let index = index.read().await;
+    IndexResponseObject {
+        version: VERSION.to_string(),
+        schema: index.schema_map.clone(),
+        id: index.meta.id,
+        name: index.meta.name.clone(),
+        indexed_doc_count: index.indexed_doc_count().await,
+        committed_doc_count: index.committed_doc_count().await,
+        operations_count: 0,
+        query_count: 0,
     }
 }
 
+pub(crate) async fn get_index_info_api(
+    index_id: u64,
+    indexes: &HashMap<u64, IndexArc>,
+) -> Result<IndexResponseObject, String> {
+    let index = indexes.get(&index_id).ok_or("index_id not found")?;
+    Ok(index_info(index).await)
+}
+
 pub(crate) async fn get_apikey_indices_info_api(
-    index_list: &HashMap<u64, IndexArc>,
+    indexes: &HashMap<u64, IndexArc>,
 ) -> Result<Vec<IndexResponseObject>, String> {
-    let mut index_response_object_vec: Vec<IndexResponseObject> = Vec::new();
-    for index in index_list.iter() {
-        let index_ref = index.1.read().await;
-
-        index_response_object_vec.push(IndexResponseObject {
-            version: VERSION.to_string(),
-            schema: index_ref.schema_map.clone(),
-            id: index_ref.meta.id,
-            name: index_ref.meta.name.clone(),
-            indexed_doc_count: index_ref.indexed_doc_count().await,
-            committed_doc_count: index_ref.committed_doc_count().await,
-            operations_count: 0,
-            query_count: 0,
-
-        });
+    let mut result = Vec::with_capacity(indexes.len());
+    for index in indexes.values() {
+        result.push(index_info(index).await);
     }
-
-    Ok(index_response_object_vec)
+    Ok(result)
 }
 
 pub(crate) async fn index_document_api(
@@ -365,15 +200,7 @@ pub(crate) async fn update_documents_api(
     Ok(index_arc.read().await.indexed_doc_count().await as u64)
 }
 
-pub(crate) async fn delete_document_by_parameter_api(
-    index_arc: &IndexArc,
-    document_id: u64,
-) -> Result<u64, String> {
-    index_arc.delete_document(document_id).await;
-    Ok(index_arc.read().await.indexed_doc_count().await as u64)
-}
-
-pub(crate) async fn delete_document_by_object_api(
+pub(crate) async fn delete_document_api(
     index_arc: &IndexArc,
     document_id: u64,
 ) -> Result<u64, String> {
@@ -444,9 +271,12 @@ pub(crate) async fn query_index_api(
     let start_time = Instant::now();
 
     let query_vector = match search_request.query_vector.as_ref() {
-        Some(value) if search_request.search_mode != SearchMode::Lexical => Some(
-            seekpower::vector::parse_external_embedding(value, &index_arc.read().await.meta.inference)?
-        ),
+        Some(value) if search_request.search_mode != SearchMode::Lexical => {
+            Some(seekpower::vector::parse_external_embedding(
+                value,
+                &index_arc.read().await.meta.inference,
+            )?)
+        }
         _ => None,
     };
 
@@ -462,14 +292,14 @@ pub(crate) async fn query_index_api(
             search_request.result_type,
             search_request.realtime,
             search_request.field_filter,
-
             search_request.facet_filter,
             search_request.result_sort,
-
         )
         .await;
 
-    if let Some(error) = result_object.error { return Err(error); }
+    if let Some(error) = result_object.error {
+        return Err(error);
+    }
     let elapsed_time = start_time.elapsed().as_nanos();
 
     let mut results: Vec<Document> = Vec::new();
@@ -510,6 +340,5 @@ pub(crate) async fn query_index_api(
         count_total: result_object.result_count_total,
         query_terms: result_object.query_terms,
         results,
-
     })
 }

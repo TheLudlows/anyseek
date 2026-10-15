@@ -32,7 +32,7 @@
 
 ## 2. HTTP 接口全集
 
-表中 `{id}` 为索引 ID，`{doc}` 为内部文档 ID。数据接口使用 `apikey` 请求头；主密钥可直接操作自己作用域的索引，并用于创建/撤销额外 key。接口以 [实际路由](seekpower_server/src/http_server.rs) 为准，OpenAPI 尚未覆盖标记为“未登记”的操作。
+表中 `{id}` 为索引 ID，`{doc}` 为内部文档 ID。数据接口使用 `apikey` 请求头；主密钥可直接操作自己作用域的索引，并用于创建/撤销额外 key。接口以 [实际路由](seekpower_server/src/http_server.rs) 为准，OpenAPI 覆盖下表 15 个业务/存活操作。
 
 | 方法 | 路径 | 功能 | OpenAPI |
 | --- | --- | --- | --- |
@@ -80,7 +80,7 @@
 - 启动参数 `generate_openapi=true` 生成 OpenAPI JSON/YAML；启动/索引概况使用普通日志；核心库 `info::collect_index_info` 返回结构化统计，采集不提交或同步文件。核心日志由调用方配置；服务支持 `RUST_LOG`。
 - Rust 核心库可嵌入应用；HTTP 服务内嵌静态 UI；保留 Dockerfile 从源码构建。两个 crate 均 `publish=false`。
 - 核心默认 features 为 `zh`、`vb`。`vb` 提供来源、两路分数及 shard/level/cluster 等诊断字段；这些字段不表示保留自动切块。哈希实现固定使用 AHash。HTTP DTO 与 OpenAPI 全部位于服务，核心不提供 `api-schema` feature。
-- CI 保留独立核心构建/依赖边界、workspace 构建与测试、HTTP/Chromium、静态资源及生成 OpenAPI 一致性检查。
+- CI 保留独立核心构建/依赖边界、workspace 构建与测试、HTTP/Chromium、静态资源及 OpenAPI 契约检查与产物生成。
 
 ## 5. 已移除与尚未实现
 

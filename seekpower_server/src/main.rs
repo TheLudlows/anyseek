@@ -4,7 +4,7 @@
 
 //! Seekpower HTTP service and embedded search UI.
 //! Build from this repository; see seekpower_server/README.md for startup and authentication,
-//! FEATURES.md for the complete route inventory, and src/test_api.rest for HTTP examples.
+//! FEATURES.md for the complete route inventory, and test_api.rest for HTTP examples.
 
 use std::collections::HashMap;
 use std::env;
@@ -25,12 +25,12 @@ pub static MASTER_KEY_SECRET: LazyLock<String> =
     LazyLock::new(|| env::var("MASTER_KEY_SECRET").unwrap_or("1234".to_string()));
 
 #[doc(hidden)]
-mod api_endpoints;
+mod operations;
 use seekpower_server::{api_types, api_schema};
 #[doc(hidden)]
 mod http_server;
 #[doc(hidden)]
-mod multi_tenancy;
+mod keys;
 #[doc(hidden)]
 mod server;
 #[doc(hidden)]
