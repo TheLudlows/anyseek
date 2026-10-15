@@ -77,4 +77,4 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 
 普通创建请求只需名称和 schema；向量字段另传 `vector:{"dimensions":N}`。Text 字段默认存储并建立全文索引；向量字段默认不存储原始值、不建立全文索引；其他字段默认存储。过滤/排序字段显式设置 `filterable:true`。
 
-查询模式由文本/向量输入推导；空请求 `{}` 浏览文档，查询包含未提交写入。默认返回 10 条并统计总数；`count:false` 返回 `count_total:null`，全文/浏览查询可用 `length:0` 只统计，向量/混合查询仍要求正的结果窗口。`operator:"or"` 改为任一词匹配，默认 `and`。向量/混合总数仍受候选检索语义限制，不承诺全库精确计数。遍历默认返回 10 个未删除文档，支持字段投影。参数迁移见 [MIGRATION.md](../MIGRATION.md)。
+查询模式由文本/向量输入推导；空请求 `{}` 浏览文档，查询包含未提交写入。默认返回 10 条并统计总数；`count:false` 返回 `count_total:null`，全文/浏览查询可用 `length:0` 只统计，向量/混合查询仍要求正的结果窗口。`operator:"or"` 改为任一词匹配，默认 `and`。向量/混合总数仍受候选检索语义限制，不承诺全库精确计数。遍历默认返回 10 个未删除文档，支持字段投影。

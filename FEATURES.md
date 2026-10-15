@@ -30,7 +30,7 @@
 
 字段类型：`U8/U16/U32/U64`、`I8/I16/I32/I64`、`Timestamp`、`F32/F64`、`Bool`、`String16/String32`、`StringSet16/StringSet32`、`Text`、`Json`、`Binary`。字段类型存在不代表每种类型都支持元数据过滤、全文或向量索引。向量使用 `Json` 或 `Binary` 加 `index_vector:true`，没有独立的 `FieldType::Vector`。
 
-HTTP 新建索引采用 Snappy、English 高频词、N-gram=9、Auto 聚类；查询搜索全部向量簇。核心显式配置仍保留，已有索引继续使用其持久化配置。HTTP 默认包含未提交写入；空查询浏览文档；`count:false` 不报告总数，返回 `count_total:null`。旧调优参数直接拒绝，迁移见 [MIGRATION.md](MIGRATION.md)。
+HTTP 新建索引采用 Snappy、English 高频词、N-gram=9、Auto 聚类；查询搜索全部向量簇。核心显式配置仍保留，已有索引继续使用其持久化配置。HTTP 默认包含未提交写入；空查询浏览文档；`count:false` 不报告总数，返回 `count_total:null`。旧调优参数直接拒绝。
 
 ## 2. HTTP 接口全集
 

@@ -17,23 +17,6 @@
 
 普通资源 GET、JSON/base64 外部向量、API key 数据隔离和 Web UI 保留。Binary/base64 是 JSON 中的字段编码，不是被删除的整包二进制查询协议。
 
-## HTTP 参数收敛（2026-10-15）
-
-本次只调整 HTTP 配置与读取契约，索引格式仍为 7.0，已有当前格式索引按原配置重开，无需因本次修改而重建。旧请求字段返回 400，不静默忽略。
-
-| 原参数 | 现在的调用方式 |
-| --- | --- |
-| similarity、frequent_words、ngram_indexing、document_compression、clustering | 创建时省略；服务内部固定 Bm25fProximity、English、9、Snappy、Auto |
-| inference.External | 改为 `vector:{"dimensions":N}`；可选 metric，默认 Cosine；precision/quantization 默认 F32/None |
-| schema[].facet / longest / 内部 field_id | facet 改为 filterable；删除 longest 和内部 ID；store/index_lexical 可省略，按字段类型默认 |
-| search_mode、内嵌 ann_mode | 删除；文本→全文、向量→向量、两者→混合；服务使用 All，similarity_threshold 可放在查询顶层 |
-| realtime、enable_empty_query | 删除；查询始终包含未提交写入，空输入浏览文档；可见不等于持久化 |
-| result_type | 默认返回结果与总数；count:false 不计数且 count_total 为 null；全文/浏览查询用 length:0 只计数，向量/混合仍要求正的结果窗口 |
-| query_type_default | 默认 AND；使用 operator:or 选择 OR；短语继续使用查询字符串中的双引号 |
-| iterator.include_deleted | 删除；HTTP 只返回未删除记录，默认 take=10、include_document=true |
-
-按查询删除要求非空文本，不接受向量；空查询浏览不会转化为清空索引。全量删除仍需显式发送原始 clear。Rust 核心仍保留原有调优参数，force_shard_number 继续仅作为服务运维参数。
-
 ## 现有数据
 
 - 当前索引格式为 **7.0**，只读取该版本；旧索引不支持、不转换。使用新目录从原始记录建立新索引。
