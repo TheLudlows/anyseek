@@ -16,7 +16,7 @@ fn schema() -> Vec<SchemaField> {
 
 #[test]
 fn retired_query_options_are_rejected() {
-    let create = json!({"index_name":"contract","schema":schema()});
+    let create = json!({"index_name":"contract","schema":[{"field":"body","field_type":"Text"}]});
     for field in ["spelling_correction", "query_completion", "synonyms", "stemmer"] {
         for value in [json!(null), json!({}), json!([]), json!("None"), json!("English")] {
             let mut request = create.clone(); request[field] = value;

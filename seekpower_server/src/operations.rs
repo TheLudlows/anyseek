@@ -1,5 +1,6 @@
 use crate::api_types::{
-    GetDocumentRequest, IndexResponseObject, SearchRequestObject, SearchResultObject,
+    CreateIndexRequest, GetDocumentRequest, IndexResponseObject, SearchRequestObject,
+    SearchResultObject,
 };
 use std::{
     collections::HashMap,
@@ -18,11 +19,11 @@ use seekpower::{
     index::{
         AccessType, Clustering, DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document,
         DocumentCompression, FrequentwordType, IS_AVX2, IS_NEON, IndexArc, IndexDocument,
-        IndexDocuments, IndexMetaObject, LexicalSimilarity, SchemaField, StopwordType,
-        TokenizerType, UpdateDocument, UpdateDocuments, create_index,
+        IndexDocuments, IndexMetaObject, LexicalSimilarity, SchemaField, UpdateDocument,
+        UpdateDocuments, create_index,
     },
     iterator::{GetIterator, IteratorResult},
-    search::{Search, SearchMode},
+    search::Search,
     vector::Inference,
 };
 
@@ -39,23 +40,26 @@ pub(crate) fn live_api() -> String {
     "Seekpower server ".to_owned() + VERSION + simd
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn create_index_api<'a>(
-    index_path: &'a PathBuf,
-    index_name: String,
-    schema: Vec<SchemaField>,
-    lexical_similarity: LexicalSimilarity,
-    tokenizer: TokenizerType,
-    stop_words: StopwordType,
-    frequent_words: FrequentwordType,
-    ngram_indexing: u8,
-    document_compression: DocumentCompression,
+pub(crate) async fn create_index_api(
+    index_path: &PathBuf,
+    request: CreateIndexRequest,
     force_shard_number: Option<usize>,
-    apikey_object: &'a mut ApikeyObject,
-    mute: bool,
-    clustering: Clustering,
-    inference: Inference,
+    apikey_object: &mut ApikeyObject,
 ) -> Result<u64, String> {
+    let mut names = HashSet::new();
+    if request.index_name.trim().is_empty() || request.schema.is_empty() {
+        return Err("index_name and schema must be nonempty".into());
+    }
+    for field in &request.schema {
+        if field.field.trim().is_empty() || !names.insert(&field.field) {
+            return Err("schema field names must be nonempty and unique".into());
+        }
+        if !field.boost.is_finite() || field.boost <= 0.0 {
+            return Err("field boost must be finite and positive".into());
+        }
+    }
+    let schema: Vec<SchemaField> = request.schema.into_iter().map(Into::into).collect();
+    let inference = request.vector.map(Inference::from).unwrap_or_default();
     seekpower::vector::validate_vector_schema(&inference, &schema)?;
     let mut index_id: u64 = 0;
     for id in apikey_object.index_list.keys().sorted() {
@@ -73,20 +77,20 @@ pub(crate) async fn create_index_api<'a>(
 
     let meta = IndexMetaObject {
         id: index_id,
-        name: index_name,
-        lexical_similarity,
-        tokenizer,
-        stop_words,
-        frequent_words,
-        ngram_indexing,
-        document_compression,
+        name: request.index_name,
+        lexical_similarity: LexicalSimilarity::Bm25fProximity,
+        tokenizer: request.tokenizer,
+        stop_words: request.stop_words,
+        frequent_words: FrequentwordType::English,
+        ngram_indexing: 9,
+        document_compression: DocumentCompression::Snappy,
         access_type: AccessType::Mmap,
-        clustering,
+        clustering: Clustering::Auto,
         inference,
     };
 
     let index_arc =
-        create_index(&index_id_path, meta, &schema, 11, mute, force_shard_number).await?;
+        create_index(&index_id_path, meta, &schema, 11, true, force_shard_number).await?;
 
     apikey_object.index_list.insert(index_id, index_arc);
 
@@ -220,14 +224,17 @@ pub(crate) async fn delete_documents_by_query_api(
     index_arc: &IndexArc,
     search_request: SearchRequestObject,
 ) -> Result<u64, String> {
+    if search_request.query_string.trim().is_empty() || search_request.query_vector.is_some() {
+        return Err("deletion by query requires nonempty text without a vector; use clear to delete all documents".into());
+    }
     seekpower::search::validate_metadata_filters(index_arc, &search_request.facet_filter).await?;
     index_arc
         .delete_documents_by_query(
             search_request.query_string.to_owned(),
-            search_request.query_type_default,
+            search_request.query_type(),
             search_request.offset,
             search_request.length,
-            search_request.realtime,
+            true,
             search_request.field_filter,
             search_request.facet_filter,
             search_request.result_sort,
@@ -269,14 +276,23 @@ pub(crate) async fn query_index_api(
     search_request: SearchRequestObject,
 ) -> Result<SearchResultObject, String> {
     let start_time = Instant::now();
-
+    if search_request
+        .offset
+        .checked_add(search_request.length)
+        .is_none()
+    {
+        return Err("offset plus length is too large".into());
+    }
+    if search_request.query_vector.is_none() && search_request.similarity_threshold.is_some() {
+        return Err("similarity_threshold requires query_vector".into());
+    }
+    let mode = search_request.search_mode();
+    let result_type = search_request.result_type();
     let query_vector = match search_request.query_vector.as_ref() {
-        Some(value) if search_request.search_mode != SearchMode::Lexical => {
-            Some(seekpower::vector::parse_external_embedding(
-                value,
-                &index_arc.read().await.meta.inference,
-            )?)
-        }
+        Some(value) => Some(seekpower::vector::parse_external_embedding(
+            value,
+            &index_arc.read().await.meta.inference,
+        )?),
         _ => None,
     };
 
@@ -284,13 +300,13 @@ pub(crate) async fn query_index_api(
         .search(
             search_request.query_string.to_owned(),
             query_vector,
-            search_request.query_type_default,
-            search_request.search_mode,
-            search_request.enable_empty_query,
+            search_request.query_type(),
+            mode,
+            true,
             search_request.offset,
             search_request.length,
-            search_request.result_type,
-            search_request.realtime,
+            result_type,
+            true,
             search_request.field_filter,
             search_request.facet_filter,
             search_request.result_sort,
@@ -311,11 +327,7 @@ pub(crate) async fn query_index_api(
             match index_arc
                 .read()
                 .await
-                .get_document(
-                    result.doc_id,
-                    search_request.realtime,
-                    &return_fields_filter,
-                )
+                .get_document(result.doc_id, true, &return_fields_filter)
                 .await
             {
                 Ok(doc) => {
@@ -337,7 +349,9 @@ pub(crate) async fn query_index_api(
         offset: search_request.offset,
         length: search_request.length,
         count: result_object.results.len(),
-        count_total: result_object.result_count_total,
+        count_total: search_request
+            .count
+            .then_some(result_object.result_count_total),
         query_terms: result_object.query_terms,
         results,
     })

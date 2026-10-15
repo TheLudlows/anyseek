@@ -1,34 +1,36 @@
 # 当前功能清单
 
-核查日期：2026-10-14（Asia/Shanghai）。基于主干 `d1254da`（D5 已合入），本分支执行 E1/E2。主干与本分支的合入状态见 [STATUS.md](STATUS.md)。本文按本分支实现列举功能，不将路线图视为已实现能力。
+核查日期：2026-10-15（Asia/Shanghai）。基于主干 `4e171b5`，本分支收敛 HTTP 参数；Rust 核心配置与索引格式保持不变。
 
 ## 1. 检索与数据能力
 
 | 类别 | 当前保留功能 | 条件与边界 |
 | --- | --- | --- |
-| 全文检索 | AND/OR/NOT、短语、查询中的 `+`/`-`/双引号、多字段检索、字段权重 | 默认 `Intersection`；显式选择 `Lexical` |
-| 相关性 | `Bm25f`、`Bm25fProximity` | 尚未收缩为单一评分方式 |
+| 全文检索 | AND/OR/NOT、短语、查询中的 `+`/`-`/双引号、多字段检索、字段权重 | HTTP 默认 AND；只有文本时自动使用全文检索 |
+| 相关性 | `Bm25f`、`Bm25fProximity` | 核心保留两种；HTTP 新建索引固定 Bm25fProximity |
 | 分词 | `AsciiAlphabetic`、`UnicodeAlphanumeric`、`UnicodeAlphanumericFolded`、`Whitespace`、`WhitespaceLowercase`、`UnicodeAlphanumericZH` | 中文分词依赖默认启用的 `zh`；Folded 支持字符规范化 |
-| 文本配置 | 停用词、高频词、词级二元/三元 N-gram 索引 | N-gram 默认位掩码 9，不提供字符前缀/子串匹配；停用词/高频词支持英德法西预设及自定义 |
-| 向量输入 | 外部向量、多个向量字段、JSON 数组或 Binary/base64 | `Inference::External`；所有向量字段共享索引级配置；应用负责模型和切块 |
+| 文本配置 | 停用词、高频词、词级二元/三元 N-gram 索引 | N-gram 默认位掩码 9，不提供字符前缀/子串匹配；停用词保留配置；HTTP 高频词固定 English，核心仍支持自定义 |
+| 向量输入 | 外部向量、多个向量字段、JSON 数组或 Binary/base64 | HTTP 使用 `vector:{"dimensions":N}`，核心仍为 `Inference::External`；所有向量字段共享索引级配置；应用负责模型和切块 |
 | 向量校验 | 维度、精度、有限数值/范围、非零余弦范数、base64 格式 | 非法请求显式报错；批次入队前校验输入不等于事务 |
 | 向量检索 | 全簇扫描、Leveled IVF ANN、K-Medoid 聚类 | `AnnMode::All/Nprobe/Similaritythreshold/NprobeSimilaritythreshold`；全簇扫描仍使用配置的存储精度/量化，不等于原始 F32 精确评分 |
 | 向量配置 | F32/I8；Cosine/Dot/Euclidean；不量化、ScalarQuantizationI8、TurboQuantI8 | I8 输入只能配 `quantization: None`；聚类 `None/Auto/Fixed`；可设相似度阈值 |
-| 混合检索 | 全文与向量分别召回，按文档 ID 合并并执行 RRF | 当前融合参数在代码内固定；无自动模式选择、模型重排或跨节点协调 |
+| 混合检索 | 全文与向量分别召回，按文档 ID 合并并执行 RRF | 当前融合参数在代码内固定；HTTP 按文本/向量输入推导模式；无模型重排或跨节点协调 |
 | 字段选择 | `field_filter` 选择检索字段；`fields` 投影存储字段 | 字段选择不等于元数据值过滤 |
-| 元数据过滤 | 字符串/字符串集合、整数、浮点、时间戳范围过滤 | 依赖 `facet:true`；三种模式使用共享谓词，向量在评分/Top-K 前过滤；ANN 仍受簇探测范围限制 |
+| 元数据过滤 | 字符串/字符串集合、整数、浮点、时间戳范围过滤 | 创建请求使用 `filterable:true`（核心/索引响应仍为 `facet:true`）；三种模式使用共享谓词，向量在评分/Top-K 前过滤；ANN 仍受簇探测范围限制 |
 | 排序 | 相关性、facet 字段升降序、多字段组合、`_score`/`_id` | Vector/Hybrid 也会对已召回候选排序，但向量召回先按相似度截断，不保证全库字段排序 Top-K |
 | 结果与分页 | `Topk/Count/TopkCount`、`offset/length`、显式空查询浏览 | 完整计数/空查询能力主要在词法路径；ANN 和 Hybrid 的 `count_total` 不应作为全库精确去重命中数 |
-| 实时可见性 | 搜索 `realtime:true` 可包含尚未提交的数据 | 可搜索不等于已持久化；异常退出可能丢失未提交数据 |
+| 实时可见性 | HTTP 默认包含未提交数据；Rust 核心显式选择 realtime | 可搜索不等于已持久化；异常退出可能丢失未提交数据 |
 | 索引生命周期 | 创建、打开、查看、提交、关闭、删除；核心库清空索引 | HTTP 服务启动加载磁盘索引；Rust 库与 HTTP 统一使用 Mmap；实时写入缓冲仍在内存 |
 | 文档写入 | JSON 单条/批量写入、按内部 DocID 单条/批量替换更新 | 当前更新不是业务 ID upsert，也不是字段局部合并；内部 DocID 不提供稳定业务 ID/版本契约 |
 | 文档读取 | 按 DocID 读存储字段、字段投影、保留原文 | 不生成摘要或高亮；非存储字段不能作为原文返回 |
 | 文档删除 | 单个/多个 DocID 删除、按查询选取文档删除 | 按查询删除仍保留；没有跨记录事务承诺 |
-| 遍历 | 双向 iterator、起点、skip/take、字段投影、可选文档内容 | 正 take 向前、负 take 向后；`include_deleted` 可返回删除 ID，不代表恢复原文 |
+| 遍历 | 双向 iterator、起点、skip/take、字段投影、可选文档内容 | 正 take 向前、负 take 向后；HTTP 默认 10 个未删除文档；核心仍可显式返回删除 ID，不代表恢复原文 |
 | 本地存储 | 倒排、向量、facet、文档存储、删除标记；增量提交及重新打开 | RAM 缓冲、本机 shard/level、mmap；没有集群复制或已验收的 WAL/检查点恢复协议 |
 | 压缩与执行 | None/Snappy 文档压缩；posting 编码、SIMD、Block-max WAND、MaxScore | 默认文档压缩 Snappy；不是已完成当前版本性能认证 |
 
 字段类型：`U8/U16/U32/U64`、`I8/I16/I32/I64`、`Timestamp`、`F32/F64`、`Bool`、`String16/String32`、`StringSet16/StringSet32`、`Text`、`Json`、`Binary`。字段类型存在不代表每种类型都支持元数据过滤、全文或向量索引。向量使用 `Json` 或 `Binary` 加 `index_vector:true`，没有独立的 `FieldType::Vector`。
+
+HTTP 新建索引采用 Snappy、English 高频词、N-gram=9、Auto 聚类；查询搜索全部向量簇。核心显式配置仍保留，已有索引继续使用其持久化配置。HTTP 默认包含未提交写入；空查询浏览文档；`count:false` 不报告总数，返回 `count_total:null`。旧调优参数直接拒绝，迁移见 [MIGRATION.md](MIGRATION.md)。
 
 ## 2. HTTP 接口全集
 

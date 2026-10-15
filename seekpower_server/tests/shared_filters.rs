@@ -63,22 +63,22 @@ async fn query(
     ann: Value,
 ) -> ResultObject {
     let r: SearchRequestObject = serde_json::from_value(json!({"query":"common", "length":length,
-        "search_mode":mode(name,ann),"facet_filter":filter}))
+        "facet_filter":filter}))
     .unwrap();
     index
         .search(
-            r.query_string,
+            r.query_string.clone(),
             if name == "Lexical" {
                 None
             } else {
                 Some(Embedding::F32(vec![1., 0., 0.]))
             },
-            r.query_type_default,
-            r.search_mode,
+            r.query_type(),
+            serde_json::from_value(mode(name, ann.clone())).unwrap(),
             false,
             r.offset,
             r.length,
-            r.result_type,
+            r.result_type(),
             realtime,
             r.field_filter,
             r.facet_filter,
@@ -384,7 +384,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                     json!({"NprobeSimilaritythreshold":[3,if metric==VectorSimilarity::Euclidean {1000.0} else {-1000.0}]}),
                     json!({"Similaritythreshold":if metric==VectorSimilarity::Euclidean {1000.0} else {-1000.0}}),
                 ] {
-                    let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","length":3,"search_mode":mode(name,ann.clone()),"facet_filter":predicate,"field_filter":["vector"]})).unwrap();
+                    let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","length":3,"facet_filter":predicate,"field_filter":["vector"]})).unwrap();
                     let embedding = if precision == Precision::I8 {
                         Embedding::I8(vec![24, 0, 0])
                     } else {
@@ -392,14 +392,14 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                     };
                     let result = index
                         .search(
-                            r.query_string,
+                            r.query_string.clone(),
                             Some(embedding),
-                            r.query_type_default,
-                            r.search_mode,
+                            r.query_type(),
+                            serde_json::from_value(mode(name, ann.clone())).unwrap(),
                             false,
                             0,
                             r.length,
-                            r.result_type,
+                            r.result_type(),
                             false,
                             r.field_filter,
                             r.facet_filter,
@@ -447,14 +447,14 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","facet_filter":[{"StringSet32":{"field":"tags","filter":["even"]}}]})).unwrap();
             let result = index
                 .search(
-                    r.query_string,
+                    r.query_string.clone(),
                     None,
-                    r.query_type_default,
-                    r.search_mode,
+                    r.query_type(),
+                    r.search_mode(),
                     false,
                     0,
                     10,
-                    r.result_type,
+                    r.result_type(),
                     false,
                     vec![],
                     r.facet_filter,

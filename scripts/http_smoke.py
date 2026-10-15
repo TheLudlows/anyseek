@@ -179,14 +179,9 @@ def exercise(binary, workdir):
 
             schema = [
                 {'field': 'title', 'field_type': 'Text', 'store': False, 'index_lexical': False},
-                {'field': 'body', 'field_type': 'Text', 'store': True, 'index_lexical': True,
-                 'longest': True},
+                {'field': 'body', 'field_type': 'Text', 'store': True, 'index_lexical': True},
                 {'field': 'url', 'field_type': 'Text', 'store': False, 'index_lexical': False}]
-            index_id = api('POST', '/api/v1/index', {
-                'index_name': 'http_smoke', 'schema': schema, 'similarity': 'Bm25f',
-                'tokenizer': 'UnicodeAlphanumeric', 'stop_words': 'None',
-                'frequent_words': 'English', 'ngram_indexing': 9,
-                'document_compression': 'Snappy', 'inference': 'None', 'clustering': 'None'})
+            index_id = api('POST', '/api/v1/index', {'index_name': 'http_smoke', 'schema': schema, 'tokenizer': 'UnicodeAlphanumeric', 'stop_words': 'None'})
             check(index_id == 0, f'first index ID mismatch: {index_id}')
             path = f'/api/v1/index/{index_id}'
             api('POST', path + '/doc', {'title': 'title1 test', 'body': 'body1', 'url': 'url1'})
@@ -212,14 +207,12 @@ def exercise(binary, workdir):
                         api_key, expected=400)
             request('GET', path + '/query?query=test&query_rewriting=SearchOnly',
                     key=api_key, expected=405)
-            literal = api('POST', path + '/query', {'query': 'tset', 'search_mode': 'Lexical',
-                          'result_type': 'TopkCount'})
+            literal = api('POST', path + '/query', {'query': 'tset'})
             check(literal['query'] == literal['original_query'] == 'tset' and
                   literal['count_total'] == 0 and 'suggestions' not in literal,
                   f'query unexpectedly rewritten: {literal}')
             print('PASS retired query options rejected and literal query preserved')
-            request('POST', '/api/v1/index', {'index_name': 'geo', 'schema': [
-                {'field': 'location', 'field_type': 'Point', 'store': True, 'index_lexical': False, 'facet': True}]}, api_key, expected=400)
+            request('POST', '/api/v1/index', {'index_name': 'geo', 'schema': [{'field': 'location', 'field_type': 'Point', 'store': True, 'index_lexical': False, 'filterable': True}]}, api_key, expected=400)
             geo_options = [
                 {'distance_fields': []},
                 {'facet_filter': [{'Point': {'field': 'location', 'filter': [[0, 0], {'start': 0, 'end': 10}, 'Kilometers']}}]},
@@ -235,13 +228,11 @@ def exercise(binary, workdir):
                     **{name: json.dumps(value) for name, value in options.items()}}), key=api_key, expected=405)
             request('GET', path + '/doc/0', {'distance_fields': []}, api_key, expected=400)
             request('GET', path + '/doc/0?distance_fields=%5B%5D', key=api_key, expected=400)
-            check(api('POST', path + '/query', {'query': 'test', 'length': 10, 'result_type': 'TopkCount'})['count_total'] == 2,
+            check(api('POST', path + '/query', {'query': 'test', 'length': 10})['count_total'] == 2,
                   'retained POST JSON query options failed')
             print('PASS retired geographic schema/query/read options rejected by HTTP')
 
-            result = api('POST', path + '/query', {
-                'query': '+body2 +test', 'result_type': 'TopkCount',
-                'search_mode': 'Lexical', 'realtime': False})
+            result = api('POST', path + '/query', {'query': '+body2 +test'})
             check(result['count_total'] == 1 and len(result['results']) == 1,
                   f'lexical query mismatch: {result}')
             doc_id = result['results'][0]['_id']
@@ -300,26 +291,21 @@ def exercise(binary, workdir):
             # Keep update/delete/get covered when the core attachment parameter is removed.
             api('PATCH', path + '/doc', [doc_id, {'body': 'updated unique_record'}])
             check(api('PATCH', path) == 5, 'update did not finish')
-            updated = api('POST', path + '/query', {
-                'query': 'unique_record', 'search_mode': 'Lexical', 'result_type': 'TopkCount'})
+            updated = api('POST', path + '/query', {'query': 'unique_record'})
             check(updated['count_total'] == 1, 'updated record not searchable')
             updated_id = updated['results'][0]['_id']
             check(api('GET', path + f'/doc/{updated_id}')['body'] == 'updated unique_record',
                   'updated record not readable')
             api('DELETE', path + f'/doc/{updated_id}')
-            check(api('POST', path + '/query', {'query': 'unique_record', 'search_mode': 'Lexical',
-                  'result_type': 'TopkCount'})['count_total'] == 0, 'deleted record still visible')
+            check(api('POST', path + '/query', {'query': 'unique_record'})['count_total'] == 0, 'deleted record still visible')
             print('PASS JSON create/write/commit/query/get/update/delete; PDF endpoints removed')
 
-            vector_schema = [schema[1], {'field': 'category', 'field_type': 'String16', 'store': True,
-                                        'index_lexical': False, 'facet': True},
-                             {'field': 'date', 'field_type': 'Timestamp', 'store': True, 'index_lexical': False, 'facet': True},
-                             {'field': 'price', 'field_type': 'F64', 'store': True, 'index_lexical': False, 'facet': True},
-                             {'field': 'tags', 'field_type': 'StringSet32', 'store': True, 'index_lexical': False, 'facet': True}, {'field': 'vector', 'field_type': 'Json', 'store': True,
+            vector_schema = [schema[1], {'field': 'category', 'field_type': 'String16', 'store': True, 'index_lexical': False, 'filterable': True},
+                             {'field': 'date', 'field_type': 'Timestamp', 'store': True, 'index_lexical': False, 'filterable': True},
+                             {'field': 'price', 'field_type': 'F64', 'store': True, 'index_lexical': False, 'filterable': True},
+                             {'field': 'tags', 'field_type': 'StringSet32', 'store': True, 'index_lexical': False, 'filterable': True}, {'field': 'vector', 'field_type': 'Json', 'store': True,
                                          'index_lexical': False, 'index_vector': True}]
-            config = {'index_name': 'external_vectors', 'schema': vector_schema,
-                      'inference': {'External': {'dimensions': 3, 'precision': 'F32',
-                       'quantization': 'None', 'similarity': 'Cosine'}}, 'clustering': 'None'}
+            config = {'index_name': 'external_vectors', 'schema': vector_schema, 'vector': {'dimensions': 3, 'precision': 'F32', 'quantization': 'None', 'metric': 'Cosine'}}
             vector_id = api('POST', '/api/v1/index', config)
             vp = f'/api/v1/index/{vector_id}'
             for invalid in ({'body': 'missing'}, {'body': 'bad', 'vector': [1, 2]},
@@ -331,9 +317,7 @@ def exercise(binary, workdir):
                                      {'body': 'beta', 'vector': [0, 1, 0], 'category': 'b', 'date': 1640995200, 'price': 20, 'tags': ['blue']}])
             check(api('PATCH', vp) == 2, 'external write count')
             for mode in ('Vector', 'Hybrid'):
-                query_request = {'query': 'alpha', 'search_mode': {mode: {
-                    'similarity_threshold': None, 'ann_mode': 'All'}}, 'result_type': 'TopkCount'}
-                request('POST', vp + '/query', query_request, api_key, expected=400)
+                query_request = {'query': '' if mode == 'Vector' else 'alpha'}
                 for invalid in ([1], [0, 0, 0], ['x', 0, 0], '!base64',
                                 base64.b64encode(bytes.fromhex('7f8000000000000000000000')).decode()):
                     request('POST', vp + '/query', {**query_request, 'query_vector': invalid},
@@ -353,26 +337,23 @@ def exercise(binary, workdir):
                     'facet_filter': [{'String16': {'field': 'category', 'filter': ['absent']}}]})
                 check(absent['results'] == [], f'{mode} absent metadata')
             for name in ('Lexical', 'Vector', 'Hybrid'):
-                search_mode = 'Lexical' if name == 'Lexical' else {name: {'ann_mode': 'All', 'similarity_threshold': None}}
                 for predicate in [
                     {'String16': {'field': 'missing', 'filter': ['b']}},
                     {'String16': {'field': 'body', 'filter': ['beta']}},
                     {'F64': {'field': 'category', 'filter': {'start': 0, 'end': 1}}},
                     {'Timestamp': {'field': 'date', 'filter': {'start': 2, 'end': 1}}}
                 ]:
-                    rejected = request('POST', vp + '/query', {'query': 'alpha', 'query_vector': [1, 0, 0],
-                        'search_mode': search_mode, 'facet_filter': [predicate]}, api_key, expected=400)
+                    rejected = request('POST', vp + '/query', {'query': '' if name == 'Vector' else 'alpha', 'query_vector': None if name == 'Lexical' else [1, 0, 0], 'facet_filter': [predicate]}, api_key, expected=400)
                     check(b'facet_filter' in rejected, f'{name} invalid metadata predicate accepted')
             request('DELETE', vp + '/doc', {'query': 'alpha', 'facet_filter': [
                 {'String16': {'field': 'missing', 'filter': ['a']}}]}, api_key, expected=400)
             print('PASS metadata filters before vector/hybrid Top-K; invalid predicates fail across modes')
-            filtered = api('POST', vp + '/query', {'query': '', 'enable_empty_query': True,
-                'search_mode': 'Lexical', 'facet_filter': [{'String16': {'field': 'category', 'filter': ['b']}}]})
+            filtered = api('POST', vp + '/query', {'query': '', 'facet_filter': [{'String16': {'field': 'category', 'filter': ['b']}}]})
             check([doc['body'] for doc in filtered['results']] == ['beta'], 'lexical metadata filter')
             request('PATCH', vp + '/doc', [0, {'body': 'invalid update'}], api_key, expected=400)
             request('PATCH', vp + '/doc', [[0, {'body': 'changed', 'vector': [0, 0, 1]}],
                                            [1, {'body': 'invalid'}]], api_key, expected=400)
-            lexical = api('POST', vp + '/query', {'query': 'alpha', 'search_mode': 'Lexical'})
+            lexical = api('POST', vp + '/query', {'query': 'alpha'})
             check(lexical['results'][0]['body'] == 'alpha', 'failed update lost original')
             for method in ('GET', 'POST', 'QUERY', 'OPTIONS'):
                 retired_response = request(method, f'/api/v2/index/{vector_id}/query', b'retired binary payload', api_key,
@@ -381,10 +362,10 @@ def exercise(binary, workdir):
                                            expected=204 if method == 'OPTIONS' else 501)
                 check(retired_response == unknown_response, 'retired path still has a dedicated response')
             print('PASS retired binary query protocol is unavailable')
-            for inference in ({'Model2Vec': {'model': 'PotionBase2M', 'chunk_size': 1000}},
-                              {'External': {'dimensions': 0, 'precision': 'F32', 'quantization': 'None', 'similarity': 'Cosine'}},
-                              {'External': {'dimensions': 3, 'precision': 'F32', 'quantization': 'None', 'similarity': 'invalid'}}):
-                request('POST', '/api/v1/index', {**config, 'inference': inference}, api_key, expected=400)
+            for vector in ({'dimensions': 0}, {'dimensions': 3, 'metric': 'invalid'},
+                           {'dimensions': 3, 'precision': 'None'},
+                           {'dimensions': 3, 'precision': 'I8', 'quantization': 'TurboQuantI8'}):
+                request('POST', '/api/v1/index', {**config, 'vector': vector}, api_key, expected=400)
             binary_schema = [{**field, 'field_type': 'Binary'} if field['field'] == 'vector' else field
                              for field in vector_schema]
             binary_id = api('POST', '/api/v1/index', {**config, 'schema': binary_schema})
@@ -392,16 +373,10 @@ def exercise(binary, workdir):
             encoded = base64.b64encode(bytes.fromhex('3f8000000000000000000000')).decode()
             api('POST', bp + '/doc', {'body': 'binary', 'vector': encoded})
             check(api('PATCH', bp) == 1, 'binary vector write')
-            result = api('POST', bp + '/query', {'query': '', 'query_vector': encoded,
-                'search_mode': {'Vector': {'similarity_threshold': None, 'ann_mode': 'All'}}})
+            result = api('POST', bp + '/query', {'query': '', 'query_vector': encoded})
             check(result['results'][0]['body'] == 'binary', 'base64 vector query')
             print('PASS external vector/hybrid, invalid input, batch and update atomic validation')
-            metadata_id = api('POST', '/api/v1/index', {'index_name': 'metadata', 'schema': [
-                {**field, 'store': True} for field in schema] + [
-                {'field': 'category', 'field_type': 'String16', 'store': True, 'index_lexical': False, 'facet': True},
-                {'field': 'price', 'field_type': 'F64', 'store': True, 'index_lexical': False, 'facet': True},
-                {'field': 'tags', 'field_type': 'StringSet32', 'store': True, 'index_lexical': False, 'facet': True},
-                {'field': 'date', 'field_type': 'Timestamp', 'store': True, 'index_lexical': False, 'facet': True}]})
+            metadata_id = api('POST', '/api/v1/index', {'index_name': 'metadata', 'schema': [{**field, 'store': True} for field in schema] + [{'field': 'category', 'field_type': 'String16', 'store': True, 'index_lexical': False, 'filterable': True}, {'field': 'price', 'field_type': 'F64', 'store': True, 'index_lexical': False, 'filterable': True}, {'field': 'tags', 'field_type': 'StringSet32', 'store': True, 'index_lexical': False, 'filterable': True}, {'field': 'date', 'field_type': 'Timestamp', 'store': True, 'index_lexical': False, 'filterable': True}]})
             mp = f'/api/v1/index/{metadata_id}'
             api('POST', mp + '/doc', [
                 {'title': 'Old record', 'body': 'ordinary metadata', 'url': '', 'category': 'a',
@@ -612,35 +587,101 @@ def exercise(binary, workdir):
                 check(process.returncode == 0, f'unclean signal shutdown: {signum}')
                 process = launch()
                 ready(process)
-                result = api('POST', shutdown_path + '/query', {'query': marker, 'realtime': False})
+                result = api('POST', shutdown_path + '/query', {'query': marker})
                 check(result['count_total'] == 1, f'shutdown lost accepted write: {signum}')
             api('DELETE', shutdown_path)
             print('PASS removed close/version routes and SIGTERM/SIGINT commit before exit')
+
+            # Minimal public settings resolve once at creation and survive restart.
+            defaults = {'index_name': 'defaults', 'schema': [
+                {'field': 'body', 'field_type': 'Text'},
+                {'field': 'category', 'field_type': 'String16', 'filterable': True},
+                {'field': 'vector', 'field_type': 'Json', 'index_vector': True}],
+                'vector': {'dimensions': 3}}
+            default_id = api('POST', '/api/v1/index', defaults)
+            dp = f'/api/v1/index/{default_id}'
+            effective = api('GET', dp)['schema']
+            check(effective['body']['store'] and effective['body']['index_lexical'], 'text defaults')
+            check(effective['category']['store'] and effective['category']['facet'] and
+                  not effective['category']['index_lexical'], 'metadata defaults')
+            check(not effective['vector']['store'] and not effective['vector']['index_lexical'], 'vector defaults')
+            metadata_path = workdir / 'index' / '1' / str(default_id) / 'index.json'
+            metadata = metadata_path.read_bytes()
+            settings = json.loads(metadata)
+            check(settings['document_compression'] == 'Snappy' and settings['ngram_indexing'] == 9 and
+                  settings['frequent_words'] == 'English' and settings['clustering'] == 'Auto' and
+                  settings['lexical_similarity'] == 'Bm25fProximity', 'managed creation settings')
+            check(settings['inference']['External'] == {'dimensions': 3, 'precision': 'F32',
+                  'quantization': 'None', 'similarity': 'Cosine'}, 'vector defaults')
+            api('POST', dp + '/doc', [{'body': 'alpha', 'category': 'a', 'vector': [1, 0, 0]},
+                                     {'body': 'beta', 'category': 'b', 'vector': [0, 1, 0]}])
+            for payload in ({'query': 'alpha'}, {'query_vector': [1, 0, 0]},
+                            {'query': 'alpha', 'query_vector': [1, 0, 0]}):
+                result = api('POST', dp + '/query', payload)
+                check(result['results'][0]['body'] == 'alpha' and 'vector' not in result['results'][0],
+                      f'inferred mode/default projection before commit: {payload}')
+            check(api('POST', dp + '/query', {})['count_total'] == 2, 'empty input must browse')
+            check(api('POST', dp + '/query', {'query': 'alpha beta'})['count_total'] == 0, 'default AND')
+            check(api('POST', dp + '/query', {'query': 'alpha beta', 'operator': 'or'})['count_total'] == 2, 'explicit OR')
+            count_only = api('POST', dp + '/query', {'length': 0})
+            check(count_only['count_total'] == 2 and count_only['results'] == [], 'count-only search')
+            for payload in ({}, {'query_vector': [1, 0, 0]}, {'query': 'alpha', 'query_vector': [1, 0, 0]}):
+                if 'query_vector' in payload:
+                    request('POST', dp + '/query', {**payload, 'length': 0}, api_key, expected=400)
+                uncounted = api('POST', dp + '/query', {**payload, 'count': False, 'length': 1})
+                check(uncounted['count_total'] is None and len(uncounted['results']) == 1, 'uncounted search')
+            iterator = api('POST', dp + '/iterator', {})
+            check(len(iterator['results']) == 2 and all(item['doc']['body'] for item in iterator['results']),
+                  'iterator defaults must include live documents')
+            reverse = api('POST', dp + '/iterator', {'take': -10, 'fields': ['body']})
+            check([item['doc_id'] for item in reverse['results']] ==
+                  [item['doc_id'] for item in reversed(iterator['results'])] and
+                  all(set(item['doc']) == {'body'} for item in reverse['results']), 'reverse iterator projection')
+            for body in ({}, {'query': ''}, {'query': 'alpha', 'query_vector': [1, 0, 0]}):
+                request('DELETE', dp + '/doc', body, api_key, expected=400)
+            for key, value in {'similarity': 'Bm25f', 'frequent_words': 'None', 'ngram_indexing': 0,
+                               'document_compression': 'None', 'clustering': 'None', 'inference': 'None'}.items():
+                request('POST', '/api/v1/index', {**defaults, key: value}, api_key, expected=400)
+            for key, value in {'search_mode': 'Lexical', 'realtime': False, 'enable_empty_query': False,
+                               'result_type': 'Count', 'query_type_default': 'Union', 'ann_mode': 'All'}.items():
+                request('POST', dp + '/query', {'query': 'alpha', key: value}, api_key, expected=400)
+            for key in ('longest', 'facet', 'field_id', 'indexed_field_id'):
+                request('POST', '/api/v1/index', {**defaults, 'schema': [
+                    {'field': 'body', 'field_type': 'Text', key: True}]}, api_key, expected=400)
+            for fields in ([], [{'field': '', 'field_type': 'Text'}],
+                           [{'field': 'body', 'field_type': 'Text'}] * 2):
+                request('POST', '/api/v1/index', {**defaults, 'schema': fields}, api_key, expected=400)
+            request('POST', dp + '/iterator', {'include_deleted': True}, api_key, expected=400)
+            request('POST', dp + '/query', {'similarity_threshold': 0.5}, api_key, expected=400)
+            api('PATCH', dp)
+            process.terminate()
+            process.wait(timeout=10)
+            process = launch()
+            ready(process)
+            check(metadata_path.read_bytes() == metadata, 'restart rewrote stored creation settings')
+            check(api('POST', dp + '/query', {'query_vector': [1, 0, 0]})['results'][0]['body'] == 'alpha',
+                  'simplified vector index did not survive restart')
+            api('DELETE', dp)
+            print('PASS minimal schema, managed settings, inferred modes, default visibility, count/iterator and strict parameters')
 
             for codec in ('Lz4', 'Zstd'):
                 request('POST', '/api/v1/index', {'index_name': 'retired_codec', 'schema': schema,
                         'document_compression': codec}, api_key, expected=400)
             print('PASS removed document codecs rejected by HTTP')
 
-            # N-gram masks are independent; FFR and FRF must not require RFF.
-            for mask in (None, 32, 64):
-                options = {'index_name': f'ngram_{mask}', 'schema': schema,
-                           'frequent_words': {'Custom': {'terms': ['of', 'the']}}}
-                if mask is not None:
-                    options['ngram_indexing'] = mask
-                ng_id = api('POST', '/api/v1/index', options)
-                ng_path = f'/api/v1/index/{ng_id}'
-                api('POST', ng_path + '/doc', [{'body': 'of the art'}, {'body': 'of art the'}, {'body': 'rust'}])
-                api('PATCH', ng_path)
-                for phrase in ('of the art', 'of art the'):
-                    result = api('POST', ng_path + '/query', {'query': f'"{phrase}"', 'realtime': False})
-                    check(result['count_total'] == 1 and result['results'][0]['body'] == phrase,
-                          f'N-gram mask {mask} lost or changed phrase matches: {phrase}')
-                for query in ('r', 'ru', 'us', 'r*'):
-                    check(api('POST', ng_path + '/query', {'query': query})['count_total'] == 0,
-                          'word N-grams must not introduce character prefix/substring search')
-                api('DELETE', ng_path)
-            print('PASS default/independent N-gram flags and word-level query contract')
+            # HTTP uses managed N-gram defaults; the Rust core still tests every mask.
+            ng_id = api('POST', '/api/v1/index', {'index_name': 'ngram_defaults', 'schema': schema})
+            ng_path = f'/api/v1/index/{ng_id}'
+            api('POST', ng_path + '/doc', [{'body': 'of the art'}, {'body': 'of art the'}, {'body': 'rust'}])
+            for phrase in ('of the art', 'of art the'):
+                result = api('POST', ng_path + '/query', {'query': f'"{phrase}"'})
+                check(result['count_total'] == 1 and result['results'][0]['body'] == phrase,
+                      f'Default N-grams changed phrase matches: {phrase}')
+            for query in ('r', 'ru', 'us', 'r*'):
+                check(api('POST', ng_path + '/query', {'query': query})['count_total'] == 0,
+                      'word N-grams must not introduce character prefix/substring search')
+            api('DELETE', ng_path)
+            print('PASS managed N-gram defaults and word-level query contract')
 
             # Key creation, revocation and scopes remain independent of retired quotas.
             def scoped(key, method, path, data=None):

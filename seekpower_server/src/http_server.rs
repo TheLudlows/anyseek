@@ -283,7 +283,7 @@ async fn list_indexes(
     params(
         ("apikey" = String, Header, description = "Master API key")
     ),
-    request_body(content = DeleteApikeyRequest, example = json!({"apikey_base64": "KEY_TO_REVOKE"})),
+    request_body(content = DeleteApikeyRequest, example = json!({"apikey_base64":"KEY_TO_REVOKE"})),
     responses(
         (status = 200, description = "Success", body = u64, content_type = "application/json"),
         (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
@@ -309,7 +309,7 @@ async fn delete_key(
     Ok(Json(count))
 }
 
-/// Creates an index in the authenticated key scope and returns its ID. Vector/Hybrid indexes require externally supplied vectors.
+/// Creates an index in the authenticated key scope and returns its ID. Vector fields require dimensions; embeddings are supplied by callers.
 #[utoipa::path(
     post, path = "/api/v1/index", tag = "Index",
     params(
@@ -317,9 +317,9 @@ async fn delete_key(
     ),
     request_body(content = CreateIndexRequest,
         examples(
-            ("Lexical" = (value = json!({"index_name":"documents","schema":[{"field":"body","field_type":"Text","store":true,"index_lexical":true}]}))),
-            ("Hybrid" = (value = json!({"index_name":"hybrid","schema":[{"field":"body","field_type":"Text","store":true,"index_lexical":true},{"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}],"inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}}))),
-            ("Vector" = (value = json!({"index_name":"vectors","schema":[{"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}],"inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}})))
+            ("Lexical" = (value = json!({"index_name":"documents","schema":[{"field":"body","field_type":"Text"}]}))),
+            ("Hybrid" = (value = json!({"index_name":"hybrid","schema":[{"field":"body","field_type":"Text"},{"field":"vector","field_type":"Json","index_vector":true}],"vector":{"dimensions":3}}))),
+            ("Vector" = (value = json!({"index_name":"vectors","schema":[{"field":"vector","field_type":"Json","index_vector":true}],"vector":{"dimensions":3}})))
         )),
     responses(
         (status = 200, description = "Success", body = u64, content_type = "application/json"),
@@ -335,23 +335,7 @@ async fn create_index(
 ) -> ApiResult<u64> {
     let mut keys = state.keys.write().await;
     let scope = keys.get_mut(&key).ok_or(ApiError::Unauthorized)?;
-    let id = create_index_api(
-        &state.index_path,
-        request.index_name,
-        request.schema,
-        request.similarity,
-        request.tokenizer,
-        request.stop_words,
-        request.frequent_words,
-        request.ngram_indexing,
-        request.document_compression,
-        state.force_shard_number,
-        scope,
-        true,
-        request.clustering,
-        request.inference,
-    )
-    .await?;
+    let id = create_index_api(&state.index_path, request, state.force_shard_number, scope).await?;
     Ok(Json(id))
 }
 
@@ -387,7 +371,7 @@ async fn get_index(
     ))
 }
 
-/// Commits pending writes to disk and returns the indexed document count. Writes are visible before commit when realtime=true; explicit commit allows reads with realtime=false. Automatic commit also occurs every 64K documents per shard and on graceful shutdown.
+/// Commits pending writes to disk and returns the indexed document count. Searches include pending writes; explicit commit persists them. Automatic commit also occurs every 64K documents per shard and on graceful shutdown.
 #[utoipa::path(
     patch, path = "/api/v1/index/{index_id}", tag = "Index",
     params(
@@ -472,7 +456,7 @@ async fn iterate(
             request.document_id,
             request.skip,
             request.take,
-            request.include_deleted,
+            false,
             request.include_document,
             request.fields,
         )
@@ -631,7 +615,7 @@ async fn delete_document(
     }
 }
 
-/// Deletes a document ID, an ID array, or documents matching a query. Send raw unquoted clear to remove all documents. Deletion is immediately visible; storage space is not reclaimed. Returns the remaining document count inside Ok.
+/// Deletes a document ID, an ID array, or documents matching a nonempty text query. Send raw unquoted clear to remove all documents. Deletion is immediately visible; storage space is not reclaimed. Returns the remaining document count inside Ok.
 #[utoipa::path(
     delete, path = "/api/v1/index/{index_id}/doc", tag = "Document",
     params(
@@ -670,7 +654,7 @@ async fn delete_documents(
     Ok(Json(result))
 }
 
-/// Runs a lexical, vector or hybrid query. Vector and Hybrid require query_vector. Parameters must be in the JSON body.
+/// Searches text, vectors, or both. Mode is inferred from the supplied inputs. Pending writes are visible; empty input browses documents. Parameters must be in the JSON body.
 #[utoipa::path(
     post, path = "/api/v1/index/{index_id}/query", tag = "Query",
     params(
@@ -679,9 +663,9 @@ async fn delete_documents(
     ),
     request_body(content = SearchRequestObject,
         examples(
-            ("Lexical" = (value = json!({"query":"hello","search_mode":"Lexical"}))),
-            ("Vector" = (value = json!({"query":"","query_vector":[1.0,0.0,0.0],"search_mode":{"Vector":{"similarity_threshold":null,"ann_mode":"All"}}}))),
-            ("Hybrid" = (value = json!({"query":"hello","query_vector":[1.0,0.0,0.0],"search_mode":{"Hybrid":{"similarity_threshold":null,"ann_mode":"All"}}})))
+            ("Lexical" = (value = json!({"query":"hello"}))),
+            ("Vector" = (value = json!({"query_vector":[1.0,0.0,0.0]}))),
+            ("Hybrid" = (value = json!({"query":"hello","query_vector":[1.0,0.0,0.0]})))
         )),
     responses(
         (status = 200, description = "Success", body = SearchResultObject, content_type = "application/json"),
@@ -940,5 +924,80 @@ mod tests {
                 .len(),
             3
         );
+    }
+    #[test]
+    fn openapi_describes_only_public_settings_and_valid_examples() {
+        let (_, openapi) = api_router().split_for_parts();
+        let doc = serde_json::to_value(openapi).unwrap();
+        let schemas = &doc["components"]["schemas"];
+        for (name, removed) in [
+            (
+                "CreateIndexRequest",
+                &[
+                    "similarity",
+                    "frequent_words",
+                    "ngram_indexing",
+                    "clustering",
+                    "document_compression",
+                    "inference",
+                ][..],
+            ),
+            (
+                "SearchRequestObject",
+                &[
+                    "search_mode",
+                    "realtime",
+                    "enable_empty_query",
+                    "result_type",
+                    "query_type_default",
+                ][..],
+            ),
+            (
+                "FieldRequest",
+                &["longest", "facet", "field_id", "indexed_field_id"][..],
+            ),
+            ("GetIteratorRequest", &["include_deleted"][..]),
+        ] {
+            for field in removed {
+                assert!(
+                    schemas[name]["properties"].get(field).is_none(),
+                    "{name}.{field}"
+                );
+            }
+        }
+        assert_eq!(
+            schemas["FieldRequest"]["required"],
+            json!(["field", "field_type"])
+        );
+        assert_eq!(schemas["VectorConfig"]["required"], json!(["dimensions"]));
+        assert_eq!(
+            schemas["GetIteratorRequest"]["properties"]["take"]["default"],
+            10
+        );
+        assert_eq!(
+            schemas["GetIteratorRequest"]["properties"]["include_document"]["default"],
+            true
+        );
+        assert_eq!(
+            schemas["SearchRequestObject"]["properties"]["count"]["default"],
+            true
+        );
+        for (path, creation) in [
+            ("/api/v1/index", true),
+            ("/api/v1/index/{index_id}/query", false),
+        ] {
+            let examples = doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]
+                ["examples"]
+                .as_object()
+                .unwrap();
+            for example in examples.values() {
+                if creation {
+                    serde_json::from_value::<CreateIndexRequest>(example["value"].clone()).unwrap();
+                } else {
+                    serde_json::from_value::<SearchRequestObject>(example["value"].clone())
+                        .unwrap();
+                }
+            }
+        }
     }
 }

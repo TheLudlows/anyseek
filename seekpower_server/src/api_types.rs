@@ -1,100 +1,111 @@
-//! HTTP request/response contracts. Core operation types remain in seekpower.
+//! HTTP contracts. Internal tuning stays in the engine; callers describe data and queries.
 use crate::api_schema;
 use seekpower::{
-    index::{
-        Clustering, Document, DocumentCompression, FrequentwordType, LexicalSimilarity, NgramSet,
-        SchemaField, StopwordType, TokenizerType,
-    },
+    index::{Document, FieldType, SchemaField, StopwordType, TokenizerType},
     search::{FacetFilter, QueryType, ResultSort, ResultType, SearchMode},
-    vector::Inference,
+    vector::{Inference, Precision, Quantization},
+    vector_similarity::{AnnMode, VectorSimilarity},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
-/// Search request object
+/// Search text, vectors, or both. Empty input browses documents. Pending writes are visible.
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequestObject {
-    /// Query string, search operators + - "" are recognized.
-    #[serde(rename = "query")]
+    /// Text query; supports +, - and quoted phrases. Omit for vector search or browsing.
+    #[serde(default, rename = "query")]
     pub query_string: String,
-    /// External query vector, required for Vector and Hybrid search. No model inference is performed.
+    /// External embedding. A vector alone selects Vector; nonempty text plus a vector selects Hybrid.
     #[serde(default)]
     pub query_vector: Option<Value>,
     #[serde(default)]
-    #[schema(required = false, default = false, example = false)]
-    /// Enable empty queries to browse all documents with pagination, filtering and sorting.
-    /// Otherwise an empty query string returns no results.
-    /// Typical use cases include index browsing, index export, conversion, analytics, audits, and inspection.
-    pub enable_empty_query: bool,
-    #[serde(default)]
-    #[schema(required = false, minimum = 0, default = 0, example = 0)]
-    /// Offset of search results to return.
+    /// Number of matching results to skip.
     pub offset: usize,
-    /// Number of search results to return.
+    /// Number of results. Lexical/browse queries accept zero for count-only; vector/hybrid require a positive window.
     #[serde(default = "length_api")]
-    #[schema(required = false, minimum = 1, default = 10, example = 10)]
+    #[schema(default = 10, minimum = 0)]
     pub length: usize,
+    /// Include the total reported by the retrieval mode. False returns count_total:null.
+    #[serde(default = "default_true")]
+    #[schema(default = true)]
+    pub count: bool,
+    /// Match all or any unqualified query terms. Explicit query operators take precedence.
     #[serde(default)]
-    /// Specify the type of search result.
-    #[schema(value_type = api_schema::ResultType)]
-    pub result_type: ResultType,
-    /// True realtime search: include indexed, but uncommitted documents into search results.
-    #[serde(default)]
-    pub realtime: bool,
-    /// Specify field names where to search at querytime, whereas SchemaField.indexed is set at indextime. If empty then all indexed fields are searched.
-    #[schema(required = false, example = json!(["title"]))]
+    #[schema(default = "and")]
+    pub operator: QueryOperator,
+    /// Search only these indexed fields; empty means all indexed fields.
     #[serde(default)]
     pub field_filter: Vec<String>,
-    /// Specify names of fields to return in the search results, where SchemaField.store is set at indextime. If empty then all stored fields are returned.
+    /// Return only these stored fields; empty means all stored fields.
     #[serde(default)]
     pub fields: Vec<String>,
-
-    /// Metadata filters apply to Lexical, Vector and Hybrid search and require facet:true fields.
-    /// Predicates are ANDed; values within a string/set predicate are ORed. Ranges are start-inclusive, end-exclusive.
-    /// Vector candidates are filtered before scoring and Top-K; ANN still scans only the configured clusters.
-    /// Unknown fields, type mismatches and invalid range bounds return an explicit error.
+    /// Metadata predicates, ANDed together. Fields must have filterable=true at index creation.
     #[serde(default)]
     #[schema(value_type = Vec<api_schema::FacetFilter>)]
     pub facet_filter: Vec<FacetFilter>,
-    /// Sort field and order:
-    /// Search results are sorted by the specified facet field, either in ascending or descending order.
-    /// If no sort field is specified, then the search results are sorted by rank in descending order per default.
-    /// Multiple sort fields are combined by a "sort by, then sort by"-method ("tie-breaking"-algorithm).
-    /// The results are sorted by the first field, and only for those results where the first field value is identical (tie) the results are sub-sorted by the second field,
-    /// until the n-th field value is either not equal or the last field is reached.
-    /// A special _score field (BM25x), reflecting how relevant the result is for a given search query (phrase match, match in title etc.) can be combined with any of the other sort fields as primary, secondary or n-th search criterium.
-    /// Sort is only enabled on facet fields that are defined in schema at create_index!
-    /// Examples:
-    /// - result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending},ResultSort {field: "language".into(), order: SortOrder::Ascending}];
-    #[schema(required = false, example = json!([{"field": "date", "order": "Ascending" }]))]
+    /// Sort by filterable fields or _score; empty means relevance order.
     #[serde(default)]
     #[schema(value_type = Vec<api_schema::ResultSort>)]
     pub result_sort: Vec<ResultSort>,
-    /// Specify default query type: (default=Intersection). This can be overwritten by search operator within the query string (+-"").
-    #[schema(required = false, example = QueryType::Intersection)]
-    #[serde(default = "query_type_api")]
-    #[schema(value_type = api_schema::QueryType)]
-    pub query_type_default: QueryType,
-    /// Specify search mode: (default=Lexical).
-    #[schema(required = false, example = SearchMode::Lexical)]
-    #[serde(default = "search_mode_api")]
-    #[schema(value_type = api_schema::SearchMode)]
-    pub search_mode: SearchMode,
+    /// Optional vector score/distance threshold, interpreted using the index metric.
+    #[serde(default)]
+    pub similarity_threshold: Option<f32>,
 }
 
-fn search_mode_api() -> SearchMode {
-    SearchMode::Lexical
+/// Boolean matching for unqualified text terms.
+#[derive(Default, Deserialize, Serialize, Clone, Copy, Debug, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryOperator {
+    #[default]
+    /// Match all terms.
+    And,
+    /// Match any term.
+    Or,
 }
 
-fn query_type_api() -> QueryType {
-    QueryType::Intersection
+impl SearchRequestObject {
+    /// Resolve the public operator to the core query type.
+    pub fn query_type(&self) -> QueryType {
+        match self.operator {
+            QueryOperator::And => QueryType::Intersection,
+            QueryOperator::Or => QueryType::Union,
+        }
+    }
+    /// Resolve the retrieval mode from the supplied inputs.
+    pub fn search_mode(&self) -> SearchMode {
+        if self.query_vector.is_none() {
+            SearchMode::Lexical
+        } else if self.query_string.trim().is_empty() {
+            SearchMode::Vector {
+                similarity_threshold: self.similarity_threshold,
+                ann_mode: AnnMode::All,
+            }
+        } else {
+            SearchMode::Hybrid {
+                similarity_threshold: self.similarity_threshold,
+                ann_mode: AnnMode::All,
+            }
+        }
+    }
+    /// Resolve document and count collection requirements.
+    pub fn result_type(&self) -> ResultType {
+        if !self.count {
+            ResultType::Topk
+        } else if self.length == 0 {
+            ResultType::Count
+        } else {
+            ResultType::TopkCount
+        }
+    }
 }
-
 fn length_api() -> usize {
     10
+}
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -112,8 +123,9 @@ pub struct SearchResultObject {
     pub length: usize,
     /// Number of returned search results matching the query
     pub count: usize,
-    /// Total number of search results matching the query
-    pub count_total: usize,
+    /// Total matches reported by the selected retrieval mode; null when count=false.
+    #[schema(required = true)]
+    pub count_total: Option<usize>,
     /// Vector of lexical search query terms.
     pub query_terms: Vec<String>,
     #[schema(value_type=Vec<HashMap<String, serde_json::Value>>)]
@@ -121,122 +133,144 @@ pub struct SearchResultObject {
     pub results: Vec<Document>,
 }
 
-/// Create index request object
+/// Create an index. Compression, scoring, clustering and word N-grams are managed internally.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateIndexRequest {
-    /// Index name, used for informational purposes only.
-    #[schema(example = "demo_index")]
+    /// Name displayed in index listings.
     pub index_name: String,
-    #[schema(required = true, example = json!([
-    {"field":"title","field_type":"Text","store":true,"index_lexical":true,"boost":10.0},
-    {"field":"body","field_type":"Text","store":true,"index_lexical":true,"longest":true},
-    {"field":"url","field_type":"Text","store":true,"index_lexical":false},
-    {"field":"date","field_type":"Timestamp","store":true,"index_lexical":false,"facet":true}]))]
-    /// Schema definition for the index: field name, field type, and indexing options. The schema defines how documents are indexed and searched. It specifies the fields that are indexed, stored, and used for faceting, as well as the field types and their properties. It also defines whether lexical, hybrid, or vector search is enabled for each field.
-    #[serde(default)]
-    #[schema(value_type = Vec<api_schema::SchemaField>)]
-    pub schema: Vec<SchemaField>,
-    /// Specify similarity measure for the index: (default=Bm25fProximity). The similarity function is used to calculate the relevance score of search results for a given search query. The choice of similarity function can affect search performance and relevance, depending on the characteristics of the text being indexed and the search queries being executed.
-    #[serde(default = "similarity_type_api")]
-    #[schema(value_type = api_schema::LexicalSimilarity)]
-    pub similarity: LexicalSimilarity,
-    /// Specify tokenizer type for the index: (default=UnicodeAlphanumeric). The tokenizer is used to split text into tokens for indexing and searching. The choice of tokenizer can affect search performance and relevance, depending on the language and characteristics of the text being indexed.
+    /// Explicit field definitions; names must be nonempty and unique.
+    #[schema(min_items = 1)]
+    pub schema: Vec<FieldRequest>,
+    /// Keep the existing Unicode tokenizer by default. Use UnicodeAlphanumericZH for Chinese segmentation.
     #[serde(default = "tokenizer_type_api")]
     #[schema(value_type = api_schema::TokenizerType)]
     pub tokenizer: TokenizerType,
-    /// Specify stop words for the index. Stop words are not indexed and not searched for. This can be used to reduce index size and improve search performance by excluding high-frequency, low-information terms from the index.
+    /// Optional stopword removal; default None preserves all words.
     #[serde(default)]
     #[schema(value_type = api_schema::StopwordType)]
     pub stop_words: StopwordType,
-    /// Specify frequent words for the index. Frequent words are used to optimize search performance for high-frequency terms.
+    /// Required when a field has index_vector=true. Embeddings are provided by the caller.
     #[serde(default)]
-    #[schema(value_type = api_schema::FrequentwordType)]
-    pub frequent_words: FrequentwordType,
-    /// Word-level bigram/trigram indexing for faster phrase queries with frequent terms.
-    /// F means a configured frequent word; R means another word. This does not enable
-    /// character substring or prefix search. Single terms are always indexed.
-    /// Combine these independent flags with bitwise OR:
-    /// - SingleTerm = 0: no additional n-grams.
-    /// - NgramFF = 1 (0b00000001): frequent + frequent.
-    /// - NgramFR = 2 (0b00000010): frequent + rare.
-    /// - NgramRF = 4 (0b00000100): rare + frequent.
-    /// - NgramFFF = 8 (0b00001000): frequent + frequent + frequent.
-    /// - NgramRFF = 16 (0b00010000): rare + frequent + frequent.
-    /// - NgramFFR = 32 (0b00100000): frequent + frequent + rare.
-    /// - NgramFRF = 64 (0b01000000): frequent + rare + frequent.
-    /// The default is 9 (1 | 8), enabling NgramFF and NgramFFF.
-    /// Additional n-grams increase index size and indexing work. Changing flags
-    /// requires rebuilding the index; it does not change existing postings.
-    #[serde(default = "ngram_indexing_api")]
-    #[schema(default = 9, example = 9)]
-    pub ngram_indexing: u8,
-    /// Enable document compression for the index. This can reduce the index size on disk and in memory, but may increase indexing and search latency. Default: Snappy compression.
-    #[serde(default = "document_compression_api")]
-    #[schema(value_type = api_schema::DocumentCompression)]
-    pub document_compression: DocumentCompression,
-    #[serde(default)]
-    /// Enable clustering for vector search.
-    #[schema(value_type = api_schema::Clustering)]
-    pub clustering: Clustering,
-    /// Configure external vector dimensions, precision, quantization and distance metric.
-    #[serde(default)]
-    #[schema(value_type = api_schema::Inference)]
-    pub inference: Inference,
+    pub vector: Option<VectorConfig>,
 }
 
-fn similarity_type_api() -> LexicalSimilarity {
-    LexicalSimilarity::Bm25fProximity
+/// Public field settings; internal field IDs and encoding hints are not accepted.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FieldRequest {
+    /// Unique, nonempty field name.
+    pub field: String,
+    #[schema(value_type = api_schema::FieldType)]
+    /// Value type used for indexing and validation.
+    pub field_type: FieldType,
+    /// Default true for ordinary fields, false for vector fields.
+    #[serde(default)]
+    pub store: Option<bool>,
+    /// Default true for Text fields, false for other types and vector fields.
+    #[serde(default)]
+    pub index_lexical: Option<bool>,
+    #[serde(default)]
+    /// Index externally supplied embeddings in a Json or Binary field.
+    pub index_vector: bool,
+    /// Enable metadata filtering and sorting. Default false avoids unnecessary storage.
+    #[serde(default)]
+    pub filterable: bool,
+    /// Optional field weight for lexical relevance.
+    #[serde(default = "default_boost")]
+    #[schema(default = 1)]
+    pub boost: f32,
+}
+impl From<FieldRequest> for SchemaField {
+    fn from(field: FieldRequest) -> Self {
+        let lexical = !field.index_vector && matches!(field.field_type, FieldType::Text);
+        Self::new(
+            field.field,
+            field.store.unwrap_or(!field.index_vector),
+            field.index_lexical.unwrap_or(lexical),
+            field.index_vector,
+            field.field_type,
+            field.filterable,
+            false,
+            field.boost,
+        )
+    }
 }
 
+/// Vector space shared by the index. Defaults preserve floating-point embeddings without quantization.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VectorConfig {
+    #[schema(minimum = 1)]
+    /// Number of values in each embedding.
+    pub dimensions: usize,
+    #[serde(default = "cosine")]
+    #[schema(value_type = api_schema::VectorSimilarity, default = "Cosine")]
+    /// Distance metric expected by the embedding model.
+    pub metric: VectorSimilarity,
+    /// Advanced: stored embedding precision; normally omit.
+    #[serde(default = "float_precision")]
+    #[schema(value_type = api_schema::Precision, default = "F32")]
+    pub precision: Precision,
+    /// Advanced: optional lossy quantization; normally omit.
+    #[serde(default)]
+    #[schema(value_type = api_schema::Quantization, default = "None")]
+    pub quantization: Quantization,
+}
+impl From<VectorConfig> for Inference {
+    fn from(vector: VectorConfig) -> Self {
+        Self::External {
+            dimensions: vector.dimensions,
+            precision: vector.precision,
+            quantization: vector.quantization,
+            similarity: vector.metric,
+        }
+    }
+}
+fn cosine() -> VectorSimilarity {
+    VectorSimilarity::Cosine
+}
+fn float_precision() -> Precision {
+    Precision::F32
+}
+fn default_boost() -> f32 {
+    1.0
+}
 fn tokenizer_type_api() -> TokenizerType {
     TokenizerType::UnicodeAlphanumeric
 }
 
-fn ngram_indexing_api() -> u8 {
-    NgramSet::NgramFF as u8 | NgramSet::NgramFFF as u8
-}
-
-fn document_compression_api() -> DocumentCompression {
-    DocumentCompression::Snappy
-}
-
-/// Specifies which document ID to return
+/// Iterate live document IDs; optionally include stored documents.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetIteratorRequest {
-    /// base document ID to start the iteration from
-    /// Use None to start from the beginning (take>0) or the end (take<0) of the index
-    /// In JSON use null for None
     #[serde(default)]
+    /// Start ID; omitted starts at the beginning or end according to take.
     pub document_id: Option<u64>,
-    /// the number of document IDs to skip
     #[serde(default)]
+    /// Number of live IDs to skip.
     pub skip: usize,
-    /// the number of document IDs to return
-    /// take>0: take next t document IDs, take<0: take previous t document IDs
-    #[serde(default = "default_1usize")]
+    /// Positive for forward traversal, negative for backward. Defaults to 10.
+    #[serde(default = "iterator_take")]
+    #[schema(default = 10)]
     pub take: isize,
-    /// if true, also deleted document IDs are included in the result
-    #[serde(default)]
-    pub include_deleted: bool,
-    /// if true, the documents are also retrieved along with their document IDs
-    #[serde(default)]
+    #[serde(default = "default_true")]
+    #[schema(default = true)]
+    /// Return stored fields as well as IDs.
     pub include_document: bool,
-    /// which fields to return (if include_document is true, if empty then return all stored fields)
     #[serde(default)]
+    /// Empty means all stored fields.
     pub fields: Vec<String>,
 }
-
-fn default_1usize() -> isize {
-    1
+fn iterator_take() -> isize {
+    10
 }
 
-/// Specifies which document and which field to return
+/// Projection for a stored document read.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetDocumentRequest {
-    /// which fields to return
+    /// Empty means all stored fields.
     #[serde(default)]
     pub fields: Vec<String>,
 }

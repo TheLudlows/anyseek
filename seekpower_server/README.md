@@ -40,7 +40,7 @@ target/debug/seekpower_server local_ip=127.0.0.1 local_port=8080
 ```sh
 BASE='http://127.0.0.1:8080'
 API_KEY='paste-master-key'
-curl -X POST "$BASE/api/v1/index" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"index_name":"example","schema":[{"field":"body","field_type":"Text","store":true,"index_lexical":true}]}'
+curl -X POST "$BASE/api/v1/index" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"index_name":"example","schema":[{"field":"body","field_type":"Text"}]}'
 ```
 
 将创建索引响应的 ID 填入 `INDEX_ID`，然后执行：
@@ -49,7 +49,7 @@ curl -X POST "$BASE/api/v1/index" -H "apikey: $API_KEY" -H 'Content-Type: applic
 INDEX_ID=0
 curl -X POST "$BASE/api/v1/index/$INDEX_ID/doc" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '[{"body":"hello world"},{"body":"hello search"}]'
 curl -X PATCH "$BASE/api/v1/index/$INDEX_ID" -H "apikey: $API_KEY"
-curl -X POST "$BASE/api/v1/index/$INDEX_ID/query" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"query":"hello","search_mode":"Lexical"}'
+curl -X POST "$BASE/api/v1/index/$INDEX_ID/query" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"query":"hello"}'
 curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"take":10,"include_document":true,"fields":["body"]}'
 ```
 
@@ -74,3 +74,7 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 统计聚合已移除：`query_facets`（包括空数组）返回 400，查询不再返回 `facets`，索引信息不再返回 `facets_minmax`。UI 不再依赖自动计算的数据日期范围，起止日期由用户输入，结束日期包含当天。
 
 倒排写入缓冲区从空开始，按每条 posting 所需空间增长，提交/清空后释放；位置压缩缓存只为使用到的词项分段按需分配。已删除每个分片固定预分配 400 MB 的策略。实际内存仍随分片、字段、未提交记录与向量数量增长；`force_shard_number=1` 可限制新建索引的本机分片数，不会改变磁盘已有索引的分片布局。
+
+普通创建请求只需名称和 schema；向量字段另传 `vector:{"dimensions":N}`。Text 字段默认存储并建立全文索引；向量字段默认不存储原始值、不建立全文索引；其他字段默认存储。过滤/排序字段显式设置 `filterable:true`。
+
+查询模式由文本/向量输入推导；空请求 `{}` 浏览文档，查询包含未提交写入。默认返回 10 条并统计总数；`count:false` 返回 `count_total:null`，全文/浏览查询可用 `length:0` 只统计，向量/混合查询仍要求正的结果窗口。`operator:"or"` 改为任一词匹配，默认 `and`。向量/混合总数仍受候选检索语义限制，不承诺全库精确计数。遍历默认返回 10 个未删除文档，支持字段投影。参数迁移见 [MIGRATION.md](../MIGRATION.md)。

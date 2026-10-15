@@ -110,11 +110,11 @@ function openSelectedIndex(id) {
 function presetSchema() {
     const mode = $('#indexMode').val();
     const schema = [
-        {field: 'title', field_type: 'Text', store: true, index_lexical: mode !== 'Vector'},
-        {field: 'body', field_type: 'Text', store: true, index_lexical: mode !== 'Vector'},
-        {field: 'url', field_type: 'Text', store: true, index_lexical: false}
+        {field: 'title', field_type: 'Text', ...(mode === 'Vector' ? {index_lexical: false} : {})},
+        {field: 'body', field_type: 'Text', ...(mode === 'Vector' ? {index_lexical: false} : {})},
+        {field: 'url', field_type: 'Text', index_lexical: false}
     ];
-    if (mode !== 'Lexical') schema.push({field: 'vector', field_type: 'Json', store: true, index_lexical: false, index_vector: true});
+    if (mode !== 'Lexical') schema.push({field: 'vector', field_type: 'Json', index_vector: true});
     $('#indexSchema').val(JSON.stringify(schema, null, 2));
     $('#dimensionControl').prop('hidden', mode === 'Lexical');
     $('#vectorDimensions').prop('disabled', mode === 'Lexical');
@@ -163,7 +163,7 @@ $(function () {
                 const dimensions = Number($('#vectorDimensions').val());
                 if (!Number.isInteger(dimensions) || dimensions < 1 || dimensions > 65535) throw new Error('Vector dimensions must be an integer from 1 to 65535.');
                 if (!schema.some(field => field.index_vector)) throw new Error('Vector/Hybrid indexes need at least one index_vector field.');
-                body.inference = {External: {dimensions, precision: 'F32', quantization: 'None', similarity: 'Cosine'}};
+                body.vector = {dimensions};
             } else if (schema.some(field => field.index_vector)) {
                 throw new Error('Choose Vector or Hybrid to configure vector dimensions.');
             }

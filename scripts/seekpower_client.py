@@ -14,7 +14,7 @@ Usage:
     index_id = client.create_index({...})
     client.write_documents(index_id, [{'body': '...'}])
     client.commit(index_id)
-    result = client.query(index_id, {'query': '...', 'search_mode': 'Lexical'})
+    result = client.query(index_id, {'query': '...'})
 
 Every non-2xx response raises AssertionError via the module-level check() helper,
 matching the assertion style of scripts/http_smoke.py.
