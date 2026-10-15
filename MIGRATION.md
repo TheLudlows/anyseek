@@ -40,7 +40,7 @@
 
 - `collect_index_info(&index).await` 返回 `IndexInfo`，不再接收展示标签/耗时字符串；旧 `Info { entry, value }` 与 `entries` 删除。读取 `indexed_documents`、`index_size_bytes` 等数值字段，在调用方格式化。
 - 统计采集不触发 commit/fsync。持久化成功与错误语义仍以提交接口实际实现为准。
-- 核心只使用 `log` 门面，调用方安装 logger 后才输出；保留 `mute` 对进度日志的控制。服务默认 info，可用 `RUST_LOG=seekstorm=warn` 或 `RUST_LOG=off` 控制日志；启动与索引概况改用普通日志；主密钥和首次普通 key 保留直接输出。
+- 核心只使用 `log` 门面，调用方安装 logger 后才输出；保留 `mute` 对进度日志的控制。服务默认 info，可用 `RUST_LOG=seekstorm=warn` 或 `RUST_LOG=off` 控制日志；启动与索引概况改用普通日志；主密钥保留直接输出。
 
 ## 统计聚合裁剪
 
@@ -56,7 +56,7 @@
 - 创建 API key 只接受空 JSON 对象 `{}`，始终随机生成；`demo` 字段/URL 参数返回 400。已有 key 身份文件与数据作用域不变。
 - 删除 stdin 的 create/delete/info/search/openapi/help/quit；通过 REST、Web UI 和启动参数 `generate_openapi=true` 操作。Ctrl-C/SIGINT、SIGTERM 正常结束连接后提交并关闭索引。
 - 删除 HTTP PUT `/api/v1/index/{id}` 关闭入口和 `/version`，使用 PATCH 提交、GET `/api/v1/live` 存活检查。这两个旧入口按未知路由返回 501。
-- Web UI 不再从 URL `api_key` 登录；在连接表单输入普通 key，当前标签页的 sessionStorage 保留。`index_id` URL 参数继续支持。
+- Web UI 不再从 URL `api_key` 登录；在连接表单输入 Master API key 或已有普通 key，当前标签页的 sessionStorage 保留。`index_id` URL 参数继续支持。
 - 删除未使用的 tokenizer、根索引高频词字符串集合、恒关闭的实验分支、彩色表格依赖及无引用的根目录历史图片。正常全文/向量/混合检索、核心 close 与词法 Count 优化保留。
 
 ## N-gram 修复与 D1～D3

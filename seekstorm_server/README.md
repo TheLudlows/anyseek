@@ -22,27 +22,24 @@ target/debug/seekstorm_server local_ip=127.0.0.1 local_port=8080
 
 ## 首次启动与界面创建索引
 
-全新、空的数据目录首次启动时，服务自动生成一个随机普通 API key，日志中显示 `Initial API key: ...`。保存这个 key；明文只在初始化时显示一次，磁盘身份文件仅保存哈希。
+服务启动时输出 `Master API key: ...`。它由 `MASTER_KEY_SECRET` 派生，可直接连接界面及调用索引、写入、检索接口。磁盘身份文件只保存哈希。
 
-1. 打开 `http://127.0.0.1:8080/`，输入这个普通 key 并点击 **Connect**。
+1. 打开 `http://127.0.0.1:8080/`，输入这个 Master API key 并点击 **Connect**。
 2. 填写索引名称，选择 **Lexical / Vector / Hybrid**。向量模式填写外部模型维度；默认 F32、Cosine，向量字段名为 `vector`。
 3. 可展开高级选项编辑字段 schema，然后点击 **Create & open index**。
 4. 点击右上角 **Write data**，粘贴单条 JSON/对象数组或选择 JSON 文件，再点击 **Write & commit**。也可使用下面的 JSON API；右上角 **Indexes / API key** 可重新连接、创建或切换索引。
 
-重启复用已持久化的 key/索引。已有 key 的安装不会额外创建新 key。数据根目录的 `bootstrap.complete` 记录初始化已完成，应与整个数据目录一同保存；撤销全部 key 后重启也不会重新生成凭证。丢失首次输出的 key 时，用主密钥调用创建 key API 获取新 key。新 key 是独立的数据作用域，不会自动接管旧 key 下的索引。
+重启复用已持久化的 key/索引，不自动生成普通 key，也不需要初始化标记。需要独立数据作用域时，用主密钥调用创建 key API；新 key 不会接管其他 key 的索引。
 
-## API 创建 key、索引并检索
+## API 创建索引并检索
 
-服务默认输出 info 级别日志，可通过 `RUST_LOG=seekstorm=warn` 限制核心日志，或 `RUST_LOG=off` 关闭日志。启动与索引概况使用普通日志；首次 key 和主密钥仍会输出。
+服务默认输出 info 级别日志，可通过 `RUST_LOG=seekstorm=warn` 限制核心日志，或 `RUST_LOG=off` 关闭日志。启动与索引概况使用普通日志；主密钥仍会输出。
 
-以下为 POSIX shell 示例。已有首次初始化的 key 时可直接填入 `API_KEY`，跳过创建 key 步骤。需要额外 key 时，将 `MASTER_KEY` 替换为启动日志显示的主密钥，再保存创建响应。
+以下为 POSIX shell 示例，直接将启动日志显示的主密钥填入 `API_KEY`。
 
 ```sh
 BASE='http://127.0.0.1:8080'
-MASTER_KEY='paste-master-key'
-curl -X POST "$BASE/api/v1/apikey" -H "apikey: $MASTER_KEY" -H 'Content-Type: application/json' -d '{}'
-
-API_KEY='paste-created-key'
+API_KEY='paste-master-key'
 curl -X POST "$BASE/api/v1/index" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"index_name":"example","schema":[{"field":"body","field_type":"Text","store":true,"index_lexical":true}]}'
 ```
 
@@ -62,7 +59,7 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 
 ## Web UI
 
-访问 `http://127.0.0.1:8080/`，通过连接表单输入普通 API key。密钥和选中的索引仅保存在当前标签页的 sessionStorage；点击 **Forget key** 清除本标签页凭证，但不会撤销服务端 key。URL 可指定 `index_id`，不接受 `api_key` 登录。UI 默认 Lexical，Vector/Hybrid 需要手动粘贴 JSON 查询向量，文本变化后由调用方更新向量。
+访问 `http://127.0.0.1:8080/`，通过连接表单输入 Master API key（已有普通 API key 也可连接）。密钥和选中的索引仅保存在当前标签页的 sessionStorage；点击 **Forget key** 清除本标签页凭证，但不会撤销服务端 key。URL 可指定 `index_id`，不接受 `api_key` 登录。UI 默认 Lexical，Vector/Hybrid 需要手动粘贴 JSON 查询向量，文本变化后由调用方更新向量。
 
 保留结果分页、原文/外部链接预览、图片展示、UTC 日期起止输入、三种检索模式日期过滤和排序。日期交互依赖配置好的时间字段；Vector/Hybrid 需要有效查询向量；非法过滤条件明确报错。ANN 过滤受簇探测范围限制。索引创建/选择及 JSON 文档写入有界面入口。写入会调用文档 POST，再调用索引 PATCH 提交，展示数量并可返回搜索；若 POST 已接受但 PATCH 失败，提供只重试提交的按钮，避免重复写入。索引删除、文档更新/删除及 key 创建/撤销仍通过 API 完成。JSON 文件仅在浏览器读取后发送普通 JSON 请求，不是服务端文件解析/目录导入。
 

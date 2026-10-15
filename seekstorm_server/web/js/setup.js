@@ -44,7 +44,7 @@ async function setupApi(method, path, key, body) {
     });
     const text = await response.text();
     if (!response.ok) {
-        if (response.status === 401) throw Object.assign(new Error('Invalid API key. Use an ordinary API key, not the master key.'), {status: response.status});
+        if (response.status === 401) throw Object.assign(new Error('Invalid API key. Check the key copied from the server logs.'), {status: response.status});
         throw Object.assign(new Error(text || `Request failed (${response.status}).`), {status: response.status});
     }
     const value = JSON.parse(text);
@@ -65,7 +65,7 @@ async function connectKey(key) {
     $('#indexList').empty();
     setSetupBusy(true);
     try {
-        if (!key) throw new Error('Paste the Initial API key from the server logs, or another existing API key.');
+        if (!key) throw new Error('Paste the Master API key from the server logs, or another existing API key.');
         const indexes = await setupApi('GET', 'api/v1/apikey', key);
         if (request !== setupRequest) return;
         API_KEY = key;

@@ -34,7 +34,6 @@ mod http_server;
 mod multi_tenancy;
 #[doc(hidden)]
 mod server;
-mod bootstrap;
 #[doc(hidden)]
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[doc(hidden)]
