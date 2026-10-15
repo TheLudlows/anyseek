@@ -33,12 +33,13 @@ async fn create(path: &Path, access_type: AccessType) -> IndexArc {
 }
 
 async fn search(index: &IndexArc, options: Value, realtime: bool) -> ResultObject {
-    let mut value = json!({"query":"common", "length":20, "enable_empty_query":true,
-        "result_type":"TopkCount", "result_sort":[{"field":"price","order":"Ascending"}]});
+    let mut value = json!({"query":"common", "length":20, "sort":[{"field":"price","order":"Ascending"}]});
     value.as_object_mut().unwrap().extend(options.as_object().unwrap().clone());
+    let result_type = value.as_object_mut().unwrap().remove("result_type")
+        .map(|v| serde_json::from_value(v).unwrap()).unwrap_or(seekpower::search::ResultType::TopkCount);
     let r: SearchRequestObject = serde_json::from_value(value).unwrap();
-    let result = index.search(r.query_string, None, r.query_type_default,
-        r.search_mode, r.enable_empty_query, r.offset, r.length, r.result_type, realtime,
+    let result = index.search(r.query_string.clone(), None, r.query_type(),
+        r.search_mode(), true, r.offset, r.length, result_type, realtime,
         r.field_filter,  r.facet_filter, r.result_sort).await;
     assert!(result.error.is_none(), "{:?}", result.error);
     result
@@ -58,8 +59,8 @@ async fn check_prices(index: &IndexArc, options: Value, realtime: bool, expected
 async fn check_metadata(index: &IndexArc, realtime: bool) {
     check_prices(index,json!({}),realtime,&[10.,20.,30.,40.]).await;
     check_prices(index,json!({"query":""}),realtime,&[10.,20.,30.,40.]).await;
-    check_prices(index,json!({"query":"alpha beta","query_type_default":"Union"}),realtime,&[10.,20.,30.,40.]).await;
-    check_prices(index,json!({"query":"common alpha","query_type_default":"Intersection"}),realtime,&[10.,30.]).await;
+    check_prices(index,json!({"query":"alpha beta","operator":"or"}),realtime,&[10.,20.,30.,40.]).await;
+    check_prices(index,json!({"query":"common alpha","operator":"and"}),realtime,&[10.,30.]).await;
     for (filter, expected) in [
         (json!({"String16":{"field":"category","filter":["a"]}}), vec![10.,30.]),
         (json!({"StringSet32":{"field":"tags","filter":["red"]}}), vec![10.,20.]),
@@ -67,21 +68,21 @@ async fn check_metadata(index: &IndexArc, realtime: bool) {
         (json!({"Timestamp":{"field":"date","filter":{"start":200,"end":400}}}), vec![20.,30.]),
     ] {
         for query in ["common", "alpha beta", "north south", ""] {
-            check_prices(index,json!({"query":query,"query_type_default":"Union","facet_filter":[filter.clone()]}),realtime,&expected).await;
+            check_prices(index,json!({"query":query,"operator":"or","filter":[filter.clone()]}),realtime,&expected).await;
         }
     }
-    check_prices(index,json!({"facet_filter":[
+    check_prices(index,json!({"filter":[
         {"String16":{"field":"category","filter":["a"]}},
         {"F64":{"field":"price","filter":{"start":20.,"end":40.}}}
     ]}),realtime,&[30.]).await;
-    check_prices(index,json!({"result_sort":[{"field":"date","order":"Descending"}]}),realtime,&[40.,30.,20.,10.]).await;
-    check_prices(index,json!({"result_sort":[{"field":"category","order":"Ascending"},{"field":"price","order":"Descending"}]}),realtime,&[30.,10.,40.,20.]).await;
+    check_prices(index,json!({"sort":[{"field":"date","order":"Descending"}]}),realtime,&[40.,30.,20.,10.]).await;
+    check_prices(index,json!({"sort":[{"field":"category","order":"Ascending"},{"field":"price","order":"Descending"}]}),realtime,&[30.,10.,40.,20.]).await;
     // Cover both single-term-per-shard and multi-term-per-shard union paths.
     for query in ["alpha beta", "north south"] {
         for result_type in ["Count", "TopkCount"] {
             for filtered in [false, true] {
-                let result = search(index,json!({"query":query,"query_type_default":"Union","result_type":result_type,
-                    "facet_filter": if filtered { json!([{"String16":{"field":"category","filter":["a"]}}]) } else { json!([]) }}),realtime).await;
+                let result = search(index,json!({"query":query,"operator":"or","result_type":result_type,
+                    "filter": if filtered { json!([{"String16":{"field":"category","filter":["a"]}}]) } else { json!([]) }}),realtime).await;
                 let per_bin = if filtered {1} else {2};
                 assert_eq!(result.result_count_total,2 * per_bin,"{query} {result_type} realtime={realtime}");
 
@@ -95,17 +96,17 @@ fn retired_geo_requests_are_rejected() {
     assert!(serde_json::from_value::<CreateIndexRequest>(json!({"index_name":"geo","schema":[{"field":"location","field_type":"Point","store":true,"index_lexical":false,"facet":true}]})).is_err());
     for options in [
         json!({"distance_fields":[]}),
-        json!({"facet_filter":[{"Point":{"field":"location","filter":[[0.,0.],{"start":0.,"end":10.},"Kilometers"]}}]}),
+        json!({"filter":[{"Point":{"field":"location","filter":[[0.,0.],{"start":0.,"end":10.},"Kilometers"]}}]}),
         json!({"query_facets":[{"Point":{"field":"location","base":[0.,0.],"unit":"Kilometers","range_type":"CountWithinRange","ranges":[["near",0.]]}}]}),
-        json!({"result_sort":[{"field":"date","order":"Ascending","base":"None"}]}),
-        json!({"result_sort":[{"field":"location","order":"Ascending","base":{"Point":[0.,0.]}}]}),
+        json!({"sort":[{"field":"date","order":"Ascending","base":"None"}]}),
+        json!({"sort":[{"field":"location","order":"Ascending","base":{"Point":[0.,0.]}}]}),
     ] {
         let mut request = json!({"query":"common"});
         request.as_object_mut().unwrap().extend(options.as_object().unwrap().clone());
         assert!(serde_json::from_value::<SearchRequestObject>(request).is_err(),"{options}");
     }
     assert!(serde_json::from_value::<GetDocumentRequest>(json!({"distance_fields":[]})).is_err());
-    assert!(serde_json::from_value::<GetDocumentRequest>(json!({"fields":["body"]})).is_ok());
+    assert!(serde_json::from_value::<GetDocumentRequest>(json!({"fields":"body"})).is_ok());
 }
 
 #[tokio::test]

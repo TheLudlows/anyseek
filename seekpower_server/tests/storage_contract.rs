@@ -1,5 +1,5 @@
 //! Retired storage options fail explicitly; retained API defaults are stable.
-use seekpower::index::{AccessType, Close, DocumentCompression, create_index, open_index};
+use seekpower::index::{AccessType, Close, create_index, open_index};
 use seekpower_server::api_types::CreateIndexRequest;
 use serde_json::json;
 use std::{fs, path::Path};
@@ -10,11 +10,7 @@ fn api_defaults_and_retired_codecs() {
         {"field":"body","field_type":"Text","store":true,"index_lexical":true}
     ]});
     let parsed: CreateIndexRequest = serde_json::from_value(request.clone()).unwrap();
-    assert_eq!(parsed.ngram_indexing, 9);
-    assert!(matches!(
-        parsed.document_compression,
-        DocumentCompression::Snappy
-    ));
+    assert_eq!(parsed.schema.len(), 1);
     for codec in ["Lz4", "Zstd"] {
         let mut invalid = request.clone();
         invalid["document_compression"] = json!(codec);

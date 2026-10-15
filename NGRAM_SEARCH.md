@@ -2,7 +2,7 @@
 
 N-gram 是相邻的两个或三个词项组成的索引项，用于词法短语检索；这里不是字符 N-gram，也不是已删除的拼写纠错/自动补全。
 
-创建索引时配置 `frequent_words` 和 `ngram_indexing`。高频词集合可用 English、German、French、Spanish、Custom 或 None；F 表示高频词，R 表示其余词。当前 HTTP 默认高频词配置为 English，N-gram 位掩码默认 FF | FFF（数值 9）；有效组合需要相应的高频词集合。
+Rust 核心创建索引时可配置 `frequent_words` 和 `ngram_indexing`；HTTP 不再接受这两个参数。高频词集合可用 English、German、French、Spanish、Custom 或 None；F 表示高频词，R 表示其余词。HTTP 新建索引固定高频词配置为 English、N-gram 位掩码 FF | FFF（数值 9）；有效组合需要相应的高频词集合。
 
 | 枚举 | 数值 | 组合 |
 | --- | --- | --- |
@@ -21,7 +21,7 @@ N-gram 是相邻的两个或三个词项组成的索引项，用于词法短语�
 
 ## 独立开关与修复说明
 
-FFR=32 与 FRF=64 的写入分支分别检查自身开关，不依赖 RFF=16。两者可独立启用；API/OpenAPI 统一使用上表的位掩码，默认 9（1 | 8），5 表示 FF | RF。
+FFR=32 与 FRF=64 的写入分支分别检查自身开关，不依赖 RFF=16。两者可独立启用；Rust 核心使用上表的位掩码，5 表示 FF | RF；HTTP 内部固定 9（1 | 8）。
 
 旧实现在单独启用 FFR/FRF 时可能缺少对应 postings，导致短语漏召回。已有受影响索引需要从原始记录重新建立；修复不会补齐旧索引，也不提供兼容/升级逻辑。默认 9 不启用这两种组合。
 

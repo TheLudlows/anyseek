@@ -56,17 +56,7 @@ def exercise(base, master):
         {'field': 'title', 'field_type': 'Text', 'store': True, 'index_lexical': True},
         {'field': 'body', 'field_type': 'Text', 'store': True, 'index_lexical': True},
     ]
-    index_id = client.create_index({
-        'index_name': 'write_query_smoke',
-        'schema': schema,
-        'similarity': 'Bm25f',
-        'tokenizer': 'UnicodeAlphanumeric',
-        'stop_words': 'None',
-        'frequent_words': 'English',
-        'document_compression': 'Snappy',
-        'inference': 'None',
-        'clustering': 'None',
-    })
+    index_id = client.create_index({'index_name': 'write_query_smoke', 'schema': schema, 'tokenizer': 'UnicodeAlphanumeric', 'stop_words': 'None'})
     check(isinstance(index_id, int),
           f'index ID is not an integer: {index_id!r}')
     print(f'PASS index created (id={index_id})')
@@ -81,12 +71,7 @@ def exercise(base, master):
     print('PASS document write and commit')
 
     # Query the committed index for a shared phrase.
-    result = client.query(index_id, {
-        'query': 'quick fox',
-        'search_mode': 'Lexical',
-        'result_type': 'TopkCount',
-        'realtime': False,
-    })
+    result = client.query(index_id, {'query': 'quick fox'})
     check(result['count_total'] == 2, f'query count mismatch: {result}')
     titles = sorted(doc['title'] for doc in result['results'])
     check(titles == ['first', 'third'], f'query result mismatch: {result}')
@@ -94,12 +79,7 @@ def exercise(base, master):
 
     # A realtime query sees a write that has not been committed yet.
     client.write_documents(index_id, {'title': 'fourth', 'body': 'uncommitted realtime record'})
-    realtime = client.query(index_id, {
-        'query': 'realtime',
-        'search_mode': 'Lexical',
-        'result_type': 'TopkCount',
-        'realtime': True,
-    })
+    realtime = client.query(index_id, {'query': 'realtime'})
     check(realtime['count_total'] == 1, f'realtime query mismatch: {realtime}')
     check(realtime['results'][0]['title'] == 'fourth',
           f'realtime result mismatch: {realtime}')

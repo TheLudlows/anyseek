@@ -72,34 +72,31 @@ pub(crate) struct DeleteApikeyRequest {
 const APIKEY_PATH: &str = "apikey.json";
 
 /// Save file atomically
-fn save_file_atomically(path: &PathBuf, content: String) {
+fn save_file_atomically(path: &PathBuf, content: String) -> std::io::Result<()> {
     let mut temp_path = path.clone();
     temp_path.set_extension("bak");
-    fs::write(&temp_path, content).unwrap();
-    match fs::rename(temp_path, path) {
-        Ok(_) => {}
-        Err(e) => println!("error: {e:?}"),
-    }
+    fs::write(&temp_path, content)?;
+    fs::rename(temp_path, path)
 }
 
-fn save_apikey_data(apikey: &ApikeyObject, index_path: &PathBuf) {
+fn save_apikey_data(apikey: &ApikeyObject, index_path: &PathBuf) -> std::io::Result<()> {
     let apikey_id: u64 = apikey.id;
 
     let apikey_id_path = Path::new(&index_path).join(apikey_id.to_string());
     let apikey_persistence_json = serde_json::to_string(&apikey).unwrap();
     let apikey_persistence_path = Path::new(&apikey_id_path).join(APIKEY_PATH);
-    save_file_atomically(&apikey_persistence_path, apikey_persistence_json);
+    save_file_atomically(&apikey_persistence_path, apikey_persistence_json)
 }
 
 pub(crate) fn create_apikey_api<'a>(
     index_path: &'a PathBuf,
     apikey: &[u8],
     apikey_list: &'a mut HashMap<u128, ApikeyObject>,
-) -> &'a mut ApikeyObject {
+) -> std::io::Result<&'a mut ApikeyObject> {
     let apikey_hash_u128 = calculate_hash(&apikey) as u128;
     // A repeated identity must not replace its scope or orphan indices.
     if apikey_list.contains_key(&apikey_hash_u128) {
-        return apikey_list.get_mut(&apikey_hash_u128).unwrap();
+        return Ok(apikey_list.get_mut(&apikey_hash_u128).unwrap());
     }
 
     let mut apikey_id: u64 = 0;
@@ -120,28 +117,28 @@ pub(crate) fn create_apikey_api<'a>(
     };
 
     let apikey_id_path = Path::new(&index_path).join(apikey_id.to_string());
-    fs::create_dir_all(apikey_id_path).unwrap();
+    fs::create_dir_all(apikey_id_path)?;
 
-    save_apikey_data(&apikey_object, index_path);
+    save_apikey_data(&apikey_object, index_path)?;
 
     apikey_list.insert(apikey_hash_u128, apikey_object);
-    apikey_list.get_mut(&apikey_hash_u128).unwrap()
+    Ok(apikey_list.get_mut(&apikey_hash_u128).unwrap())
 }
 
 pub(crate) fn delete_apikey_api(
     index_path: &PathBuf,
     apikey_list: &mut HashMap<u128, ApikeyObject>,
     apikey_hash: u128,
-) -> Result<u64, String> {
+) -> std::io::Result<Option<u64>> {
     if let Some(apikey_object) = apikey_list.get(&apikey_hash) {
         let apikey_id_path = Path::new(&index_path).join(apikey_object.id.to_string());
         println!("delete path {}", apikey_id_path.to_string_lossy());
-        fs::remove_dir_all(&apikey_id_path).unwrap();
+        fs::remove_dir_all(&apikey_id_path)?;
 
         apikey_list.remove(&apikey_hash);
-        Ok(apikey_list.len() as u64)
+        Ok(Some(apikey_list.len() as u64))
     } else {
-        Err("not found".to_string())
+        Ok(None)
     }
 }
 

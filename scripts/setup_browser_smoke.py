@@ -51,10 +51,10 @@ def exercise_setup(browser, base, master):
         assert 'api_key' not in page.url
         payload = creates[-1]
         if mode != 'Lexical':
-            assert payload['inference']['External']['dimensions'] == 3
+            assert payload['vector']['dimensions'] == 3
             assert any(field.get('index_vector') for field in payload['schema'])
         else:
-            assert 'inference' not in payload
+            assert 'vector' not in payload
         from documents_browser_smoke import exercise_documents
         exercise_documents(page, mode)
 

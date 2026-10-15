@@ -14,7 +14,7 @@ Usage:
     index_id = client.create_index({...})
     client.write_documents(index_id, [{'body': '...'}])
     client.commit(index_id)
-    result = client.query(index_id, {'query': '...', 'search_mode': 'Lexical'})
+    result = client.query(index_id, {'query': '...'})
 
 Every non-2xx response raises AssertionError via the module-level check() helper,
 matching the assertion style of scripts/http_smoke.py.
@@ -68,12 +68,7 @@ class SeekpowerClient:
             return body
 
     def api(self, method, path, data=None, key=_DEFAULT):
-        value = json.loads(self.request(method, path, data, key))
-        if isinstance(value, dict):
-            check('Err' not in value, f'{method} {path}: {value}')
-            if set(value) == {'Ok'}:
-                return value['Ok']
-        return value
+        return json.loads(self.request(method, path, data, key))
 
     # -- public API surface ---------------------------------------------
 
@@ -87,7 +82,7 @@ class SeekpowerClient:
 
     def create_api_key(self, key):
         """POST /api/v1/apikey - mint a new API key (requires the master key)."""
-        return self.request('POST', '/api/v1/apikey', {}, key).decode()
+        return self.api('POST', '/api/v1/apikey', {}, key)
 
     def create_index(self, config, key=_DEFAULT):
         """POST /api/v1/index - create an index; returns the new index id."""

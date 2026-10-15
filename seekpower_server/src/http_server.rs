@@ -7,7 +7,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Request, State},
+    extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State},
     http::{Method, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -24,8 +24,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use crate::{
     MASTER_KEY_SECRET,
     api_types::{
-        CreateIndexRequest, GetDocumentRequest, GetIteratorRequest, IndexResponseObject,
-        SearchRequestObject, SearchResultObject,
+        CreateIndexRequest, DeleteDocuments, ErrorResponse, GetDocumentRequest, GetIteratorRequest,
+        IndexResponseObject, SearchRequestObject, SearchResultObject, UpdateDocuments,
     },
     keys::{
         ApikeyObject, CreateApikeyRequest, DeleteApikeyRequest, calculate_hash, create_apikey_api,
@@ -45,11 +45,12 @@ struct AppState {
     force_shard_number: Option<usize>,
 }
 
-enum ApiError {
+pub(crate) enum ApiError {
     Unauthorized,
     NotFound(&'static str),
     BadRequest(String),
     Internal,
+    MethodNotAllowed,
 }
 
 impl From<String> for ApiError {
@@ -58,20 +59,35 @@ impl From<String> for ApiError {
     }
 }
 
+impl From<std::io::Error> for ApiError {
+    fn from(error: std::io::Error) -> Self {
+        log::error!("HTTP storage operation failed: {error}");
+        Self::Internal
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        match self {
-            Self::Unauthorized => {
-                (StatusCode::UNAUTHORIZED, "apikey invalid or missing").into_response()
-            }
-            Self::NotFound(message) => (StatusCode::NOT_FOUND, message).into_response(),
-            Self::BadRequest(message) => {
-                (StatusCode::BAD_REQUEST, format!("bad request:{message}")).into_response()
-            }
-            Self::Internal => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
-            }
-        }
+        let (status, code, message) = match self {
+            Self::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "apikey invalid or missing".into(),
+            ),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, "not_found", message.into()),
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, "bad_request", message),
+            Self::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal server error".into(),
+            ),
+            Self::MethodNotAllowed => (
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "method not allowed".into(),
+            ),
+        };
+        (status, Json(ErrorResponse { code, message })).into_response()
     }
 }
 
@@ -119,13 +135,9 @@ impl FromRequestParts<AppState> for ScopedIndex {
         let Path(params) = Path::<HashMap<String, String>>::from_request_parts(parts, state)
             .await
             .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-        let id = params["index_id"].parse::<u64>().map_err(|_| {
-            if parts.uri.path().trim_end_matches('/').ends_with("/query") {
-                ApiError::NotFound("index does not exist")
-            } else {
-                ApiError::BadRequest("index_id invalid or missing".into())
-            }
-        })?;
+        let id = params["index_id"]
+            .parse::<u64>()
+            .map_err(|_| ApiError::BadRequest("index_id invalid or missing".into()))?;
         let keys = state.keys.read().await;
         let scope = keys.get(&key).ok_or(ApiError::Unauthorized)?;
         scope
@@ -152,7 +164,7 @@ impl<T: DeserializeOwned + Send> FromRequest<AppState> for JsonBody<T> {
     }
 }
 
-// Preserve the existing OPTIONS, POST-only and URL-parameter contracts.
+// Normalize paths before routing and apply CORS and POST-only query semantics.
 async fn protocol(mut request: Request, next: Next) -> Response {
     let path = request.uri().path().trim_end_matches('/');
     let post_only = path.starts_with("/api/v1/index/")
@@ -166,7 +178,7 @@ async fn protocol(mut request: Request, next: Next) -> Response {
                     if post_only {
                         "POST, OPTIONS"
                     } else {
-                        "POST, GET, OPTIONS"
+                        "GET, HEAD, POST, PATCH, DELETE, OPTIONS"
                     },
                 ),
                 (header::ACCESS_CONTROL_ALLOW_HEADERS, "content-type, apikey"),
@@ -174,19 +186,16 @@ async fn protocol(mut request: Request, next: Next) -> Response {
         )
             .into_response()
     } else if post_only && request.method() != Method::POST {
-        (
-            StatusCode::METHOD_NOT_ALLOWED,
-            [(header::ALLOW, "POST, OPTIONS")],
-            "use POST with a JSON request body for search and document iteration",
-        )
-            .into_response()
+        let mut response = ApiError::MethodNotAllowed.into_response();
+        response
+            .headers_mut()
+            .insert(header::ALLOW, "POST, OPTIONS".parse().unwrap());
+        response
     } else if post_only && request.uri().query().is_some_and(|query| !query.is_empty()) {
         ApiError::BadRequest(
             "put all query/iterator parameters in the JSON request body, not the URL".into(),
         )
         .into_response()
-    } else if request.method() == Method::HEAD {
-        not_implemented().await.into_response()
     } else {
         // Accept the existing trailing-slash spelling without redirecting a request body.
         if !path.is_empty() && path != request.uri().path() {
@@ -201,9 +210,6 @@ async fn protocol(mut request: Request, next: Next) -> Response {
         }
         next.run(request).await
     };
-    if response.status() == StatusCode::NOT_IMPLEMENTED {
-        response.headers_mut().remove(header::ALLOW);
-    }
     response
         .headers_mut()
         .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
@@ -230,10 +236,10 @@ async fn live() -> Json<String> {
     ),
     request_body(content = inline(CreateApikeyRequest), example = json!({})),
     responses(
-        (status = 200, description = "Success", body = String, content_type = "text/plain"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 500, description = "Internal server error", body = String, content_type = "text/plain")
+        (status = 200, description = "Success", body = String, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 500, description = "Internal server error", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "create_api_key"
 )]
@@ -242,7 +248,7 @@ async fn create_key(
     _: MasterKey,
     uri: axum::http::Uri,
     JsonBody(_): JsonBody<CreateApikeyRequest>,
-) -> Result<String, ApiError> {
+) -> ApiResult<String> {
     if uri.query().is_some_and(|query| !query.is_empty()) {
         return Err(ApiError::BadRequest(
             "API key creation accepts only an empty JSON object".into(),
@@ -252,8 +258,8 @@ async fn create_key(
     SysRng
         .try_fill_bytes(&mut key)
         .map_err(|_| ApiError::Internal)?;
-    create_apikey_api(&state.index_path, &key, &mut *state.keys.write().await);
-    Ok(general_purpose::STANDARD.encode(key))
+    create_apikey_api(&state.index_path, &key, &mut *state.keys.write().await)?;
+    Ok(Json(general_purpose::STANDARD.encode(key)))
 }
 
 /// Lists indexes in the authenticated key scope.
@@ -263,18 +269,18 @@ async fn create_key(
         ("apikey" = String, Header, description = "API key")
     ),
     responses(
-        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<Vec<IndexResponseObject>>, content_type = "application/json"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain")
+        (status = 200, description = "Success", body = Vec<IndexResponseObject>, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "get_api_key_info"
 )]
 async fn list_indexes(
     State(state): State<AppState>,
     ApiKey(key): ApiKey,
-) -> ApiResult<Result<Vec<IndexResponseObject>, String>> {
+) -> ApiResult<Vec<IndexResponseObject>> {
     let keys = state.keys.read().await;
     let scope = keys.get(&key).ok_or(ApiError::Unauthorized)?;
-    Ok(Json(get_apikey_indices_info_api(&scope.index_list).await))
+    Ok(Json(get_apikey_indices_info_api(&scope.index_list).await?))
 }
 
 /// Revokes a key and deletes all its indexes. Requires the master API key. Returns the remaining key count.
@@ -283,12 +289,13 @@ async fn list_indexes(
     params(
         ("apikey" = String, Header, description = "Master API key")
     ),
-    request_body(content = DeleteApikeyRequest, example = json!({"apikey_base64": "KEY_TO_REVOKE"})),
+    request_body(content = DeleteApikeyRequest, example = json!({"apikey_base64":"KEY_TO_REVOKE"})),
     responses(
+        (status = 500, description = "Internal server error", body = ErrorResponse, content_type = "application/json"),
         (status = 200, description = "Success", body = u64, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "delete_api_key"
 )]
@@ -299,17 +306,17 @@ async fn delete_key(
 ) -> ApiResult<u64> {
     let key = general_purpose::STANDARD
         .decode(request.apikey_base64)
-        .map_err(|_| ApiError::Unauthorized)?;
+        .map_err(|_| ApiError::BadRequest("apikey_base64 is invalid".into()))?;
     let count = delete_apikey_api(
         &state.index_path,
         &mut *state.keys.write().await,
         calculate_hash(&key) as u128,
-    )
-    .map_err(|_| ApiError::NotFound("apikey does not exist"))?;
+    )?
+    .ok_or(ApiError::NotFound("apikey does not exist"))?;
     Ok(Json(count))
 }
 
-/// Creates an index in the authenticated key scope and returns its ID. Vector/Hybrid indexes require externally supplied vectors.
+/// Creates an index in the authenticated key scope and returns its ID. Vector fields require dimensions; embeddings are supplied by callers.
 #[utoipa::path(
     post, path = "/api/v1/index", tag = "Index",
     params(
@@ -317,14 +324,15 @@ async fn delete_key(
     ),
     request_body(content = CreateIndexRequest,
         examples(
-            ("Lexical" = (value = json!({"index_name":"documents","schema":[{"field":"body","field_type":"Text","store":true,"index_lexical":true}]}))),
-            ("Hybrid" = (value = json!({"index_name":"hybrid","schema":[{"field":"body","field_type":"Text","store":true,"index_lexical":true},{"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}],"inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}}))),
-            ("Vector" = (value = json!({"index_name":"vectors","schema":[{"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}],"inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}})))
+            ("Lexical" = (value = json!({"index_name":"documents","schema":[{"field":"body","field_type":"Text"}]}))),
+            ("Hybrid" = (value = json!({"index_name":"hybrid","schema":[{"field":"body","field_type":"Text"},{"field":"vector","field_type":"Json","index_vector":true}],"vector":{"dimensions":3}}))),
+            ("Vector" = (value = json!({"index_name":"vectors","schema":[{"field":"vector","field_type":"Json","index_vector":true}],"vector":{"dimensions":3}})))
         )),
     responses(
+        (status = 500, description = "Internal server error", body = ErrorResponse, content_type = "application/json"),
         (status = 200, description = "Success", body = u64, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain")
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "create_index"
 )]
@@ -335,23 +343,7 @@ async fn create_index(
 ) -> ApiResult<u64> {
     let mut keys = state.keys.write().await;
     let scope = keys.get_mut(&key).ok_or(ApiError::Unauthorized)?;
-    let id = create_index_api(
-        &state.index_path,
-        request.index_name,
-        request.schema,
-        request.similarity,
-        request.tokenizer,
-        request.stop_words,
-        request.frequent_words,
-        request.ngram_indexing,
-        request.document_compression,
-        state.force_shard_number,
-        scope,
-        true,
-        request.clustering,
-        request.inference,
-    )
-    .await?;
+    let id = create_index_api(&state.index_path, request, state.force_shard_number, scope).await?;
     Ok(Json(id))
 }
 
@@ -364,17 +356,18 @@ async fn create_index(
     ),
     responses(
         (status = 200, description = "Success", body = IndexResponseObject, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "get_index_info"
 )]
 async fn get_index(
     State(state): State<AppState>,
     ApiKey(key): ApiKey,
-    Path(index_id): Path<String>,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
 ) -> ApiResult<IndexResponseObject> {
+    let Path(index_id) = path.map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let index_id = index_id
         .parse()
         .map_err(|_| ApiError::BadRequest("index_id invalid or missing".into()))?;
@@ -387,7 +380,7 @@ async fn get_index(
     ))
 }
 
-/// Commits pending writes to disk and returns the indexed document count. Writes are visible before commit when realtime=true; explicit commit allows reads with realtime=false. Automatic commit also occurs every 64K documents per shard and on graceful shutdown.
+/// Commits pending writes to disk and returns the indexed document count. Searches include pending writes; explicit commit persists them. Automatic commit also occurs every 64K documents per shard and on graceful shutdown.
 #[utoipa::path(
     patch, path = "/api/v1/index/{index_id}", tag = "Index",
     params(
@@ -396,10 +389,10 @@ async fn get_index(
     ),
     responses(
         (status = 200, description = "Success", body = u64, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain"),
-        (status = 500, description = "Internal server error", body = String, content_type = "text/plain")
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json"),
+        (status = 500, description = "Internal server error", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "commit_index"
 )]
@@ -419,20 +412,22 @@ async fn commit_index(ScopedIndex(index): ScopedIndex) -> ApiResult<u64> {
         ("index_id" = u64, Path, description = "Index ID")
     ),
     responses(
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
         (status = 200, description = "Success", body = usize, content_type = "application/json"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "delete_index"
 )]
 async fn delete_index(
     State(state): State<AppState>,
     ApiKey(key): ApiKey,
-    Path(index_id): Path<String>,
+    path: Result<Path<String>, axum::extract::rejection::PathRejection>,
 ) -> ApiResult<usize> {
+    let Path(index_id) = path.map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let index_id = index_id
         .parse()
-        .map_err(|_| ApiError::NotFound("index does not exist"))?;
+        .map_err(|_| ApiError::BadRequest("index_id invalid or missing".into()))?;
     let mut keys = state.keys.write().await;
     let scope = keys.get_mut(&key).ok_or(ApiError::Unauthorized)?;
     delete_index_api(index_id, &mut scope.index_list)
@@ -451,28 +446,24 @@ async fn delete_index(
     request_body(content = GetIteratorRequest, example = json!({"document_id":null,"skip":0,"take":10,"include_document":true})),
     responses(
         (status = 200, description = "Success", body = crate::api_schema::IteratorResult, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain"),
-        (status = 405, description = "Use POST for query and iteration", body = String, content_type = "text/plain")
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json"),
+        (status = 405, description = "Use POST for query and iteration", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "document_iterator_post"
 )]
 async fn iterate(
     ScopedIndex(index): ScopedIndex,
-    bytes: Bytes,
+    JsonBody(request): JsonBody<GetIteratorRequest>,
 ) -> ApiResult<seekpower::iterator::IteratorResult> {
-    if bytes.is_empty() {
-        return Err(ApiError::BadRequest("Request body is empty".into()));
-    }
-    let request: GetIteratorRequest = parse_json(&bytes)?;
     Ok(Json(
         get_iterator_api_post(
             &index,
             request.document_id,
             request.skip,
             request.take,
-            request.include_deleted,
+            false,
             request.include_document,
             request.fields,
         )
@@ -480,7 +471,7 @@ async fn iterate(
     ))
 }
 
-/// Writes one document or a batch and returns the indexed document count inside Ok. Vector fields must contain external embeddings matching the index dimensions. Commit to persist pending writes.
+/// Writes one document or a batch and returns the indexed document count as a JSON number. Vector fields must contain external embeddings matching the index dimensions. Commit to persist pending writes.
 #[utoipa::path(
     post, path = "/api/v1/index/{index_id}/doc", tag = "Document",
     params(
@@ -494,183 +485,182 @@ async fn iterate(
             ("External vector" = (value = json!({"body":"hello","vector":[1.0,0.0,0.0]})))
         )),
     responses(
-        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<usize>, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain"),
-        (status = 500, description = "Internal server error", body = String, content_type = "text/plain")
+        (status = 200, description = "Success", body = usize, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json"),
+        (status = 500, description = "Internal server error", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "index_document"
 )]
 async fn write_documents(
     ScopedIndex(index): ScopedIndex,
-    bytes: Bytes,
-) -> ApiResult<Result<usize, String>> {
+    bytes: Result<Bytes, axum::extract::rejection::BytesRejection>,
+) -> ApiResult<usize> {
+    let bytes = bytes.map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let count = INDEX_RUNTIME
         .spawn(async move {
-            if bytes.trim_ascii_start().starts_with(b"[") {
-                index_documents_api(&index, parse_json(&bytes)?)
-                    .await
-                    .map_err(ApiError::from)
+            let documents = if bytes.trim_ascii_start().starts_with(b"[") {
+                parse_json(&bytes)?
             } else {
-                index_document_api(&index, parse_json(&bytes)?)
-                    .await
-                    .map_err(ApiError::from)
-            }
+                vec![parse_json(&bytes)?]
+            };
+            index_documents_api(&index, documents)
+                .await
+                .map_err(ApiError::from)
         })
         .await
         .map_err(|_| ApiError::Internal)??;
-    Ok(Json(Ok(count)))
+    Ok(Json(count))
 }
 
-/// Replaces one document or a batch by ID. Each replacement is a delete followed by an insert. Returns the indexed document count inside Ok.
+/// Replaces one document or a batch by ID. Each replacement is a complete delete-and-insert with a new document ID, not a partial patch. Returns the indexed document count as a JSON number.
 #[utoipa::path(
     patch, path = "/api/v1/index/{index_id}/doc", tag = "Document",
     params(
         ("apikey" = String, Header, description = "API key"),
         ("index_id" = u64, Path, description = "Index ID")
     ),
-    request_body(content = crate::api_schema::UpdateDocuments,
+    request_body(content = UpdateDocuments,
         examples(
-            ("Single" = (value = json!([0,{"body":"updated"}]))),
-            ("Batch" = (value = json!([[0,{"body":"updated"}],[1,{"body":"also updated"}]])))
+            ("Single" = (value = json!({"id":0,"document":{"body":"updated"}}))),
+            ("Batch" = (value = json!([{"id":0,"document":{"body":"updated"}},{"id":1,"document":{"body":"also updated"}}])))
         )),
     responses(
-        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<u64>, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
+        (status = 200, description = "Success", body = u64, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "update_document"
 )]
 async fn update_documents(
     ScopedIndex(index): ScopedIndex,
-    JsonBody(value): JsonBody<serde_json::Value>,
-) -> ApiResult<Result<u64, String>> {
-    let count = if value.get(0).is_some_and(serde_json::Value::is_array) {
-        let documents = serde_json::from_value(value)
-            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-        update_documents_api(&index, documents).await?
-    } else {
-        let document = serde_json::from_value(value)
-            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-        update_document_api(&index, document).await?
-    };
-    Ok(Json(Ok(count)))
+    JsonBody(request): JsonBody<UpdateDocuments>,
+) -> ApiResult<u64> {
+    Ok(Json(
+        update_documents_api(&index, request.into_documents()).await?,
+    ))
 }
 
-/// Reads a stored document. Omit the body to return all stored fields, or pass fields in a JSON body. URL parameters are rejected. Obtain valid IDs through search or iteration.
+/// Reads a stored document. Omit fields to return all stored fields, or use ?fields=body,title. Request bodies are rejected. Obtain valid IDs through search or iteration.
 #[utoipa::path(
     get, path = "/api/v1/index/{index_id}/doc/{document_id}", tag = "Document",
     params(
         ("apikey" = String, Header, description = "API key"),
         ("index_id" = u64, Path, description = "Index ID"),
-        ("document_id" = u64, Path, description = "Document ID")
+        ("document_id" = u64, Path, description = "Document ID"),
+        GetDocumentRequest
     ),
-    request_body(content = ref("#/components/schemas/GetDocumentRequest"), content_type = "application/json", example = json!({"fields":["body"]})),
     responses(
         (status = 200, description = "Success", body = std::collections::HashMap<String, serde_json::Value>, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "get_document"
 )]
 async fn get_document(
     ScopedIndex(index): ScopedIndex,
     Path((_, document_id)): Path<(String, String)>,
-    uri: axum::http::Uri,
-    bytes: Bytes,
+    query: Result<Query<GetDocumentRequest>, axum::extract::rejection::QueryRejection>,
+    bytes: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> ApiResult<Document> {
     let document_id = document_id
         .parse()
         .map_err(|_| ApiError::BadRequest("doc_id invalid or missing".into()))?;
-    if uri.query().is_some_and(|query| !query.is_empty()) {
+    let bytes = bytes.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if !bytes.is_empty() {
         return Err(ApiError::BadRequest(
-            "document reads accept fields in the JSON body, not URL parameters".into(),
+            "document reads accept fields in the URL, not a request body".into(),
         ));
     }
-    let request = if bytes.is_empty() {
-        GetDocumentRequest { fields: Vec::new() }
-    } else {
-        parse_json(&bytes)?
-    };
+    let Query(request) = query.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let fields = request
+        .fields
+        .split(',')
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned)
+        .collect();
+
     Ok(Json(
-        get_document_api(&index, document_id, request)
+        get_document_api(&index, document_id, fields)
             .await
             .ok_or(ApiError::NotFound("document not found"))?,
     ))
 }
 
-/// Deletes a numeric document ID and returns the remaining document count inside Ok. Deletion is immediately visible. For a nonnumeric ID, the existing handler uses the same body forms as DELETE /doc.
+/// Deletes a numeric document ID and returns the allocated document count as a JSON number. Deletion is immediately visible.
 #[utoipa::path(
     delete, path = "/api/v1/index/{index_id}/doc/{document_id}", tag = "Document",
     params(
         ("apikey" = String, Header, description = "API key"),
         ("index_id" = u64, Path, description = "Index ID"),
-        ("document_id" = String, Path, description = "Document ID")
+        ("document_id" = u64, Path, description = "Document ID")
     ),
-    request_body(description = "Optional fallback body for a nonnumeric path ID.",
-        content((ref("#/components/schemas/DeleteDocuments") = "application/json"), (ref("#/components/schemas/ClearCommand") = "text/plain", example = "clear"))),
     responses(
-        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<u64>, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
+        (status = 200, description = "Success", body = u64, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "delete_document_by_parameter"
 )]
 async fn delete_document(
     ScopedIndex(index): ScopedIndex,
     Path((_, document_id)): Path<(String, String)>,
-    bytes: Bytes,
-) -> ApiResult<Result<u64, String>> {
-    match document_id.parse() {
-        Ok(id) => Ok(Json(delete_document_api(&index, id).await)),
-        Err(_) => delete_documents(ScopedIndex(index), bytes).await,
+    bytes: Result<Bytes, axum::extract::rejection::BytesRejection>,
+) -> ApiResult<u64> {
+    let bytes = bytes.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if !bytes.is_empty() {
+        return Err(ApiError::BadRequest(
+            "delete by ID does not accept a request body".into(),
+        ));
     }
+    let id = document_id
+        .parse()
+        .map_err(|_| ApiError::BadRequest("document_id must be an unsigned integer".into()))?;
+    Ok(Json(delete_document_api(&index, id).await?))
 }
 
-/// Deletes a document ID, an ID array, or documents matching a query. Send raw unquoted clear to remove all documents. Deletion is immediately visible; storage space is not reclaimed. Returns the remaining document count inside Ok.
+/// Deletes IDs, all matches of a nonempty text query, or all documents with all=true. Returns the allocated document count (zero after all=true). Deletion is immediately visible; storage space is not reclaimed.
 #[utoipa::path(
     delete, path = "/api/v1/index/{index_id}/doc", tag = "Document",
     params(
         ("apikey" = String, Header, description = "API key"),
         ("index_id" = u64, Path, description = "Index ID")
     ),
-    request_body(content(
-            (crate::api_schema::DeleteDocuments = "application/json", examples(
-                ("ID" = (value = json!(0))),
-                ("IDs" = (value = json!([0,1]))),
-                ("Query" = (value = json!({"query":"hello"})))
-            )),
-            (crate::api_schema::ClearCommand = "text/plain", example = "clear")
-        )),
+    request_body(content = DeleteDocuments, examples(
+        ("IDs" = (value = json!({"ids":[0,1]}))),
+        ("Query" = (value = json!({"query":"hello"}))),
+        ("All" = (value = json!({"all":true})))
+    )),
     responses(
-        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<u64>, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
+        (status = 200, description = "Success", body = u64, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "delete_document_by_request_object"
 )]
 async fn delete_documents(
     ScopedIndex(index): ScopedIndex,
-    bytes: Bytes,
-) -> ApiResult<Result<u64, String>> {
-    let result = if bytes == b"clear"[..] {
-        clear_index_api(&index).await
-    } else if let Ok(query) = serde_json::from_slice::<SearchRequestObject>(&bytes) {
-        Ok(delete_documents_by_query_api(&index, query).await?)
-    } else if bytes.trim_ascii_start().starts_with(b"[") {
-        delete_documents_by_object_api(&index, parse_json(&bytes)?).await
-    } else {
-        delete_document_api(&index, parse_json(&bytes)?).await
+    JsonBody(request): JsonBody<DeleteDocuments>,
+) -> ApiResult<u64> {
+    let count = match request {
+        DeleteDocuments::Ids { ids } => delete_documents_by_object_api(&index, ids).await?,
+        DeleteDocuments::Query(query) => delete_documents_by_query_api(&index, query).await?,
+        DeleteDocuments::All { all: true } => clear_index_api(&index).await?,
+        DeleteDocuments::All { all: false } => {
+            return Err(ApiError::BadRequest(
+                "all must be true to remove all documents".into(),
+            ));
+        }
     };
-    Ok(Json(result))
+    Ok(Json(count))
 }
 
-/// Runs a lexical, vector or hybrid query. Vector and Hybrid require query_vector. Parameters must be in the JSON body.
+/// Searches text, vectors, or both. Mode is inferred from the supplied inputs. Pending writes are visible; empty input browses documents. Parameters must be in the JSON body.
 #[utoipa::path(
     post, path = "/api/v1/index/{index_id}/query", tag = "Query",
     params(
@@ -679,16 +669,16 @@ async fn delete_documents(
     ),
     request_body(content = SearchRequestObject,
         examples(
-            ("Lexical" = (value = json!({"query":"hello","search_mode":"Lexical"}))),
-            ("Vector" = (value = json!({"query":"","query_vector":[1.0,0.0,0.0],"search_mode":{"Vector":{"similarity_threshold":null,"ann_mode":"All"}}}))),
-            ("Hybrid" = (value = json!({"query":"hello","query_vector":[1.0,0.0,0.0],"search_mode":{"Hybrid":{"similarity_threshold":null,"ann_mode":"All"}}})))
+            ("Lexical" = (value = json!({"query":"hello"}))),
+            ("Vector" = (value = json!({"query_vector":[1.0,0.0,0.0]}))),
+            ("Hybrid" = (value = json!({"query":"hello","query_vector":[1.0,0.0,0.0]})))
         )),
     responses(
         (status = 200, description = "Success", body = SearchResultObject, content_type = "application/json"),
-        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
-        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
-        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain"),
-        (status = 405, description = "Use POST for query and iteration", body = String, content_type = "text/plain")
+        (status = 400, description = "Invalid request", body = ErrorResponse, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = ErrorResponse, content_type = "application/json"),
+        (status = 404, description = "Resource not found in this key scope", body = ErrorResponse, content_type = "application/json"),
+        (status = 405, description = "Use POST for query and iteration", body = ErrorResponse, content_type = "application/json")
     ),
     operation_id = "query_index_post"
 )]
@@ -700,7 +690,6 @@ async fn query_index(
 }
 
 #[derive(OpenApi, Default)]
-#[openapi(components(schemas(GetDocumentRequest)))]
 #[openapi(tags(
     (name="Info", description="Return info about the server"),
     (name="API Key", description="Create and delete API keys"),
@@ -729,8 +718,12 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(query_index))
 }
 
-async fn not_implemented() -> impl IntoResponse {
-    (StatusCode::NOT_IMPLEMENTED, "not implemented")
+async fn not_found() -> ApiError {
+    ApiError::NotFound("route not found")
+}
+
+async fn method_not_allowed() -> ApiError {
+    ApiError::MethodNotAllowed
 }
 
 fn router(state: AppState) -> Router {
@@ -784,8 +777,8 @@ fn router(state: AppState) -> Router {
         );
     }
     let app = app
-        .fallback(not_implemented)
-        .method_not_allowed_fallback(not_implemented)
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::disable())
         .with_state(state);
     // Wrap the router so normalization happens before route matching.
@@ -855,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn openapi_preserves_wire_contracts() {
+    fn openapi_describes_uniform_json_contracts() {
         let (_, openapi) = api_router().split_for_parts();
         let doc = serde_json::to_value(openapi).unwrap();
         let paths = doc["paths"].as_object().unwrap();
@@ -866,79 +859,127 @@ mod tests {
                 .sum::<usize>(),
             15
         );
-        for (path, operations) in paths {
-            for (method, operation) in operations.as_object().unwrap() {
-                let media = if path == "/api/v1/apikey" && method == "post" {
-                    "text/plain"
-                } else {
-                    "application/json"
-                };
-                let content = &operation["responses"]["200"]["content"];
-                assert_eq!(content.as_object().unwrap().len(), 1);
-                assert!(content.get(media).is_some(), "{method} {path}");
+        for operations in paths.values() {
+            for operation in operations.as_object().unwrap().values() {
+                for (status, response) in operation["responses"].as_object().unwrap() {
+                    let content = &response["content"];
+                    assert_eq!(content.as_object().unwrap().len(), 1);
+                    let schema = resolve(&doc, &content["application/json"]["schema"]);
+                    assert!(!schema.is_null());
+                    if status != "200" {
+                        assert_eq!(schema["required"], json!(["code", "message"]));
+                    }
+                    assert!(schema["properties"].get("Ok").is_none());
+                }
             }
         }
-        for (path, method, value_type) in [
-            ("/api/v1/apikey", "get", "array"),
-            ("/api/v1/index/{index_id}/doc", "post", "integer"),
-            ("/api/v1/index/{index_id}/doc", "patch", "integer"),
-            ("/api/v1/index/{index_id}/doc", "delete", "integer"),
-            (
-                "/api/v1/index/{index_id}/doc/{document_id}",
-                "delete",
-                "integer",
-            ),
-        ] {
-            let schema = resolve(
-                &doc,
-                &paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"],
-            );
-            assert_eq!(schema["required"], json!(["Ok"]));
-            assert_eq!(schema["properties"]["Ok"]["type"], value_type);
-        }
-        let key_body = &paths["/api/v1/apikey"]["delete"]["requestBody"];
-        assert_eq!(key_body["required"], true);
-        assert_eq!(
-            resolve(&doc, &key_body["content"]["application/json"]["schema"])["required"],
-            json!(["apikey_base64"])
-        );
-        let document_path = &paths["/api/v1/index/{index_id}/doc/{document_id}"];
-        for method in ["get", "delete"] {
-            let body = &document_path[method]["requestBody"];
-            assert_ne!(body["required"], true);
-            // Optional body must not advertise JSON null as a valid payload.
-            assert!(
-                body["content"]["application/json"]["schema"]
-                    .get("$ref")
-                    .is_some()
-            );
-        }
         let schemas = &doc["components"]["schemas"];
-        let write = &schemas["WriteDocuments"]["oneOf"];
-        assert_eq!(write[0]["type"], "object");
-        assert_eq!(write[1]["items"]["type"], "object");
-        let update = &schemas["UpdateDocuments"]["oneOf"];
+        assert!(schemas.get("SchemaField").is_none());
         assert_eq!(
-            resolve(&doc, &update[0]),
-            resolve(&doc, &update[1]["items"])
+            schemas["DocumentReplacement"]["required"],
+            json!(["id", "document"])
         );
-        let replacement = resolve(&doc, &update[0]);
-        assert_eq!(replacement["minItems"], 2);
-        assert_eq!(replacement["maxItems"], 2);
-        assert_eq!(replacement["prefixItems"][0]["type"], "integer");
-        assert_eq!(replacement["prefixItems"][1]["type"], "object");
-        let delete = &paths["/api/v1/index/{index_id}/doc"]["delete"]["requestBody"];
-        assert_eq!(delete["required"], true);
-        assert_eq!(
-            resolve(&doc, &delete["content"]["text/plain"]["schema"])["enum"],
-            json!(["clear"])
-        );
-        assert_eq!(
-            schemas["DeleteDocuments"]["oneOf"]
+        let document = &paths["/api/v1/index/{index_id}/doc/{document_id}"];
+        assert!(document["get"].get("requestBody").is_none());
+        assert!(document["delete"].get("requestBody").is_none());
+        assert!(
+            document["get"]["parameters"]
                 .as_array()
                 .unwrap()
-                .len(),
-            3
+                .iter()
+                .any(|p| p["name"] == "fields" && p["in"] == "query")
         );
+        for path in ["/api/v1/index/{index_id}/doc"] {
+            for method in ["patch", "delete"] {
+                for example in
+                    paths[path][method]["requestBody"]["content"]["application/json"]["examples"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                {
+                    let value = example["value"].clone();
+                    if method == "patch" {
+                        serde_json::from_value::<UpdateDocuments>(value).unwrap();
+                    } else {
+                        serde_json::from_value::<DeleteDocuments>(value).unwrap();
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn openapi_describes_only_public_settings_and_valid_examples() {
+        let (_, openapi) = api_router().split_for_parts();
+        let doc = serde_json::to_value(openapi).unwrap();
+        let schemas = &doc["components"]["schemas"];
+        for (name, removed) in [
+            (
+                "CreateIndexRequest",
+                &[
+                    "similarity",
+                    "frequent_words",
+                    "ngram_indexing",
+                    "clustering",
+                    "document_compression",
+                    "inference",
+                ][..],
+            ),
+            (
+                "SearchRequestObject",
+                &[
+                    "search_mode",
+                    "realtime",
+                    "enable_empty_query",
+                    "result_type",
+                    "query_type_default",
+                ][..],
+            ),
+            (
+                "FieldRequest",
+                &["longest", "facet", "field_id", "indexed_field_id"][..],
+            ),
+            ("GetIteratorRequest", &["include_deleted"][..]),
+        ] {
+            for field in removed {
+                assert!(
+                    schemas[name]["properties"].get(field).is_none(),
+                    "{name}.{field}"
+                );
+            }
+        }
+        assert_eq!(
+            schemas["FieldRequest"]["required"],
+            json!(["field", "field_type"])
+        );
+        assert_eq!(schemas["VectorConfig"]["required"], json!(["dimensions"]));
+        assert_eq!(
+            schemas["GetIteratorRequest"]["properties"]["take"]["default"],
+            10
+        );
+        assert_eq!(
+            schemas["GetIteratorRequest"]["properties"]["include_document"]["default"],
+            true
+        );
+        assert_eq!(
+            schemas["SearchRequestObject"]["properties"]["count"]["default"],
+            true
+        );
+        for (path, creation) in [
+            ("/api/v1/index", true),
+            ("/api/v1/index/{index_id}/query", false),
+        ] {
+            let examples = doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]
+                ["examples"]
+                .as_object()
+                .unwrap();
+            for example in examples.values() {
+                if creation {
+                    serde_json::from_value::<CreateIndexRequest>(example["value"].clone()).unwrap();
+                } else {
+                    serde_json::from_value::<SearchRequestObject>(example["value"].clone())
+                        .unwrap();
+                }
+            }
+        }
     }
 }

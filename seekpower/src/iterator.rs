@@ -205,7 +205,7 @@ impl GetIterator for IndexArc {
                             .await
                             .get_document(
                                 docid as usize,
-                                false,
+                                true,
                                 &fields_hashset,
                             )
                             .await
@@ -280,8 +280,8 @@ impl GetIterator for IndexArc {
                             .await
                             .get_document(
                                 docid as usize,
-                                false,
-                                &std::collections::HashSet::new(),
+                                true,
+                                &fields_hashset,
                             )
                             .await
                             .ok(),

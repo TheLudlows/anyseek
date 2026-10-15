@@ -8,10 +8,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, env::current_exe, fs, path::Path, sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 
-use crate::{
-    MASTER_KEY_SECRET, VERSION, keys::open_all_apikeys, http_server::http_server,
-};
 use crate::keys::create_apikey_api;
+use crate::{MASTER_KEY_SECRET, VERSION, http_server::http_server, keys::open_all_apikeys};
 
 pub(crate) async fn initialize(params: HashMap<String, String>) {
     let force_shard_number = params
@@ -67,7 +65,12 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
         open_all_apikeys(&index_path, &mut keys).await;
         // The master key owns a persisted index scope and can also manage other keys.
         let master_key_bytes = Sha256::digest(MASTER_KEY_SECRET.as_bytes());
-        create_apikey_api(&index_path, master_key_bytes.as_slice(), &mut keys);
+        create_apikey_api(&index_path, master_key_bytes.as_slice(), &mut keys).unwrap_or_else(
+            |error| {
+                log::error!("Persisting master key failed: {error}");
+                std::process::exit(1)
+            },
+        );
         let index_count: usize = keys.values().map(|key| key.index_list.len()).sum();
         log::info!(
             "Loaded {} API key scopes, {index_count} indices, {} bytes on disk in {:?}",

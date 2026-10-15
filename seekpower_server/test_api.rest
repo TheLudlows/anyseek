@@ -1,798 +1,139 @@
-// use with VSC extension "Rest client" to execute API calls and inspect responses
-
+// VS Code REST Client. Copy the master key from the server startup log.
 @base_url = http://127.0.0.1:8080
 @master_key = PASTE_MASTER_API_KEY
 @api_key = {{master_key}}
-@key_to_revoke = PASTE_ORDINARY_API_KEY
 @index_id = 0
+@vector_index_id = 1
+@key_to_revoke = PASTE_ORDINARY_API_KEY
 
-// WARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, 
-// otherwise your generated API keys will be compromised.
-### create api key (use master API key displayed in the server console at startup)
-POST {{base_url}}/api/v1/apikey HTTP/1.1
+### Health
+GET {{base_url}}/api/v1/live
+
+### Create an optional isolated key
+POST {{base_url}}/api/v1/apikey
 apikey: {{master_key}}
-content-type: application/json
+Content-Type: application/json
 
 {}
 
-### delete api key (requires master key)
-DELETE {{base_url}}/api/v1/apikey HTTP/1.1
+### List indexes in this key's scope
+GET {{base_url}}/api/v1/apikey
+apikey: {{api_key}}
+
+### Create a lexical index; text is stored and indexed by default
+POST {{base_url}}/api/v1/index
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"index_name":"documents","schema":[{"field":"body","field_type":"Text"},{"field":"category","field_type":"String16","filterable":true}]}
+
+### Index information
+GET {{base_url}}/api/v1/index/{{index_id}}
+apikey: {{api_key}}
+
+### Write one document (an array writes a batch)
+POST {{base_url}}/api/v1/index/{{index_id}}/doc
+apikey: {{api_key}}
+Content-Type: application/json
+
+[{"body":"hello database","category":"guide"},{"body":"hello world","category":"note"}]
+
+### Search immediately, before committing
+POST {{base_url}}/api/v1/index/{{index_id}}/query
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"query":"hello"}
+
+### Filter, project and match any term
+POST {{base_url}}/api/v1/index/{{index_id}}/query
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"query":"database world","operator":"or","fields":["body"],"filter":[{"String16":{"field":"category","filter":["guide"]}}]}
+
+### Browse without text; omit total counting
+POST {{base_url}}/api/v1/index/{{index_id}}/query
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"count":false,"length":10,"sort":[{"field":"category","order":"Ascending"}]}
+
+### Persist pending writes
+PATCH {{base_url}}/api/v1/index/{{index_id}}
+apikey: {{api_key}}
+
+### Read selected stored fields; omit fields for the full document
+GET {{base_url}}/api/v1/index/{{index_id}}/doc/0?fields=body
+apikey: {{api_key}}
+
+### Iterate live documents; defaults to 10 with stored fields
+POST {{base_url}}/api/v1/index/{{index_id}}/iterator
+apikey: {{api_key}}
+Content-Type: application/json
+
+{}
+
+### Fully replace one document (an array of these objects replaces a batch); new ID allocated
+PATCH {{base_url}}/api/v1/index/{{index_id}}/doc
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"id":0,"document":{"body":"updated database","category":"guide"}}
+
+### Create a hybrid index; vectors default to F32/Cosine, without quantization
+POST {{base_url}}/api/v1/index
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"index_name":"hybrid","schema":[{"field":"body","field_type":"Text"},{"field":"vector","field_type":"Json","index_vector":true}],"vector":{"dimensions":3}}
+
+### Supply external embeddings; no model runs in the server
+POST {{base_url}}/api/v1/index/{{vector_index_id}}/doc
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"body":"hello database","vector":[1,0,0]}
+
+### Vector-only search; no query string required
+POST {{base_url}}/api/v1/index/{{vector_index_id}}/query
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"query_vector":[1,0,0]}
+
+### Text plus vector selects hybrid search
+POST {{base_url}}/api/v1/index/{{vector_index_id}}/query
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"query":"database","query_vector":[1,0,0]}
+
+### Delete by internal document ID
+DELETE {{base_url}}/api/v1/index/{{index_id}}/doc/1
+apikey: {{api_key}}
+
+### Delete all matches of nonempty text; for IDs use {"ids":[0,1]}
+DELETE {{base_url}}/api/v1/index/{{index_id}}/doc
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"query":"database"}
+
+### Explicitly remove all documents
+DELETE {{base_url}}/api/v1/index/{{index_id}}/doc
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"all":true}
+
+### Delete the index
+DELETE {{base_url}}/api/v1/index/{{index_id}}
+apikey: {{api_key}}
+
+### Revoke a key and delete its indexes
+DELETE {{base_url}}/api/v1/apikey
 apikey: {{master_key}}
-content-type: application/json
+Content-Type: application/json
 
 {"apikey_base64":"{{key_to_revoke}}"}
-
-### create index
-POST {{base_url}}/api/v1/index HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "schema":[{
-        "field": "title", 
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true,
-        "boost":10.0
-    },
-        {
-        "field": "body",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true,
-        "longest": true
-    },
-    {
-        "field": "url", 
-        "field_type": "String32", 
-        "store": true, 
-        "index_lexical": false
-    }], 
-    "index_name": "test_index",
-    "similarity": "Bm25fProximity",
-    "tokenizer": "UnicodeAlphanumeric"
-}
-
-### get index
-GET {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-### get all indexes (per apikey)
-
-### get all indices (per server - requires master apikey)
-
-### delete index
-DELETE {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-### commit index
-PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-### index document
-POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "title":"title1 test",
-    "body":"body1",
-    "url":"url1"
-}
-
-### index documents
-POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-[
-{
-    "title":"title2",
-    "body":"body2 test",
-    "url":"url2"
-},
-{
-    "title":"title3 test",
-    "body":"body3 test",
-    "url":"url3"
-}
-]
-
-### get documents with selected fields
-GET {{base_url}}/api/v1/index/{{index_id}}/doc/0
-apikey: {{api_key}}
-content-type: application/json
-
-//optional request body
-{
-    "fields": ["title", "body"]
-}
-
-### get document with stored fields
-GET {{base_url}}/api/v1/index/{{index_id}}/doc/0
-apikey: {{api_key}}
-content-type: application/json
-
-### delete document, by single document ID in URL parameter
-DELETE  {{base_url}}/api/v1/index/{{index_id}}/doc/0 HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-
-### delete document, by single document ID in JSON request object
-DELETE  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-0
-
-### delete documents, by vector of document IDs in JSON request object
-DELETE  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-[
-    0,
-    1
-]
-
-### delete documents, by query in JSON request object
-DELETE  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"test",
-    "offset":0,
-    "length":10,
-    "realtime": true,
-    "field_filter": ["title", "body"]
-}
-
-### update document
-PATCH  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-[0,{"title":"title1 test","body":"body1","url":"url1"}]
-
-### update documents
-PATCH  {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-[[1,{"title":"title1 test","body":"body1","url":"url1"}],
-[2,{"title":"title3 test","body":"body3 test","url":"url3"}]]
-
-### query index POST
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"test",
-    "offset":0,
-    "length":10,
-    "result_type": "TopkCount",
-    "realtime": true,
-    "field_filter": ["title", "body"]
-}
-
-### query index POST with stored fields
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"test",
-    "offset":0,
-    "length":10,
-    "realtime": true
-}
-
-### create index NUMBER
-POST {{base_url}}/api/v1/index HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "schema":[{
-        "field": "title",
-        "field_type": "Text", 
-        "store": true,  
-        "index_lexical": true,
-        "boost":10.0
-    },
-        {
-        "field": "body", 
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true
-    },
-    {
-        "field": "url", 
-        "field_type": "String32", 
-        "store": true, 
-        "index_lexical": false
-    },
-    {
-        "field": "number", 
-        "field_type": "I64", 
-        "store": true, 
-        "index_lexical": true
-    }],
-    "index_name": "test_index",
-    "similarity": "Bm25fProximity",
-    "tokenizer": "UnicodeAlphanumeric"
-}
-
-### index doc NUMBER
-POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "title":"title1 test",
-    "body":"body1",
-    "url":"url1",
-    "number": 12345
-}
-
-### query index POST with numeric fields
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"12345",
-    "offset":0,
-    "length":10,
-    "realtime": true
-}
-
-### query index POST with metadata filter (Lexical, Vector or Hybrid)
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"bm25",
-    "offset":0,
-    "length":10,
-    "realtime":false,
-    "result_sort":[],
-    "facet_filter": [{"Timestamp": {"field": "date","filter": {"start":820450800,"end":1577833200}}}]
-}      
-
-
-
-### iterator: get first 2 documents
-POST {{base_url}}/api/v1/index/{{index_id}}/iterator/
-apikey: {{api_key}}
-content-type: application/json
-
-//request body
-{
-    "document_id": null,
-    "skip": 0,
-    "take": 2,
-    "include_document": true,
-    "fields": []
-}
-
-### iterator: get last 2 documents
-POST {{base_url}}/api/v1/index/{{index_id}}/iterator/
-apikey: {{api_key}}
-content-type: application/json
-
-//request body
-{
-    "document_id": null,
-    "skip": 0,
-    "take": -2,
-    "include_document": true,
-    "fields": []
-}
-
-### iterator: get next document
-POST {{base_url}}/api/v1/index/{{index_id}}/iterator/
-apikey: {{api_key}}
-content-type: application/json
-
-//request body
-{
-    "document_id": 0,
-    "skip": 1,
-    "take": 1,
-    "include_document": true,
-    "fields": []
-}
-
-### iterator: get previous document
-POST {{base_url}}/api/v1/index/{{index_id}}/iterator/
-apikey: {{api_key}}
-content-type: application/json
-
-//request body
-{
-    "document_id": 1,
-    "skip": 1,
-    "take": -1,
-    "include_document": true,
-    "fields": []
-}
-
-### search enable_empty_query: default (descending)
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"",
-    "enable_empty_query": true,
-    "offset":0,
-    "length":10,
-    "realtime":false
-} 
-
-### search enable_empty_query: descending 
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"",
-    "enable_empty_query": true,
-    "offset":0,
-    "length":10,
-    "realtime":false,
-    "result_sort":[{"field": "_id", "order": "Descending" }]
-} 
-
-### search enable_empty_query: ascending 
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"",
-    "enable_empty_query": true,
-    "offset":0,
-    "length":10,
-    "realtime":false,
-    "result_sort":[{"field": "_id", "order": "Ascending" }]
-} 
-
-//---- JSON Object field
-
-### create index
-POST {{base_url}}/api/v1/index HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "schema":[{
-        "field": "title", 
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true
-    },
-    {
-        "field": "body",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true,
-        "longest": true
-    },
-    {
-        "field": "json", 
-        "field_type": "Json",
-        "store": true, 
-        "index_lexical": true
-    }], 
-    "index_name": "test_index",
-    "similarity": "Bm25fProximity",
-    "tokenizer": "UnicodeAlphanumeric"
-}
-
-### index document
-POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "title":"title1 test",
-    "body":"body1",
-    "json":{ 
-        "region": "US",
-        "manager": {
-            "age":     30,
-            "name": {
-            "first": "John",
-            "last":  "Smith"
-            },
-            "regions": ["north", "west", "south"]
-        }
-    }
-}
-
-### commit index
-PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-### query index POST
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"\"John Smith\"",
-    "offset":0,
-    "length":10,
-    "result_type": "TopkCount",
-    "realtime": true
-}
-
-// Structured product records
-
-### create index
-POST {{base_url}}/api/v1/index HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "schema":[{
-        "field": "number", 
-        "field_type": "U32", 
-        "store": true, 
-        "index_lexical": false
-    },
-    {
-        "field": "image",
-        "field_type": "Binary", 
-        "store": true, 
-        "index_lexical": false
-    },
-    {
-        "field": "title",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true
-    },
-    {
-        "field": "url",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": false
-    },
-    {
-        "field": "body",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true,
-        "longest": true
-    },
-    {
-        "field": "about",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true
-    },
-    {
-        "field": "manufacturer",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true
-    },
-    {
-        "field": "brand",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true
-    },
-    {
-        "field": "category",
-        "field_type": "Text", 
-        "store": true, 
-        "index_lexical": true
-    }
-    ], 
-    "index_name": "amazon_index",
-    "similarity": "Bm25fProximity",
-    "tokenizer": "UnicodeAlphanumeric"
-}
-
-// realtime vector search
-
-### create index
-POST {{base_url}}/api/v1/index HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "schema":[{
-        "field": "vector",
-        "field_type": "Json",
-        "store": true, 
-        "index_lexical": false,
-        "index_vector": true
-    },
-    {
-        "field": "body",
-        "field_type": "Text",
-        "store": true,
-        "index_lexical": true,
-        "index_vector": false
-    },
-        {
-        "field": "url", 
-        "field_type": "String32", 
-        "store": true, 
-        "index_lexical": false,
-        "index_vector": false
-    }], 
-    "index_name": "test_index",
-    "clustering": "None",
-    "inference": {"External": { "dimensions": 3, "precision": "F32", "similarity": "Cosine", "quantization": "None" }}
-}
-
-### index document
-POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-[
-    {"vector":[1,0,0],"body":"animal from a comedy","url":"url1"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,0,1],"body":"small carnivorous mammal","url":"url3"}
-]
-
-### query index POST
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"rosy panther",
-    "query_vector":[1,0,0],
-    "offset":0,
-    "length":10,
-    "result_type": "TopkCount",
-    "realtime": true,
-    "search_mode": {"Vector":{"similarity_threshold": 0.7, "ann_mode": "All"}}
-}
-
-// commit incomplete levels
-
-### create index
-POST {{base_url}}/api/v1/index HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "schema":[{
-        "field": "vector",
-        "field_type": "Json",
-        "store": true, 
-        "index_lexical": false,
-        "index_vector": true
-    },
-    {
-        "field": "body",
-        "field_type": "Text",
-        "store": true,
-        "index_lexical": true,
-        "index_vector": false
-    },
-        {
-        "field": "url", 
-        "field_type": "String32", 
-        "store": true, 
-        "index_lexical": false,
-        "index_vector": false
-    }], 
-    "index_name": "test_index",
-    "clustering": "None",
-    "inference": {"External": { "dimensions": 3, "precision": "F32", "similarity": "Cosine", "quantization": "None" }}
-}
-
-### index document
-POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-[
-    {"vector":[1,0,0],"body":"animal from a comedy","url":"url1"},
-
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-
-    {"vector":[0,0,1],"body":"small carnivorous mammal","url":"url3"}
-]
-
-### commit index
-PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-### index document
-POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-[
-    {"vector":[1,0,0],"body":"animal from a comedy","url":"url1"},
-
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    {"vector":[0,1,0],"body":"largest mammal in the ocean","url":"url2"},
-    
-    {"vector":[0,0,1],"body":"small carnivorous mammal","url":"url3"}
-]
-
-### commit index
-PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-### query index POST
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"rosy panther",
-    "query_vector":[1,0,0],
-    "offset":0,
-    "length":10,
-    "result_type": "TopkCount",
-    "realtime": false,
-    "search_mode": {"Vector":{"similarity_threshold": 0.7, "ann_mode": "All"}}
-}
-
-
-// vector search
-
-### create index
-POST {{base_url}}/api/v1/index HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "schema":[
-    {
-        "field":"vector",
-        "field_type":"Json",
-        "store":false,
-        "index_lexical":false,
-        "index_vector":true
-    },
-    {
-        "field":"index",
-        "field_type":"Text",
-        "store":true,
-        "index_lexical":false,
-        "index_vector":false
-    }] , 
-    "index_name": "vectors_index",
-    "clustering": "None",
-    "inference": {
-        "External": { "dimensions": 128, "precision": "F32", "quantization": "ScalarQuantizationI8", "similarity": "Euclidean" }
-    }
-}
-
-### index document
-POST {{base_url}}/api/v1/index/{{index_id}}/doc HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-[
-    {"vector":[0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010, 0.011, 0.012, 0.013, 0.014, 0.015, 0.016, 0.017, 0.018, 0.019, 0.020, 0.021, 0.022, 0.023, 0.024, 0.025, 0.026, 0.027, 0.028, 0.029, 0.030, 0.031, 0.032, 0.033, 0.034, 0.035, 0.036, 0.037, 0.038, 0.039, 0.040, 0.041, 0.042, 0.043, 0.044, 0.045, 0.046, 0.047, 0.048, 0.049, 0.050, 0.051, 0.052, 0.053, 0.054, 0.055, 0.056, 0.057, 0.058, 0.059, 0.060, 0.061, 0.062, 0.063, 0.064, 0.065, 0.066, 0.067, 0.068, 0.069, 0.070, 0.071, 0.072, 0.073, 0.074, 0.075, 0.076, 0.077, 0.078, 0.079, 0.080, 0.081, 0.082, 0.083, 0.084, 0.085, 0.086, 0.087, 0.088, 0.089, 0.090, 0.091, 0.092, 0.093, 0.094, 0.095, 0.096, 0.097, 0.098, 0.099, 0.100, 0.101, 0.102, 0.103, 0.104, 0.105, 0.106, 0.107, 0.108, 0.109, 0.110, 0.111, 0.112, 0.113, 0.114, 0.115, 0.116, 0.117, 0.118, 0.119, 0.120, 0.121, 0.122, 0.123, 0.124, 0.125, 0.126, 0.127, 0.128],"index":"0"},
-    {"vector":[0.129, 0.130, 0.131, 0.132, 0.133, 0.134, 0.135, 0.136, 0.137, 0.138, 0.139, 0.140, 0.141, 0.142, 0.143, 0.144, 0.145, 0.146, 0.147, 0.148, 0.149, 0.150, 0.151, 0.152, 0.153, 0.154, 0.155, 0.156, 0.157, 0.158, 0.159, 0.160, 0.161, 0.162, 0.163, 0.164, 0.165, 0.166, 0.167, 0.168, 0.169, 0.170, 0.171, 0.172, 0.173, 0.174, 0.175, 0.176, 0.177, 0.178, 0.179, 0.180, 0.181, 0.182, 0.183, 0.184, 0.185, 0.186, 0.187, 0.188, 0.189, 0.190, 0.191, 0.192, 0.193, 0.194, 0.195, 0.196, 0.197, 0.198, 0.199, 0.200, 0.201, 0.202, 0.203, 0.204, 0.205, 0.206, 0.207, 0.208, 0.209, 0.210, 0.211, 0.212, 0.213, 0.214, 0.215, 0.216, 0.217, 0.218, 0.219, 0.220, 0.221, 0.222, 0.223, 0.224, 0.225, 0.226, 0.227, 0.228, 0.229, 0.230, 0.231, 0.232, 0.233, 0.234, 0.235, 0.236, 0.237, 0.238, 0.239, 0.240, 0.241, 0.242, 0.243, 0.244, 0.245, 0.246, 0.247, 0.248, 0.249, 0.250, 0.251, 0.252, 0.253, 0.254, 0.255, 0.256],"index":"1"},
-    {"vector":[0.257, 0.258, 0.259, 0.260, 0.261, 0.262, 0.263, 0.264, 0.265, 0.266, 0.267, 0.268, 0.269, 0.270, 0.271, 0.272, 0.273, 0.274, 0.275, 0.276, 0.277, 0.278, 0.279, 0.280, 0.281, 0.282, 0.283, 0.284, 0.285, 0.286, 0.287, 0.288, 0.289, 0.290, 0.291, 0.292, 0.293, 0.294, 0.295, 0.296, 0.297, 0.298, 0.299, 0.300, 0.301, 0.302, 0.303, 0.304, 0.305, 0.306, 0.307, 0.308, 0.309, 0.310, 0.311, 0.312, 0.313, 0.314, 0.315, 0.316, 0.317, 0.318, 0.319, 0.320, 0.321, 0.322, 0.323, 0.324, 0.325, 0.326, 0.327, 0.328, 0.329, 0.330, 0.331, 0.332, 0.333, 0.334, 0.335, 0.336, 0.337, 0.338, 0.339, 0.340, 0.341, 0.342, 0.343, 0.344, 0.345, 0.346, 0.347, 0.348, 0.349, 0.350, 0.351, 0.352, 0.353, 0.354, 0.355, 0.356, 0.357, 0.358, 0.359, 0.360, 0.361, 0.362, 0.363, 0.364, 0.365, 0.366, 0.367, 0.368, 0.369, 0.370, 0.371, 0.372, 0.373, 0.374, 0.375, 0.376, 0.377, 0.378, 0.379, 0.380, 0.381, 0.382, 0.383, 0.384],"index":"2"}
-]
-
-### commit index
-PATCH {{base_url}}/api/v1/index/{{index_id}} HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-### query index POST
-POST {{base_url}}/api/v1/index/{{index_id}}/query HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "query":"",
-    "query_vector": [
-        0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010, 0.011, 0.012, 0.013,
-        0.014, 0.015, 0.016, 0.017, 0.018, 0.019, 0.020, 0.021, 0.022, 0.023, 0.024, 0.025, 0.026,
-        0.027, 0.028, 0.029, 0.030, 0.031, 0.032, 0.033, 0.034, 0.035, 0.036, 0.037, 0.038, 0.039,
-        0.040, 0.041, 0.042, 0.043, 0.044, 0.045, 0.046, 0.047, 0.048, 0.049, 0.050, 0.051, 0.052,
-        0.053, 0.054, 0.055, 0.056, 0.057, 0.058, 0.059, 0.060, 0.061, 0.062, 0.063, 0.064, 0.065,
-        0.066, 0.067, 0.068, 0.069, 0.070, 0.071, 0.072, 0.073, 0.074, 0.075, 0.076, 0.077, 0.078,
-        0.079, 0.080, 0.081, 0.082, 0.083, 0.084, 0.085, 0.086, 0.087, 0.088, 0.089, 0.090, 0.091,
-        0.092, 0.093, 0.094, 0.095, 0.096, 0.097, 0.098, 0.099, 0.100, 0.101, 0.102, 0.103, 0.104,
-        0.105, 0.106, 0.107, 0.108, 0.109, 0.110, 0.111, 0.112, 0.113, 0.114, 0.115, 0.116, 0.117,
-        0.118, 0.119, 0.120, 0.121, 0.122, 0.123, 0.124, 0.125, 0.126, 0.127, 0.128
-    ],
-    "offset":0,
-    "length":10,
-    "result_type": "Topk",
-    "realtime": false,
-    "search_mode": {
-        "Vector":{
-            "similarity_threshold": 0.7, 
-            "ann_mode": {"Nprobe":55}
-        }
-    }
-
-}
-
-// e-commerce demo
-
-//create in console
-
-### create index
-POST {{base_url}}/api/v1/index HTTP/1.1
-apikey: {{api_key}}
-content-type: application/json
-
-{
-    "schema":
-    [
-        { "field": "objectID",    "field_type": "String32", "store": true,  "index_lexical": false },
-        { "field": "name",        "field_type": "Text",     "store": true,  "index_lexical": true  },
-        { "field": "description", "field_type": "Text",     "store": true,  "index_lexical": true  },
-        { "field": "image",       "field_type": "String32", "store": true,  "index_lexical": false },
-        { "field": "url",         "field_type": "String32", "store": true,  "index_lexical": false },
-        { "field": "categories",  "field_type": "StringSet32", "store": true, "index_lexical": false, "facet": true },
-        { "field": "brand",       "field_type": "String32", "store": true,  "index_lexical": false, "facet": true },
-        { "field": "type",        "field_type": "String32", "store": true,  "index_lexical": false, "facet": true },
-        { "field": "rating",      "field_type": "U8",      "store": true,  "index_lexical": false, "facet": true },
-        { "field": "popularity",  "field_type": "U32",      "store": true,  "index_lexical": false, "facet": true },
-        { "field": "price",       "field_type": "F64",      "store": true,  "index_lexical": false, "facet": true }
-    ], 
-    "index_name": "test_index",
-    "similarity": "Bm25fProximity",
-    "tokenizer": "UnicodeAlphanumeric"
-}

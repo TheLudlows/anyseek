@@ -27,7 +27,7 @@ cargo run -p seekpower_server -- local_ip=127.0.0.1 local_port=8080
 | 数据与服务 | JSON 单条/批量写入、读取、更新、删除；索引生命周期；API key 鉴权与数据作用域 |
 | Web UI | 密钥连接、索引创建/选择、字段 schema 配置、JSON 粘贴/文件写入与提交、三种检索模式、外部向量输入、分页、原文/链接预览、日期输入过滤与排序 |
 
-完整接口、配置、外围功能及限制见 [FEATURES.md](FEATURES.md)。特别注意：ANN 过滤仍受簇探测范围影响；UI 尚无完整管理页面；内部 DocID 不是稳定业务 ID；实时可见不等于崩溃可恢复。分布式与可靠性补强属于后续阶段。
+完整接口、配置、外围功能及限制见 [FEATURES.md](FEATURES.md)。特别注意：HTTP 向量检索默认搜索全部簇，核心显式 ANN 仍受簇探测范围影响；UI 尚无完整管理页面；内部 DocID 不是稳定业务 ID；实时可见不等于崩溃可恢复。分布式与可靠性补强属于后续阶段。
 
 ## 外部向量示例
 
@@ -37,21 +37,20 @@ cargo run -p seekpower_server -- local_ip=127.0.0.1 local_port=8080
 {
   "index_name": "external_demo",
   "schema": [
-    {"field":"body","field_type":"Text","store":true,"index_lexical":true},
-    {"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}
+    {"field":"body","field_type":"Text"},
+    {"field":"vector","field_type":"Json","index_vector":true}
   ],
-  "inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}},
-  "clustering":"None"
+  "vector":{"dimensions":3}
 }
 ```
 
 向 `/api/v1/index/{id}/doc` POST `{"body":"example text","vector":[1,0,0]}`，再 PATCH `/api/v1/index/{id}` 提交。向 `/api/v1/index/{id}/query` POST：
 
 ```json
-{"query":"example","query_vector":[1,0,0],"search_mode":{"Hybrid":{"similarity_threshold":null,"ann_mode":"All"}}}
+{"query":"example","query_vector":[1,0,0]}
 ```
 
-Vector/Hybrid 必须提供 `query_vector`；Lexical 仅需文本。写入必须包含所有已配置的向量字段。二进制向量字段仍以 base64 字符串放在 JSON 中，与已删除的 v2 二进制查询协议无关。
+仅文本执行全文检索，仅 `query_vector` 执行向量检索，两者都有执行混合检索。空对象 `{}` 浏览文档；查询默认包含未提交写入，持久化仍需提交。写入必须包含所有已配置的向量字段。二进制向量字段仍以 base64 字符串放在 JSON 中，与已删除的 v2 二进制查询协议无关。
 
 ## 开发与文档
 

@@ -23,7 +23,7 @@ fn retired_presentation_options_are_rejected() {
         assert!(serde_json::from_value::<GetDocumentRequest>(json!({"query_terms":query_terms})).is_err());
     }
     assert!(serde_json::from_value::<GetDocumentRequest>(json!({})).is_ok());
-    assert!(serde_json::from_value::<GetDocumentRequest>(json!({"fields":["body"]})).is_ok());
+    assert!(serde_json::from_value::<GetDocumentRequest>(json!({"fields":"body"})).is_ok());
 }
 
 #[tokio::test]
