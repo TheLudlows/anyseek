@@ -34,7 +34,6 @@ mod http_server;
 mod multi_tenancy;
 #[doc(hidden)]
 mod server;
-mod bootstrap;
 #[doc(hidden)]
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[doc(hidden)]
@@ -52,7 +51,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
 
     if params.get("generate_openapi").is_some_and(|value| value == "true") {
-        api_endpoints::generate_openapi();
+        http_server::generate_openapi();
         return Ok(());
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))

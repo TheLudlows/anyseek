@@ -65,27 +65,9 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
     {
         let mut keys = apikey_list.write().await;
         open_all_apikeys(&index_path, &mut keys).await;
-        // Register the master key as a full scoped key in its own right, so it
-        // can create indices, write, commit and query exactly like an ordinary
-        // key (in addition to its exclusive ability to mint/delete keys). It is
-        // persisted and reloaded like any other key, so indices it owns survive
-        // restarts. On restart `open_all_apikeys` already reloads it, and the
-        // `contains_key` guard inside `create_apikey_api` skips re-insertion.
+        // The master key owns a persisted index scope and can also manage other keys.
         let master_key_bytes = Sha256::digest(MASTER_KEY_SECRET.as_bytes());
         create_apikey_api(&index_path, master_key_bytes.as_slice(), &mut keys);
-        match crate::bootstrap::initialize_key(&index_path, &mut keys) {
-            Ok(Some(key)) => {
-                println!("Initial API key: {key}");
-                println!(
-                    "Save this key now; it will not be displayed again. Open the Web UI to connect and create an index."
-                );
-            }
-            Ok(None) => {}
-            Err(error) => {
-                log::error!("API key initialization failed: {error}");
-                std::process::exit(1);
-            }
-        }
         let index_count: usize = keys.values().map(|key| key.index_list.len()).sum();
         log::info!(
             "Loaded {} API key scopes, {index_count} indices, {} bytes on disk in {:?}",

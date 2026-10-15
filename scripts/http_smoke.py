@@ -121,29 +121,34 @@ def exercise(binary, workdir):
         try:
             ready(process)
             print('PASS health')
-            initial_keys = re.findall(r'^Initial API key: (.+)$', log_path.read_text(), re.MULTILINE)
-            check(len(initial_keys) == 1, 'first startup did not generate exactly one key')
-            initial_key = initial_keys[0]
-            check(len(base64.b64decode(initial_key)) == 32 and initial_key != master,
-                  'initial key is not an independent 256-bit ordinary credential')
-            check(json.loads(request('GET', '/api/v1/apikey', key=initial_key)) == {'Ok': []},
-                  'initial key must have an empty index scope')
-            request('POST', '/api/v1/apikey', {}, initial_key, expected=401)
-            initial_identity = (workdir / 'index' / '0' / 'apikey.json').read_bytes()
-            check(initial_key.encode() not in initial_identity, 'plaintext key persisted in identity')
+            check(re.findall(r'^Master API key: (.+)$', log_path.read_text(), re.MULTILINE) == [master],
+                  'startup did not expose the configured master key')
+            check(json.loads(request('GET', '/api/v1/apikey', key=master)) == {'Ok': []},
+                  'master key must be directly usable with an empty scope')
+            master_identity = (workdir / 'index' / '0' / 'apikey.json').read_bytes()
+            check(master.encode() not in master_identity, 'plaintext key persisted in identity')
+            master_id = json.loads(request('POST', '/api/v1/index', {
+                'index_name': 'master_scope', 'schema': [
+                    {'field': 'body', 'field_type': 'Text', 'store': True, 'index_lexical': True}]}, master))
+            master_path = f'/api/v1/index/{master_id}'
+            request('POST', master_path + '/doc', {'body': 'master_record'}, master)
+            request('PATCH', master_path, key=master)
             process.terminate()
             process.wait(timeout=10)
             process = launch()
             ready(process)
-            request('GET', '/api/v1/apikey', key=initial_key)
-            check((workdir / 'index' / '0' / 'apikey.json').read_bytes() == initial_identity,
-                  'restart changed initial identity')
-            check(len(re.findall(r'^Initial API key:', log_path.read_text(), re.MULTILINE)) == 1,
-                  'restart generated or redisplayed an initial key')
-            print('PASS first-run random key, ordinary authorization and restart idempotency')
+            check(json.loads(request('POST', master_path + '/query', {'query': 'master_record'}, master))['count_total'] == 1,
+                  'master-owned documents did not survive restart')
+            check((workdir / 'index' / '0' / 'apikey.json').read_bytes() == master_identity,
+                  'restart changed master identity')
+            request('DELETE', master_path, key=master)
+            check(len(list((workdir / 'index').rglob('apikey.json'))) == 1,
+                  'startup created an unsolicited ordinary key')
+            check(not (workdir / 'index' / 'bootstrap.complete').exists(), 'obsolete bootstrap marker created')
+            print('PASS direct master-key create/write/query and restart persistence')
 
             html = request('GET', '/').decode()
-            check(initial_key not in html and master not in html, 'credentials leaked into public HTML')
+            check(master not in html, 'credentials leaked into public HTML')
             check('searchInput' in html and 'searchMain' in html, 'search UI missing')
             assets = Assets()
             assets.feed(html)
@@ -165,7 +170,7 @@ def exercise(binary, workdir):
                 request('POST', '/api/v1/apikey', {field: 0}, master, expected=400)
                 request('POST', '/api/v1/apikey?' + urlencode({field: 0}), {}, master, expected=400)
             request('POST', '/api/v1/apikey', {'demo': True}, api_key, expected=401)
-            check(len(base64.b64decode(api_key)) == 32 and api_key not in (initial_key, master, base64.b64encode(bytes(32)).decode()), 'random key invalid')
+            check(len(base64.b64decode(api_key)) == 32 and api_key not in (master, base64.b64encode(bytes(32)).decode()), 'random key invalid')
             request('GET', '/api/v1/apikey', key=base64.b64encode(bytes(32)).decode(), expected=401)
             request('GET', '/version', expected=501)
             for invalid in (b'[]', b'null', b'false', b'""', b'{"demo":false}', b'{"demo":true}'):
@@ -462,7 +467,7 @@ def exercise(binary, workdir):
                 with sync_playwright() as browser_driver:
                     browser = browser_driver.chromium.launch()
                     from setup_browser_smoke import exercise_setup
-                    exercise_setup(browser, base, initial_key, master)
+                    exercise_setup(browser, base, master)
                     page = browser.new_page()
                     errors = []
                     page.on('pageerror', lambda error: (errors.append(str(error)), print(f'BROWSER ERROR: {error}')))
@@ -671,7 +676,7 @@ def exercise(binary, workdir):
                         ('POST', '/doc', {'body': 'cross_scope_write'}),
                         ('DELETE', '', None)]:
                     request(method, rp + suffix, body, other_key, expected=404)
-                request('GET', path, key=master, expected=401)
+                request('GET', rp, key=master, expected=404)
                 request('GET', path, key='not-base64!', expected=401)
                 request('POST', '/api/v1/apikey', {}, other_key, expected=401)
                 request('DELETE', '/api/v1/apikey', {'apikey_base64': api_key}, other_key, expected=401)
@@ -685,7 +690,6 @@ def exercise(binary, workdir):
             legacy_bytes = json.dumps(key_record).encode()
             key_file.write_bytes(legacy_bytes)
             persisted_files = {str(file.relative_to(workdir / 'index')) for file in (workdir / 'index').rglob('apikey.json')}
-            (workdir / 'index' / 'bootstrap.complete').unlink()  # Existing install before bootstrap support.
             process = launch()
             ready(process)
             assert_scopes()
@@ -705,19 +709,20 @@ def exercise(binary, workdir):
             check(api('DELETE', path + '/doc', b'clear') == 0, 'clear count mismatch')
             check(api('GET', path)['indexed_doc_count'] == 0, 'index not empty after clear')
             print('PASS clear and index info')
-            request('DELETE', '/api/v1/apikey', {'apikey_base64': initial_key}, master)
             request('DELETE', '/api/v1/apikey', {'apikey_base64': api_key}, master)
-            check(not list((workdir / 'index').rglob('apikey.json')), 'revocation did not remove identities')
+            check(list((workdir / 'index').rglob('apikey.json')) == [workdir / 'index' / '0' / 'apikey.json'],
+                  'revocation did not leave only the master identity')
             process.terminate()
             process.wait(timeout=10)
             process = launch()
             ready(process)
-            request('GET', '/api/v1/apikey', key=initial_key, expected=401)
             request('GET', '/api/v1/apikey', key=api_key, expected=401)
-            check(not list((workdir / 'index').rglob('apikey.json')), 'revoked keys were regenerated')
-            check(len(re.findall(r'^Initial API key:', log_path.read_text(), re.MULTILINE)) == 1,
-                  'revocation/restart created an unsolicited credential')
-            print('PASS existing installation unchanged and all-keys-revoked restart')
+            check(list((workdir / 'index').rglob('apikey.json')) == [workdir / 'index' / '0' / 'apikey.json'],
+                  'revoked ordinary keys were regenerated')
+            request('GET', '/api/v1/apikey', key=master)
+            check((workdir / 'index' / '0' / 'apikey.json').read_bytes() == master_identity,
+                  'ordinary key revocation changed the master identity')
+            print('PASS ordinary key revocation/restart preserves direct master access')
         except BaseException:
             log.flush()
             print(log_path.read_text(errors='replace'))

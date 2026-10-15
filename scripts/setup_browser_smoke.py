@@ -3,7 +3,7 @@ import json
 from playwright.sync_api import expect
 
 
-def exercise_setup(browser, base, initial_key, master):
+def exercise_setup(browser, base, master):
     context = browser.new_context(viewport={'width': 1100, 'height': 900})
     page = context.new_page()
     errors = []
@@ -12,11 +12,11 @@ def exercise_setup(browser, base, initial_key, master):
     # Enter setup explicitly to exercise the connection form.
     page.locator('#manageIndexes').click()
     expect(page.locator('#setupKey')).to_be_enabled()
-    page.locator('#setupKey').fill(master)
+    page.locator('#setupKey').fill('invalid-base64-key!')
     page.locator('#connectForm button[type="submit"]').click()
     expect(page.locator('#setupError')).to_contain_text('Invalid API key')
     expect(page.locator('#indexManager')).to_be_hidden()
-    page.locator('#setupKey').fill(initial_key)
+    page.locator('#setupKey').fill(master)
     page.locator('#connectForm button[type="submit"]').click()
     expect(page.locator('#indexListStatus')).to_contain_text('No indexes yet')
     expect(page.locator('#openIndex')).to_be_disabled()

@@ -5,7 +5,13 @@ use seekstorm::index::IndexArc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::http_server::calculate_hash;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+pub(crate) fn calculate_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
 
 pub(crate) async fn get_apikey_hash(
     api_key_base64: String,

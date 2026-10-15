@@ -14,7 +14,7 @@ export MASTER_KEY_SECRET='replace-with-your-private-secret'
 cargo run -p seekstorm_server -- local_ip=127.0.0.1 local_port=8080
 ```
 
-打开 `http://127.0.0.1:8080/`。空数据目录首次启动会自动生成普通 API key，在日志中显示 `Initial API key`；将它填入页面的连接表单，即可在界面创建和选择索引。重启不会重复生成 key。文档可通过界面的 **Write data** 或 JSON API 写入；由 `MASTER_KEY_SECRET` 派生的主密钥用于额外 key 的创建/撤销。完整流程见 [服务使用](seekstorm_server/README.md)。
+打开 `http://127.0.0.1:8080/`，将启动日志中的 `Master API key` 填入连接表单，即可创建索引、写入和检索。主密钥由 `MASTER_KEY_SECRET` 派生，重启复用其索引；不自动生成普通 key。需要独立数据作用域时，可用主密钥创建/撤销额外 key。完整流程见 [服务使用](seekstorm_server/README.md)。
 
 ## 当前能力
 
