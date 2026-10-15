@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""Reproducible Linux HTTP baseline; starts an isolated server and needs NumPy only for data/ground truth."""
+import argparse
+import base64
+from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime, timezone
+import hashlib
+import http.client
+import json
+import math
+import multiprocessing
+import os
+from pathlib import Path
+import platform
+import random
+import secrets
+import socket
+import statistics
+import subprocess
+import tempfile
+import threading
+import time
+
+
+def encode(value):
+    return json.dumps(value, separators=(',', ':'), ensure_ascii=False).encode()
+
+
+class Client:
+    def __init__(self, port, key):
+        self.connection = http.client.HTTPConnection('127.0.0.1', port, timeout=180)
+        self.headers = {'apikey': key, 'Content-Type': 'application/json'}
+
+    def request(self, method, path, body=None):
+        if body is not None and not isinstance(body, bytes):
+            body = encode(body)
+        start = time.perf_counter()
+        self.connection.request(method, path, body, self.headers)
+        response = self.connection.getresponse()
+        raw = response.read()
+        elapsed = time.perf_counter() - start
+        if response.status != 200:
+            raise RuntimeError(f'{method} {path}: HTTP {response.status}: {raw[:500]!r}')
+        return json.loads(raw), elapsed * 1000, len(raw)
+
+    def close(self):
+        self.connection.close()
+
+
+def resource_pid(process, index_argument):
+    # /proc can be mounted from an outer PID namespace in containers.
+    for path in [Path(f'/proc/{process.pid}/cmdline'), *Path('/proc').glob('[0-9]*/cmdline')]:
+        try:
+            if index_argument.encode() in path.read_bytes().split(b'\0'):
+                return int(path.parent.name)
+        except OSError:
+            continue
+    raise RuntimeError('cannot locate benchmark server in /proc for resource measurement')
+
+
+def process_usage(pid):
+    """CPU seconds across all server threads, and resident bytes (Linux /proc)."""
+    stat = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+    cpu = (int(stat[11]) + int(stat[12])) / os.sysconf('SC_CLK_TCK')
+    rss = int(Path(f'/proc/{pid}/statm').read_text().split()[1]) * os.sysconf('SC_PAGE_SIZE')
+    return cpu, rss
+
+
+class Measurement:
+    def __init__(self, pid):
+        self.pid = pid
+        self.stop = threading.Event()
+
+    def __enter__(self):
+        self.cpu, self.peak = process_usage(self.pid)
+        self.driver_cpu = time.process_time()
+        self.start = time.perf_counter()
+        self.thread = threading.Thread(target=self.sample, daemon=True)
+        self.thread.start()
+        return self
+
+    def sample(self):
+        while not self.stop.wait(0.05):
+            try:
+                self.peak = max(self.peak, process_usage(self.pid)[1])
+            except FileNotFoundError:
+                return
+
+    def __exit__(self, *_):
+        elapsed = time.perf_counter() - self.start
+        driver_cpu = time.process_time() - self.driver_cpu
+        self.stop.set()
+        self.thread.join()
+        cpu, rss = process_usage(self.pid)
+        self.result = {
+            'wall_seconds': elapsed,
+            'server_cpu_seconds': cpu - self.cpu,
+            'server_cpu_cores': (cpu - self.cpu) / elapsed,
+            'driver_cpu_cores': driver_cpu / elapsed,
+            'server_peak_rss_mib': max(self.peak, rss) / 2**20,
+        }
+
+
+def generate(args):
+    # Generation and brute-force reference run before timed server work.
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
+    import numpy as np
+    rng = np.random.default_rng(args.seed)
+    topics = min(64, max(1, args.documents // args.top_k))
+    centers = rng.standard_normal((topics, args.dimensions), dtype=np.float32)
+    centers /= np.linalg.norm(centers, axis=1, keepdims=True)
+    vectors = centers[np.arange(args.documents) % topics] + rng.standard_normal(
+        (args.documents, args.dimensions), dtype=np.float32) * (0.4 / math.sqrt(args.dimensions))
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    query_vectors = centers[np.arange(args.query_pool) % topics] + rng.standard_normal(
+        (args.query_pool, args.dimensions), dtype=np.float32) * (0.4 / math.sqrt(args.dimensions))
+    query_vectors /= np.linalg.norm(query_vectors, axis=1, keepdims=True)
+    vocabulary = ('database search storage index vector query document server engine memory disk '
+                  'network cache stream transaction table partition cluster replica shard token '
+                  'filter range score result text field value record update insert delete read '
+                  'write commit log recovery snapshot backup balance tenant resource capacity '
+                  'request response latency throughput batch thread queue worker block page '
+                  'compression encoding language ranking keyword similarity distance metadata').split()
+    text_rng = random.Random(args.seed)
+    batches, batch = [], []
+    digest = hashlib.sha256()
+    for i in range(args.documents):
+        batch.append({'record_id': i, 'body': f'topic{i % topics:04d} ' + ' '.join(
+            text_rng.choices(vocabulary, k=48)), 'vector': vectors[i].tolist()})
+        if len(batch) == args.batch_size or i + 1 == args.documents:
+            payload = encode(batch)
+            batches.append(payload)
+            digest.update(payload)
+            batch = []
+    # Independent float64 cosine reference over the actual float32 input values.
+    exact_vectors = vectors.astype(np.float64)
+    exact_vectors /= np.linalg.norm(exact_vectors, axis=1, keepdims=True)
+    exact_queries = query_vectors.astype(np.float64)
+    exact_queries /= np.linalg.norm(exact_queries, axis=1, keepdims=True)
+    scores = exact_queries @ exact_vectors.T
+    truth = np.argsort(-scores, axis=1, kind='stable')[:, :args.top_k].tolist()
+    payloads = {'lexical': [], 'vector': [], 'hybrid': []}
+    for i, vector in enumerate(query_vectors.tolist()):
+        text = f'topic{i % topics:04d}'
+        for mode, query in [('lexical', {'query': text}), ('vector', {'query_vector': vector}),
+                            ('hybrid', {'query': text, 'query_vector': vector})]:
+            # Keep the API's count=true and full stored-document projection defaults.
+            payloads[mode].append(encode({**query, 'length': args.top_k}))
+    return batches, payloads, truth, {
+        'numpy_version': np.__version__, 'topics': topics, 'words_per_document': 49,
+        'input_json_bytes': sum(map(len, batches)), 'input_sha256': digest.hexdigest(),
+        'queries_sha256': hashlib.sha256(b''.join(p for group in payloads.values() for p in group)).hexdigest(),
+    }
+
+
+def percentiles(values):
+    ordered = sorted(values)
+    return {f'p{p}': ordered[max(0, math.ceil(len(ordered) * p / 100) - 1)]
+            for p in (50, 95, 99)}
+
+
+def init_worker(port, key, path, payloads, warmup, ready, start, deadline):
+    global worker_state
+    worker_state = port, key, path, payloads, warmup, ready, start, deadline
+
+
+def query_worker(number):
+    port, key, path, payloads, warmup, ready, start, deadline = worker_state
+    client = Client(port, key)
+    latencies, engine_ms, response_bytes = [], [], 0
+    position = number
+    try:
+        try:
+            for i in range(warmup):
+                client.request('POST', path, payloads[(position + i) % len(payloads)])
+            ready.wait(timeout=180)
+        except Exception:
+            ready.abort()
+            raise
+        start.wait()
+        cpu_start = time.process_time()
+        while time.perf_counter() < deadline.value:
+            result, ms, size = client.request('POST', path, payloads[position % len(payloads)])
+            # Never hide HTTP/JSON/shape errors in QPS.
+            if not isinstance(result.get('results'), list) or result['count'] != len(result['results']):
+                raise RuntimeError(f'invalid query response: {result}')
+            latencies.append(ms)
+            engine_ms.append(result['time'] / 1e6)
+            response_bytes += size
+            position += 1
+        return latencies, engine_ms, response_bytes, time.process_time() - cpu_start
+    finally:
+        client.close()
+
+
+def load(port, key, path, payloads, concurrency, args, pid):
+    # Separate Python processes avoid a shared GIL becoming the concurrency limit.
+    context = multiprocessing.get_context('fork')
+    ready = context.Barrier(concurrency + 1)
+    start = context.Event()
+    deadline = context.Value('d', 0.0, lock=False)
+    with ProcessPoolExecutor(max_workers=concurrency, mp_context=context,
+            initializer=init_worker,
+            initargs=(port, key, path, payloads, args.warmup, ready, start, deadline)) as pool:
+        futures = [pool.submit(query_worker, i) for i in range(concurrency)]
+        ready.wait(timeout=180)
+        with Measurement(pid) as measurement:
+            deadline.value = time.perf_counter() + args.seconds
+            start.set()
+            results = [future.result() for future in futures]
+    latencies = [value for result in results for value in result[0]]
+    engine_ms = [value for result in results for value in result[1]]
+    if not latencies:
+        raise RuntimeError('measurement completed without any requests')
+    measurement.result['driver_cpu_cores'] += sum(r[3] for r in results) / measurement.result['wall_seconds']
+    return {**measurement.result, 'requests': len(latencies), 'errors': 0,
+            'qps': len(latencies) / measurement.result['wall_seconds'],
+            'http_latency_ms': percentiles(latencies),
+            'reported_search_ms': percentiles(engine_ms),
+            'mean_response_bytes': sum(r[2] for r in results) / len(latencies)}
+
+
+def environment(root, binary):
+    def command(*args):
+        return subprocess.check_output(args, cwd=root, text=True).strip()
+    def read(path):
+        p = Path(path)
+        return p.read_text().strip() if p.exists() else None
+    return {
+        'engine_commit': command('git', 'rev-parse', 'HEAD'),
+        'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+        'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        'rustc': command('rustc', '--version'), 'python': platform.python_version(),
+        'platform': platform.platform(), 'cpu': command('lscpu'),
+        'cpu_affinity': sorted(os.sched_getaffinity(0)),
+        'cgroup_cpu_max': read('/sys/fs/cgroup/cpu.max'),
+        'cgroup_memory_max': read('/sys/fs/cgroup/memory.max'),
+        'cgroup_cpu_stat_before': read('/sys/fs/cgroup/cpu.stat'),
+        'meminfo': read('/proc/meminfo'),
+        'filesystem': command('df', '-T', tempfile.gettempdir()),
+        'cargo_config': read(root / '.cargo/config.toml'),
+    }
+
+
+def run(args, root, binary):
+    batches, payloads, truth, dataset = generate(args)
+    report = {'format_version': 1, 'started_at': datetime.now(timezone.utc).isoformat(),
+              'config': {k: v for k, v in vars(args).items() if k not in ('server', 'output')},
+              'environment': environment(root, binary), 'dataset': dataset,
+              'method': {'transport': 'loopback HTTP/1.1 keep-alive, one connection per worker process',
+                         'load': 'closed-loop; fixed duration; warmed before every repetition',
+                         'http_latency': 'request send through complete response read; excludes response JSON decode',
+                         'qps': 'successful completions / wall time, including driver JSON decoding and result collection/drain',
+                         'reported_search': 'server time field; excludes stored-document materialization/serialization',
+                         'rss': 'server RSS sampled every 50 ms; includes mapped resident pages',
+                         'quality': 'vector Recall@K against independent float64 exhaustive cosine; no human relevance labels',
+                         'scope': 'synthetic, warm cache, default HTTP settings; no cold-cache/filter/update/saturation claim'},
+              'queries': []}
+    secret = secrets.token_hex(24)
+    key = base64.b64encode(hashlib.sha256(secret.encode()).digest()).decode()
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    with tempfile.TemporaryDirectory(prefix='seekpower-perf-') as directory:
+        directory = Path(directory)
+        with (directory / 'server.log').open('wb') as log:
+            process = subprocess.Popen([str(binary), 'local_ip=127.0.0.1', f'local_port={port}',
+                f'index_path={directory / "index"}'], stdout=log, stderr=log,
+                env={**os.environ, 'MASTER_KEY_SECRET': secret})
+            client = Client(port, key)
+            try:
+                deadline = time.monotonic() + 60
+                while True:
+                    try:
+                        client.request('GET', '/api/v1/live')
+                        break
+                    except (OSError, http.client.HTTPException):
+                        client.close()
+                        if process.poll() is not None or time.monotonic() >= deadline:
+                            raise RuntimeError('benchmark server failed to start')
+                        time.sleep(0.1)
+                pid = resource_pid(process, f'index_path={directory / "index"}')
+                config = {'index_name': 'baseline', 'schema': [
+                    {'field': 'record_id', 'field_type': 'U32'},
+                    {'field': 'body', 'field_type': 'Text'},
+                    {'field': 'vector', 'field_type': 'Json', 'index_vector': True}],
+                    'vector': {'dimensions': args.dimensions}}
+                index_id, _, _ = client.request('POST', '/api/v1/index', config)
+                path = f'/api/v1/index/{index_id}'
+                with Measurement(pid) as ingest:
+                    for batch in batches:
+                        client.request('POST', path + '/doc', batch)
+                with Measurement(pid) as commit:
+                    count, _, _ = client.request('PATCH', path)
+                if count != args.documents:
+                    raise RuntimeError(f'indexed count {count} != {args.documents}')
+                total = ingest.result['wall_seconds'] + commit.result['wall_seconds']
+                report['ingest'] = {'submit': ingest.result, 'commit': commit.result,
+                    'submit_documents_per_second': args.documents / ingest.result['wall_seconds'],
+                    'documents_per_second_including_commit': args.documents / total}
+                files = list((directory / 'index').rglob('*'))
+                report['index'] = {'create_request': config,
+                    'info': client.request('GET', path)[0],
+                    'logical_bytes': sum(f.stat().st_size for f in files if f.is_file()),
+                    'allocated_bytes': sum(f.stat().st_blocks * 512 for f in files if f.is_file()),
+                    'metadata': [{'path': str(p.relative_to(directory / 'index')), 'value': json.loads(p.read_text())}
+                                 for p in files if p.name == 'index.json']}
+                recall = []
+                for i in range(args.query_pool):
+                    result, _, _ = client.request('POST', path + '/query', payloads['vector'][i])
+                    ids = [doc['record_id'] for doc in result['results']]
+                    if len(ids) != args.top_k or len(set(ids)) != args.top_k:
+                        raise RuntimeError('vector result count or unique record IDs do not match top_k')
+                    recall.append(len(set(ids) & set(truth[i])) / args.top_k)
+                    lexical, _, _ = client.request('POST', path + '/query', payloads['lexical'][i])
+                    topic = i % dataset['topics']
+                    expected = len(range(topic, args.documents, dataset['topics']))
+                    if lexical['count_total'] != expected:
+                        raise RuntimeError(f'lexical count {lexical["count_total"]} != {expected}')
+                report['quality'] = {'vector_recall_at_k': statistics.mean(recall),
+                    'vector_min_recall_at_k': min(recall), 'vector_recall_per_query': recall,
+                    'lexical_count_queries_checked': args.query_pool}
+                print(f'Indexed {args.documents} docs incl. commit: {args.documents / total:.1f} docs/s; '
+                      f'vector Recall@{args.top_k}={statistics.mean(recall):.4f}', flush=True)
+                # Shuffle scenario order per repetition to reduce systematic order bias.
+                scenarios = [(mode, c) for mode in payloads for c in args.concurrency]
+                for repetition in range(args.repeats):
+                    order = scenarios.copy()
+                    random.Random(args.seed + repetition).shuffle(order)
+                    for mode, concurrency in order:
+                        result = load(port, key, path + '/query', payloads[mode], concurrency, args, pid)
+                        report['queries'].append({'mode': mode, 'concurrency': concurrency,
+                                                  'repetition': repetition + 1, **result})
+                        print(f'{mode} c={concurrency} repeat={repetition + 1}: {result["qps"]:.1f} QPS; '
+                              f'p95={result["http_latency_ms"]["p95"]:.3f} ms', flush=True)
+            finally:
+                client.close()
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=60)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+    report['environment']['cgroup_cpu_stat_after'] = Path('/sys/fs/cgroup/cpu.stat').read_text()
+    report['finished_at'] = datetime.now(timezone.utc).isoformat()
+    report['summary'] = []
+    for mode in payloads:
+        for concurrency in args.concurrency:
+            runs = [r for r in report['queries'] if r['mode'] == mode and r['concurrency'] == concurrency]
+            report['summary'].append({'mode': mode, 'concurrency': concurrency,
+                'qps_median': statistics.median(r['qps'] for r in runs),
+                'qps_min': min(r['qps'] for r in runs), 'qps_max': max(r['qps'] for r in runs),
+                'http_latency_ms_median_of_runs': {p: statistics.median(r['http_latency_ms'][p] for r in runs)
+                                                  for p in ('p50', 'p95', 'p99')},
+                'server_cpu_cores_median': statistics.median(r['server_cpu_cores'] for r in runs),
+                'driver_cpu_cores_median': statistics.median(r['driver_cpu_cores'] for r in runs),
+                'server_peak_rss_mib': max(r['server_peak_rss_mib'] for r in runs)})
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--server', default='target/release/seekpower_server')
+    parser.add_argument('--output', required=True, help='JSON result file; existing files are not overwritten')
+    parser.add_argument('--documents', type=int, default=20000)
+    parser.add_argument('--dimensions', type=int, default=128)
+    parser.add_argument('--batch-size', type=int, default=500)
+    parser.add_argument('--query-pool', type=int, default=64)
+    parser.add_argument('--top-k', type=int, default=10)
+    parser.add_argument('--seconds', type=float, default=5)
+    parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--warmup', type=int, default=32, help='untimed requests per worker before every run')
+    parser.add_argument('--concurrency', type=int, nargs='+', default=[1, 4])
+    parser.add_argument('--seed', type=int, default=20261015)
+    args = parser.parse_args()
+    if platform.system() != 'Linux':
+        parser.error('resource measurement requires Linux /proc')
+    if any(value <= 0 for value in [args.documents, args.dimensions, args.batch_size, args.query_pool,
+                                    args.top_k, args.seconds, args.repeats, *args.concurrency]) or args.warmup < 0:
+        parser.error('sizes, durations and concurrency must be positive; warmup must be nonnegative')
+    if args.top_k > args.documents or len(set(args.concurrency)) != len(args.concurrency):
+        parser.error('top-k must not exceed document count; concurrency entries must be unique')
+    output = Path(args.output)
+    if output.exists():
+        parser.error('output already exists; choose a new file to preserve previous measurements')
+    binary = Path(args.server).resolve(strict=True)
+    root = Path(__file__).resolve().parents[1]
+    subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', 'seekpower', 'seekpower_server',
+                    '.cargo', 'Cargo.toml'], cwd=root, check=True, stdout=subprocess.DEVNULL)
+    report = run(args, root, binary)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open('x') as file:
+        json.dump(report, file, indent=2, ensure_ascii=False)
+        file.write('\n')
+    print(f'Results: {output}', flush=True)
+
+
+if __name__ == '__main__':
+    main()

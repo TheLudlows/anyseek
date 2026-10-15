@@ -52,6 +52,22 @@ cargo run -p seekpower_server -- local_ip=127.0.0.1 local_port=8080
 
 仅文本执行全文检索，仅 `query_vector` 执行向量检索，两者都有执行混合检索。空对象 `{}` 浏览文档；查询默认包含未提交写入，持久化仍需提交。写入必须包含所有已配置的向量字段。二进制向量字段仍以 base64 字符串放在 JSON 中，与已删除的 v2 二进制查询协议无关。
 
+## 性能基线
+
+Linux 下使用独立临时目录启动 release 服务，通过本机 HTTP 长连接测量；只需为压测脚本安装 NumPy：
+
+```sh
+cargo build --release -p seekpower_server
+python3 -m pip install numpy
+python3 scripts/performance_baseline.py --output /tmp/seekpower-baseline.json
+```
+
+默认固定种子生成 20,000 篇合成文档、128 维向量和 64 个查询，测全文/向量/混合检索，并发 1、4，每组预热后运行 5 秒、重复 3 次。使用默认计数和正文返回，Top-10；向量采用 HTTP 默认的全簇检索。每个连接由独立进程驱动，压测端与服务共享机器资源。
+
+JSON 记录每轮 QPS、HTTP P50/P95/P99、服务端/压测端 CPU、服务端采样 RSS、索引磁盘占用，以及单次批量写入和提交耗时。汇总值为各轮指标的中位数；向量 Recall@10 对照独立 float64 全量余弦计算，全文核对匹配计数。请求失败会中止，不产生成功结果文件。
+
+[首版实测数据](benchmarks/http-baseline-2026-10-15.json) 包含源码与二进制哈希、数据哈希、配置和环境。结果用于同环境版本对比：属于合成数据的热缓存、闭环负载，不是容量上限；未衡量真实语料的全文/混合相关性、冷缓存、过滤和混合读写。提交耗时表示 API 完成时间，不验证崩溃恢复或持久化保证。`--help` 可查看数据量、维度、时长和并发等覆盖参数；输出文件不会被覆盖。
+
 ## 开发与文档
 
 - [Rust 示例](docs/library-examples.md)、[元数据过滤与排序](FACETED_SEARCH.md)、[N-gram 配置](NGRAM_SEARCH.md)。本地执行 `cargo doc --workspace --no-deps` 生成与当前源码一致的 Rust 文档。
