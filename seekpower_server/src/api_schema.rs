@@ -672,3 +672,45 @@ pub enum VectorSimilarity {
     /// Euclidean distance (L2)
     Euclidean,
 }
+
+/// Successful responses that retain the existing externally tagged Result encoding.
+#[derive(ToSchema)]
+pub struct WrappedResponse<T> {
+    #[schema(rename = "Ok")]
+    pub value: T,
+}
+
+/// One document or a batch of documents.
+#[derive(ToSchema)]
+#[serde(untagged)]
+pub enum WriteDocuments {
+    Single(std::collections::HashMap<String, Value>),
+    Batch(Vec<std::collections::HashMap<String, Value>>),
+}
+
+/// One (document ID, replacement document) tuple or a batch of tuples.
+#[derive(ToSchema)]
+#[serde(untagged)]
+pub enum UpdateDocuments {
+    Single(DocumentReplacement),
+    Batch(Vec<DocumentReplacement>),
+}
+
+/// JSON deletion forms; the raw clear command is documented separately as text/plain.
+#[derive(ToSchema)]
+#[serde(untagged)]
+pub enum DeleteDocuments {
+    Id(u64),
+    Ids(Vec<u64>),
+    Query(crate::api_types::SearchRequestObject),
+}
+
+#[derive(ToSchema)]
+#[schema(min_items = 2, max_items = 2)]
+pub struct DocumentReplacement(pub (u64, std::collections::HashMap<String, Value>));
+
+#[derive(ToSchema)]
+pub enum ClearCommand {
+    #[schema(rename = "clear")]
+    Clear,
+}

@@ -23,14 +23,15 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     MASTER_KEY_SECRET,
-    api_endpoints::*,
     api_types::{
         CreateIndexRequest, GetDocumentRequest, GetIteratorRequest, IndexResponseObject,
         SearchRequestObject, SearchResultObject,
     },
-    multi_tenancy::{
-        ApikeyObject, CreateApikeyRequest, DeleteApikeyRequest, calculate_hash, get_apikey_hash,
+    keys::{
+        ApikeyObject, CreateApikeyRequest, DeleteApikeyRequest, calculate_hash, create_apikey_api,
+        delete_apikey_api, get_apikey_hash,
     },
+    operations::*,
 };
 use seekpower::{
     INDEX_RUNTIME,
@@ -209,44 +210,32 @@ async fn protocol(mut request: Request, next: Next) -> Response {
     response
 }
 
-/// Live
-///
-/// Returns a live message with the Seekpower server version.
+/// Returns the running server version.
 #[utoipa::path(
-    tag = "Info",
-    get,
-    path = "/api/v1/live",
+    get, path = "/api/v1/live", tag = "Info",
     responses(
-        (status = 200, description = "Seekpower server is live", body = String),
+        (status = 200, description = "Success", body = String, content_type = "application/json")
     ),
-    operation_id = "live",
+    operation_id = "live"
 )]
 async fn live() -> Json<String> {
     Json(live_api())
 }
 
-/// Create API Key
-///
-/// Creates an API key and returns the Base64 encoded API key.
-/// Expects the Base64 encoded master API key in the header.
-/// Use the **master API key displayed** in the server console at startup.
-///
-/// WARNING: make sure to set the MASTER_KEY_SECRET environment variable to a secret, otherwise your generated API keys will be compromised.
+/// Creates a random API key. Requires the master API key and an empty JSON object. URL parameters are rejected.
 #[utoipa::path(
-    tag = "API Key",
-    post,
-    path = "/api/v1/apikey",
+    post, path = "/api/v1/apikey", tag = "API Key",
     params(
-        ("apikey" = String, Header, description = "YOUR_MASTER_API_KEY",example="BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="),
+        ("apikey" = String, Header, description = "Master API key")
     ),
-    request_body = inline(CreateApikeyRequest),
+    request_body(content = inline(CreateApikeyRequest), example = json!({})),
     responses(
-        (status = 200, description = "API key created, returns Base64 encoded API key", body = String),
-        (status = BAD_REQUEST, description = "Invalid or retired API key creation options"),
-        (status = UNAUTHORIZED, description = "master_apikey invalid"),
-        (status = UNAUTHORIZED, description = "master_apikey missing")
+        (status = 200, description = "Success", body = String, content_type = "text/plain"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 500, description = "Internal server error", body = String, content_type = "text/plain")
     ),
-    operation_id = "create_api_key",
+    operation_id = "create_api_key"
 )]
 async fn create_key(
     State(state): State<AppState>,
@@ -267,26 +256,17 @@ async fn create_key(
     Ok(general_purpose::STANDARD.encode(key))
 }
 
-/// Get API Key Info
-///
-/// Get info about all indices associated with the specified API key
+/// Lists indexes in the authenticated key scope.
 #[utoipa::path(
-    get,
-    tag = "API Key",
-    path = "/api/v1/apikey",
+    get, path = "/api/v1/apikey", tag = "API Key",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+        ("apikey" = String, Header, description = "API key")
     ),
     responses(
-        (
-            status = 200, description = "Indices found, returns a list of index info",
-            body = Vec<IndexResponseObject>,
-        ),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "Index ID or API key missing"),
-        (status = UNAUTHORIZED, description = "API key does not exists"),
+        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<Vec<IndexResponseObject>>, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain")
     ),
-    operation_id = "get_api_key_info",
+    operation_id = "get_api_key_info"
 )]
 async fn list_indexes(
     State(state): State<AppState>,
@@ -297,24 +277,20 @@ async fn list_indexes(
     Ok(Json(get_apikey_indices_info_api(&scope.index_list).await))
 }
 
-/// Delete API Key
-///
-/// Deletes an API key and returns the number of remaining API keys.
-/// Expects the Base64 encoded master API key in the header.
-/// WARNING: This will delete all indices and documents associated with the API key.
+/// Revokes a key and deletes all its indexes. Requires the master API key. Returns the remaining key count.
 #[utoipa::path(
-    delete,
-    tag = "API Key",
-    path = "/api/v1/apikey",
+    delete, path = "/api/v1/apikey", tag = "API Key",
     params(
-        ("apikey" = String, Header, description = "YOUR_MASTER_API_KEY",example="BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="),
+        ("apikey" = String, Header, description = "Master API key")
     ),
+    request_body(content = DeleteApikeyRequest, example = json!({"apikey_base64": "KEY_TO_REVOKE"})),
     responses(
-        (status = 200, description = "API key deleted, returns number of remaining API keys", body = u64),
-        (status = UNAUTHORIZED, description = "master_apikey invalid"),
-        (status = UNAUTHORIZED, description = "master_apikey missing")
+        (status = 200, description = "Success", body = u64, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
     ),
-    operation_id = "delete_api_key",
+    operation_id = "delete_api_key"
 )]
 async fn delete_key(
     State(state): State<AppState>,
@@ -333,106 +309,24 @@ async fn delete_key(
     Ok(Json(count))
 }
 
-/// Create Index
-///
-/// Create an index within the directory associated with the specified API key and return the index_id.
+/// Creates an index in the authenticated key scope and returns its ID. Vector/Hybrid indexes require externally supplied vectors.
 #[utoipa::path(
-    post,
-    tag = "Index",
-    path = "/api/v1/index",
+    post, path = "/api/v1/index", tag = "Index",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+        ("apikey" = String, Header, description = "API key")
     ),
-
-    request_body(
-        content = CreateIndexRequest,
+    request_body(content = CreateIndexRequest,
         examples(
-            ("Example: Lexical index" = (value = json!({
-				"schema":[{
-					"field": "title",
-					"field_type": "Text",
-					"store": true,
-					"index_lexical": true,
-					"boost":10.0
-				},
-					{
-					"field": "body",
-					"field_type": "Text",
-					"store": true,
-					"index_lexical": true,
-					"longest": true
-				},
-				{
-					"field": "url",
-					"field_type": "String32",
-					"store": true,
-					"index_lexical": false
-				}],
-				"index_name": "wikipedia",
-				"similarity": "Bm25fProximity",
-				"tokenizer": "UnicodeAlphanumeric"
-			}))),
-			("Example: Hybrid index" = (value = json!({
-				"schema":[{
-					"field": "title",
-					"field_type": "Text",
-					"store": true,
-					"index_lexical": true,
-					"index_vector": false
-				},
-				{
-					"field": "body",
-					"field_type": "Text",
-					"store": true,
-					"index_lexical": true,
-					"index_vector": false
-				},
-					{
-					"field": "vector",
-					"field_type": "Json",
-					"store": true,
-					"index_lexical": false,
-					"index_vector": true
-				}],
-				"index_name": "wikipedia",
-				"similarity": "Bm25fProximity",
-				"tokenizer": "UnicodeAlphanumeric",
-				"clustering": "Auto",
-				"inference": {"External": { "dimensions": 3, "precision": "F32", "similarity": "Cosine", "quantization": "None" }}
-			}))),
-            ("Example: Vector index" = (value = json!({
-				"schema":[
-				{
-					"field":"vector",
-					"field_type":"Json",
-					"store":false,
-					"index_lexical":false,
-					"index_vector":true
-				},
-				{
-					"field":"index",
-					"field_type":"Text",
-					"store":true,
-					"index_lexical":false,
-					"index_vector":false
-				}],
-				"index_name": "vectors",
-				"clustering": "Auto",
-				"inference": {
-					"External": { "dimensions": 128, "precision": "F32", "quantization": "ScalarQuantizationI8", "similarity": "Euclidean" }
-				}
-			})))
-        )
-    ),
-
+            ("Lexical" = (value = json!({"index_name":"documents","schema":[{"field":"body","field_type":"Text","store":true,"index_lexical":true}]}))),
+            ("Hybrid" = (value = json!({"index_name":"hybrid","schema":[{"field":"body","field_type":"Text","store":true,"index_lexical":true},{"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}],"inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}}))),
+            ("Vector" = (value = json!({"index_name":"vectors","schema":[{"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}],"inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}})))
+        )),
     responses(
-        (status = OK, description = "Index created, returns the index_id", body = u64),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "API key does not exists"),
-        (status = UNAUTHORIZED, description = "API key is missing"),
-        (status = UNAUTHORIZED, description = "API key does not exists")
+        (status = 200, description = "Success", body = u64, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain")
     ),
-    operation_id = "create_index",
+    operation_id = "create_index"
 )]
 async fn create_index(
     State(state): State<AppState>,
@@ -461,29 +355,20 @@ async fn create_index(
     Ok(Json(id))
 }
 
-/// Get Index Info
-///
-/// Get index Info from index with index_id
+/// Returns index metadata, schema and document counts.
 #[utoipa::path(
-    get,
-    tag = "Index",
-    path = "/api/v1/index/{index_id}",
+    get, path = "/api/v1/index/{index_id}", tag = "Index",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID")
     ),
     responses(
-        (
-            status = 200, description = "Index found, returns the index info",
-            body = IndexResponseObject,
-        ),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "API key does not exist"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing"),
+        (status = 200, description = "Success", body = IndexResponseObject, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
     ),
-    operation_id = "get_index_info",
+    operation_id = "get_index_info"
 )]
 async fn get_index(
     State(state): State<AppState>,
@@ -502,43 +387,21 @@ async fn get_index(
     ))
 }
 
-/// Commit Index
-///
-/// Commit moves indexed documents from the intermediate uncompressed data structure (array lists/HashMap, queryable by realtime search) in RAM
-/// to the final compressed data structure (roaring bitmap) on Mmap or disk -
-/// which is persistent, more compact, with lower query latency and allows search with realtime=false.
-/// Commit is invoked automatically each time 64K documents are newly indexed **per shard** as well as on close_index (e.g. server quit).
-/// There is no way to prevent this automatic commit by not manually invoking it.
-/// But commit can also be invoked manually at any time at any number of newly indexed documents.
-/// commit is a **hard commit** for persistence on disk. A **soft commit** for searchability
-/// is invoked implicitly with every index_doc,
-/// i.e. the document can immediately searched and included in the search results
-/// if it matches the query AND the query parameter realtime=true is enabled.
-/// **Use commit with caution, as it is an expensive operation**.
-/// **Usually, there is no need to invoke it manually**, as it is invoked automatically every 64k documents **per shard** and when the index is closed with close_index.
-/// Before terminating the program, always call close_index (commit), otherwise all documents indexed since last (manual or automatic) commit are lost.
-/// There are only 2 reasons that justify a manual commit:
-/// 1. if you want to search newly indexed documents without using realtime=true for search performance reasons or
-/// 2. if after indexing new documents there won't be more documents indexed (for some time),
-///    so there won't be (soon) a commit invoked automatically at the next 64k threshold **per shard** or close_index,
-///    but you still need immediate persistence guarantees on disk to protect against data loss in the event of a crash.
+/// Commits pending writes to disk and returns the indexed document count. Writes are visible before commit when realtime=true; explicit commit allows reads with realtime=false. Automatic commit also occurs every 64K documents per shard and on graceful shutdown.
 #[utoipa::path(
-    patch,
-    tag = "Index",
-    path = "/api/v1/index/{index_id}",
+    patch, path = "/api/v1/index/{index_id}", tag = "Index",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID")
     ),
     responses(
-        (status = 200, description = "Index committed, returns the number of committed documents", body = u64),
-        (status = BAD_REQUEST, description = "Index id invalid or missing"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "API key does not exist"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing")
+        (status = 200, description = "Success", body = u64, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain"),
+        (status = 500, description = "Internal server error", body = String, content_type = "text/plain")
     ),
-    operation_id = "commit_index",
+    operation_id = "commit_index"
 )]
 async fn commit_index(ScopedIndex(index): ScopedIndex) -> ApiResult<u64> {
     let count = INDEX_RUNTIME
@@ -548,26 +411,19 @@ async fn commit_index(ScopedIndex(index): ScopedIndex) -> ApiResult<u64> {
     Ok(Json(count))
 }
 
-/// Delete Index
-///
-/// Delete an index within the directory associated with the specified API key and return the number of remaining indices.
+/// Deletes an index and returns the remaining index count in this key scope.
 #[utoipa::path(
-    delete,
-    tag = "Index",
-    path = "/api/v1/index/{index_id}",
+    delete, path = "/api/v1/index/{index_id}", tag = "Index",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID")
     ),
     responses(
-        (status = 200, description = "Index deleted, returns the number of indices", body = u64),
-        (status = BAD_REQUEST, description = "index_id invalid or missing"),
-        (status = NOT_FOUND, description = "Index_id does not exists"),
-        (status = NOT_FOUND, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing")
+        (status = 200, description = "Success", body = usize, content_type = "application/json"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
     ),
-    operation_id = "delete_index",
+    operation_id = "delete_index"
 )]
 async fn delete_index(
     State(state): State<AppState>,
@@ -585,55 +441,20 @@ async fn delete_index(
     Ok(Json(scope.index_list.len()))
 }
 
-/// Document iterator
-///
-/// Document iterator accepts a JSON request body via POST.
-/// The document iterator allows to iterate over all document IDs and documents in the entire index, forward or backward.
-/// It enables efficient sequential access to every document, even in very large indexes, without running a search.
-/// Paging through the index works without collecting document IDs to Min-heap in size-limited RAM first.
-/// The iterator guarantees that only valid document IDs are returned, even though document IDs are not strictly continuous.
-/// Document IDs can also be fetched in batches, reducing round trips and significantly improving performance, especially when using the REST API.
-/// Typical use cases include index export, conversion, analytics, audits, and inspection.
-/// Explanation of "eventually continuous" docid:
-/// In Seekpower, document IDs become continuous over time. In a multi-sharded index, each shard maintains its own document ID space.
-/// Because documents are distributed across shards in a non-deterministic, load-dependent way, shard-local document IDs advance at different rates.
-/// When these are mapped to global document IDs, temporary gaps can appear.
-/// As a result, simply iterating from 0 to the total document count may encounter invalid IDs near the end.
-/// The Document Iterator abstracts this complexity and reliably returns only valid document IDs.
-/// # Parameters
-/// - docid=None, take>0: **skip first s document IDs**, then **take next t document IDs** of an index.
-/// - docid=None, take<0: **skip last s document IDs**, then **take previous t document IDs** of an index.
-/// - docid=Some, take>0: **skip next s document IDs**, then **take next t document IDs** of an index, relative to a given document ID, with end-of-index indicator.
-/// - docid=Some, take<0: **skip previous s document IDs**, then **take previous t document IDs**, relative to a given document ID, with start-of-index indicator.
-/// - take=0: does not make sense, that defies the purpose of get_iterator.
-/// - The sign of take indicates the direction of iteration: positive take for forward iteration, negative take for backward iteration.
-/// - The skip parameter is always positive, indicating the number of document IDs to skip before taking document IDs. The skip direction is determined by the sign of take too.
-/// - include_document: if true, the documents are also retrieved along with their document IDs.
-/// Next page:     take last  docid from previous result set, skip=1, take=+page_size
-/// Previous page: take first docid from previous result set, skip=1, take=-page_size
-/// Returns an IteratorResult, consisting of the number of actually skipped document IDs, and a list of taken document IDs and documents, ordered in traversal direction (ascending for positive take, descending for negative take).
-/// Detect end/begin of index during iteration: if returned vec.len() < requested take || if returned skip <requested skip
+/// Iterates document IDs and optionally stored documents. IDs may have gaps. Positive take traverses forward; negative take traverses backward. For the next page use the last returned ID and skip=1. Parameters must be in the JSON body.
 #[utoipa::path(
-    post,
-    tag = "Iterator",
-    path = "/api/v1/index/{index_id}/iterator",
+    post, path = "/api/v1/index/{index_id}/iterator", tag = "Iterator",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID")
     ),
-    request_body(content = GetIteratorRequest, example=json!({
-        "document_id": null,
-        "skip": 0,
-        "take": -1,
-    })),
+    request_body(content = GetIteratorRequest, example = json!({"document_id":null,"skip":0,"take":10,"include_document":true})),
     responses(
-        (status = 200, description = "Document ID found, returning an IteratorResult", body = crate::api_schema::IteratorResult),
-        (status = BAD_REQUEST, description = "index_id invalid or missing"),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing"),
+        (status = 200, description = "Success", body = crate::api_schema::IteratorResult, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain"),
+        (status = 405, description = "Use POST for query and iteration", body = String, content_type = "text/plain")
     ),
     operation_id = "document_iterator_post"
 )]
@@ -659,57 +480,27 @@ async fn iterate(
     ))
 }
 
-/// Index Document(s)
-///
-/// Index a JSON document or an array of JSON documents (bulk), each consisting of arbitrary key-value pairs to the index with the specified apikey and index_id, and return the number of indexed docs.
-/// Index documents enables true real-time search (as opposed to near realtime.search):
-/// When in query_index the parameter `realtime` is set to `true` then indexed, but uncommitted documents are immediately included in the search results, without requiring a commit or refresh.
-/// Therefore a explicit commit_index is almost never required, as it is invoked automatically after 64k documents are indexed **per shard** or on close_index for persistence.
+/// Writes one document or a batch and returns the indexed document count inside Ok. Vector fields must contain external embeddings matching the index dimensions. Commit to persist pending writes.
 #[utoipa::path(
-    post,
-    tag = "Document",
-    path = "/api/v1/index/{index_id}/doc",
+    post, path = "/api/v1/index/{index_id}/doc", tag = "Document",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID")
     ),
-
-    request_body(
-        content = HashMap<String, Value>, description = "JSON document or array of JSON documents, each consisting of key-value pairs",content_type = "application/json",
+    request_body(content = crate::api_schema::WriteDocuments,
         examples(
-    ("Example: Single Lexical/Hybrid document" = (value = json!(  {
-        "title": "title1 test",
-        "body": "body1",
-        "url": "url1"
-		} ))),
-	("Example: Multiple Lexical/Hybrid documents" = (value = json!(  [
-{
-    "title":"title2",
-    "body":"body2 test",
-    "url":"url2"
-},
-{
-    "title":"title3 test",
-    "body":"body3 test",
-    "url":"url3"
-}
-]   ))),
-    ("Example: Multiple Vector documents" = (value = json!(  [
-    {"vector":[0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010, 0.011, 0.012, 0.013, 0.014, 0.015, 0.016, 0.017, 0.018, 0.019, 0.020, 0.021, 0.022, 0.023, 0.024, 0.025, 0.026, 0.027, 0.028, 0.029, 0.030, 0.031, 0.032, 0.033, 0.034, 0.035, 0.036, 0.037, 0.038, 0.039, 0.040, 0.041, 0.042, 0.043, 0.044, 0.045, 0.046, 0.047, 0.048, 0.049, 0.050, 0.051, 0.052, 0.053, 0.054, 0.055, 0.056, 0.057, 0.058, 0.059, 0.060, 0.061, 0.062, 0.063, 0.064, 0.065, 0.066, 0.067, 0.068, 0.069, 0.070, 0.071, 0.072, 0.073, 0.074, 0.075, 0.076, 0.077, 0.078, 0.079, 0.080, 0.081, 0.082, 0.083, 0.084, 0.085, 0.086, 0.087, 0.088, 0.089, 0.090, 0.091, 0.092, 0.093, 0.094, 0.095, 0.096, 0.097, 0.098, 0.099, 0.100, 0.101, 0.102, 0.103, 0.104, 0.105, 0.106, 0.107, 0.108, 0.109, 0.110, 0.111, 0.112, 0.113, 0.114, 0.115, 0.116, 0.117, 0.118, 0.119, 0.120, 0.121, 0.122, 0.123, 0.124, 0.125, 0.126, 0.127, 0.128],"index":"0"},
-    {"vector":[0.129, 0.130, 0.131, 0.132, 0.133, 0.134, 0.135, 0.136, 0.137, 0.138, 0.139, 0.140, 0.141, 0.142, 0.143, 0.144, 0.145, 0.146, 0.147, 0.148, 0.149, 0.150, 0.151, 0.152, 0.153, 0.154, 0.155, 0.156, 0.157, 0.158, 0.159, 0.160, 0.161, 0.162, 0.163, 0.164, 0.165, 0.166, 0.167, 0.168, 0.169, 0.170, 0.171, 0.172, 0.173, 0.174, 0.175, 0.176, 0.177, 0.178, 0.179, 0.180, 0.181, 0.182, 0.183, 0.184, 0.185, 0.186, 0.187, 0.188, 0.189, 0.190, 0.191, 0.192, 0.193, 0.194, 0.195, 0.196, 0.197, 0.198, 0.199, 0.200, 0.201, 0.202, 0.203, 0.204, 0.205, 0.206, 0.207, 0.208, 0.209, 0.210, 0.211, 0.212, 0.213, 0.214, 0.215, 0.216, 0.217, 0.218, 0.219, 0.220, 0.221, 0.222, 0.223, 0.224, 0.225, 0.226, 0.227, 0.228, 0.229, 0.230, 0.231, 0.232, 0.233, 0.234, 0.235, 0.236, 0.237, 0.238, 0.239, 0.240, 0.241, 0.242, 0.243, 0.244, 0.245, 0.246, 0.247, 0.248, 0.249, 0.250, 0.251, 0.252, 0.253, 0.254, 0.255, 0.256],"index":"1"},
-    {"vector":[0.257, 0.258, 0.259, 0.260, 0.261, 0.262, 0.263, 0.264, 0.265, 0.266, 0.267, 0.268, 0.269, 0.270, 0.271, 0.272, 0.273, 0.274, 0.275, 0.276, 0.277, 0.278, 0.279, 0.280, 0.281, 0.282, 0.283, 0.284, 0.285, 0.286, 0.287, 0.288, 0.289, 0.290, 0.291, 0.292, 0.293, 0.294, 0.295, 0.296, 0.297, 0.298, 0.299, 0.300, 0.301, 0.302, 0.303, 0.304, 0.305, 0.306, 0.307, 0.308, 0.309, 0.310, 0.311, 0.312, 0.313, 0.314, 0.315, 0.316, 0.317, 0.318, 0.319, 0.320, 0.321, 0.322, 0.323, 0.324, 0.325, 0.326, 0.327, 0.328, 0.329, 0.330, 0.331, 0.332, 0.333, 0.334, 0.335, 0.336, 0.337, 0.338, 0.339, 0.340, 0.341, 0.342, 0.343, 0.344, 0.345, 0.346, 0.347, 0.348, 0.349, 0.350, 0.351, 0.352, 0.353, 0.354, 0.355, 0.356, 0.357, 0.358, 0.359, 0.360, 0.361, 0.362, 0.363, 0.364, 0.365, 0.366, 0.367, 0.368, 0.369, 0.370, 0.371, 0.372, 0.373, 0.374, 0.375, 0.376, 0.377, 0.378, 0.379, 0.380, 0.381, 0.382, 0.383, 0.384],"index":"2"}
-]   )))
-        )
-    ),
+            ("Single" = (value = json!({"body":"hello"}))),
+            ("Batch" = (value = json!([{"body":"hello"},{"body":"world"}]))),
+            ("External vector" = (value = json!({"body":"hello","vector":[1.0,0.0,0.0]})))
+        )),
     responses(
-        (status = 200, description = "Document indexed, returns the number of indexed documents", body = usize),
-        (status = BAD_REQUEST, description = "Document object invalid"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "API key does not exist"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing")
+        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<usize>, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain"),
+        (status = 500, description = "Internal server error", body = String, content_type = "text/plain")
     ),
-    operation_id = "index_document",
+    operation_id = "index_document"
 )]
 async fn write_documents(
     ScopedIndex(index): ScopedIndex,
@@ -732,32 +523,25 @@ async fn write_documents(
     Ok(Json(Ok(count)))
 }
 
-/// Update Document(s)
-///
-/// Update a JSON document or an array of JSON documents (bulk), each consisting of arbitrary key-value pairs to the index with the specified apikey and index_id, and return the number of indexed docs.
-/// Update document is a combination of delete_document and index_document.
-/// All current limitations of delete_document apply.
-/// Update documents enables true real-time search (as opposed to near realtime.search):
-/// When in query_index the parameter `realtime` is set to `true` then indexed, but uncommitted documents are immediately included in the search results, without requiring a commit or refresh.
-/// Therefore a explicit commit_index is almost never required, as it is invoked automatically after 64k documents are indexed **per shard** or on close_index for persistence.
+/// Replaces one document or a batch by ID. Each replacement is a delete followed by an insert. Returns the indexed document count inside Ok.
 #[utoipa::path(
-    patch,
-    tag = "Document",
-    path = "/api/v1/index/{index_id}/doc",
+    patch, path = "/api/v1/index/{index_id}/doc", tag = "Document",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID")
     ),
-    request_body(content = (u64, HashMap<String, Value>), description = "Tuple of (doc_id, JSON document) or array of tuples (doc_id, JSON documents), each JSON document consisting of arbitrary key-value pairs", content_type = "application/json", example=json!([0,{"title":"title1 test","body":"body1","url":"url1"}])),
+    request_body(content = crate::api_schema::UpdateDocuments,
+        examples(
+            ("Single" = (value = json!([0,{"body":"updated"}]))),
+            ("Batch" = (value = json!([[0,{"body":"updated"}],[1,{"body":"also updated"}]])))
+        )),
     responses(
-        (status = 200, description = "Document indexed, returns the number of indexed documents", body = usize),
-        (status = BAD_REQUEST, description = "Document object invalid"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "API key does not exist"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing")
+        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<u64>, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
     ),
-    operation_id = "update_document",
+    operation_id = "update_document"
 )]
 async fn update_documents(
     ScopedIndex(index): ScopedIndex,
@@ -775,34 +559,22 @@ async fn update_documents(
     Ok(Json(Ok(count)))
 }
 
-/// Get Document
-///
-/// Get document from index with index_id
-/// ⚠️ Use search or get_iterator first to obtain a valid doc_id. Document IDs are not guaranteed to be continuous and gapless!
+/// Reads a stored document. Omit the body to return all stored fields, or pass fields in a JSON body. URL parameters are rejected. Obtain valid IDs through search or iteration.
 #[utoipa::path(
-    get,
-    tag = "Document",
-    path = "/api/v1/index/{index_id}/doc/{document_id}",
+    get, path = "/api/v1/index/{index_id}/doc/{document_id}", tag = "Document",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
-        ("document_id" = u64, Path, description = "document id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID"),
+        ("document_id" = u64, Path, description = "Document ID")
     ),
-    request_body(content = GetDocumentRequest, example=json!({
-        "fields": ["title", "body"]
-    })),
+    request_body(content = ref("#/components/schemas/GetDocumentRequest"), content_type = "application/json", example = json!({"fields":["body"]})),
     responses(
-        (status = 200, description = "Document found, returns the JSON document consisting of arbitrary key-value pairs", body = HashMap<String, Value>),
-        (status = BAD_REQUEST, description = "index_id invalid or missing"),
-        (status = BAD_REQUEST, description = "doc_id invalid or missing"),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "Document id does not exist"),
-        (status = NOT_FOUND, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing"),
+        (status = 200, description = "Success", body = std::collections::HashMap<String, serde_json::Value>, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
     ),
-    operation_id = "get_document",
+    operation_id = "get_document"
 )]
 async fn get_document(
     ScopedIndex(index): ScopedIndex,
@@ -830,35 +602,21 @@ async fn get_document(
     ))
 }
 
-/// Delete Document by document ID
-///
-/// Delete document by document_id from index with index_id
-/// ⚠️ Use search or get_iterator first to obtain a valid doc_id. Document IDs are not guaranteed to be continuous and gapless!
-/// Immediately effective, independent of commit.
-/// Index space used by deleted documents is not reclaimed (until compaction is implemented), but result_count_total is updated.
-/// By manually deleting the delete.bin file the deleted documents can be recovered (until compaction).
-/// Deleted documents impact performance, especially but not limited to counting (Count, TopKCount). They also increase the size of the index (until compaction is implemented).
-/// For minimal query latency delete index and reindexing documents is preferred over deleting documents (until compaction is implemented).
-/// BM25 scores are not updated (until compaction is implemented), but the impact is minimal.
+/// Deletes a numeric document ID and returns the remaining document count inside Ok. Deletion is immediately visible. For a nonnumeric ID, the existing handler uses the same body forms as DELETE /doc.
 #[utoipa::path(
-    delete,
-    tag = "Document",
-    path = "/api/v1/index/{index_id}/doc/{document_id}",
+    delete, path = "/api/v1/index/{index_id}/doc/{document_id}", tag = "Document",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
-        ("document_id" = u64, Path, description = "document id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID"),
+        ("document_id" = String, Path, description = "Document ID")
     ),
+    request_body(description = "Optional fallback body for a nonnumeric path ID.",
+        content((ref("#/components/schemas/DeleteDocuments") = "application/json"), (ref("#/components/schemas/ClearCommand") = "text/plain", example = "clear"))),
     responses(
-        (status = 200, description = "Document deleted, returns indexed documents count", body = usize),
-        (status = BAD_REQUEST, description = "index_id invalid or missing"),
-        (status = BAD_REQUEST, description = "doc_id invalid or missing"),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "Document id does not exist"),
-        (status = NOT_FOUND, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing"),
+        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<u64>, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
     ),
     operation_id = "delete_document_by_parameter"
 )]
@@ -868,47 +626,31 @@ async fn delete_document(
     bytes: Bytes,
 ) -> ApiResult<Result<u64, String>> {
     match document_id.parse() {
-        Ok(id) => Ok(Json(delete_document_by_parameter_api(&index, id).await)),
+        Ok(id) => Ok(Json(delete_document_api(&index, id).await)),
         Err(_) => delete_documents(ScopedIndex(index), bytes).await,
     }
 }
 
-/// Delete Document(s) by Request Object
-///
-/// Delete document by document_id, by array of document_id (bulk), by query (SearchRequestObject) from index with index_id, or clear all documents from index.
-/// Immediately effective, independent of commit.
-/// Index space used by deleted documents is not reclaimed (until compaction is implemented), but result_count_total is updated.
-/// By manually deleting the delete.bin file the deleted documents can be recovered (until compaction).
-/// Deleted documents impact performance, especially but not limited to counting (Count, TopKCount). They also increase the size of the index (until compaction is implemented).
-/// For minimal query latency delete index and reindexing documents is preferred over deleting documents (until compaction is implemented).
-/// BM25 scores are not updated (until compaction is implemented), but the impact is minimal.
-/// Document ID can by obtained by search. When deleting by query (SearchRequestObject), it is advised to perform a dry run search first, to see which documents will be deleted.
+/// Deletes a document ID, an ID array, or documents matching a query. Send raw unquoted clear to remove all documents. Deletion is immediately visible; storage space is not reclaimed. Returns the remaining document count inside Ok.
 #[utoipa::path(
-    delete,
-    tag = "Document",
-    path = "/api/v1/index/{index_id}/doc",
+    delete, path = "/api/v1/index/{index_id}/doc", tag = "Document",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID")
     ),
-    request_body(content = SearchRequestObject, description = "Specifies the document(s) to delete by different request objects\n- 'clear' : delete all documents in index (clear index)\n- u64 : delete single doc ID\n- [u64] : delete array of doc ID \n- SearchRequestObject : delete documents by query", content_type = "application/json", example=json!({
-        "query":"test",
-        "offset":0,
-        "length":10,
-        "realtime": false,
-        "field_filter": ["title", "body"]
-    })),
-
+    request_body(content(
+            (crate::api_schema::DeleteDocuments = "application/json", examples(
+                ("ID" = (value = json!(0))),
+                ("IDs" = (value = json!([0,1]))),
+                ("Query" = (value = json!({"query":"hello"})))
+            )),
+            (crate::api_schema::ClearCommand = "text/plain", example = "clear")
+        )),
     responses(
-        (status = 200, description = "Document deleted, returns indexed documents count", body = usize),
-        (status = BAD_REQUEST, description = "index_id invalid or missing"),
-        (status = BAD_REQUEST, description = "doc_id invalid or missing"),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "Document id does not exist"),
-        (status = NOT_FOUND, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing"),
+        (status = 200, description = "Success", body = crate::api_schema::WrappedResponse<u64>, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain")
     ),
     operation_id = "delete_document_by_request_object"
 )]
@@ -923,88 +665,30 @@ async fn delete_documents(
     } else if bytes.trim_ascii_start().starts_with(b"[") {
         delete_documents_by_object_api(&index, parse_json(&bytes)?).await
     } else {
-        delete_document_by_object_api(&index, parse_json(&bytes)?).await
+        delete_document_api(&index, parse_json(&bytes)?).await
     };
     Ok(Json(result))
 }
 
-/// Query Index
-///
-/// Query results from index with index_id
-/// The following parameters are supported:
-/// - Result type
-/// - Result sorting
-/// - Realtime search
-/// - Field filter
-/// - Fields to include in search results
-/// - Facet filter: filter facets by field and value
-/// - Result sort: sort results by field and direction
-/// - Query type default: default query type, if not specified in query
+/// Runs a lexical, vector or hybrid query. Vector and Hybrid require query_vector. Parameters must be in the JSON body.
 #[utoipa::path(
-    post,
-    tag = "Query",
-    path = "/api/v1/index/{index_id}/query",
+    post, path = "/api/v1/index/{index_id}/query", tag = "Query",
     params(
-        ("apikey" = String, Header, description = "YOUR_SECRET_API_KEY",example="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
-        ("index_id" = u64, Path, description = "index id"),
+        ("apikey" = String, Header, description = "API key"),
+        ("index_id" = u64, Path, description = "Index ID")
     ),
-
-    request_body(
-        content = SearchRequestObject,
+    request_body(content = SearchRequestObject,
         examples(
-            ("Example: Lexical search" = (value = json!(  {
-        "query": "detroit",
-        "query_vector": null,
-        "enable_empty_query": false,
-        "offset": 0,
-        "length": 10,
-        "result_type": "TopkCount",
-        "realtime": true,
-        "field_filter": ["title"],
-        "fields": [],
-        "query_type_default": "Intersection",
-        "search_mode": "Lexical"
-    }   ))),
-	("Example: Hybrid search" = (value = json!({
-        "query": "example", "query_vector": [1.0, 0.0, 0.0],
-        "length": 10, "result_type": "TopkCount", "realtime": true,
-        "search_mode": {"Hybrid": {"similarity_threshold": null, "ann_mode": "All"}}
-    }))),
-("Example: Vector search" = (value = json!(  {
-    "query":"",
-    "query_vector": [
-        0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010, 0.011, 0.012, 0.013,
-        0.014, 0.015, 0.016, 0.017, 0.018, 0.019, 0.020, 0.021, 0.022, 0.023, 0.024, 0.025, 0.026,
-        0.027, 0.028, 0.029, 0.030, 0.031, 0.032, 0.033, 0.034, 0.035, 0.036, 0.037, 0.038, 0.039,
-        0.040, 0.041, 0.042, 0.043, 0.044, 0.045, 0.046, 0.047, 0.048, 0.049, 0.050, 0.051, 0.052,
-        0.053, 0.054, 0.055, 0.056, 0.057, 0.058, 0.059, 0.060, 0.061, 0.062, 0.063, 0.064, 0.065,
-        0.066, 0.067, 0.068, 0.069, 0.070, 0.071, 0.072, 0.073, 0.074, 0.075, 0.076, 0.077, 0.078,
-        0.079, 0.080, 0.081, 0.082, 0.083, 0.084, 0.085, 0.086, 0.087, 0.088, 0.089, 0.090, 0.091,
-        0.092, 0.093, 0.094, 0.095, 0.096, 0.097, 0.098, 0.099, 0.100, 0.101, 0.102, 0.103, 0.104,
-        0.105, 0.106, 0.107, 0.108, 0.109, 0.110, 0.111, 0.112, 0.113, 0.114, 0.115, 0.116, 0.117,
-        0.118, 0.119, 0.120, 0.121, 0.122, 0.123, 0.124, 0.125, 0.126, 0.127, 0.128
-    ],
-    "offset":0,
-    "length":10,
-    "result_type": "Topk",
-    "realtime": false,
-    "search_mode": {
-        "Vector":{
-            "similarity_threshold": 0.7,
-            "ann_mode": {"Nprobe":55}
-        }
-    }
-
-}  )))
-        )
-    ),
+            ("Lexical" = (value = json!({"query":"hello","search_mode":"Lexical"}))),
+            ("Vector" = (value = json!({"query":"","query_vector":[1.0,0.0,0.0],"search_mode":{"Vector":{"similarity_threshold":null,"ann_mode":"All"}}}))),
+            ("Hybrid" = (value = json!({"query":"hello","query_vector":[1.0,0.0,0.0],"search_mode":{"Hybrid":{"similarity_threshold":null,"ann_mode":"All"}}})))
+        )),
     responses(
-        (status = 200, description = "Results found, returns the SearchResultObject", body = SearchResultObject),
-        (status = BAD_REQUEST, description = "Request object incorrect"),
-        (status = NOT_FOUND, description = "Index id does not exist"),
-        (status = NOT_FOUND, description = "API key does not exist"),
-        (status = UNAUTHORIZED, description = "api_key does not exists"),
-        (status = UNAUTHORIZED, description = "api_key missing"),
+        (status = 200, description = "Success", body = SearchResultObject, content_type = "application/json"),
+        (status = 400, description = "Invalid request", body = String, content_type = "text/plain"),
+        (status = 401, description = "API key missing or invalid", body = String, content_type = "text/plain"),
+        (status = 404, description = "Resource not found in this key scope", body = String, content_type = "text/plain"),
+        (status = 405, description = "Use POST for query and iteration", body = String, content_type = "text/plain")
     ),
     operation_id = "query_index_post"
 )]
@@ -1016,6 +700,7 @@ async fn query_index(
 }
 
 #[derive(OpenApi, Default)]
+#[openapi(components(schemas(GetDocumentRequest)))]
 #[openapi(tags(
     (name="Info", description="Return info about the server"),
     (name="API Key", description="Create and delete API keys"),
@@ -1029,7 +714,7 @@ async fn query_index(
     title = "Seekpower REST API documentation",
     contact(name = "Seekpower", url = "https://github.com/TheLudlows/seekpower")
 ))]
-#[openapi(servers((url = "http://127.0.0.1", description = "Local Seekpower server")))]
+#[openapi(servers((url = "http://127.0.0.1:8080", description = "Local Seekpower server")))]
 struct ApiDoc;
 
 fn api_router() -> OpenApiRouter<AppState> {
@@ -1155,4 +840,105 @@ pub(crate) fn generate_openapi() {
         path_json.to_string_lossy(),
         path_yml.to_string_lossy()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn resolve<'a>(doc: &'a Value, schema: &'a Value) -> &'a Value {
+        match schema["$ref"].as_str() {
+            Some(reference) => doc.pointer(reference.strip_prefix('#').unwrap()).unwrap(),
+            None => schema,
+        }
+    }
+
+    #[test]
+    fn openapi_preserves_wire_contracts() {
+        let (_, openapi) = api_router().split_for_parts();
+        let doc = serde_json::to_value(openapi).unwrap();
+        let paths = doc["paths"].as_object().unwrap();
+        assert_eq!(
+            paths
+                .values()
+                .map(|p| p.as_object().unwrap().len())
+                .sum::<usize>(),
+            15
+        );
+        for (path, operations) in paths {
+            for (method, operation) in operations.as_object().unwrap() {
+                let media = if path == "/api/v1/apikey" && method == "post" {
+                    "text/plain"
+                } else {
+                    "application/json"
+                };
+                let content = &operation["responses"]["200"]["content"];
+                assert_eq!(content.as_object().unwrap().len(), 1);
+                assert!(content.get(media).is_some(), "{method} {path}");
+            }
+        }
+        for (path, method, value_type) in [
+            ("/api/v1/apikey", "get", "array"),
+            ("/api/v1/index/{index_id}/doc", "post", "integer"),
+            ("/api/v1/index/{index_id}/doc", "patch", "integer"),
+            ("/api/v1/index/{index_id}/doc", "delete", "integer"),
+            (
+                "/api/v1/index/{index_id}/doc/{document_id}",
+                "delete",
+                "integer",
+            ),
+        ] {
+            let schema = resolve(
+                &doc,
+                &paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"],
+            );
+            assert_eq!(schema["required"], json!(["Ok"]));
+            assert_eq!(schema["properties"]["Ok"]["type"], value_type);
+        }
+        let key_body = &paths["/api/v1/apikey"]["delete"]["requestBody"];
+        assert_eq!(key_body["required"], true);
+        assert_eq!(
+            resolve(&doc, &key_body["content"]["application/json"]["schema"])["required"],
+            json!(["apikey_base64"])
+        );
+        let document_path = &paths["/api/v1/index/{index_id}/doc/{document_id}"];
+        for method in ["get", "delete"] {
+            let body = &document_path[method]["requestBody"];
+            assert_ne!(body["required"], true);
+            // Optional body must not advertise JSON null as a valid payload.
+            assert!(
+                body["content"]["application/json"]["schema"]
+                    .get("$ref")
+                    .is_some()
+            );
+        }
+        let schemas = &doc["components"]["schemas"];
+        let write = &schemas["WriteDocuments"]["oneOf"];
+        assert_eq!(write[0]["type"], "object");
+        assert_eq!(write[1]["items"]["type"], "object");
+        let update = &schemas["UpdateDocuments"]["oneOf"];
+        assert_eq!(
+            resolve(&doc, &update[0]),
+            resolve(&doc, &update[1]["items"])
+        );
+        let replacement = resolve(&doc, &update[0]);
+        assert_eq!(replacement["minItems"], 2);
+        assert_eq!(replacement["maxItems"], 2);
+        assert_eq!(replacement["prefixItems"][0]["type"], "integer");
+        assert_eq!(replacement["prefixItems"][1]["type"], "object");
+        let delete = &paths["/api/v1/index/{index_id}/doc"]["delete"]["requestBody"];
+        assert_eq!(delete["required"], true);
+        assert_eq!(
+            resolve(&doc, &delete["content"]["text/plain"]["schema"])["enum"],
+            json!(["clear"])
+        );
+        assert_eq!(
+            schemas["DeleteDocuments"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
 }

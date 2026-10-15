@@ -1,6 +1,6 @@
 # Seekpower HTTP 服务
 
-本服务托管 JSON API 与内嵌搜索 UI。完整路由及功能边界见 [FEATURES.md](../FEATURES.md)；请求字段见生成的 OpenAPI 文件（`generate_openapi=true`）和 [HTTP 示例](src/test_api.rest)。
+本服务托管 JSON API 与内嵌搜索 UI。完整路由及功能边界见 [FEATURES.md](../FEATURES.md)；请求字段见生成的 OpenAPI 文件（`generate_openapi=true`）和 [HTTP 示例](test_api.rest)。
 
 ## 启动
 
