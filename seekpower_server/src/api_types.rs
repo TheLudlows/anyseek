@@ -7,8 +7,6 @@ use seekpower::{
     vector_similarity::{AnnMode, VectorSimilarity},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
 use utoipa::ToSchema;
 
 /// Search text, vectors, or both. Empty input browses documents. Pending writes are visible.
@@ -20,7 +18,7 @@ pub struct SearchRequestObject {
     pub query_string: String,
     /// External embedding. A vector alone selects Vector; nonempty text plus a vector selects Hybrid.
     #[serde(default)]
-    pub query_vector: Option<Value>,
+    pub query_vector: Option<serde_json::Value>,
     #[serde(default)]
     /// Number of matching results to skip.
     pub offset: usize,
@@ -35,9 +33,11 @@ pub struct SearchRequestObject {
     /// Match all or any unqualified query terms. Explicit query operators take precedence.
     #[serde(default)]
     #[schema(default = "and")]
+    /// Match all (and) or any (or) query terms.
     pub operator: QueryOperator,
     /// Search only these indexed fields; empty means all indexed fields.
     #[serde(default)]
+    #[serde(rename = "search_fields")]
     pub field_filter: Vec<String>,
     /// Return only these stored fields; empty means all stored fields.
     #[serde(default)]
@@ -45,10 +45,12 @@ pub struct SearchRequestObject {
     /// Metadata predicates, ANDed together. Fields must have filterable=true at index creation.
     #[serde(default)]
     #[schema(value_type = Vec<api_schema::FacetFilter>)]
+    #[serde(rename = "filter")]
     pub facet_filter: Vec<FacetFilter>,
     /// Sort by filterable fields or _score; empty means relevance order.
     #[serde(default)]
     #[schema(value_type = Vec<api_schema::ResultSort>)]
+    #[serde(rename = "sort")]
     pub result_sort: Vec<ResultSort>,
     /// Optional vector score/distance threshold, interpreted using the index metric.
     #[serde(default)]
@@ -66,13 +68,20 @@ pub enum QueryOperator {
     Or,
 }
 
-impl SearchRequestObject {
-    /// Resolve the public operator to the core query type.
-    pub fn query_type(&self) -> QueryType {
-        match self.operator {
+impl QueryOperator {
+    /// Resolve Boolean matching to the engine query type.
+    pub fn query_type(self) -> QueryType {
+        match self {
             QueryOperator::And => QueryType::Intersection,
             QueryOperator::Or => QueryType::Union,
         }
+    }
+}
+
+impl SearchRequestObject {
+    /// Resolve the public operator to the core query type.
+    pub fn query_type(&self) -> QueryType {
+        self.operator.query_type()
     }
     /// Resolve the retrieval mode from the supplied inputs.
     pub fn search_mode(&self) -> SearchMode {
@@ -128,7 +137,7 @@ pub struct SearchResultObject {
     pub count_total: Option<usize>,
     /// Vector of lexical search query terms.
     pub query_terms: Vec<String>,
-    #[schema(value_type=Vec<HashMap<String, serde_json::Value>>)]
+    #[schema(value_type=Vec<std::collections::HashMap<String, serde_json::Value>>)]
     /// Vector of search result documents
     pub results: Vec<Document>,
 }
@@ -194,6 +203,20 @@ impl From<FieldRequest> for SchemaField {
             false,
             field.boost,
         )
+    }
+}
+
+impl From<&SchemaField> for FieldRequest {
+    fn from(field: &SchemaField) -> Self {
+        Self {
+            field: field.field.clone(),
+            field_type: field.field_type.clone(),
+            store: Some(field.store),
+            index_lexical: Some(field.index_lexical),
+            index_vector: field.index_vector,
+            filterable: field.facet,
+            boost: field.boost,
+        }
     }
 }
 
@@ -266,67 +289,122 @@ fn iterator_take() -> isize {
     10
 }
 
-/// Projection for a stored document read.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+/// URL query parameters for a stored document read.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
 pub struct GetDocumentRequest {
-    /// Empty means all stored fields.
+    /// Comma-separated stored field names; omit to return all stored fields.
     #[serde(default)]
-    pub fields: Vec<String>,
+    pub fields: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-/// Index response object
-pub struct IndexResponseObject {
-    /// Index ID
+/// One complete replacement. Updates delete the old document and allocate a new ID.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentReplacement {
+    /// Existing internal document ID.
     pub id: u64,
-    /// Index name
-    #[schema(example = "demo_index")]
-    pub name: String,
-    #[schema(example = json!({
-        "title":{
-            "field":"title",
-            "store":true,
-            "index_lexical":true,
-            "field_type":"Text",
-            "boost":10.0,
-            "field_id":0
-        },
-        "body":{
-            "field":"body",
-            "store":true,
-            "index_lexical":true,
-            "field_type":"Text",
-            "field_id":1
-        },
-        "url":{
-           "field":"url",
-           "store":true,
-           "index_lexical":false,
-           "field_type":"Text",
-           "field_id":2
-        },
-        "date":{
-           "field":"date",
-           "store":true,
-           "index_lexical":false,
-           "field_type":"Timestamp",
-           "facet":true,
-           "field_id":3
+    /// Full replacement document, not a partial patch.
+    #[schema(value_type = std::collections::HashMap<String, serde_json::Value>)]
+    pub document: Document,
+}
+
+/// One replacement or a batch of replacements.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(untagged, try_from = "serde_json::Value")]
+pub enum UpdateDocuments {
+    /// One complete replacement.
+    Single(DocumentReplacement),
+    /// Several complete replacements.
+    Batch(Vec<DocumentReplacement>),
+}
+impl TryFrom<serde_json::Value> for UpdateDocuments {
+    type Error = serde_json::Error;
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        match value {
+            serde_json::Value::Object(_) => serde_json::from_value(value).map(Self::Single),
+            serde_json::Value::Array(ref items)
+                if items.iter().all(serde_json::Value::is_object) =>
+            {
+                serde_json::from_value(value).map(Self::Batch)
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected a replacement object or an array of replacement objects",
+            )),
         }
-     }))]
-    /// Schema definition for the index
-    #[schema(value_type = HashMap<String, api_schema::SchemaField>)]
-    pub schema: HashMap<String, SchemaField>,
-    /// Number of indexed documents
+    }
+}
+impl UpdateDocuments {
+    /// Convert complete replacements to the engine batch format.
+    pub fn into_documents(self) -> Vec<(u64, Document)> {
+        let documents = match self {
+            Self::Single(d) => vec![d],
+            Self::Batch(d) => d,
+        };
+        documents.into_iter().map(|d| (d.id, d.document)).collect()
+    }
+}
+
+/// Delete all documents matching nonempty text and optional metadata predicates.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteQueryRequest {
+    /// Nonempty text query; all matching documents are deleted.
+    pub query: String,
+    #[serde(default)]
+    #[schema(default = "and")]
+    /// Match all (and) or any (or) query terms.
+    pub operator: QueryOperator,
+    #[serde(default)]
+    /// Limit text matching to these fields; empty searches all.
+    pub search_fields: Vec<String>,
+    #[serde(default)]
+    #[schema(value_type = Vec<api_schema::FacetFilter>)]
+    /// Metadata predicates combined with AND.
+    pub filter: Vec<FacetFilter>,
+}
+
+/// Select exactly one deletion form. Full removal requires all=true.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum DeleteDocuments {
+    /// Delete the specified internal IDs.
+    Ids {
+        /// IDs to delete.
+        ids: Vec<u64>,
+    },
+    /// Delete every text and metadata match.
+    Query(DeleteQueryRequest),
+    /// Explicitly remove every document.
+    All {
+        /// Must be true.
+        all: bool,
+    },
+}
+
+/// All HTTP errors use this JSON shape; status codes determine success or failure.
+#[derive(Serialize, ToSchema)]
+pub struct ErrorResponse {
+    /// Stable error category.
+    pub code: &'static str,
+    /// Human-readable diagnostic.
+    pub message: String,
+}
+
+/// Public index metadata. Field definitions use the same names as creation.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IndexResponseObject {
+    /// Index ID within the authenticated key scope.
+    pub id: u64,
+    /// Display name.
+    pub name: String,
+    /// Resolved public field settings, ordered by name.
+    pub schema: Vec<FieldRequest>,
+    /// Allocated document count, including deleted IDs.
     pub indexed_doc_count: usize,
-    /// Number of committed documents
+    /// Committed document count.
     pub committed_doc_count: usize,
-    /// Number of operations: index, update, delete, queries
-    pub operations_count: u64,
-    /// Number of queries (informational)
-    pub query_count: u64,
-    /// Seekpower version the index was created with
-    #[schema(example = "0.11.1")]
+    /// Running server version.
     pub version: String,
 }

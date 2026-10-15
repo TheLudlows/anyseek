@@ -15,7 +15,7 @@
 | 向量检索 | 全簇扫描、Leveled IVF ANN、K-Medoid 聚类 | `AnnMode::All/Nprobe/Similaritythreshold/NprobeSimilaritythreshold`；全簇扫描仍使用配置的存储精度/量化，不等于原始 F32 精确评分 |
 | 向量配置 | F32/I8；Cosine/Dot/Euclidean；不量化、ScalarQuantizationI8、TurboQuantI8 | I8 输入只能配 `quantization: None`；聚类 `None/Auto/Fixed`；可设相似度阈值 |
 | 混合检索 | 全文与向量分别召回，按文档 ID 合并并执行 RRF | 当前融合参数在代码内固定；HTTP 按文本/向量输入推导模式；无模型重排或跨节点协调 |
-| 字段选择 | `field_filter` 选择检索字段；`fields` 投影存储字段 | 字段选择不等于元数据值过滤 |
+| 字段选择 | `search_fields` 选择检索字段；`fields` 投影存储字段 | 字段选择不等于元数据值过滤 |
 | 元数据过滤 | 字符串/字符串集合、整数、浮点、时间戳范围过滤 | 创建请求使用 `filterable:true`（核心/索引响应仍为 `facet:true`）；三种模式使用共享谓词，向量在评分/Top-K 前过滤；ANN 仍受簇探测范围限制 |
 | 排序 | 相关性、facet 字段升降序、多字段组合、`_score`/`_id` | Vector/Hybrid 也会对已召回候选排序，但向量召回先按相似度截断，不保证全库字段排序 Top-K |
 | 结果与分页 | `Topk/Count/TopkCount`、`offset/length`、显式空查询浏览 | 完整计数/空查询能力主要在词法路径；ANN 和 Hybrid 的 `count_total` 不应作为全库精确去重命中数 |
@@ -48,15 +48,15 @@ HTTP 新建索引采用 Snappy、English 高频词、N-gram=9、Auto 聚类；�
 | DELETE | `/api/v1/index/{id}` | 删除索引 | 已登记 |
 | POST | `/api/v1/index/{id}/doc` | 单条/批量写入 | 已登记 |
 | PATCH | `/api/v1/index/{id}/doc` | 单条/批量完整替换更新 | 已登记 |
-| DELETE | `/api/v1/index/{id}/doc` | 按 ID、ID 数组或查询删除 | 已登记 |
-| GET | `/api/v1/index/{id}/doc/{doc}` | 读取文档；可用 JSON body 指定 `fields` | 已登记 |
+| DELETE | `/api/v1/index/{id}/doc` | JSON：`ids`、非空 `query` 或 `all:true` | 已登记 |
+| GET | `/api/v1/index/{id}/doc/{doc}` | 读取文档；可用 URL `?fields=body,title` 投影 | 已登记 |
 | DELETE | `/api/v1/index/{id}/doc/{doc}` | 删除单条文档 | 已登记 |
 | POST | `/api/v1/index/{id}/query` | Lexical/Vector/Hybrid JSON 查询 | 已登记 |
 | POST | `/api/v1/index/{id}/iterator` | 双向文档遍历 | 已登记 |
 | GET | `/` 及固定静态资源路径 | 内嵌 Web UI、CSS/JS、图标 | 不作为数据 API 登记 |
 | OPTIONS | 服务路由 | CORS 预检；query/iterator 声明 `POST, OPTIONS` | 不作为数据 API 登记 |
 
-以上为 15 个 `/api/v1` 业务/存活操作，加 UI/静态资源和预检。B1/B2 后 query/iterator 的 GET 与 HTTP QUERY 返回 405；POST URL 非空参数返回 400；旧 `/api/v2/index/{id}/query` 与 `/file` 路由无专用处理，和其他未知路径一样返回 501；OPTIONS 使用通用 CORS 预检返回 204。
+以上为 15 个 `/api/v1` 业务/存活操作，加 UI/静态资源和预检。B1/B2 后 query/iterator 的 GET 与 HTTP QUERY 返回 405；POST URL 非空参数返回 400；旧 `/api/v2/index/{id}/query` 与 `/file` 路由无专用处理，和其他未知路径一样返回 404；OPTIONS 使用通用 CORS 预检返回 204。
 
 ## 3. Web UI
 

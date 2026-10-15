@@ -42,14 +42,12 @@ async function setupApi(method, path, key, body) {
         method, headers: {apikey: key, 'Content-Type': 'application/json'},
         ...(body === undefined ? {} : {body: JSON.stringify(body)}), cache: 'no-store'
     });
-    const text = await response.text();
+    const value = await response.json();
     if (!response.ok) {
         if (response.status === 401) throw Object.assign(new Error('Invalid API key. Check the key copied from the server logs.'), {status: response.status});
-        throw Object.assign(new Error(text || `Request failed (${response.status}).`), {status: response.status});
+        throw Object.assign(new Error(value.message || `Request failed (${response.status}).`), {status: response.status});
     }
-    const value = JSON.parse(text);
-    if (value && typeof value === 'object' && 'Err' in value) throw Object.assign(new Error(value.Err), {status: response.status});
-    return value && typeof value === 'object' && 'Ok' in value ? value.Ok : value;
+    return value;
 }
 function setSetupBusy(busy) {
     $('#welcome button,#welcome input,#welcome select,#welcome textarea').prop('disabled', busy);

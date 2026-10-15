@@ -68,12 +68,7 @@ class SeekpowerClient:
             return body
 
     def api(self, method, path, data=None, key=_DEFAULT):
-        value = json.loads(self.request(method, path, data, key))
-        if isinstance(value, dict):
-            check('Err' not in value, f'{method} {path}: {value}')
-            if set(value) == {'Ok'}:
-                return value['Ok']
-        return value
+        return json.loads(self.request(method, path, data, key))
 
     # -- public API surface ---------------------------------------------
 
@@ -87,7 +82,7 @@ class SeekpowerClient:
 
     def create_api_key(self, key):
         """POST /api/v1/apikey - mint a new API key (requires the master key)."""
-        return self.request('POST', '/api/v1/apikey', {}, key).decode()
+        return self.api('POST', '/api/v1/apikey', {}, key)
 
     def create_index(self, config, key=_DEFAULT):
         """POST /api/v1/index - create an index; returns the new index id."""

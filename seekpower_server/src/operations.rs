@@ -1,7 +1,8 @@
 use crate::api_types::{
-    CreateIndexRequest, GetDocumentRequest, IndexResponseObject, SearchRequestObject,
+    CreateIndexRequest, DeleteQueryRequest, IndexResponseObject, SearchRequestObject,
     SearchResultObject,
 };
+use crate::http_server::ApiError;
 use std::{
     collections::HashMap,
     fs,
@@ -17,10 +18,9 @@ use crate::keys::ApikeyObject;
 use seekpower::{
     commit::Commit,
     index::{
-        AccessType, Clustering, DeleteDocument, DeleteDocuments, DeleteDocumentsByQuery, Document,
-        DocumentCompression, FrequentwordType, IS_AVX2, IS_NEON, IndexArc, IndexDocument,
-        IndexDocuments, IndexMetaObject, LexicalSimilarity, SchemaField, UpdateDocument,
-        UpdateDocuments, create_index,
+        AccessType, Clustering, DeleteDocument, DeleteDocuments, Document, DocumentCompression,
+        FrequentwordType, IS_AVX2, IS_NEON, IndexArc, IndexDocuments, IndexMetaObject,
+        LexicalSimilarity, SchemaField, UpdateDocuments, create_index,
     },
     iterator::{GetIterator, IteratorResult},
     search::Search,
@@ -45,17 +45,23 @@ pub(crate) async fn create_index_api(
     request: CreateIndexRequest,
     force_shard_number: Option<usize>,
     apikey_object: &mut ApikeyObject,
-) -> Result<u64, String> {
+) -> Result<u64, ApiError> {
     let mut names = HashSet::new();
     if request.index_name.trim().is_empty() || request.schema.is_empty() {
-        return Err("index_name and schema must be nonempty".into());
+        return Err(ApiError::BadRequest(
+            "index_name and schema must be nonempty".into(),
+        ));
     }
     for field in &request.schema {
         if field.field.trim().is_empty() || !names.insert(&field.field) {
-            return Err("schema field names must be nonempty and unique".into());
+            return Err(ApiError::BadRequest(
+                "schema field names must be nonempty and unique".into(),
+            ));
         }
         if !field.boost.is_finite() || field.boost <= 0.0 {
-            return Err("field boost must be finite and positive".into());
+            return Err(ApiError::BadRequest(
+                "field boost must be finite and positive".into(),
+            ));
         }
     }
     let schema: Vec<SchemaField> = request.schema.into_iter().map(Into::into).collect();
@@ -73,7 +79,7 @@ pub(crate) async fn create_index_api(
     let index_id_path = Path::new(&index_path)
         .join(apikey_object.id.to_string())
         .join(index_id.to_string());
-    fs::create_dir_all(&index_id_path).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&index_id_path)?;
 
     let meta = IndexMetaObject {
         id: index_id,
@@ -89,8 +95,12 @@ pub(crate) async fn create_index_api(
         inference,
     };
 
-    let index_arc =
-        create_index(&index_id_path, meta, &schema, 11, true, force_shard_number).await?;
+    let index_arc = create_index(&index_id_path, meta, &schema, 11, true, force_shard_number)
+        .await
+        .map_err(|error| {
+            log::error!("Creating index failed: {error}");
+            ApiError::Internal
+        })?;
 
     apikey_object.index_list.insert(index_id, index_arc);
 
@@ -122,13 +132,16 @@ async fn index_info(index: &IndexArc) -> IndexResponseObject {
     let index = index.read().await;
     IndexResponseObject {
         version: VERSION.to_string(),
-        schema: index.schema_map.clone(),
+        schema: index
+            .schema_map
+            .values()
+            .sorted_by_key(|f| &f.field)
+            .map(Into::into)
+            .collect(),
         id: index.meta.id,
         name: index.meta.name.clone(),
         indexed_doc_count: index.indexed_doc_count().await,
         committed_doc_count: index.committed_doc_count().await,
-        operations_count: 0,
-        query_count: 0,
     }
 }
 
@@ -150,15 +163,6 @@ pub(crate) async fn get_apikey_indices_info_api(
     Ok(result)
 }
 
-pub(crate) async fn index_document_api(
-    index_arc: &IndexArc,
-    document: Document,
-) -> Result<usize, String> {
-    index_arc.index_document(document).await?;
-
-    Ok(index_arc.read().await.indexed_doc_count().await)
-}
-
 pub(crate) async fn index_documents_api(
     index_arc: &IndexArc,
     document_vec: Vec<Document>,
@@ -170,30 +174,18 @@ pub(crate) async fn index_documents_api(
 pub(crate) async fn get_document_api(
     index_arc: &IndexArc,
     document_id: usize,
-    get_document_request: GetDocumentRequest,
+    fields: Vec<String>,
 ) -> Option<Document> {
     if !index_arc.read().await.stored_field_names.is_empty() {
         index_arc
             .read()
             .await
-            .get_document(
-                document_id,
-                true,
-                &HashSet::from_iter(get_document_request.fields),
-            )
+            .get_document(document_id, true, &HashSet::from_iter(fields))
             .await
             .ok()
     } else {
         None
     }
-}
-
-pub(crate) async fn update_document_api(
-    index_arc: &IndexArc,
-    id_document: (u64, Document),
-) -> Result<u64, String> {
-    index_arc.update_document(id_document).await?;
-    Ok(index_arc.read().await.indexed_doc_count().await as u64)
 }
 
 pub(crate) async fn update_documents_api(
@@ -222,26 +214,42 @@ pub(crate) async fn delete_documents_by_object_api(
 
 pub(crate) async fn delete_documents_by_query_api(
     index_arc: &IndexArc,
-    search_request: SearchRequestObject,
+    request: DeleteQueryRequest,
 ) -> Result<u64, String> {
-    if search_request.query_string.trim().is_empty() || search_request.query_vector.is_some() {
-        return Err("deletion by query requires nonempty text without a vector; use clear to delete all documents".into());
+    if request.query.trim().is_empty() {
+        return Err(
+            "deletion by query requires nonempty text; use all:true to delete all documents".into(),
+        );
     }
-    seekpower::search::validate_metadata_filters(index_arc, &search_request.facet_filter).await?;
-    index_arc
-        .delete_documents_by_query(
-            search_request.query_string.to_owned(),
-            search_request.query_type(),
-            search_request.offset,
-            search_request.length,
+    let length = index_arc.read().await.indexed_doc_count().await;
+    let result = index_arc
+        .search(
+            request.query,
+            None,
+            request.operator.query_type(),
+            seekpower::search::SearchMode::Lexical,
+            false,
+            0,
+            length,
+            seekpower::search::ResultType::Topk,
             true,
-            search_request.field_filter,
-            search_request.facet_filter,
-            search_request.result_sort,
+            request.search_fields,
+            request.filter,
+            Vec::new(),
         )
         .await;
-
-    Ok(index_arc.read().await.indexed_doc_count().await as u64)
+    if let Some(error) = result.error {
+        return Err(error);
+    }
+    delete_documents_by_object_api(
+        index_arc,
+        result
+            .results
+            .into_iter()
+            .map(|r| r.doc_id as u64)
+            .collect(),
+    )
+    .await
 }
 
 pub(crate) async fn get_iterator_api_post(

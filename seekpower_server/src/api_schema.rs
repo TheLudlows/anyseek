@@ -1,26 +1,12 @@
 //! Service-only OpenAPI descriptions for core values.
 //! Shared core values use these descriptions; public request settings live in api_types.
 //! Remote Serialize derives check public field/variant layouts against the core at compile time.
-//! SchemaField is a documentation view because its internal field IDs are private.
 #![allow(dead_code, missing_docs)]
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
 use std::ops::Range;
 use utoipa::ToSchema;
-
-fn default_false() -> bool {
-    false
-}
-fn default_1() -> f32 {
-    1.0
-}
-fn is_default_bool(value: &bool) -> bool {
-    !*value
-}
-fn is_default_f32(value: &f32) -> bool {
-    *value == 1.0
-}
 
 /// FacetFilter:
 /// either numerical range facet filter (range start/end) or
@@ -362,51 +348,6 @@ pub struct ResultSort {
     pub order: seekpower::search::SortOrder,
 }
 
-/// Defines a field in index schema: field, stored, indexed , field_type, facet, boost.
-#[derive(ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SchemaField {
-    /// unique name of a field
-    pub field: String,
-    /// only stored fields are returned in the search results
-    pub store: bool,
-    /// only indexed fields can be searched
-    /// Even if index_lexical is true in the schema, the field in the actual document is optional. You can index documents without that field, but you cannot search for that field in those documents.
-    pub index_lexical: bool,
-    /// only indexed fields can be searched
-    /// Vector fields are required and validated before the document is queued for indexing.
-    #[serde(skip_serializing_if = "is_default_bool")]
-    #[serde(default = "default_false")]
-    pub index_vector: bool,
-    /// type of a field
-    #[schema(value_type = FieldType)]
-    pub field_type: seekpower::index::FieldType,
-    /// Enable metadata filtering and sorting for string and numerical fields.
-    /// both numerical and string fields can be indexed (indexed=true) and stored (stored=true) in the json document,
-    /// but with field_facet=true they are additionally stored in a binary format, for fast filtering and sorting without docstore access (decompression, deserialization)
-    #[serde(skip_serializing_if = "is_default_bool")]
-    #[serde(default = "default_false")]
-    pub facet: bool,
-
-    /// Indicate the longest field in schema.
-    /// Otherwise the longest field will be automatically detected in first index_document.
-    /// Setting/detecting the longest field ensures efficient index encoding.
-    #[serde(skip_serializing_if = "is_default_bool")]
-    #[serde(default = "default_false")]
-    pub longest: bool,
-
-    /// optional custom weight factor for Bm25 ranking
-    #[serde(skip_serializing_if = "is_default_f32")]
-    #[serde(default = "default_1")]
-    pub boost: f32,
-
-    #[serde(skip)]
-    pub(crate) indexed_field_id: usize,
-    #[serde(default)]
-    #[schema(ignore)]
-    pub(crate) field_id: usize,
-}
-
 /// Specifies the sort order for the search results.
 #[derive(ToSchema, Serialize)]
 #[serde(remote = "seekpower::search::SortOrder")]
@@ -504,44 +445,10 @@ pub enum VectorSimilarity {
     Euclidean,
 }
 
-/// Successful responses that retain the existing externally tagged Result encoding.
-#[derive(ToSchema)]
-pub struct WrappedResponse<T> {
-    #[schema(rename = "Ok")]
-    pub value: T,
-}
-
 /// One document or a batch of documents.
 #[derive(ToSchema)]
 #[serde(untagged)]
 pub enum WriteDocuments {
     Single(std::collections::HashMap<String, Value>),
     Batch(Vec<std::collections::HashMap<String, Value>>),
-}
-
-/// One (document ID, replacement document) tuple or a batch of tuples.
-#[derive(ToSchema)]
-#[serde(untagged)]
-pub enum UpdateDocuments {
-    Single(DocumentReplacement),
-    Batch(Vec<DocumentReplacement>),
-}
-
-/// JSON deletion forms; the raw clear command is documented separately as text/plain.
-#[derive(ToSchema)]
-#[serde(untagged)]
-pub enum DeleteDocuments {
-    Id(u64),
-    Ids(Vec<u64>),
-    Query(crate::api_types::SearchRequestObject),
-}
-
-#[derive(ToSchema)]
-#[schema(min_items = 2, max_items = 2)]
-pub struct DocumentReplacement(pub (u64, std::collections::HashMap<String, Value>));
-
-#[derive(ToSchema)]
-pub enum ClearCommand {
-    #[schema(rename = "clear")]
-    Clear,
 }

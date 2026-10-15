@@ -27,7 +27,7 @@ if(!Number.isFinite(start)||!Number.isFinite(end)||start>=end){$('#searchError')
 facetFilter=[{Timestamp:{field:DATE_FIELD,filter:{start:start,end:end}}}];
 }
 }
-$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:search_mode==="Vector"?undefined:query,query_vector:queryVector,offset:(page-1)*10,length:10,result_sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],facet_filter:facetFilter}),traditional:true,cache:false,type:"POST",dataType:'json',success:function(data){if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;contentBox.empty();
+$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:search_mode==="Vector"?undefined:query,query_vector:queryVector,offset:(page-1)*10,length:10,sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],filter:facetFilter}),traditional:true,cache:false,type:"POST",dataType:'json',success:function(data){if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;contentBox.empty();
 data.results.forEach(element=>{
 const linkText=valid(element[URL_FIELD]);
 const linkUrl=httpUrl(linkText);
@@ -53,7 +53,7 @@ if(linkUrl){prevUrl.text(linkText).show();prevText.attr('src',linkUrl).show();}
 else{prevText2.text(bodyText);}
 });
 });
-setPage(page,data.count,data.count_total,data.time);},error:function(xhr){if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;$("#contentBox").empty();$("#searchError").text(xhr.responseText||"Search request failed.");},beforeSend:setHeader});}
+setPage(page,data.count,data.count_total,data.time);},error:function(xhr){if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;$("#contentBox").empty();$("#searchError").text(xhr.responseJSON?.message||"Search request failed.");},beforeSend:setHeader});}
 function valid(value){return value==null?'':typeof value==='object'?JSON.stringify(value):String(value);}
 function httpUrl(value){try{const url=new URL(value);return ['http:','https:'].includes(url.protocol)?url.href:null;}catch{return null;}}
 function showStatus(async=true){
@@ -62,17 +62,17 @@ $.ajax({url:STATUS_URL,traditional:true,cache:false,type:'GET',async:async,dataT
 success:function(data){
 if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;
 $('#welcome').hide();$('#version').text(data.version);$('#indexName').text(data.name);$('#indexedDocs').text(data.indexed_doc_count.toLocaleString());
-const schema=new Map(Object.entries(data.schema).sort((a,b)=>a[1].field_id-b[1].field_id));
+const schema=new Map(data.schema.map(field=>[field.field,field]));
 const textFields=[...schema].filter(([key,value])=>value.store&&value.field_type!=='Binary'&&value.field_type!=='Timestamp'&&value.field_type!=='U32').map(([key])=>key);
 for(const target of ['title','body','url']){
-if(target==='title'&&!data.schema[TITLE_FIELD])TITLE_FIELD=textFields.shift()||TITLE_FIELD;
-if(target==='body'&&!data.schema[TEXT_FIELD])TEXT_FIELD=textFields.find(key=>key!==TITLE_FIELD)||TEXT_FIELD;
-if(target==='url'&&!data.schema[URL_FIELD])URL_FIELD=textFields.find(key=>key!==TITLE_FIELD&&key!==TEXT_FIELD)||URL_FIELD;
+if(target==='title'&&!schema.has(TITLE_FIELD))TITLE_FIELD=textFields.shift()||TITLE_FIELD;
+if(target==='body'&&!schema.has(TEXT_FIELD))TEXT_FIELD=textFields.find(key=>key!==TITLE_FIELD)||TEXT_FIELD;
+if(target==='url'&&!schema.has(URL_FIELD))URL_FIELD=textFields.find(key=>key!==TITLE_FIELD&&key!==TEXT_FIELD)||URL_FIELD;
 }
-const dateFields=[...schema].filter(([key,value])=>value.field_type==='Timestamp'&&value.facet).map(([key])=>key);
+const dateFields=[...schema].filter(([key,value])=>value.field_type==='Timestamp'&&value.filterable).map(([key])=>key);
 IS_DATE_FIELD=dateFields.length>0;
 if(IS_DATE_FIELD&&!dateFields.includes(DATE_FIELD))DATE_FIELD=dateFields[0];
-for(const [key,value] of schema){if(value.field_type==='Binary'&&value.store&&!data.schema[IMAGE_FIELD]){IMAGE_FIELD=key;break;}}
+for(const [key,value] of schema){if(value.field_type==='Binary'&&value.store&&!schema.has(IMAGE_FIELD)){IMAGE_FIELD=key;break;}}
 document.getElementById('dateControls').hidden=!IS_DATE_FIELD;
 status_loaded=true;
 CURRENT_SCHEMA=data.schema;$('#writeDocuments').prop('disabled',false);

@@ -63,7 +63,7 @@ async fn query(
     ann: Value,
 ) -> ResultObject {
     let r: SearchRequestObject = serde_json::from_value(json!({"query":"common", "length":length,
-        "facet_filter":filter}))
+        "filter":filter}))
     .unwrap();
     index
         .search(
@@ -384,7 +384,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                     json!({"NprobeSimilaritythreshold":[3,if metric==VectorSimilarity::Euclidean {1000.0} else {-1000.0}]}),
                     json!({"Similaritythreshold":if metric==VectorSimilarity::Euclidean {1000.0} else {-1000.0}}),
                 ] {
-                    let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","length":3,"facet_filter":predicate,"field_filter":["vector"]})).unwrap();
+                    let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","length":3,"filter":predicate,"search_fields":["vector"]})).unwrap();
                     let embedding = if precision == Precision::I8 {
                         Embedding::I8(vec![24, 0, 0])
                     } else {
@@ -444,7 +444,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             index.index_documents(vec![replacement]).await.unwrap();
             index.commit().await;
             // The set dictionary reuses ID 0 after clear; old memberships must not survive.
-            let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","facet_filter":[{"StringSet32":{"field":"tags","filter":["even"]}}]})).unwrap();
+            let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","filter":[{"StringSet32":{"field":"tags","filter":["even"]}}]})).unwrap();
             let result = index
                 .search(
                     r.query_string.clone(),

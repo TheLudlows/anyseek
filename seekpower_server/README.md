@@ -53,7 +53,7 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/query" -H "apikey: $API_KEY" -H 'Cont
 curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"take":10,"include_document":true,"fields":["body"]}'
 ```
 
-搜索与遍历仅接受 POST JSON；普通索引/文档读取仍为 GET。按 DocID 读取时，字段投影使用 JSON body `{"fields":["body"]}`。更新为完整记录替换。向量配置与示例见 [根 README](../README.md)。
+搜索与遍历仅接受 POST JSON；普通索引/文档读取仍为 GET。按 DocID 读取时，字段投影使用 URL `?fields=body,title`。更新使用 `{"id":0,"document":{"body":"new text"}}`，表示完整替换并分配新 ID；数组可批量替换。删除请求使用 `{"ids":[0,1]}`、`{"query":"text"}`（全部匹配）或 `{"all":true}`。成功响应直接返回 JSON 值，错误统一为 `{"code":"bad_request","message":"..."}` 并使用相应 HTTP 状态码。向量配置与示例见 [根 README](../README.md)。
 
 撤销 key 需要主密钥，body 为 `{"apikey_base64":"要删除的key"}`；同时删除其索引。创建 key 只接受 `{}` 并生成随机密钥；`demo` 参数返回 400。没有内置配额/限流。
 

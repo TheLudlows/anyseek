@@ -50,25 +50,22 @@ POST {{base_url}}/api/v1/index/{{index_id}}/query
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"query":"database world","operator":"or","fields":["body"],"facet_filter":[{"String16":{"field":"category","filter":["guide"]}}]}
+{"query":"database world","operator":"or","fields":["body"],"filter":[{"String16":{"field":"category","filter":["guide"]}}]}
 
 ### Browse without text; omit total counting
 POST {{base_url}}/api/v1/index/{{index_id}}/query
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"count":false,"length":10,"result_sort":[{"field":"category","order":"Ascending"}]}
+{"count":false,"length":10,"sort":[{"field":"category","order":"Ascending"}]}
 
 ### Persist pending writes
 PATCH {{base_url}}/api/v1/index/{{index_id}}
 apikey: {{api_key}}
 
-### Read a document; the fields body is optional
-GET {{base_url}}/api/v1/index/{{index_id}}/doc/0
+### Read selected stored fields; omit fields for the full document
+GET {{base_url}}/api/v1/index/{{index_id}}/doc/0?fields=body
 apikey: {{api_key}}
-Content-Type: application/json
-
-{"fields":["body"]}
 
 ### Iterate live documents; defaults to 10 with stored fields
 POST {{base_url}}/api/v1/index/{{index_id}}/iterator
@@ -77,12 +74,12 @@ Content-Type: application/json
 
 {}
 
-### Replace one document (an array of tuples replaces a batch)
+### Fully replace one document (an array of these objects replaces a batch); new ID allocated
 PATCH {{base_url}}/api/v1/index/{{index_id}}/doc
 apikey: {{api_key}}
 Content-Type: application/json
 
-[0,{"body":"updated database","category":"guide"}]
+{"id":0,"document":{"body":"updated database","category":"guide"}}
 
 ### Create a hybrid index; vectors default to F32/Cosine, without quantization
 POST {{base_url}}/api/v1/index
@@ -116,19 +113,19 @@ Content-Type: application/json
 DELETE {{base_url}}/api/v1/index/{{index_id}}/doc/1
 apikey: {{api_key}}
 
-### Delete by nonempty text query, or send a numeric ID / array of IDs
+### Delete all matches of nonempty text; for IDs use {"ids":[0,1]}
 DELETE {{base_url}}/api/v1/index/{{index_id}}/doc
 apikey: {{api_key}}
 Content-Type: application/json
 
 {"query":"database"}
 
-### Remove all documents: raw clear, without JSON quotes
+### Explicitly remove all documents
 DELETE {{base_url}}/api/v1/index/{{index_id}}/doc
 apikey: {{api_key}}
-Content-Type: text/plain
+Content-Type: application/json
 
-clear
+{"all":true}
 
 ### Delete the index
 DELETE {{base_url}}/api/v1/index/{{index_id}}
