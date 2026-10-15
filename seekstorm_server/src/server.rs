@@ -9,9 +9,9 @@ use std::{collections::HashMap, env::current_exe, fs, path::Path, sync::Arc, tim
 use tokio::sync::RwLock;
 
 use crate::{
-    MASTER_KEY_SECRET, VERSION, api_endpoints::{create_apikey_api, open_all_apikeys},
-    http_server::http_server,
+    MASTER_KEY_SECRET, VERSION, api_endpoints::open_all_apikeys, http_server::http_server,
 };
+use crate::api_endpoints::create_apikey_api;
 
 pub(crate) async fn initialize(params: HashMap<String, String>) {
     let force_shard_number = params
