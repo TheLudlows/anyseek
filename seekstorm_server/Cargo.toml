@@ -27,9 +27,8 @@ log = "0.4"
 env_logger = "0.11"
 seekstorm = { version = "3.4.1", path = "../seekstorm" , default-features = false}
 base64 = "0.23.1"
-http-body-util = "0.1.5"
-hyper = { version = "1.12.0", features = ["full", "server"] }
-hyper-util = { version = "0.1.21", features = ["server", "tokio", "http1", "http2"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "tokio"] }
+utoipa-axum = "0.3"
 indexmap = { version = "2.14.2", features = ["serde"] }
 itertools = "0.15.0"
 num_cpus = "1.17.0"
