@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the retained HTTP/UI surface without a published client SDK.
 
-Requires only Python 3 and an already-built seekstorm_server. All writes go to a
+Requires only Python 3 and an already-built seekpower_server. All writes go to a
 new temporary index directory; the child is stopped even if an assertion fails.
 Migrates the former SDK live/key/index/write/commit/query/get/clear scenarios.
 """
@@ -742,7 +742,7 @@ def main():
     args = parser.parse_args()
     binary = args.server.resolve()
     if not binary.is_file():
-        parser.error(f'server binary not found: {binary}; run cargo build -p seekstorm_server')
+        parser.error(f'server binary not found: {binary}; run cargo build -p seekpower_server')
     with tempfile.TemporaryDirectory(prefix='seekpower-http-') as directory:
         exercise(binary, Path(directory))
     print('PASS HTTP/UI smoke')

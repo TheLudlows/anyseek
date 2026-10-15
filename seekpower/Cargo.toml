@@ -1,0 +1,62 @@
+[package]
+name = "seekpower"
+version = "3.4.1"
+authors = ["Wolf Garbe <wolf.garbe@seekstorm.com>"]
+license = "Apache-2.0"
+categories = ["database-implementations", "data-structures"]
+description = """Vector & lexical search engine library & multi-tenancy server"""
+documentation = "https://github.com/TheLudlows/seekpower#readme"
+homepage = "https://github.com/TheLudlows/seekpower"
+repository = "https://github.com/TheLudlows/seekpower"
+readme = "../README.md"
+keywords = ["search", "information", "retrieval"]
+edition = "2024"
+publish = false
+
+[features]
+# Optional features: zh=Chinese word segmentation, vb=result diagnostics.
+# You can also disable all default features and re-enable them case-wise in your toml with: seekpower = { path = "../seekpower", default-features = false, features = ["zh"] }
+default = ["zh","vb"]
+zh = []
+vb = []
+
+[lib]
+name = "seekpower"
+path = "src/lib.rs"
+
+[dependencies]
+log = "0.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tokio = { version = "1.53.2", features = ["full"] }
+base64 = "0.23.1"
+ahash ={ version = "0.8.12", features = ["serde"]}
+rand = { version = "0.10.3", features = ["chacha"]}
+futures = "0.3.34"
+num = "0.4.3"
+num-derive = "0.5.1"
+num-traits = "0.2.19"
+itertools = "0.15.0"
+async-recursion = "1.2.0"
+smallvec = "1.16.3"
+memmap2 = "0.9.11"
+regex-syntax = "0.8.11"
+indexmap = { version = "2.14.2", features = ["serde"]}
+unicode-normalization = "0.1.25"
+finl_unicode = "1.4.0"
+num_cpus = "1.17.0"
+snap = "1.1.2"
+bytemuck = { version = "1.25.2", features = ["derive","extern_crate_alloc"] }
+
+[dev-dependencies]
+tokio-test = "0.4.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version ="0.3.9",  features = ["winbase"]}
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+rustc-args = ["-C", "target-cpu=native"]
+rustdoc-args = ["-C", "target-cpu=native"]

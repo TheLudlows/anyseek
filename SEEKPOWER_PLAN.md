@@ -1,4 +1,4 @@
-# SeekPower：单机与分布式演进计划
+# Seekpower：单机与分布式演进计划
 
 更新日期：2026-10-14（Asia/Shanghai）。当前实现以 [FEATURES.md](FEATURES.md) 为准，合入与验证见 [STATUS.md](STATUS.md) 和 [VALIDATION.md](VALIDATION.md)，上游来源见 [UPSTREAM.md](UPSTREAM.md)。下文未完成部分均为目标，不是当前能力承诺。
 
@@ -91,7 +91,7 @@ API 类别：Collection 管理、批量 upsert、按 ID delete/get、search、fl
 
 ### 9.1 内部执行分片不等于分布式逻辑分片
 
-SeekStorm 已有用于本机并行的内部 shard/level。分布式逻辑分片则是路由、复制、迁移、恢复的单位。首期可把一个独立引擎实例及其数据目录封装为一个逻辑分片，内部并行度单独配置，不与节点 CPU 核数绑定成集群路由规则。
+Seekpower 已有用于本机并行的内部 shard/level。分布式逻辑分片则是路由、复制、迁移、恢复的单位。首期可把一个独立引擎实例及其数据目录封装为一个逻辑分片，内部并行度单独配置，不与节点 CPU 核数绑定成集群路由规则。
 
 同一 Collection 的 Schema、分词器、向量空间和评分约定需要版本化。路由使用稳定业务 ID/路由键；重试、迁移和副本切换携带明确的 epoch/版本边界。
 

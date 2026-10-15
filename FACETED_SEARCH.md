@@ -31,4 +31,4 @@ ANN 仍只搜索 ann_mode 配置选中的簇；过滤不自动扩大 Nprobe，�
 
 索引格式 7.0 的 `facet.json` 仅保存字段名和有序值字典；计数、min/max 和兼容占位均已删除。`facet.bin` 仍保存过滤/排序使用的值与 ID。仅支持当前格式，不读取或升级旧索引。向量量化的内部数值范围与字段统计无关。
 
-接口与限制见 [FEATURES.md](FEATURES.md)、[服务文档](seekstorm_server/README.md)。
+接口与限制见 [FEATURES.md](FEATURES.md)、[服务文档](seekpower_server/README.md)。

@@ -1,20 +1,20 @@
-# SeekPower
+# Seekpower
 
-基于 SeekStorm 的单机全文、向量与混合检索引擎。当前组成是 `seekstorm` Rust 核心库、`seekstorm_server` HTTP 服务和内嵌 Web UI。模型推理、文档解析与切块由调用方完成。
+Seekpower 是单机全文、向量与混合检索引擎。当前组成是 `seekpower` Rust 核心库、`seekpower_server` HTTP 服务和内嵌 Web UI。模型推理、文档解析与切块由调用方完成。
 
-[完整功能清单](FEATURES.md) · [服务使用](seekstorm_server/README.md) · [架构](ARCHITECTURE.md) · [迁移说明](MIGRATION.md) · [状态](STATUS.md) · [后续计划](SEEKPOWER_PLAN.md)
+[完整功能清单](FEATURES.md) · [服务使用](seekpower_server/README.md) · [架构](ARCHITECTURE.md) · [迁移说明](MIGRATION.md) · [状态](STATUS.md) · [后续计划](SEEKPOWER_PLAN.md)
 
 ## 构建与启动
 
-从本仓库构建；上游发布包和镜像不包含 SeekPower 的修改。两个 crate 暂时保留原名，不发布到上游包名。
+从本仓库构建核心库和 HTTP 服务。
 
 ```sh
 cargo build --workspace
 export MASTER_KEY_SECRET='replace-with-your-private-secret'
-cargo run -p seekstorm_server -- local_ip=127.0.0.1 local_port=8080
+cargo run -p seekpower_server -- local_ip=127.0.0.1 local_port=8080
 ```
 
-打开 `http://127.0.0.1:8080/`，将启动日志中的 `Master API key` 填入连接表单，即可创建索引、写入和检索。主密钥由 `MASTER_KEY_SECRET` 派生，重启复用其索引；不自动生成普通 key。需要独立数据作用域时，可用主密钥创建/撤销额外 key。完整流程见 [服务使用](seekstorm_server/README.md)。
+打开 `http://127.0.0.1:8080/`，将启动日志中的 `Master API key` 填入连接表单，即可创建索引、写入和检索。主密钥由 `MASTER_KEY_SECRET` 派生，重启复用其索引；不自动生成普通 key。需要独立数据作用域时，可用主密钥创建/撤销额外 key。完整流程见 [服务使用](seekpower_server/README.md)。
 
 ## 当前能力
 
@@ -56,9 +56,9 @@ Vector/Hybrid 必须提供 `query_vector`；Lexical 仅需文本。写入必须�
 ## 开发与文档
 
 - [Rust 示例](docs/library-examples.md)、[元数据过滤与排序](FACETED_SEARCH.md)、[N-gram 配置](NGRAM_SEARCH.md)。本地执行 `cargo doc --workspace --no-deps` 生成与当前源码一致的 Rust 文档。
-- [HTTP 请求示例](seekstorm_server/src/test_api.rest)、[OpenAPI JSON](seekstorm_server/openapi/openapi.json) / [YAML](seekstorm_server/openapi/openapi.yml)。路由覆盖差异见功能清单。
-- 运行 `cargo test --workspace --all-targets`；HTTP 冒烟使用 `python3 scripts/http_smoke.py --server target/debug/seekstorm_server`。浏览器回归需安装 Python Playwright/Chromium，并设置 `SEEKPOWER_BROWSER_TEST=1`。
-- 核心默认 features：`zh`（中文分词）、`vb`（结果诊断信息）；哈希实现固定使用 AHash。HTTP 对象与 OpenAPI 定义均在服务工程，核心通过 `log` 发出日志，由调用方配置输出。具体见 [Cargo.toml](seekstorm/Cargo.toml)。
+- [HTTP 请求示例](seekpower_server/src/test_api.rest)。运行 `target/debug/seekpower_server generate_openapi=true`，在可执行文件目录生成 `openapi.json` 和 `openapi.yml`；CI 也会提供生成文件。路由覆盖差异见功能清单。
+- 运行 `cargo test --workspace --all-targets`；HTTP 冒烟使用 `python3 scripts/http_smoke.py --server target/debug/seekpower_server`。浏览器回归需安装 Python Playwright/Chromium，并设置 `SEEKPOWER_BROWSER_TEST=1`。
+- 核心默认 features：`zh`（中文分词）、`vb`（结果诊断信息）；哈希实现固定使用 AHash。HTTP 对象与 OpenAPI 定义均在服务工程，核心通过 `log` 发出日志，由调用方配置输出。具体见 [Cargo.toml](seekpower/Cargo.toml)。
 - [验证记录](VALIDATION.md) 保存实际测试和历史失败；[CHANGELOG](CHANGELOG.md) 保留上游历史，不作为当前功能列表。
 
-来源与许可：[UPSTREAM.md](UPSTREAM.md)、[Apache-2.0 LICENSE](LICENSE)。保留上游及第三方署名和许可。
+本项目使用 [Apache-2.0 许可证](LICENSE)。

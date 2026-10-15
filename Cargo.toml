@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
-    "seekstorm",
-    "seekstorm_server"
+    "seekpower",
+    "seekpower_server"
 ]
 
 [workspace.lints.rust]
