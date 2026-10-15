@@ -10,7 +10,7 @@ The single-record Rust API is `index_arc.index_document(document).await?`; the a
 
 Add required crates to your project
 ```text
-cargo add seekstorm --path ../seekstorm
+cargo add seekpower --path ../seekpower
 cargo add tokio
 cargo add serde_json
 ```
@@ -21,7 +21,7 @@ use std::error::Error;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
-  // your SeekStorm code here
+  // your Seekpower code here
 
    Ok(())
 }
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 create schema (from JSON)
 ```rust
-use seekstorm::index::SchemaField;
+use seekpower::index::SchemaField;
 
 let schema_json = r#"
 [{"field":"title","field_type":"Text","store":false,"index_lexical":false},
@@ -40,7 +40,7 @@ let schema:Vec<SchemaField>=serde_json::from_str(schema_json).unwrap();
 
 create schema (from SchemaField)
 ```rust
-use seekstorm::index::{SchemaField,FieldType};
+use seekpower::index::{SchemaField,FieldType};
 
 let schema= vec![
     SchemaField::new("title".to_owned(), false, false,false, FieldType::Text, false,false, 1.0),
@@ -54,9 +54,9 @@ create index
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekstorm::index::{IndexMetaObject, Clustering, LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,SchemaField,FieldType,DocumentCompression,create_index};
-use seekstorm::vector::Inference;
-use seekstorm::vector_similarity::VectorSimilarity;
+use seekpower::index::{IndexMetaObject, Clustering, LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,SchemaField,FieldType,DocumentCompression,create_index};
+use seekpower::vector::Inference;
+use seekpower::vector_similarity::VectorSimilarity;
 
 let index_path=Path::new("C:/index/");
 
@@ -91,7 +91,7 @@ open index (alternatively to create index)
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekstorm::index::open_index;
+use seekpower::index::open_index;
 
 let index_path=Path::new("C:/index/");
 let mut index_arc=open_index(index_path).await.unwrap();
@@ -104,7 +104,7 @@ index documents (from JSON)
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekstorm::index::{open_index, IndexDocuments};
+use seekpower::index::{open_index, IndexDocuments};
 
 let index_path=Path::new("C:/index/");
 let mut index_arc=open_index(index_path).await.unwrap();
@@ -124,7 +124,7 @@ index document (from Document)
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::index::{Document, IndexDocument, open_index};
+use seekpower::index::{Document, IndexDocument, open_index};
 use std::path::Path;
 use serde_json::Value;
 
@@ -146,8 +146,8 @@ commit documents
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::commit::Commit;
-use seekstorm::index::open_index;
+use seekpower::commit::Commit;
+use seekpower::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -162,8 +162,8 @@ search index
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::search::{Search, SearchMode, QueryType, ResultType};
-use seekstorm::index::open_index;
+use seekpower::search::{Search, SearchMode, QueryType, ResultType};
+use seekpower::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -206,47 +206,47 @@ The interpretation of operator chars within the query string (set `query_type=Qu
 
 Intersection, AND `+`
 ```rust ,no_run
-use seekstorm::search::QueryType;
+use seekpower::search::QueryType;
 let query_type=QueryType::Union;
 let query="+red +apple".to_string();
 ```
 
 ```rust ,no_run
-use seekstorm::search::QueryType;
+use seekpower::search::QueryType;
 let query_type=QueryType::Intersection;
 let query="red apple".to_string();
 ```
 
 Union, OR
 ```rust ,no_run
-use seekstorm::search::QueryType;
+use seekpower::search::QueryType;
 let query_type=QueryType::Union;
 let query="red apple".to_string();
 ```
 
 Phrase `""`
 ```rust ,no_run
-use seekstorm::search::QueryType;
+use seekpower::search::QueryType;
 let query_type=QueryType::Union;
 let query="\"red apple\"".to_string();
 ```
 
 ```rust ,no_run
-use seekstorm::search::QueryType;
+use seekpower::search::QueryType;
 let query_type=QueryType::Phrase;
 let query="red apple".to_string();
 ```
 
 Except, minus, NOT `-`
 ```rust ,no_run
-use seekstorm::search::QueryType;
+use seekpower::search::QueryType;
 let query_type=QueryType::Union;
 let query="apple -red".to_string();
 ```
 
 Mixed phrase and intersection
 ```rust ,no_run
-use seekstorm::search::QueryType;
+use seekpower::search::QueryType;
 let query_type=QueryType::Union;
 let query="+\"the who\" +uk".to_string();
 ```
@@ -256,10 +256,10 @@ multi-threaded search
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::search::{QueryType, SearchMode, ResultType, Search};
+use seekpower::search::{QueryType, SearchMode, ResultType, Search};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use seekstorm::index::open_index;
+use seekpower::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -328,7 +328,7 @@ for query in query_vec {
 clear index
 ```rust, no_run
 # tokio_test::block_on(async {
-use seekstorm::index::open_index;
+use seekpower::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -343,7 +343,7 @@ delete index
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::index::open_index;
+use seekpower::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -359,7 +359,7 @@ iterate through document ID of an index
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::{index::open_index,iterator::GetIterator};
+use seekpower::{index::open_index,iterator::GetIterator};
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -403,8 +403,8 @@ close index
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekstorm::index::open_index;
-use seekstorm::index::Close;
+use seekpower::index::open_index;
+use seekpower::index::Close;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -415,9 +415,9 @@ index_arc.close().await;
 # });
 ```
 
-seekstorm library version string
+seekpower library version string
 ```rust ,no_run
-use seekstorm::index::version;
+use seekpower::index::version;
 
 let version=version();
 println!("version {}",version);
@@ -436,7 +436,7 @@ This example combines metadata indexing, filtering, and search:
 
 Add required crates to your project
 ```text
-cargo add seekstorm --path ../seekstorm
+cargo add seekpower --path ../seekpower
 cargo add tokio
 cargo add serde_json
 ```
@@ -447,7 +447,7 @@ use std::error::Error;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
-  // your SeekStorm code here
+  // your Seekpower code here
 
    Ok(())
 }
@@ -458,9 +458,9 @@ create index
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use seekstorm::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
-use seekstorm::vector::Inference;
-use seekstorm::vector_similarity::VectorSimilarity;
+use seekpower::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
+use seekpower::vector::Inference;
+use seekpower::vector_similarity::VectorSimilarity;
 
 let index_path=Path::new("C:/index/");//x
 
@@ -497,8 +497,8 @@ index documents
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekstorm::index::{IndexDocuments,open_index};
-use seekstorm::commit::Commit;
+use seekpower::index::{IndexDocuments,open_index};
+use seekpower::commit::Commit;
 
 let index_path=Path::new("C:/index/");
 let index_arc=open_index(index_path).await.unwrap();
@@ -523,8 +523,8 @@ search index
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekstorm::index::{IndexDocuments,open_index};
-use seekstorm::search::{Search,SearchMode,QueryType,ResultType};
+use seekpower::index::{IndexDocuments,open_index};
+use seekpower::search::{Search,SearchMode,QueryType,ResultType};
 use std::collections::HashSet;
 
 let index_path=Path::new("C:/index/");
@@ -569,9 +569,9 @@ create index
 
     use std::path::Path;
     use std::sync::{Arc, RwLock};
-    use seekstorm::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
-    use seekstorm::vector::{Embedding, Inference, Precision, Quantization};
-    use seekstorm::vector_similarity::VectorSimilarity;
+    use seekpower::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
+    use seekpower::vector::{Embedding, Inference, Precision, Quantization};
+    use seekpower::vector_similarity::VectorSimilarity;
 
    let index_path=Path::new("tests/index_test/");
 
@@ -609,8 +609,8 @@ index documents/vectors
 # tokio_test::block_on(async {
 
     use std::path::Path;
-    use seekstorm::index::{IndexDocuments,open_index};
-    use seekstorm::commit::Commit;
+    use seekpower::index::{IndexDocuments,open_index};
+    use seekpower::commit::Commit;
 
     // open index
     let index_path=Path::new("tests/index_test/");
@@ -638,11 +638,11 @@ query documents/vectors
 # tokio_test::block_on(async {
 
     use std::path::Path;
-    use seekstorm::index::{IndexDocuments,open_index};
-    use seekstorm::search::{Search,SearchMode,QueryType,ResultType};
-    use seekstorm::vector_similarity::{AnnMode, VectorSimilarity};
-    use seekstorm::commit::Commit;
-    use seekstorm::vector::Embedding;
+    use seekpower::index::{IndexDocuments,open_index};
+    use seekpower::search::{Search,SearchMode,QueryType,ResultType};
+    use seekpower::vector_similarity::{AnnMode, VectorSimilarity};
+    use seekpower::commit::Commit;
+    use seekpower::vector::Embedding;
     use std::collections::HashSet;
 
   // open index

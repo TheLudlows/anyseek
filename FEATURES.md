@@ -32,7 +32,7 @@
 
 ## 2. HTTP 接口全集
 
-表中 `{id}` 为索引 ID，`{doc}` 为内部文档 ID。数据接口使用 `apikey` 请求头；主密钥可直接操作自己作用域的索引，并用于创建/撤销额外 key。接口以 [实际路由](seekstorm_server/src/http_server.rs) 为准，OpenAPI 尚未覆盖标记为“未登记”的操作。
+表中 `{id}` 为索引 ID，`{doc}` 为内部文档 ID。数据接口使用 `apikey` 请求头；主密钥可直接操作自己作用域的索引，并用于创建/撤销额外 key。接口以 [实际路由](seekpower_server/src/http_server.rs) 为准，OpenAPI 尚未覆盖标记为“未登记”的操作。
 
 | 方法 | 路径 | 功能 | OpenAPI |
 | --- | --- | --- | --- |
@@ -90,4 +90,4 @@
 
 多字段排序、命中计数、分页、多向量、量化选项、N-gram 和 `vb` **仍保留**。
 
-核查入口：[数据类型](seekstorm/src/index.rs)、[检索执行](seekstorm/src/search.rs)、[向量配置](seekstorm/src/vector.rs)、[ANN 模式](seekstorm/src/vector_similarity.rs)、[服务路由](seekstorm_server/src/http_server.rs)、[启动与退出](seekstorm_server/src/server.rs)、[UI](seekstorm_server/web/js/master.js)、[构建特性](seekstorm/Cargo.toml)。
+核查入口：[数据类型](seekpower/src/index.rs)、[检索执行](seekpower/src/search.rs)、[向量配置](seekpower/src/vector.rs)、[ANN 模式](seekpower/src/vector_similarity.rs)、[服务路由](seekpower_server/src/http_server.rs)、[启动与退出](seekpower_server/src/server.rs)、[UI](seekpower_server/web/js/master.js)、[构建特性](seekpower/Cargo.toml)。

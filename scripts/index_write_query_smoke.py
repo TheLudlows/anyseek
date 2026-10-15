@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Create-index, write and query smoke test against a running seekstorm_server.
+"""Create-index, write and query smoke test against a running seekpower_server.
 
-Requires only Python 3 and a seekstorm_server already listening on the local
+Requires only Python 3 and a seekpower_server already listening on the local
 default port (80). Start the server yourself first, e.g.:
 
-    cargo run -p seekstorm_server
+    cargo run -p seekpower_server
 
-then run this script. All calls go through SeekStormClient
-(scripts/seekstorm_client.py). The master key is derived from the
+then run this script. All calls go through SeekpowerClient
+(scripts/seekpower_client.py). The master key is derived from the
 MASTER_KEY_SECRET environment variable (default "1234") exactly as the server
 derives it, so this script authenticates against a server started without
 explicitly setting that variable. Exercises the core create -> write -> commit
 -> query loop plus a realtime query over an uncommitted write.
 
-The REST surface is wrapped by SeekStormClient (scripts/seekstorm_client.py).
+The REST surface is wrapped by SeekpowerClient (scripts/seekpower_client.py).
 """
 import argparse
 import sys
@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from seekstorm_client import SeekStormClient, check
+from seekpower_client import SeekpowerClient, check
 
 # Hardcoded master key = base64(sha256("1234")), matching a server started
 # without setting MASTER_KEY_SECRET (whose default is "1234"). Authenticate
@@ -31,7 +31,7 @@ MASTER_KEY = 'A6xnQhbz4Vx2HuGl4lXwZ5U2I8iziLRFnhP5eNfIRvQ='
 
 
 def exercise(base, master):
-    client = SeekStormClient(base)
+    client = SeekpowerClient(base)
 
     # The server is started by the caller; wait for it to answer health checks.
     deadline = time.monotonic() + 30
@@ -43,7 +43,7 @@ def exercise(base, master):
             if time.monotonic() >= deadline:
                 raise RuntimeError(
                     f'server not reachable at {base} within 30 seconds; '
-                    'start it first with `cargo run -p seekstorm_server`')
+                    'start it first with `cargo run -p seekpower_server`')
             time.sleep(0.1)
     print('PASS health')
 

@@ -2,14 +2,14 @@
 # will have compiled files and executables
 debug/
 target/
-seekstorm/tests/index_test/
-seekstorm/tests/index_facet_test/
-seekstorm/tests/index_delete_*/
-seekstorm/tests/index_get_*/
-seekstorm/tests/index_scan32_*/
-seekstorm/tests/index_union_*/
-seekstorm/tests/index_delete_union*/
-seekstorm/tests/index_docid3_*/
+seekpower/tests/index_test/
+seekpower/tests/index_facet_test/
+seekpower/tests/index_delete_*/
+seekpower/tests/index_get_*/
+seekpower/tests/index_scan32_*/
+seekpower/tests/index_union_*/
+seekpower/tests/index_delete_union*/
+seekpower/tests/index_docid3_*/
 .vscode/
 .idea
 

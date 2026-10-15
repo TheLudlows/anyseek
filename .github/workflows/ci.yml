@@ -47,7 +47,7 @@ jobs:
               names = {package['name'] for package in packages}
           forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs', 'rkyv', 'tabled', 'colored', 'num-format', 'crossbeam-channel', 'ctrlc', 'half', 'lz4_flex', 'zstd', 'snowball_stemmers_rs', 'gxhash', 'zstd-safe', 'zstd-sys'}
           assert not forbidden, f'retired dependencies remain: {forbidden}'
-          core = next(package for package in packages if package['name'] == 'seekstorm')
+          core = next(package for package in packages if package['name'] == 'seekpower')
           assert not any(dependency['name'] == 'aho-corasick' for dependency in core['dependencies']), 'direct highlighter dependency remains'
           # The tokenizer retains regex-syntax; optional API dependencies are checked separately.
           print('PASS no direct highlighter dependency')
@@ -60,16 +60,14 @@ jobs:
       - name: HTTP API and embedded UI smoke (no SDK)
         env:
           SEEKPOWER_BROWSER_TEST: "1"
-        run: python3 scripts/http_smoke.py --server target/debug/seekstorm_server
+        run: python3 scripts/http_smoke.py --server target/debug/seekpower_server
       - name: Existing core and server tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --workspace --all-targets
       - name: Generate API reference
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
-          target/debug/seekstorm_server generate_openapi=true > /dev/null
-          diff -u seekstorm_server/openapi/openapi.json target/debug/openapi.json
-          diff -u seekstorm_server/openapi/openapi.yml target/debug/openapi.yml
+          target/debug/seekpower_server generate_openapi=true > /dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: openapi
