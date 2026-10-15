@@ -68,6 +68,16 @@ JSON 记录每轮 QPS、HTTP P50/P95/P99、服务端/压测端 CPU、服务端�
 
 [首版实测数据](benchmarks/http-baseline-2026-10-15.json) 包含源码与二进制哈希、数据哈希、配置和环境。结果用于同环境版本对比：属于合成数据的热缓存、闭环负载，不是容量上限；未衡量真实语料的全文/混合相关性、冷缓存、过滤和混合读写。提交耗时表示 API 完成时间，不验证崩溃恢复或持久化保证。`--help` 可查看数据量、维度、时长和并发等覆盖参数；输出文件不会被覆盖。
 
+真实语料使用完整 [BEIR SciFact](https://github.com/beir-cellar/beir)：5,183 篇文档、300 条测试查询。固定 `intfloat/multilingual-e5-small` 模型版本，CPU ONNX FP32 推理、384 维、最长 512 token、带掩码均值池化和 L2 归一化；查询/文档分别加 `query: `/`passage: ` 前缀。向量预先生成，耗时单独记录：
+
+```sh
+python3 -m pip install numpy==2.2.6 onnxruntime==1.23.2 tokenizers==0.22.2
+python3 scripts/prepare_scifact.py --cache /tmp/seekpower-model --output /tmp/seekpower-scifact
+python3 scripts/performance_baseline.py --dataset /tmp/seekpower-scifact --output /tmp/seekpower-scifact-result.json
+```
+
+正文合并标题和文本，全文/混合请求显式使用 `operator=or`；其他 HTTP 配置不变。性能测 Top-10，相关性另取 Top-100，按人工标注计算 nDCG@10、Recall@100、MRR@10；最近邻 Recall@10 单独列出。[SciFact 实测数据](benchmarks/scifact-baseline-2026-10-15.json) 保留模型和输入哈希。该准备脚本只处理 SciFact，不包含中文 MIRACL，也不代表百万级索引表现。模型、数据和向量保留在指定缓存/输出目录，不提交仓库。
+
 ## 开发与文档
 
 - [Rust 示例](docs/library-examples.md)、[元数据过滤与排序](FACETED_SEARCH.md)、[N-gram 配置](NGRAM_SEARCH.md)。本地执行 `cargo doc --workspace --no-deps` 生成与当前源码一致的 Rust 文档。

@@ -105,6 +105,8 @@ def generate(args):
     # Generation and brute-force reference run before timed server work.
     os.environ['OPENBLAS_NUM_THREADS'] = '1'
     import numpy as np
+    if args.dataset:
+        return load_dataset(args)
     rng = np.random.default_rng(args.seed)
     topics = min(64, max(1, args.documents // args.top_k))
     centers = rng.standard_normal((topics, args.dimensions), dtype=np.float32)
@@ -151,6 +153,75 @@ def generate(args):
         'input_json_bytes': sum(map(len, batches)), 'input_sha256': digest.hexdigest(),
         'queries_sha256': hashlib.sha256(b''.join(p for group in payloads.values() for p in group)).hexdigest(),
     }
+
+
+def load_dataset(args):
+    """Load a prepared BEIR corpus; embeddings and source files must match its manifest."""
+    import numpy as np
+    directory = Path(args.dataset)
+    metadata = json.loads((directory / 'manifest.json').read_text())
+    for name, expected in metadata['files_sha256'].items():
+        with (directory / name).open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
+                raise ValueError(f'dataset checksum mismatch: {name}')
+    corpus = [json.loads(line) for line in (directory / 'corpus.jsonl').read_text().splitlines()]
+    queries = [json.loads(line) for line in (directory / 'queries.jsonl').read_text().splitlines()]
+    vectors = np.load(directory / 'vectors.npy', allow_pickle=False)
+    query_vectors = np.load(directory / 'query_vectors.npy', allow_pickle=False)
+    args.documents, args.dimensions = vectors.shape
+    args.query_pool = len(queries)
+    if (len(corpus) != args.documents or query_vectors.shape != (len(queries), args.dimensions)
+            or args.top_k > args.documents or not len(queries)):
+        raise ValueError('corpus/query/embedding dimensions do not match')
+    if not np.isfinite(vectors).all() or not np.isfinite(query_vectors).all():
+        raise ValueError('nonfinite embeddings')
+    doc_rows = {str(doc['_id']): i for i, doc in enumerate(corpus)}
+    query_rows = {str(query['_id']): i for i, query in enumerate(queries)}
+    if len(doc_rows) != len(corpus) or len(query_rows) != len(queries):
+        raise ValueError('duplicate document or query IDs')
+    qrels = [{} for _ in queries]
+    for line in (directory / 'qrels/test.tsv').read_text().splitlines()[1:]:
+        query_id, doc_id, relevance = line.split('\t')
+        if query_id in query_rows and float(relevance) > 0:
+            qrels[query_rows[query_id]][doc_rows[doc_id]] = float(relevance)
+    if not all(qrels):
+        raise ValueError('each evaluation query must have positive relevance judgments')
+    batches, digest = [], hashlib.sha256()
+    for offset in range(0, len(corpus), args.batch_size):
+        payload = encode([{'record_id': i,
+                           'body': (corpus[i].get('title', '') + '\n' + corpus[i]['text']).strip(),
+                           'vector': vectors[i].tolist()}
+                          for i in range(offset, min(offset + args.batch_size, len(corpus)))])
+        batches.append(payload)
+        digest.update(payload)
+    exact_vectors, exact_queries = vectors.astype(np.float64), query_vectors.astype(np.float64)
+    for matrix in (exact_vectors, exact_queries):
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        if (norms == 0).any():
+            raise ValueError('zero-length embedding')
+        matrix /= norms
+    truth = np.argsort(-(exact_queries @ exact_vectors.T), axis=1, kind='stable')[:, :args.top_k].tolist()
+    payloads = {'lexical': [], 'vector': [], 'hybrid': []}
+    for query, vector in zip(queries, query_vectors.tolist()):
+        for mode, request in [('lexical', {'query': query['text']}), ('vector', {'query_vector': vector}),
+                              ('hybrid', {'query': query['text'], 'query_vector': vector})]:
+            payloads[mode].append(encode({**request, 'operator': 'or', 'length': args.top_k}))
+    return batches, payloads, truth, {
+        **metadata, '_qrels': qrels, 'input_json_bytes': sum(map(len, batches)),
+        'input_sha256': digest.hexdigest(),
+        'queries_sha256': hashlib.sha256(b''.join(p for group in payloads.values() for p in group)).hexdigest(),
+    }
+
+
+def ranking_metrics(ids, relevant):
+    if len(ids) != len(set(ids)):
+        raise ValueError('duplicate result IDs')
+    dcg = sum(relevant.get(doc, 0) / math.log2(rank + 2) for rank, doc in enumerate(ids[:10]))
+    ideal = sum(score / math.log2(rank + 2) for rank, score in
+                enumerate(sorted(relevant.values(), reverse=True)[:10]))
+    return {'ndcg_at_10': dcg / ideal,
+            'recall_at_100': len(set(ids[:100]) & relevant.keys()) / len(relevant),
+            'mrr_at_10': next((1 / rank for rank, doc in enumerate(ids[:10], 1) if doc in relevant), 0)}
 
 
 def percentiles(values):
@@ -244,6 +315,7 @@ def environment(root, binary):
 
 def run(args, root, binary):
     batches, payloads, truth, dataset = generate(args)
+    qrels = dataset.pop('_qrels', None)
     report = {'format_version': 1, 'started_at': datetime.now(timezone.utc).isoformat(),
               'config': {k: v for k, v in vars(args).items() if k not in ('server', 'output')},
               'environment': environment(root, binary), 'dataset': dataset,
@@ -256,6 +328,11 @@ def run(args, root, binary):
                          'quality': 'vector Recall@K against independent float64 exhaustive cosine; no human relevance labels',
                          'scope': 'synthetic, warm cache, default HTTP settings; no cold-cache/filter/update/saturation claim'},
               'queries': []}
+    if qrels is not None:
+        report['method'].update({
+            'quality': 'human qrels: nDCG@10 (linear gains), Recall@100, MRR@10; separately exact cosine Recall@K',
+            'scope': 'prepared real corpus, warm cache; operator=or; top K for timing, top 100 for relevance; embedding time excluded',
+        })
     secret = secrets.token_hex(24)
     key = base64.b64encode(hashlib.sha256(secret.encode()).digest()).decode()
     with socket.socket() as sock:
@@ -306,20 +383,33 @@ def run(args, root, binary):
                     'metadata': [{'path': str(p.relative_to(directory / 'index')), 'value': json.loads(p.read_text())}
                                  for p in files if p.name == 'index.json']}
                 recall = []
+                relevance = {mode: [] for mode in payloads}
                 for i in range(args.query_pool):
                     result, _, _ = client.request('POST', path + '/query', payloads['vector'][i])
                     ids = [doc['record_id'] for doc in result['results']]
                     if len(ids) != args.top_k or len(set(ids)) != args.top_k:
                         raise RuntimeError('vector result count or unique record IDs do not match top_k')
                     recall.append(len(set(ids) & set(truth[i])) / args.top_k)
-                    lexical, _, _ = client.request('POST', path + '/query', payloads['lexical'][i])
-                    topic = i % dataset['topics']
-                    expected = len(range(topic, args.documents, dataset['topics']))
-                    if lexical['count_total'] != expected:
-                        raise RuntimeError(f'lexical count {lexical["count_total"]} != {expected}')
+                    if qrels is not None:
+                        for mode in payloads:
+                            request = {**json.loads(payloads[mode][i]), 'length': 100}
+                            ranked, _, _ = client.request('POST', path + '/query', request)
+                            relevance[mode].append(ranking_metrics([doc['record_id'] for doc in ranked['results']], qrels[i]))
+                    else:
+                        lexical, _, _ = client.request('POST', path + '/query', payloads['lexical'][i])
+                        topic = i % dataset['topics']
+                        expected = len(range(topic, args.documents, dataset['topics']))
+                        if lexical['count_total'] != expected:
+                            raise RuntimeError(f'lexical count {lexical["count_total"]} != {expected}')
                 report['quality'] = {'vector_recall_at_k': statistics.mean(recall),
-                    'vector_min_recall_at_k': min(recall), 'vector_recall_per_query': recall,
-                    'lexical_count_queries_checked': args.query_pool}
+                    'vector_min_recall_at_k': min(recall), 'vector_recall_per_query': recall}
+                if qrels is not None:
+                    report['quality']['relevance'] = {
+                        mode: {metric: statistics.mean(row[metric] for row in rows) for metric in rows[0]}
+                        for mode, rows in relevance.items()}
+                    report['quality']['relevance_per_query'] = relevance
+                else:
+                    report['quality']['lexical_count_queries_checked'] = args.query_pool
                 print(f'Indexed {args.documents} docs incl. commit: {args.documents / total:.1f} docs/s; '
                       f'vector Recall@{args.top_k}={statistics.mean(recall):.4f}', flush=True)
                 # Shuffle scenario order per repetition to reduce systematic order bias.
@@ -363,6 +453,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', default='target/release/seekpower_server')
     parser.add_argument('--output', required=True, help='JSON result file; existing files are not overwritten')
+    parser.add_argument('--dataset', help='prepared BEIR dataset directory; overrides synthetic sizes')
     parser.add_argument('--documents', type=int, default=20000)
     parser.add_argument('--dimensions', type=int, default=128)
     parser.add_argument('--batch-size', type=int, default=500)
