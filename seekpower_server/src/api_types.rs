@@ -367,7 +367,7 @@ pub struct DeleteQueryRequest {
 
 /// Select exactly one deletion form. Full removal requires all=true.
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(untagged, deny_unknown_fields)]
+#[serde(untagged, try_from = "serde_json::Map<String, serde_json::Value>")]
 pub enum DeleteDocuments {
     /// Delete the specified internal IDs.
     Ids {
@@ -381,6 +381,23 @@ pub enum DeleteDocuments {
         /// Must be true.
         all: bool,
     },
+}
+
+impl TryFrom<serde_json::Map<String, serde_json::Value>> for DeleteDocuments {
+    type Error = serde_json::Error;
+    fn try_from(
+        mut fields: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, Self::Error> {
+        if fields.len() == 1 {
+            if let Some(ids) = fields.remove("ids") {
+                return serde_json::from_value(ids).map(|ids| Self::Ids { ids });
+            }
+            if let Some(all) = fields.remove("all") {
+                return serde_json::from_value(all).map(|all| Self::All { all });
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(fields)).map(Self::Query)
+    }
 }
 
 /// All HTTP errors use this JSON shape; status codes determine success or failure.

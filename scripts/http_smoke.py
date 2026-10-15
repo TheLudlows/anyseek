@@ -603,7 +603,7 @@ def exercise(binary, workdir):
             api('POST', up + '/doc', [{'body': 'match', '类别': 'remove'} for _ in range(12)] +
                                     [{'body': 'match', '类别': 'keep'}])
             check(api('GET', up + '/doc/0?' + urlencode({'fields': '类别'})) == {'类别': 'remove'}, 'encoded URL projection')
-            for body in (0, [0, 1], b'clear', {'all': False}, {'all': True, 'query': 'match'},
+            for body in (0, [0, 1], [True], [[]], ['match'], b'clear', {'all': False}, {'all': True, 'query': 'match'},
                          {'ids': [0], 'query': 'match'}, {'query': 'match', 'length': 1},
                          {'query': 'match', 'sort': []}, {'query': 'match', 'fields': ['body']},
                          {'query': 'match', 'count': False}, {'query': 'match', 'filter': [
