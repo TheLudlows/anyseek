@@ -225,7 +225,8 @@ def main():
     parser.add_argument('--wait-every', type=int, default=100)
     parser.add_argument('--indexing-memory', default='4 GiB')
     parser.add_argument('--indexing-threads', type=int, default=4)
-    parser.add_argument('--max-rss-mib', type=int, default=6500)
+    parser.add_argument('--max-rss-mib', type=int, default=0,
+                        help='optional RSS stop threshold; 0 relies on container memory limit, allowing mapped-page reclaim')
     parser.add_argument('--top-k', type=int, default=10)
     parser.add_argument('--seconds', type=float, default=5)
     parser.add_argument('--repeats', type=int, default=3)

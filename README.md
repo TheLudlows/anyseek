@@ -137,7 +137,7 @@ taskset -c 0-3 python3 scripts/meilisearch_baseline.py \
   --output benchmarks/miracl-zh-meilisearch-2026-10-16.json
 ```
 
-固定 4 个索引线程、4 GiB 索引内存预算，在同一 8 GiB 容器内运行。每批 500 段，每 100 批等待全部异步任务成功，写入时间包含索引完成；保留数据库和日志供检查。仅 `search_body` 可搜索，返回 `record_id` 和原文 `body`。使用默认排序、容错、前缀和语言检测，`matchingStrategy=last`；默认结果总数为有上限的估算，与 SeekPower 的 OR 查询和精确计数不同。Meilisearch 内部还会存储 `search_body`，因此磁盘占用也不是相同存储布局的对比。原始结果记录版本、哈希、实际设置、逐查询指标和资源使用；失败任务或降级响应不会被计为成功基准。
+固定 4 个索引线程、4 GiB 索引内存预算，在同一 8 GiB 容器内运行。默认不额外按 RSS 中止，以允许映射文件页回收；可通过 `--max-rss-mib` 设置阈值。每批 500 段，每 100 批等待全部异步任务成功，写入时间包含索引完成；保留数据库和日志供检查。仅 `search_body` 可搜索，返回 `record_id` 和原文 `body`。使用默认排序、容错、前缀和语言检测，`matchingStrategy=last`；默认结果总数为有上限的估算，与 SeekPower 的 OR 查询和精确计数不同。Meilisearch 内部还会存储 `search_body`，因此磁盘占用也不是相同存储布局的对比。原始结果记录版本、哈希、实际设置、逐查询指标和资源使用；失败任务或降级响应不会被计为成功基准。
 
 ## 开发与文档
 
