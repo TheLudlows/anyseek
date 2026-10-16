@@ -125,7 +125,7 @@ fn segment_zh(index: &Shard, text: &str) -> Vec<String> {
         .word_segmentation_option
         .as_ref()
         .unwrap()
-        .cut(text, true)
+        .cut(text, false)
         .into_iter()
         .map(|token| token.word.to_owned())
         .collect()
@@ -1357,6 +1357,9 @@ mod tests {
                 ("江苏省会是哪里", vec!["江苏省", "会", "是", "哪里"]),
                 ("南京市长江大桥", vec!["南京市", "长江大桥"]),
                 ("北京大学", vec!["北京大学"]),
+                ("李荣浩有哪些作品", vec!["李", "荣", "浩", "有", "哪些", "作品"]),
+                ("魏博现", vec!["魏", "博", "现"]),
+                ("周深", vec!["周", "深"]),
                 ("OpenAI发布Rust2026", vec!["openai", "发布", "rust2026"]),
                 ("C++ C# Rust-2026", vec!["c++", "c#", "rust-2026"]),
             ] {

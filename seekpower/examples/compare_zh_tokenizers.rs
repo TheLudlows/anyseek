@@ -43,7 +43,7 @@ fn main() {
             vec![text.to_owned()]
         } else {
             jieba
-                .cut(text, true)
+                .cut(text, mode == "jieba")
                 .into_iter()
                 .map(|token| token.word.to_owned())
                 .collect()
@@ -58,11 +58,8 @@ fn main() {
             .map(|(_, parts)| parts)
             .collect();
         for repetition in 0..4 {
-            let modes = if repetition % 2 == 0 {
-                ["reference", "jieba"]
-            } else {
-                ["jieba", "reference"]
-            };
+            let mut modes = ["reference", "jieba", "jieba_no_hmm"];
+            modes.rotate_left(repetition % 3);
             for mode in modes {
                 let start = Instant::now();
                 let mut tokens = 0;
@@ -86,10 +83,11 @@ fn main() {
         .map(|(row, parts)| {
             json!({"id":row["id"],"text":row["text"],
             "reference":parts.iter().flat_map(|p| segment("reference",p)).collect::<Vec<_>>(),
-            "jieba":parts.iter().flat_map(|p| segment("jieba",p)).collect::<Vec<_>>()})
+            "jieba":parts.iter().flat_map(|p| segment("jieba",p)).collect::<Vec<_>>(),
+            "jieba_no_hmm":parts.iter().flat_map(|p| segment("jieba_no_hmm",p)).collect::<Vec<_>>()})
         })
         .collect();
     println!("{}", serde_json::to_string_pretty(&json!({"input":input,
-        "jieba_version":"0.11.0","hmm":true,"runs":runs,"queries":queries,
-        "method":"Same normalized fragments, ASCII bypass and owned token output; initialization, lowercasing and boundary splitting excluded. One warmup, three alternating-order measured repetitions. Not HTTP latency."})).unwrap());
+        "jieba_version":"0.11.0","hmm":{"jieba":true,"jieba_no_hmm":false},"runs":runs,"queries":queries,
+        "method":"Same normalized fragments, ASCII bypass and owned token output; initialization, lowercasing and boundary splitting excluded. One warmup, three rotating-order measured repetitions. Not HTTP latency."})).unwrap());
 }
