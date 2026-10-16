@@ -1,0 +1,18 @@
+{
+  "status": "aborted_by_resource_guard",
+  "dataset": "MIRACL/zh",
+  "source_documents": 4934368,
+  "split": "dev",
+  "mode": "lexical",
+  "phase": "ingest",
+  "submitted_batches": 1921,
+  "batch_size": 500,
+  "submitted_documents": 960500,
+  "committed_documents_at_failure": null,
+  "server_rss_limit_mib": 5500,
+  "memory_limit_bytes": 8589934592,
+  "commit_every_batches": 20,
+  "error": "server RSS exceeded 5500 MiB after 1921 batches",
+  "note": "Configured RSS guard, not an OOM; no completed query or ingestion performance result. The next run uses four-CPU affinity.",
+  "recorded_at": "2026-10-16T01:09:34.526626+00:00"
+}

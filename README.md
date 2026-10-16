@@ -72,11 +72,24 @@ JSON 记录每轮 QPS、HTTP P50/P95/P99、服务端/压测端 CPU、服务端�
 
 ```sh
 python3 -m pip install numpy==2.2.6 onnxruntime==1.23.2 tokenizers==0.22.2
-python3 scripts/prepare_scifact.py --cache /tmp/seekpower-model --output /tmp/seekpower-scifact
+python3 scripts/prepare_retrieval.py --cache /tmp/seekpower-model --output /tmp/seekpower-scifact
 python3 scripts/performance_baseline.py --dataset /tmp/seekpower-scifact --output /tmp/seekpower-scifact-result.json
 ```
 
-正文合并标题和文本，全文/混合请求显式使用 `operator=or`；其他 HTTP 配置不变。性能测 Top-10，相关性另取 Top-100，按人工标注计算 nDCG@10、Recall@100、MRR@10；最近邻 Recall@10 单独列出。[SciFact 实测数据](benchmarks/scifact-baseline-2026-10-15.json) 保留模型和输入哈希。该准备脚本只处理 SciFact，不包含中文 MIRACL，也不代表百万级索引表现。模型、数据和向量保留在指定缓存/输出目录，不提交仓库。
+正文合并标题和文本，全文/混合请求显式使用 `operator=or`；其他 HTTP 配置不变。性能测 Top-10，相关性另取 Top-100，按人工标注计算 nDCG@10、Recall@100、MRR@10；最近邻 Recall@10 单独列出。[SciFact 实测数据](benchmarks/scifact-baseline-2026-10-15.json) 保留模型和输入哈希。SciFact 结果不代表百万级索引表现。模型、数据和向量保留在指定缓存/输出目录，不提交仓库。
+
+MIRACL 中文使用固定版本的官方完整语料（4,934,368 段）、393 条开发集查询和 3,928 条正负相关性标注，自动选择 `UnicodeAlphanumericZH` 分词。完整语料准备、嵌入和压测命令：
+
+```sh
+python3 scripts/prepare_retrieval.py --dataset miracl-zh --cache /tmp/miracl-cache --output /tmp/miracl-full
+python3 scripts/performance_baseline.py --dataset /tmp/miracl-full --commit-every 20 --output /tmp/miracl-full-result.json
+```
+
+准备程序按块生成向量并记录进度；中断后使用相同命令续跑，校验输入和模型一致性。完成的输出不会覆盖。压测使用磁盘请求缓存、内存映射向量和分块精确余弦参考，不会构造全量查询×文档矩阵；`--commit-every 20` 每 20 个批次提交一次以限制未提交数据，耗时计入写入阶段。服务端自身的资源需求仍随数据量增长。
+
+资源有限时，显式加 `--documents 10000` 生成子集：保留全部开发集正负标注文档，并从全语料按固定 SHA-256 顺序补足背景文档。报告标记 `full_corpus=false`，这种筛选降低检索难度，不能与官方全量成绩比较。仅准备全文数据可用 `--text-only`，压测对应使用 `--modes lexical`。`--max-rss-mib` 可设置写入时的服务端内存保护阈值，超限失败不会输出成功报告。
+
+人工标注指标包含 nDCG@10、Recall@10、Recall@100、MRR@10，与向量最近邻 Recall 分开记录。CI 只运行指标、分块参考检索和流式加载的轻量测试，不下载语料或执行性能门槛判断。
 
 ## 开发与文档
 

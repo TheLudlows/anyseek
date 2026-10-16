@@ -155,8 +155,56 @@ def generate(args):
     }
 
 
+class DiskBatches:
+    """Pre-serialize outside the timed run without retaining all HTTP bodies in RAM."""
+    def __init__(self):
+        self.file = tempfile.TemporaryFile()
+        self.digest = hashlib.sha256()
+        self.size = 0
+
+    def append(self, documents):
+        payload = encode(documents)
+        self.file.write(payload + b'\n')
+        self.digest.update(payload)
+        self.size += len(payload)
+
+    def __iter__(self):
+        self.file.seek(0)
+        for line in self.file:
+            yield line[:-1]
+
+    def close(self):
+        self.file.close()
+
+
+def exact_neighbors(vectors, queries, k, block_size=4096):
+    """Exhaustive float64 cosine, bounded memory, stable document-row tie breaking."""
+    import numpy as np
+    queries = queries.astype(np.float64)
+    norms = np.linalg.norm(queries, axis=1, keepdims=True)
+    if not np.isfinite(queries).all() or (norms == 0).any():
+        raise ValueError('invalid query embedding')
+    queries /= norms
+    best_scores = np.empty((len(queries), 0))
+    best_ids = np.empty((len(queries), 0), dtype=np.int64)
+    for start in range(0, len(vectors), block_size):
+        block = np.asarray(vectors[start:start + block_size], dtype=np.float64)
+        norms = np.linalg.norm(block, axis=1, keepdims=True)
+        if not np.isfinite(block).all() or (norms == 0).any():
+            raise ValueError('invalid document embedding')
+        block /= norms
+        scores = queries @ block.T
+        local = np.argsort(-scores, axis=1, kind='stable')[:, :k]
+        ids = np.concatenate([best_ids, local + start], axis=1)
+        candidates = np.concatenate([best_scores, np.take_along_axis(scores, local, axis=1)], axis=1)
+        order = np.lexsort((ids, -candidates), axis=1)[:, :k]
+        best_ids = np.take_along_axis(ids, order, axis=1)
+        best_scores = np.take_along_axis(candidates, order, axis=1)
+    return best_ids.tolist()
+
+
 def load_dataset(args):
-    """Load a prepared BEIR corpus; embeddings and source files must match its manifest."""
+    """Stream a prepared BEIR corpus; mmap embeddings and block exact reference search."""
     import numpy as np
     directory = Path(args.dataset)
     metadata = json.loads((directory / 'manifest.json').read_text())
@@ -164,51 +212,67 @@ def load_dataset(args):
         with (directory / name).open('rb') as stream:
             if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
                 raise ValueError(f'dataset checksum mismatch: {name}')
-    corpus = [json.loads(line) for line in (directory / 'corpus.jsonl').read_text().splitlines()]
     queries = [json.loads(line) for line in (directory / 'queries.jsonl').read_text().splitlines()]
-    vectors = np.load(directory / 'vectors.npy', allow_pickle=False)
-    query_vectors = np.load(directory / 'query_vectors.npy', allow_pickle=False)
-    args.documents, args.dimensions = vectors.shape
-    args.query_pool = len(queries)
-    if (len(corpus) != args.documents or query_vectors.shape != (len(queries), args.dimensions)
-            or args.top_k > args.documents or not len(queries)):
+    args.documents, args.query_pool = metadata['documents'], len(queries)
+    args.dimensions = metadata['dimensions']
+    needs_vectors = any(mode != 'lexical' for mode in args.modes)
+    if needs_vectors and not args.dimensions:
+        raise ValueError('text-only dataset requires --modes lexical')
+    vectors = np.load(directory / 'vectors.npy', mmap_mode='r', allow_pickle=False) if needs_vectors else None
+    query_vectors = np.load(directory / 'query_vectors.npy', allow_pickle=False) if needs_vectors else None
+    if (not len(queries) or args.top_k > args.documents or
+            (needs_vectors and (vectors.shape != (args.documents, args.dimensions) or
+                               query_vectors.shape != (len(queries), args.dimensions)))):
         raise ValueError('corpus/query/embedding dimensions do not match')
-    if not np.isfinite(vectors).all() or not np.isfinite(query_vectors).all():
-        raise ValueError('nonfinite embeddings')
-    doc_rows = {str(doc['_id']): i for i, doc in enumerate(corpus)}
     query_rows = {str(query['_id']): i for i, query in enumerate(queries)}
-    if len(doc_rows) != len(corpus) or len(query_rows) != len(queries):
-        raise ValueError('duplicate document or query IDs')
-    qrels = [{} for _ in queries]
-    for line in (directory / 'qrels/test.tsv').read_text().splitlines()[1:]:
+    if len(query_rows) != len(queries):
+        raise ValueError('duplicate query IDs')
+    labeled = []
+    for line in (directory / metadata.get('qrels_file', 'qrels/test.tsv')).read_text().splitlines()[1:]:
         query_id, doc_id, relevance = line.split('\t')
         if query_id in query_rows and float(relevance) > 0:
-            qrels[query_rows[query_id]][doc_rows[doc_id]] = float(relevance)
+            labeled.append((query_id, doc_id, float(relevance)))
+    relevant_ids = {doc for _, doc, _ in labeled}
+    doc_rows, batches, batch = {}, DiskBatches(), []
+    count = 0
+    with (directory / 'corpus.jsonl').open() as stream:
+        for i, line in enumerate(stream):
+            doc = json.loads(line)
+            doc_id = str(doc['_id'])
+            if doc_id in relevant_ids:
+                if doc_id in doc_rows:
+                    raise ValueError('duplicate relevant document ID')
+                doc_rows[doc_id] = i
+            document = {'record_id': i, 'body': (doc.get('title', '') + '\n' + doc['text']).strip()}
+            if needs_vectors:
+                document['vector'] = vectors[i].tolist()
+            batch.append(document)
+            count += 1
+            if len(batch) == args.batch_size:
+                batches.append(batch)
+                batch = []
+    if batch:
+        batches.append(batch)
+    if count != args.documents or relevant_ids != doc_rows.keys():
+        raise ValueError('corpus count or relevant documents do not match')
+    qrels = [{} for _ in queries]
+    for query, doc, relevance in labeled:
+        qrels[query_rows[query]][doc_rows[doc]] = relevance
     if not all(qrels):
         raise ValueError('each evaluation query must have positive relevance judgments')
-    batches, digest = [], hashlib.sha256()
-    for offset in range(0, len(corpus), args.batch_size):
-        payload = encode([{'record_id': i,
-                           'body': (corpus[i].get('title', '') + '\n' + corpus[i]['text']).strip(),
-                           'vector': vectors[i].tolist()}
-                          for i in range(offset, min(offset + args.batch_size, len(corpus)))])
-        batches.append(payload)
-        digest.update(payload)
-    exact_vectors, exact_queries = vectors.astype(np.float64), query_vectors.astype(np.float64)
-    for matrix in (exact_vectors, exact_queries):
-        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-        if (norms == 0).any():
-            raise ValueError('zero-length embedding')
-        matrix /= norms
-    truth = np.argsort(-(exact_queries @ exact_vectors.T), axis=1, kind='stable')[:, :args.top_k].tolist()
-    payloads = {'lexical': [], 'vector': [], 'hybrid': []}
-    for query, vector in zip(queries, query_vectors.tolist()):
-        for mode, request in [('lexical', {'query': query['text']}), ('vector', {'query_vector': vector}),
-                              ('hybrid', {'query': query['text'], 'query_vector': vector})]:
-            payloads[mode].append(encode({**request, 'operator': 'or', 'length': args.top_k}))
+    truth = exact_neighbors(vectors, query_vectors, args.top_k) if needs_vectors else None
+    payloads = {mode: [] for mode in args.modes}
+    for i, query in enumerate(queries):
+        for mode in payloads:
+            request = {'operator': 'or', 'length': args.top_k}
+            if mode != 'vector':
+                request['query'] = query['text']
+            if mode != 'lexical':
+                request['query_vector'] = query_vectors[i].tolist()
+            payloads[mode].append(encode(request))
     return batches, payloads, truth, {
-        **metadata, '_qrels': qrels, 'input_json_bytes': sum(map(len, batches)),
-        'input_sha256': digest.hexdigest(),
+        **metadata, '_qrels': qrels, 'query_ids': list(query_rows),
+        'input_json_bytes': batches.size, 'input_sha256': batches.digest.hexdigest(),
         'queries_sha256': hashlib.sha256(b''.join(p for group in payloads.values() for p in group)).hexdigest(),
     }
 
@@ -220,6 +284,7 @@ def ranking_metrics(ids, relevant):
     ideal = sum(score / math.log2(rank + 2) for rank, score in
                 enumerate(sorted(relevant.values(), reverse=True)[:10]))
     return {'ndcg_at_10': dcg / ideal,
+            'recall_at_10': len(set(ids[:10]) & relevant.keys()) / len(relevant),
             'recall_at_100': len(set(ids[:100]) & relevant.keys()) / len(relevant),
             'mrr_at_10': next((1 / rank for rank, doc in enumerate(ids[:10], 1) if doc in relevant), 0)}
 
@@ -316,6 +381,7 @@ def environment(root, binary):
 def run(args, root, binary):
     batches, payloads, truth, dataset = generate(args)
     qrels = dataset.pop('_qrels', None)
+    payloads = {mode: payloads[mode] for mode in args.modes}
     report = {'format_version': 1, 'started_at': datetime.now(timezone.utc).isoformat(),
               'config': {k: v for k, v in vars(args).items() if k not in ('server', 'output')},
               'environment': environment(root, binary), 'dataset': dataset,
@@ -330,7 +396,7 @@ def run(args, root, binary):
               'queries': []}
     if qrels is not None:
         report['method'].update({
-            'quality': 'human qrels: nDCG@10 (linear gains), Recall@100, MRR@10; separately exact cosine Recall@K',
+            'quality': 'human qrels: nDCG@10 (linear gains), Recall@10/100, MRR@10; exact cosine Recall@K when vector mode is measured',
             'scope': 'prepared real corpus, warm cache; operator=or; top K for timing, top 100 for relevance; embedding time excluded',
         })
     secret = secrets.token_hex(24)
@@ -362,17 +428,32 @@ def run(args, root, binary):
                     {'field': 'body', 'field_type': 'Text'},
                     {'field': 'vector', 'field_type': 'Json', 'index_vector': True}],
                     'vector': {'dimensions': args.dimensions}}
+                if dataset.get('tokenizer'):
+                    config['tokenizer'] = dataset['tokenizer']
+                if not any(mode != 'lexical' for mode in payloads):
+                    config['schema'].pop()
+                    del config['vector']
                 index_id, _, _ = client.request('POST', '/api/v1/index', config)
                 path = f'/api/v1/index/{index_id}'
                 with Measurement(pid) as ingest:
+                    submitted, periodic_commits = 0, 0
                     for batch in batches:
                         client.request('POST', path + '/doc', batch)
+                        submitted += 1
+                        if args.max_rss_mib and process_usage(pid)[1] > args.max_rss_mib * 2**20:
+                            raise RuntimeError(f'server RSS exceeded {args.max_rss_mib} MiB after {submitted} batches')
+                        if args.commit_every and submitted % args.commit_every == 0:
+                            client.request('PATCH', path)
+                            periodic_commits += 1
+                        if submitted % 100 == 0:
+                            print(f'Ingested approximately {min(submitted * args.batch_size, args.documents):,} documents', flush=True)
                 with Measurement(pid) as commit:
                     count, _, _ = client.request('PATCH', path)
                 if count != args.documents:
                     raise RuntimeError(f'indexed count {count} != {args.documents}')
                 total = ingest.result['wall_seconds'] + commit.result['wall_seconds']
                 report['ingest'] = {'submit': ingest.result, 'commit': commit.result,
+                    'periodic_commits': periodic_commits, 'submit_includes_periodic_commits': bool(args.commit_every),
                     'submit_documents_per_second': args.documents / ingest.result['wall_seconds'],
                     'documents_per_second_including_commit': args.documents / total}
                 files = list((directory / 'index').rglob('*'))
@@ -385,33 +466,36 @@ def run(args, root, binary):
                 recall = []
                 relevance = {mode: [] for mode in payloads}
                 for i in range(args.query_pool):
-                    result, _, _ = client.request('POST', path + '/query', payloads['vector'][i])
-                    ids = [doc['record_id'] for doc in result['results']]
-                    if len(ids) != args.top_k or len(set(ids)) != args.top_k:
-                        raise RuntimeError('vector result count or unique record IDs do not match top_k')
-                    recall.append(len(set(ids) & set(truth[i])) / args.top_k)
+                    if 'vector' in payloads:
+                        result, _, _ = client.request('POST', path + '/query', payloads['vector'][i])
+                        ids = [doc['record_id'] for doc in result['results']]
+                        if len(ids) != args.top_k or len(set(ids)) != args.top_k:
+                            raise RuntimeError('vector result count or unique record IDs do not match top_k')
+                        recall.append(len(set(ids) & set(truth[i])) / args.top_k)
                     if qrels is not None:
                         for mode in payloads:
                             request = {**json.loads(payloads[mode][i]), 'length': 100}
                             ranked, _, _ = client.request('POST', path + '/query', request)
                             relevance[mode].append(ranking_metrics([doc['record_id'] for doc in ranked['results']], qrels[i]))
-                    else:
+                    elif 'lexical' in payloads:
                         lexical, _, _ = client.request('POST', path + '/query', payloads['lexical'][i])
                         topic = i % dataset['topics']
                         expected = len(range(topic, args.documents, dataset['topics']))
                         if lexical['count_total'] != expected:
                             raise RuntimeError(f'lexical count {lexical["count_total"]} != {expected}')
-                report['quality'] = {'vector_recall_at_k': statistics.mean(recall),
-                    'vector_min_recall_at_k': min(recall), 'vector_recall_per_query': recall}
+                report['quality'] = {}
+                if recall:
+                    report['quality'].update(vector_recall_at_k=statistics.mean(recall),
+                        vector_min_recall_at_k=min(recall), vector_recall_per_query=recall)
                 if qrels is not None:
                     report['quality']['relevance'] = {
                         mode: {metric: statistics.mean(row[metric] for row in rows) for metric in rows[0]}
                         for mode, rows in relevance.items()}
                     report['quality']['relevance_per_query'] = relevance
-                else:
+                elif 'lexical' in payloads:
                     report['quality']['lexical_count_queries_checked'] = args.query_pool
                 print(f'Indexed {args.documents} docs incl. commit: {args.documents / total:.1f} docs/s; '
-                      f'vector Recall@{args.top_k}={statistics.mean(recall):.4f}', flush=True)
+                      f'quality={report["quality"].get("relevance", {})}', flush=True)
                 # Shuffle scenario order per repetition to reduce systematic order bias.
                 scenarios = [(mode, c) for mode in payloads for c in args.concurrency]
                 for repetition in range(args.repeats):
@@ -423,8 +507,16 @@ def run(args, root, binary):
                                                   'repetition': repetition + 1, **result})
                         print(f'{mode} c={concurrency} repeat={repetition + 1}: {result["qps"]:.1f} QPS; '
                               f'p95={result["http_latency_ms"]["p95"]:.3f} ms', flush=True)
+            except Exception:
+                log.flush()
+                with (directory / 'server.log').open('rb') as failed_log:
+                    failed_log.seek(max(0, (directory / 'server.log').stat().st_size - 4000))
+                    print(failed_log.read().decode(errors='replace'), flush=True)
+                raise
             finally:
                 client.close()
+                if isinstance(batches, DiskBatches):
+                    batches.close()
                 if process.poll() is None:
                     process.terminate()
                     try:
@@ -453,6 +545,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', default='target/release/seekpower_server')
     parser.add_argument('--output', required=True, help='JSON result file; existing files are not overwritten')
+    parser.add_argument('--modes', nargs='+', choices=['lexical', 'vector', 'hybrid'], default=['lexical', 'vector', 'hybrid'])
+    parser.add_argument('--commit-every', type=int, default=0, help='commit after this many batches; 0 only commits at the end; periodic commits are included in ingest time')
+    parser.add_argument('--max-rss-mib', type=int, default=0, help='abort ingestion above this server RSS; 0 disables the guard')
     parser.add_argument('--dataset', help='prepared BEIR dataset directory; overrides synthetic sizes')
     parser.add_argument('--documents', type=int, default=20000)
     parser.add_argument('--dimensions', type=int, default=128)
@@ -468,9 +563,9 @@ def main():
     if platform.system() != 'Linux':
         parser.error('resource measurement requires Linux /proc')
     if any(value <= 0 for value in [args.documents, args.dimensions, args.batch_size, args.query_pool,
-                                    args.top_k, args.seconds, args.repeats, *args.concurrency]) or args.warmup < 0:
+                                    args.top_k, args.seconds, args.repeats, *args.concurrency]) or args.warmup < 0 or args.commit_every < 0 or args.max_rss_mib < 0:
         parser.error('sizes, durations and concurrency must be positive; warmup must be nonnegative')
-    if args.top_k > args.documents or len(set(args.concurrency)) != len(args.concurrency):
+    if (not args.dataset and args.top_k > args.documents) or len(set(args.concurrency)) != len(args.concurrency) or len(set(args.modes)) != len(args.modes):
         parser.error('top-k must not exceed document count; concurrency entries must be unique')
     output = Path(args.output)
     if output.exists():
