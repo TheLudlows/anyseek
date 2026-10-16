@@ -104,7 +104,7 @@ def run(args):
         'method': {'transport': 'loopback HTTP/1.1 keep-alive, one connection per worker process',
             'load': 'same closed-loop driver; fixed duration; warmup before every run; HTTP send through response read, excluding JSON decode',
             'quality': 'same qrels and ranking_metrics; top 100 for relevance; top 10 for latency',
-            'search': 'default ranking, typo tolerance, prefix search and automatic language detection; matchingStrategy=last; estimatedTotalHits capped by default maxTotalHits, unlike SeekPower exact count=true OR search',
+            'search': 'default ranking rules, typo tolerance, prefix search and automatic language detection; proximityPrecision recorded in settings; matchingStrategy=last; estimatedTotalHits capped by default maxTotalHits, unlike SeekPower exact count=true OR search',
             'indexing': '500 documents per request; wait for every task in each 100-request group; includes asynchronous indexing completion and polling, not just HTTP acceptance',
             'storage': 'same original body and t2s search_body; only search_body searchable; record_id and original body returned. Meilisearch also stores search_body internally',
             'memory': 'RSS includes resident mapped pages; indexing-memory budget is not an RSS hard limit',
@@ -137,7 +137,8 @@ def run(args):
             report['environment']['version'] = client.request('GET', '/version')[0]
             task = client.request('POST', '/indexes', {'uid': 'baseline', 'primaryKey': 'record_id'})[0]
             wait_tasks(client, [task['taskUid']], pid, directory, args)
-            settings = {'searchableAttributes': ['search_body'], 'displayedAttributes': ['record_id', 'body']}
+            settings = {'searchableAttributes': ['search_body'], 'displayedAttributes': ['record_id', 'body'],
+                        'proximityPrecision': args.proximity_precision}
             task = client.request('PATCH', '/indexes/baseline/settings', settings)[0]
             wait_tasks(client, [task['taskUid']], pid, directory, args)
             report['settings'] = client.request('GET', '/indexes/baseline/settings')[0]
@@ -152,6 +153,8 @@ def run(args):
                         count += sum(t['details']['indexedDocuments'] for t in tasks)
                         report['ingest_groups'].append({'documents': count, 'tasks': len(tasks),
                             'elapsed_seconds': time.perf_counter() - ingest.start})
+                        Path(args.output).with_suffix('.partial.json').write_text(
+                            json.dumps(report, ensure_ascii=False, indent=2) + '\n')
                         pending.clear()
                         print(f'Indexed {count:,}/{args.documents:,} documents', flush=True)
                 if pending:
@@ -211,6 +214,7 @@ def run(args):
             report['finished_at'] = datetime.now(timezone.utc).isoformat()
             report['environment']['cgroup_cpu_stat_after'] = Path('/sys/fs/cgroup/cpu.stat').read_text()
             Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+            Path(args.output).with_suffix('.partial.json').unlink(missing_ok=True)
     return report
 
 
@@ -224,6 +228,7 @@ def main():
     parser.add_argument('--batch-size', type=int, default=500)
     parser.add_argument('--wait-every', type=int, default=100)
     parser.add_argument('--indexing-memory', default='4 GiB')
+    parser.add_argument('--proximity-precision', choices=['byWord', 'byAttribute'], default='byWord')
     parser.add_argument('--indexing-threads', type=int, default=4)
     parser.add_argument('--max-rss-mib', type=int, default=0,
                         help='optional RSS stop threshold; 0 relies on container memory limit, allowing mapped-page reclaim')
@@ -240,7 +245,7 @@ def main():
         parser.error('sizes/durations must be positive; warmup and RSS guard nonnegative')
     if args.wait_every > 1000 or len(set(args.concurrency)) != len(args.concurrency):
         parser.error('wait-every must be <=1000 and concurrency values unique')
-    if Path(args.output).exists() or Path(args.work_dir).exists():
+    if Path(args.output).exists() or Path(args.output).with_suffix('.partial.json').exists() or Path(args.work_dir).exists():
         parser.error('output and work directory must not already exist')
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     run(args)
