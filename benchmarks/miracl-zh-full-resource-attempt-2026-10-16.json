@@ -14,5 +14,21 @@
   "commit_every_batches": 20,
   "error": "server RSS exceeded 5500 MiB after 1921 batches",
   "note": "Configured RSS guard, not an OOM; no completed query or ingestion performance result. The next run uses four-CPU affinity.",
-  "recorded_at": "2026-10-16T01:09:34.526626+00:00"
+  "recorded_at": "2026-10-16T01:09:34.526626+00:00",
+  "next_attempt": {
+    "status": "interrupted_by_execution_environment",
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "server_rss_limit_mib": 6500,
+    "commit_every_batches": 20,
+    "last_reported_submitted_documents": 3600000,
+    "error": "exec-server transport disconnected: pong_timeout; execution session disappeared",
+    "oom_kill_count": 0,
+    "note": "No completed benchmark result. Retrying in a terminal session with live progress, commit every 100 batches."
+  },
+  "successful_retry": "miracl-zh-full-lexical-2026-10-16.json"
 }

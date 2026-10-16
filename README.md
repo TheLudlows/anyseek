@@ -89,6 +89,19 @@ python3 scripts/performance_baseline.py --dataset /tmp/miracl-full --commit-ever
 
 资源有限时，显式加 `--documents 10000` 生成子集：保留全部开发集正负标注文档，并从全语料按固定 SHA-256 顺序补足背景文档。报告标记 `full_corpus=false`，这种筛选降低检索难度，不能与官方全量成绩比较。仅准备全文数据可用 `--text-only`，压测对应使用 `--modes lexical`。`--max-rss-mib` 可设置写入时的服务端内存保护阈值，超限失败不会输出成功报告。
 
+本机实测分开保存：
+
+- [493 万条全文结果](benchmarks/miracl-zh-full-lexical-2026-10-16.json)：4 核 CPU 亲和性、每 100 批提交一次，完整 393 条查询。该配置并发 4 的 QPS 约 145、P95 约 58.6 ms；nDCG@10 为 0.1467、Recall@10 为 20.52%、Recall@100 为 46.66%。
+- [一万条子集三模式结果](benchmarks/miracl-zh-10k-baseline-2026-10-16.json)：默认 CPU 亲和性，保留全部 3,786 篇被标注文档并补足背景样本。该子集的纯向量 nDCG@10 为 0.7177，混合为 0.6391，不能据此推断全量结果。
+- [未完成的尝试](benchmarks/miracl-zh-full-resource-attempt-2026-10-16.json)：默认多分片运行在约 96 万条触发主动 RSS 保护；第一次 4 核运行被执行环境中断。它们不参与成功结果统计。全量向量/混合尚未实测。
+
+复现本次完整全文配置（将 `0-3` 换成机器实际可用的四个 CPU）：
+
+```sh
+python3 scripts/prepare_retrieval.py --dataset miracl-zh --text-only --cache /tmp/miracl-cache --output /tmp/miracl-text
+taskset -c 0-3 python3 scripts/performance_baseline.py --dataset /tmp/miracl-text --modes lexical --commit-every 100 --max-rss-mib 6500 --output /tmp/miracl-text-result.json
+```
+
 人工标注指标包含 nDCG@10、Recall@10、Recall@100、MRR@10，与向量最近邻 Recall 分开记录。CI 只运行指标、分块参考检索和流式加载的轻量测试，不下载语料或执行性能门槛判断。
 
 ## 开发与文档
