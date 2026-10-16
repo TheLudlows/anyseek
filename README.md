@@ -128,6 +128,17 @@ done
 
 转换预先完成，不计入 HTTP 延迟或写入时间；完整文档转换累计 43.19 秒，查询转换 P95 为 0.00221 ms，整个输入准备阶段为 43.03 / 91.85 秒。它们是客户端测量，不代表接入引擎后的开销。两组都额外传输 `search_body`，写入吞吐不能直接与旧版单字段基线比较。原文返回已通过 HTTP 检查；OpenCC 配置、词典/实现哈希、逐查询指标均保存在 JSON 中。
 
+Meilisearch 对照复用上述数据加载、相关性指标及多进程 HTTP 压测逻辑。官方 v1.55.0 Linux amd64 二进制 SHA-256 为 `7e33f5889235f14290074a19a6d3574bd9b10fb2ee8731eabb7dafd0714b0513`。准备相同全文语料后运行：
+
+```sh
+taskset -c 0-3 python3 scripts/meilisearch_baseline.py \
+  --server /path/to/meilisearch --dataset /tmp/miracl-text \
+  --work-dir /tmp/meilisearch-miracl --text-normalization t2s \
+  --output benchmarks/miracl-zh-meilisearch-2026-10-16.json
+```
+
+固定 4 个索引线程、4 GiB 索引内存预算，在同一 8 GiB 容器内运行。每批 500 段，每 100 批等待全部异步任务成功，写入时间包含索引完成；保留数据库和日志供检查。仅 `search_body` 可搜索，返回 `record_id` 和原文 `body`。使用默认排序、容错、前缀和语言检测，`matchingStrategy=last`；默认结果总数为有上限的估算，与 SeekPower 的 OR 查询和精确计数不同。Meilisearch 内部还会存储 `search_body`，因此磁盘占用也不是相同存储布局的对比。原始结果记录版本、哈希、实际设置、逐查询指标和资源使用；失败任务或降级响应不会被计为成功基准。
+
 ## 开发与文档
 
 - [Rust 示例](docs/library-examples.md)、[元数据过滤与排序](FACETED_SEARCH.md)、[N-gram 配置](NGRAM_SEARCH.md)。本地执行 `cargo doc --workspace --no-deps` 生成与当前源码一致的 Rust 文档。
