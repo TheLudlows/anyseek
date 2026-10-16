@@ -22,3 +22,7 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+# MIRACL download fragments and locally decompressed corpus
+/miracl-corpus-v1.0-zh/*.part
+/miracl-corpus-v1.0-zh/*.jsonl

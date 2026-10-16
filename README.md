@@ -54,6 +54,7 @@ cargo run -p seekpower_server -- local_ip=127.0.0.1 local_port=8080
 
 ## 开发与文档
 
+- [中文测试语料](miracl-corpus-v1.0-zh/README.md)：MIRACL 中文语料，包含 4,934,368 条段落，按 10 个 gzip 分片保存；提供来源、字段说明、读取方法和 SHA-256 校验清单。
 - [Rust 示例](docs/library-examples.md)、[元数据过滤与排序](FACETED_SEARCH.md)、[N-gram 配置](NGRAM_SEARCH.md)。本地执行 `cargo doc --workspace --no-deps` 生成与当前源码一致的 Rust 文档。
 - [HTTP 请求示例](seekpower_server/test_api.rest)。运行 `target/debug/seekpower_server generate_openapi=true`，在可执行文件目录生成 `openapi.json` 和 `openapi.yml`；CI 也会提供生成文件。完整路由见功能清单。
 - 运行 `cargo test --workspace --all-targets`；HTTP 冒烟使用 `python3 scripts/http_smoke.py --server target/debug/seekpower_server`。浏览器回归需安装 Python Playwright/Chromium，并设置 `SEEKPOWER_BROWSER_TEST=1`。
