@@ -42,8 +42,8 @@ class BaselineTests(unittest.TestCase):
             root = Path(directory)
             (root / 'corpus.jsonl').write_text('\n'.join(json.dumps(d) for d in [
                 {'_id': 'negative', 'title': '标题', 'text': '干扰文档'},
-                {'_id': 'positive', 'title': '标题', 'text': '中文正文'}]))
-            (root / 'queries.jsonl').write_text(json.dumps({'_id': 'q', 'text': '中文问题'}))
+                {'_id': 'positive', 'title': '標題', 'text': '繼承者們 Rust API 軟體'}]))
+            (root / 'queries.jsonl').write_text(json.dumps({'_id': 'q', 'text': '繼承者們'}))
             (root / 'dev.tsv').write_text('query-id\tcorpus-id\tscore\nq\tnegative\t0\nq\tpositive\t1\n')
             manifest = {'documents': 2, 'dimensions': 0, 'qrels_file': 'dev.tsv',
                         'tokenizer': 'UnicodeAlphanumericZH', 'files_sha256': {
@@ -62,6 +62,29 @@ class BaselineTests(unittest.TestCase):
                 self.assertEqual(json.loads(payloads['lexical'][0])['operator'], 'or')
             finally:
                 batches.close()
+            for mode, expected_body, expected_query in [
+                    ('identity', '標題\n繼承者們 Rust API 軟體', '繼承者們'),
+                    ('t2s', '标题\n继承者们 Rust API 软体', '继承者们')]:
+                args.text_normalization = mode
+                batches, payloads, _, metadata = load_dataset(args)
+                try:
+                    document = json.loads(list(batches)[1])[0]
+                    self.assertEqual(document['record_id'], 1)
+                    self.assertEqual(document['body'], '標題\n繼承者們 Rust API 軟體')
+                    self.assertEqual(document['search_body'], expected_body)
+                    self.assertEqual(json.loads(payloads['lexical'][0])['query'], expected_query)
+                    self.assertEqual(metadata['_qrels'], [{1: 1.0}])
+                    stats = metadata['text_normalization']
+                    self.assertEqual(stats['documents']['count'], 2)
+                    self.assertEqual(stats['queries']['count'], 1)
+                    self.assertEqual(stats['documents']['changed'], int(mode == 't2s'))
+                    self.assertEqual(stats['queries']['changed'], int(mode == 't2s'))
+                finally:
+                    batches.close()
+            args.modes = ['hybrid']
+            with self.assertRaisesRegex(ValueError, 'lexical-only'):
+                load_dataset(args)
+            args.modes = ['lexical']
             (root / 'corpus.jsonl').write_text('tampered')
             with self.assertRaisesRegex(ValueError, 'checksum'):
                 load_dataset(args)

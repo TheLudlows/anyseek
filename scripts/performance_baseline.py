@@ -6,6 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 import hashlib
 import http.client
+import importlib.metadata
 import json
 import math
 import multiprocessing
@@ -203,6 +204,38 @@ def exact_neighbors(vectors, queries, k, block_size=4096):
     return best_ids.tolist()
 
 
+class TextNormalization:
+    """Benchmark-only normalization; keep stored text separate from indexed text."""
+    def __init__(self, mode):
+        self.convert = lambda text: text
+        self.report = {'mode': mode, 'location': 'client preprocessing, excluded from engine timings',
+                       'documents': {'count': 0, 'changed': 0, 'conversion_seconds': 0.0},
+                       'queries': {'count': 0, 'changed': 0, 'conversion_seconds': 0.0},
+                       'query_conversion_ms': []}
+        if mode == 't2s':
+            import opencc
+            version = importlib.metadata.version('OpenCC')
+            if version != '1.4.2':
+                raise ValueError('normalization experiment requires OpenCC==1.4.2')
+            self.convert = opencc.OpenCC('t2s.json').convert
+            root = Path(opencc.__file__).parent
+            self.report.update(package='OpenCC', version=version, config='t2s.json',
+                files_sha256={str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+                              for p in sorted(root.rglob('*')) if p.suffix in ('.json', '.ocd2', '.so', '.py')})
+
+    def __call__(self, text, kind):
+        start = time.perf_counter()
+        converted = self.convert(text)
+        elapsed = time.perf_counter() - start
+        stats = self.report[kind]
+        stats['count'] += 1
+        stats['changed'] += converted != text
+        stats['conversion_seconds'] += elapsed
+        if kind == 'queries':
+            self.report['query_conversion_ms'].append(elapsed * 1000)
+        return converted
+
+
 def load_dataset(args):
     """Stream a prepared BEIR corpus; mmap embeddings and block exact reference search."""
     import numpy as np
@@ -216,6 +249,10 @@ def load_dataset(args):
     args.documents, args.query_pool = metadata['documents'], len(queries)
     args.dimensions = metadata['dimensions']
     needs_vectors = any(mode != 'lexical' for mode in args.modes)
+    normalization = getattr(args, 'text_normalization', None)
+    if normalization and (needs_vectors or metadata.get('tokenizer') != 'UnicodeAlphanumericZH'):
+        raise ValueError('text normalization experiment requires Chinese lexical-only data')
+    normalize = TextNormalization(normalization) if normalization else None
     if needs_vectors and not args.dimensions:
         raise ValueError('text-only dataset requires --modes lexical')
     vectors = np.load(directory / 'vectors.npy', mmap_mode='r', allow_pickle=False) if needs_vectors else None
@@ -244,10 +281,14 @@ def load_dataset(args):
                     raise ValueError('duplicate relevant document ID')
                 doc_rows[doc_id] = i
             document = {'record_id': i, 'body': (doc.get('title', '') + '\n' + doc['text']).strip()}
+            if normalize:
+                document['search_body'] = normalize(document['body'], 'documents')
             if needs_vectors:
                 document['vector'] = vectors[i].tolist()
             batch.append(document)
             count += 1
+            if normalize and count % 250000 == 0:
+                print(f'Prepared {count:,} documents ({normalization})', flush=True)
             if len(batch) == args.batch_size:
                 batches.append(batch)
                 batch = []
@@ -266,12 +307,13 @@ def load_dataset(args):
         for mode in payloads:
             request = {'operator': 'or', 'length': args.top_k}
             if mode != 'vector':
-                request['query'] = query['text']
+                request['query'] = normalize(query['text'], 'queries') if normalize else query['text']
             if mode != 'lexical':
                 request['query_vector'] = query_vectors[i].tolist()
             payloads[mode].append(encode(request))
     return batches, payloads, truth, {
         **metadata, '_qrels': qrels, 'query_ids': list(query_rows),
+        **({'text_normalization': normalize.report} if normalize else {}),
         'input_json_bytes': batches.size, 'input_sha256': batches.digest.hexdigest(),
         'queries_sha256': hashlib.sha256(b''.join(p for group in payloads.values() for p in group)).hexdigest(),
     }
@@ -379,12 +421,15 @@ def environment(root, binary):
 
 
 def run(args, root, binary):
+    preparation_start = time.perf_counter()
     batches, payloads, truth, dataset = generate(args)
+    preparation_seconds = time.perf_counter() - preparation_start
     qrels = dataset.pop('_qrels', None)
     payloads = {mode: payloads[mode] for mode in args.modes}
     report = {'format_version': 1, 'started_at': datetime.now(timezone.utc).isoformat(),
               'config': {k: v for k, v in vars(args).items() if k not in ('server', 'output')},
               'environment': environment(root, binary), 'dataset': dataset,
+              'preparation_wall_seconds': preparation_seconds,
               'method': {'transport': 'loopback HTTP/1.1 keep-alive, one connection per worker process',
                          'load': 'closed-loop; fixed duration; warmed before every repetition',
                          'http_latency': 'request send through complete response read; excludes response JSON decode',
@@ -433,6 +478,13 @@ def run(args, root, binary):
                 if not any(mode != 'lexical' for mode in payloads):
                     config['schema'].pop()
                     del config['vector']
+                if dataset.get('text_normalization'):
+                    config['schema'][1]['index_lexical'] = False
+                    config['schema'].append({'field': 'search_body', 'field_type': 'Text', 'store': False})
+                    report['method']['text_normalization'] = (
+                        'identity/t2s use identical schemas: body stores the original title+text; '
+                        'only search_body is indexed and never returned; queries use the same transform. '
+                        'Normalization is precomputed; conversion time is reported separately.')
                 index_id, _, _ = client.request('POST', '/api/v1/index', config)
                 path = f'/api/v1/index/{index_id}'
                 with Measurement(pid) as ingest:
@@ -549,6 +601,8 @@ def main():
     parser.add_argument('--commit-every', type=int, default=0, help='commit after this many batches; 0 only commits at the end; periodic commits are included in ingest time')
     parser.add_argument('--max-rss-mib', type=int, default=0, help='abort ingestion above this server RSS; 0 disables the guard')
     parser.add_argument('--dataset', help='prepared BEIR dataset directory; overrides synthetic sizes')
+    parser.add_argument('--text-normalization', choices=['identity', 't2s'],
+                        help='Chinese lexical-only experiment; keep original stored text and normalize indexed/query text before timing')
     parser.add_argument('--documents', type=int, default=20000)
     parser.add_argument('--dimensions', type=int, default=128)
     parser.add_argument('--batch-size', type=int, default=500)
@@ -562,6 +616,8 @@ def main():
     args = parser.parse_args()
     if platform.system() != 'Linux':
         parser.error('resource measurement requires Linux /proc')
+    if args.text_normalization and not args.dataset:
+        parser.error('--text-normalization requires --dataset')
     if any(value <= 0 for value in [args.documents, args.dimensions, args.batch_size, args.query_pool,
                                     args.top_k, args.seconds, args.repeats, *args.concurrency]) or args.warmup < 0 or args.commit_every < 0 or args.max_rss_mib < 0:
         parser.error('sizes, durations and concurrency must be positive; warmup must be nonnegative')
