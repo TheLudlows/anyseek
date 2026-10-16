@@ -470,8 +470,6 @@ pub(crate) async fn tokenizer(
                     .segment(first_part, true);
                 non_unique_terms_line_string.extend(result.0);
             } else {
-                non_unique_terms_line_string
-                    .push(text_normalized[start_pos..text_normalized.len()].to_string());
                 let result = index
                     .word_segmentation_option
                     .as_ref()
@@ -1311,4 +1309,168 @@ pub(crate) async fn tokenizer(
     }
 
     *nonunique_terms_count = position;
+}
+
+#[cfg(all(test, feature = "zh"))]
+mod tests {
+    use super::*;
+    use crate::{
+        commit::Commit,
+        index::{
+            AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
+            IndexMetaObject, LexicalSimilarity, StopwordType, create_index, open_index,
+        },
+        search::{ResultType, Search, SearchMode},
+        vector::Inference,
+    };
+    use serde_json::json;
+    use std::{collections::BTreeSet, fs};
+
+    #[tokio::test]
+    async fn zh_tail_preserves_terms_positions_and_phrase_matches() {
+        let path = std::env::temp_dir().join(format!("seekpower-zh-tail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        let meta = IndexMetaObject {
+            id: 0,
+            name: "zh-tail".into(),
+            lexical_similarity: LexicalSimilarity::Bm25fProximity,
+            tokenizer: TokenizerType::UnicodeAlphanumericZH,
+            stop_words: StopwordType::None,
+            frequent_words: FrequentwordType::English,
+            ngram_indexing: 9,
+            document_compression: DocumentCompression::Snappy,
+            access_type: AccessType::Mmap,
+            clustering: Clustering::None,
+            inference: Inference::None,
+        };
+        let schema = serde_json::from_value(json!([
+            {"field":"body", "field_type":"Text", "store":true, "index_lexical":true}
+        ]))
+        .unwrap();
+        let index = create_index(&path, meta, &schema, 11, true, Some(1))
+            .await
+            .unwrap();
+        {
+            let index = index.read().await;
+            let shard = index.shard_vec[0].read().await;
+            for (text, expected) in [
+                ("", vec![]),
+                ("中国", vec!["中国"]),
+                ("rust", vec!["rust"]),
+                ("中国 rust", vec!["中国", "rust"]),
+                ("rust 中国", vec!["rust", "中国"]),
+                ("江苏省会是哪里", vec!["江苏省", "会", "是", "哪里"]),
+            ] {
+                for suffix in ["", "。", " "] {
+                    for is_query in [false, true] {
+                        let input = format!("{text}{suffix}");
+                        let mut terms = AHashMap::new();
+                        let mut query_terms = Vec::new();
+                        let mut count = 0;
+                        tokenizer(
+                            &shard,
+                            &input,
+                            &mut terms,
+                            &mut query_terms,
+                            TokenizerType::UnicodeAlphanumericZH,
+                            shard.segment_number_mask1,
+                            &mut count,
+                            65_536,
+                            65_536,
+                            is_query,
+                            &mut QueryType::Union,
+                            9,
+                            0,
+                            1,
+                        )
+                        .await;
+                        assert_eq!(
+                            count as usize,
+                            expected.len(),
+                            "{input:?}, query={is_query}"
+                        );
+                        assert_eq!(terms.len(), expected.len(), "{input:?}, query={is_query}");
+                        for (position, term) in expected.iter().enumerate() {
+                            assert_eq!(
+                                terms[*term].field_positions_vec,
+                                vec![vec![position as u16]]
+                            );
+                        }
+                        if is_query {
+                            assert_eq!(
+                                query_terms
+                                    .iter()
+                                    .map(|t| t.term.as_str())
+                                    .collect::<Vec<_>>(),
+                                expected
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        index
+            .index_documents(
+                [
+                    "中国 rust",
+                    "中国 rust。",
+                    "中国 rust search",
+                    "中国 search rust",
+                    "rust 中国",
+                ]
+                .into_iter()
+                .map(|body| serde_json::from_value(json!({"body":body})).unwrap())
+                .collect(),
+            )
+            .await
+            .unwrap();
+        index.commit().await;
+        index.close().await;
+        drop(index);
+        let index = open_index(&path).await.unwrap();
+        for query in ["中国 rust", "中国 rust。", "中国 rust "] {
+            let result = index
+                .search(
+                    query.into(),
+                    None,
+                    QueryType::Phrase,
+                    SearchMode::Lexical,
+                    false,
+                    0,
+                    10,
+                    ResultType::TopkCount,
+                    false,
+                    vec![],
+                    vec![],
+                    vec![],
+                )
+                .await;
+            assert!(result.error.is_none(), "{:?}", result.error);
+            assert_eq!(result.result_count_total, 3, "{query}");
+            assert_eq!(
+                result
+                    .results
+                    .iter()
+                    .map(|r| r.doc_id)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([0, 1, 2])
+            );
+            let score = |id| {
+                result
+                    .results
+                    .iter()
+                    .find(|r| r.doc_id == id)
+                    .unwrap()
+                    .score
+            };
+            assert_eq!(
+                score(0),
+                score(1),
+                "punctuation must not change term frequency or document length"
+            );
+        }
+        index.close().await;
+        drop(index);
+        fs::remove_dir_all(path).unwrap();
+    }
 }
