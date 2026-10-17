@@ -88,7 +88,8 @@ def exercise(binary, workdir):
     check(retired.returncode == 2 and b'ingest_path has been removed' in retired.stderr,
           'retired import configuration was silently accepted')
     print('PASS retired import configuration rejected')
-    for args in (['unknown=value'], ['local_port=bad'], ['force_shard_number=0'],
+    for args in (['unknown=value'], ['local_port=bad'], ['force_shard_number=0'], ['default_nprobe=0'], ['default_nprobe=-1'],
+                 ['default_nprobe=1.5'], ['default_nprobe=18446744073709551616'],
                  ['generate_openapi=yes'], ['index_path='], ['bare_argument'],
                  ['local_port=80', 'local_port=81']):
         rejected = subprocess.run([str(binary), *args], cwd=workdir, capture_output=True, timeout=10)
@@ -101,7 +102,7 @@ def exercise(binary, workdir):
         def launch():
             return subprocess.Popen(
                 [str(binary), 'local_ip=127.0.0.1', f'local_port={port}',
-                 f'index_path={workdir / "index"}', 'force_shard_number=1'],
+                 f'index_path={workdir / "index"}', 'force_shard_number=1', 'default_nprobe=7'],
                 cwd=workdir, env={**os.environ, 'MASTER_KEY_SECRET': secret},
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
 
@@ -696,6 +697,21 @@ def exercise(binary, workdir):
                     request('POST', dp + '/query', {**payload, 'length': 0}, api_key, expected=400)
                 uncounted = api('POST', dp + '/query', {**payload, 'count': False, 'length': 1})
                 check(uncounted['count_total'] is None and len(uncounted['results']) == 1, 'uncounted search')
+            # ANN budgets are typed, explicit and rejected on lexical/browse requests.
+            for options in ({'all': True}, {'nprobe': 1}, {'nprobe': 1000000},
+                            {'all': False, 'nprobe': 2}):
+                for text in ('', 'alpha'):
+                    result = api('POST', dp + '/query', {'query': text, 'query_vector': [1, 0, 0], **options})
+                    check(result['results'], 'ANN/full-scan query returned no candidates')
+            for invalid in (0, -1, 1.5, 1.0, '1', True, None, 2**64):
+                request('POST', dp + '/query', {'query_vector': [1, 0, 0], 'nprobe': invalid}, api_key, expected=400)
+            for invalid in (0, 'true', None):
+                request('POST', dp + '/query', {'query_vector': [1, 0, 0], 'all': invalid}, api_key, expected=400)
+            request('POST', dp + '/query', {'query_vector': [1, 0, 0], 'all': True, 'nprobe': 1}, api_key, expected=400)
+            for text in ('', 'alpha'):
+                for options in ({'all': True}, {'all': False}, {'nprobe': 1}):
+                    request('POST', dp + '/query', {'query': text, **options}, api_key, expected=400)
+            print('PASS ANN budgets, full scan, conflicts and strict JSON types')
             iterator = api('POST', dp + '/iterator', {})
             check(len(iterator['results']) == 2 and all(item['doc']['body'] for item in iterator['results']),
                   'iterator defaults must include live documents')

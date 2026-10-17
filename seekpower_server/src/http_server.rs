@@ -43,6 +43,7 @@ struct AppState {
     index_path: PathBuf,
     keys: Arc<RwLock<HashMap<u128, ApikeyObject>>>,
     force_shard_number: Option<usize>,
+    default_nprobe: std::num::NonZeroUsize,
 }
 
 pub(crate) enum ApiError {
@@ -671,6 +672,8 @@ async fn delete_documents(
         examples(
             ("Lexical" = (value = json!({"query":"hello"}))),
             ("Vector" = (value = json!({"query_vector":[1.0,0.0,0.0]}))),
+            ("ANN budget" = (value = json!({"query_vector":[1.0,0.0,0.0],"nprobe":100}))),
+            ("Full scan" = (value = json!({"query_vector":[1.0,0.0,0.0],"all":true}))),
             ("Hybrid" = (value = json!({"query":"hello","query_vector":[1.0,0.0,0.0]})))
         )),
     responses(
@@ -683,10 +686,13 @@ async fn delete_documents(
     operation_id = "query_index_post"
 )]
 async fn query_index(
+    State(state): State<AppState>,
     ScopedIndex(index): ScopedIndex,
     JsonBody(request): JsonBody<SearchRequestObject>,
 ) -> ApiResult<SearchResultObject> {
-    Ok(Json(query_index_api(&index, request).await?))
+    Ok(Json(
+        query_index_api(&index, request, state.default_nprobe).await?,
+    ))
 }
 
 #[derive(OpenApi, Default)]
@@ -793,6 +799,7 @@ pub(crate) async fn http_server(
     local_ip: &String,
     local_port: &u16,
     force_shard_number: &Option<usize>,
+    default_nprobe: std::num::NonZeroUsize,
 ) {
     let address =
         std::net::SocketAddr::new(local_ip.parse().expect("validated local_ip"), *local_port);
@@ -804,6 +811,7 @@ pub(crate) async fn http_server(
         index_path: index_path.to_path_buf(),
         keys,
         force_shard_number: *force_shard_number,
+        default_nprobe,
     };
     if let Err(error) = axum::serve(listener, router(state))
         .with_graceful_shutdown(crate::server::shutdown_signal())
@@ -964,6 +972,22 @@ mod tests {
             schemas["SearchRequestObject"]["properties"]["count"]["default"],
             true
         );
+        assert_eq!(
+            schemas["SearchRequestObject"]["properties"]["nprobe"]["minimum"],
+            1
+        );
+        assert!(
+            schemas["SearchRequestObject"]["properties"]
+                .get("all")
+                .is_some()
+        );
+        let required = schemas["SearchRequestObject"]["required"].as_array();
+        for name in ["all", "nprobe"] {
+            assert!(!required.is_some_and(|fields| fields.contains(&json!(name))));
+            let property = &schemas["SearchRequestObject"]["properties"][name];
+            assert!(!property.to_string().contains("\"null\""));
+        }
+
         for (path, creation) in [
             ("/api/v1/index", true),
             ("/api/v1/index/{index_id}/query", false),

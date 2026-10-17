@@ -15,6 +15,13 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
     let force_shard_number = params
         .get("force_shard_number")
         .and_then(|n| n.parse().ok());
+    let default_nprobe = params
+        .get("default_nprobe")
+        .map(|n| {
+            n.parse::<std::num::NonZeroUsize>()
+                .expect("validated default_nprobe")
+        })
+        .unwrap_or_else(|| std::num::NonZeroUsize::new(crate::api_types::DEFAULT_NPROBE).unwrap());
     let path = params
         .get("index_path")
         .map(String::as_str)
@@ -104,6 +111,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
         &local_ip,
         &local_port,
         &force_shard_number,
+        default_nprobe,
     )
     .await;
     log::info!("Committing and closing all indices");

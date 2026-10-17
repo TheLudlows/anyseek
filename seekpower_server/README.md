@@ -16,6 +16,7 @@ target/debug/seekpower_server local_ip=127.0.0.1 local_port=8080
 | `local_ip` | `0.0.0.0` |
 | `local_port` | `80` |
 | `force_shard_number` | 未设置时按物理 CPU 核数；显式设置须为正整数，是本机并行分片数 |
+| `default_nprobe` | `200`（初始校准值，非通用最优）；必须为正整数，请求 `nprobe` 可覆盖 |
 | `generate_openapi` | `false`；设为 `true` 时生成 JSON/YAML 到可执行文件目录后退出 |
 
 仅接受 `name=value`，未知、重复、非法参数返回退出码 2。`MASTER_KEY_SECRET` 用于派生主密钥；须配置私有值，源码默认值不适合部署使用。可使用仓库 [Dockerfile](../Dockerfile) 构建此分支。
@@ -78,3 +79,25 @@ curl -X POST "$BASE/api/v1/index/$INDEX_ID/iterator" -H "apikey: $API_KEY" -H 'C
 普通创建请求只需名称和 schema；向量字段另传 `vector:{"dimensions":N}`。Text 字段默认存储并建立全文索引；向量字段默认不存储原始值、不建立全文索引；其他字段默认存储。过滤/排序字段显式设置 `filterable:true`。
 
 查询模式由文本/向量输入推导；空请求 `{}` 浏览文档，查询包含未提交写入。默认返回 10 条并统计总数；`count:false` 返回 `count_total:null`，全文/浏览查询可用 `length:0` 只统计，向量/混合查询仍要求正的结果窗口。`operator:"or"` 改为任一词匹配，默认 `and`。向量/混合总数仍受候选检索语义限制，不承诺全库精确计数。遍历默认返回 10 个未删除文档，支持字段投影。
+
+## 向量搜索预算（默认行为变更）
+
+Vector/Hybrid 请求不再默认全簇扫描，而使用服务的 `default_nprobe`。纯词法行为不变。要保持旧版的全簇行为，请显式传 `all:true`；核心库的 AnnMode 默认值没有变化。
+
+```json
+{"query_vector":[1,0,0]}
+{"query":"example","query_vector":[1,0,0],"nprobe":100}
+{"query_vector":[1,0,0],"all":true}
+```
+
+`nprobe` 必须是正整数；省略时继承服务预算。`all:false` 同样使用请求或服务预算。`all:true` 与 `nprobe` 同传返回400；没有 query_vector 的关键词/浏览请求携带任一字段也返回400。显式null、错误类型、0、负数、小数、整数溢出均拒绝。
+
+预算按每分片、每level计算，超过该level簇数时由核心取min；不是全局候选文档数、超时限制或召回保证。未提交向量另行扫描，预算不限制这部分工作。相似度阈值可同时使用，仍是文档评分/距离过滤，不是簇预算。全簇扫描使用已配置的存储精度/量化，不等于原始F32精确评分。不要依赖ANN的count_total作为全库精确命中数。
+
+参数应在代表性train集合选择并冻结，再用dev验证。默认值只是初始折中，不是通用最优；数据、分片数、簇大小及过滤条件改变后应重新校准。
+
+### 初始默认值的校准依据
+
+初始 `default_nprobe=200` 来自 SeekPower 自身的 train-only 校准：固定100k MIRACL中文缩减语料、BGE-small-zh-v1.5 512维F32、无量化、单分片，128条固定train查询各重复两次；候选15/50/100/200/300/400。预先规定在平均精确邻居Recall@100至少0.98的候选中选择客户端p95最低者，未使用dev选参。
+
+200的train邻居召回为0.983203、nDCG@10为0.818170、p50/p95为9.02/18.17ms；All对照为1.0、0.818951、17.10/34.06ms。该小样本顺序试验没有置信区间，不是性能承诺，尤其不能保证其他数据或dev的召回达到0.98。完整候选、查询ID和原始结果哈希见 [校准记录](../docs/ann-default-calibration.json)。启动时用 `default_nprobe=...` 调整，请求可再覆盖。

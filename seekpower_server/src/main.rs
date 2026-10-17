@@ -73,7 +73,7 @@ fn parse_params(args: impl Iterator<Item=String>) -> Result<HashMap<String, Stri
             "index_path" if !value.is_empty() => {},
             "local_ip" if value.parse::<std::net::IpAddr>().is_ok() => {},
             "local_port" if value.parse::<u16>().is_ok() => {},
-            "force_shard_number" if value.parse::<usize>().is_ok_and(|n| n > 0) => {},
+            "force_shard_number" | "default_nprobe" if value.parse::<usize>().is_ok_and(|n| n > 0) => {},
             "generate_openapi" if value.parse::<bool>().is_ok() => {},
             _ => return Err(format!("unsupported or invalid parameter: {name}")),
         }
@@ -91,10 +91,12 @@ mod tests {
     fn cli_options_are_explicit_and_validated() {
         let parse = |args: &[&str]| parse_params(args.iter().map(|s| s.to_string()));
         assert!(parse(&[]).is_ok());
+        assert_eq!(parse(&["default_nprobe=37"]).unwrap()["default_nprobe"], "37");
         assert_eq!(parse(&["index_path=a=b", "local_port=0", "local_ip=::1", "force_shard_number=1"]).unwrap()["index_path"], "a=b");
         assert_eq!(parse(&["local_ip=[::1]"]).unwrap()["local_ip"], "::1");
         for args in [vec!["unknown=x"],vec!["ingest_path=x"],vec!["--help"],vec!["local_port=bad"],
-            vec!["local_ip=bad"],vec!["force_shard_number=0"],vec!["index_path="],vec!["generate_openapi=yes"],
+            vec!["default_nprobe=0"],vec!["default_nprobe=-1"],vec!["default_nprobe=1.5"],
+            vec!["default_nprobe=18446744073709551616"],vec!["local_ip=bad"],vec!["force_shard_number=0"],vec!["index_path="],vec!["generate_openapi=yes"],
             vec!["local_port=80","local_port=81"]] {
             assert!(parse(&args).is_err(), "{args:?}");
         }

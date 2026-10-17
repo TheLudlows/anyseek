@@ -51,7 +51,7 @@ HTTP 新建索引采用 Snappy、English 高频词、N-gram=9、Auto 聚类；�
 | DELETE | `/api/v1/index/{id}/doc` | JSON：`ids`、非空 `query` 或 `all:true` | 已登记 |
 | GET | `/api/v1/index/{id}/doc/{doc}` | 读取文档；可用 URL `?fields=body,title` 投影 | 已登记 |
 | DELETE | `/api/v1/index/{id}/doc/{doc}` | 删除单条文档 | 已登记 |
-| POST | `/api/v1/index/{id}/query` | Lexical/Vector/Hybrid JSON 查询 | 已登记 |
+| POST | `/api/v1/index/{id}/query` | Lexical/Vector/Hybrid JSON 查询；默认 ANN，`nprobe` 覆盖预算，`all:true` 全簇 | 已登记 |
 | POST | `/api/v1/index/{id}/iterator` | 双向文档遍历 | 已登记 |
 | GET | `/` 及固定静态资源路径 | 内嵌 Web UI、CSS/JS、图标 | 不作为数据 API 登记 |
 | OPTIONS | 服务路由 | CORS 预检；query/iterator 声明 `POST, OPTIONS` | 不作为数据 API 登记 |
@@ -77,7 +77,7 @@ HTTP 新建索引采用 Snappy、English 高频词、N-gram=9、Auto 聚类；�
 - 倒排写入缓冲区按需增长，提交/清空后释放；位置压缩缓存按实际使用的词项分段分配，不再为每个分片固定预分配 400 MB。
 - 启动直接使用由 MASTER_KEY_SECRET 派生的主密钥及其持久化索引作用域；不自动生成普通 key 或初始化标记。
 - API key 鉴权、按 key 的索引/数据目录隔离、随机 key；无内置配额或限流。
-- 启动参数：`index_path`、`local_ip`、`local_port`、`force_shard_number`、`generate_openapi`；未知、重复、非法参数启动失败。
+- 启动参数：`index_path`、`local_ip`、`local_port`、`force_shard_number`、`default_nprobe`、`generate_openapi`；未知、重复、非法参数启动失败。
 - Ctrl-C/SIGINT 或 SIGTERM 停止接收请求、结束已有连接，再提交并关闭全部索引；无 stdin 交互命令。
 - 启动参数 `generate_openapi=true` 生成 OpenAPI JSON/YAML；启动/索引概况使用普通日志；核心库 `info::collect_index_info` 返回结构化统计，采集不提交或同步文件。核心日志由调用方配置；服务支持 `RUST_LOG`。
 - Rust 核心库可嵌入应用；HTTP 服务内嵌静态 UI；保留 Dockerfile 从源码构建。两个 crate 均 `publish=false`。

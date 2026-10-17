@@ -450,7 +450,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                     r.query_string.clone(),
                     None,
                     r.query_type(),
-                    r.search_mode(),
+                    r.search_mode(std::num::NonZeroUsize::new(seekpower_server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(),
                     false,
                     0,
                     10,
