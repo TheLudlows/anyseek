@@ -282,6 +282,7 @@ pub(crate) async fn clear_index_api(index_arc: &IndexArc) -> Result<u64, String>
 pub(crate) async fn query_index_api(
     index_arc: &IndexArc,
     search_request: SearchRequestObject,
+    default_nprobe: std::num::NonZeroUsize,
 ) -> Result<SearchResultObject, String> {
     let start_time = Instant::now();
     if search_request
@@ -294,7 +295,7 @@ pub(crate) async fn query_index_api(
     if search_request.query_vector.is_none() && search_request.similarity_threshold.is_some() {
         return Err("similarity_threshold requires query_vector".into());
     }
-    let mode = search_request.search_mode();
+    let mode = search_request.search_mode(default_nprobe)?;
     let result_type = search_request.result_type();
     let query_vector = match search_request.query_vector.as_ref() {
         Some(value) => Some(seekpower::vector::parse_external_embedding(

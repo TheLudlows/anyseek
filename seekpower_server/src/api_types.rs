@@ -1,4 +1,4 @@
-//! HTTP contracts. Internal tuning stays in the engine; callers describe data and queries.
+//! HTTP contracts, including an optional vector-search probe budget.
 use crate::api_schema;
 use seekpower::{
     index::{Document, FieldType, SchemaField, StopwordType, TokenizerType},
@@ -7,7 +7,11 @@ use seekpower::{
     vector_similarity::{AnnMode, VectorSimilarity},
 };
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use utoipa::ToSchema;
+
+/// Initial HTTP ANN budget; calibrated on the fixed MIRACL Chinese train subset.
+pub const DEFAULT_NPROBE: usize = 200;
 
 /// Search text, vectors, or both. Empty input browses documents. Pending writes are visible.
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -55,6 +59,23 @@ pub struct SearchRequestObject {
     /// Optional vector score/distance threshold, interpreted using the index metric.
     #[serde(default)]
     pub similarity_threshold: Option<f32>,
+    /// Scan all clusters using the stored vector representation. Omit for ANN.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub all: Option<bool>,
+    /// Positive probe budget per shard per level; capped at that level's cluster count.
+    /// Overrides the server default. Not a global candidate count or recall guarantee.
+    #[serde(
+        default,
+        deserialize_with = "present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(value_type = Option<usize>, minimum = 1, nullable = false)]
+    pub nprobe: Option<NonZeroUsize>,
 }
 
 /// Boolean matching for unqualified text terms.
@@ -84,20 +105,31 @@ impl SearchRequestObject {
         self.operator.query_type()
     }
     /// Resolve the retrieval mode from the supplied inputs.
-    pub fn search_mode(&self) -> SearchMode {
-        if self.query_vector.is_none() {
+    pub fn search_mode(&self, default_nprobe: NonZeroUsize) -> Result<SearchMode, String> {
+        if self.query_vector.is_none() && (self.all.is_some() || self.nprobe.is_some()) {
+            return Err("all and nprobe require query_vector".into());
+        }
+        if self.all == Some(true) && self.nprobe.is_some() {
+            return Err("all=true cannot be combined with nprobe".into());
+        }
+        let ann_mode = if self.all == Some(true) {
+            AnnMode::All
+        } else {
+            AnnMode::Nprobe(self.nprobe.unwrap_or(default_nprobe).get())
+        };
+        Ok(if self.query_vector.is_none() {
             SearchMode::Lexical
         } else if self.query_string.trim().is_empty() {
             SearchMode::Vector {
                 similarity_threshold: self.similarity_threshold,
-                ann_mode: AnnMode::All,
+                ann_mode,
             }
         } else {
             SearchMode::Hybrid {
                 similarity_threshold: self.similarity_threshold,
-                ann_mode: AnnMode::All,
+                ann_mode,
             }
-        }
+        })
     }
     /// Resolve document and count collection requirements.
     pub fn result_type(&self) -> ResultType {
@@ -110,6 +142,15 @@ impl SearchRequestObject {
         }
     }
 }
+// Missing fields use serde(default); explicit null is rejected like other wrong types.
+fn present_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 fn length_api() -> usize {
     10
 }
