@@ -29,5 +29,5 @@ Cargo.lock
 
 # Local OpenSearch distribution, indexes, and logs (keep the release archive)
 /tools/opensearch/*
-!/tools/opensearch/opensearch-3.9.0-windows-x64.zip
-!/tools/opensearch/opensearch-3.9.0-windows-x64.zip.sha512
+!/tools/opensearch/opensearch-3.9.0-linux-x64.tar.gz
+!/tools/opensearch/opensearch-3.9.0-linux-x64.tar.gz.sha512
