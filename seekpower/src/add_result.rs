@@ -228,7 +228,7 @@ pub(crate) fn add_result_singleterm_multifield(
                 && search_result.topk_candidates.result_sort.is_empty()
                 && !search_result.topk_candidates.empty_query
                 && search_result.topk_candidates.current_heap_size >= top_k
-                && block_score <= search_result.topk_candidates._elements[0].score
+                && search_result.topk_candidates.can_prune(block_score, docid, top_k)
             {
                 return;
             }
@@ -286,7 +286,7 @@ pub(crate) fn add_result_singleterm_multifield(
                 && search_result.topk_candidates.result_sort.is_empty()
                 && !search_result.topk_candidates.empty_query
                 && search_result.topk_candidates.current_heap_size >= top_k
-                && block_score <= search_result.topk_candidates._elements[0].score
+                && search_result.topk_candidates.can_prune(block_score, docid, top_k)
             {
                 return;
             }
@@ -455,7 +455,7 @@ pub(crate) fn add_result_singleterm_singlefield(
                 && search_result.topk_candidates.result_sort.is_empty()
                 && !search_result.topk_candidates.empty_query
                 && search_result.topk_candidates.current_heap_size >= top_k
-                && block_score <= search_result.topk_candidates._elements[0].score
+                && search_result.topk_candidates.can_prune(block_score, docid, top_k)
             {
                 return;
             }
@@ -508,7 +508,7 @@ pub(crate) fn add_result_singleterm_singlefield(
                 && search_result.topk_candidates.result_sort.is_empty()
                 && !search_result.topk_candidates.empty_query
                 && search_result.topk_candidates.current_heap_size >= top_k
-                && block_score <= search_result.topk_candidates._elements[0].score
+                && search_result.topk_candidates.can_prune(block_score, docid, top_k)
             {
                 return;
             }
@@ -2685,7 +2685,7 @@ pub(crate) fn add_result_multiterm_multifield(
                 && search_result.topk_candidates.result_sort.is_empty()
                 && !search_result.topk_candidates.empty_query
                 && search_result.topk_candidates.current_heap_size >= top_k
-                && block_score <= search_result.topk_candidates._elements[0].score
+                && search_result.topk_candidates.can_prune(block_score, docid, top_k)
             {
                 return;
             }
@@ -2697,7 +2697,7 @@ pub(crate) fn add_result_multiterm_multifield(
                 && field_filter_set.is_empty()
                 && !search_result.topk_candidates.empty_query
                 && search_result.topk_candidates.current_heap_size >= top_k
-                && block_score <= search_result.topk_candidates._elements[0].score
+                && search_result.topk_candidates.can_prune(block_score, docid, top_k)
             {
                 *result_count += 1;
                 return;
@@ -2745,7 +2745,7 @@ pub(crate) fn add_result_multiterm_multifield(
             && search_result.topk_candidates.result_sort.is_empty()
             && !search_result.topk_candidates.empty_query
             && search_result.topk_candidates.current_heap_size >= top_k
-            && bm25 <= search_result.topk_candidates._elements[0].score
+            && search_result.topk_candidates.can_prune(bm25, docid, top_k)
         {
             return;
         }
@@ -3112,7 +3112,7 @@ pub(crate) fn add_result_multiterm_singlefield(
                 && search_result.topk_candidates.result_sort.is_empty()
                 && !search_result.topk_candidates.empty_query
                 && search_result.topk_candidates.current_heap_size >= top_k
-                && block_score <= search_result.topk_candidates._elements[0].score
+                && search_result.topk_candidates.can_prune(block_score, docid, top_k)
             {
                 return;
             }
@@ -3124,7 +3124,7 @@ pub(crate) fn add_result_multiterm_singlefield(
                 && field_filter_set.is_empty()
                 && !search_result.topk_candidates.empty_query
                 && search_result.topk_candidates.current_heap_size >= top_k
-                && block_score <= search_result.topk_candidates._elements[0].score
+                && search_result.topk_candidates.can_prune(block_score, docid, top_k)
             {
                 *result_count += 1;
                 return;
@@ -3171,7 +3171,7 @@ pub(crate) fn add_result_multiterm_singlefield(
             && search_result.topk_candidates.result_sort.is_empty()
             && !search_result.topk_candidates.empty_query
             && search_result.topk_candidates.current_heap_size >= top_k
-            && bm25 <= search_result.topk_candidates._elements[0].score
+            && search_result.topk_candidates.can_prune(bm25, docid, top_k)
         {
             return;
         }

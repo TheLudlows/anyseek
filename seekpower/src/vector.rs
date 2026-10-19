@@ -388,6 +388,11 @@ pub(crate) struct TopK {
     result_count_total: usize,
     observed_vector_count: usize,
     lowest_similarity_score: f32,
+    // Conservative complete worst-key bound. Replacements and duplicate score
+    // increases only improve the true worst key, so an older bound stays safe.
+    worst_rank_bound: Option<(f32, usize)>,
+    #[cfg(test)]
+    full_scans: usize,
 }
 
 impl TopK {
@@ -430,6 +435,9 @@ impl TopK {
             },
             observed_vector_count: 0,
             lowest_similarity_score: f32::MIN,
+            worst_rank_bound: None,
+            #[cfg(test)]
+            full_scans: 0,
         }
     }
 
@@ -448,13 +456,21 @@ impl TopK {
     ) -> bool {
         self.observed_vector_count += 1;
 
-        if score < self.similarity_threshold_precalculated
-            || (self.len == self.k && score <= self.lowest_similarity_score)
+        if self.k == 0 || score.is_nan()
+            || score < self.similarity_threshold_precalculated
+            || (self.len == self.k && score < self.lowest_similarity_score)
         {
             return false;
         }
 
         self.result_count_total += 1;
+
+        // Keep the existing count/threshold semantics; this additional rejection
+        // changes only selection work, not scores or candidate membership.
+        if self.len == self.k && self.worst_rank_bound.is_some_and(|(bound_score, bound_id)|
+            min_heap::rank_ordering(score, doc_id, bound_score, bound_id).is_le()) {
+            return false;
+        }
 
         if self.len < self.k {
             let new_item = Item {
@@ -485,8 +501,11 @@ impl TopK {
             return true;
         }
 
+        #[cfg(test)]
+        { self.full_scans += 1; }
         let mut min_i = 0;
         let mut min_v = self.items[0].score;
+        let mut min_id = self.items[0].doc_id;
         for (i, item) in self.items.iter_mut().enumerate().take(self.len) {
             if item.doc_id == doc_id {
                 if score > item.score {
@@ -500,13 +519,15 @@ impl TopK {
                 return true;
             }
 
-            if item.score < min_v {
+            if min_heap::rank_ordering(item.score, item.doc_id, min_v, min_id).is_lt() {
                 min_v = item.score;
+                min_id = item.doc_id;
                 min_i = i;
             }
         }
 
-        if score > min_v {
+        self.worst_rank_bound = Some((min_v, min_id));
+        if min_heap::rank_ordering(score, doc_id, min_v, min_id).is_gt() {
             self.lowest_similarity_score = min_v;
             self.items[min_i] = Item {
                 doc_id,
@@ -1345,7 +1366,7 @@ impl SearchVectorShard for ShardArc {
                 }
 
                 top_k_medoid.items[..top_k_medoid.len]
-                    .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+                    .sort_by(|a, b| min_heap::rank_ordering(b.score, b.doc_id, a.score, a.doc_id));
 
                 let num_cluster = top_k_medoid.len;
 
@@ -1452,7 +1473,7 @@ impl SearchVectorShard for ShardArc {
             offset += level_vectors_count as usize * vector_size;
         }
 
-        top_k.items[..top_k.len].sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        top_k.items[..top_k.len].sort_by(|a, b| min_heap::rank_ordering(b.score, b.doc_id, a.score, a.doc_id));
 
         for item in top_k.items[..top_k.len].iter() {
             let result = min_heap::Result {
@@ -1494,5 +1515,62 @@ impl SearchVectorShard for ShardArc {
         result_object.observed_cluster_count = observed_cluster_count;
 
         result_object
+    }
+}
+
+#[cfg(test)]
+mod stable_ranking_tests {
+    use super::*;
+
+    #[test]
+    fn stable_vector_topk_keeps_lowest_ids_across_input_orders() {
+        // More ties than K, including a full heap and its cached rejection bound.
+        for order in [ (0..97).collect::<Vec<_>>(), (0..97).rev().collect(),
+            (0..97).map(|i| (i * 37) % 97).collect() ] {
+            let mut top = TopK::new(7, None, VectorSimilarity::Dot, 1.0);
+            for id in order { top.push(id, 0, 0, 0, 0, 1.0, 1.0, 0); }
+            top.items[..top.len].sort_by_key(|x| x.doc_id);
+            assert_eq!(top.items[..top.len].iter().map(|x| x.doc_id).collect::<Vec<_>>(), (0..7).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn stable_vector_bound_matches_exhaustive_topk_and_rejects_dense_ties() {
+        let mut dense = TopK::new(100, None, VectorSimilarity::Dot, 1.0);
+        for id in 0..70000 { dense.push(id, 0, 0, 0, 0, 1.0, 1.0, 0); }
+        assert_eq!(dense.full_scans, 1, "equal higher IDs need no O(K) scan");
+        assert_eq!(dense.result_count_total, 70000, "preserve first-fix counts");
+        for k in [1, 7, 100] {
+            let mut top = TopK::new(k, None, VectorSimilarity::Dot, 1.0);
+            let mut oracle = std::collections::BTreeMap::<usize, f32>::new();
+            for step in 0..3000 {
+                let id = (step * 37) % 131;
+                let score = if step % 19 == 0 { -0.0 } else { ((step * 17) % 11) as f32 };
+                top.push(id, 0, 0, 0, 0, score, score, 0);
+                oracle.entry(id).and_modify(|s| *s = s.max(score)).or_insert(score);
+                let mut expected: Vec<_> = oracle.iter().map(|(&id,&score)| (score,id)).collect();
+                expected.sort_by(|a,b| min_heap::rank_ordering(b.0,b.1,a.0,a.1));
+                expected.truncate(k);
+                let mut actual: Vec<_> = top.items[..top.len].iter().map(|x| (x.score,x.doc_id)).collect();
+                actual.sort_by(|a,b| min_heap::rank_ordering(b.0,b.1,a.0,a.1));
+                assert_eq!(actual, expected, "step={step} K={k}");
+            }
+        }
+    }
+
+    #[test]
+    fn stable_vector_topk_signed_zero_duplicates_and_threshold() {
+        let mut top = TopK::new(2, None, VectorSimilarity::Dot, 1.0);
+        for (id, score) in [(9, 0.0), (8, -0.0), (7, 0.0), (6, -0.0), (7, 1.0)] {
+            top.push(id, 0, 0, 0, 0, score, score, 0);
+        }
+        let mut ids = top.items[..top.len].iter().map(|x| x.doc_id).collect::<Vec<_>>();
+        ids.sort(); assert_eq!(ids, vec![6, 7]);
+        assert!(!top.push(0, 0, 0, 0, 0, 0.0, f32::NAN, 0));
+        let mut empty = TopK::new(0, None, VectorSimilarity::Dot, 1.0);
+        assert!(!empty.push(0, 0, 0, 0, 0, 1.0, 1.0, 0));
+        let mut threshold = TopK::new(2, Some(0.5), VectorSimilarity::Dot, 1.0);
+        assert!(!threshold.push(0, 0, 0, 0, 0, -1.0, -1.0, 0));
+        assert!(threshold.push(1, 0, 0, 0, 0, 0.0, 0.0, 0));
     }
 }

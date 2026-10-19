@@ -1,7 +1,7 @@
 use crate::INDEX_RUNTIME;
 use crate::index::{DOCUMENT_LENGTH_COMPRESSION, FieldType, NgramType, Shard, ShardArc};
 use crate::iterator::{search_iterator_index, search_iterator_shard};
-use crate::min_heap::{Result, result_ordering_root};
+use crate::min_heap::{Result, rank_ordering, result_ordering_root};
 use crate::tokenizer::tokenizer;
 use crate::union::{union_docid_2, union_docid_3};
 use crate::utils::{
@@ -1101,7 +1101,7 @@ impl Search for IndexArc {
                     let mut rrf_results: AHashMap<usize, Result> = AHashMap::new();
                     for (i, result) in result_object_results_lexical
                         .iter()
-                        .sorted_by(|a, b| b.score.partial_cmp(&a.score).unwrap())
+                        .sorted_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id))
                         .enumerate()
                     {
                         rrf_results.insert(
@@ -1119,7 +1119,7 @@ impl Search for IndexArc {
                     }
                     for (i, result) in result_object_results_vector
                         .iter()
-                        .sorted_by(|a, b| b.score.partial_cmp(&a.score).unwrap())
+                        .sorted_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id))
                         .enumerate()
                     {
                         let rrf_score = 1.0 / (k + i as f32);
@@ -1221,7 +1221,7 @@ impl Search for IndexArc {
                 } else {
                     result_object
                         .results
-                        .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+                        .sort_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id));
                 }
             }
 
@@ -2143,7 +2143,7 @@ impl SearchLexicalShard for ShardArc {
                 } else {
                     result_object
                         .results
-                        .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+                        .sort_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id));
                 }
             } else {
                 result_object

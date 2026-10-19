@@ -42,9 +42,10 @@ pub(crate) async fn single_docid<'a>(
         || !search_result.topk_candidates.result_sort.is_empty()
         || !facet_filter.is_empty() && result_type != &ResultType::Topk;
     if SPEEDUP_FLAG
+        && search_result.topk_candidates.result_sort.is_empty()
         && (result_type == &ResultType::Count
             || (search_result.topk_candidates.current_heap_size == top_k
-                && block_score <= search_result.topk_candidates._elements[0].score))
+                && search_result.topk_candidates.can_prune(block_score, (blo.block_id as usize) << 16, top_k)))
         && (!filtered || result_type == &ResultType::Topk)
     {
         return;
@@ -328,9 +329,10 @@ pub(crate) async fn single_blockid<'a>(
 
             block_vec.push(block_object);
         } else if !SPEEDUP_FLAG
+            || !search_result.topk_candidates.result_sort.is_empty()
             || (filtered && result_type != &ResultType::Topk)
             || search_result.topk_candidates.current_heap_size < top_k
-            || block_score > search_result.topk_candidates._elements[0].score
+            || !search_result.topk_candidates.can_prune(block_score, (blo.block_id as usize) << 16, top_k)
         {
             single_docid(
                 index,
@@ -350,13 +352,11 @@ pub(crate) async fn single_blockid<'a>(
     }
 
     if SORT_FLAG && SPEEDUP_FLAG {
-        block_vec.sort_unstable_by(|x, y| y.block_score.partial_cmp(&x.block_score).unwrap());
-        for (block_index, block) in block_vec.iter().enumerate() {
-            if !filtered && block_index == top_k {
-                break;
-            }
-            if (search_result.topk_candidates.current_heap_size == top_k)
-                && (block.block_score <= search_result.topk_candidates._elements[0].score)
+        block_vec.sort_unstable_by(|x, y| y.block_score.partial_cmp(&x.block_score).unwrap().then_with(|| x.block_id.cmp(&y.block_id)));
+        for block in &block_vec {
+            if search_result.topk_candidates.result_sort.is_empty()
+                && (search_result.topk_candidates.current_heap_size == top_k)
+                && (search_result.topk_candidates.can_prune(block.block_score, block.block_id << 16, top_k))
             {
                 if !filtered {
                     break;
