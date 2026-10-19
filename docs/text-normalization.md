@@ -26,9 +26,10 @@ is initialized once and reused across indexes and queries.
 This is t2s, not Taiwanese/Hong Kong/mainland vocabulary rewriting: e.g.
 `軟體` becomes `软体`, not `软件`. ASCII bytes (including query quotes, plus and
 minus operators) are neither consumed nor introduced by the pinned mappings.
-Normalization does not fix existing parser or NOT posting-rank defects (#37;
-Chinese NOT behavior was already noted in #28). Independent NOT acceptance
-checks are retained separately from ordinary-query equivalence checks.
+NOT posting-rank and leading CJK query-operator repairs are inherited from
+the independent stage A commits (#37; Chinese behavior was noted in #28),
+not implemented by normalization. Independent NOT acceptance checks are
+retained separately from ordinary-query equivalence checks.
 
 One deliberate compatibility boundary is recorded in #38: embedded NUL and all
 following text are preserved. OpenCC 1.1.9's C-string path truncates at NUL. The

@@ -3394,6 +3394,7 @@ mod score_bound_contract_tests {
                 name: "bound-contract".into(),
                 lexical_similarity: LexicalSimilarity::Bm25f,
                 tokenizer: TokenizerType::UnicodeAlphanumeric,
+                text_normalization: TextNormalization::None,
                 stop_words: StopwordType::None,
                 frequent_words: FrequentwordType::None,
                 ngram_indexing: 0,
