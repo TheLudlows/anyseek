@@ -428,6 +428,12 @@ pub(crate) async fn union_scan_8<'a>(
         }
     }
 
+    // NOT changes eligibility, not positive membership or posting-rank order.
+    // Ordinary queries allocate no extra bitmap.
+    let mut excluded_docids = if not_query_list.iter().any(|p| p.bm25_flag) {
+        vec![0u64; 1024]
+    } else { Vec::new() };
+
     for plo in not_query_list.iter_mut() {
         if !plo.bm25_flag {
             continue;
@@ -445,7 +451,7 @@ pub(crate) async fn union_scan_8<'a>(
                     intersect = unsafe { _blsr_u64(intersect) };
 
                     let docid = ((ulong_pos << 6) + bit_pos) as usize;
-                    query_terms_bitset_table[docid] = 0;
+                    excluded_docids[docid >> 6] |= 1u64 << (docid & 63);
                 }
             }
         } else if plo.compression_type == CompressionType::Array {
@@ -453,7 +459,7 @@ pub(crate) async fn union_scan_8<'a>(
                 let docid =
                     read_u16(&plo.byte_array[plo.compressed_doc_id_range..], i * 2) as usize;
 
-                query_terms_bitset_table[docid] = 0;
+                excluded_docids[docid >> 6] |= 1u64 << (docid & 63);
             }
         } else {
             let runs_count = read_u16(&plo.byte_array[plo.compressed_doc_id_range..], 0) as i32;
@@ -471,7 +477,7 @@ pub(crate) async fn union_scan_8<'a>(
                 for j in 0..=runlength {
                     let docid = startdocid + j;
 
-                    query_terms_bitset_table[docid] = 0;
+                    excluded_docids[docid >> 6] |= 1u64 << (docid & 63);
                 }
             }
         }
@@ -501,37 +507,42 @@ pub(crate) async fn union_scan_8<'a>(
 
     for (i, query_terms_bitset) in query_terms_bitset_table.iter().enumerate() {
         if *query_terms_bitset > 0 {
-            result_count_local += 1;
+            let excluded = !excluded_docids.is_empty()
+                && excluded_docids[i >> 6] & (1u64 << (i & 63)) != 0;
+            if !excluded {
+                result_count_local += 1;
 
-            if !block_skip
-                && (search_result.topk_candidates.current_heap_size < top_k
-                    || !search_result.topk_candidates.can_prune(
-                        query_terms_max_score_sum_table[*query_terms_bitset as usize], block_id_msb | i, top_k))
-            {
-                for (j, query_term) in query_list.iter_mut().take(query_list_len).enumerate() {
-                    query_term.bm25_flag = (query_terms_bitset & (1 << j)) > 0;
+                if !block_skip
+                    && (search_result.topk_candidates.current_heap_size < top_k
+                        || !search_result.topk_candidates.can_prune(
+                            query_terms_max_score_sum_table[*query_terms_bitset as usize], block_id_msb | i, top_k))
+                {
+                    for (j, query_term) in query_list.iter_mut().take(query_list_len).enumerate() {
+                        query_term.bm25_flag = (query_terms_bitset & (1 << j)) > 0;
 
-                    query_term.p_docid = p_docid_array[j];
+                        query_term.p_docid = p_docid_array[j];
+                    }
+
+                    add_result_multiterm_multifield(
+                        shard,
+                        block_id_msb | i,
+                        &mut _result_count,
+                        search_result,
+                        top_k,
+                        result_type,
+                        field_filter_set,
+                        facet_filter,
+                        non_unique_query_list,
+                        query_list,
+                        not_query_list,
+                        false,
+                        f32::MAX,
+                        false,
+                    );
                 }
 
-                add_result_multiterm_multifield(
-                    shard,
-                    block_id_msb | i,
-                    &mut _result_count,
-                    search_result,
-                    top_k,
-                    result_type,
-                    field_filter_set,
-                    facet_filter,
-                    non_unique_query_list,
-                    query_list,
-                    not_query_list,
-                    false,
-                    f32::MAX,
-                    false,
-                );
             }
-
+            // Excluded documents still occupy positive posting payload ranks.
             if !block_skip {
                 for (j, item) in p_docid_array.iter_mut().take(query_list_len).enumerate() {
                     *item += ((query_terms_bitset >> j) & 1) as usize
@@ -649,6 +660,12 @@ pub(crate) async fn union_scan_32<'a>(
         }
     }
 
+    // NOT changes eligibility, not positive membership or posting-rank order.
+    // Ordinary queries allocate no extra bitmap.
+    let mut excluded_docids = if not_query_list.iter().any(|p| p.bm25_flag) {
+        vec![0u64; 1024]
+    } else { Vec::new() };
+
     for plo in not_query_list.iter_mut() {
         if !plo.bm25_flag {
             continue;
@@ -666,7 +683,7 @@ pub(crate) async fn union_scan_32<'a>(
                     intersect = unsafe { _blsr_u64(intersect) };
 
                     let docid = ((ulong_pos << 6) + bit_pos) as usize;
-                    query_terms_bitset_table[docid] = 0;
+                    excluded_docids[docid >> 6] |= 1u64 << (docid & 63);
                 }
             }
         } else if plo.compression_type == CompressionType::Array {
@@ -674,7 +691,7 @@ pub(crate) async fn union_scan_32<'a>(
                 let docid =
                     read_u16(&plo.byte_array[plo.compressed_doc_id_range..], i * 2) as usize;
 
-                query_terms_bitset_table[docid] = 0;
+                excluded_docids[docid >> 6] |= 1u64 << (docid & 63);
             }
         } else {
             let runs_count = read_u16(&plo.byte_array[plo.compressed_doc_id_range..], 0) as i32;
@@ -692,7 +709,7 @@ pub(crate) async fn union_scan_32<'a>(
                 for j in 0..=runlength {
                     let docid = startdocid + j;
 
-                    query_terms_bitset_table[docid] = 0;
+                    excluded_docids[docid >> 6] |= 1u64 << (docid & 63);
                 }
             }
         }
@@ -712,47 +729,52 @@ pub(crate) async fn union_scan_32<'a>(
 
     for (i, query_terms_bitset) in query_terms_bitset_table.iter().enumerate() {
         if *query_terms_bitset > 0 {
-            result_count_local += 1;
+            let excluded = !excluded_docids.is_empty()
+                && excluded_docids[i >> 6] & (1u64 << (i & 63)) != 0;
+            if !excluded {
+                result_count_local += 1;
 
-            if !block_skip
-                && (search_result.topk_candidates.current_heap_size < top_k
-                    || query_terms_bitset & mask > 0)
-            {
-                let mut query_terms_max_score_sum = 0f32;
-                for (j, plo) in query_list.iter().take(query_list_len).enumerate() {
-                    if (query_terms_bitset & (1 << j)) > 0 {
-                        query_terms_max_score_sum +=
-                            plo.blocks[plo.p_block as usize].max_block_score;
-                    }
-                }
-                if search_result.topk_candidates.current_heap_size < top_k
-                    || !search_result.topk_candidates.can_prune(query_terms_max_score_sum, block_id_msb | i, top_k)
+                if !block_skip
+                    && (search_result.topk_candidates.current_heap_size < top_k
+                        || query_terms_bitset & mask > 0)
                 {
-                    for (j, query_term) in query_list.iter_mut().take(query_list_len).enumerate() {
-                        query_term.bm25_flag = (query_terms_bitset & (1 << j)) > 0;
-
-                        query_term.p_docid = p_docid_array[j];
+                    let mut query_terms_max_score_sum = 0f32;
+                    for (j, plo) in query_list.iter().take(query_list_len).enumerate() {
+                        if (query_terms_bitset & (1 << j)) > 0 {
+                            query_terms_max_score_sum +=
+                                plo.blocks[plo.p_block as usize].max_block_score;
+                        }
                     }
+                    if search_result.topk_candidates.current_heap_size < top_k
+                        || !search_result.topk_candidates.can_prune(query_terms_max_score_sum, block_id_msb | i, top_k)
+                    {
+                        for (j, query_term) in query_list.iter_mut().take(query_list_len).enumerate() {
+                            query_term.bm25_flag = (query_terms_bitset & (1 << j)) > 0;
 
-                    add_result_multiterm_multifield(
-                        shard,
-                        block_id_msb | i,
-                        &mut _result_count,
-                        search_result,
-                        top_k,
-                        result_type,
-                        field_filter_set,
-                        facet_filter,
-                        non_unique_query_list,
-                        query_list,
-                        not_query_list,
-                        false,
-                        f32::MAX,
-                        false,
-                    );
+                            query_term.p_docid = p_docid_array[j];
+                        }
+
+                        add_result_multiterm_multifield(
+                            shard,
+                            block_id_msb | i,
+                            &mut _result_count,
+                            search_result,
+                            top_k,
+                            result_type,
+                            field_filter_set,
+                            facet_filter,
+                            non_unique_query_list,
+                            query_list,
+                            not_query_list,
+                            false,
+                            f32::MAX,
+                            false,
+                        );
+                    }
                 }
-            }
 
+            }
+            // Excluded documents still occupy positive posting payload ranks.
             if !block_skip {
                 for (j, item) in p_docid_array.iter_mut().take(query_list_len).enumerate() {
                     *item += ((query_terms_bitset >> j) & 1) as usize

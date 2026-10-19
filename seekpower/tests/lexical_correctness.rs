@@ -207,6 +207,8 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
         }
         let avg = (65561 + 8191 * 5 + 14) as f64 / 73728.0;
         let all = search(&index, "alpha", false, 4, false, false).await;
+        assert_eq!(all.iter().map(|r| r.0).collect::<BTreeSet<_>>(),
+            [0, 1, 65536].into_iter().collect(), "complete append fixture membership");
         for &(id, score) in &all {
             let lens = match id {
                 0 => [1, 20],

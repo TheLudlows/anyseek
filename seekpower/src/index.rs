@@ -1846,8 +1846,9 @@ pub(crate) fn get_max_score(
     };
     // Accumulate the bound in f64 and round its final f32 value outward.
     // Slack also covers f32 TF arithmetic, field/component accumulation and
-    // the supported query-list bound summations (<=32 terms).
-    let rounding = (64.0 + 8.0 * index.indexed_field_vec.len() as f64) * f32::EPSILON as f64;
+    // summation through MAX_QUERY_TERM_NUMBER (100), not just the 32-bit scan window.
+    let rounding = (64.0 + 8.0 * index.indexed_field_vec.len() as f64
+        + 4.0 * MAX_QUERY_TERM_NUMBER as f64) * f32::EPSILON as f64;
     let slack = (rounding / (1.0 - rounding)).max(0.001);
     let upper = whole.max(component_sum) * (K + 1.0 + SIGMA) as f64 * weight;
     ((upper * (1.0 + slack) + 0.001) as f32).next_up()
@@ -3364,4 +3365,121 @@ pub(crate) struct DocumentItem {
     pub document: Document,
     pub unique_terms: AHashMap<String, TermObject>,
     pub field_vec: Vec<(usize, u8, u32, u32)>,
+}
+
+#[cfg(test)]
+mod score_bound_contract_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn saturation_bound_boosts_ngram_components_and_100_term_accumulation() {
+        assert_eq!(MAX_QUERY_TERM_NUMBER, 100);
+        for fields in [1, 3] {
+            let path = std::env::temp_dir().join(format!(
+                "seekpower-bound-contract-{}-{fields}",
+                std::process::id()
+            ));
+            assert!(!path.exists());
+            let schema: Vec<SchemaField> = serde_json::from_value(serde_json::Value::Array(
+                (0..fields)
+                    .map(|i| {
+                        serde_json::json!({"field":format!("f{i}"),"field_type":"Text",
+                    "store":false,"index_lexical":true,"boost":([0.25,4.0,8.0][i])})
+                    })
+                    .collect(),
+            ))
+            .unwrap();
+            let meta = IndexMetaObject {
+                id: 0,
+                name: "bound-contract".into(),
+                lexical_similarity: LexicalSimilarity::Bm25f,
+                tokenizer: TokenizerType::UnicodeAlphanumeric,
+                stop_words: StopwordType::None,
+                frequent_words: FrequentwordType::None,
+                ngram_indexing: 0,
+                document_compression: DocumentCompression::Snappy,
+                access_type: AccessType::Mmap,
+                clustering: Clustering::None,
+                inference: Inference::None,
+            };
+            let index = create_index(&path, meta, &schema, 11, true, Some(1))
+                .await
+                .unwrap();
+            {
+                let root = index.read().await;
+                let mut shard = root.shard_vec[0].write().await;
+                shard.indexed_doc_count = 10000;
+                let weights: Vec<f32> = if fields == 1 {
+                    vec![1.0]
+                } else {
+                    shard.indexed_schema_vec.iter().map(|s| s.boost).collect()
+                };
+                for kind in [
+                    NgramType::SingleTerm,
+                    NgramType::NgramFF,
+                    NgramType::NgramFFF,
+                ] {
+                    for whole_df in [1u32, 17, 5000, 10000] {
+                        let bound = get_max_score(
+                            &shard,
+                            &shard.segments_index[0],
+                            1,
+                            1234,
+                            9999,
+                            whole_df,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            &kind,
+                        );
+                        assert!(bound.is_finite() && bound > 0.0);
+                        // Test whole-gram proximity and component-scoring alternatives
+                        // separately, using literal BM25 parameters rather than a scorer.
+                        let mut alternatives = vec![vec![whole_df]];
+                        match kind {
+                            NgramType::NgramFF => alternatives.push(vec![1, 1234]),
+                            NgramType::NgramFFF => alternatives.push(vec![1, 1234, 9999]),
+                            _ => {}
+                        }
+                        for dfs in alternatives {
+                            for tf in [1f32, 3.0, 65535.0, 16_777_216.0] {
+                                for dl in [0f32, 1.0, 31.0, 4096.0, 1e8] {
+                                    for avg in [0.0001f32, 0.5, 1.0, 1024.0, 1e8] {
+                                        let mut score = 0f32;
+                                        for &df in &dfs {
+                                            let idf = (1.0
+                                                + (10000.0 - df as f32 + 0.5) / (df as f32 + 0.5))
+                                                .ln();
+                                            for &boost in &weights {
+                                                score += boost
+                                                    * idf
+                                                    * (tf * 2.2
+                                                        / (tf + 1.2 * (0.25 + 0.75 * dl / avg)));
+                                            }
+                                        }
+                                        assert!(score <= bound, "score={score}, bound={bound}");
+                                        let (mut query_score, mut query_bound) = (0f32, 0f32);
+                                        for _ in 0..MAX_QUERY_TERM_NUMBER {
+                                            query_score += score;
+                                            query_bound += bound;
+                                        }
+                                        assert!(
+                                            query_score <= query_bound,
+                                            "100-term accumulated bound"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                shard.indexed_doc_count = 0;
+            }
+            index.close().await;
+            drop(index);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
 }
