@@ -3126,11 +3126,15 @@ impl IndexDocumentShard2 for ShardArc {
 
         let do_commit = shard_mut.block_id != docid_local >> 16;
         if do_commit {
-            if shard_mut.is_vector_indexing {
-                shard_mut.commit_vector_shard().await;
+            // A caller may already have committed the complete previous block.
+            // Committing it again emits an empty duplicate level and offsets the
+            // appended postings. Only flush pending data; always advance the ID.
+            if shard_mut.uncommitted {
+                if shard_mut.is_vector_indexing {
+                    shard_mut.commit_vector_shard().await;
+                }
+                shard_mut.commit_lexical_shard(docid_local).await;
             }
-            shard_mut.commit_lexical_shard(docid_local).await;
-
             shard_mut.block_id = docid_local >> 16;
         }
 

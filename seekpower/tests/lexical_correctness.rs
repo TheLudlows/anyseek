@@ -211,7 +211,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                 0 => [1, 20],
                 1 => [3, 3],
                 65536 => [1, 13],
-                _ => panic!("unexpected doc"),
+                _ => panic!("unexpected doc {id}; results={all:?}; reopened={reopened}"),
             };
             close_score(
                 score,
