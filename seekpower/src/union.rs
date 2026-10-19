@@ -224,7 +224,7 @@ pub(crate) async fn union_docid<'a>(
             facet_filter,
         )
         .await;
-    } else {
+    } else if query_list.len() <= 32 {
         union_scan_32(
             shard,
             non_unique_query_list,
@@ -239,6 +239,10 @@ pub(crate) async fn union_docid<'a>(
             facet_filter,
         )
         .await;
+    } else {
+        union_scan_wide(shard, non_unique_query_list, query_list, not_query_list,
+            block_id, result_count, search_result, top_k, result_type,
+            field_filter_set, facet_filter).await;
     }
     if exact_metadata_count {
         let mut exact_count = count_before;
@@ -582,6 +586,245 @@ pub(crate) async fn union_scan_32<'a>(
 
     let mut max_score = 0.0;
     let mut mask = u32::MAX >> (union_max - cmp::min(query_list.len(), union_max));
+    // A partial heap has no valid top-k score threshold: its minimum can
+    // fall as new candidates arrive. Never freeze a mask from that value.
+    // Explicit sorts/browsing also cannot use this relevance-only mask.
+    if top_k > 0
+        && search_result.topk_candidates.current_heap_size >= top_k
+        && search_result.topk_candidates.result_sort.is_empty()
+        && !search_result.topk_candidates.empty_query
+        && search_result.topk_candidates._elements[0].score.is_finite()
+    {
+        for plo in query_list.iter_mut().take(union_max).rev() {
+            if plo.end_flag {
+                continue;
+            }
+            max_score += plo.blocks[plo.p_block as usize].max_block_score;
+
+            if max_score >= search_result.topk_candidates._elements[0].score {
+                break;
+            }
+
+            mask >>= 1;
+        }
+    }
+
+    let mut max_score = 0.0;
+
+    for (i, plo) in query_list.iter_mut().take(union_max).enumerate() {
+        if plo.end_flag {
+            continue;
+        }
+
+        plo.p_docid = 0;
+        let mask = 1 << i;
+        max_score += plo.blocks[plo.p_block as usize].max_block_score;
+
+        if plo.compression_type == CompressionType::Bitmap {
+            for ulong_pos in 0u64..1024 {
+                let mut intersect: u64 = read_u64(
+                    &plo.byte_array[plo.compressed_doc_id_range..],
+                    ulong_pos as usize * 8,
+                );
+
+                while intersect != 0 {
+                    let bit_pos = unsafe { _mm_tzcnt_64(intersect) } as u64;
+                    intersect = unsafe { _blsr_u64(intersect) };
+
+                    let docid = ((ulong_pos << 6) + bit_pos) as usize;
+                    query_terms_bitset_table[docid] |= mask;
+                }
+            }
+        } else if plo.compression_type == CompressionType::Array {
+            for i in 0..plo.p_docid_count {
+                let docid =
+                    read_u16(&plo.byte_array[plo.compressed_doc_id_range..], i * 2) as usize;
+
+                query_terms_bitset_table[docid] |= mask;
+            }
+        } else {
+            let runs_count = read_u16(&plo.byte_array[plo.compressed_doc_id_range..], 0) as i32;
+
+            for ii in (1..(runs_count << 1) + 1).step_by(2) {
+                let startdocid = read_u16(
+                    &plo.byte_array[plo.compressed_doc_id_range..],
+                    ii as usize * 2,
+                ) as usize;
+                let runlength = read_u16(
+                    &plo.byte_array[plo.compressed_doc_id_range..],
+                    (ii + 1) as usize * 2,
+                ) as usize;
+
+                for j in 0..=runlength {
+                    let docid = startdocid + j;
+
+                    query_terms_bitset_table[docid] |= mask;
+                }
+            }
+        }
+    }
+
+    // NOT changes eligibility, not positive membership or posting-rank order.
+    // Ordinary queries allocate no extra bitmap.
+    let mut excluded_docids = if not_query_list.iter().any(|p| p.bm25_flag) {
+        vec![0u64; 1024]
+    } else { Vec::new() };
+
+    for plo in not_query_list.iter_mut() {
+        if !plo.bm25_flag {
+            continue;
+        }
+
+        if plo.compression_type == CompressionType::Bitmap {
+            for ulong_pos in 0u64..1024 {
+                let mut intersect: u64 = read_u64(
+                    &plo.byte_array[plo.compressed_doc_id_range..],
+                    ulong_pos as usize * 8,
+                );
+
+                while intersect != 0 {
+                    let bit_pos = unsafe { _mm_tzcnt_64(intersect) } as u64;
+                    intersect = unsafe { _blsr_u64(intersect) };
+
+                    let docid = ((ulong_pos << 6) + bit_pos) as usize;
+                    excluded_docids[docid >> 6] |= 1u64 << (docid & 63);
+                }
+            }
+        } else if plo.compression_type == CompressionType::Array {
+            for i in 0..plo.p_docid_count {
+                let docid =
+                    read_u16(&plo.byte_array[plo.compressed_doc_id_range..], i * 2) as usize;
+
+                excluded_docids[docid >> 6] |= 1u64 << (docid & 63);
+            }
+        } else {
+            let runs_count = read_u16(&plo.byte_array[plo.compressed_doc_id_range..], 0) as i32;
+
+            for ii in (1..(runs_count << 1) + 1).step_by(2) {
+                let startdocid = read_u16(
+                    &plo.byte_array[plo.compressed_doc_id_range..],
+                    ii as usize * 2,
+                ) as usize;
+                let runlength = read_u16(
+                    &plo.byte_array[plo.compressed_doc_id_range..],
+                    (ii + 1) as usize * 2,
+                ) as usize;
+
+                for j in 0..=runlength {
+                    let docid = startdocid + j;
+
+                    excluded_docids[docid >> 6] |= 1u64 << (docid & 63);
+                }
+            }
+        }
+    }
+
+    let block_skip = search_result.topk_candidates.current_heap_size >= top_k
+        && search_result.topk_candidates.can_prune(max_score, block_id << 16, top_k)
+        && search_result.topk_candidates.result_sort.is_empty();
+
+    let query_list_len = cmp::min(query_list.len(), union_max);
+
+    // A full block consumes 65,536 postings, including its one-past-end cursor.
+    let mut p_docid_array = vec![0usize; union_max];
+
+    let mut _result_count = 0;
+    let block_id_msb = block_id << 16;
+
+    for (i, query_terms_bitset) in query_terms_bitset_table.iter().enumerate() {
+        if *query_terms_bitset > 0 {
+            let excluded = !excluded_docids.is_empty()
+                && excluded_docids[i >> 6] & (1u64 << (i & 63)) != 0;
+            if !excluded {
+                result_count_local += 1;
+
+                if !block_skip
+                    && (search_result.topk_candidates.current_heap_size < top_k
+                        || query_terms_bitset & mask > 0)
+                {
+                    let mut query_terms_max_score_sum = 0f32;
+                    for (j, plo) in query_list.iter().take(query_list_len).enumerate() {
+                        if (query_terms_bitset & (1 << j)) > 0 {
+                            query_terms_max_score_sum +=
+                                plo.blocks[plo.p_block as usize].max_block_score;
+                        }
+                    }
+                    if search_result.topk_candidates.current_heap_size < top_k
+                        || !search_result.topk_candidates.can_prune(query_terms_max_score_sum, block_id_msb | i, top_k)
+                    {
+                        for (j, query_term) in query_list.iter_mut().take(query_list_len).enumerate() {
+                            query_term.bm25_flag = (query_terms_bitset & (1 << j)) > 0;
+
+                            query_term.p_docid = p_docid_array[j];
+                        }
+
+                        add_result_multiterm_multifield(
+                            shard,
+                            block_id_msb | i,
+                            &mut _result_count,
+                            search_result,
+                            top_k,
+                            result_type,
+                            field_filter_set,
+                            facet_filter,
+                            non_unique_query_list,
+                            query_list,
+                            not_query_list,
+                            false,
+                            f32::MAX,
+                            false,
+                        );
+                    }
+                }
+
+            }
+            // Excluded documents still occupy positive posting payload ranks.
+            if !block_skip {
+                for (j, item) in p_docid_array.iter_mut().take(query_list_len).enumerate() {
+                    *item += ((query_terms_bitset >> j) & 1) as usize
+                }
+            }
+
+            continue;
+        }
+    }
+
+    *result_count += result_count_local;
+}
+
+// Same block scan and posting-rank contract as the <=32 path, with enough
+// membership bits for the supported100 query terms. Ordinary queries retain
+// their existing8/32-bit paths and allocation costs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn union_scan_wide<'a>(
+    shard: &'a Shard,
+    non_unique_query_list: &mut [NonUniquePostingListObjectQuery<'a>],
+    query_list: &mut [PostingListObjectQuery<'a>],
+    not_query_list: &mut [PostingListObjectQuery<'a>],
+    block_id: usize,
+    result_count: &mut i32,
+    search_result: &mut SearchResult<'_>,
+    top_k: usize,
+    result_type: &ResultType,
+    field_filter_set: &AHashSet<u16>,
+    facet_filter: &[FilterSparse],
+) {
+    let union_max = 128usize;
+    debug_assert!(query_list.len() <= crate::index::MAX_QUERY_TERM_NUMBER);
+
+    // Only queries above32 terms allocate the wider heap-backed membership table.
+    let mut query_terms_bitset_table = vec![0u128; ROARING_BLOCK_SIZE];
+    let mut result_count_local = 0;
+
+    query_list.sort_by(|a, b| {
+        b.blocks[b.p_block as usize]
+            .max_block_score
+            .partial_cmp(&a.blocks[a.p_block as usize].max_block_score)
+            .unwrap()
+    });
+
+    let mut max_score = 0.0;
+    let mut mask = u128::MAX >> (union_max - cmp::min(query_list.len(), union_max));
     // A partial heap has no valid top-k score threshold: its minimum can
     // fall as new candidates arrive. Never freeze a mask from that value.
     // Explicit sorts/browsing also cannot use this relevance-only mask.

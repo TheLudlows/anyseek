@@ -81,7 +81,10 @@ fn tokens<'a>(d: &'a Value, field: &str) -> Vec<&'a str> {
 fn decoded(n: usize) -> usize {
     match n {
         0..=23 => n,
-        100 => 96,
+        32 => 32,
+        33 => 33,
+        64 | 65 => 64,
+        99 | 100 => 96,
         _ => panic!("fixture length has no independent literal decode: {n}"),
     }
 }
@@ -439,5 +442,54 @@ async fn mixed_global_df_uses_all_physical_documents_without_changing_visibility
         index.close().await;
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn wide_or_boundaries_preserve_membership_scores_not_and_reopen() {
+    for policy in [
+        FieldLengthNormalization::Shared,
+        FieldLengthNormalization::PerField,
+    ] {
+        for n in [32, 33, 64, 65, 99, 100] {
+            let (mut index, path) =
+                fresh_policy(&format!("wide-{policy:?}-{n}"), 1, 0, policy).await;
+            let terms = (0..n)
+                .map(|i| format!("t{i:03}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let docs = vec![
+                json!({"title":terms}),
+                json!({"title":"t000 banned"}),
+                json!({"title":"t000"}),
+            ];
+            add(&index, &docs, 3).await;
+            for stage in 0..3 {
+                if stage == 1 {
+                    index.commit().await;
+                }
+                if stage == 2 {
+                    index.close().await;
+                    drop(index);
+                    index = open_index(&path).await.unwrap();
+                }
+                // Only title is populated: Shared andPerField have the same independently
+                // specified denominator, including the compressed32/64/96 length buckets.
+                check(&index, &docs, &BTreeSet::new(), &terms, 1).await;
+                if n < 100 {
+                    check(
+                        &index,
+                        &docs,
+                        &BTreeSet::new(),
+                        &format!("{terms} -banned"),
+                        1,
+                    )
+                    .await;
+                }
+            }
+            index.close().await;
+            drop(index);
+            std::fs::remove_dir_all(path).unwrap();
+        }
     }
 }
