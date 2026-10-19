@@ -204,10 +204,12 @@ pub(crate) async fn union_docid<'a>(
     }
 
     // Ranked scans may prune candidates. Reuse the exact bitmap pass
-    // for document hit counts when filters or large disjunctions require it.
+    // for document hit counts when filters, deletions, or large disjunctions require it.
     let count_before = *result_count;
     let exact_metadata_count = result_type == &ResultType::TopkCount
-        && (query_list.len() > 32 || !facet_filter.is_empty());
+        && (query_list.len() > 32
+            || !facet_filter.is_empty()
+            || !shard.delete_hashset.is_empty());
 
     if query_list.len() <= 8 {
         union_scan_8(
