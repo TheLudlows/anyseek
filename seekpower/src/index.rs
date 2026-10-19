@@ -3384,7 +3384,9 @@ impl IndexDocumentShard2 for ShardArc {
                 longest_field_id = shard_mut.longest_field_id;
             }
             shard_mut.longest_field_id = longest_field_id;
-            shard_mut.indexed_field_vec[longest_field_id].is_longest_field = true;
+            for field in &mut shard_mut.indexed_field_vec {
+                field.is_longest_field = field.indexed_field_id == longest_field_id;
+            }
             if shard_mut.longest_field_auto && shard_mut.indexed_field_vec.len() > 1 {
                 log::debug!(
                     "detect longest field id {} name {} length {}",
