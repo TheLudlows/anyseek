@@ -568,7 +568,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
 
                     let tf = field.1 as f32;
 
-                    bm25f += plo_single.idf
+                    bm25f += shard.indexed_schema_vec[field_id].boost * plo_single.idf
                         * ((tf * (K + 1.0)
                             / (tf + (K * (1.0 - B + (B * document_length_quotient)))))
                             + SIGMA);
@@ -587,7 +587,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
 
                     let tf_ngram1 = field.1 as f32;
 
-                    bm25f += plo_single.idf_ngram1
+                    bm25f += shard.indexed_schema_vec[field_id].boost * plo_single.idf_ngram1
                         * ((tf_ngram1 * (K + 1.0)
                             / (tf_ngram1 + (K * (1.0 - B + (B * document_length_quotient)))))
                             + SIGMA);
@@ -605,7 +605,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
 
                     let tf_ngram2 = field.1 as f32;
 
-                    bm25f += plo_single.idf_ngram2
+                    bm25f += shard.indexed_schema_vec[field_id].boost * plo_single.idf_ngram2
                         * ((tf_ngram2 * (K + 1.0)
                             / (tf_ngram2 + (K * (1.0 - B + (B * document_length_quotient)))))
                             + SIGMA);
@@ -624,7 +624,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
 
                     let tf_ngram1 = field.1 as f32;
 
-                    bm25f += plo_single.idf_ngram1
+                    bm25f += shard.indexed_schema_vec[field_id].boost * plo_single.idf_ngram1
                         * ((tf_ngram1 * (K + 1.0)
                             / (tf_ngram1 + (K * (1.0 - B + (B * document_length_quotient)))))
                             + SIGMA);
@@ -642,7 +642,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
 
                     let tf_ngram2 = field.1 as f32;
 
-                    bm25f += plo_single.idf_ngram2
+                    bm25f += shard.indexed_schema_vec[field_id].boost * plo_single.idf_ngram2
                         * ((tf_ngram2 * (K + 1.0)
                             / (tf_ngram2 + (K * (1.0 - B + (B * document_length_quotient)))))
                             + SIGMA);
@@ -660,7 +660,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
 
                     let tf_ngram3 = field.1 as f32;
 
-                    bm25f += plo_single.idf_ngram3
+                    bm25f += shard.indexed_schema_vec[field_id].boost * plo_single.idf_ngram3
                         * ((tf_ngram3 * (K + 1.0)
                             / (tf_ngram3 + (K * (1.0 - B + (B * document_length_quotient)))))
                             + SIGMA);
