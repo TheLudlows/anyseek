@@ -38,6 +38,31 @@ pub struct Result {
     pub source: ResultSource,
 }
 
+/// Numeric score ordering: larger is better, signed zeros tie, and all NaNs
+/// rank below numbers (including infinities). External vectors reject NaNs;
+/// this fallback keeps internal comparison transitive without changing scores.
+#[inline]
+pub(crate) fn score_ordering(a: f32, b: f32) -> core::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => core::cmp::Ordering::Equal,
+        (true, false) => core::cmp::Ordering::Less,
+        (false, true) => core::cmp::Ordering::Greater,
+        (false, false) => a.partial_cmp(&b).unwrap(),
+    }
+}
+
+/// Greater means a better candidate. Use the same rule before TopK truncation
+/// and after shard merging; local IDs preserve global ID order within a shard.
+#[inline]
+pub(crate) fn rank_ordering(
+    a_score: f32,
+    a_id: usize,
+    b_score: f32,
+    b_id: usize,
+) -> core::cmp::Ordering {
+    score_ordering(a_score, b_score).then_with(|| b_id.cmp(&a_id))
+}
+
 /// MinHeap implements an min-heap, which is a binary heap used as priority queue.
 /// Maintains a list of the top-k most relevant result candidates.
 /// Better performance than a ordered list with binary search, inserts, and deletes
@@ -81,18 +106,15 @@ pub(crate) fn result_ordering_root(
 
         if field.idx == usize::MAX - 1 {
             let order = if field.order == SortOrder::Descending {
-                result1
-                    .score
-                    .partial_cmp(&result2.score)
-                    .unwrap_or(core::cmp::Ordering::Equal)
+                score_ordering(result1.score, result2.score)
             } else {
-                result2
-                    .score
-                    .partial_cmp(&result1.score)
-                    .unwrap_or(core::cmp::Ordering::Equal)
+                score_ordering(result2.score, result1.score)
             };
 
-            return order;
+            if !order.is_eq() {
+                return order;
+            }
+            continue;
         }
 
         match shard1.facets[field.idx].field_type {
@@ -502,13 +524,10 @@ pub(crate) fn result_ordering_root(
         }
     }
 
-    if empty_query {
+    if empty_query && result_sort.is_empty() {
         result1.doc_id.cmp(&result2.doc_id)
     } else {
-        result1
-            .score
-            .partial_cmp(&result2.score)
-            .unwrap_or(core::cmp::Ordering::Equal)
+        rank_ordering(result1.score, result1.doc_id, result2.score, result2.doc_id)
     }
 }
 
@@ -559,18 +578,15 @@ impl<'a> MinHeap<'a> {
 
             if field.idx == usize::MAX - 1 {
                 let order = if field.order == SortOrder::Descending {
-                    result1
-                        .score
-                        .partial_cmp(&result2.score)
-                        .unwrap_or(core::cmp::Ordering::Equal)
+                    score_ordering(result1.score, result2.score)
                 } else {
-                    result2
-                        .score
-                        .partial_cmp(&result1.score)
-                        .unwrap_or(core::cmp::Ordering::Equal)
+                    score_ordering(result2.score, result1.score)
                 };
 
-                return order;
+                if !order.is_eq() {
+                    return order;
+                }
+                continue;
             }
 
             match self.index.facets[field.idx].field_type {
@@ -980,13 +996,10 @@ impl<'a> MinHeap<'a> {
             }
         }
 
-        if self.empty_query {
+        if self.empty_query && self.result_sort.is_empty() {
             result1.doc_id.cmp(&result2.doc_id)
         } else {
-            result1
-                .score
-                .partial_cmp(&result2.score)
-                .unwrap_or(core::cmp::Ordering::Equal)
+            rank_ordering(result1.score, result1.doc_id, result2.score, result2.doc_id)
         }
     }
 
@@ -1129,14 +1142,35 @@ impl<'a> MinHeap<'a> {
         }
     }
 
-    /// Snapshot (heap size, heap minimum) to detect scoring progress.
+    /// Prune only if even the best possible (score upper bound, ID lower
+    /// bound) cannot improve the full heap. Bounds and IDs are shard-local.
+    /// Unknown/NaN bounds, browsing and explicit user sorts must keep scanning.
     #[inline(always)]
-    pub(crate) fn heap_progress(&self) -> (usize, f32) {
+    pub(crate) fn can_prune(&self, score_upper: f32, id_lower: usize, top_k: usize) -> bool {
+        if top_k == 0
+            || self.current_heap_size < top_k
+            || self.empty_query
+            || !self.result_sort.is_empty()
+            || score_upper.is_nan()
+        {
+            return false;
+        }
+        let worst = self._elements[0];
+        score_upper < worst.score || (score_upper == worst.score && id_lower >= worst.doc_id)
+    }
+
+    /// Snapshot the complete worst rank, including ID improvements at equal score.
+    #[inline(always)]
+    pub(crate) fn heap_progress(&self) -> (usize, Result) {
         let size = self.current_heap_size;
         let min = if size > 0 {
-            self._elements[0].score
+            self._elements[0]
         } else {
-            f32::NEG_INFINITY
+            Result {
+                doc_id: usize::MAX,
+                score: f32::NEG_INFINITY,
+                ..Default::default()
+            }
         };
         (size, min)
     }
@@ -1153,7 +1187,10 @@ impl<'a> MinHeap<'a> {
 
     #[inline(always)]
     pub(crate) fn add_topk(&mut self, result: Result, top_k: usize) -> bool {
-        if self.current_heap_size > top_k
+        if top_k == 0 {
+            return false;
+        }
+        if self.current_heap_size >= top_k
             && self
                 .result_ordering_shard(self._elements[0], result)
                 .is_ge()
@@ -1217,6 +1254,137 @@ impl<'a> MinHeap<'a> {
             true
         } else {
             false
+        }
+    }
+}
+
+#[cfg(test)]
+mod stable_ranking_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stable_heap_topk_input_order_and_duplicates() {
+        use crate::index::*;
+        use crate::vector::Inference;
+        let path =
+            std::env::temp_dir().join(format!("seekpower-stable-heap-{}", std::process::id()));
+        assert!(!path.exists());
+        let schema = serde_json::from_str(
+            r#"[{"field":"body","field_type":"Text","store":false,"index_lexical":true}]"#,
+        )
+        .unwrap();
+        let meta = IndexMetaObject {
+            id: 0,
+            name: "heap".into(),
+            lexical_similarity: LexicalSimilarity::Bm25f,
+            tokenizer: TokenizerType::UnicodeAlphanumeric,
+            stop_words: StopwordType::None,
+            frequent_words: FrequentwordType::None,
+            ngram_indexing: NgramSet::SingleTerm as u8,
+            document_compression: DocumentCompression::Snappy,
+            access_type: AccessType::Mmap,
+            clustering: Clustering::None,
+            inference: Inference::None,
+        };
+        let index = create_index(&path, meta, &schema, 11, false, Some(1))
+            .await
+            .unwrap();
+        {
+            let root = index.read().await;
+            let shard = root.shard_vec[0].read().await;
+            let sorts = vec![];
+            for order in [
+                (0..97).collect::<Vec<_>>(),
+                (0..97).rev().collect(),
+                (0..97).map(|i| (i * 37) % 97).collect(),
+            ] {
+                let mut heap = MinHeap::new(7, &shard, false, &sorts);
+                for id in order {
+                    heap.add_topk(
+                        Result {
+                            doc_id: id,
+                            score: 1.0,
+                            ..Default::default()
+                        },
+                        7,
+                    );
+                }
+                assert!(heap.can_prune(1.0, 6, 7));
+                assert!(heap.can_prune(1.0, 1 << 16, 7));
+                assert!(!heap.can_prune(1.0, 0, 7));
+                assert!(!heap.can_prune(1.0, 5, 7));
+                assert!(heap.can_prune(0.5, 0, 7));
+                assert!(!heap.can_prune(2.0, usize::MAX, 7));
+                assert!(!heap.can_prune(f32::NAN, usize::MAX, 7));
+                assert!(!heap.can_prune(0.0, 100, 8));
+                // A bound may be discarded only when every represented key
+                // is no better than the actual root, including equal IDs.
+                for upper in [0.5, 1.0, 2.0] {
+                    for lower in [0, 5, 6, 65536] {
+                        if heap.can_prune(upper, lower, 7) {
+                            for score in [upper - 0.5, upper] {
+                                for id in [lower, lower + 1] {
+                                    assert!(rank_ordering(score, id, 1.0, 6).is_le());
+                                }
+                            }
+                        }
+                    }
+                }
+                let explicit = vec![ResultSortIndex {
+                    idx: usize::MAX - 1,
+                    order: SortOrder::Descending,
+                }];
+                heap.result_sort = &explicit;
+                assert!(!heap.can_prune(0.0, usize::MAX, 7));
+                heap.result_sort = &sorts;
+                heap.empty_query = true;
+                assert!(!heap.can_prune(0.0, usize::MAX, 7));
+                heap.empty_query = false;
+                heap.pin_heap();
+                assert!(!heap.add_topk(
+                    Result {
+                        doc_id: 0,
+                        score: 1.0,
+                        ..Default::default()
+                    },
+                    7
+                ));
+                let mut ids: Vec<_> = heap._elements[..heap.current_heap_size]
+                    .iter()
+                    .map(|x| x.doc_id)
+                    .collect();
+                ids.sort();
+                assert_eq!(ids, (0..7).collect::<Vec<_>>());
+            }
+        }
+        index.close().await;
+        drop(index);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn stable_score_order_is_total_and_zero_is_a_tie() {
+        let values = [
+            f32::NAN,
+            f32::from_bits(0xffc00001),
+            f32::NEG_INFINITY,
+            -1.0,
+            -0.0,
+            0.0,
+            1.0,
+            f32::INFINITY,
+        ];
+        assert!(score_ordering(-0.0, 0.0).is_eq());
+        assert!(rank_ordering(-0.0, 1, 0.0, 2).is_gt());
+        for a in values {
+            for b in values {
+                for c in values {
+                    assert_eq!(score_ordering(a, b), score_ordering(b, a).reverse());
+                    if score_ordering(a, b).is_le() && score_ordering(b, c).is_le() {
+                        assert!(score_ordering(a, c).is_le());
+                    }
+                }
+            }
         }
     }
 }

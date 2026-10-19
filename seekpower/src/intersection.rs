@@ -62,7 +62,7 @@ pub(crate) fn intersection_bitmap_2(
             *result_count += u64::count_ones(intersect) as i32;
         } else if !filtered
             && search_result.topk_candidates.current_heap_size == top_k
-            && block_score <= search_result.topk_candidates._elements[0].score
+            && search_result.topk_candidates.can_prune(block_score, block_id << 16, top_k)
         {
             if result_type != &ResultType::Topk {
                 *result_count += u64::count_ones(intersect) as i32;
@@ -249,7 +249,7 @@ pub(crate) async fn intersection_docid(
         && search_result.topk_candidates.result_sort.is_empty()
         && (result_type == &ResultType::Topk)
         && (search_result.topk_candidates.current_heap_size == top_k)
-        && (block_score <= search_result.topk_candidates._elements[0].score)
+        && (search_result.topk_candidates.can_prune(block_score, block_id << 16, top_k))
     {
         return;
     }
@@ -646,8 +646,7 @@ pub(crate) async fn intersection_docid(
                             && !filtered
                             && (result_type == &ResultType::Count
                                 || ((search_result.topk_candidates.current_heap_size == top_k)
-                                    && (block_score
-                                        <= search_result.topk_candidates._elements[0].score)))
+                                    && (search_result.topk_candidates.can_prune(block_score, block_id << 16, top_k))))
                         {
                             if result_type != &ResultType::Topk {
                                 *result_count += 1;
@@ -2080,9 +2079,10 @@ pub(crate) async fn intersection_blockid<'a>(
                     };
                     block_vec.push(block_object);
                 } else if !SPEEDUP_FLAG
+                    || !search_result.topk_candidates.result_sort.is_empty()
                     || result_type == &ResultType::Count
                     || search_result.topk_candidates.current_heap_size < top_k
-                    || block_score > search_result.topk_candidates._elements[0].score
+                    || !search_result.topk_candidates.can_prune(block_score, (block_id1 as usize) << 16, top_k)
                 {
                     {
                         for query_list_item_mut in query_list.iter_mut() {
@@ -2153,12 +2153,12 @@ pub(crate) async fn intersection_blockid<'a>(
     }
 
     if SORT_FLAG && SPEEDUP_FLAG && (result_type != &ResultType::Count) {
-        block_vec.sort_unstable_by(|x, y| y.block_score.partial_cmp(&x.block_score).unwrap());
+        block_vec.sort_unstable_by(|x, y| y.block_score.partial_cmp(&x.block_score).unwrap().then_with(|| x.block_id.cmp(&y.block_id)));
         for block in block_vec {
             if (result_type == &ResultType::Topk)
                 && search_result.topk_candidates.result_sort.is_empty()
                 && (search_result.topk_candidates.current_heap_size == top_k)
-                && (block.block_score <= search_result.topk_candidates._elements[0].score)
+                && (search_result.topk_candidates.can_prune(block.block_score, block.block_id << 16, top_k))
             {
                 break;
             }

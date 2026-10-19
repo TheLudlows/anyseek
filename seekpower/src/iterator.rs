@@ -376,7 +376,8 @@ pub(crate) async fn search_iterator_index(
     if result_type != ResultType::Count {
         let iterator = if result_sort.len() == 1
             && !result_sort.is_empty()
-            && result_sort.first().unwrap().order == SortOrder::Ascending
+            && (result_sort.first().unwrap().field == "_score"
+                || result_sort.first().unwrap().order == SortOrder::Ascending)
         {
             index_arc
                 .get_iterator(None, offset, length as isize, false, false, vec![])

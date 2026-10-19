@@ -478,7 +478,7 @@ pub(crate) async fn union_scan_8<'a>(
     }
 
     let block_skip = search_result.topk_candidates.current_heap_size >= top_k
-        && max_score <= search_result.topk_candidates._elements[0].score
+        && search_result.topk_candidates.can_prune(max_score, block_id << 16, top_k)
         && search_result.topk_candidates.result_sort.is_empty();
 
     let query_list_len = cmp::min(query_list.len(), union_max);
@@ -493,7 +493,8 @@ pub(crate) async fn union_scan_8<'a>(
         }
     }
 
-    let mut p_docid_array = vec![0u16; union_max];
+    // A full block consumes 65,536 postings, including its one-past-end cursor.
+    let mut p_docid_array = vec![0usize; union_max];
 
     let mut _result_count = 0;
     let block_id_msb = block_id << 16;
@@ -504,13 +505,13 @@ pub(crate) async fn union_scan_8<'a>(
 
             if !block_skip
                 && (search_result.topk_candidates.current_heap_size < top_k
-                    || query_terms_max_score_sum_table[*query_terms_bitset as usize]
-                        > search_result.topk_candidates._elements[0].score)
+                    || !search_result.topk_candidates.can_prune(
+                        query_terms_max_score_sum_table[*query_terms_bitset as usize], block_id_msb | i, top_k))
             {
                 for (j, query_term) in query_list.iter_mut().take(query_list_len).enumerate() {
                     query_term.bm25_flag = (query_terms_bitset & (1 << j)) > 0;
 
-                    query_term.p_docid = p_docid_array[j] as usize;
+                    query_term.p_docid = p_docid_array[j];
                 }
 
                 add_result_multiterm_multifield(
@@ -533,7 +534,7 @@ pub(crate) async fn union_scan_8<'a>(
 
             if !block_skip {
                 for (j, item) in p_docid_array.iter_mut().take(query_list_len).enumerate() {
-                    *item += ((query_terms_bitset >> j) & 1) as u16
+                    *item += ((query_terms_bitset >> j) & 1) as usize
                 }
             }
         }
@@ -576,7 +577,7 @@ pub(crate) async fn union_scan_32<'a>(
         }
         max_score += plo.blocks[plo.p_block as usize].max_block_score;
 
-        if max_score > search_result.topk_candidates._elements[0].score {
+        if max_score >= search_result.topk_candidates._elements[0].score {
             break;
         }
 
@@ -688,12 +689,13 @@ pub(crate) async fn union_scan_32<'a>(
     }
 
     let block_skip = search_result.topk_candidates.current_heap_size >= top_k
-        && max_score <= search_result.topk_candidates._elements[0].score
+        && search_result.topk_candidates.can_prune(max_score, block_id << 16, top_k)
         && search_result.topk_candidates.result_sort.is_empty();
 
     let query_list_len = cmp::min(query_list.len(), union_max);
 
-    let mut p_docid_array = vec![0u16; union_max];
+    // A full block consumes 65,536 postings, including its one-past-end cursor.
+    let mut p_docid_array = vec![0usize; union_max];
 
     let mut _result_count = 0;
     let block_id_msb = block_id << 16;
@@ -714,12 +716,12 @@ pub(crate) async fn union_scan_32<'a>(
                     }
                 }
                 if search_result.topk_candidates.current_heap_size < top_k
-                    || query_terms_max_score_sum > search_result.topk_candidates._elements[0].score
+                    || !search_result.topk_candidates.can_prune(query_terms_max_score_sum, block_id_msb | i, top_k)
                 {
                     for (j, query_term) in query_list.iter_mut().take(query_list_len).enumerate() {
                         query_term.bm25_flag = (query_terms_bitset & (1 << j)) > 0;
 
-                        query_term.p_docid = p_docid_array[j] as usize;
+                        query_term.p_docid = p_docid_array[j];
                     }
 
                     add_result_multiterm_multifield(
@@ -743,7 +745,7 @@ pub(crate) async fn union_scan_32<'a>(
 
             if !block_skip {
                 for (j, item) in p_docid_array.iter_mut().take(query_list_len).enumerate() {
-                    *item += ((query_terms_bitset >> j) & 1) as u16
+                    *item += ((query_terms_bitset >> j) & 1) as usize
                 }
             }
 
@@ -1022,7 +1024,7 @@ pub(crate) async fn union_docid_2<'a>(
     }
 
     if (search_result.topk_candidates.current_heap_size < top_k)
-        || (query_list[0].max_list_score > search_result.topk_candidates._elements[0].score)
+        || (query_list[0].max_list_score >= search_result.topk_candidates._elements[0].score)
     {
         search_result.topk_candidates.pin_heap();
 
@@ -1043,7 +1045,7 @@ pub(crate) async fn union_docid_2<'a>(
     }
 
     if (search_result.topk_candidates.current_heap_size < top_k)
-        || (query_list[1].max_list_score > search_result.topk_candidates._elements[0].score)
+        || (query_list[1].max_list_score >= search_result.topk_candidates._elements[0].score)
     {
         search_result.topk_candidates.pin_heap();
 
@@ -1138,7 +1140,7 @@ pub(crate) async fn union_docid_3<'a>(
                 let (heap_size_after, heap_min_after) =
                     search_result.topk_candidates.heap_progress();
                 let productive = heap_size_after > heap_size_before
-                    || (heap_size_after > 0 && heap_min_after > heap_min_before);
+                    || (heap_size_after > 0 && search_result.topk_candidates.result_ordering_shard(heap_min_after, heap_min_before).is_gt());
                 streak = if productive { 0 } else { empty_streak + 1 };
             }
 
@@ -1166,7 +1168,7 @@ pub(crate) async fn union_docid_3<'a>(
                     }
 
                     if search_result.topk_candidates.current_heap_size < top_k
-                        || max_score > search_result.topk_candidates._elements[0].score
+                        || max_score >= search_result.topk_candidates._elements[0].score
                     {
                         if !query_queue.is_empty()
                             && max_score > query_queue[query_queue.len() - 1].max_score
@@ -1218,7 +1220,7 @@ pub(crate) async fn union_docid_3<'a>(
         if !query_queue.is_empty()
             && (search_result.topk_candidates.current_heap_size < top_k
                 || query_queue.first().unwrap().max_score
-                    > search_result.topk_candidates._elements[0].score)
+                    >= search_result.topk_candidates._elements[0].score)
         {
             search_result.topk_candidates.pin_heap();
 
@@ -1246,7 +1248,7 @@ pub(crate) async fn union_docid_3<'a>(
                 let mut merged: Vec<PostingListObjectQuery> = Vec::new();
                 for pending in query_queue.iter() {
                     if search_result.topk_candidates.current_heap_size >= top_k
-                        && pending.max_score <= search_result.topk_candidates._elements[0].score
+                        && pending.max_score < search_result.topk_candidates._elements[0].score
                     {
                         continue;
                     }

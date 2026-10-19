@@ -659,6 +659,32 @@ def exercise(binary, workdir):
                 'Access-Control-Allow-Methods': 'GET, HEAD, POST, PATCH, DELETE, OPTIONS'})
             print('PASS storage failures return structured 500 without publishing failed resources')
 
+            # Equal ranks must survive candidate truncation and concurrent HTTP requests.
+            from concurrent.futures import ThreadPoolExecutor
+            stable_id = api('POST', '/api/v1/index', {
+                'index_name': 'stable-ranking', 'schema': [
+                    {'field': 'body', 'field_type': 'Text'},
+                    {'field': 'ordinal', 'field_type': 'U64', 'filterable': True},
+                    {'field': 'vector', 'field_type': 'Json', 'index_vector': True}],
+                'vector': {'dimensions': 3}})
+            stable_path = f'/api/v1/index/{stable_id}'
+            api('POST', stable_path + '/doc', [
+                {'body': 'alpha beta', 'ordinal': i, 'vector': [1, 0, 0]}
+                for i in range(90)])
+            api('PATCH', stable_path)
+            for payload in ({'query': 'alpha beta'}, {'query_vector': [1, 0, 0]},
+                            {'query': 'alpha beta', 'query_vector': [1, 0, 0]}):
+                def ranked(_):
+                    result = api('POST', stable_path + '/query', {**payload, 'length': 7})
+                    return [(doc['ordinal'], doc['_score']) for doc in result['results']]
+                expected = ranked(None)
+                check([row[0] for row in expected] == list(range(7)), 'stable tied top K IDs')
+                for concurrency in (1, 4):
+                    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                        check(all(rows == expected for rows in pool.map(ranked, range(12))),
+                              'stable lexical/vector/hybrid C1/C4')
+            print('PASS stable tied TopK across lexical/vector/hybrid HTTP C1/C4')
+
             # Minimal public settings resolve once at creation and survive restart.
             defaults = {'index_name': 'defaults', 'schema': [
                 {'field': 'body', 'field_type': 'Text'},
