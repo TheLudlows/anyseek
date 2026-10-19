@@ -271,6 +271,71 @@ pub(crate) async fn intersection_docid(
         }
     });
 
+    // A range-driven probe must not advance past an earlier sparse-list match.
+    // Mixed multi-list RLE paths previously reused that sparse posting rank,
+    // admitting documents that did not contain every term and mis-scoring OR
+    // subsets. Resolve each complete intersection from explicit posting ranks.
+    // This bounded-block fallback favors correctness over the old mixed cursors.
+    if query_list.len() >= 3
+        && query_list.iter().any(|p| p.compression_type == CompressionType::Rle)
+        && query_list.iter().all(|p| matches!(p.compression_type,
+            CompressionType::Array | CompressionType::Bitmap | CompressionType::Rle))
+    {
+        let lists: Vec<Vec<u16>> = query_list.iter().map(|plo| {
+            let bytes = &plo.byte_array[plo.compressed_doc_id_range..];
+            let mut docs = Vec::with_capacity(plo.p_docid_count);
+            match plo.compression_type {
+                CompressionType::Array => {
+                    for i in 0..plo.p_docid_count { docs.push(read_u16(bytes, i * 2)); }
+                }
+                CompressionType::Bitmap => {
+                    for word in 0..1024usize {
+                        let mut bits = read_u64(bytes, word * 8);
+                        while bits != 0 {
+                            docs.push((word * 64 + bits.trailing_zeros() as usize) as u16);
+                            bits &= bits - 1;
+                        }
+                    }
+                }
+                CompressionType::Rle => {
+                    for run in 0..read_u16(bytes, 0) as usize {
+                        let first = read_u16(bytes, 2 + run * 4) as u32;
+                        let last = first + read_u16(bytes, 4 + run * 4) as u32;
+                        for doc in first..=last { docs.push(doc as u16); }
+                    }
+                }
+                _ => unreachable!(),
+            }
+            debug_assert_eq!(docs.len(), plo.p_docid_count);
+            docs
+        }).collect();
+        let anchor = lists.iter().enumerate().min_by_key(|(_, v)| v.len()).unwrap().0;
+        let mut ranks = vec![0usize; lists.len()];
+        for &doc in &lists[anchor] {
+            let mut present = true;
+            for (i, list) in lists.iter().enumerate() {
+                // Each cursor only advances: linear work over the decoded block,
+                // rather than a binary search in every list for every anchor hit.
+                while ranks[i] < list.len() && list[ranks[i]] < doc {
+                    ranks[i] += 1;
+                }
+                if ranks[i] == list.len() || list[ranks[i]] != doc {
+                    present = false;
+                    break;
+                }
+            }
+            if !present { continue; }
+            for (plo, &rank) in query_list.iter_mut().zip(&ranks) { plo.p_docid = rank; }
+            add_result_multiterm_multifield(
+                shard, (block_id << 16) | doc as usize, result_count,
+                search_result, top_k, result_type, field_filter_set, facet_filter,
+                non_unique_query_list, query_list, not_query_list, phrase_query,
+                block_score, all_terms_frequent,
+            );
+        }
+        return;
+    }
+
     'restart: loop {
         match (
             &query_list[t1].compression_type,

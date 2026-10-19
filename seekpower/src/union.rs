@@ -571,17 +571,27 @@ pub(crate) async fn union_scan_32<'a>(
 
     let mut max_score = 0.0;
     let mut mask = u32::MAX >> (union_max - cmp::min(query_list.len(), union_max));
-    for plo in query_list.iter_mut().take(union_max).rev() {
-        if plo.end_flag {
-            continue;
-        }
-        max_score += plo.blocks[plo.p_block as usize].max_block_score;
+    // A partial heap has no valid top-k score threshold: its minimum can
+    // fall as new candidates arrive. Never freeze a mask from that value.
+    // Explicit sorts/browsing also cannot use this relevance-only mask.
+    if top_k > 0
+        && search_result.topk_candidates.current_heap_size >= top_k
+        && search_result.topk_candidates.result_sort.is_empty()
+        && !search_result.topk_candidates.empty_query
+        && search_result.topk_candidates._elements[0].score.is_finite()
+    {
+        for plo in query_list.iter_mut().take(union_max).rev() {
+            if plo.end_flag {
+                continue;
+            }
+            max_score += plo.blocks[plo.p_block as usize].max_block_score;
 
-        if max_score >= search_result.topk_candidates._elements[0].score {
-            break;
-        }
+            if max_score >= search_result.topk_candidates._elements[0].score {
+                break;
+            }
 
-        mask >>= 1;
+            mask >>= 1;
+        }
     }
 
     let mut max_score = 0.0;
@@ -1119,10 +1129,14 @@ pub(crate) async fn union_docid_3<'a>(
             }
         } else if query_list.len() >= 3 {
             let (heap_size_before, heap_min_before) = search_result.topk_candidates.heap_progress();
+            // Child query_index partitions assume the inherited term order.
+            // Intersection reorders lists by per-block codec/frequency; keep
+            // that execution order separate from the subset enumeration order.
+            let mut intersection_query_list = query_list.clone();
             intersection_blockid(
                 shard,
                 non_unique_query_list,
-                &mut query_list,
+                &mut intersection_query_list,
                 not_query_list,
                 result_count_arc,
                 search_result,

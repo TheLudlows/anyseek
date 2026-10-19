@@ -823,6 +823,13 @@ pub(crate) fn get_bm25f_multiterm_multifield(
     docid: usize,
     query_list: &mut [PostingListObjectQuery],
 ) -> f32 {
+    // Traversal may reorder posting lists. Score in a fixed term order without
+    // mutating their cursor state, so f32 ties do not depend on the query path.
+    let mut ordered_terms: SmallVec<[&PostingListObjectQuery; 32]> = query_list.iter().collect();
+    ordered_terms.sort_unstable_by(|a, b| a.term.cmp(&b.term)
+        .then_with(|| (a.ngram_type.clone() as u8).cmp(&(b.ngram_type.clone() as u8))));
+    let query_list = ordered_terms;
+
     let mut bm25f = 0.0;
     let block_id = docid >> 16;
 
@@ -1041,6 +1048,13 @@ pub(crate) fn get_bm25f_multiterm_singlefield(
     docid: usize,
     query_list: &mut [PostingListObjectQuery],
 ) -> f32 {
+    // Traversal may reorder posting lists. Score in a fixed term order without
+    // mutating their cursor state, so f32 ties do not depend on the query path.
+    let mut ordered_terms: SmallVec<[&PostingListObjectQuery; 32]> = query_list.iter().collect();
+    ordered_terms.sort_unstable_by(|a, b| a.term.cmp(&b.term)
+        .then_with(|| (a.ngram_type.clone() as u8).cmp(&(b.ngram_type.clone() as u8))));
+    let query_list = ordered_terms;
+
     let mut bm25f = 0.0;
     let block_id = docid >> 16;
 
