@@ -3356,11 +3356,8 @@ impl IndexDocumentShard2 for ShardArc {
         }
 
         shard_mut.uncommitted = true;
-        if shard_mut.meta.field_length_normalization == FieldLengthNormalization::PerField {
-            // A new physical document can change both averages and global IDF.
-            // Never serve a cached frequent-word ranking from the prior snapshot.
-            shard_mut.frequentword_results.clear();
-        }
+        // Physical N/DF can change even for committed-only visibility.
+        shard_mut.frequentword_results.clear();
 
 
         let mut longest_field_id: usize = 0;
