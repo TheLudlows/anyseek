@@ -22,6 +22,7 @@ fn meta(access_type: AccessType) -> IndexMetaObject {
         name: "get_nonstored_doc".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
+        text_normalization: seekpower::index::TextNormalization::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,

@@ -452,3 +452,13 @@ pub enum WriteDocuments {
     Single(std::collections::HashMap<String, Value>),
     Batch(Vec<std::collections::HashMap<String, Value>>),
 }
+
+/// Versioned pre-tokenization rule. None preserves current behavior.
+#[derive(Serialize, ToSchema)]
+#[serde(remote = "seekpower::index::TextNormalization")]
+pub enum TextNormalization {
+    /// No extra normalization.
+    None,
+    /// OpenCC 1.1.9 phrase-aware t2s; no regional vocabulary conversion.
+    OpenCcT2s1_1_9,
+}

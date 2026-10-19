@@ -1,7 +1,7 @@
 //! HTTP contracts, including an optional vector-search probe budget.
 use crate::api_schema;
 use seekpower::{
-    index::{Document, FieldType, SchemaField, StopwordType, TokenizerType},
+    index::{Document, FieldType, SchemaField, StopwordType, TokenizerType, TextNormalization},
     search::{FacetFilter, QueryType, ResultSort, ResultType, SearchMode},
     vector::{Inference, Precision, Quantization},
     vector_similarity::{AnnMode, VectorSimilarity},
@@ -196,6 +196,10 @@ pub struct CreateIndexRequest {
     #[serde(default = "tokenizer_type_api")]
     #[schema(value_type = api_schema::TokenizerType)]
     pub tokenizer: TokenizerType,
+    /// Immutable rule shared by document and query analysis; default None.
+    #[serde(default)]
+    #[schema(value_type = api_schema::TextNormalization)]
+    pub text_normalization: TextNormalization,
     /// Optional stopword removal; default None preserves all words.
     #[serde(default)]
     #[schema(value_type = api_schema::StopwordType)]
@@ -453,6 +457,9 @@ pub struct ErrorResponse {
 /// Public index metadata. Field definitions use the same names as creation.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct IndexResponseObject {
+    /// Persisted pre-tokenization rule; cannot be overridden per query.
+    #[schema(value_type = api_schema::TextNormalization)]
+    pub text_normalization: TextNormalization,
     /// Index ID within the authenticated key scope.
     pub id: u64,
     /// Display name.

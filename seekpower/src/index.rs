@@ -657,6 +657,17 @@ impl fmt::Display for Clustering {
     }
 }
 
+/// Immutable pre-tokenization text normalization, shared by index and query.
+/// Missing metadata defaults to None; an existing index is never auto-converted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum TextNormalization {
+    /// Preserve the existing analysis behavior (default).
+    #[default]
+    None,
+    /// Phrase-aware t2s using pinned OpenCC 1.1.9 tables, without regional rules.
+    OpenCcT2s1_1_9,
+}
+
 /// Specifies LexicalSimilarity, TokenizerType and AccessType when creating an new index
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -671,6 +682,9 @@ pub struct IndexMetaObject {
     pub lexical_similarity: LexicalSimilarity,
     /// TokenizerType defines the tokenizer behavior: AsciiAlphabetic, UnicodeAlphanumeric, UnicodeAlphanumericFolded, UnicodeAlphanumericZH
     pub tokenizer: TokenizerType,
+    /// Pre-tokenization rule for this index and every query. Immutable after creation.
+    #[serde(default)]
+    pub text_normalization: TextNormalization,
 
     /// StopwordType defines the stopword behavior: None, English, German, French, Spanish, Custom.
     /// Stopwords are removed, both from index and query: for compact index size and faster queries.
@@ -1590,6 +1604,16 @@ pub(crate) fn create_shard(
                     words
                 }
             };
+
+            // Metadata remains as supplied; the analysis dictionaries use the same
+            // pinned normalization as document/query tokens, including after reopen.
+            let (stop_words, frequent_words) = if meta.text_normalization == TextNormalization::OpenCcT2s1_1_9 {
+                let stop_words = stop_words.into_iter().map(|word| crate::opencc_t2s::convert(&word).into_owned()).collect();
+                let mut frequent_words: Vec<String> = frequent_words.into_iter().map(|word| crate::opencc_t2s::convert(&word).into_owned()).collect();
+                frequent_words.sort_unstable();
+                frequent_words.dedup();
+                (stop_words, frequent_words)
+            } else { (stop_words, frequent_words) };
 
             let frequent_hashset: AHashSet<u64> = frequent_words
                 .iter()

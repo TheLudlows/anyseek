@@ -86,6 +86,7 @@ pub(crate) async fn create_index_api(
         name: request.index_name,
         lexical_similarity: LexicalSimilarity::Bm25fProximity,
         tokenizer: request.tokenizer,
+        text_normalization: request.text_normalization,
         stop_words: request.stop_words,
         frequent_words: FrequentwordType::English,
         ngram_indexing: 9,
@@ -131,6 +132,7 @@ pub(crate) async fn commit_index_api(index_arc: &IndexArc) -> Result<u64, String
 async fn index_info(index: &IndexArc) -> IndexResponseObject {
     let index = index.read().await;
     IndexResponseObject {
+        text_normalization: index.meta.text_normalization,
         version: VERSION.to_string(),
         schema: index
             .schema_map

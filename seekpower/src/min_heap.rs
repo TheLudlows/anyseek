@@ -1278,6 +1278,7 @@ mod stable_ranking_tests {
             name: "heap".into(),
             lexical_similarity: LexicalSimilarity::Bm25f,
             tokenizer: TokenizerType::UnicodeAlphanumeric,
+        text_normalization: crate::index::TextNormalization::None,
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::None,
             ngram_indexing: NgramSet::SingleTerm as u8,

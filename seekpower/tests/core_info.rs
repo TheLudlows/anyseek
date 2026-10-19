@@ -41,6 +41,7 @@ async fn typed_snapshot_does_not_commit_and_caller_controls_logging() {
         name: "typed info".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
+        text_normalization: seekpower::index::TextNormalization::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
