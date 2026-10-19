@@ -74,3 +74,8 @@ pub(crate) mod word_segmentation;
 
 
 mod metadata_filter;
+
+mod field_length;
+
+#[cfg(test)]
+mod field_length_tests;

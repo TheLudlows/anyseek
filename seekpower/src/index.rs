@@ -582,6 +582,8 @@ fn is_default_f32(num: &f32) -> bool {
 pub(crate) struct IndexedField {
     pub schema_field_name: String,
     pub field_length_sum: usize,
+    pub field_document_count: u64,
+    pub length_component_cache: [f32; 256],
     pub indexed_field_id: usize,
 
     pub is_longest_field: bool,
@@ -657,6 +659,16 @@ impl fmt::Display for Clustering {
     }
 }
 
+/// Length denominator selected when creating an index; immutable thereafter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum FieldLengthNormalization {
+    /// Historical shared sum of field lengths divided by physical document count.
+    #[default]
+    Shared,
+    /// Each field uses its decoded length sum divided by its nonempty document count.
+    PerField,
+}
+
 /// Immutable pre-tokenization text normalization, shared by index and query.
 /// Missing metadata defaults to None; an existing index is never auto-converted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -685,6 +697,9 @@ pub struct IndexMetaObject {
     /// Pre-tokenization rule for this index and every query. Immutable after creation.
     #[serde(default)]
     pub text_normalization: TextNormalization,
+    /// Persisted length policy; Shared remains the conservative default.
+    #[serde(default)]
+    pub field_length_normalization: FieldLengthNormalization,
 
     /// StopwordType defines the stopword behavior: None, English, German, French, Spanish, Custom.
     /// Stopwords are removed, both from index and query: for compact index size and faster queries.
@@ -1141,6 +1156,8 @@ pub(crate) async fn create_index_root(
                         schema_field_name: schema_field.field.clone(),
                         is_longest_field: false,
                         field_length_sum: 0,
+                        field_document_count: 0,
+                        length_component_cache: [0.0; 256],
                         indexed_field_id: indexed_field_vec.len(),
                     });
                     indexed_schema_vec.push(schema_field_clone);
@@ -1499,6 +1516,8 @@ pub(crate) fn create_shard(
                         schema_field_name: schema_field.field.clone(),
                         is_longest_field: false,
                         field_length_sum: 0,
+                        field_document_count: 0,
+                        length_component_cache: [0.0; 256],
                         indexed_field_id: indexed_field_vec.len(),
                     });
                     indexed_schema_vec.push(schema_field_clone);
@@ -1961,6 +1980,18 @@ pub(crate) async fn open_shard(
                                                 &shard.index_file_mmap,
                                                 &mut index_mmap_position,
                                             );
+                                            if shard.meta.field_length_normalization == FieldLengthNormalization::PerField {
+                                                for field in &mut shard.indexed_field_vec {
+                                                    let sum = read_u64_ref(&shard.index_file_mmap, &mut index_mmap_position);
+                                                    let count = read_u64_ref(&shard.index_file_mmap, &mut index_mmap_position);
+                                                    if count > shard.indexed_doc_count as u64 || sum < count || (count == 0) != (sum == 0) {
+                                                        return Err("invalid persisted field length statistics".into());
+                                                    }
+                                                    field.field_length_sum = usize::try_from(sum).map_err(|_| "field length sum exceeds platform capacity")?;
+                                                    field.field_document_count = count;
+                                                }
+                                            }
+
 
                                             for _key0 in 0..shard.segment_number1 {
                                                 let block_length = read_u32_ref(
@@ -2052,6 +2083,11 @@ pub(crate) async fn open_shard(
                                 }
                             }
 
+                            if shard.meta.field_length_normalization == FieldLengthNormalization::PerField {
+                                for field_id in 0..shard.indexed_field_vec.len() {
+                                    shard.refresh_field_length_cache(field_id);
+                                }
+                            }
                             for (i, component) in shard.bm25_component_cache.iter_mut().enumerate()
                             {
                                 let document_length_quotient = DOCUMENT_LENGTH_COMPRESSION[i]
@@ -2524,6 +2560,13 @@ impl Shard {
         self.indexed_doc_count = 0;
         self.committed_doc_count = 0;
         self.positions_sum_normalized = 0;
+        for field in &mut self.indexed_field_vec {
+            field.field_length_sum = 0;
+            field.field_document_count = 0;
+            field.length_component_cache = [0.0; 256];
+        }
+        self.frequentword_results.clear();
+
 
         self.level_index = Vec::new();
 
@@ -3313,6 +3356,12 @@ impl IndexDocumentShard2 for ShardArc {
         }
 
         shard_mut.uncommitted = true;
+        if shard_mut.meta.field_length_normalization == FieldLengthNormalization::PerField {
+            // A new physical document can change both averages and global IDF.
+            // Never serve a cached frequent-word ranking from the prior snapshot.
+            shard_mut.frequentword_results.clear();
+        }
+
 
         let mut longest_field_id: usize = 0;
         let mut longest_field_length: u32 = 0;
@@ -3326,6 +3375,11 @@ impl IndexDocumentShard2 for ShardArc {
                 [docid_local & 0b11111111_11111111] = value.1;
             shard_mut.positions_sum_normalized += value.2 as u64;
             shard_mut.indexed_field_vec[value.0].field_length_sum += value.2 as usize;
+            if shard_mut.meta.field_length_normalization == FieldLengthNormalization::PerField && value.2 > 0 {
+                shard_mut.indexed_field_vec[value.0].field_document_count += 1;
+                shard_mut.refresh_field_length_cache(value.0);
+            }
+
         }
 
         if docid_local == 0 && shard_mut.is_lexical_indexing {
@@ -3395,6 +3449,7 @@ mod score_bound_contract_tests {
                 lexical_similarity: LexicalSimilarity::Bm25f,
                 tokenizer: TokenizerType::UnicodeAlphanumeric,
                 text_normalization: TextNormalization::None,
+                field_length_normalization: crate::index::FieldLengthNormalization::Shared,
                 stop_words: StopwordType::None,
                 frequent_words: FrequentwordType::None,
                 ngram_indexing: 0,

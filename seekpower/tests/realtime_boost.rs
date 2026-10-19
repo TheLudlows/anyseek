@@ -21,6 +21,7 @@ async fn boosted_single_term_matches_formula_in_every_state() {
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
         text_normalization: TextNormalization::None,
+        field_length_normalization: seekpower::index::FieldLengthNormalization::Shared,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: 0,

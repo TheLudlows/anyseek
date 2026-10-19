@@ -462,3 +462,13 @@ pub enum TextNormalization {
     /// OpenCC 1.1.9 phrase-aware t2s; no regional vocabulary conversion.
     OpenCcT2s1_1_9,
 }
+
+/// Immutable field length normalization policy.
+#[derive(Serialize, ToSchema)]
+#[serde(remote = "seekpower::index::FieldLengthNormalization")]
+pub enum FieldLengthNormalization {
+    /// Historical shared length average.
+    Shared,
+    /// Nonempty physical document average for each field.
+    PerField,
+}

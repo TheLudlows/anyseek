@@ -40,6 +40,7 @@ async fn stored_records_and_projection_survive_reopen() {
         let meta=IndexMetaObject { id:0, name:"raw_document".into(),
             lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::UnicodeAlphanumeric,
         text_normalization: seekpower::index::TextNormalization::None,
+        field_length_normalization: seekpower::index::FieldLengthNormalization::Shared,
             stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
             ngram_indexing:NgramSet::SingleTerm as u8, document_compression,
             access_type:AccessType::Mmap, clustering:Clustering::None, inference:Inference::None };

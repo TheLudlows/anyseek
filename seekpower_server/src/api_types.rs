@@ -200,6 +200,10 @@ pub struct CreateIndexRequest {
     #[serde(default)]
     #[schema(value_type = api_schema::TextNormalization)]
     pub text_normalization: TextNormalization,
+    /// Immutable length denominator policy; Shared is the default.
+    #[serde(default)]
+    #[schema(value_type = api_schema::FieldLengthNormalization)]
+    pub field_length_normalization: seekpower::index::FieldLengthNormalization,
     /// Optional stopword removal; default None preserves all words.
     #[serde(default)]
     #[schema(value_type = api_schema::StopwordType)]
@@ -460,6 +464,10 @@ pub struct IndexResponseObject {
     /// Persisted pre-tokenization rule; cannot be overridden per query.
     #[schema(value_type = api_schema::TextNormalization)]
     pub text_normalization: TextNormalization,
+    /// Immutable length denominator policy; Shared is the default.
+    #[serde(default)]
+    #[schema(value_type = api_schema::FieldLengthNormalization)]
+    pub field_length_normalization: seekpower::index::FieldLengthNormalization,
     /// Index ID within the authenticated key scope.
     pub id: u64,
     /// Display name.

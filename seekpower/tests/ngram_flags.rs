@@ -103,6 +103,7 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
         lexical_similarity: similarity,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
         text_normalization: seekpower::index::TextNormalization::None,
+        field_length_normalization: seekpower::index::FieldLengthNormalization::Shared,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::Custom {
             terms: vec!["of".into(), "the".into(), "and".into()],

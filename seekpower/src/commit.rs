@@ -276,6 +276,15 @@ impl Shard {
             .index_file
             .write(&self.compressed_index_segment_block_buffer[0..16]);
 
+        // Per-field snapshots belong to this committed level, alongside the
+        // existing physical count and decoded-length sum, not a separate sidecar.
+        if self.meta.field_length_normalization == crate::index::FieldLengthNormalization::PerField {
+            for field in &self.indexed_field_vec {
+                self.index_file.write_all(&(field.field_length_sum as u64).to_le_bytes()).expect("write field length sum");
+                self.index_file.write_all(&field.field_document_count.to_le_bytes()).expect("write field document count");
+            }
+        }
+
         let segment_head_position = self.index_file.stream_position().unwrap() as usize;
         self.index_file
             .seek(SeekFrom::Current((self.segment_number1 * 8) as i64))

@@ -513,7 +513,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
             as f32;
 
         let document_length_quotient =
-            document_length_normalized / document_length_normalized_average;
+            document_length_normalized / shard.field_length_average(0, document_length_normalized_average);
 
         match plo_single.ngram_type {
             NgramType::SingleTerm => {
@@ -564,7 +564,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
                         as usize] as f32;
 
                     let document_length_quotient =
-                        document_length_normalized / document_length_normalized_average;
+                        document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                     let tf = field.1 as f32;
 
@@ -583,7 +583,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
                         as usize] as f32;
 
                     let document_length_quotient =
-                        document_length_normalized / document_length_normalized_average;
+                        document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                     let tf_ngram1 = field.1 as f32;
 
@@ -601,7 +601,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
                         as usize] as f32;
 
                     let document_length_quotient =
-                        document_length_normalized / document_length_normalized_average;
+                        document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                     let tf_ngram2 = field.1 as f32;
 
@@ -620,7 +620,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
                         as usize] as f32;
 
                     let document_length_quotient =
-                        document_length_normalized / document_length_normalized_average;
+                        document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                     let tf_ngram1 = field.1 as f32;
 
@@ -638,7 +638,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
                         as usize] as f32;
 
                     let document_length_quotient =
-                        document_length_normalized / document_length_normalized_average;
+                        document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                     let tf_ngram2 = field.1 as f32;
 
@@ -656,7 +656,7 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
                         as usize] as f32;
 
                     let document_length_quotient =
-                        document_length_normalized / document_length_normalized_average;
+                        document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                     let tf_ngram3 = field.1 as f32;
 
@@ -707,7 +707,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
                     as usize] as f32;
 
                 document_length_quotient =
-                    document_length_normalized / document_length_normalized_average;
+                    document_length_normalized / shard.field_length_average(0, document_length_normalized_average);
             }
 
             match plo.ngram_type {
@@ -769,7 +769,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
                             as f32;
 
                         let document_length_quotient =
-                            document_length_normalized / document_length_normalized_average;
+                            document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                         let tf = field.1 as f32;
 
@@ -792,7 +792,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
                             as f32;
 
                         let document_length_quotient =
-                            document_length_normalized / document_length_normalized_average;
+                            document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                         let tf_ngram1 = field.1 as f32;
 
@@ -814,7 +814,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
                             as f32;
 
                         let document_length_quotient =
-                            document_length_normalized / document_length_normalized_average;
+                            document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                         let tf_ngram2 = field.1 as f32;
 
@@ -837,7 +837,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
                             as f32;
 
                         let document_length_quotient =
-                            document_length_normalized / document_length_normalized_average;
+                            document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                         let tf_ngram1 = field.1 as f32;
 
@@ -859,7 +859,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
                             as f32;
 
                         let document_length_quotient =
-                            document_length_normalized / document_length_normalized_average;
+                            document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                         let tf_ngram2 = field.1 as f32;
 
@@ -881,7 +881,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
                             as f32;
 
                         let document_length_quotient =
-                            document_length_normalized / document_length_normalized_average;
+                            document_length_normalized / shard.field_length_average(field_id, document_length_normalized_average);
 
                         let tf_ngram3 = field.1 as f32;
 
