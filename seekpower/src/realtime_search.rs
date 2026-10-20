@@ -918,6 +918,18 @@ impl Shard {
         }
     }
 
+    /// Read current component metadata, not the snapshot attached to an old ngram.
+    /// Preserve the existing quantized-committed + exact-realtime DF convention.
+    pub(crate) fn get_ngram_component_df(&self, term: &str) -> u32 {
+        let key0 = hash32(term.as_bytes()) & self.segment_number_mask1;
+        let key_hash = hash64(term.as_bytes());
+        let committed = decode_posting_list_counts(
+            &self.segments_index[key0 as usize], self, key_hash,
+        ).map_or(0, |counts| counts.0);
+        let decoded = DOCUMENT_LENGTH_COMPRESSION[crate::index::int_to_byte4(committed) as usize];
+        decoded + if self.uncommitted { self.get_posting_count_uncommitted(term) as u32 } else { 0 }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn search_lexical_shard_uncommitted(
         &self,
@@ -993,23 +1005,9 @@ impl Shard {
                             || term.ngram_type == NgramType::NgramRF
                             || term.ngram_type == NgramType::NgramFR
                         {
-                            let posting_count_ngram_1 =
-                                if let Some(posting_count) = posting_counts_option {
-                                    posting_count.1
-                                } else {
-                                    0
-                                } + self
-                                    .get_posting_count_uncommitted(&non_unique_term.term_ngram_1)
-                                    as u32;
+                            let posting_count_ngram_1 = self.get_ngram_component_df(&non_unique_term.term_ngram_1);
 
-                            let posting_count_ngram_2 =
-                                if let Some(posting_count) = posting_counts_option {
-                                    posting_count.2
-                                } else {
-                                    0
-                                } + self
-                                    .get_posting_count_uncommitted(&non_unique_term.term_ngram_0)
-                                    as u32;
+                            let posting_count_ngram_2 = self.get_ngram_component_df(&non_unique_term.term_ngram_0);
 
                             idf_ngram1 = (((self.indexed_doc_count as f32
                                 - posting_count_ngram_1 as f32
@@ -1025,32 +1023,11 @@ impl Shard {
                                 + 1.0)
                                 .ln();
                         } else {
-                            let posting_count_ngram_1 =
-                                if let Some(posting_count) = posting_counts_option {
-                                    posting_count.1
-                                } else {
-                                    0
-                                } + self
-                                    .get_posting_count_uncommitted(&non_unique_term.term_ngram_2)
-                                    as u32;
+                            let posting_count_ngram_1 = self.get_ngram_component_df(&non_unique_term.term_ngram_2);
 
-                            let posting_count_ngram_2 =
-                                if let Some(posting_count) = posting_counts_option {
-                                    posting_count.2
-                                } else {
-                                    0
-                                } + self
-                                    .get_posting_count_uncommitted(&non_unique_term.term_ngram_1)
-                                    as u32;
+                            let posting_count_ngram_2 = self.get_ngram_component_df(&non_unique_term.term_ngram_1);
 
-                            let posting_count_ngram_3 =
-                                if let Some(posting_count) = posting_counts_option {
-                                    posting_count.3
-                                } else {
-                                    0
-                                } + self
-                                    .get_posting_count_uncommitted(&non_unique_term.term_ngram_0)
-                                    as u32;
+                            let posting_count_ngram_3 = self.get_ngram_component_df(&non_unique_term.term_ngram_0);
 
                             idf_ngram1 = (((self.indexed_doc_count as f32
                                 - posting_count_ngram_1 as f32
