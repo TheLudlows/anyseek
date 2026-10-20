@@ -275,3 +275,84 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
         "upstream NOT acceptance blocked (#37/#28): {failures:?}"
     );
 }
+
+#[tokio::test]
+async fn nul_suffix_alone_has_independent_hits_in_every_state() {
+    for tokenizer in ["unicode", "zh"] {
+        for mask in [0, 9, 127] {
+            let (mut index, path) = fresh(
+                &format!("{tokenizer}-nul-{mask}"),
+                TextNormalization::OpenCcT2s1_1_9,
+                mask,
+            )
+            .await;
+            let mut docs = vec!["臺灣\0頭髮", "臺灣"];
+            add(&index, &docs).await;
+            for stage in 0..5 {
+                if stage == 1 || stage == 3 {
+                    index.commit().await;
+                }
+                if stage == 2 {
+                    docs.push("臺灣\0後綴");
+                    index
+                        .index_documents(vec![
+                            serde_json::from_value(json!({"body":docs[2]})).unwrap(),
+                        ])
+                        .await
+                        .unwrap();
+                    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                        while index.read().await.indexed_doc_count().await != 3 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                }
+                if stage == 4 {
+                    index.close().await;
+                    drop(index);
+                    index = open_index(&path).await.unwrap();
+                }
+                for rt in [false, true] {
+                    let want: BTreeSet<usize> = if stage == 0 && !rt {
+                        BTreeSet::new()
+                    } else {
+                        [0].into_iter().collect()
+                    };
+                    // Neither query contains NUL or the shared prefix: truncating both
+                    // query/document sides cannot make this independent assertion pass.
+                    assert_eq!(
+                        ids(&index, "头发", rt).await,
+                        want,
+                        "stage={stage} rt={rt} mask={mask}"
+                    );
+                    let want: BTreeSet<usize> = if stage >= 3 || (stage == 2 && rt) {
+                        [2].into_iter().collect()
+                    } else {
+                        BTreeSet::new()
+                    };
+                    assert_eq!(
+                        ids(&index, "后缀", rt).await,
+                        want,
+                        "stage={stage} rt={rt} mask={mask}"
+                    );
+                }
+                for (i, original) in docs.iter().enumerate() {
+                    let stored = index
+                        .read()
+                        .await
+                        .get_document(i, true, &HashSet::new())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        stored["body"].as_str().unwrap().as_bytes(),
+                        original.as_bytes()
+                    );
+                }
+            }
+            index.close().await;
+            drop(index);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+}
