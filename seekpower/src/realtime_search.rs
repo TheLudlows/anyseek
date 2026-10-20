@@ -680,12 +680,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
     docid: usize,
     query_list: &mut [PostingListObjectQuery],
 ) -> f32 {
-    // Traversal may reorder posting lists. Score in a fixed term order without
-    // mutating their cursor state, so f32 ties do not depend on the query path.
-    let mut ordered_terms: SmallVec<[&PostingListObjectQuery; 32]> = query_list.iter().collect();
-    ordered_terms.sort_unstable_by(|a, b| a.term.cmp(&b.term)
-        .then_with(|| (a.ngram_type.clone() as u8).cmp(&(b.ngram_type.clone() as u8))));
-    let query_list = ordered_terms;
+    let query_list = crate::add_result::scoring_terms(query_list);
 
     let mut bm25f = 0.0;
 
@@ -698,7 +693,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
     if shard.indexed_field_vec.len() == 1 {
         let mut document_length_quotient = 0.0;
 
-        for plo in query_list.iter() {
+        for plo in query_list {
             if !plo.bm25_flag {
                 continue;
             }
@@ -756,7 +751,7 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
             }
         }
     } else {
-        for plo in query_list.iter() {
+        for plo in query_list {
             if !plo.bm25_flag {
                 continue;
             }
@@ -1143,6 +1138,7 @@ impl Shard {
 
         not_query_list = not_query_list_map.into_values().collect();
         query_list = query_list_map.into_values().collect();
+        crate::add_result::prepare_scoring_order(&mut query_list);
         let query_list_len = query_list.len();
 
         let non_unique_query_list_count = non_unique_query_list.len();

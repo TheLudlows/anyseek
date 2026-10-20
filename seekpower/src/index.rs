@@ -315,6 +315,8 @@ pub(crate) struct PostingListObjectQuery<'a> {
     pub field_vec_ngram1: SmallVec<[(u16, usize); 2]>,
     pub field_vec_ngram2: SmallVec<[(u16, usize); 2]>,
     pub field_vec_ngram3: SmallVec<[(u16, usize); 2]>,
+    // Query-prepared canonical scoring ordinal; MAX keeps the original sorting fallback.
+    pub scoring_order: u8,
     pub bm25_flag: bool,
 }
 
@@ -368,6 +370,7 @@ impl Default for PostingListObjectQuery<'_> {
 
             end_flag: false,
             end_flag_block: false,
+            scoring_order: u8::MAX,
             bm25_flag: true,
             intersect: 0,
             ulong_pos: 0,

@@ -51,6 +51,10 @@ async fn scoring_buffer_field_count_matrix() {
                                 2 => "beta neutral the alpha",
                                 _ => "neutral the of and neutral",
                             };
+                            let text = if f == 0 {
+                                format!("{text} {}", (0..if i % 2 == 0 {100} else {33})
+                                    .map(|n|format!("q{n:03}")).collect::<Vec<_>>().join(" "))
+                            } else { text.to_string() };
                             doc.insert(format!("text{f}"),json!(text));
                         }
                         if has_vector { doc.insert("vector".into(),json!([1.0,(i % 3) as f32,0.0])); }
@@ -67,9 +71,9 @@ async fn scoring_buffer_field_count_matrix() {
                             drop(index);
                             index = open_index(&path).await.unwrap();
                         }
-                        for case in 0..9 {
-                            if case >= 7 && !has_vector { continue; }
-                            let (text, qt) = match case {
+                        for case in 0..17 {
+                            if matches!(case, 7 | 8) && !has_vector { continue; }
+                            let (short_text, qt) = match case {
                                 0 => ("alpha beta the",QueryType::Union),
                                 1 => ("alpha beta",QueryType::Intersection),
                                 2 => ("the of and",QueryType::Phrase),
@@ -78,6 +82,12 @@ async fn scoring_buffer_field_count_matrix() {
                                 5 => ("alpha",QueryType::Union),
                                 _ => ("alpha beta",QueryType::Union),
                             };
+                            let text = if case >= 9 {
+                                let count = [8, 32, 33, 100][(case - 9) / 2];
+                                let mut terms: Vec<_> = (0..count).map(|n|format!("q{n:03}")).collect();
+                                if case % 2 == 0 { terms.reverse(); }
+                                terms.join(" ")
+                            } else { short_text.to_string() };
                             let mode = match case {
                                 7 => SearchMode::Hybrid { similarity_threshold:None, ann_mode:AnnMode::All },
                                 8 => SearchMode::WeightedHybrid { similarity_threshold:None, ann_mode:AnnMode::All,
@@ -85,7 +95,7 @@ async fn scoring_buffer_field_count_matrix() {
                                         vector_candidates:Some(20),..Default::default()} },
                                 _ => SearchMode::Lexical,
                             };
-                            let result = index.search(text.into(),(case >= 7).then(||Embedding::F32(vec![1.0,0.0,0.0])),
+                            let result = index.search(text.into(),(matches!(case, 7 | 8)).then(||Embedding::F32(vec![1.0,0.0,0.0])),
                                 qt,mode,false,0,12,ResultType::TopkCount,stage == 0,
                                 if case == 6 {vec![format!("text{}",text_fields-1)]} else {vec![]},vec![],
                                 if case == 6 {vec![ResultSort {field:"_score".into(),order:SortOrder::Descending}]} else {vec![]}).await;
