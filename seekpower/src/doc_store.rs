@@ -1,3 +1,5 @@
+mod projection;
+
 use memmap2::Mmap;
 use std::collections::HashSet;
 use std::io::{Seek, SeekFrom, Write};
@@ -31,7 +33,7 @@ impl Shard {
 
         let doc_id_local = doc_id & 0b11111111_11111111;
 
-        let mut doc = if is_uncommitted {
+        let doc = if is_uncommitted {
             let docstore_pointer_docs = &self.compressed_docstore_segment_block_buffer;
 
             let position = doc_id_local * 4;
@@ -51,14 +53,14 @@ impl Shard {
 
             match self.meta.document_compression {
                 DocumentCompression::None => {
-                    let doc: Document = serde_json::from_slice(compressed_doc).unwrap();
+                    let doc: Document = projection::decode(compressed_doc, fields, &self.stored_field_names).unwrap();
                     doc
                 }
                 DocumentCompression::Snappy => {
                     let decompressed_doc = snap::raw::Decoder::new()
                         .decompress_vec(compressed_doc)
                         .unwrap();
-                    let doc: Document = serde_json::from_slice(&decompressed_doc).unwrap();
+                    let doc: Document = projection::decode(&decompressed_doc, fields, &self.stored_field_names).unwrap();
                     doc
                 }
             }
@@ -86,26 +88,18 @@ impl Shard {
 
             match self.meta.document_compression {
                 DocumentCompression::None => {
-                    let doc: Document = serde_json::from_slice(compressed_doc).unwrap();
+                    let doc: Document = projection::decode(compressed_doc, fields, &self.stored_field_names).unwrap();
                     doc
                 }
                 DocumentCompression::Snappy => {
                     let decompressed_doc = snap::raw::Decoder::new()
                         .decompress_vec(compressed_doc)
                         .unwrap();
-                    let doc: Document = serde_json::from_slice(&decompressed_doc).unwrap();
+                    let doc: Document = projection::decode(&decompressed_doc, fields, &self.stored_field_names).unwrap();
                     doc
                 }
             }
         };
-
-        if !fields.is_empty() {
-            for key in self.stored_field_names.iter() {
-                if !fields.contains(key) {
-                    doc.shift_remove(key);
-                }
-            }
-        }
 
         Ok(doc)
     }
