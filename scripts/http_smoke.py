@@ -683,6 +683,24 @@ def exercise(binary, workdir):
                     with ThreadPoolExecutor(max_workers=concurrency) as pool:
                         check(all(rows == expected for rows in pool.map(ranked, range(12))),
                               'stable lexical/vector/hybrid C1/C4')
+            hybrid = {'query': 'alpha beta', 'query_vector': [1, 0, 0], 'length': 7}
+            baseline = api('POST', stable_path + '/query', hybrid)['results']
+            check(api('POST', stable_path + '/query', {**hybrid, 'rrf': {}})['results'] == baseline,
+                  'RRF omitted and explicit defaults differ')
+            for probe in ({'all': True}, {'nprobe': 1}):
+                weighted = api('POST', stable_path + '/query', {**hybrid, **probe, 'rrf': {
+                    'constant': 5, 'keyword_weight': 0.5, 'vector_weight': 1,
+                    'keyword_candidates': 2, 'vector_candidates': 3}})['results']
+                check([d['ordinal'] for d in weighted] == [0, 1, 2], 'RRF candidate truncation')
+                check(abs(weighted[0]['_score'] - 0.3) < 1e-6 and
+                      abs(weighted[2]['_score'] - 1 / 7) < 1e-6, 'RRF weights and missing channel')
+            for rrf in (None, {'constant': 0}, {'constant': -1}, {'constant': 1e100},
+                        {'keyword_weight': -1}, {'keyword_weight': 0, 'vector_weight': 0},
+                        {'keyword_candidates': 0}, {'vector_candidates': 1.5}, {'unknown': 1}):
+                request('POST', stable_path + '/query', {**hybrid, 'rrf': rrf}, api_key, expected=400)
+            for payload in ({'query': 'alpha'}, {'query_vector': [1, 0, 0]}):
+                request('POST', stable_path + '/query', {**payload, 'rrf': {}}, api_key, expected=400)
+            print('PASS weighted RRF defaults, scores, candidate budgets, ANN/full scan and invalid HTTP inputs')
             print('PASS stable tied TopK across lexical/vector/hybrid HTTP C1/C4')
 
             # Minimal public settings resolve once at creation and survive restart.
