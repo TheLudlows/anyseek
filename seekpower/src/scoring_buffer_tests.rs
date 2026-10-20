@@ -140,7 +140,4 @@ fn component_storage_inline_boundary_and_fallback() {
         assert_eq!(actual.iter().map(|v|v.to_bits()).collect::<Vec<_>>(),
             old.iter().map(|v|v.to_bits()).collect::<Vec<_>>());
     }
-    println!("SmallVec object sizes: old={} new={}",
-        std::mem::size_of::<SmallVec<[f32; 2]>>(),
-        std::mem::size_of::<SmallVec<[f32; 4]>>());
 }
