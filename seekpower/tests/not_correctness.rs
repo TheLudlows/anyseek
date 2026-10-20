@@ -24,6 +24,7 @@ async fn fresh(label: &str, ngrams: u8) -> (IndexArc, PathBuf) {
         } else {
             TokenizerType::UnicodeAlphanumericZH
         },
+        text_normalization: seekpower::index::TextNormalization::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: ngrams,

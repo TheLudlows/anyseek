@@ -1,0 +1,26 @@
+{
+  "TSPhrases.txt": {
+    "url": "https://raw.githubusercontent.com/BYVoid/OpenCC/556ed22496d650bd0b13b6c163be9814637970ae/data/dictionary/TSPhrases.txt",
+    "sha256": "504169029c43f7f234b8e2ae470720af3657675c5574ff8aa0feb257e1dc5ce2",
+    "bytes": 5181
+  },
+  "TSCharacters.txt": {
+    "url": "https://raw.githubusercontent.com/BYVoid/OpenCC/556ed22496d650bd0b13b6c163be9814637970ae/data/dictionary/TSCharacters.txt",
+    "sha256": "6b5a0a799bea2bb22c001f635eaa3fc2904310f0c08addbff275477a80ecf09a",
+    "bytes": 34627
+  },
+  "LICENSE": {
+    "url": "https://raw.githubusercontent.com/BYVoid/OpenCC/556ed22496d650bd0b13b6c163be9814637970ae/LICENSE",
+    "sha256": "b534e465949558eec2597b04f5092b5e161236a68dfbfd04d547592ac3964308",
+    "bytes": 9165
+  },
+  "t2s.json": {
+    "url": "https://raw.githubusercontent.com/BYVoid/OpenCC/556ed22496d650bd0b13b6c163be9814637970ae/data/config/t2s.json",
+    "sha256": "b818534194f27c2d95f01001edb0a5ec49b9050119892cb30a0504bb202cc07c",
+    "bytes": 406
+  },
+  "version": "OpenCC 1.1.9",
+  "commit": "556ed22496d650bd0b13b6c163be9814637970ae",
+  "license": "Apache-2.0",
+  "official_wheel_dictionary_equivalence": true
+}

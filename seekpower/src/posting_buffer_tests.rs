@@ -23,6 +23,7 @@ async fn lazy_buffers_grow_commit_restore_and_clear() {
             name: "buffers".into(),
             lexical_similarity: LexicalSimilarity::Bm25fProximity,
             tokenizer: TokenizerType::UnicodeAlphanumeric,
+        text_normalization: crate::index::TextNormalization::None,
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::English,
             ngram_indexing: 9,

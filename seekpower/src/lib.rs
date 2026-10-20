@@ -54,6 +54,7 @@ pub(crate) mod intersection_simd;
 /// Iterator over all documents, also for search with empty query.
 pub mod iterator;
 pub(crate) mod min_heap;
+pub(crate) mod opencc_t2s;
 pub(crate) mod realtime_search;
 /// Search the index for all indexed documents, both for committed and uncommitted documents.
 /// The latter enables true realtime search: documents are available for search in exact the same millisecond they are indexed.

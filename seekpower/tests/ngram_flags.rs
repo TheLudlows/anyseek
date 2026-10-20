@@ -102,6 +102,7 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
         name: "ngram_flags".into(),
         lexical_similarity: similarity,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
+        text_normalization: seekpower::index::TextNormalization::None,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::Custom {
             terms: vec!["of".into(), "the".into(), "and".into()],

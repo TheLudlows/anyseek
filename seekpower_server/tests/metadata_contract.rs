@@ -26,6 +26,7 @@ async fn create(path: &Path, access_type: AccessType) -> IndexArc {
     let _ = fs::remove_dir_all(path);
     let meta = IndexMetaObject { id:0, name:"metadata_contract".into(),
         lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::UnicodeAlphanumeric,
+        text_normalization: seekpower::index::TextNormalization::None,
         stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
         ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,
         access_type, clustering:Clustering::None, inference:Inference::None };

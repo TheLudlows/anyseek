@@ -150,6 +150,13 @@ pub(crate) async fn tokenizer(
     indexed_field_id: usize,
     indexed_field_number: usize,
 ) {
+    // Normalize only the transient analysis view, never the stored document.
+    // Both index and query enter this same path with the persisted shard rule.
+    let normalized = match index.meta.text_normalization {
+        crate::index::TextNormalization::None => std::borrow::Cow::Borrowed(text),
+        crate::index::TextNormalization::OpenCcT2s1_1_9 => crate::opencc_t2s::convert(text),
+    };
+    let text = normalized.as_ref();
     let token_per_field_max_capped = cmp::max(token_per_field_max, 65_536);
 
     let text_normalized;
@@ -1330,6 +1337,7 @@ mod tests {
             name: "zh-tail".into(),
             lexical_similarity: LexicalSimilarity::Bm25fProximity,
             tokenizer: TokenizerType::UnicodeAlphanumericZH,
+        text_normalization: crate::index::TextNormalization::None,
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::English,
             ngram_indexing: 9,
