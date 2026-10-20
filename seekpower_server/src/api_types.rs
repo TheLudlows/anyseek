@@ -17,6 +17,10 @@ pub const DEFAULT_NPROBE: usize = 200;
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequestObject {
+    /// Optional weighted RRF for text plus vector queries; ranks start at zero.
+    #[serde(default, deserialize_with = "present_value", skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<api_schema::RrfOptions>, nullable = false)]
+    pub rrf: Option<seekpower::search::RrfOptions>,
     /// Text query; supports +, - and quoted phrases. Omit for vector search or browsing.
     #[serde(default, rename = "query")]
     pub query_string: String,
@@ -112,6 +116,12 @@ impl SearchRequestObject {
         if self.all == Some(true) && self.nprobe.is_some() {
             return Err("all=true cannot be combined with nprobe".into());
         }
+        if let Some(rrf) = &self.rrf {
+            rrf.validate()?;
+            if self.query_vector.is_none() || self.query_string.trim().is_empty() {
+                return Err("rrf requires both query text and query_vector".into());
+            }
+        }
         let ann_mode = if self.all == Some(true) {
             AnnMode::All
         } else {
@@ -123,6 +133,12 @@ impl SearchRequestObject {
             SearchMode::Vector {
                 similarity_threshold: self.similarity_threshold,
                 ann_mode,
+            }
+        } else if let Some(rrf) = self.rrf {
+            SearchMode::WeightedHybrid {
+                similarity_threshold: self.similarity_threshold,
+                ann_mode,
+                rrf,
             }
         } else {
             SearchMode::Hybrid {
@@ -480,4 +496,27 @@ pub struct IndexResponseObject {
     pub committed_doc_count: usize,
     /// Running server version.
     pub version: String,
+}
+
+#[cfg(test)]
+mod rrf_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn http_rrf_contract() {
+        let default_probe = NonZeroUsize::new(200).unwrap();
+        for value in [json!({"rrf":{}}),json!({"query_vector":[1,0,0],"rrf":{}}),
+            json!({"query":"alpha","query_vector":[1,0,0],"rrf":{"constant":0}}),
+            json!({"query":"alpha","query_vector":[1,0,0],"rrf":{"keyword_candidates":0}})] {
+            let request: SearchRequestObject = serde_json::from_value(value).unwrap();
+            assert!(request.search_mode(default_probe).is_err());
+        }
+        for value in [json!({"rrf":null}),json!({"rrf":{"constant":null}}),json!({"rrf":{"bogus":1}})] {
+            assert!(serde_json::from_value::<SearchRequestObject>(value).is_err());
+        }
+        let request: SearchRequestObject = serde_json::from_value(json!({"query":"alpha","query_vector":[1,0,0],"rrf":{"constant":5,"keyword_weight":0.5,"keyword_candidates":20,"vector_candidates":30}})).unwrap();
+        assert!(matches!(request.search_mode(default_probe).unwrap(),SearchMode::WeightedHybrid { rrf, .. } if rrf.constant == 5.0 && rrf.keyword_candidates == Some(20) && rrf.vector_candidates == Some(30)));
+        let request: SearchRequestObject = serde_json::from_value(json!({"query":"alpha","query_vector":[1,0,0]})).unwrap();
+        assert!(matches!(request.search_mode(default_probe).unwrap(),SearchMode::Hybrid { .. }));
+    }
 }

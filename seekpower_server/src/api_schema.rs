@@ -472,3 +472,25 @@ pub enum FieldLengthNormalization {
     /// Nonempty physical document average for each field.
     PerField,
 }
+
+/// Zero-based reciprocal rank fusion. Omitted fields preserve legacy defaults.
+#[derive(ToSchema, Serialize)]
+#[serde(remote = "seekpower::search::RrfOptions")]
+pub struct RrfOptions {
+    /// Positive finite smoothing constant; one-based k=60 is 61 here.
+    #[schema(default = 0.6, exclusive_minimum = 0)]
+    #[serde(default)]
+    pub constant: f32,
+    #[schema(default = 1, minimum = 0)]
+    #[serde(default)]
+    pub keyword_weight: f32,
+    #[schema(default = 1, minimum = 0)]
+    #[serde(default)]
+    pub vector_weight: f32,
+    /// Per-shard TopK budget and global fusion cap; omitted preserves legacy window.
+    #[schema(minimum = 1)]
+    pub keyword_candidates: Option<usize>,
+    /// Per-shard TopK budget and global fusion cap; does not bound probes or scanned vectors.
+    #[schema(minimum = 1)]
+    pub vector_candidates: Option<usize>,
+}

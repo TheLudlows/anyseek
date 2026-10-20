@@ -1,0 +1,60 @@
+{
+  "workspace_suite": {
+    "command": "cargo test --workspace --no-fail-fast",
+    "passed": 151,
+    "failed": 0,
+    "log": "/workspace/rrf-validation/rrf-tests-3.log"
+  },
+  "supplemental_checks": [
+    "Latest weighted_rrf: 2 passed, including per-shard/global caps, retrieval beyond output window, zero-based formula, missing channels, zero weights, invalid/non-finite/overflow values, defaults, pagination, realtime and reopen.",
+    "No-default-features weighted_rrf and stable_ranking: 4 passed; weighted_rrf rerun after realtime/reopen additions: 2 passed.",
+    "Server lib HTTP DTO tests: 1 passed.",
+    "Final OpenAPI schema test: 1 passed.",
+    "Localhost HTTP/UI smoke including RRF: passed.",
+    "Core boundary/dependency checks: passed for defaults and no-default-features.",
+    "git diff --check: passed."
+  ],
+  "logs": {
+    "rrf-no-default.log": {
+      "sha256": "a81c50115f4ff31c27ed200384d19a89a2cd7facbd23806524259bfad78222ca",
+      "path": "/workspace/rrf-validation/rrf-no-default.log"
+    },
+    "rrf-openapi.log": {
+      "sha256": "85ada04ed0b5e8ab80d605693cb4d198a0aa07888b460581890e7e32d9757c61",
+      "path": "/workspace/rrf-validation/rrf-openapi.log"
+    },
+    "rrf-server-final.log": {
+      "sha256": "15e5e894408130d5b48c9f0806e3b210ec4ad49de2bfcf0a187d5275961bf3d8",
+      "path": "/workspace/rrf-validation/rrf-server-final.log"
+    },
+    "rrf-tests-3.log": {
+      "sha256": "13512e4ca473581d73fd361a85a500e9b68538a5397b075abd040c5160c8ccee",
+      "path": "/workspace/rrf-validation/rrf-tests-3.log"
+    },
+    "rrf-reviewed.log": {
+      "sha256": "12b362da4ca68dc4fb9e8c98d7ba875a621b5e7a13d31afa37da28bcc060705a",
+      "path": "/workspace/rrf-validation/rrf-reviewed.log"
+    },
+    "rrf-no-default-final.log": {
+      "sha256": "e1813c8b7a919cceeff35bc7413baec3d8394546cd1443096a868437de76e487",
+      "path": "/workspace/rrf-validation/rrf-no-default-final.log"
+    },
+    "rrf-boundary.log": {
+      "sha256": "e5b9ca89fa727257e870059fad95e330cf17c1579a60ac9b85c56def9bc13b27",
+      "path": "/workspace/rrf-validation/rrf-boundary.log"
+    },
+    "rrf-http.log": {
+      "sha256": "3e197523930188664c417277624d87a86213f9fb363b795a493b529b67eb98fd",
+      "path": "/workspace/rrf-validation/rrf-http.log"
+    }
+  },
+  "review": {
+    "candidate_budget": "Both per-shard TopK argument and post-merge global cap; not a scan/probe/time limit.",
+    "zero_weight": "Excluded from fusion but retrieval and validation still run. Both zero rejected.",
+    "legacy": "Default f32 arithmetic and no global cap preserved; independently asserted literal legacy formula on one and three shards.",
+    "rank": "Shard IDs remapped globally before deterministic score/ID ranking and fusion.",
+    "api": "New enum variant preserves Hybrid literals but exhaustive downstream matches need updating; new HTTP rrf field is optional.",
+    "evaluation": "Independent quality evaluation remains blocked by unavailable local artifacts and the absence of a verified unseen held-out split; no new relevance or latency scores claimed."
+  },
+  "formatter": "rustfmt unavailable in installed toolchain; no format-check pass claimed"
+}

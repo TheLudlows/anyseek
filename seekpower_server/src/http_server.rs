@@ -920,6 +920,12 @@ mod tests {
         let (_, openapi) = api_router().split_for_parts();
         let doc = serde_json::to_value(openapi).unwrap();
         let schemas = &doc["components"]["schemas"];
+        assert!(schemas["SearchRequestObject"]["properties"]["rrf"].is_object());
+        let rrf = &schemas["RrfOptions"];
+        assert_eq!(rrf["properties"]["constant"]["default"], 0.6);
+        assert_eq!(rrf["properties"]["keyword_candidates"]["minimum"], 1);
+        assert!(rrf.get("required").is_none_or(|v| v.as_array().unwrap().is_empty()));
+
         for (name, removed) in [
             (
                 "CreateIndexRequest",

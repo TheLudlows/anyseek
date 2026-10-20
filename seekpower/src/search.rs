@@ -75,6 +75,15 @@ pub enum SearchMode {
         /// Specifies in which clusters to search for ANN results.
         ann_mode: AnnMode,
     },
+    /// Opt-in weighted fusion. Existing Hybrid literals retain legacy defaults.
+    WeightedHybrid {
+        /// Optional vector similarity threshold.
+        similarity_threshold: Option<f32>,
+        /// Vector cluster probing policy, independent of candidate budgets.
+        ann_mode: AnnMode,
+        /// Validated fusion and candidate settings.
+        rrf: RrfOptions,
+    },
     /// Hybrid search mode: Search results are retrieved based on a combination of lexical and vector search.
     /// The relevance score of search results is calculated based on RRF (Reciprocal Rank Fusion) of the result positions in lexical and vector search.
     Hybrid {
@@ -85,6 +94,55 @@ pub enum SearchMode {
         /// Specifies in which clusters to search for ANN results.
         ann_mode: AnnMode,
     },
+}
+
+/// Weighted reciprocal rank fusion settings. Ranks start at zero; absent hits contribute zero.
+#[derive(PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RrfOptions {
+    /// Positive finite smoothing constant. One-based k=60 corresponds to 61 here.
+    pub constant: f32,
+    /// Finite nonnegative keyword contribution weight.
+    pub keyword_weight: f32,
+    /// Finite nonnegative vector contribution weight.
+    pub vector_weight: f32,
+    /// Positive per-shard keyword TopK budget and global fusion cap; None uses the legacy window.
+    pub keyword_candidates: Option<usize>,
+    /// Positive per-shard vector TopK budget and global fusion cap; None uses the legacy window.
+    pub vector_candidates: Option<usize>,
+}
+
+impl Default for RrfOptions {
+    fn default() -> Self {
+        Self {
+            constant: 0.6,
+            keyword_weight: 1.0,
+            vector_weight: 1.0,
+            keyword_candidates: None,
+            vector_candidates: None,
+        }
+    }
+}
+
+impl RrfOptions {
+    /// Reject invalid inputs and combinations capable of overflowing the fused f32 score.
+    /// One zero weight disables that channel's contribution; both zero is invalid.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !self.constant.is_finite() || self.constant <= 0.0 {
+            return Err("RRF constant must be finite and positive".into());
+        }
+        if [self.keyword_weight, self.vector_weight].iter().any(|w| !w.is_finite() || *w < 0.0)
+            || (self.keyword_weight == 0.0 && self.vector_weight == 0.0) {
+            return Err("RRF weights must be finite, nonnegative, and not both zero".into());
+        }
+        if !(self.keyword_weight / self.constant + self.vector_weight / self.constant).is_finite() {
+            return Err("RRF maximum fused score must be finite".into());
+        }
+        if self.keyword_candidates == Some(0) || self.vector_candidates == Some(0) {
+            return Err("RRF candidate budgets must be positive".into());
+        }
+        Ok(())
+    }
 }
 
 /// The following result types are supported:
@@ -674,6 +732,16 @@ impl Search for IndexArc {
         facet_filter: Vec<FacetFilter>,
         result_sort: Vec<ResultSort>,
     ) -> ResultObject {
+        let rrf = match &search_mode {
+            SearchMode::WeightedHybrid { rrf, .. } => *rrf,
+            _ => RrfOptions::default(),
+        };
+        if let Err(error) = rrf.validate() {
+            return ResultObject {
+                error: Some(error),
+                ..Default::default()
+            };
+        }
         let index_ref = self.read().await;
         if let Err(error) =
             crate::metadata_filter::validate_filters(&index_ref.schema_map, &facet_filter)
@@ -966,17 +1034,15 @@ impl Search for IndexArc {
                         }
                         (None, Some(rlo_vector))
                     }
-                    SearchMode::Hybrid {
-                        similarity_threshold,
-                        ann_mode,
-                    } => {
+                    SearchMode::Hybrid { similarity_threshold, ann_mode }
+                    | SearchMode::WeightedHybrid { similarity_threshold, ann_mode, .. } => {
                         let mut rlo_lexical = shard_clone
                             .search_lexical_shard(
                                 query_string_clone.clone(),
                                 query_type_clone,
                                 enable_empty_query,
                                 0,
-                                offset + length,
+                                rrf.keyword_candidates.unwrap_or(offset + length),
                                 result_type_clone,
                                 include_uncommitted,
                                 field_filter_clone.clone(),
@@ -993,7 +1059,7 @@ impl Search for IndexArc {
                         let mut rlo_vector = shard_clone
                             .search_vector_shard(
                                 query_vector_clone,
-                                offset + length,
+                                rrf.vector_candidates.unwrap_or(offset + length),
                                 include_uncommitted,
                                 similarity_threshold,
                                 ann_mode,
@@ -1052,10 +1118,7 @@ impl Search for IndexArc {
                             .collect::<Vec<String>>();
                     };
                 }
-                SearchMode::Hybrid {
-                    similarity_threshold: _,
-                    ann_mode: _,
-                } => {
+                SearchMode::Hybrid { .. } | SearchMode::WeightedHybrid { .. } => {
                     let rlo_shard_lexical = rlo_shard_hybrid_options.0.as_mut().unwrap();
                     let rlo_shard_vector = rlo_shard_hybrid_options.1.as_mut().unwrap();
                     if aggregate_results {
@@ -1093,22 +1156,24 @@ impl Search for IndexArc {
                 } => {
                     result_object.results = result_object_results_vector;
                 }
-                SearchMode::Hybrid {
-                    similarity_threshold: _,
-                    ann_mode: _,
-                } => {
-                    let k = 0.6;
+                SearchMode::Hybrid { .. } | SearchMode::WeightedHybrid { .. } => {
+                    let k = rrf.constant;
                     let mut rrf_results: AHashMap<usize, Result> = AHashMap::new();
                     for (i, result) in result_object_results_lexical
                         .iter()
                         .sorted_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id))
+                        .take(if rrf.keyword_weight == 0.0 {
+                            0
+                        } else {
+                            rrf.keyword_candidates.unwrap_or(usize::MAX)
+                        })
                         .enumerate()
                     {
                         rrf_results.insert(
                             result.doc_id,
                             Result {
                                 doc_id: result.doc_id,
-                                score: 1.0 / (k + i as f32),
+                                score: rrf.keyword_weight / (k + i as f32),
                                 #[cfg(feature = "vb")]
                                 lexical_score: result.score,
                                 #[cfg(feature = "vb")]
@@ -1120,9 +1185,14 @@ impl Search for IndexArc {
                     for (i, result) in result_object_results_vector
                         .iter()
                         .sorted_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id))
+                        .take(if rrf.vector_weight == 0.0 {
+                            0
+                        } else {
+                            rrf.vector_candidates.unwrap_or(usize::MAX)
+                        })
                         .enumerate()
                     {
-                        let rrf_score = 1.0 / (k + i as f32);
+                        let rrf_score = rrf.vector_weight / (k + i as f32);
 
                         #[cfg(feature = "vb")]
                         rrf_results
