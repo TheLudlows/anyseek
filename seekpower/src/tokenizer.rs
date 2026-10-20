@@ -117,6 +117,21 @@ pub fn fold_diacritics_accents_ligatures_zalgo_umlaut(string: &str) -> String {
 }
 
 /// Tokenizer splits text to terms
+// WordSegmentationTM may emit a unary sign as its own token before CJK.
+// Keep it on the first term of the same lexical span. Lone signs, internal
+// C++/hyphens, and document analysis retain their existing behavior.
+#[cfg(feature = "zh")]
+fn segment_zh_span(index: &Shard, span: &str, is_query: bool) -> Vec<String> {
+    let unary = is_query && span.len() > 1
+        && matches!(span.as_bytes()[0], b'+' | b'-');
+    let body = if unary { &span[1..] } else { span };
+    let mut terms = index.word_segmentation_option.as_ref().unwrap().segment(body, true).0;
+    if unary {
+        if let Some(first) = terms.first_mut() { first.insert(0, span.as_bytes()[0] as char); }
+    }
+    terms
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::assigning_clones)]
 pub(crate) async fn tokenizer(
@@ -292,12 +307,8 @@ pub(crate) async fn tokenizer(
                         }
                         _ => {
                             if start {
-                                let result = index
-                                    .word_segmentation_option
-                                    .as_ref()
-                                    .unwrap()
-                                    .segment(&text_normalized[start_pos..char.0], true);
-                                non_unique_terms_line_string.extend(result.0);
+                                let result = segment_zh_span(index, &text_normalized[start_pos..char.0], is_query);
+                                non_unique_terms_line_string.extend(result);
                             }
                             false
                         }
@@ -444,12 +455,8 @@ pub(crate) async fn tokenizer(
 
                         _ => {
                             if start {
-                                let result = index
-                                    .word_segmentation_option
-                                    .as_ref()
-                                    .unwrap()
-                                    .segment(&text_normalized[start_pos..char.0], true);
-                                non_unique_terms_line_string.extend(result.0);
+                                let result = segment_zh_span(index, &text_normalized[start_pos..char.0], is_query);
+                                non_unique_terms_line_string.extend(result);
                             }
                             false
                         }
@@ -463,27 +470,15 @@ pub(crate) async fn tokenizer(
     if tokenizer == TokenizerType::UnicodeAlphanumericZH {
         if start {
             if first_part.len() >= 2 {
-                let result = index
-                    .word_segmentation_option
-                    .as_ref()
-                    .unwrap()
-                    .segment(first_part, true);
-                non_unique_terms_line_string.extend(result.0);
+                let result = segment_zh_span(index, first_part, is_query);
+                non_unique_terms_line_string.extend(result);
             } else {
-                let result = index
-                    .word_segmentation_option
-                    .as_ref()
-                    .unwrap()
-                    .segment(&text_normalized[start_pos..text_normalized.len()], true);
-                non_unique_terms_line_string.extend(result.0);
+                let result = segment_zh_span(index, &text_normalized[start_pos..text_normalized.len()], is_query);
+                non_unique_terms_line_string.extend(result);
             }
         } else if !first_part.is_empty() {
-            let result = index
-                .word_segmentation_option
-                .as_ref()
-                .unwrap()
-                .segment(first_part, true);
-            non_unique_terms_line_string.extend(result.0);
+            let result = segment_zh_span(index, first_part, is_query);
+            non_unique_terms_line_string.extend(result);
         }
         non_unique_terms_line = non_unique_terms_line_string
             .iter()

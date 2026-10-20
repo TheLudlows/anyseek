@@ -1,4 +1,3 @@
-use add_result::decode_positions_commit;
 use ahash::{AHashMap, AHashSet};
 use futures::future;
 use indexmap::IndexMap;
@@ -21,7 +20,7 @@ use std::{
     time::Instant,
 };
 use tokio::sync::{RwLock, Semaphore};
-use utils::{read_u32, write_u16};
+use utils::write_u16;
 
 #[cfg(feature = "zh")]
 use crate::word_segmentation::WordSegmentationTM;
@@ -1792,234 +1791,43 @@ pub(crate) fn get_document_length_compressed_mmap(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn get_max_score(
     index: &Shard,
-    segment: &SegmentIndex,
+    _segment: &SegmentIndex,
     posting_count_ngram_1: u32,
     posting_count_ngram_2: u32,
     posting_count_ngram_3: u32,
     posting_count: u32,
-    block_id: usize,
-    max_docid: usize,
-    max_p_docid: usize,
-    pointer_pivot_p_docid: usize,
-    compression_type_pointer: u32,
+    _block_id: usize,
+    _max_docid: usize,
+    _max_p_docid: usize,
+    _pointer_pivot_p_docid: usize,
+    _compression_type_pointer: u32,
     ngram_type: &NgramType,
 ) -> f32 {
-    let byte_array = {
-        &index.index_file_mmap[segment.byte_array_blocks_pointer[block_id].0
-            ..segment.byte_array_blocks_pointer[block_id].0
-                + segment.byte_array_blocks_pointer[block_id].1]
+    // A representative selected under an earlier average length is not a
+    // score upper bound after append/reopen. Use BM25's analytic saturation
+    // bound, independent of document lengths and stored representatives.
+    let n = index.indexed_doc_count as f32;
+    let idf = |df: u32| (1.0 + (n - df as f32 + 0.5) / (df as f32 + 0.5)).ln().max(0.0);
+    let whole = idf(posting_count) as f64;
+    let component_sum = match ngram_type {
+        NgramType::SingleTerm => 0.0,
+        NgramType::NgramFF | NgramType::NgramFR | NgramType::NgramRF =>
+            idf(posting_count_ngram_1) as f64 + idf(posting_count_ngram_2) as f64,
+        _ => idf(posting_count_ngram_1) as f64 + idf(posting_count_ngram_2) as f64 + idf(posting_count_ngram_3) as f64,
     };
-
-    let mut bm25f = 0.0;
-
-    let rank_position_pointer_range: u32 =
-        compression_type_pointer & 0b0011_1111_1111_1111_1111_1111_1111_1111;
-
-    let posting_pointer_size_sum;
-    let rank_position_pointer;
-
-    let (posting_pointer_size, embed_flag) = if max_p_docid < pointer_pivot_p_docid {
-        posting_pointer_size_sum = max_p_docid as u32 * 2;
-        rank_position_pointer = read_u16(
-            byte_array,
-            rank_position_pointer_range as usize + posting_pointer_size_sum as usize,
-        ) as u32;
-        (2, (rank_position_pointer & 0b10000000_00000000) != 0)
-    } else {
-        posting_pointer_size_sum = (max_p_docid as u32) * 3 - pointer_pivot_p_docid as u32;
-        rank_position_pointer = read_u32(
-            byte_array,
-            rank_position_pointer_range as usize + posting_pointer_size_sum as usize,
-        );
-        (
-            3,
-            (rank_position_pointer & 0b10000000_00000000_00000000) != 0,
-        )
+    // Covers both whole-ngram Proximity and component-ngram score paths.
+    // Single-field scorers historically use implicit weight 1.
+    let weight = if index.indexed_field_vec.len() == 1 { 1.0 } else {
+        index.indexed_schema_vec.iter().map(|f| f.boost.max(0.0) as f64).sum::<f64>()
     };
-
-    let positions_pointer = if embed_flag {
-        rank_position_pointer_range as usize + posting_pointer_size_sum as usize
-    } else {
-        let pointer_value = if posting_pointer_size == 2 {
-            rank_position_pointer & 0b01111111_11111111
-        } else {
-            rank_position_pointer & 0b01111111_11111111_11111111
-        } as usize;
-
-        rank_position_pointer_range as usize - pointer_value
-    };
-
-    let mut field_vec: SmallVec<[(u16, usize); 2]> = SmallVec::new();
-    let mut field_vec_ngram1 = SmallVec::new();
-    let mut field_vec_ngram2 = SmallVec::new();
-    let mut field_vec_ngram3 = SmallVec::new();
-
-    decode_positions_commit(
-        posting_pointer_size,
-        embed_flag,
-        byte_array,
-        positions_pointer,
-        ngram_type,
-        index.indexed_field_vec.len(),
-        index.indexed_field_id_bits,
-        index.indexed_field_id_mask,
-        index.longest_field_id as u16,
-        &mut field_vec,
-        &mut field_vec_ngram1,
-        &mut field_vec_ngram2,
-        &mut field_vec_ngram3,
-    );
-
-    if ngram_type == &NgramType::SingleTerm
-        || index.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity
-    {
-        let idf = (((index.indexed_doc_count as f32 - posting_count as f32 + 0.5)
-            / (posting_count as f32 + 0.5))
-            + 1.0)
-            .ln();
-
-        for field in field_vec.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
-                get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } as usize] as f32;
-
-            let document_length_quotient =
-                document_length_normalized / index.document_length_normalized_average;
-
-            let tf = field.1 as f32;
-
-            let weight = index.indexed_schema_vec[field.0 as usize].boost;
-
-            bm25f += weight
-                * idf
-                * ((tf * (K + 1.0) / (tf + (K * (1.0 - B + (B * document_length_quotient)))))
-                    + SIGMA);
-        }
-    } else if ngram_type == &NgramType::NgramFF
-        || ngram_type == &NgramType::NgramFR
-        || ngram_type == &NgramType::NgramRF
-    {
-        let idf_ngram1 = (((index.indexed_doc_count as f32 - posting_count_ngram_1 as f32 + 0.5)
-            / (posting_count_ngram_1 as f32 + 0.5))
-            + 1.0)
-            .ln();
-
-        let idf_ngram2 = (((index.indexed_doc_count as f32 - posting_count_ngram_2 as f32 + 0.5)
-            / (posting_count_ngram_2 as f32 + 0.5))
-            + 1.0)
-            .ln();
-
-        for field in field_vec_ngram1.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
-                get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } as usize] as f32;
-
-            let document_length_quotient =
-                document_length_normalized / index.document_length_normalized_average;
-
-            let tf_ngram1 = field.1 as f32;
-
-            let weight = index.indexed_schema_vec[field.0 as usize].boost;
-
-            bm25f += weight
-                * idf_ngram1
-                * ((tf_ngram1 * (K + 1.0)
-                    / (tf_ngram1 + (K * (1.0 - B + (B * document_length_quotient)))))
-                    + SIGMA);
-        }
-
-        for field in field_vec_ngram2.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
-                get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } as usize] as f32;
-
-            let document_length_quotient =
-                document_length_normalized / index.document_length_normalized_average;
-
-            let tf_ngram2 = field.1 as f32;
-
-            let weight = index.indexed_schema_vec[field.0 as usize].boost;
-
-            bm25f += weight
-                * idf_ngram2
-                * ((tf_ngram2 * (K + 1.0)
-                    / (tf_ngram2 + (K * (1.0 - B + (B * document_length_quotient)))))
-                    + SIGMA);
-        }
-    } else {
-        let idf_ngram1 = (((index.indexed_doc_count as f32 - posting_count_ngram_1 as f32 + 0.5)
-            / (posting_count_ngram_1 as f32 + 0.5))
-            + 1.0)
-            .ln();
-
-        let idf_ngram2 = (((index.indexed_doc_count as f32 - posting_count_ngram_2 as f32 + 0.5)
-            / (posting_count_ngram_2 as f32 + 0.5))
-            + 1.0)
-            .ln();
-
-        let idf_ngram3 = (((index.indexed_doc_count as f32 - posting_count_ngram_3 as f32 + 0.5)
-            / (posting_count_ngram_3 as f32 + 0.5))
-            + 1.0)
-            .ln();
-
-        for field in field_vec_ngram1.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
-                get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } as usize] as f32;
-
-            let document_length_quotient =
-                document_length_normalized / index.document_length_normalized_average;
-
-            let tf_ngram1 = field.1 as f32;
-
-            let weight = index.indexed_schema_vec[field.0 as usize].boost;
-
-            bm25f += weight
-                * idf_ngram1
-                * ((tf_ngram1 * (K + 1.0)
-                    / (tf_ngram1 + (K * (1.0 - B + (B * document_length_quotient)))))
-                    + SIGMA);
-        }
-
-        for field in field_vec_ngram2.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
-                get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } as usize] as f32;
-
-            let document_length_quotient =
-                document_length_normalized / index.document_length_normalized_average;
-
-            let tf_ngram2 = field.1 as f32;
-
-            let weight = index.indexed_schema_vec[field.0 as usize].boost;
-
-            bm25f += weight
-                * idf_ngram2
-                * ((tf_ngram2 * (K + 1.0)
-                    / (tf_ngram2 + (K * (1.0 - B + (B * document_length_quotient)))))
-                    + SIGMA);
-        }
-
-        for field in field_vec_ngram3.iter() {
-            let document_length_normalized = DOCUMENT_LENGTH_COMPRESSION[{
-                get_document_length_compressed_mmap(index, field.0 as usize, block_id, max_docid)
-            } as usize] as f32;
-
-            let document_length_quotient =
-                document_length_normalized / index.document_length_normalized_average;
-
-            let tf_ngram3 = field.1 as f32;
-
-            let weight = index.indexed_schema_vec[field.0 as usize].boost;
-
-            bm25f += weight
-                * idf_ngram3
-                * ((tf_ngram3 * (K + 1.0)
-                    / (tf_ngram3 + (K * (1.0 - B + (B * document_length_quotient)))))
-                    + SIGMA);
-        }
-    }
-    bm25f
+    // Accumulate the bound in f64 and round its final f32 value outward.
+    // Slack also covers f32 TF arithmetic, field/component accumulation and
+    // summation through MAX_QUERY_TERM_NUMBER (100), not just the 32-bit scan window.
+    let rounding = (64.0 + 8.0 * index.indexed_field_vec.len() as f64
+        + 4.0 * MAX_QUERY_TERM_NUMBER as f64) * f32::EPSILON as f64;
+    let slack = (rounding / (1.0 - rounding)).max(0.001);
+    let upper = whole.max(component_sum) * (K + 1.0 + SIGMA) as f64 * weight;
+    ((upper * (1.0 + slack) + 0.001) as f32).next_up()
 }
 
 /// Opens the index using memory-mapped files.
@@ -3319,11 +3127,15 @@ impl IndexDocumentShard2 for ShardArc {
 
         let do_commit = shard_mut.block_id != docid_local >> 16;
         if do_commit {
-            if shard_mut.is_vector_indexing {
-                shard_mut.commit_vector_shard().await;
+            // A caller may already have committed the complete previous block.
+            // Committing it again emits an empty duplicate level and offsets the
+            // appended postings. Only flush pending data; always advance the ID.
+            if shard_mut.uncommitted {
+                if shard_mut.is_vector_indexing {
+                    shard_mut.commit_vector_shard().await;
+                }
+                shard_mut.commit_lexical_shard(docid_local).await;
             }
-            shard_mut.commit_lexical_shard(docid_local).await;
-
             shard_mut.block_id = docid_local >> 16;
         }
 
@@ -3529,4 +3341,121 @@ pub(crate) struct DocumentItem {
     pub document: Document,
     pub unique_terms: AHashMap<String, TermObject>,
     pub field_vec: Vec<(usize, u8, u32, u32)>,
+}
+
+#[cfg(test)]
+mod score_bound_contract_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn saturation_bound_boosts_ngram_components_and_100_term_accumulation() {
+        assert_eq!(MAX_QUERY_TERM_NUMBER, 100);
+        for fields in [1, 3] {
+            let path = std::env::temp_dir().join(format!(
+                "seekpower-bound-contract-{}-{fields}",
+                std::process::id()
+            ));
+            assert!(!path.exists());
+            let schema: Vec<SchemaField> = serde_json::from_value(serde_json::Value::Array(
+                (0..fields)
+                    .map(|i| {
+                        serde_json::json!({"field":format!("f{i}"),"field_type":"Text",
+                    "store":false,"index_lexical":true,"boost":([0.25,4.0,8.0][i])})
+                    })
+                    .collect(),
+            ))
+            .unwrap();
+            let meta = IndexMetaObject {
+                id: 0,
+                name: "bound-contract".into(),
+                lexical_similarity: LexicalSimilarity::Bm25f,
+                tokenizer: TokenizerType::UnicodeAlphanumeric,
+                stop_words: StopwordType::None,
+                frequent_words: FrequentwordType::None,
+                ngram_indexing: 0,
+                document_compression: DocumentCompression::Snappy,
+                access_type: AccessType::Mmap,
+                clustering: Clustering::None,
+                inference: Inference::None,
+            };
+            let index = create_index(&path, meta, &schema, 11, true, Some(1))
+                .await
+                .unwrap();
+            {
+                let root = index.read().await;
+                let mut shard = root.shard_vec[0].write().await;
+                shard.indexed_doc_count = 10000;
+                let weights: Vec<f32> = if fields == 1 {
+                    vec![1.0]
+                } else {
+                    shard.indexed_schema_vec.iter().map(|s| s.boost).collect()
+                };
+                for kind in [
+                    NgramType::SingleTerm,
+                    NgramType::NgramFF,
+                    NgramType::NgramFFF,
+                ] {
+                    for whole_df in [1u32, 17, 5000, 10000] {
+                        let bound = get_max_score(
+                            &shard,
+                            &shard.segments_index[0],
+                            1,
+                            1234,
+                            9999,
+                            whole_df,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            &kind,
+                        );
+                        assert!(bound.is_finite() && bound > 0.0);
+                        // Test whole-gram proximity and component-scoring alternatives
+                        // separately, using literal BM25 parameters rather than a scorer.
+                        let mut alternatives = vec![vec![whole_df]];
+                        match kind {
+                            NgramType::NgramFF => alternatives.push(vec![1, 1234]),
+                            NgramType::NgramFFF => alternatives.push(vec![1, 1234, 9999]),
+                            _ => {}
+                        }
+                        for dfs in alternatives {
+                            for tf in [1f32, 3.0, 65535.0, 16_777_216.0] {
+                                for dl in [0f32, 1.0, 31.0, 4096.0, 1e8] {
+                                    for avg in [0.0001f32, 0.5, 1.0, 1024.0, 1e8] {
+                                        let mut score = 0f32;
+                                        for &df in &dfs {
+                                            let idf = (1.0
+                                                + (10000.0 - df as f32 + 0.5) / (df as f32 + 0.5))
+                                                .ln();
+                                            for &boost in &weights {
+                                                score += boost
+                                                    * idf
+                                                    * (tf * 2.2
+                                                        / (tf + 1.2 * (0.25 + 0.75 * dl / avg)));
+                                            }
+                                        }
+                                        assert!(score <= bound, "score={score}, bound={bound}");
+                                        let (mut query_score, mut query_bound) = (0f32, 0f32);
+                                        for _ in 0..MAX_QUERY_TERM_NUMBER {
+                                            query_score += score;
+                                            query_bound += bound;
+                                        }
+                                        assert!(
+                                            query_score <= query_bound,
+                                            "100-term accumulated bound"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                shard.indexed_doc_count = 0;
+            }
+            index.close().await;
+            drop(index);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
 }
