@@ -82,3 +82,5 @@ mod field_length_tests;
 
 #[cfg(test)]
 mod warmup_cache_tests;
+
+mod term_hash;

@@ -41,7 +41,7 @@ use crate::{
     vector_similarity::{TurboQuant, VectorSimilarity},
 };
 
-use ahash::RandomState;
+
 
 pub(crate) const INDEX_FILENAME: &str = "index.bin";
 pub(crate) const DOCSTORE_FILENAME: &str = "docstore.bin";
@@ -57,9 +57,54 @@ pub(crate) const VECTOR_FILENAME: &str = "vector.bin";
 
 const INDEX_HEADER_SIZE: u64 = 4;
 /// Current on-disk format major version; opening requires an exact version match.
-pub const INDEX_FORMAT_VERSION_MAJOR: u16 = 7;
+pub const INDEX_FORMAT_VERSION_MAJOR: u16 = 8;
 /// Current on-disk format minor version; opening requires an exact version match.
 pub const INDEX_FORMAT_VERSION_MINOR: u16 = 0;
+
+// Validate before opening writable files or constructing any shard. A format
+// number identifies the complete hash contract; there is no legacy auto-detection.
+fn validate_index_header(index_path: &Path, allow_new: bool) -> Result<(), String> {
+    let path = index_path.join(INDEX_FILENAME);
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if allow_new && error.kind() == std::io::ErrorKind::NotFound => {
+            if !index_path.exists() || fs::read_dir(index_path)
+                .map_err(|e| format!("cannot inspect {}: {e}", index_path.display()))?
+                .next().is_none()
+            {
+                return Ok(());
+            }
+            return Err(format!("missing index format header: {} (refusing to initialize a nonempty directory)", path.display()));
+        }
+        Err(error) => return Err(format!("cannot read index format header {}: {error}", path.display())),
+    };
+    let mut header = [0u8; 4];
+    file.read_exact(&mut header)
+        .map_err(|e| format!("invalid or truncated index format header {}: {e}", path.display()))?;
+    let version = (u16::from_le_bytes([header[0], header[1]]), u16::from_le_bytes([header[2], header[3]]));
+    if version != (INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR) {
+        return Err(format!("unsupported index format {}.{} in {}; expected {}.{} ({TERM_HASH_ALGORITHM}); incompatible legacy hashes are not migrated; create a separate new index",
+            version.0, version.1, path.display(), INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR));
+    }
+    Ok(())
+}
+
+fn validate_index_files(index_path: &Path, allow_new: bool) -> Result<(), String> {
+    validate_index_header(index_path, allow_new)?;
+    if !index_path.join(INDEX_FILENAME).exists() { return Ok(()); }
+    let shards = index_path.join("shards");
+    let entries = fs::read_dir(&shards)
+        .map_err(|e| format!("cannot inspect index shards {}: {e}", shards.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read shard entry: {e}"))?;
+        if entry.file_type().map_err(|e| format!("cannot inspect shard entry: {e}"))?.is_dir()
+            && entry.file_name().to_str().is_some_and(|name| name.parse::<usize>().is_ok())
+        {
+            validate_index_header(&entry.path(), false)?;
+        }
+    }
+    Ok(())
+}
 
 /// Maximum processed positions per term per document: default=65_536. E.g. 65,536 * 'the' per document, exceeding positions are ignored for search.
 pub const MAX_POSITIONS_PER_TERM: usize = 65_536;
@@ -1064,6 +1109,7 @@ pub(crate) async fn create_index_root(
     mute: bool,
     force_shard_number: Option<usize>,
 ) -> Result<IndexArc, String> {
+    validate_index_files(index_path, serialize_schema)?;
     crate::vector::validate_vector_schema(&meta.inference, schema)?;
     let segment_number1 = 1usize << segment_number_bits1;
     let segment_number_mask1 = (1u32 << segment_number_bits1) - 1;
@@ -1339,9 +1385,9 @@ pub(crate) async fn create_index_root(
                     &index.compressed_index_segment_block_buffer[0..INDEX_HEADER_SIZE as usize],
                 );
             } else {
-                let _ = index.index_file.read(
+                index.index_file.read_exact(
                     &mut index.compressed_index_segment_block_buffer[0..INDEX_HEADER_SIZE as usize],
-                );
+                ).map_err(|e| format!("cannot read index format header: {e}"))?;
                 index.index_format_version_major =
                     read_u16(&index.compressed_index_segment_block_buffer, 0);
                 index.index_format_version_minor =
@@ -1406,6 +1452,7 @@ pub(crate) fn create_shard(
     mute: bool,
     longest_field_id_option: Option<usize>,
 ) -> Result<Shard, String> {
+    validate_index_header(index_path, serialize_schema)?;
     let segment_number1 = 1usize << segment_number_bits1;
     let segment_number_mask1 = (1u32 << segment_number_bits1) - 1;
 
@@ -1759,9 +1806,9 @@ pub(crate) fn create_shard(
                     &index.compressed_index_segment_block_buffer[0..INDEX_HEADER_SIZE as usize],
                 );
             } else {
-                let _ = index.index_file.read(
+                index.index_file.read_exact(
                     &mut index.compressed_index_segment_block_buffer[0..INDEX_HEADER_SIZE as usize],
-                );
+                ).map_err(|e| format!("cannot read index format header: {e}"))?;
                 index.index_format_version_major =
                     read_u16(&index.compressed_index_segment_block_buffer, 0);
                 index.index_format_version_minor =
@@ -1885,6 +1932,7 @@ pub(crate) async fn open_shard(
     vector_type: Precision,
     vector_dimensions: usize,
 ) -> Result<ShardArc, String> {
+    validate_index_header(index_path, false)?;
     if !mute {
         log::info!("opening index ...");
     }
@@ -2136,6 +2184,7 @@ pub(crate) async fn open_shard(
 /// * `index_path` - index path.
 /// * `mute` - prevent emitting status messages (e.g. when using pipes for data interprocess communication).
 pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
+    validate_index_files(index_path, false)?;
     let start_time = Instant::now();
 
     match File::open(Path::new(index_path).join(META_FILENAME)) {
@@ -2392,21 +2441,17 @@ pub static IS_NEON: LazyLock<bool> = LazyLock::new(|| {
 /// the SIMD path; on archs without a backend this is always `false`.
 pub static IS_SIMD: LazyLock<bool> = LazyLock::new(|| *IS_AVX2 || *IS_NEON);
 
-pub(crate) static HASHER_32: LazyLock<RandomState> =
-    LazyLock::new(|| RandomState::with_seeds(805272099, 242851902, 646123436, 591410655));
-
-pub(crate) static HASHER_64: LazyLock<RandomState> =
-    LazyLock::new(|| RandomState::with_seeds(808259318, 750368348, 84901999, 789810389));
+/// Persistent term hash contract of index format 8.0. Changing it requires a format bump.
+pub const TERM_HASH_ALGORITHM: &str = "xxh64-utf8-v1";
 
 #[inline]
 pub(crate) fn hash32(term_bytes: &[u8]) -> u32 {
-    HASHER_32.hash_one(term_bytes) as u32
+    crate::term_hash::segment_hash(term_bytes)
 }
 
 #[inline]
 pub(crate) fn hash64(term_bytes: &[u8]) -> u64 {
-    HASHER_64.hash_one(term_bytes)
-        & 0b1111111111111111111111111111111111111111111111111111111111111000
+    crate::term_hash::term_key(term_bytes)
 }
 
 static FREQUENT_EN: &str = include_str!("../assets/dictionaries/frequent_en.txt");
