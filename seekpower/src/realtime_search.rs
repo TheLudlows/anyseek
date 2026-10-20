@@ -516,7 +516,8 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
             document_length_normalized / shard.field_length_average(0, document_length_normalized_average);
 
         match plo_single.ngram_type {
-            NgramType::SingleTerm => {
+            _ if plo_single.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                 let tf = plo_single.field_vec[0].1 as f32;
 
                 bm25f = plo_single.idf
@@ -555,7 +556,8 @@ pub(crate) fn get_bm25f_singleterm_multifield_uncommitted(
         }
     } else {
         match plo_single.ngram_type {
-            NgramType::SingleTerm => {
+            _ if plo_single.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                 for field in plo_single.field_vec.iter() {
                     let field_id = field.0 as usize;
 
@@ -711,7 +713,8 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
             }
 
             match plo.ngram_type {
-                NgramType::SingleTerm => {
+                _ if plo.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                     let tf = plo.field_vec[0].1 as f32;
 
                     bm25f += plo.idf
@@ -759,7 +762,8 @@ pub(crate) fn get_bm25f_multiterm_multifield_uncommitted(
             }
 
             match plo.ngram_type {
-                NgramType::SingleTerm => {
+                _ if plo.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                     for field in plo.field_vec.iter() {
                         let field_id = field.0 as usize;
 

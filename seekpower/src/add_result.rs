@@ -567,7 +567,8 @@ pub(crate) fn get_bm25f_singleterm_multifield(
         let bm25_component = shard.length_component(0, get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111));
 
         match plo_single.ngram_type {
-            NgramType::SingleTerm => {
+            _ if plo_single.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                 let tf = field_vec[0].1 as f32;
 
                 bm25f = plo_single.idf * ((tf * (K + 1.0) / (tf + bm25_component)) + SIGMA);
@@ -733,7 +734,8 @@ pub(crate) fn get_bm25f_singleterm_singlefield(
         let bm25_component = shard.length_component(0, get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111));
 
         match plo_single.ngram_type {
-            NgramType::SingleTerm => {
+            _ if plo_single.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                 let tf = positions_count as f32;
 
                 bm25f = plo_single.idf * ((tf * (K + 1.0) / (tf + bm25_component)) + SIGMA);
@@ -769,7 +771,8 @@ pub(crate) fn get_bm25f_singleterm_singlefield(
             ));
 
         match plo_single.ngram_type {
-            NgramType::SingleTerm => {
+            _ if plo_single.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                 let tf = positions_count as f32;
 
                 bm25f = plo_single.idf * ((tf * (K + 1.0) / (tf + bm25_component)) + SIGMA);
@@ -824,7 +827,8 @@ pub(crate) fn get_bm25f_multiterm_multifield(
             }
 
             match plo.ngram_type {
-                NgramType::SingleTerm => {
+                _ if plo.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                     let tf = plo.field_vec[0].1 as f32;
 
                     bm25f += plo.idf * ((tf * (K + 1.0) / (tf + bm25_component)) + SIGMA);
@@ -864,7 +868,8 @@ pub(crate) fn get_bm25f_multiterm_multifield(
             }
 
             match plo.ngram_type {
-                NgramType::SingleTerm => {
+                _ if plo.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                     for field in plo.field_vec.iter() {
                         let field_id = field.0 as usize;
                         if bm25_component_vec[field_id] == 0.0 {
@@ -1028,7 +1033,8 @@ pub(crate) fn get_bm25f_multiterm_singlefield(
         }
 
         match plo.ngram_type {
-            NgramType::SingleTerm => {
+            _ if plo.ngram_type == NgramType::SingleTerm
+                || shard.meta.lexical_similarity == LexicalSimilarity::Bm25fProximity => {
                 let tf = plo.positions_count as f32;
 
                 bm25f += plo.idf * ((tf * (K + 1.0) / (tf + bm25_component)) + SIGMA);
