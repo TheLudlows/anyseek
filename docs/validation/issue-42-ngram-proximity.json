@@ -57,5 +57,30 @@
     "expected": 1.2039728043259361
   },
   "fix": "Use whole-ngram TF/IDF in every Proximity scoring helper, including committed one-field/multiterm paths. Ordinary Bm25f component branches unchanged.",
-  "scope": "#47 component DF mapping and a separately observed stale committed component-DF snapshot are not claimed fixed by this commit."
+  "scope": "#47 component DF mapping and a separately observed stale committed component-DF snapshot are not claimed fixed by this commit.",
+  "review_strengthening": {
+    "score_checks": 2112,
+    "finite_score_required": true,
+    "component_tf": "extra nonadjacent of in every matching document makes TF(of)=TF(gram)+1",
+    "mixed": "both component-only append and additional matching uncommitted doc4; exact hits0/4 and physical DF offset1 checked for both sources",
+    "validation": {
+      "exit": 0,
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "seekpower",
+        "--test",
+        "ngram_proximity",
+        "--",
+        "--test-threads=1"
+      ],
+      "wall_s": 11.252862289999939,
+      "peak_cgroup_GiB": 1.0958709716796875,
+      "min_disk_GiB": 5.01739501953125,
+      "guard": null
+    }
+  }
 }

@@ -27,8 +27,8 @@ async fn add(index: &IndexArc, docs: &[Value], total: usize) {
     .await
     .unwrap();
 }
-fn idf(df: f64) -> f64 {
-    (1.0 + (4.0 - df + 0.5) / (df + 0.5)).ln()
+fn idf(n: f64, df: f64) -> f64 {
+    (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
 }
 fn expected(
     fields: usize,
@@ -36,13 +36,16 @@ fn expected(
     proximity: bool,
     mask: u8,
     words: usize,
+    extra_match: bool,
 ) -> f64 {
     let specs = if fields == 1 {
-        vec![(1.0, 4.0, 4.0, 1.0)]
+        vec![(1.0, 5.0, 5.0, 1.0)]
     } else {
-        vec![(2.0, 7.0, 7.0, 2.0), (0.5, 4.0, 4.0, 1.0)]
+        vec![(2.0, 8.0, 8.0, 2.0), (0.5, 5.0, 5.0, 1.0)]
     };
-    let shared = if fields == 1 { 4.0 } else { 11.0 };
+    let shared = if fields == 1 { 5.0 } else { 13.0 };
+    let n = if extra_match { 5.0 } else { 4.0 };
+    let extra_df = if extra_match { 1.0 } else { 0.0 };
     specs
         .into_iter()
         .map(|(boost, dl, mean, tf)| {
@@ -52,10 +55,13 @@ fn expected(
                 mean
             };
             let component = |df, frequency: f64| {
-                boost * idf(df) * frequency * 2.2 / (frequency + 1.2 * (0.25 + 0.75 * dl / avg))
+                boost * idf(n, df + extra_df) * frequency * 2.2
+                    / (frequency + 1.2 * (0.25 + 0.75 * dl / avg))
             };
             let mut score = if !proximity || mask == 0 {
-                (1..=words.min(3)).map(|df| component(df as f64, tf)).sum()
+                (1..=words.min(3))
+                    .map(|df| component(df as f64, tf + if df == 2 { 1.0 } else { 0.0 }))
+                    .sum()
             } else if words == 2 || mask != 1 {
                 component(1.0, tf)
             } else {
@@ -78,9 +84,9 @@ pub async fn exercise(proximity: bool) {
     ] {
         for fields in [1, 2] {
             for mask in [0, 1, 9, 127] {
-                for mixed in [false, true] {
+                for (mixed, extra_match) in [(false, false), (true, false), (true, true)] {
                     let label = format!(
-                        "ngram-{proximity}-{policy:?}-{fields}-{mask}-{mixed}-{}",
+                        "ngram-{proximity}-{policy:?}-{fields}-{mask}-{mixed}-{extra_match}-{}",
                         std::process::id()
                     );
                     let path = std::env::temp_dir().join(&label);
@@ -107,31 +113,36 @@ pub async fn exercise(proximity: bool) {
                     let schema=serde_json::from_value(if fields==1 {json!([{"field":"a","field_type":"Text","index_lexical":true,"store":false,"boost":1.0}])}else{json!([{"field":"a","field_type":"Text","index_lexical":true,"store":false,"boost":2.0},{"field":"b","field_type":"Text","index_lexical":true,"store":false,"boost":0.5}])}).unwrap();
                     // Constant per-field lengths keep legacy Shared committed means unchanged on append,
                     // isolating ngram scoring from the separate length-update policy.
-                    // Literal physical DFs: the=1, of=2, and=3, anchor=1. Lengths <=7 decode exactly.
-                    let docs = if fields == 1 {
+                    // Literal physical DFs: the/of/and/anchor=1/2/3/1 (plus one with extra_match).
+                    // The extra nonadjacent `of` raises component TF but not whole-gram TF.
+                    // Lengths <=8 decode exactly; all docs have constant per-field lengths.
+                    let mut docs = if fields == 1 {
                         vec![
-                            json!({"a":"the of and anchor"}),
-                            json!({"a":"of neutral neutral neutral"}),
-                            json!({"a":"and neutral neutral neutral"}),
-                            json!({"a":"and neutral neutral neutral"}),
+                            json!({"a":"the of and anchor of"}),
+                            json!({"a":"of neutral neutral neutral neutral"}),
+                            json!({"a":"and neutral neutral neutral neutral"}),
+                            json!({"a":"and neutral neutral neutral neutral"}),
                         ]
                     } else {
                         vec![
-                            json!({"a":"the of and the of and anchor","b":"the of and anchor"}),
-                            json!({"a":"of neutral neutral neutral neutral neutral neutral","b":"of neutral neutral neutral"}),
-                            json!({"a":"and neutral neutral neutral neutral neutral neutral","b":"and neutral neutral neutral"}),
-                            json!({"a":"and neutral neutral neutral neutral neutral neutral","b":"and neutral neutral neutral"}),
+                            json!({"a":"the of and the of and anchor of","b":"the of and anchor of"}),
+                            json!({"a":"of neutral neutral neutral neutral neutral neutral neutral","b":"of neutral neutral neutral neutral"}),
+                            json!({"a":"and neutral neutral neutral neutral neutral neutral neutral","b":"and neutral neutral neutral neutral"}),
+                            json!({"a":"and neutral neutral neutral neutral neutral neutral neutral","b":"and neutral neutral neutral neutral"}),
                         ]
                     };
+                    if extra_match {
+                        docs.push(docs[0].clone());
+                    }
                     let mut index = create_index(&path, meta, &schema, 11, true, Some(1))
                         .await
                         .unwrap();
                     if mixed {
                         add(&index, &docs[..1], 1).await;
                         index.commit().await;
-                        add(&index, &docs[1..], 4).await;
+                        add(&index, &docs[1..], docs.len()).await;
                     } else {
-                        add(&index, &docs, 4).await;
+                        add(&index, &docs, docs.len()).await;
                     }
                     for stage in 0..3 {
                         if stage == 1 {
@@ -174,15 +185,33 @@ pub async fn exercise(proximity: bool) {
                                         .await;
                                     assert!(r.error.is_none(), "{:?}", r.error);
                                     let visible = stage > 0 || mixed || realtime;
+                                    let want_ids = if !visible {
+                                        vec![]
+                                    } else if extra_match && (stage > 0 || realtime) {
+                                        vec![0, 4]
+                                    } else {
+                                        vec![0]
+                                    };
                                     assert_eq!(
                                         r.results.iter().map(|x| x.doc_id).collect::<Vec<_>>(),
-                                        if visible { vec![0] } else { vec![] },
+                                        want_ids,
                                         "{label} stage={stage} q={q}"
                                     );
-                                    assert_eq!(r.result_count_total, usize::from(visible));
-                                    if visible {
-                                        let want = expected(fields, policy, proximity, mask, words);
-                                        let got = r.results[0].score as f64;
+                                    assert_eq!(r.result_count_total, want_ids.len());
+                                    for hit in r.results {
+                                        let want = expected(
+                                            fields,
+                                            policy,
+                                            proximity,
+                                            mask,
+                                            words,
+                                            extra_match,
+                                        );
+                                        let got = hit.score as f64;
+                                        assert!(
+                                            got.is_finite(),
+                                            "{label} stage={stage} q={q} nonfinite score={got}"
+                                        );
                                         checked += 1;
                                         if (got - want).abs() > 2e-5 * want.abs().max(1.0) {
                                             failures.push(format!("{label} stage={stage} rt={realtime} explicit={explicit} q={q} got={got} want={want}"));
