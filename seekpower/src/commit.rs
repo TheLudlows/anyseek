@@ -186,6 +186,7 @@ impl Commit for IndexArc {
 
 impl Shard {
     pub(crate) async fn commit_lexical_shard(&mut self, indexed_doc_count: usize) {
+        self.invalidate_frequentword_results();
         let is_last_level_incomplete = self.is_last_level_incomplete;
         if is_last_level_incomplete {
             self.merge_incomplete_index_level_to_level0();

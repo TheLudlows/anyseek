@@ -79,3 +79,6 @@ mod field_length;
 
 #[cfg(test)]
 mod field_length_tests;
+
+#[cfg(test)]
+mod warmup_cache_tests;

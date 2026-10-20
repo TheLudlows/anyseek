@@ -862,6 +862,8 @@ pub struct Shard {
 
     pub(crate) mute: bool,
     pub(crate) frequentword_results: AHashMap<String, ResultObject>,
+    // Changes under the shard write lock whenever cached scores can become stale.
+    frequentword_cache_generation: u64,
 
     pub(crate) facets: Vec<FacetField>,
     pub(crate) facets_map: AHashMap<String, usize>,
@@ -1697,6 +1699,7 @@ pub(crate) fn create_shard(
                 postinglist_count: 0,
                 mute,
                 frequentword_results: AHashMap::new(),
+                frequentword_cache_generation: 0,
                 facets: facets_vec,
                 facets_map,
                 facets_size_sum,
@@ -2274,10 +2277,33 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
 }
 
 pub(crate) async fn warmup(shard_object_arc: &ShardArc) {
-    shard_object_arc.write().await.frequentword_results.clear();
+    warmup_inner(
+        shard_object_arc,
+        #[cfg(test)]
+        None,
+    )
+    .await;
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct WarmupPause {
+    pub computed: tokio::sync::Notify,
+    pub resume: tokio::sync::Notify,
+}
+
+pub(crate) async fn warmup_inner(
+    shard_object_arc: &ShardArc,
+    #[cfg(test)] pause: Option<&WarmupPause>,
+) {
+    shard_object_arc
+        .write()
+        .await
+        .invalidate_frequentword_results();
 
     let frequent_words = shard_object_arc.read().await.frequent_words.clone();
     for frequentword in frequent_words.iter() {
+        let generation = shard_object_arc.read().await.frequentword_cache_generation;
         let results_list = shard_object_arc
             .search_lexical_shard(
                 frequentword.to_owned(),
@@ -2293,7 +2319,17 @@ pub(crate) async fn warmup(shard_object_arc: &ShardArc) {
             )
             .await;
 
+        #[cfg(test)]
+        if let Some(pause) = pause {
+            pause.computed.notify_one();
+            pause.resume.notified().await;
+        }
         let mut index_mut = shard_object_arc.write().await;
+        // Search releases its read lock before publication. A mutation in that
+        // gap invalidates this result even if another warmup already finished.
+        if generation != index_mut.frequentword_cache_generation {
+            continue;
+        }
         index_mut
             .frequentword_results
             .insert(frequentword.to_string(), results_list);
@@ -2428,6 +2464,11 @@ pub(crate) const DOCUMENT_LENGTH_COMPRESSION: [u32; 256] = {
 };
 
 impl Shard {
+    pub(crate) fn invalidate_frequentword_results(&mut self) {
+        self.frequentword_cache_generation = self.frequentword_cache_generation.wrapping_add(1);
+        self.frequentword_results.clear();
+    }
+
     pub(crate) fn string_set_to_single_term_id(&mut self) {
         for (i, facet) in self.facets.iter().enumerate() {
             if facet.field_type == FieldType::StringSet16
@@ -2565,7 +2606,7 @@ impl Shard {
             field.field_document_count = 0;
             field.length_component_cache = [0.0; 256];
         }
-        self.frequentword_results.clear();
+        self.invalidate_frequentword_results();
 
 
         self.level_index = Vec::new();
@@ -3357,7 +3398,7 @@ impl IndexDocumentShard2 for ShardArc {
 
         shard_mut.uncommitted = true;
         // Physical N/DF can change even for committed-only visibility.
-        shard_mut.frequentword_results.clear();
+        shard_mut.invalidate_frequentword_results();
 
 
         let mut longest_field_id: usize = 0;
