@@ -1,0 +1,86 @@
+{
+  "issue": 42,
+  "base": "f0b27c4eb07aa097549d522b1a07fea3e51e0d4e",
+  "oracle": "Literal N=4, DF(the/of/and/anchor)=1/2/3/1; field lengths constant4 or7/4 to isolate legacy Shared committed mean. TF and boosts differ across fields. 1056 score checks, exact ID0 membership and total. Two policies,1/2fields,ngram0/1/9/127,realtime/mixed/commit/reopen,default/explicit sort.",
+  "baseline": {
+    "exit": 101,
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "seekpower",
+      "--test",
+      "ngram_proximity",
+      "--test",
+      "ngram_component_df",
+      "--no-fail-fast",
+      "--",
+      "--test-threads=1"
+    ],
+    "wall_s": 10.23898222799994,
+    "peak_cgroup_GiB": 0.9575767517089844,
+    "min_disk_GiB": 5.018268585205078,
+    "guard": null
+  },
+  "regression": {
+    "exit": 0,
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "seekpower",
+      "--lib",
+      "--test",
+      "ngram_proximity",
+      "--test",
+      "ngram_flags",
+      "--test",
+      "realtime_boost",
+      "--",
+      "--test-threads=1"
+    ],
+    "wall_s": 21.68759929299995,
+    "peak_cgroup_GiB": 1.28509521484375,
+    "min_disk_GiB": 5.018268585205078,
+    "guard": null
+  },
+  "representative_failure": {
+    "query": "\"the of\"",
+    "policy": "Shared",
+    "fields": 1,
+    "state": "realtime",
+    "actual": 0,
+    "expected": 1.2039728043259361
+  },
+  "fix": "Use whole-ngram TF/IDF in every Proximity scoring helper, including committed one-field/multiterm paths. Ordinary Bm25f component branches unchanged.",
+  "scope": "#47 component DF mapping and a separately observed stale committed component-DF snapshot are not claimed fixed by this commit.",
+  "review_strengthening": {
+    "score_checks": 2112,
+    "finite_score_required": true,
+    "component_tf": "extra nonadjacent of in every matching document makes TF(of)=TF(gram)+1",
+    "mixed": "both component-only append and additional matching uncommitted doc4; exact hits0/4 and physical DF offset1 checked for both sources",
+    "validation": {
+      "exit": 0,
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "seekpower",
+        "--test",
+        "ngram_proximity",
+        "--",
+        "--test-threads=1"
+      ],
+      "wall_s": 11.252862289999939,
+      "peak_cgroup_GiB": 1.0958709716796875,
+      "min_disk_GiB": 5.01739501953125,
+      "guard": null
+    }
+  }
+}
