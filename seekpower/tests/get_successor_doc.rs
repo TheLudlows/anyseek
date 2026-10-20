@@ -26,6 +26,7 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
         text_normalization: seekpower::index::TextNormalization::None,
+        field_length_normalization: seekpower::index::FieldLengthNormalization::Shared,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,

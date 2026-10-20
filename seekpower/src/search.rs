@@ -1816,6 +1816,17 @@ impl SearchLexicalShard for ShardArc {
 
                                 if found_plo {
                                     if result_type != ResultType::Count {
+                                        // Scoring sees all physical documents, as does N and the
+                                        // realtime scorer. Keep traversal posting counts unchanged.
+                                        let live_df = if shard_ref.uncommitted {
+                                            shard_ref.segments_level0[key0 as usize].segment.get(&key_hash).map_or(0, |p| p.posting_count as u32)
+                                        } else { 0 };
+                                        let posting_count = posting_count + live_df;
+                                        let component_df = |term: &str| if shard_ref.uncommitted { shard_ref.get_posting_count_uncommitted(term) as u32 } else { 0 };
+                                        let bigram = matches!(non_unique_term.ngram_type, NgramType::NgramFF | NgramType::NgramFR | NgramType::NgramRF);
+                                        let posting_count_ngram_1 = posting_count_ngram_1 + component_df(if bigram { &non_unique_term.term_ngram_1 } else { &non_unique_term.term_ngram_2 });
+                                        let posting_count_ngram_2 = posting_count_ngram_2 + component_df(if bigram { &non_unique_term.term_ngram_0 } else { &non_unique_term.term_ngram_1 });
+                                        let posting_count_ngram_3 = posting_count_ngram_3 + component_df(&non_unique_term.term_ngram_0);
                                         if non_unique_term.ngram_type == NgramType::SingleTerm
                                             || shard_ref.meta.lexical_similarity
                                                 == LexicalSimilarity::Bm25fProximity

@@ -1338,6 +1338,7 @@ mod tests {
             lexical_similarity: LexicalSimilarity::Bm25fProximity,
             tokenizer: TokenizerType::UnicodeAlphanumericZH,
         text_normalization: crate::index::TextNormalization::None,
+        field_length_normalization: crate::index::FieldLengthNormalization::Shared,
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::English,
             ngram_indexing: 9,

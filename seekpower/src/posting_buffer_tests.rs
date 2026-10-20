@@ -24,6 +24,7 @@ async fn lazy_buffers_grow_commit_restore_and_clear() {
             lexical_similarity: LexicalSimilarity::Bm25fProximity,
             tokenizer: TokenizerType::UnicodeAlphanumeric,
         text_normalization: crate::index::TextNormalization::None,
+        field_length_normalization: crate::index::FieldLengthNormalization::Shared,
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::English,
             ngram_indexing: 9,

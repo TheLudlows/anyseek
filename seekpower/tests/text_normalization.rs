@@ -28,6 +28,7 @@ async fn fresh(label: &str, rule: TextNormalization, ngrams: u8) -> (IndexArc, P
             TokenizerType::UnicodeAlphanumericZH
         },
         text_normalization: rule,
+        field_length_normalization: seekpower::index::FieldLengthNormalization::Shared,
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::English,
         ngram_indexing: ngrams,
