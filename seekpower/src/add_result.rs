@@ -802,6 +802,12 @@ pub(crate) fn get_bm25f_singleterm_singlefield(
     bm25f
 }
 
+// Keep common text/title/vector schemas inline; larger schemas still spill safely.
+#[inline(always)]
+fn bm25_components(field_count: usize) -> SmallVec<[f32; 4]> {
+    smallvec![0.0; field_count]
+}
+
 #[inline(always)]
 pub(crate) fn get_bm25f_multiterm_multifield(
     shard: &Shard,
@@ -860,8 +866,7 @@ pub(crate) fn get_bm25f_multiterm_multifield(
             }
         }
     } else {
-        let mut bm25_component_vec: SmallVec<[f32; 2]> =
-            smallvec![0.0; shard.indexed_field_vec.len()];
+        let mut bm25_component_vec = bm25_components(shard.indexed_field_vec.len());
         for plo in query_list.iter() {
             if !plo.bm25_flag {
                 continue;
@@ -3276,3 +3281,7 @@ pub(crate) fn add_result_multiterm_singlefield(
         top_k,
     );
 }
+
+#[cfg(test)]
+#[path = "scoring_buffer_tests.rs"]
+mod scoring_buffer_tests;
