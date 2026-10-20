@@ -1031,7 +1031,7 @@ impl Shard {
                                 } else {
                                     0
                                 } + self
-                                    .get_posting_count_uncommitted(&non_unique_term.term_ngram_1)
+                                    .get_posting_count_uncommitted(&non_unique_term.term_ngram_2)
                                     as u32;
 
                             let posting_count_ngram_2 =
@@ -1040,7 +1040,7 @@ impl Shard {
                                 } else {
                                     0
                                 } + self
-                                    .get_posting_count_uncommitted(&non_unique_term.term_ngram_0)
+                                    .get_posting_count_uncommitted(&non_unique_term.term_ngram_1)
                                     as u32;
 
                             let posting_count_ngram_3 =
