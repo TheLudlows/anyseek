@@ -235,3 +235,110 @@ pub async fn exercise(proximity: bool) {
         failures.join("\n")
     );
 }
+
+/// Preserve the established committed-DF quantization while refreshing its source.
+pub async fn exercise_quantized_df() {
+    for policy in [
+        FieldLengthNormalization::Shared,
+        FieldLengthNormalization::PerField,
+    ] {
+        let label = format!("component-quantization-{policy:?}-{}", std::process::id());
+        let path = std::env::temp_dir().join(&label);
+        assert!(!path.exists());
+        let meta = IndexMetaObject {
+            id: 0,
+            name: label,
+            lexical_similarity: LexicalSimilarity::Bm25f,
+            tokenizer: TokenizerType::UnicodeAlphanumeric,
+            text_normalization: TextNormalization::None,
+            field_length_normalization: policy,
+            stop_words: StopwordType::None,
+            frequent_words: FrequentwordType::English,
+            ngram_indexing: 1,
+            document_compression: DocumentCompression::Snappy,
+            access_type: AccessType::Mmap,
+            clustering: Clustering::None,
+            inference: Inference::None,
+        };
+        let schema = serde_json::from_value(
+            json!([{"field":"a","field_type":"Text","index_lexical":true,"store":false}]),
+        )
+        .unwrap();
+        let mut index = create_index(&path, meta, &schema, 11, true, Some(1))
+            .await
+            .unwrap();
+        let mut docs = vec![json!({"a":"of neutral"}); 100];
+        docs[0] = json!({"a":"the of"});
+        add(&index, &docs, 100).await;
+        index.commit().await;
+        for stage in 0..6 {
+            if stage == 1 {
+                add(&index, &vec![json!({"a":"of neutral"}); 4], 104).await;
+            }
+            if stage == 2 || stage == 5 {
+                index.commit().await;
+            }
+            if stage == 3 {
+                index.close().await;
+                drop(index);
+                index = open_index(&path).await.unwrap();
+            }
+            if stage == 4 {
+                add(&index, &[json!({"a":"the of"})], 105).await;
+            }
+            // Literal codec boundaries:100 ->96;104/105 ->104. Realtime counts
+            // are added without quantization, preserving the previous convention.
+            let n = if stage == 0 {
+                100.0
+            } else if stage < 4 {
+                104.0
+            } else {
+                105.0
+            };
+            let df_the = if stage < 4 { 1.0 } else { 2.0 };
+            let df_of = match stage {
+                0 => 96.0,
+                1 => 100.0,
+                4 => 105.0,
+                _ => 104.0,
+            };
+            let expected = ((n - df_the + 0.5) / (df_the + 0.5) + 1.0_f64).ln()
+                + ((n - df_of + 0.5) / (df_of + 0.5) + 1.0_f64).ln();
+            for realtime in [false, true] {
+                let r = index
+                    .search(
+                        "\"the of\"".into(),
+                        None,
+                        QueryType::Union,
+                        SearchMode::Lexical,
+                        false,
+                        0,
+                        100,
+                        ResultType::TopkCount,
+                        realtime,
+                        vec![],
+                        vec![],
+                        vec![],
+                    )
+                    .await;
+                let want = if stage == 5 || (stage == 4 && realtime) {
+                    vec![0, 104]
+                } else {
+                    vec![0]
+                };
+                assert_eq!(r.results.iter().map(|x| x.doc_id).collect::<Vec<_>>(), want);
+                assert_eq!(r.result_count_total, want.len());
+                for hit in r.results {
+                    assert!(
+                        (hit.score as f64 - expected).abs() < 2e-5,
+                        "stage={stage} got={} expected={expected}",
+                        hit.score
+                    );
+                }
+            }
+        }
+        index.close().await;
+        drop(index);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}

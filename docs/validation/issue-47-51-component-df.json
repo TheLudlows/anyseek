@@ -1,0 +1,107 @@
+{
+  "issues": [
+    47,
+    51
+  ],
+  "mapping_only_commit": "e32405f",
+  "mapping_only_remaining_failures": 288,
+  "mapping_only_pure_realtime_failures": 0,
+  "baseline": {
+    "exit": 101,
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "seekpower",
+      "--test",
+      "ngram_proximity",
+      "--test",
+      "ngram_component_df",
+      "--no-fail-fast",
+      "--",
+      "--test-threads=1"
+    ],
+    "wall_s": 10.23898222799994,
+    "peak_cgroup_GiB": 0.9575767517089844,
+    "min_disk_GiB": 5.018268585205078,
+    "guard": null
+  },
+  "mapping_only": {
+    "exit": 101,
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "seekpower",
+      "--test",
+      "ngram_component_df",
+      "--",
+      "--test-threads=1"
+    ],
+    "wall_s": 11.680788684999925,
+    "peak_cgroup_GiB": 1.0429878234863281,
+    "min_disk_GiB": 5.017494201660156,
+    "guard": null
+  },
+  "fixed": {
+    "exit": 0,
+    "command": [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "seekpower",
+      "--lib",
+      "--test",
+      "ngram_component_df",
+      "--test",
+      "ngram_proximity",
+      "--test",
+      "ngram_flags",
+      "--test",
+      "lexical_correctness",
+      "--",
+      "--test-threads=1"
+    ],
+    "wall_s": 77.57679434200008,
+    "peak_cgroup_GiB": 1.1442756652832031,
+    "min_disk_GiB": 5.01739501953125,
+    "guard": null
+  },
+  "fix51": "Read component posting-count metadata at query setup rather than the old ngram snapshot. Quantize committed DF using existing int_to_byte4/table and add exact realtime count, preserving previous convention. No document scan, format change, or migration. Proximity and single terms do not perform extra component lookups.",
+  "cost": "Up to3 additional posting metadata lookups per ordinary Bm25f ngram for each candidate source; no large benchmark in this correctness task.",
+  "tests": "1056 literal ordinary component score checks plusProximity control; codec boundaries100->96,104/105->104; component-only append, matching append, commit/reopen. Existing library/ngram flags/lexical regressions pass.",
+  "strengthened_matrix": {
+    "score_checks_per_similarity": 2112,
+    "extra_component_tf": true,
+    "matching_and_nonmatching_append": true,
+    "finite_scores": true,
+    "validation": {
+      "exit": 0,
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "-p",
+        "seekpower",
+        "--test",
+        "ngram_component_df",
+        "--test",
+        "ngram_proximity",
+        "--",
+        "--test-threads=1"
+      ],
+      "wall_s": 10.422242813999901,
+      "peak_cgroup_GiB": 1.0075035095214844,
+      "min_disk_GiB": 5.017219543457031,
+      "guard": null
+    }
+  },
+  "local_build_caveat": "An intermediate shared-target run reused the sibling worktree library. Targets are now isolated; main library sources were touched to force full recompilation, and the final strengthened matrix passed. Retain intermediate logs, do not classify stale artifact failures as source defects."
+}
