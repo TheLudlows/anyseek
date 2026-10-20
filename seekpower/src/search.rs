@@ -2030,6 +2030,7 @@ impl SearchLexicalShard for ShardArc {
             }
             not_query_list = not_query_list_map.into_values().collect();
             query_list = query_list_map.into_values().collect();
+            crate::add_result::prepare_scoring_order(&mut query_list);
 
             {
                 for plo in query_list.iter_mut() {

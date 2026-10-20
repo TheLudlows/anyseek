@@ -802,6 +802,53 @@ pub(crate) fn get_bm25f_singleterm_singlefield(
     bm25f
 }
 
+// This key is independent of posting traversal order and cursor state.
+fn scoring_term_cmp(a: &PostingListObjectQuery, b: &PostingListObjectQuery) -> Ordering {
+    a.term.cmp(&b.term)
+        .then_with(|| (a.ngram_type.clone() as u8).cmp(&(b.ngram_type.clone() as u8)))
+}
+
+pub(crate) fn prepare_scoring_order(query_list: &mut [PostingListObjectQuery]) {
+    for term in query_list.iter_mut() {
+        term.scoring_order = u8::MAX;
+    }
+    if query_list.len() > 32 {
+        return;
+    }
+    let mut indices: SmallVec<[usize; 32]> = (0..query_list.len()).collect();
+    indices.sort_unstable_by(|&a, &b| scoring_term_cmp(&query_list[a], &query_list[b]));
+    // Equal keys retain the exact old unstable-sort behavior, including subset order.
+    if indices.windows(2).any(|w| scoring_term_cmp(&query_list[w[0]], &query_list[w[1]]) == Ordering::Equal) {
+        return;
+    }
+    for (rank, index) in indices.into_iter().enumerate() {
+        query_list[index].scoring_order = rank as u8;
+    }
+}
+
+#[inline(always)]
+pub(crate) fn scoring_terms<'a, 'b>(query_list: &'a [PostingListObjectQuery<'b>])
+    -> impl Iterator<Item = &'a PostingListObjectQuery<'b>>
+{
+    let mut slots = [None; 32];
+    let mut end = 0;
+    let prepared = query_list.iter().all(|term| {
+        let rank = term.scoring_order as usize;
+        if rank >= slots.len() || slots[rank].replace(term).is_some() {
+            return false;
+        }
+        end = end.max(rank + 1);
+        true
+    });
+    if prepared {
+        itertools::Either::Left(slots.into_iter().take(end).flatten())
+    } else {
+        let mut ordered: SmallVec<[&PostingListObjectQuery; 32]> = query_list.iter().collect();
+        ordered.sort_unstable_by(|a, b| scoring_term_cmp(a, b));
+        itertools::Either::Right(ordered.into_iter())
+    }
+}
+
 // Keep common text/title/vector schemas inline; larger schemas still spill safely.
 #[inline(always)]
 fn bm25_components(field_count: usize) -> SmallVec<[f32; 4]> {
@@ -814,12 +861,7 @@ pub(crate) fn get_bm25f_multiterm_multifield(
     docid: usize,
     query_list: &mut [PostingListObjectQuery],
 ) -> f32 {
-    // Traversal may reorder posting lists. Score in a fixed term order without
-    // mutating their cursor state, so f32 ties do not depend on the query path.
-    let mut ordered_terms: SmallVec<[&PostingListObjectQuery; 32]> = query_list.iter().collect();
-    ordered_terms.sort_unstable_by(|a, b| a.term.cmp(&b.term)
-        .then_with(|| (a.ngram_type.clone() as u8).cmp(&(b.ngram_type.clone() as u8))));
-    let query_list = ordered_terms;
+    let query_list = scoring_terms(query_list);
 
     let mut bm25f = 0.0;
     let block_id = docid >> 16;
@@ -827,7 +869,7 @@ pub(crate) fn get_bm25f_multiterm_multifield(
     if shard.indexed_field_vec.len() == 1 {
         let bm25_component = shard.length_component(0, get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111));
 
-        for plo in query_list.iter() {
+        for plo in query_list {
             if !plo.bm25_flag {
                 continue;
             }
@@ -867,7 +909,7 @@ pub(crate) fn get_bm25f_multiterm_multifield(
         }
     } else {
         let mut bm25_component_vec = bm25_components(shard.indexed_field_vec.len());
-        for plo in query_list.iter() {
+        for plo in query_list {
             if !plo.bm25_flag {
                 continue;
             }
@@ -1020,19 +1062,14 @@ pub(crate) fn get_bm25f_multiterm_singlefield(
     docid: usize,
     query_list: &mut [PostingListObjectQuery],
 ) -> f32 {
-    // Traversal may reorder posting lists. Score in a fixed term order without
-    // mutating their cursor state, so f32 ties do not depend on the query path.
-    let mut ordered_terms: SmallVec<[&PostingListObjectQuery; 32]> = query_list.iter().collect();
-    ordered_terms.sort_unstable_by(|a, b| a.term.cmp(&b.term)
-        .then_with(|| (a.ngram_type.clone() as u8).cmp(&(b.ngram_type.clone() as u8))));
-    let query_list = ordered_terms;
+    let query_list = scoring_terms(query_list);
 
     let mut bm25f = 0.0;
     let block_id = docid >> 16;
 
     let bm25_component = shard.length_component(0, get_document_length_compressed_mmap(shard, 0, block_id, docid & 0b11111111_11111111));
 
-    for plo in query_list.iter() {
+    for plo in query_list {
         if !plo.bm25_flag {
             continue;
         }
@@ -3285,3 +3322,7 @@ pub(crate) fn add_result_multiterm_singlefield(
 #[cfg(test)]
 #[path = "scoring_buffer_tests.rs"]
 mod scoring_buffer_tests;
+
+#[cfg(test)]
+#[path = "scoring_order_tests.rs"]
+mod scoring_order_tests;
