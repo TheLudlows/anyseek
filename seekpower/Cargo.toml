@@ -25,6 +25,7 @@ name = "seekpower"
 path = "src/lib.rs"
 
 [dependencies]
+xxhash-rust = { version = "=0.8.15", default-features = false, features = ["xxh64"] }
 log = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
