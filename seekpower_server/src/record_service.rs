@@ -216,12 +216,41 @@ pub(crate) struct Service {
     control_admission: Arc<Semaphore>,
     requests: Arc<Semaphore>,
     default_nprobe: std::num::NonZeroUsize,
+    // Drop after catalog, partitions and mappings: stable across root repair.
+    _root_owner: std::fs::File,
 }
 impl Service {
     pub(crate) async fn open(
         root: &FsPath,
         default_nprobe: std::num::NonZeroUsize,
     ) -> Result<Arc<Self>, String> {
+        let root = root.to_owned();
+        tokio::spawn(async move { Self::open_owned(&root, default_nprobe).await })
+            .await
+            .map_err(|e| e.to_string())?
+    }
+    async fn open_owned(
+        root: &FsPath,
+        default_nprobe: std::num::NonZeroUsize,
+    ) -> Result<Arc<Self>, String> {
+        let parent = root.parent().ok_or("service root requires parent")?;
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("invalid root name")?;
+        let root_owner = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(parent.join(format!(".seekpower-service-{name}.lock")))
+            .map_err(|e| e.to_string())?;
+        root_owner
+            .try_lock()
+            .map_err(|e| format!("service root is already owned: {e}"))?;
+        Catalog::resume_initialization(root)
+            .await
+            .map_err(|e| e.to_string())?;
         let existed = root.exists();
         let catalog = if existed {
             Catalog::open(root).await
@@ -246,7 +275,35 @@ impl Service {
             control_admission: Arc::new(Semaphore::new(16)),
             requests: Arc::new(Semaphore::new(64)),
             default_nprobe,
+            _root_owner: root_owner,
         });
+        // Only unaddressable preparation names inside this exclusively owned
+        // service root are reclaimable. Never scan sibling service roots.
+        for row in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+            let row = row.map_err(|e| e.to_string())?;
+            let name = row.file_name().to_string_lossy().into_owned();
+            if name
+                .strip_prefix(".partition-prepare-")
+                .is_some_and(|suffix| {
+                    suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+                && row.file_type().map_err(|e| e.to_string())?.is_dir()
+            {
+                std::fs::remove_dir_all(row.path()).map_err(|e| e.to_string())?;
+            }
+        }
+        for id in service
+            .catalog
+            .retired_backups()
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            if let Err(error) =
+                RecordPartition::retire_snapshot(&service.root.join(format!("backup-{id}"))).await
+            {
+                log::warn!("retired backup cleanup pending: {error}");
+            }
+        }
         for entry in service
             .catalog
             .collections()
@@ -548,7 +605,8 @@ async fn create_collection(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<Response, Error> {
-    let request: CollectionCreate = parse(&bytes)?;
+    let request: CollectionCreate =
+        parse(&bytes).map_err(|e| Error(e.0, "creation_rejected", e.2))?;
     control_id(&request.operation_id)?;
     let admission = s.admit_control(&headers, false).await?;
     owned(async move {
@@ -559,13 +617,17 @@ async fn create_collection(
         // can be changed exclusively through the master control plane.
         let operation_id = request.operation_id.clone();
         let id = request.collection_id.clone();
+        let config = record_config(request.config, request.embedding_space_id)
+            .map_err(|e| Error(e.0, "creation_rejected", e.2))?;
+        seekpower::record::validate_config(&config)
+            .map_err(|e| Error(StatusCode::BAD_REQUEST, "creation_rejected", e.to_string()))?;
         s.catalog
             .execute(CatalogRequest {
                 operation_id: request.operation_id,
                 command: CatalogCommand::PrepareCollection {
                     collection_id: id.clone(),
                     owner_key: key.clone(),
-                    config: record_config(request.config, request.embedding_space_id)?,
+                    config,
                 },
             })
             .await?;
@@ -848,7 +910,11 @@ struct RestoreRequest {
     backup_id: String,
 }
 fn validate_backup_id(id: &str) -> Result<(), Error> {
-    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if id.len() != 64
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err(bad("invalid backup ID"));
     }
     Ok(())
@@ -869,6 +935,9 @@ async fn backup(
         let p = s.record(&key, &id).await?;
         let identity = serde_json::to_vec(&(id.clone(), &request.operation_id)).map_err(bad)?;
         let backup_id = verifier(&identity);
+        if s.catalog.retired_backups().await?.contains(&backup_id) {
+            return Err(Error(StatusCode::GONE,"backup_retired","backup identity was permanently retired".into()));
+        }
         let path = s.root.join(format!("backup-{backup_id}"));
         let root = s.root.clone();
         let oid = request.operation_id.clone();
@@ -893,6 +962,49 @@ async fn backup(
         protected(result, permit)
     }).await
 }
+async fn list_backups(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+) -> Result<Response, Error> {
+    let key = s.admin(&headers).await?;
+    let _control = s.control.lock().await;
+    s.admin(&headers).await?;
+    let retired = s.catalog.retired_backups().await?;
+    let mut ids = retired
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    for entry in std::fs::read_dir(&s.root).map_err(storage)? {
+        let entry = entry.map_err(storage)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(id) = name.strip_prefix("backup-") {
+            if validate_backup_id(id).is_ok() {
+                ids.insert(id.to_owned());
+            }
+        }
+    }
+    response(ids.into_iter().map(|id|json!({"backup_id":id,"retired":retired.contains(&id),"on_disk":s.root.join(format!("backup-{id}")).exists()})).collect::<Vec<_>>(),s.permit(&key).await?)
+}
+async fn retire_backup(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    validate_backup_id(&id)?;
+    let request: BackupRequest = parse(&bytes)?;
+    control_id(&request.operation_id)?;
+    let admission = s.admit_control(&headers, true).await?;
+    owned(async move {
+        let _admission=admission;
+        let _control=s.control.lock().await;
+        let key=s.admin(&headers).await?;
+        let receipt=s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::RetireBackup { backup_id:id.clone() } }).await?;
+        let cleanup=RecordPartition::retire_snapshot(&s.root.join(format!("backup-{id}"))).await;
+        response(json!({"receipt":receipt,"backup_id":id,"retired":true,"cleanup_pending":cleanup.is_err(),"cleanup_error":cleanup.err().map(|e|e.to_string())}),s.permit(&key).await?)
+    }).await
+}
+
 async fn restore(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -906,9 +1018,17 @@ async fn restore(
         let _admission = admission;
         let _control = s.control.lock().await;
         let key = s.admin(&headers).await?;
-        let backup = RecordPartition::open(&s.root.join(format!("backup-{}",request.backup_id)), 256*1024*1024).await?;
-        let config = backup.configuration().await?;
-        drop(backup);
+        let existing = s.catalog.collections().await?.into_iter().find(|e| e.collection_id==request.collection_id);
+        let config = if let Some(entry) = existing {
+            if entry.owner_key!=key || entry.restore_from.as_ref()!=Some(&request.backup_id) { return Err(bad("collection identity belongs to another creation intent")); }
+            entry.config
+        } else {
+            if s.catalog.retired_backups().await?.contains(&request.backup_id) { return Err(Error(StatusCode::GONE,"backup_retired","backup identity was retired".into())); }
+            let backup = RecordPartition::open(&s.root.join(format!("backup-{}",request.backup_id)),256*1024*1024).await?;
+            let config = backup.configuration().await?;
+            drop(backup);
+            config
+        };
         let operation_id = request.operation_id.clone();
         let id = request.collection_id;
         s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::PrepareRestore {
@@ -1074,6 +1194,8 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         )
         .route("/api/v1/index", post(create_collection))
         .route("/api/v1/restore", post(restore))
+        .route("/api/v1/backups", get(list_backups))
+        .route("/api/v1/backups/{id}", axum::routing::delete(retire_backup))
         .route("/api/v1/index/{id}/backup", post(backup))
         .route(
             "/api/v1/index/{id}",
@@ -1527,6 +1649,20 @@ pub(crate) fn generate_openapi() {
             "/api/v1/index/{id}/backup",
             "post",
             "Independent local collection checkpoint; retry same operation for same snapshot",
+            Some(
+                json!({"type":"object","required":["operation_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"}}}),
+            ),
+        ),
+        (
+            "/api/v1/backups",
+            "get",
+            "Master: list local backup identities and durable retirement state",
+            None,
+        ),
+        (
+            "/api/v1/backups/{id}",
+            "delete",
+            "Master: durably retire backup and reclaim files; unfinished restore pins reject retirement",
             Some(
                 json!({"type":"object","required":["operation_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"}}}),
             ),

@@ -10,7 +10,30 @@ def exercise(base,master,call):
         page.goto(base);page.locator('#manageIndexes').click()
         page.locator('#setupKey').fill(master);page.locator('#connectForm button[type="submit"]').click()
         expect(page.locator('#indexManager')).to_be_visible()
+        # A known pre-prepare rejection is editable after reload; uncertainty is not.
+        page.locator('#newIndexName').fill('rejected-config')
+        page.locator('details').first.locator('summary').click()
+        schema=[{'field':'body','field_type':'Text','store':True,'boost':0}]
+        page.locator('#indexSchema').fill(json.dumps(schema))
+        page.locator('#createIndexForm button[type="submit"]').click()
+        expect(page.locator('#discardRejectedCreation')).to_be_visible()
+        page.reload();page.locator('#manageIndexes').click()
+        expect(page.locator('#discardRejectedCreation')).to_be_visible()
+        page.locator('#discardRejectedCreation').click()
+        expect(page.locator('#newIndexName')).to_be_enabled()
+        page.locator('#indexMode').select_option('Vector');page.locator('#indexMode').select_option('Lexical')
         page.locator('#newIndexName').fill('browser-records')
+        creations=[]
+        def lose_creation(route):
+            creations.append(route.request.post_data_json)
+            reply=route.fetch();assert reply.status==200
+            route.abort('failed')
+        page.route('**/api/v1/index',lose_creation,times=1)
+        page.locator('#createIndexForm button[type="submit"]').click()
+        expect(page.locator('#newIndexName')).to_be_disabled()
+        assert page.evaluate("JSON.parse(sessionStorage.getItem('seekpower.pendingCreate')).body")==creations[0]
+        expect(page.locator('#discardRejectedCreation')).to_be_hidden()
+        page.reload();page.locator('#manageIndexes').click()
         page.locator('#createIndexForm button[type="submit"]').click()
         expect(page.locator('#indexName')).to_have_text('browser-records')
         collection=page.evaluate('INDEX_ID')

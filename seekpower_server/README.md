@@ -141,3 +141,12 @@ Vector/Hybrid 请求不再默认全簇扫描，而使用服务的 `default_nprob
 初始 `default_nprobe=200` 来自 SeekPower 自身的 train-only 校准：固定100k MIRACL中文缩减语料、BGE-small-zh-v1.5 512维F32、无量化、单分片，128条固定train查询各重复两次；候选15/50/100/200/300/400。预先规定在平均精确邻居Recall@100至少0.98的候选中选择客户端p95最低者，未使用dev选参。
 
 200的train邻居召回为0.983203、nDCG@10为0.818170、p50/p95为9.02/18.17ms；All对照为1.0、0.818951、17.10/34.06ms。该小样本顺序试验没有置信区间，不是性能承诺，尤其不能保证其他数据或dev的召回达到0.98。完整候选、查询ID和原始结果哈希见 [校准记录](../docs/ann-default-calibration.json)。启动时用 `default_nprobe=...` 调整，请求可再覆盖。
+
+### Local backup retirement (P1-A)
+
+Master-only `GET /api/v1/backups` lists local collection backups. Master-only
+`DELETE /api/v1/backups/{id}` accepts `{ "operation_id": { "epoch": ..., "nonce": ... } }`.
+IDs must be lowercase hexadecimal. Retirement is durable and permanent; a
+prepared restore pins its source. `cleanup_pending: true` means logical retirement
+succeeded but physical cleanup needs retry or restart. This is collection backup
+management, not complete catalog/service backup.

@@ -59,6 +59,7 @@ function setSetupBusy(busy) {
         $('#openIndex,#indexList').prop('disabled', !$('#indexList option').length);
         $('#vectorDimensions').prop('disabled', $('#indexMode').val() === 'Lexical');
         const pending = JSON.parse(sessionValue('seekpower.pendingCreate') || 'null');
+        $('#discardRejectedCreation').prop('hidden', !pending?.rejected);
         if (pending) {
             const config = pending.body.config;
             $('#newIndexName').val(config.index_name);
@@ -158,6 +159,13 @@ $(function () {
         if ($('#indexList').val() !== null) openSelectedIndex($('#indexList').val());
     });
     $('#indexMode').on('change', presetSchema);
+    $('#discardRejectedCreation').on('click', () => {
+        const pending = JSON.parse(sessionValue('seekpower.pendingCreate') || 'null');
+        if (!pending?.rejected) return;
+        sessionStorage.removeItem('seekpower.pendingCreate');
+        setSetupBusy(false);
+        $('#setupError').text('Rejected creation discarded. Edit the configuration and submit again.');
+    });
     $('#createIndexForm').on('submit', async event => {
         event.preventDefault();
         $('#setupError').text('');
@@ -197,6 +205,10 @@ $(function () {
             sessionStorage.removeItem('seekpower.pendingCreate');
             if (request === setupRequest) openSelectedIndex(result.collection_id);
         } catch (error) {
+            if (error.code === 'creation_rejected') {
+                const pending = JSON.parse(sessionValue('seekpower.pendingCreate') || 'null');
+                if (pending) { pending.rejected = true; sessionStorage.setItem('seekpower.pendingCreate', JSON.stringify(pending)); }
+            }
             if (request === setupRequest) $('#setupError').text((error.message || 'Index creation failed.') + ' If creation is pending, retry submits its original identity and configuration.');
         } finally {
             if (request === setupRequest) setSetupBusy(false);

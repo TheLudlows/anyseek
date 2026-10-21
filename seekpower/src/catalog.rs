@@ -95,6 +95,11 @@ pub enum CatalogCommand {
         /// Stable, never reused collection identity.
         collection_id: String,
     },
+    /// Retire a local collection backup without reusing its identity.
+    RetireBackup {
+        /// Generated backup ID.
+        backup_id: String,
+    },
     /// Permanently retire a collection identity and revoke every grant.
     DeleteCollection {
         /// Stable collection identity; never reusable after deletion.
@@ -170,6 +175,7 @@ struct State {
     // revisions, not a Boolean: revoke/regrant cannot revive an old response.
     grants: BTreeMap<String, BTreeMap<String, u64>>,
     operations: Vec<Applied>,
+    retired_backups: std::collections::BTreeSet<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
@@ -379,8 +385,15 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
         } => {
             let restore_from =
                 if let CatalogCommand::PrepareRestore { backup_id, .. } = &event.request.command {
-                    if backup_id.len() != 64 || !backup_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    if backup_id.len() != 64
+                        || !backup_id
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    {
                         return Err(CatalogError::Rejected("invalid backup ID".into()));
+                    }
+                    if state.retired_backups.contains(backup_id) {
+                        return Err(CatalogError::Conflict("backup is retired".into()));
                     }
                     Some(backup_id.clone())
                 } else {
@@ -437,6 +450,23 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                     .insert(owner, event.receipt.seq);
             }
         }
+        CatalogCommand::RetireBackup { backup_id } => {
+            if backup_id.len() != 64
+                || !backup_id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(CatalogError::Rejected("invalid backup identity".into()));
+            }
+            if state.collections.values().any(|entry| {
+                !entry.active && !entry.deleted && entry.restore_from.as_ref() == Some(backup_id)
+            }) {
+                return Err(CatalogError::Conflict(
+                    "backup is pinned by an unfinished restore".into(),
+                ));
+            }
+            state.retired_backups.insert(backup_id.clone());
+        }
         CatalogCommand::DeleteCollection { collection_id } => {
             let collection = state
                 .collections
@@ -488,6 +518,23 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
     Ok(())
 }
 impl Catalog {
+    /// Resume an interrupted initial root. Caller must hold a stable service
+    /// lifetime lock outside this root, including while the root name is absent.
+    pub async fn resume_initialization(path: &Path) -> Result<(), CatalogError> {
+        let path = path.to_owned();
+        crate::INDEX_RUNTIME
+            .spawn(async move {
+                PartitionJournal::resume_initial(&path, BUDGET).map_err(|error| match error {
+                    CreateError::NotPublished(error) => storage(error),
+                    CreateError::PublicationUnknown(error) => {
+                        CatalogError::OutcomeUnknown(error.to_string())
+                    }
+                })
+            })
+            .await
+            .map_err(storage)?
+    }
+
     /// Explicit initialization only. Existing or uncertain roots must be opened,
     /// never replaced with an empty catalog. Parent directory must already exist.
     pub async fn create(path: &Path) -> Result<Self, CatalogError> {
@@ -749,6 +796,16 @@ impl Catalog {
             .map(|(id, _)| id.clone())
             .ok_or(CatalogError::Unauthorized)
     }
+    /// Privileged backup retirement inventory, persisted independently of files.
+    pub async fn retired_backups(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, CatalogError> {
+        let inner = self.inner.lock().await;
+        if !inner.healthy {
+            return Err(CatalogError::RecoveryRequired);
+        }
+        Ok(inner.state.retired_backups.clone())
+    }
     /// Privileged lifecycle inventory, including prepared but invisible entries.
     pub async fn collections(&self) -> Result<Vec<CollectionEntry>, CatalogError> {
         let inner = self.inner.lock().await;
@@ -949,6 +1006,67 @@ mod tests {
             ))
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn catalog_retirement_pins_restore_and_rejects_case_aliases() {
+        let path = root();
+        let catalog = setup(&path).await;
+        let backup_id = "a".repeat(64);
+        catalog
+            .execute(request(
+                "restore",
+                CatalogCommand::PrepareRestore {
+                    collection_id: "shared".into(),
+                    owner_key: "a".into(),
+                    config: config(),
+                    backup_id: backup_id.clone(),
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            catalog
+                .execute(request(
+                    "retire",
+                    CatalogCommand::RetireBackup {
+                        backup_id: backup_id.clone()
+                    }
+                ))
+                .await,
+            Err(CatalogError::Conflict(_))
+        ));
+        assert!(matches!(
+            catalog
+                .execute(request(
+                    "case",
+                    CatalogCommand::RetireBackup {
+                        backup_id: backup_id.to_uppercase()
+                    }
+                ))
+                .await,
+            Err(CatalogError::Rejected(_))
+        ));
+        activate(&catalog).await;
+        catalog
+            .execute(request(
+                "retire",
+                CatalogCommand::RetireBackup {
+                    backup_id: backup_id.clone(),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(catalog);
+        let catalog = Catalog::open(&path.join("catalog")).await.unwrap();
+        assert!(
+            catalog
+                .retired_backups()
+                .await
+                .unwrap()
+                .contains(&backup_id)
+        );
+        drop(catalog);
+        std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn catalog_shared_keys_revoke_preserves_data_retry_and_recovered_authorization() {

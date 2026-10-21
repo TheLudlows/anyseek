@@ -44,6 +44,7 @@
 <p class="setup-help">Default fields: title, body and url. Vector/Hybrid also include vector (F32, cosine similarity).</p>
 <details><summary>Advanced: field schema (JSON)</summary><p class="setup-help">Edit field names, storage, lexical/vector indexing and filter/sort metadata. Changing search mode resets this schema.</p><label for="indexSchema">Schema</label><textarea id="indexSchema" rows="12" spellcheck="false"></textarea></details>
 <button type="submit">Create &amp; open index</button>
+<button id="discardRejectedCreation" type="button" hidden>Discard rejected creation</button>
 <p class="setup-help">Creates an empty index. Then choose “Write data” to add JSON records.</p>
 </form>
 </div>

@@ -9,7 +9,80 @@ The product contract remains [issue #57](https://github.com/TheLudlows/seekpower
 Current capabilities remain in [FEATURES](../FEATURES.md). Historical validation
 remains in [VALIDATION](../VALIDATION.md).
 
-## Latest checkpoint — lifecycle operations and native service faults (in progress)
+## Current checkpoint — root recovery, backup retirement and pending creation
+
+Status: local final-source checks passed; current native CI rerun pending. This is a bounded
+P1-A checkpoint, not full P1 completion. Previous source `41f5f601ac3c7bbcb049f7a76ed5d6ba7bb552b9`
+passed all three jobs in [native CI run 39541649752](https://github.com/TheLudlows/seekpower/actions/runs/39541649752).
+Windows logs identify Windows Server 2025 / 10.0.26100 and D: NTFS. This is native
+process-recovery evidence, **not host crash or power-loss certification**.
+
+Changes in this checkpoint:
+
+- Service initialization now owns a stable external root lock before recovery,
+  and continues in an owned task after caller cancellation. An interrupted
+  initial catalog root is repaired using its complete original journal; a second
+  server cannot interfere. Root-owned unaddressable preparation directories are
+  reclaimed on startup; sibling service roots are never scanned.
+- Master GET `/api/v1/backups` lists local collection snapshots and retirement
+  state. DELETE `/api/v1/backups/{id}` durably tombstones the identity before
+  physical reclamation. Prepared restores pin their source; a completed restore
+  remains retryable after its source snapshot is retired. IDs are canonical
+  lowercase hex on both platforms. Retirement survives restart, cannot create a
+  new snapshot under the old ID, and frees the 32-live-backup capacity.
+- Cleanup includes interrupted initial-repair staging. Recovered trash must
+  complete another durable rename before removal, even if its owner file was
+  already removed. Cleanup failures return `cleanup_pending`, not a false
+  physical-deletion acknowledgement. Stable repair locks are removed only after
+  permanent retirement under the parent owner lock.
+- Invalid creation configuration is rejected before catalog Prepare. UI may
+  discard only this explicit `creation_rejected` result, including after reload.
+  Lost creation responses keep the original ID/configuration for retry; absence
+  or timeout never unlocks an uncertain request.
+
+Independent review found and fixed a Windows case-alias bypass of restore pins,
+recovered-trash durability and interrupted-repair staging omissions. Regression
+coverage includes canonical-ID rejection, catalog pin/retirement replay,
+partially deleted trash, actual service-root publication/repair exits and real
+Chromium lost-creation-response and rejected-creation flows.
+
+Local final-source commands/results (Linux overlayfs, explicit test root):
+
+- `cargo test --workspace --all-targets --quiet`: **161 passed, 0 failed,
+  10 ignored, 35 suites**; `/tmp/seekpower-root-final3-tests.log`.
+- Default workspace build and fault-feature server build passed.
+- `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser`:
+  passed, `/tmp/seekpower-root-e2e.log`.
+- Same command after fault-feature build with `--faults`: passed,
+  `/tmp/seekpower-root-faults.log`. All final production edits precede this run.
+- Generated OpenAPI: 17 mounted paths, 23 operations. `git diff --check`: passed.
+
+### Finite P1-A acceptance ledger
+
+| Contract / deliverable | Testable completion condition | Current status |
+| --- | --- | --- |
+| Durable + visible single-partition write | Original-ID retry, unknown vs rejection, durable pending, recovery and ABA tests plus real HTTP | Implemented; previous SHA passed both native platforms; current SHA rerun pending |
+| Shared authorization and common read view | Shared-key HTTP, revoke/output interleavings, restart authorization, statistics/query tests | Implemented; final-source rerun pending |
+| Default service/UI and lifecycle | Real HTTP iterator/deletion/restore and Chromium original-request retries | Implemented; current local HTTP/Chromium passed |
+| Live checkpoint / bounded operation retention | Checkpoint crash matrix; epoch-expired retry rejected; explicit record/op/WAL limits | Implemented; no unbounded running claim |
+| Service-root interrupted initialization | Two successive publication/repair exits followed by original master recovery | Current local real-process test passed; native CI rerun pending |
+| Backup management | Durable retirement, pending restore pin, exact replay, bounded live snapshots, cleanup restart | Implemented; current local HTTP passed; native CI rerun pending |
+| Complete service/catalog backup | One certified manifest binds complete catalog/config/record snapshots; interrupted backup never advertised; new-root restore tested | **Remaining**; current backup covers individual collections only |
+| Resource acceptance | Reject at declared limits without unintended files; reclaim safe staging and retired backups | Implemented for this bounded slice; data operation-ledger GC and physical-history compaction remain P3 |
+| Platform fault evidence | Linux and Windows native integration/process faults on final SHA; separately execute filesystem/system-fault matrix | Previous SHA native pass; current rerun pending; system faults not run |
+
+Full service/catalog backup must not silently revive grants revoked after the
+backup. It requires a complete publication/restore protocol and authorization
+reconciliation; copying live catalog files is not an acceptable substitute.
+Remaining P1-A work is this complete backup/restore contract, final native CI,
+and the declared I/O/system-failure acceptance gaps. P2 typed sources/evidence,
+P3 sustainable history reclamation, cloud protocols and performance research are
+not additions to this checkpoint. Power-loss testing needs an isolated Linux and
+Windows VM or machine with disposable real filesystem disks, externally forced
+reset/power cut, and an external acknowledged-write witness; hosted process-exit
+CI cannot provide that evidence. No user machine was accessed.
+
+## Previous checkpoint — lifecycle operations and native service faults (in progress)
 
 Parent implementation checkpoint: `b51e0cd84f334096e0be009e0430466b833d4611`.
 CI-only correction: `c46ec26b6c12f312783d3223b2fe97b4f2f0125a`.

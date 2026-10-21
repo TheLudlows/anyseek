@@ -37,7 +37,16 @@ def main():
         def restart():
             process.kill();process.wait(timeout=20);start()
         try:
+            if args.faults:
+                for stage in ['published','retired']:
+                    child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','SEEKPOWER_INITIAL_ROOT_PREFIX':'data','SEEKPOWER_INITIAL_FAULT':stage},stdout=log,stderr=log)
+                    assert child.wait(timeout=30)==87,stage
             start()
+            # A second owner and a changed bootstrap secret must never rebuild this root.
+            for secret in ['issue57-service-test','wrong-master']:
+                child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port+1}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':secret},stdout=log,stderr=log)
+                assert child.wait(timeout=30)!=0
+
             keys={name:base64.b64encode(os.urandom(32)).decode() for name in ['a','b']}
             for name,key in keys.items():call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':name,'apikey_base64':key})
             create={'operation_id':operation(),'collection_id':'shared','config':{'index_name':'Shared records','schema':[{'field':'body','field_type':'Text','store':True},{'field':'title','field_type':'Text','store':True},{'field':'date','field_type':'Timestamp','store':True,'filterable':True}]}}
@@ -205,6 +214,19 @@ def main():
             before={p.name for p in root.iterdir()}
             for _ in range(3):call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()},status=400)
             assert {p.name for p in root.iterdir()}==before
+            # Retirement is durable and never lets an original backup ID capture a new point.
+            call('GET','/api/v1/backups',key=keys['b'],status=403)
+            listed=call('GET','/api/v1/backups');assert any(x['backup_id']==backup['backup_id'] for x in listed)
+            call('DELETE','/api/v1/backups/'+backup['backup_id'].upper(),{'operation_id':operation()},status=400)
+            call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'case-restore','backup_id':backup['backup_id'].upper()},status=400)
+            retire={'operation_id':operation()}
+            result=call('DELETE','/api/v1/backups/'+backup['backup_id'],retire)
+            assert result['retired'] and not result['cleanup_pending'],result
+            call('POST','/api/v1/restore',restore) # Original completed restore stays retryable.
+            call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'retired-restore','backup_id':backup['backup_id']},status=410)
+            restart()
+            assert any(x['backup_id']==backup['backup_id'] and x['retired'] and not x['on_disk'] for x in call('GET','/api/v1/backups'))
+            call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()})
             print('PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, no revived grants, collection tombstone across restart')
             print('PASS real HTTP: default Record/catalog, shared grants, conditional writes, retry/response loss, checkpoint, crash restart, revoked operation lookup, full query parameters, vectors')
             if args.browser:

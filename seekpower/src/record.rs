@@ -66,7 +66,7 @@ pub struct RecordConfig {
     pub max_candidates: usize,
 }
 /// Shared admission check for collection intent and physical initialization.
-pub(crate) fn validate_config(config: &RecordConfig) -> Result<(), RecordError> {
+pub fn validate_config(config: &RecordConfig) -> Result<(), RecordError> {
     if config.schema.is_empty()
         || config.schema.len() > 64
         || config
@@ -1076,6 +1076,16 @@ impl RecordPartition {
                     }
                 })
             })
+            .await
+            .map_err(storage)?
+    }
+
+    /// Remove an explicitly retired independent snapshot. The caller must hold
+    /// the parent service lock and durably retire the backup identity first.
+    pub async fn retire_snapshot(path: &Path) -> Result<(), RecordError> {
+        let path = path.to_owned();
+        crate::INDEX_RUNTIME
+            .spawn(async move { PartitionJournal::retire_snapshot(&path).map_err(creation_error) })
             .await
             .map_err(storage)?
     }

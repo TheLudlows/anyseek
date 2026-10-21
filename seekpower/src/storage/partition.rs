@@ -205,6 +205,50 @@ impl PartitionJournal {
         Ok(())
     }
 
+    /// Retire an explicitly tombstoned snapshot under the parent service lock.
+    /// Stable trash naming makes deletion retryable after partial cleanup.
+    pub(crate) fn retire_snapshot(path: &Path) -> Result<(), CreateError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("missing parent"))?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| io::Error::other("invalid snapshot name"))?;
+        let staging = parent.join(format!(".initial-resume-{name}"));
+        let trash = parent.join(format!(".retired-{name}"));
+        let retry = parent.join(format!(".retired-retry-{name}"));
+        let candidates = [path, staging.as_path(), trash.as_path(), retry.as_path()];
+        let present = candidates
+            .into_iter()
+            .filter(|p| p.exists())
+            .collect::<Vec<_>>();
+        if present.len() > 1 {
+            return Err(io::Error::other("ambiguous retired snapshot").into());
+        }
+        if let Some(source) = present.first() {
+            if *source == path || *source == staging {
+                let owner = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(source.join("owner"))?;
+                owner.try_lock().map_err(io::Error::other)?;
+                drop(owner); // Parent ownership protects closed-handle Windows moves.
+            }
+            // Re-publish even recovered trash before deleting: its previous
+            // rename may have become visible without completing directory sync.
+            // Alternating names also handles a partially deleted trash tree.
+            let target = if *source == trash { &retry } else { &trash };
+            publish(source, target)?;
+            fs::remove_dir_all(target)?;
+        }
+        let repair_lock = parent.join(format!(".initial-resume-{name}.lock"));
+        if repair_lock.exists() {
+            fs::remove_file(repair_lock)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn open(path: &Path, max_bytes: u64) -> io::Result<(Self, Vec<Vec<u8>>)> {
         let owner = OpenOptions::new()
             .read(true)
@@ -378,6 +422,25 @@ mod tests {
             "seekpower-partition-{:032x}",
             rand::random::<u128>()
         ))
+    }
+    #[test]
+    fn partition_retirement_resumes_staging_and_partial_trash() {
+        for prefix in ["", ".initial-resume-", ".retired-", ".retired-retry-"] {
+            let path = root();
+            let candidate = path.with_file_name(format!(
+                "{prefix}{}",
+                path.file_name().unwrap().to_str().unwrap()
+            ));
+            fs::create_dir(&candidate).unwrap();
+            if prefix.is_empty() || prefix == ".initial-resume-" {
+                fs::write(candidate.join("owner"), []).unwrap();
+            }
+            fs::write(candidate.join("remaining-data"), b"original").unwrap();
+            PartitionJournal::retire_snapshot(&path).unwrap();
+            assert!(!candidate.exists());
+            assert!(!path.exists());
+            PartitionJournal::retire_snapshot(&path).unwrap();
+        }
     }
     #[test]
     fn partition_resume_initial_preserves_payload_and_rejects_certified_corruption() {
