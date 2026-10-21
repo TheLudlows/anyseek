@@ -1303,6 +1303,7 @@ mod tests {
         let records = RecordPartition::create(&data_path, config()).await.unwrap();
         activate(&catalog).await;
         let write = RecordWrite {
+            vector_patch: None,
             system: None,
             operation_id: OperationId::new("write".into()),
             record_id: "r".into(),

@@ -122,6 +122,18 @@ def exercise(base,master,call):
                 assert browse['count_total']==1 and browse['hits'][0]['record']['document']['title']=='Vector',browse
                 count=call('POST',f'/api/v1/index/{vector_collection}/query',{'length':0})
                 assert count['count_total']==1 and count['hits']==[],count
+            page.locator('#recordEnvelopeMode').check()
+            pending={'record_id':'pending-ui','routing_key':'r','expected':'Absent','document':{'title':'Pending vector','body':'alpha'}}
+            page.locator('#documentJson').fill(json.dumps(pending));page.locator('#submitDocuments').click()
+            expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
+            cid=page.evaluate('INDEX_ID')
+            assert call('GET',f'/api/v1/index/{cid}/doc/pending-ui/status')['pending_vector_fields']==['vector']
+            patch={'record_id':'pending-ui','routing_key':'r','expected':{'Match':1},'vector_patch':{'vector':[2,0]}}
+            page.locator('#documentJson').fill(json.dumps(patch));page.locator('#submitDocuments').click()
+            expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
+            assert call('GET',f'/api/v1/index/{cid}/doc/pending-ui/status')['pending_vector_fields']==[]
+            assert call('GET',f'/api/v1/index/{cid}/doc/pending-ui')['version']==1
+            page.locator('#recordEnvelopeMode').uncheck()
             # Known rejection can release only the rejected/unattempted remainder.
             page.locator('#documentJson').fill(json.dumps({'body':'bad vector','vector':[1]}))
             page.locator('#submitDocuments').click();expect(page.locator('#discardRejectedWrites')).to_be_visible()

@@ -1,6 +1,6 @@
 # Issue #57 P2 实施设计：来源、证据与统一可见性
 
-状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与堆叠基线见第 14 节；已批准不等于已实现。
+状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与堆叠基线见第 15 节；已批准不等于已实现。
 
 - 产品依据：[issue #57](https://github.com/TheLudlows/seekpower/issues/57)，包含顶部 2026-10-21 确认。
 - 实施入口：[P1-A 与阶段记录](implementation-57.md)。本设计不替换总体路线。
@@ -304,7 +304,7 @@ P2 新测试文件名以下是拟议名称，尚不存在。复用现有 `cargo 
 | 编号 | 已批准语义 | 实施边界 |
 | --- | --- | --- |
 | D1 | 来源更新使旧派生 stale，默认隐藏，等待上层重算发布；来源删除始终立即隐藏 | 第 14 节先交付条件更新与隐藏；不自动重算，不开放 include_stale 绕过 |
-| D2 | 正文就绪即可发布，先支持全文检索；向量后补，缺向量不参加向量召回，不填零向量 | 下一 generation/可选向量切片；当前带向量 schema 仍要求完整向量 |
+| D2 | 正文就绪即可发布，先支持全文检索；向量后补，缺向量不参加向量召回，不填零向量 | 第 15 节实现可选向量及版本受控后补；generation staging/publish 尚未实现 |
 | D3 | TTL 到期为不可逆逻辑删除，并隐藏依赖派生；不能仅延长 TTL 复活，物理回收异步 | 后续 temporal 切片，当前未实现 |
 | D4 | feed 至少保留 7 天；容量不足限制新写，不提前静默丢弃窗口内事件；过期消费者重建同步状态 | 后续 feed 切片，当前未实现 |
 
@@ -544,3 +544,53 @@ target/debug/seekpower_server generate_openapi=true
 本地证据日志：`/tmp/p2-revisions-full.log`、`/tmp/p2-revisions-build.log`、`/tmp/p2-revisions-http.log`、`/tmp/p2-revisions-boundary.log`、`/tmp/p2-revisions-fault-build.log`、`/tmp/p2-revisions-fault-http.log`、`/tmp/p2-revisions-openapi.log`。
 
 **Windows 本批原生测试未运行**，不能沿用基线 CI 当作本批通过；须另获新分支发布/CI 授权。**Linux/Windows 系统崩溃与断电仍未验收**，需要隔离环境及外部确认见证，进程退出不能替代。范围仅 D1 有界来源修订闭环；generation、可选向量、TTL、feed、历史正文 API 及持续历史回收未实现，四策略批准不代表这些已交付。完成本地检查点后交用户检视，不自动合入或扩展 PR #62。
+
+
+## 15. 可选向量及精确版本后补（本地实现，generation 的依赖切片）
+
+2026-10-21 再次只读核验 master `64b1c8f`、PR #62 OPEN/draft/head `20531fa` 均未改变。
+
+本地分支 `feat/57-p2-optional-vectors` 堆叠在 D1 `084320af6ba4b14c048de4b838d083a2a6b688b4`，仍依赖未合入的 PR #62 `20531fa`。不改 PR #62、不推送、不创建 PR。本批先落实实际向量依赖路径，**不声称 generation 已实现**。
+
+### 设计与实际边界
+
+- 缺失 schema 向量字段现在合法；显式 null、维度/精度错误、无效数值继续拒绝。底层物理索引已按字段是否存在索引向量，缺失记录不参与向量召回，绝不生成占位零向量。正文及全文立即可用；向量和 Hybrid 的向量通道只召回已具备向量的记录。
+- `record/enrichment.rs` 独立负责后补命令校验与文档合成，planner、增量发布和 WAL replay 共用合成规则。HTTP/UI 只转换现有写入 envelope，不维护第二套业务状态或独立向量 journal。
+- 新可选字段 `vector_patch` 仅填充当前 schema 中尚未存在的向量字段，必须指定当前正文 `expected:{"Match":version}`，省略 document/system。拒绝已填字段、非向量字段、已删除/stale/隔离 typed 目标。源正文修订后，旧版本请求失败；并发填充同字段只有一个新操作成功。
+- 成功后提交 seq 推进、正文 version 不变，不添加 source revision、不让现有派生证据 stale；回执仍由同一 operation_id ledger 去重。原始向量值保留于权威 document，后补不改其他正文。正文替换时由调用方明确提交新版本完整内容，不隐式继承旧向量。
+- 增量替换物理 ordinal，统一维护当前索引、活动统计、缓存和共同视图。失败时分区 fence，恢复重放完整后补决策；授权与来源删除输出屏障不变。对 source 的 vector-only 变化不误判语义失效。
+- 合成后的完整正文检查字节上限及 checkpoint 预算，typed 删除槽/字节预留继续保留。所有状态随 WAL/checkpoint、collection/service 备份及最终水位接管，不新增双权威状态。
+- 状态接口增加 `pending_vector_fields`，列出 live 正文尚缺的 schema 向量字段；不表示模型推理进度，不返回隐藏正文。HTTP 单写/batch 只允许显式 document 或对象 vector_patch，单独 `vector_patch:null` 不会变成隐式删除。
+- 权威 entry 标签 **V5**，拒绝 V4/V3 等旧格式，不提供升级迁移。
+
+已实现请求示例，使用 `POST /api/v1/index/{id}/doc`；epoch 应使用当前值并保存原请求重试：
+
+```json
+{
+  "operation_id": {"epoch": 20747, "nonce": "fill-vector"},
+  "record_id": "chunk-1", "routing_key": "document-1",
+  "expected": {"Match": 1}, "vector_patch": {"vector": [2.0, 0.0]}
+}
+```
+
+### 验证与剩余工作
+
+独立代码审查未发现阻塞缺陷；检查了版本/seq、历史、重放合成、容量预留、null 防误删及输出边界。新增核心测试涵盖缺向量召回、后补保持证据有效、重复请求、已有字段冲突、并发填充、非向量字段/无条件补写拒绝、durable-pending 恢复和来源 stale 后拒绝补写。底层索引测试验证缺向量正文持久化后仍不参与向量召回，非法显式向量继续拒绝。
+
+Linux 最终源码全量 **188 passed / 0 failed / 10 ignored，35 suites**，退出 0。10 个 ignored 为既有辅助程序，本批无新增。默认和故障注入真实 HTTP/Chromium 均退出 0；全部缺向量时 Hybrid 的全文召回亦通过。后补故障矩阵覆盖 after_append_unknown、after_durable、crash_after_durable、crash_after_visible，检查恢复后正文版本与原回执不变；既有来源修订、删除、接管、完整服务备份恢复测试保持通过。核心依赖边界、OpenAPI vector_patch schema 及 `git diff --check` 通过。
+
+验证命令：
+
+```bash
+cargo test --workspace --all-targets --quiet
+cargo build --workspace
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
+python3 scripts/check_core_boundary.py
+cargo build -p seekpower_server --features fault-injection
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --faults --browser
+target/debug/seekpower_server generate_openapi=true
+```
+
+日志：`/tmp/p2-vectors-final-tests.log`、`/tmp/p2-vectors-build.log`、`/tmp/p2-vectors-http.log`、`/tmp/p2-vectors-boundary.log`、`/tmp/p2-vectors-fault-build.log`、`/tmp/p2-vectors-fault-http.log`、`/tmp/p2-vectors-openapi.log`。新分支 **Windows 原生未运行**；Linux/Windows **系统崩溃/断电未验收**，仍需隔离环境及外部确认见证。未沿用旧分支原生 CI 当作本批通过。
+
+下一批是 generation 本身：权威 staging 清单及有界完整性验证、持久但不可见的成员、精确 source revision 绑定、原子替换 active generation 与全部检索/统计集合、重试/并发发布/恢复/备份接管，复用本批的向量规则。不能用逐成员普通写入冒充原子 generation 发布。本批没有 staging/publish API、TTL/feed、关系或持续回收。

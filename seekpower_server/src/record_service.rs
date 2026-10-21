@@ -722,9 +722,9 @@ async fn write(
     let value: Value = parse(&bytes)?;
     if !value
         .as_object()
-        .is_some_and(|v| v.contains_key("document"))
+        .is_some_and(|v| v.contains_key("document") || v.get("vector_patch").is_some_and(Value::is_object))
     {
-        return Err(bad("document must be explicit; null means deletion"));
+        return Err(bad("document or vector_patch must be explicit; null document means deletion"));
     }
     let request: RecordWrite = serde_json::from_value(value).map_err(bad)?;
     let key = s.authenticate(&headers).await?;
@@ -829,10 +829,10 @@ async fn batch(
         .and_then(Value::as_array)
         .is_some_and(|rows| {
             rows.iter()
-                .all(|r| r.as_object().is_some_and(|o| o.contains_key("document")))
+                .all(|r| r.as_object().is_some_and(|o| o.contains_key("document") || o.get("vector_patch").is_some_and(Value::is_object)))
         })
     {
-        return Err(bad("every write must contain explicit document"));
+        return Err(bad("every write must contain explicit document or vector_patch"));
     }
     let request: BatchRequest = serde_json::from_value(value).map_err(bad)?;
     if request.writes.is_empty() || request.writes.len() > 100 {
@@ -1778,6 +1778,9 @@ pub(crate) fn generate_openapi() {
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","routing_key","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"routing_key":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
+    schemas.get_mut("RecordWrite").unwrap()["required"] = json!(["operation_id","record_id","routing_key","expected"]);
+    schemas.get_mut("RecordWrite").unwrap()["anyOf"] = json!([{"required":["document"]},{"required":["vector_patch"]}]);
+    schemas.get_mut("RecordWrite").unwrap()["properties"]["vector_patch"] = json!({"type":"object","minProperties":1,"description":"Fill absent vector fields with exact Match version; omit document/system. Preserves body version."});
     schemas.get_mut("RecordWrite").unwrap()["properties"]["system"] = json!({"$ref":"#/components/schemas/EvidenceMetadata"});
     schemas.insert("EvidenceRef".into(), json!({"type":"object","additionalProperties":false,"required":["record_id","routing_key","version"],"properties":{"record_id":{"type":"string"},"routing_key":{"type":"string"},"version":{"type":"integer","minimum":1}}}));
     schemas.insert("EvidenceMetadata".into(), json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["source","derived"]},"evidence_refs":{"type":"array","maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}}}}));

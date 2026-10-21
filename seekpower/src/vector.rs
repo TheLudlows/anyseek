@@ -344,7 +344,8 @@ pub(crate) fn validate_vectors_in_schema<'a>(
     document: &Document,
 ) -> Result<(), String> {
     for field in fields.filter(|f| f.index_vector) {
-        let value = document.get(&field.field).ok_or_else(|| format!("missing vector field: {}", field.field))?;
+        // Missing vectors are pending enrichment, never zero-vector placeholders.
+        let Some(value) = document.get(&field.field) else { continue; };
         if !matches!((&field.field_type, value), (FieldType::Json, Value::Array(_)) | (FieldType::Binary, Value::String(_))) {
             return Err(format!("invalid vector field type: {}", field.field));
         }

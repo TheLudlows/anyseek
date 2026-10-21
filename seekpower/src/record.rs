@@ -18,6 +18,7 @@ use std::{
 use tokio::sync::{Mutex, Semaphore};
 
 mod evidence;
+mod enrichment;
 mod output;
 pub use evidence::{EvidenceKind, EvidenceMetadata, EvidenceRef, EvidenceVisibility};
 pub use output::DataOutputPermit;
@@ -179,8 +180,12 @@ pub struct RecordWrite {
     pub routing_key: String,
     /// Conditional write contract.
     pub expected: ExpectedVersion,
-    /// Complete original input including original vector fields; None deletes.
+    /// Complete original input including vectors; None deletes unless vector_patch is set.
     pub document: Option<Document>,
+    /// Fill previously absent schema vector fields for an exact body version.
+    /// Mutually exclusive with document/system; preserves body version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_patch: Option<Document>,
     /// Optional engine-owned source/evidence semantics; business document fields
     /// with the same name have no effect on visibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,9 +243,9 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV4")]
+    #[serde(rename = "RecordCheckpointV5")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV4")]
+    #[serde(rename = "RecordAppliedV5")]
     Applied(Applied),
 }
 struct Inner {
@@ -343,6 +348,8 @@ pub struct RecordStatus {
     pub version: u64,
     /// Why ordinary reads include or hide this identity.
     pub visibility: EvidenceVisibility,
+    /// Schema vector fields not yet supplied on a live body.
+    pub pending_vector_fields: Vec<String>,
     /// Common authoritative view waterline.
     pub visible_seq: u64,
 }
@@ -524,14 +531,15 @@ fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
     }
     let r = &applied.request;
     let previous = state.records.get(&r.record_id);
-    if applied.receipt.version != previous.map_or(1, |r| r.version.saturating_add(1))
+    if applied.receipt.version != previous.map_or(1, |r| if applied.request.vector_patch.is_some() { r.version } else { r.version.saturating_add(1) })
         || applied.receipt.record_id != r.record_id
         || previous.is_some_and(|p| p.routing_key != r.routing_key)
         || state.operation_lookup.contains_key(&r.operation_id)
     {
         return Err(storage("inconsistent committed record operation"));
     }
-    if let Some(record) = previous.filter(|r| evidence::retained_revision(r)) {
+    let document = enrichment::document(previous, r)?;
+    if let Some(record) = previous.filter(|r| evidence::retained_revision(r) && applied.request.vector_patch.is_none()) {
         state.source_revisions.push(record.clone());
     }
     state.records.insert(
@@ -540,7 +548,7 @@ fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
             record_id: r.record_id.clone(),
             routing_key: r.routing_key.clone(),
             version: applied.receipt.version,
-            document: r.document.clone(),
+            document,
             system: r.system.clone().or_else(|| previous.and_then(|p| p.system.clone())),
         },
     );
@@ -828,7 +836,9 @@ impl RecordPartition {
         let visibility = if inner.state.evidence_quarantined && record.system.is_some() {
             EvidenceVisibility::Quarantined
         } else { evidence::status(&inner.state.records, id)? };
-        Ok(Some(RecordStatus { record_id: id.into(), version: record.version, visibility, visible_seq: inner.state.seq }))
+        let pending_vector_fields = inner.config.schema.iter().filter(|f| f.index_vector
+            && record.document.as_ref().is_some_and(|d| !d.contains_key(&f.field))).map(|f| f.field.clone()).collect();
+        Ok(Some(RecordStatus { record_id: id.into(), version: record.version, visibility, pending_vector_fields, visible_seq: inner.state.seq }))
     }
     /// Search the existing lexical/vector/hybrid engine and read original records
     /// under the same partition guard. Retired candidates are filtered before TopK.
@@ -1143,6 +1153,7 @@ mod tests {
     }
     fn write(nonce: &str, id: &str, body: &str, expected: ExpectedVersion) -> RecordWrite {
         RecordWrite {
+            vector_patch: None,
             system: None,            operation_id: OperationId::new(nonce.into()),
             record_id: id.into(),
             routing_key: "document-1".into(),
@@ -1164,6 +1175,68 @@ mod tests {
         p.search("alpha".into(), vector, mode, vec![], 10)
             .await
             .unwrap()
+    }
+    #[tokio::test]
+    async fn optional_vectors_enrich_exact_revision_and_recover() {
+        let root = path(); let archive = path();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let mut source = source_write("s", "s", &[]);
+        source.document.as_mut().unwrap().remove("vector");
+        source.document.as_mut().unwrap().insert("body".into(), serde_json::json!("alpha original"));
+        p.write(source).await.unwrap();
+        let mut derived = source_write("d", "d", &[("s", 1)]);
+        derived.document.as_mut().unwrap().remove("vector");
+        derived.document.as_mut().unwrap().insert("body".into(), serde_json::json!("alpha derived"));
+        p.write(derived).await.unwrap();
+        let vector = SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All };
+        assert!(query(&p, vector.clone()).await.hits.is_empty());
+        assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 2);
+        assert_eq!(query(&p, SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All }).await.hits.len(), 2);
+        assert_eq!(p.statistics().await.unwrap().active_records, 2);
+        let mut patch = write("enrich", "s", "unused", ExpectedVersion::Match(1));
+        patch.document = None;
+        patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
+        let receipt = p.write(patch.clone()).await.unwrap();
+        assert_eq!(receipt.version, 1);
+        assert_eq!(p.write(patch.clone()).await.unwrap(), receipt);
+        assert_eq!(p.statistics().await.unwrap().retained_source_revisions, 0);
+        assert!(p.get("d").await.unwrap().is_some());
+        assert_eq!(query(&p, vector.clone()).await.hits.len(), 1);
+        let mut collision = patch.clone(); collision.operation_id = OperationId::new("collision".into());
+        assert!(matches!(p.write(collision).await, Err(RecordError::Conflict(_))));
+        p.compact_journal().await.unwrap(); p.checkpoint(&archive).await.unwrap(); drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(patch).await.unwrap(), receipt);
+        assert_eq!(query(&p, vector).await.hits.len(), 1);
+        let mut update = write("newsource", "s", "alpha new", ExpectedVersion::Match(1));
+        update.document.as_mut().unwrap().remove("vector"); p.write(update).await.unwrap();
+        let mut late = write("late", "d", "unused", ExpectedVersion::Match(1)); late.document = None;
+        late.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
+        assert!(p.write(late).await.is_err());
+        assert_eq!(p.record_status("d").await.unwrap().unwrap().visibility, EvidenceVisibility::Stale);
+        drop(p); std::fs::remove_dir_all(root).unwrap(); std::fs::remove_dir_all(archive).unwrap();
+    }
+    #[tokio::test]
+    async fn optional_vectors_pending_recovery_and_race() {
+        let root = path(); let p = RecordPartition::create(&root, config()).await.unwrap();
+        let mut initial = write("body", "r", "alpha", ExpectedVersion::Absent);
+        initial.document.as_mut().unwrap().remove("vector"); p.write(initial).await.unwrap();
+        let mut patch = write("patch", "r", "", ExpectedVersion::Match(1)); patch.document = None;
+        patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
+        let mut bad = patch.clone(); bad.vector_patch.as_mut().unwrap().insert("body".into(), serde_json::json!("changed"));
+        assert!(p.write(bad).await.is_err());
+        let mut bad = patch.clone(); bad.expected = ExpectedVersion::Any; assert!(p.write(bad).await.is_err());
+        p.inner.lock().await.fail_after_durable = true;
+        assert!(matches!(p.write(patch.clone()).await, Err(RecordError::DurablePending(2)))); drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(patch).await.unwrap().version, 1);
+        assert_eq!(p.get("r").await.unwrap().unwrap().document.unwrap()["body"], "alpha");
+        let mut update = write("revision", "r", "alpha", ExpectedVersion::Match(1)); update.document.as_mut().unwrap().remove("vector"); p.write(update).await.unwrap();
+        let mut left = write("left", "r", "", ExpectedVersion::Match(2)); left.document = None;
+        left.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
+        let mut right = left.clone(); right.operation_id = OperationId::new("right".into());
+        let (a,b) = tokio::join!(p.write(left),p.write(right)); assert_ne!(a.is_ok(), b.is_ok());
+        drop(p); std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn record_source_revision_stale_recompute_delete_and_recovery() {
@@ -1467,7 +1540,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV4", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV5", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();

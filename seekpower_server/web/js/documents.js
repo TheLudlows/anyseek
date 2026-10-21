@@ -87,8 +87,8 @@ $(function () {
             if(sessionValue('seekpower.pendingWrites'))throw new Error('Resolve the retained writes in their original collection before submitting another batch.');
             pendingDocumentCommit={collection:INDEX_ID,unresolved:false,requests:documents.map(document=>{
                 if ($('#recordEnvelopeMode').prop('checked')) {
-                    if (!Object.hasOwn(document,'document') || !document.record_id || !document.routing_key || !document.expected)
-                        throw new Error('Each envelope requires record_id, routing_key, expected and explicit document (null deletes).');
+                    if ((!Object.hasOwn(document,'document') && !Object.hasOwn(document,'vector_patch')) || !document.record_id || !document.routing_key || !document.expected)
+                        throw new Error('Each envelope requires record_id, routing_key, expected and explicit document (null deletes) or vector_patch.');
                     if (Object.hasOwn(document,'operation_id')) throw new Error('Operation IDs are managed by this editor.');
                     return {...document, operation_id:newOperationId()};
                 }

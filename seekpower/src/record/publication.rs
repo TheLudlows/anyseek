@@ -12,7 +12,8 @@ impl Inner {
         snapshot_bytes: usize,
     ) -> Result<(), RecordError> {
         let receipt = &applied.receipt;
-        let hiding = self
+        let document = enrichment::document(self.state.records.get(&receipt.record_id), &applied.request)?;
+        let hiding = applied.request.vector_patch.is_none() && self
                 .state
                 .records
                 .get(&receipt.record_id)
@@ -24,9 +25,9 @@ impl Inner {
             std::collections::BTreeSet::new()
         };
         // Updating the source replaces its own ordinal but keeps the new source visible.
-        if applied.request.document.is_some() { affected.remove(&receipt.record_id); }
+        if document.is_some() { affected.remove(&receipt.record_id); }
         let old_location = self.locations.get(&receipt.record_id).copied();
-        if let Some(document) = &applied.request.document {
+        if let Some(document) = &document {
             let id = self.ordinals.len();
             let shard = self.index.read().await.shard_vec[0].clone();
             shard

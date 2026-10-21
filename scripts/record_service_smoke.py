@@ -104,10 +104,43 @@ def main():
             for query in [{'query_vector':[1,0],'all':True},{'query':'alpha','query_vector':[1,0],'rrf':{}}]:
                 q=call('POST','/api/v1/index/vectors/query',query);assert q['hits'][0]['record']['record_id']=='v',q
             assert call('GET','/api/v1/index/vectors/doc/v')['document']['vector']==[2,0]
+            pending={**vw,'operation_id':operation(),'record_id':'pending','document':{'body':'pendingword'}}
+            call('POST','/api/v1/index/vectors/doc',pending)
+            assert call('POST','/api/v1/index/vectors/query',{'query':'pendingword'})['count_total']==1
+            assert len(call('POST','/api/v1/index/vectors/query',{'query_vector':[1,0],'all':True})['hits'])==1
+            assert call('GET','/api/v1/index/vectors/doc/pending/status')['pending_vector_fields']==['vector']
+            patch={'operation_id':operation(),'record_id':'pending','routing_key':'v','expected':{'Match':1},'vector_patch':{'vector':[2,0]}}
+            enriched=call('POST','/api/v1/index/vectors/doc',patch)['receipt']
+            assert enriched['version']==1
+            assert call('POST','/api/v1/index/vectors/doc',patch)['receipt']==enriched
+            call('POST','/api/v1/index/vectors/doc',{**patch,'operation_id':operation()},status=409)
+            assert call('GET','/api/v1/index/vectors/doc/pending/status')['pending_vector_fields']==[]
+            assert len(call('POST','/api/v1/index/vectors/query',{'query_vector':[1,0],'all':True})['hits'])==2
+            print('PASS optional vector HTTP: lexical before vector, exact version append-only enrichment, retry and readiness')
             vector_backup=call('POST','/api/v1/index/vectors/backup',{'operation_id':operation()})
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'restored-vectors','backup_id':vector_backup['backup_id']})
             assert call('GET','/api/v1/index/restored-vectors/doc/v')['document']['vector']==[2,0]
-            assert call('POST','/api/v1/index/restored-vectors/query',{'query_vector':[1,0],'all':True})['hits'][0]['record']['record_id']=='v'
+            assert len(call('POST','/api/v1/index/restored-vectors/query',{'query_vector':[1,0],'all':True})['hits'])==2
+            if args.faults:
+                import http.client
+                for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
+                    rid='patch-'+stage
+                    call('POST','/api/v1/index/vectors/doc',{**pending,'operation_id':operation(),'record_id':rid})
+                    enrichment={**patch,'operation_id':operation(),'record_id':rid}
+                    process.kill();process.wait(timeout=20)
+                    start({'SEEKPOWER_RECORD_FAULT':stage,'SEEKPOWER_RECORD_FAULT_NONCE':enrichment['operation_id']['nonce']})
+                    if stage.startswith('crash_'):
+                        try:call('POST','/api/v1/index/vectors/doc',enrichment)
+                        except (OSError,http.client.HTTPException):pass
+                        else:raise AssertionError('expected vector patch transport loss')
+                        process.wait(timeout=20);assert process.returncode==86
+                    else:
+                        assert call('POST','/api/v1/index/vectors/doc',enrichment,status=503)['code'] in ['outcome_unknown','durable_pending']
+                    restart()
+                    assert call('POST','/api/v1/index/vectors/doc',enrichment)['receipt']['version']==1
+                    assert call('GET','/api/v1/index/vectors/doc/'+rid+'/status')['pending_vector_fields']==[]
+                print('PASS vector enrichment HTTP faults: exact body version and receipt across uncertain/pending/process exits')
+
             # New Record iterator, planned conditional deletion, independent backup and lifecycle.
             page=call('POST','/api/v1/index/shared/iterator',{'length':2,'fields':['title']},key=keys['b'])
             assert len(page['records'])==2 and page['next'] and page['statistics']['active_records']==4

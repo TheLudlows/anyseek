@@ -65,7 +65,18 @@ pub(super) fn prepare(
                 .into(),
         ));
     }
-    evidence::validate(&state.records, &request)?;
+    if request.vector_patch.is_some() {
+        enrichment::validate(state, config, &request)?;
+    } else {
+        evidence::validate(&state.records, &request)?;
+    }
+    let next_document = enrichment::document(state.records.get(&request.record_id), &request)?;
+    if let Some(document) = &next_document {
+        validate_document_depth(document)?;
+        if serde_json::to_vec(document).map_err(storage)?.len() > config.max_record_bytes {
+            return Err(RecordError::Rejected("enriched record byte budget exceeded".into()));
+        }
+    }
     // One fixed bounded delete command/receipt per live typed identity. This
     // reserve is retained even when an ancestor already hides that identity.
     let typed_live = state
@@ -73,7 +84,7 @@ pub(super) fn prepare(
         .values()
         .filter(|r| r.system.is_some() && r.document.is_some())
         .count();
-    let deleting_typed = request.document.is_none()
+    let deleting_typed = next_document.is_none()
         && state
             .records
             .get(&request.record_id)
@@ -98,9 +109,9 @@ pub(super) fn prepare(
     }
     let previous = state.records.get(&request.record_id);
     let live_sources = state.records.values().filter(|r| evidence::retained_revision(r)).count();
-    let adding_history = previous.is_some_and(evidence::retained_revision);
+    let adding_history = request.vector_patch.is_none() && previous.is_some_and(evidence::retained_revision);
     let new_source = previous.is_none() && request.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Source);
-    let deleting_source = adding_history && request.document.is_none();
+    let deleting_source = adding_history && next_document.is_none();
     if state.source_revisions.len() + usize::from(adding_history) + live_sources
         + usize::from(new_source) - usize::from(deleting_source) > config.max_records {
         return Err(RecordError::Rejected("source revision budget reserves final deletion slots".into()));
@@ -120,7 +131,7 @@ pub(super) fn prepare(
     if previous.is_none() && state.records.len() >= config.max_records {
         return Err(RecordError::Rejected("identity budget exceeded".into()));
     }
-    if let Some(document) = &request.document {
+    if let Some(document) = &next_document {
         crate::vector::validate_vectors_in_schema(
             &config.index.inference,
             config.schema.iter(),
@@ -134,7 +145,7 @@ pub(super) fn prepare(
             .checked_add(1)
             .ok_or_else(|| storage("sequence exhausted"))?,
         version: previous
-            .map_or(Some(1), |r| r.version.checked_add(1))
+            .map_or(Some(1), |r| if request.vector_patch.is_some() { Some(r.version) } else { r.version.checked_add(1) })
             .ok_or_else(|| storage("version exhausted"))?,
         record_id: request.record_id.clone(),
     };
@@ -147,7 +158,7 @@ pub(super) fn prepare(
         record_id: applied.request.record_id.clone(),
         routing_key: applied.request.routing_key.clone(),
         version: receipt.version,
-        document: applied.request.document.clone(),
+        document: next_document,
         system: applied
             .request
             .system
