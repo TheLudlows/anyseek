@@ -90,6 +90,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Native toolchain
         run: rustc --version --verbose
+      - name: Native Windows filesystem evidence
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testDrive = (Split-Path -Qualifier $env:GITHUB_WORKSPACE).TrimEnd(':')
+          Get-Volume -DriveLetter $testDrive | Format-List DriveLetter,FileSystem,HealthStatus
+          Get-ComputerInfo -Property WindowsProductName,OsVersion
+      - name: Native Linux filesystem evidence
+        if: runner.os == 'Linux'
+        run: |
+          uname -a
+          findmnt -T "$GITHUB_WORKSPACE" -o SOURCE,FSTYPE,TARGET
       - name: Native journal and child-process crash tests
         run: cargo test -p seekpower --lib journal_
       - name: Native partition publication and owner-lock tests

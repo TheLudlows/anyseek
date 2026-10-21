@@ -1151,9 +1151,11 @@ mod tests {
     #[tokio::test]
     async fn catalog_invalid_config_rejected_without_poisoning_recovery() {
         let path = root();
-        let catalog = setup(&path).await;
+        let mut catalog = setup(&path).await;
         let wal_path = path.join("catalog/generation-0000000000000000/wal");
+        drop(catalog); // Compare raw bytes only outside the Windows owner lock.
         let before = std::fs::read(&wal_path).unwrap();
+        catalog = Catalog::open(&path.join("catalog")).await.unwrap();
         for boost in [f32::NAN, f32::INFINITY, -1.0] {
             let mut invalid = config();
             invalid.schema[0].boost = boost;
@@ -1168,7 +1170,10 @@ mod tests {
                 ))
                 .await;
             assert!(matches!(result, Err(CatalogError::Rejected(_))));
+            assert_eq!(catalog.authenticate(&"a".repeat(64)).await.unwrap(), "a");
+            drop(catalog);
             assert_eq!(std::fs::read(&wal_path).unwrap(), before);
+            catalog = Catalog::open(&path.join("catalog")).await.unwrap();
         }
         drop(catalog);
         let catalog = Catalog::open(&path.join("catalog")).await.unwrap();

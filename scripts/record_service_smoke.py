@@ -199,6 +199,12 @@ def main():
                     if kind=='restore':assert call('GET','/api/v1/index/interrupted-restore/doc/r0')['version']==5
                     else:assert recovered['backup_id']
                 print('PASS real HTTP faults: rejection/unknown/durable pending, process exits before/after visibility, batch tail stopped, backup/restore publication and repeated repair crashes')
+            # Rejecting excess backup requests must not allocate unbounded repair files.
+            while sum(p.name.startswith('backup-') for p in root.iterdir()) < 32:
+                call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()})
+            before={p.name for p in root.iterdir()}
+            for _ in range(3):call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()},status=400)
+            assert {p.name for p in root.iterdir()}==before
             print('PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, no revived grants, collection tombstone across restart')
             print('PASS real HTTP: default Record/catalog, shared grants, conditional writes, retry/response loss, checkpoint, crash restart, revoked operation lookup, full query parameters, vectors')
             if args.browser:

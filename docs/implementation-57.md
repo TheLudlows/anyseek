@@ -79,6 +79,15 @@ CI evidence and platform distinction:
   1 failed, 4 ignored). The failing fixture read the locked WAL through a second
   handle. It now compares bytes only after releasing the owner, then reopens;
   production locks are unchanged. Later Windows catalog/service steps did not run.
+- [Run 39541205670](https://github.com/TheLudlows/seekpower/actions/runs/39541205670),
+  SHA `111760529c14df68a8bd218ef90c4fc26e764243`: Linux native lifecycle/fault matrix
+  passed. Windows Record step now passed; catalog exposed the same locked-WAL
+  fixture assumption (11 passed, 1 failed, 1 ignored). Both fixtures are corrected;
+  a fresh native run is required. The production lock protocol was not weakened.
+- Follow-up resource correction: new backup requests rejected at the 32-backup
+  limit no longer create unused repair-lock files. The real HTTP regression
+  asserts repeated rejections leave the root directory entry set unchanged.
+  Native CI also records actual Windows/Linux filesystem evidence.
 - Final-source local results and subsequent native CI results are recorded in the
   validation ledger. Until the corrected SHA runs, Windows remains **failed**,
   not passed. Linux and Windows host/system-crash tests remain **not run**.
@@ -95,8 +104,8 @@ Default HTTP/Chromium and fault-enabled HTTP/Chromium commands passed using
 `PLAYWRIGHT_BROWSERS_PATH=/workspace/playwright-browsers`. Scripts:
 `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server
 --browser` and the fault build with additional `--faults`. Logs:
-`/tmp/seekpower-lifecycle-final-tests.log`, `...-final-e2e.log`,
-`...-final-faults.log`. OpenAPI generation passed (15 paths, 21 operations).
+`/tmp/seekpower-lifecycle-final3-tests.log`, `...-final2-e2e.log`,
+`...-final2-faults.log`. OpenAPI generation passed (15 paths, 21 operations).
 
 Remaining: full service/catalog backup portability and backup retirement tools,
 initial service-root interrupted-publication recovery, data-ledger/physical-history

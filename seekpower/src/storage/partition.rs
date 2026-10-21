@@ -135,6 +135,11 @@ impl PartitionJournal {
             .and_then(|n| n.to_str())
             .ok_or_else(|| io::Error::other("invalid root name"))?;
         let staging = parent.join(format!(".initial-resume-{name}"));
+        // Parent catalog ownership serializes creation. Do not leave a repair
+        // lock for every new request rejected by a higher-level resource limit.
+        if !path.exists() && !staging.exists() {
+            return Ok(());
+        }
         let guard = OpenOptions::new()
             .create(true)
             .truncate(false)
