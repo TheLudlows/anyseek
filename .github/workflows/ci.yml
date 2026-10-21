@@ -84,7 +84,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      SEEKPOWER_TEST_ROOT: ${{ runner.temp }}
+      SEEKPOWER_TEST_ROOT: ${{ github.workspace }}/target/p1-native-data
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
