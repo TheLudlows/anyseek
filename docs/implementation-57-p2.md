@@ -436,3 +436,64 @@ python3 scripts/record_service_smoke.py --server target/debug/seekpower_server -
 ```
 
 对应本地日志：`/tmp/p2-source-final2-tests.log`、`/tmp/p2-source-final2-build.log`、`/tmp/p2-source-final-http.log`、`/tmp/p2-source-final-boundary.log`、`/tmp/p2-source-final-fault-build.log`、`/tmp/p2-source-final-fault-http.log`。最终测试全部退出 0。10 个 ignored 沿用既有 9 个子进程 worker 入口及 1 个显式 fixture 的跨构建哈希辅助程序，无新增忽略项。故障注入包含 source 删除的 append unknown、durable pending、durable/visible 后进程退出和恢复重试；这些证据不代表系统崩溃或断电可靠性验收。文档链接/围栏/JSON 示例检查及 `git diff --check` 通过。
+
+## 13. 同服务受控接管恢复（进行中）
+
+用户已确认首版采用接管恢复，原副本封存后才能开放目标，不允许双活；进一步确认目标追平最终封存水位，保留全部已确认写入。不是恢复到备份时点再丢弃后续更新。四项 D1–D4 决策仍待答复，本节不启用它们。
+
+### 实际协议与职责
+
+- `record/recovery.rs` 负责权威谱系、终止 seal、完整状态摘要和目标认证。每个新 partition 创建随机不可复用谱系，独立 checkpoint 无论是否已有来源内容都持久标记 `independent_snapshot`，不能作为当前删除权威；谱系仅证明来源，不证明跨根全局唯一 owner。
+- `catalog/takeover.rs` 保存不随两日操作回执过期清理的接管意图。Prepare 绑定原/目标 collection、原 operation_id、备份 ID/摘要和谱系，同时关闭源 active/grants；Finalize 一次持久命令退休源并激活目标，只授予仍有效的当前管理身份，不复活旧 grants。
+- `record_service/takeover.rs` 仅编排当前独占服务根内的流程。普通 HTTP 写仍通过整个 `Catalog::authorized` guard；Prepare 的 Record 精确容量检查也在同一 catalog guard 内，防止检查后写入耗尽空间。HTTP/UI 不自行处理删除闭包或版本规则。
+- 源 seal 在 Record mutex 内取得最终水位与完整状态摘要，持久 checkpoint 后才能返回；所有旧 clone、普通读写、操作查询、统计和数据输出许可关闭。重新打开、在线 compact 或再次独立备份都不清 seal。可信恢复检查/配置读取是明确例外。
+- 备份必须是同一谱系的精确摘要输入且水位不晚于源；最终目标从源封存后的完整权威状态重建，保留全部正文、配置、版本、墓碑及操作回执。目标打开完成索引构建，并核对去除恢复控制字段后的完整状态摘要，才允许 Catalog Finalize。没有只复制旧回执却丢失对应成功写入的回滚行为。
+- 每个 pending 接管保留一个完成操作槽和 16 KiB WAL/checkpoint 预算；普通 catalog 操作不得占用。预算覆盖合法 owner/target/nonce 的最大 JSON 转义和完成证书/新 grant。真实磁盘满、同步失败仍可能 pending/fenced，不保证硬件故障时立即可用。
+
+### 持久边界与失败规则
+
+1. Prepare 之前：校验备份、源谱系与容量；失败不封存源。
+2. Prepare durable：源授权关闭、目标不可访问。即使尚未执行 Record seal，服务恢复也不得普通初始化/重新激活源。
+3. Seal durable：源写入/内容输出永久关闭，最终状态可供受控核验。未知结果只能重开核对同一 intent；没有 unseal 或强制解除接口。已知 checkpoint 未发布错误也保守关闭当前句柄，需要重开确认，不能把 Rejected 当作句柄继续可服务的保证。
+4. 目标创建及索引认证：目标无 grants，任一步失败继续隔离；启动按同一持久 intent 续办，不按目录存在直接激活。
+5. Finalize durable：原退休、目标 active 和管理 grant 在同一 Catalog 状态发布。内存 map 尚未安装时进程退出，重启按已完成目标打开，不能重新创建原。
+
+旧 operation_id 和参数用于 HTTP 重试；目标 intent 保留完整绑定，不能换源/备份/目标复用。进行中不得删除所绑定 collection 或退休其备份，完整 service backup 也拒绝归档 pending 接管。已完成服务归档可保留历史，但独立恢复再次标记非权威并隔离 typed 内容，不允许以历史接管意图自动解除隔离。跨服务自动灾难恢复、外部所有权 fencing、缺失删除历史的强制激活都不在本节范围。
+
+### 当前接口与 UI
+
+新增 `POST /api/v1/takeovers`，仅现有 master 入口可调用。以下为实际请求结构，调用会关闭原 collection，不用于真实用户数据测试：
+
+```json
+{"operation_id":{"epoch":20747,"nonce":"saved-takeover-request"},"source_collection_id":"current","collection_id":"successor","backup_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+```
+
+成功响应含 `status:"active"`、`recovery:"final_sealed_waterline"`、最终 certificate 和 `old_grants_restored:false`。UI 提供原 collection、备份和新 collection 输入，先持久保存请求；响应丢失或重载后保留相同请求重试。未确认结果时输入锁定，不将错误响应当作可以新建接管身份的依据。
+
+Record entry 更新为 `RecordCheckpointV3` / `RecordAppliedV3`，权威状态增加谱系、独立快照标记及 seal/proof；拒绝 V2/P1 格式，不实现迁移。第 12 节 V2 是上一检查点历史格式。
+
+### 验证记录（本地完成，等待本提交原生 CI）
+
+新增核心契约覆盖旧 owner/许可、最终正文及回执保留、间接隐藏、seal 重开/compact/复制、空备份不可冒充权威、取消和 durable 后失败；Catalog 覆盖完成槽预留及最坏转义预算；服务覆盖连续接管和旧响应 body。真实 HTTP 加入 Prepare、sealed、target_created、certified、finalized 退出恢复，Chromium 加入接管响应丢失后重载重试。
+
+独立审查已发现并推动修复：空快照权威绕过、sealed 统计读取、Prepare 后不可完成的容量窗口、撤销容量失败关闭回归及最大转义预留不足。最终定点复核通过，无剩余阻塞项；源码全量与真实服务回归结果如下。所有测试只用临时服务数据。
+
+- 上一检查点 `aa168ca32874192a68d3eefb9a47d1af7dd71d9a` 双平台 CI：[39568481764](https://github.com/TheLudlows/seekpower/actions/runs/39568481764)，Linux build-and-smoke、Linux/Windows persistence-native 全部通过；不覆盖本节新增代码。
+- 当前接管实现：Linux 最终源码全量 **183 passed / 0 failed / 10 ignored，35 suites**；默认及 fault-injection 真实 HTTP/Chromium 全部通过；核心依赖边界、OpenAPI 路由检查及文档链接/JSON/围栏、`git diff --check` 通过。10 个 ignored 仍为既有辅助程序，无新增。Windows 原生待推送当前源码后运行。
+- 系统崩溃/断电：未运行，仍需隔离存储故障环境及外部确认见证。进程退出测试不能替代。
+
+本阶段最终命令均退出 0：
+
+```bash
+SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p2-native-data cargo test --workspace --all-targets --quiet
+cargo build --workspace
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
+python3 scripts/check_core_boundary.py
+cargo build -p seekpower_server --features fault-injection
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --faults --browser
+target/debug/seekpower_server generate_openapi=true
+```
+
+本地日志：`/tmp/p2-takeover-final4-tests.log`、`/tmp/p2-takeover-final2-build.log`、`/tmp/p2-takeover-final3-http.log`、`/tmp/p2-takeover-boundary.log`、`/tmp/p2-takeover-fault-build.log`、`/tmp/p2-takeover-final-fault-http.log`、`/tmp/p2-takeover-openapi.log`。中间验证曾发现 catalog 未规范化配置与已持久配置比较不一致，以及 UI 通用连接状态覆盖接管输入锁，均修复后重跑。测试夹具完成备份容量测试后显式退休其旧备份，未扩大生产上限。
+
+剩余范围：同服务受控接管已形成可运行闭环；独立灾难恢复缺少最新删除历史时仍不可激活，未实现跨服务 fencing；完整 P2-1/P2、D1–D4 及系统故障验收均未完成。不得把当前切片当作整个 P2 已交付。PR 保持草稿供用户检视，不自动合入或部署。

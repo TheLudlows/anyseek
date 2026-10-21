@@ -134,7 +134,7 @@ async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
             RecordPartition::open(&root.join(&entry.directory), entry.config.max_journal_bytes)
                 .await
                 .map_err(storage)?;
-        if partition.statistics().await.map_err(storage)?.visible_seq
+        if partition.recovery_identity().await.map_err(storage)?.seq
             != *manifest
                 .record_seqs
                 .get(&entry.collection_id)
@@ -152,7 +152,7 @@ async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
         let p = RecordPartition::open(&root.join(name), 256 * 1024 * 1024)
             .await
             .map_err(storage)?;
-        if p.statistics().await.map_err(storage)?.visible_seq != *seq {
+        if p.recovery_identity().await.map_err(storage)?.seq != *seq {
             return Err(storage("backup cut mismatch"));
         }
     }
@@ -293,6 +293,9 @@ impl Catalog {
                 if !inner.healthy {
                     return Err(CatalogError::RecoveryRequired);
                 }
+                if inner.state.collections.values().any(|c| c.takeover.as_ref().is_some_and(|t| t.completed.is_none())) {
+                    return Err(CatalogError::Conflict("unfinished takeover cannot be archived as recovery authority".into()));
+                }
                 if let Some(receipt) = finish_existing(&target, &identity).await? {
                     return Ok(receipt);
                 }
@@ -326,7 +329,7 @@ impl Catalog {
                         .map_err(storage)?,
                     };
                     total = total.saturating_add(
-                        p.statistics().await.map_err(storage)?.checkpoint_bytes as u64 + 4096,
+                        p.recovery_identity().await.map_err(storage)?.checkpoint_bytes as u64 + 4096,
                     );
                 }
                 for row in std::fs::read_dir(&source_root).map_err(storage)? {
@@ -343,7 +346,7 @@ impl Catalog {
                             .await
                             .map_err(storage)?;
                         total = total.saturating_add(
-                            p.statistics().await.map_err(storage)?.checkpoint_bytes as u64 + 4096,
+                            p.recovery_identity().await.map_err(storage)?.checkpoint_bytes as u64 + 4096,
                         );
                     }
                 }

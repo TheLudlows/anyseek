@@ -23,6 +23,8 @@ pub use evidence::{EvidenceKind, EvidenceMetadata, EvidenceRef};
 pub use output::DataOutputPermit;
 mod mutation;
 mod publication;
+mod recovery;
+pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
 
 /// Failures distinguish rejected requests from operations that require recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +220,10 @@ struct Applied {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct State {
+    lineage: String,
+    sealed_for: Option<SealCertificate>,
+    takeover_proof: Option<SealCertificate>,
+    independent_snapshot: bool,
     seq: u64,
     epoch_watermark: u64,
     // Independent snapshots cannot prove the absence of later source deletes.
@@ -231,9 +237,9 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV2")]
+    #[serde(rename = "RecordCheckpointV3")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV2")]
+    #[serde(rename = "RecordAppliedV3")]
     Applied(Applied),
 }
 struct Inner {
@@ -555,7 +561,7 @@ impl RecordPartition {
                 field.longest = true;
             }
         }
-        let state = State::default();
+        let state = State { lineage: format!("{:032x}", rand::random::<u128>()), ..State::default() };
         let entry = encode_entry(&Entry::Checkpoint {
             config: config.clone(),
             state: state.clone(),
@@ -646,7 +652,9 @@ impl RecordPartition {
         })?
         .len();
         let (index, ordinals) = build(path, &config, &state).await?;
-        let output = Arc::new(std::sync::RwLock::new(output::OutputState::default()));
+        let output = Arc::new(std::sync::RwLock::new(output::OutputState {
+            revision: 0, fenced: state.sealed_for.is_some(),
+        }));
         Ok(Self {
             output: output.clone(),
             inner: Arc::new(Mutex::new(Inner {
@@ -684,7 +692,7 @@ impl RecordPartition {
             .spawn(async move {
                 let _permit = permit;
                 let mut inner = inner.lock().await;
-                if !inner.healthy {
+                if !inner.healthy || inner.state.sealed_for.is_some() {
                     return Err(RecordError::RecoveryRequired);
                 }
                 let (applied, bytes, snapshot_bytes, reserve_bytes) = match mutation::prepare(
@@ -758,7 +766,7 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.healthy || inner.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
         }
         let epoch = current_epoch().max(inner.state.epoch_watermark);
@@ -779,7 +787,7 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.healthy || inner.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
         }
         Ok(inner
@@ -837,7 +845,7 @@ impl RecordPartition {
             .spawn(async move {
                 let _permit = permit;
                 let inner = owner.lock().await;
-                if !inner.healthy {
+                if !inner.healthy || inner.state.sealed_for.is_some() {
                     return Err(RecordError::RecoveryRequired);
                 }
                 if offset
@@ -914,7 +922,7 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.healthy || inner.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
         }
         if limit == 0 || limit > inner.config.max_candidates {
@@ -1002,7 +1010,7 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.healthy || inner.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
         }
         Ok(inner.statistics())
@@ -1056,6 +1064,7 @@ impl RecordPartition {
         // A snapshot cut cannot attest to deletions that occur after that cut.
         // Preserve originals, but do not silently revive typed evidence when the
         // snapshot is opened/restored under a different owner/root.
+        snapshot_state.independent_snapshot = true;
         snapshot_state.evidence_quarantined |= snapshot_state.records.values().any(|r| r.system.is_some());
         let payload = encode_entry(&Entry::Checkpoint {
             config: inner.config.clone(),
@@ -1122,6 +1131,108 @@ mod tests {
         p.search("alpha".into(), vector, mode, vec![], 10)
             .await
             .unwrap()
+    }
+    fn seal_request(digest: String) -> SealRequest {
+        SealRequest { intent_id: "a".repeat(64), target_collection_id: "next".into(), backup_digest: digest }
+    }
+    #[tokio::test]
+    async fn record_takeover_seal_successor_preserves_final_state_and_rejects_archives() {
+        let root = path(); let backup_path = path(); let target = path(); let copied = path();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(source_write("s", "source", &[])).await.unwrap();
+        p.write(source_write("d", "derived", &[("source", 1)])).await.unwrap();
+        p.checkpoint(&backup_path).await.unwrap();
+        let backup = RecordPartition::open(&backup_path, config().max_journal_bytes).await.unwrap();
+        let binding = seal_request(backup.recovery_identity().await.unwrap().digest);
+        assert!(matches!(backup.seal_for_takeover(binding.clone()).await, Err(RecordError::Rejected(_))));
+        let latest = write("latest", "ordinary", "alpha final", ExpectedVersion::Absent);
+        let receipt = p.write(latest.clone()).await.unwrap();
+        let mut deletion = write("del", "source", "unused", ExpectedVersion::Match(1)); deletion.document = None;
+        p.write(deletion).await.unwrap();
+        let old_output = p.output_permit().unwrap();
+        let old_owner = p.clone();
+        let seal = p.seal_for_takeover(binding.clone()).await.unwrap();
+        assert_eq!(seal.final_seq, 4);
+        assert!(old_output.deliver(|| ()).is_err());
+        assert!(old_owner.write(latest.clone()).await.is_err());
+        assert!(p.get("ordinary").await.is_err());
+        assert!(p.statistics().await.is_err());
+        assert_eq!(p.seal_for_takeover(binding.clone()).await.unwrap(), seal);
+        let mut other = binding.clone(); other.target_collection_id = "different".into();
+        assert!(matches!(p.seal_for_takeover(other).await, Err(RecordError::Conflict(_))));
+        p.compact_journal().await.unwrap();
+        p.checkpoint(&copied).await.unwrap();
+        drop(old_owner); drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert!(p.output_permit().is_err());
+        assert_eq!(p.seal_for_takeover(binding.clone()).await.unwrap(), seal);
+        p.create_takeover_successor(&backup, &target, binding.clone()).await.unwrap();
+        let next = RecordPartition::open(&target, config().max_journal_bytes).await.unwrap();
+        next.certify_takeover_successor(&seal).await.unwrap();
+        assert_eq!(next.write(latest).await.unwrap(), receipt);
+        assert!(next.get("derived").await.unwrap().is_none());
+        assert_eq!(query(&next, SearchMode::Lexical).await.hits.len(), 1);
+        assert_eq!(next.statistics().await.unwrap().active_records, 1);
+        let copy = RecordPartition::open(&copied, config().max_journal_bytes).await.unwrap();
+        assert!(copy.output_permit().is_err());
+        assert!(copy.seal_for_takeover(binding).await.is_err());
+        drop(copy); drop(next); drop(backup); drop(p);
+        for root in [root, backup_path, target, copied] { std::fs::remove_dir_all(root).unwrap(); }
+    }
+    #[tokio::test]
+    async fn record_takeover_empty_archive_cannot_gain_current_authority() {
+        let root = path(); let copy_path = path();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.checkpoint(&copy_path).await.unwrap();
+        let copy = RecordPartition::open(&copy_path, config().max_journal_bytes).await.unwrap();
+        assert!(!copy.statistics().await.unwrap().evidence_quarantined);
+        copy.write(source_write("new", "source", &[])).await.unwrap();
+        assert!(copy.seal_for_takeover(seal_request("b".repeat(64))).await.is_err());
+        drop(copy); drop(p);
+        std::fs::remove_dir_all(root).unwrap(); std::fs::remove_dir_all(copy_path).unwrap();
+    }
+    #[tokio::test]
+    async fn record_takeover_durable_failure_and_cancelled_waiter_remain_sealed() {
+        for cancel in [false, true] {
+            let root = path(); let p = RecordPartition::create(&root, config()).await.unwrap();
+            let binding = seal_request("b".repeat(64));
+            if cancel {
+                let guard = p.inner.lock().await;
+                let owner = p.clone(); let request = binding.clone();
+                let task = tokio::spawn(async move { owner.seal_for_takeover(request).await });
+                while p.admission.available_permits() == 8 { tokio::task::yield_now().await; }
+                task.abort(); let _ = task.await; drop(guard);
+                // The accepted owned task retains the permit until publication.
+                while p.admission.available_permits() != 8 { tokio::task::yield_now().await; }
+                assert!(p.output_permit().is_err());
+            } else {
+                p.inner.lock().await.fail_after_durable = true;
+                assert!(matches!(p.seal_for_takeover(binding.clone()).await, Err(RecordError::DurablePending(0))));
+                assert!(p.output_permit().is_err());
+            }
+            drop(p);
+            let recovered = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+            assert_eq!(recovered.seal_for_takeover(binding).await.unwrap().final_seq, 0);
+            assert!(recovered.write(write("late", "x", "alpha", ExpectedVersion::Absent)).await.is_err());
+            drop(recovered); std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn record_takeover_preflight_rejects_capacity_before_closing_owner() {
+        let root = path(); let mut settings = config(); settings.max_journal_bytes = 8000;
+        let p = RecordPartition::create(&root, settings).await.unwrap();
+        for n in 0..100 {
+            let request = write(&format!("pressure{n}"), "a", &"x".repeat(128), ExpectedVersion::Any);
+            if p.write(request).await.is_err() { break; }
+            p.compact_journal().await.unwrap();
+        }
+        let mut binding = seal_request("b".repeat(64)); binding.target_collection_id = "\u{1}".repeat(256);
+        let identity = p.recovery_identity().await.unwrap();
+        assert!(matches!(p.validate_takeover_capacity(&binding, &identity.lineage).await, Err(RecordError::Rejected(_))));
+        assert!(p.get("a").await.unwrap().is_some());
+        assert!(p.output_permit().unwrap().deliver(|| ()).is_ok());
+        assert!(p.recovery_identity().await.unwrap().seal.is_none());
+        drop(p); std::fs::remove_dir_all(root).unwrap();
     }
     fn source_write(nonce: &str, id: &str, dependencies: &[(&str, u64)]) -> RecordWrite {
         let mut request = write(nonce, id, "evidence original", ExpectedVersion::Absent);
@@ -1243,7 +1354,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV2", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV3", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();

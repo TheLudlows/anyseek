@@ -1,4 +1,5 @@
 //! Default reliable service. No route delegates to the legacy per-key index map.
+mod takeover;
 use crate::api_types::{CreateIndexRequest, FieldRequest, SearchRequestObject};
 use axum::{
     Json, Router,
@@ -334,8 +335,11 @@ impl Service {
         Ok(service)
     }
     async fn finish_collection(&self, entry: CollectionEntry) -> Result<(), Error> {
-        if entry.deleted {
+        if entry.deleted || entry.takeover_target.is_some() {
             return Ok(());
+        }
+        if entry.takeover.as_ref().is_some_and(|t| t.completed.is_none()) {
+            return self.finish_takeover(entry).await;
         }
         if self.records.read().await.contains_key(&entry.collection_id) {
             return Ok(());
@@ -1305,6 +1309,7 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         )
         .route("/api/v1/index", post(create_collection))
         .route("/api/v1/restore", post(restore))
+        .route("/api/v1/takeovers", post(takeover::takeover))
         .route("/api/v1/backups", get(list_backups))
         .route("/api/v1/service-backups", post(service_backup))
         .route("/api/v1/service-restores", post(service_restore))
@@ -1685,6 +1690,35 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
+    async fn service_takeover_blocks_old_body_and_supports_successive_recovery() {
+        let (service, path, headers) = setup().await;
+        let doc = json!({"operation_id":OperationId::new("initial".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"final acknowledged"}});
+        write(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&doc).unwrap().into()).await.unwrap();
+        let mut origin = "c".to_string();
+        for target in ["next", "next-again"] {
+            let response = backup(State(service.clone()), headers.clone(), Path(origin.clone()),
+                serde_json::to_vec(&json!({"operation_id":OperationId::new(format!("backup-{target}"))})).unwrap().into()).await.unwrap();
+            let archive: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), MAX_RESPONSE).await.unwrap()).unwrap();
+            let pending = read(State(service.clone()), headers.clone(), Path((origin.clone(), "r".into())), Query(ReadParams { fields: String::new() })).await.unwrap();
+            let old_owner = service.records.read().await[&origin].clone();
+            let request = json!({"operation_id":OperationId::new(format!("take-{target}")),"source_collection_id":origin,"collection_id":target,"backup_id":archive["backup_id"]});
+            takeover::takeover(State(service.clone()), headers.clone(), serde_json::to_vec(&request).unwrap().into()).await.unwrap();
+            assert!(axum::body::to_bytes(pending.into_body(), MAX_RESPONSE).await.is_err());
+            assert!(old_owner.output_permit().is_err());
+            assert!(old_owner.get("r").await.is_err());
+            assert!(service.record("a", target).await.is_err());
+            let next = service.record("master", target).await.unwrap();
+            assert_eq!(next.get("r").await.unwrap().unwrap().version, 1);
+            origin = target.into();
+        }
+        drop(service);
+        let service = Service::open(&path, std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        assert!(service.record("master", "c").await.is_err());
+        assert!(service.record("master", "next").await.is_err());
+        assert!(service.record("master", "next-again").await.unwrap().get("r").await.unwrap().is_some());
+        drop(service); std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
     async fn service_internal_ids_cannot_be_reserved_by_clients_or_overflow() {
         let (service, path, headers) = setup().await;
         for (id, nonce) in [
@@ -1865,6 +1899,11 @@ pub(crate) fn generate_openapi() {
             Some(
                 json!({"type":"object","required":["operation_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"}}}),
             ),
+        ),
+        (
+            "/api/v1/takeovers", "post",
+            "Master: seal current source and recover to its final waterline in a new collection; retry the same operation",
+            Some(json!({"type":"object","additionalProperties":false,"required":["operation_id","source_collection_id","collection_id","backup_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"source_collection_id":{"type":"string"},"collection_id":{"type":"string"},"backup_id":{"type":"string"}}})),
         ),
         (
             "/api/v1/restore",
