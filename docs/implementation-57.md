@@ -9,6 +9,83 @@ The product contract remains [issue #57](https://github.com/TheLudlows/seekpower
 Current capabilities remain in [FEATURES](../FEATURES.md). Historical validation
 remains in [VALIDATION](../VALIDATION.md).
 
+## Latest local checkpoint — independent review corrections (completed locally)
+
+Parent checkpoint: `6fd41b2c9210df59ff539e9c6cef240959352124`. This follow-up
+addresses the independent persistence review before incremental publication.
+It does **not** complete P1-A or enable the reliable path in HTTP/UI.
+
+Actual changes:
+
+- Authoritative records reject JSON nesting above 64 before serialization or
+  WAL writes. Each encoded entry is checked with the recovery decoder before
+  admission, including complete checkpoints. Accepted depth is tested through
+  reopen and independent snapshot restoration; rejected writes leave WAL bytes
+  and visible sequence unchanged.
+- Creation and independent checkpoints prepare their complete initial frame and
+  synchronized witnesses before publishing the directory. Budget errors and
+  pre-publication failures are definite rejections; failures after attempting
+  directory publication remain `outcome_unknown`. No empty authority is
+  published merely to reserve a destination.
+- Recovery holds the exclusive journal lock while removing only recognized
+  `cache-<32 hex digits>` directories before reconstruction. Unknown files and
+  directory names are retained; a cache-name symlink fails closed. Repeated
+  recovery, interrupted-build debris and competing opens are covered.
+- Owned create/open/search tasks retain the authority and admission guards until
+  their indexing/search tasks finish, even after caller cancellation. The
+  journal field drops after index handles. Independent follow-up review found
+  that field order alone was insufficient for detached hybrid search tasks;
+  a controlled shard gate now verifies cancellation plus dropping the last
+  public partition owner does not release the journal lock prematurely.
+- Initialization process-exit tests cover interrupted log sync, torn first
+  witness, fully prepared-but-unpublished state, and published state. These are
+  process-exit tests, not filesystem/system-crash certification.
+
+Validation on Linux/overlayfs, with `SEEKPOWER_TEST_ROOT` set to
+`/workspace/seekpower/target/p1-native-data`:
+
+- `cargo test --workspace --all-targets --quiet`: **131 passed, 0 failed,
+  7 ignored**, 35 suites. Six ignored tests are subprocess workers explicitly
+  invoked by parent tests; the seventh is the existing opt-in AES cross-build
+  test. Log: `/tmp/seekpower-p1-review-final.log` in this executor.
+- After the final publication-error classification refinement,
+  `cargo test -p seekpower --lib journal_ --quiet`: **6 passed, 0 failed,
+  3 ignored** (subprocess workers invoked by parent tests).
+- Controlled cancellation tests: **2 passed**. An earlier test harness used the
+  single-shard lexical shortcut and never entered the asynchronous shard gate;
+  it was corrected to use hybrid search. The corrected targeted and full suite
+  both pass; there are no remaining failing tests in this checkpoint.
+- `cargo check --workspace --quiet`: passed after the final error-classification change.
+- `git diff --check`: passed. Remote master was read-only rechecked at
+  `fc4fcfe64fdf86d03c07f82cf1d4889deb896801`; no upstream baseline drift.
+- Independent read-only review covered the original checkpoint, corrections,
+  cancellation follow-up, and final publication error stages. No new blocking
+  defect was found within this correction scope; this is not full P1 acceptance.
+
+Windows native compilation, native tests, and system-crash tests remain **not
+run**; Linux system-crash tests also remain **not run**. The existing local Windows CI job is
+still unpublished; no runner was dispatched or user machine accessed.
+
+Review constraints for the next incremental change:
+
+- Keep physical posting/doc counters for decoding; introduce separate active
+  document count, term df and field-length sums. All committed, realtime, ngram,
+  upper-bound and cache paths must read the same published statistics.
+- Logical record-ID tie ordering must enter lexical/vector candidate heaps and
+  fusion before truncation. Final output sorting cannot repair lost candidates.
+- Freeze and persist the longest-field encoding decision across replacement,
+  deletion and recovery. Do not reinterpret existing postings by changing it.
+- Invalidate warmup caches at the same publication boundary and bound physical
+  history, tombstones and dedup state as well as live records.
+
+Remaining: incremental publication/resource accounting, default HTTP/UI path,
+shared-key collection registry and revocation/output barriers, live checkpoint
+rollover/WAL reclamation, native Windows validation and both platforms' system
+fault validation. Prepared directories from failed initialization remain
+identifiable but require future safe parent/catalog-level reclamation. The
+current per-write rebuild and full-state serialization remain a bounded
+reference, **not a production implementation**.
+
 ## Confirmed scope
 
 Linux **and Windows** require native reliability acceptance, not merely builds.
@@ -204,8 +281,9 @@ Self-review findings retained as open gates:
 3. Index initialization/decoding still contains legacy panic/error paths outside
    the converted commit chain. They require further audit before P1 acceptance.
 4. Independent snapshots do not replace live checkpoint-root rollover or WAL
-   retirement. Recovery still reads the bounded complete journal, and cache
-   orphan cleanup/physical reclamation are unfinished.
+   retirement. Recovery still reads the bounded complete journal. Recovery now
+   reclaims recognized derived caches under its lock; general physical-history
+   and abandoned preparation reclamation remain unfinished.
 5. Operation retention currently uses fixed day epochs with a persisted observed
    epoch watermark and count backpressure; configurable policy and clock-fault
    validation are not complete.

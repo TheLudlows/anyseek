@@ -2,7 +2,7 @@
   "date": "2026-10-21",
   "baseline": "fc4fcfe64fdf86d03c07f82cf1d4889deb896801",
   "branch": "feat/57-reliable-record-engine",
-  "status": "P1-A in progress; core checkpoint only",
+  "status": "P1-A in progress; independent review corrections complete locally",
   "linux": {
     "platform": "Linux 6.18.55 x86_64",
     "rust": "1.99.1",
@@ -11,19 +11,32 @@
     "workspace_command": "SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet",
     "workspace_result": {
       "suites": 35,
-      "passed": 125,
+      "passed": 131,
       "failed": 0,
-      "ignored": 4
+      "ignored": 7
     },
-    "build": "cargo build --workspace --quiet: passed",
-    "http_smoke": "python3 scripts/http_smoke.py --server target/debug/seekpower_server: passed",
+    "build": "Previous checkpoint: cargo build --workspace --quiet passed; no HTTP changes in this correction",
+    "http_smoke": "Previous checkpoint: passed; not rerun for storage-only correction",
     "chromium": "not run",
     "process_exit_boundaries": {
       "journal_write": 8,
       "journal_repair": 1,
-      "record_and_response_loss": 5
+      "record_and_response_loss": 5,
+      "initialization": 4
     },
-    "system_crash": "not run"
+    "system_crash": "not run",
+    "workspace_log": "/tmp/seekpower-p1-review-final.log",
+    "controlled_cancellation_tests": {
+      "passed": 2,
+      "failed": 0,
+      "covers": [
+        "owned recovery holds journal lock through mapped index completion",
+        "hybrid shard task survives caller cancellation without releasing partition lock"
+      ]
+    },
+    "final_publication_error_classification_regression": "cargo test -p seekpower --lib journal_ --quiet: 6 passed, 0 failed, 3 subprocess workers ignored by default and explicitly invoked",
+    "resolved_test_harness_failure": "query gate initially bypassed by single-shard lexical shortcut; corrected to Hybrid and passed targeted/full suite",
+    "check": "cargo check --workspace --quiet: passed after final publication-error change"
   },
   "windows": {
     "native_compilation": "not run",
@@ -38,6 +51,19 @@
     "incremental publication and resource accounting",
     "live checkpoint-root rollover and WAL retirement",
     "complete recovery/error audit",
-    "Linux and Windows system-crash certification"
-  ]
+    "Linux and Windows system-crash certification",
+    "safe parent/catalog-level reclamation of failed initialization preparations"
+  ],
+  "review_checkpoint_parent": "6fd41b2c9210df59ff539e9c6cef240959352124",
+  "independent_review": {
+    "mode": "read-only",
+    "original_findings": [
+      "accepted deeply nested JSON unrecoverable",
+      "repeated recovery accumulates caches",
+      "initial budget rejection leaves empty destination and reports unknown"
+    ],
+    "followup_finding": "cancelled hybrid query may retain mmap after journal lock is released",
+    "all_findings": "corrected and regression tested on Linux",
+    "final_static_review": "no new blocking defect in correction scope"
+  }
 }

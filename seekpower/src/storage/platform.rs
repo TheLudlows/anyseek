@@ -1,24 +1,38 @@
 use std::{fs, io, path::Path};
 
+#[derive(Debug)]
+pub(super) enum PublishError {
+    BeforeRename(io::Error),
+    RenameAttempted(io::Error),
+}
+impl From<io::Error> for PublishError {
+    fn from(error: io::Error) -> Self {
+        Self::BeforeRename(error)
+    }
+}
+
 /// Publish a prepared directory on the same filesystem. The destination must
 /// not exist; callers must never replace an open/mapped generation in place.
-pub(super) fn publish_directory(prepared: &Path, target: &Path) -> io::Result<()> {
+pub(super) fn publish_directory(prepared: &Path, target: &Path) -> Result<(), PublishError> {
     if prepared.parent() != target.parent() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "publication must remain in one directory",
-        ));
+        )
+        .into());
     }
     #[cfg(unix)]
     {
         fs::File::open(prepared)?.sync_all()?;
-        fs::rename(prepared, target)?;
+        fs::rename(prepared, target).map_err(PublishError::RenameAttempted)?;
         fs::File::open(
             target
                 .parent()
-                .ok_or_else(|| io::Error::other("missing parent"))?,
-        )?
+                .ok_or_else(|| PublishError::RenameAttempted(io::Error::other("missing parent")))?,
+        )
+        .map_err(PublishError::RenameAttempted)?
         .sync_all()
+        .map_err(PublishError::RenameAttempted)
     }
     #[cfg(windows)]
     {
@@ -44,7 +58,7 @@ pub(super) fn publish_directory(prepared: &Path, target: &Path) -> io::Result<()
             )
         } == 0
         {
-            return Err(io::Error::last_os_error());
+            return Err(PublishError::RenameAttempted(io::Error::last_os_error()));
         }
         Ok(())
     }
@@ -53,6 +67,7 @@ pub(super) fn publish_directory(prepared: &Path, target: &Path) -> io::Result<()
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "uncertified persistence platform",
-        ))
+        )
+        .into())
     }
 }

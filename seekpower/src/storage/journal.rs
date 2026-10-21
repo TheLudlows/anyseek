@@ -35,6 +35,19 @@ fn decode_seal(bytes: &[u8]) -> io::Result<(u64, u64)> {
     Ok((number(&bytes[8..16]), number(&bytes[16..24])))
 }
 
+/// Before publication, no destination was changed. Once publication is
+/// attempted, a failure may follow rename/sync and must be resolved by opening.
+#[derive(Debug)]
+pub(crate) enum CreateError {
+    NotPublished(io::Error),
+    PublicationUnknown(io::Error),
+}
+impl From<io::Error> for CreateError {
+    fn from(error: io::Error) -> Self {
+        Self::NotPublished(error)
+    }
+}
+
 /// Bounded, single-writer journal with a separately synchronized commit witness.
 /// Success requires two independent, synchronized witness files. At most one
 /// witness is overwritten at a time, oldest first. After interruption/corruption
@@ -54,21 +67,34 @@ pub(crate) struct Journal {
 impl Journal {
     /// Build in a unique sibling directory, sync all files, then publish. No
     /// legacy directory is overwritten or initialized in place.
+    #[cfg(test)]
     pub(crate) fn create(path: &Path, max_bytes: u64) -> io::Result<Self> {
+        Self::create_initialized(path, max_bytes, None).map_err(|error| match error {
+            CreateError::NotPublished(error) | CreateError::PublicationUnknown(error) => error,
+        })
+    }
+
+    /// Prepare the complete initial authority before publishing its directory.
+    /// A rejected payload never occupies the destination. Publication I/O errors
+    /// remain uncertain to callers, including a failed parent-directory sync.
+    pub(crate) fn create_initialized(
+        path: &Path,
+        max_bytes: u64,
+        initial: Option<&[u8]>,
+    ) -> Result<Self, CreateError> {
+        if let Some(payload) = initial {
+            Self::validate_initial(payload.len(), max_bytes)?;
+        }
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::other("journal needs a parent"))?;
         if path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "journal exists",
-            ));
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "journal exists").into());
         }
         if max_bytes < MAGIC.len() as u64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "journal budget too small",
-            ));
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidInput, "journal budget too small").into(),
+            );
         }
         let prepared = parent.join(format!(".prepare-{:032x}", rand::random::<u128>()));
         fs::create_dir(&prepared)?;
@@ -90,9 +116,25 @@ impl Journal {
                 witness.sync_all()?;
             }
         }
-        super::platform::publish_directory(&prepared, path)?;
-        let (journal, entries) = Self::open(path, max_bytes)?;
-        debug_assert!(entries.is_empty());
+        if let Some(payload) = initial {
+            let (mut journal, _) = Self::open(&prepared, max_bytes)?;
+            journal.append(payload)?;
+            // Close every file before directory rename (Windows).
+            drop(journal);
+        }
+        #[cfg(test)]
+        crash_boundary("initial_prepared");
+        super::platform::publish_directory(&prepared, path).map_err(|error| match error {
+            super::platform::PublishError::BeforeRename(error) => CreateError::NotPublished(error),
+            super::platform::PublishError::RenameAttempted(error) => {
+                CreateError::PublicationUnknown(error)
+            }
+        })?;
+        #[cfg(test)]
+        crash_boundary("initial_published");
+        let (journal, entries) =
+            Self::open(path, max_bytes).map_err(CreateError::PublicationUnknown)?;
+        debug_assert_eq!(entries.len(), usize::from(initial.is_some()));
         Ok(journal)
     }
 
@@ -210,8 +252,22 @@ impl Journal {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn seq(&self) -> u64 {
         self.seq
+    }
+
+    pub(crate) fn validate_initial(length: usize, max_bytes: u64) -> io::Result<()> {
+        let extent = (MAGIC.len() as u64)
+            .checked_add(FRAME_HEADER as u64)
+            .and_then(|n| n.checked_add(length as u64));
+        if length > MAX_FRAME || extent.is_none_or(|n| n > max_bytes) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "initial checkpoint budget exceeded",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_append(&self, length: usize) -> io::Result<()> {
@@ -427,6 +483,52 @@ mod tests {
             fs::remove_dir_all(path).unwrap();
         }
     }
+    #[test]
+    #[ignore = "invoked only by parent initialization crash test"]
+    fn journal_initialization_worker() {
+        let path = std::env::var_os("SEEKPOWER_JOURNAL_PATH").expect("worker path");
+        Journal::create_initialized(Path::new(&path), 1024, Some(b"complete snapshot")).unwrap();
+        panic!("initialization crash hook was not reached");
+    }
+
+    #[test]
+    fn journal_initialization_publishes_complete_snapshot_or_no_target() {
+        for stage in [
+            "log_synced",
+            "first_witness_torn",
+            "initial_prepared",
+            "initial_published",
+        ] {
+            let root = path();
+            fs::create_dir(&root).unwrap();
+            let target = root.join("partition");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "storage::journal::tests::journal_initialization_worker",
+                ])
+                .env("SEEKPOWER_JOURNAL_PATH", &target)
+                .env("SEEKPOWER_JOURNAL_CRASH", stage)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(73), "{stage}: {output:?}");
+            if stage == "initial_published" {
+                let (journal, entries) = Journal::open(&target, 1024).unwrap();
+                assert_eq!(entries, [b"complete snapshot".to_vec()]);
+                drop(journal);
+            } else {
+                assert!(!target.exists(), "{stage}");
+                // The same destination remains usable after interrupted preparation.
+                drop(Journal::create_initialized(&target, 1024, Some(b"retry snapshot")).unwrap());
+                let (journal, entries) = Journal::open(&target, 1024).unwrap();
+                assert_eq!(entries, [b"retry snapshot".to_vec()]);
+                drop(journal);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[test]
     fn journal_budget_rejection_leaves_writer_usable() {
         let path = path();

@@ -5,7 +5,7 @@ use crate::{
     commit::Commit,
     index::{Document, IndexArc, IndexDocuments, IndexMetaObject, SchemaField, create_index},
     search::{FacetFilter, QueryType, ResultType, Search, SearchMode},
-    storage::journal::Journal,
+    storage::journal::{CreateError, Journal},
     vector::Embedding,
 };
 use serde::{Deserialize, Serialize};
@@ -157,7 +157,6 @@ enum Entry {
     Applied(Applied),
 }
 struct Inner {
-    journal: Journal,
     path: PathBuf,
     config: RecordConfig,
     state: State,
@@ -166,6 +165,9 @@ struct Inner {
     healthy: bool,
     #[cfg(test)]
     fail_after_durable: bool,
+    // Fields drop in declaration order: release all index/mmap handles before
+    // releasing the partition lock, so a concurrent opener can clean caches.
+    journal: Journal,
 }
 /// Serial single-partition reference implementation. Queries and writes share
 /// one guard through candidate retrieval and authoritative record lookup.
@@ -189,6 +191,81 @@ pub struct RecordSearch {
     pub visible_seq: u64,
     /// Ranked effective records.
     pub hits: Vec<RecordHit>,
+}
+
+fn creation_error(error: CreateError) -> RecordError {
+    match error {
+        CreateError::NotPublished(error) => RecordError::Rejected(error.to_string()),
+        CreateError::PublicationUnknown(error) => RecordError::OutcomeUnknown(error.to_string()),
+    }
+}
+
+// Match the recovery decoder before admitting authoritative bytes. This also
+// protects future envelope/schema changes from encoding/decoding asymmetry.
+fn encode_entry(entry: &Entry) -> Result<Vec<u8>, RecordError> {
+    let bytes = serde_json::to_vec(entry).map_err(storage)?;
+    serde_json::from_slice::<Entry>(&bytes)
+        .map_err(|e| RecordError::Rejected(format!("unrecoverable entry: {e}")))?;
+    Ok(bytes)
+}
+
+fn validate_document_depth(document: &Document) -> Result<(), RecordError> {
+    fn visit(value: &serde_json::Value, depth: usize) -> Result<(), RecordError> {
+        if depth > 64 {
+            return Err(RecordError::Rejected("document nesting exceeds 64".into()));
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, depth + 1)?;
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    visit(value, depth + 1)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    for value in document.values() {
+        visit(value, 1)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn query_test_gate() {
+    if let Some(path) = std::env::var_os("SEEKPOWER_RECORD_QUERY_GATE") {
+        let path = PathBuf::from(path);
+        std::fs::write(path.join("query-entered"), b"ready").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !path.join("query-release").exists() {
+            assert!(std::time::Instant::now() < deadline, "query gate timed out");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+}
+
+// Only call while holding the exclusive journal lock, with no surviving index
+// tasks from the preceding owner. Unknown files and symlinks are never followed.
+fn clean_recovery_caches(path: &Path) -> Result<(), RecordError> {
+    for entry in std::fs::read_dir(path).map_err(storage)? {
+        let entry = entry.map_err(storage)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(suffix) = name.strip_prefix("cache-") else {
+            continue;
+        };
+        if suffix.len() == 32 && suffix.bytes().all(|c| c.is_ascii_hexdigit()) {
+            if !entry.file_type().map_err(storage)?.is_dir() {
+                return Err(storage("derived cache path is not a directory"));
+            }
+            std::fs::remove_dir_all(entry.path()).map_err(storage)?;
+        }
+    }
+    Ok(())
 }
 
 async fn detach(index: &IndexArc) {
@@ -215,6 +292,15 @@ async fn build(
     // Break legacy ownership cycles so a rejected candidate can release mapped
     // files on Windows. The partition owns the root for the complete query.
     detach(&index).await;
+    #[cfg(test)]
+    if std::env::var_os("SEEKPOWER_RECORD_BUILD_GATE").as_deref() == Some(path.as_os_str()) {
+        std::fs::write(path.join("build-entered"), b"ready").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !path.join("build-release").exists() {
+            assert!(std::time::Instant::now() < deadline, "build gate timed out");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
     let records: Vec<_> = state
         .records
         .values()
@@ -265,6 +351,14 @@ fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
 impl RecordPartition {
     /// Create a new authoritative partition. Parent directory must exist.
     pub async fn create(path: &Path, config: RecordConfig) -> Result<Self, RecordError> {
+        let path = path.to_owned();
+        crate::INDEX_RUNTIME
+            .spawn(async move { Self::create_owned(&path, config).await })
+            .await
+            .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
+    }
+
+    async fn create_owned(path: &Path, config: RecordConfig) -> Result<Self, RecordError> {
         if config.schema.is_empty()
             || config.schema.len() > 64
             || config
@@ -306,16 +400,15 @@ impl RecordPartition {
         {
             return Err(RecordError::Rejected("embedding_space_id required".into()));
         }
-        let mut journal = Journal::create(path, config.max_journal_bytes).map_err(storage)?;
         let state = State::default();
-        let entry = serde_json::to_vec(&Entry::Checkpoint {
+        let entry = encode_entry(&Entry::Checkpoint {
             config: config.clone(),
             state: state.clone(),
-        })
-        .map_err(storage)?;
-        journal
-            .append(&entry)
-            .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+        })?;
+        Journal::validate_initial(entry.len(), config.max_journal_bytes)
+            .map_err(|e| RecordError::Rejected(e.to_string()))?;
+        let journal = Journal::create_initialized(path, config.max_journal_bytes, Some(&entry))
+            .map_err(creation_error)?;
         let (index, ordinals) = build(path, &config, &state).await?;
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -335,7 +428,18 @@ impl RecordPartition {
     /// Recover complete authoritative state before serving any query. The budget
     /// is supplied before reading files, not trusted from a potentially bad file.
     pub async fn open(path: &Path, max_journal_bytes: u64) -> Result<Self, RecordError> {
+        let path = path.to_owned();
+        // The owned task retains the journal lock until every indexing task has
+        // drained, even if the caller cancels recovery.
+        crate::INDEX_RUNTIME
+            .spawn(async move { Self::open_owned(&path, max_journal_bytes).await })
+            .await
+            .map_err(storage)?
+    }
+
+    async fn open_owned(path: &Path, max_journal_bytes: u64) -> Result<Self, RecordError> {
         let (journal, entries) = Journal::open(path, max_journal_bytes).map_err(storage)?;
+        clean_recovery_caches(path)?;
         let mut entries = entries.into_iter();
         let first = entries
             .next()
@@ -402,6 +506,9 @@ impl RecordPartition {
                 {
                     return Err(RecordError::Rejected("empty identity".into()));
                 }
+                if let Some(document) = &request.document {
+                    validate_document_depth(document)?;
+                }
                 // serde_json::Value equality ignores object insertion order; the
                 // whole semantic request is compared, not a collision-prone digest.
                 if let Some(old) = inner
@@ -465,11 +572,10 @@ impl RecordPartition {
                 };
                 let mut next = inner.state.clone();
                 apply(&mut next, &applied)?;
-                let snapshot = serde_json::to_vec(&Entry::Checkpoint {
+                let snapshot = encode_entry(&Entry::Checkpoint {
                     config: inner.config.clone(),
                     state: next.clone(),
-                })
-                .map_err(storage)?;
+                })?;
                 if snapshot.len() > 16 * 1024 * 1024
                     || snapshot.len() as u64 + 32 > inner.config.max_journal_bytes
                 {
@@ -477,7 +583,7 @@ impl RecordPartition {
                         "complete checkpoint budget exceeded".into(),
                     ));
                 }
-                let bytes = serde_json::to_vec(&Entry::Applied(applied)).map_err(storage)?;
+                let bytes = encode_entry(&Entry::Applied(applied))?;
                 inner
                     .journal
                     .validate_append(bytes.len())
@@ -563,66 +669,73 @@ impl RecordPartition {
         filters: Vec<FacetFilter>,
         limit: usize,
     ) -> Result<RecordSearch, RecordError> {
-        let _permit = self
+        let permit = self
             .admission
             .clone()
             .try_acquire_owned()
             .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
-        let inner = self.inner.lock().await;
-        if !inner.healthy {
-            return Err(RecordError::RecoveryRequired);
-        }
-        if limit == 0 || limit > inner.config.max_candidates {
-            return Err(RecordError::Rejected("candidate budget exceeded".into()));
-        }
-        if let SearchMode::WeightedHybrid { rrf, .. } = &mode {
-            if rrf
-                .keyword_candidates
-                .is_some_and(|n| n > inner.config.max_candidates)
-                || rrf
-                    .vector_candidates
-                    .is_some_and(|n| n > inner.config.max_candidates)
-            {
-                return Err(RecordError::Rejected(
-                    "fusion candidate budget exceeded".into(),
-                ));
-            }
-        }
-        let result = inner
-            .index
-            .search(
-                text,
-                vector,
-                QueryType::Union,
-                mode,
-                true,
-                0,
-                limit,
-                ResultType::Topk,
-                false,
-                vec![],
-                filters,
-                vec![],
-            )
-            .await;
-        if let Some(error) = result.error {
-            return Err(storage(error));
-        }
-        let mut hits = Vec::new();
-        for hit in result.results {
-            let id = inner
-                .ordinals
-                .get(hit.doc_id)
-                .ok_or_else(|| storage("candidate ordinal outside view"))?;
-            hits.push(RecordHit {
-                record: inner.state.records[id].clone(),
-                score: hit.score,
-            });
-        }
-        Ok(RecordSearch {
-            visible_seq: inner.state.seq,
-            hits,
-        })
+        let owner = self.inner.clone();
+        crate::INDEX_RUNTIME
+            .spawn(async move {
+                let _permit = permit;
+                let inner = owner.lock().await;
+                if !inner.healthy {
+                    return Err(RecordError::RecoveryRequired);
+                }
+                if limit == 0 || limit > inner.config.max_candidates {
+                    return Err(RecordError::Rejected("candidate budget exceeded".into()));
+                }
+                if let SearchMode::WeightedHybrid { rrf, .. } = &mode {
+                    if rrf
+                        .keyword_candidates
+                        .is_some_and(|n| n > inner.config.max_candidates)
+                        || rrf
+                            .vector_candidates
+                            .is_some_and(|n| n > inner.config.max_candidates)
+                    {
+                        return Err(RecordError::Rejected(
+                            "fusion candidate budget exceeded".into(),
+                        ));
+                    }
+                }
+                let result = inner
+                    .index
+                    .search(
+                        text,
+                        vector,
+                        QueryType::Union,
+                        mode,
+                        true,
+                        0,
+                        limit,
+                        ResultType::Topk,
+                        false,
+                        vec![],
+                        filters,
+                        vec![],
+                    )
+                    .await;
+                if let Some(error) = result.error {
+                    return Err(storage(error));
+                }
+                let mut hits = Vec::new();
+                for hit in result.results {
+                    let id = inner
+                        .ordinals
+                        .get(hit.doc_id)
+                        .ok_or_else(|| storage("candidate ordinal outside view"))?;
+                    hits.push(RecordHit {
+                        record: inner.state.records[id].clone(),
+                        score: hit.score,
+                    });
+                }
+                Ok(RecordSearch {
+                    visible_seq: inner.state.seq,
+                    hits,
+                })
+            })
+            .await
+            .map_err(storage)?
     }
     /// Create an independently recoverable snapshot at a new location. No live
     /// files are copied; original data, configuration, versions and dedup results
@@ -637,16 +750,18 @@ impl RecordPartition {
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
-        let payload = serde_json::to_vec(&Entry::Checkpoint {
+        let payload = encode_entry(&Entry::Checkpoint {
             config: inner.config.clone(),
             state: inner.state.clone(),
-        })
-        .map_err(storage)?;
-        let mut target =
-            Journal::create(destination, inner.config.max_journal_bytes).map_err(storage)?;
-        target
-            .append(&payload)
-            .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+        })?;
+        Journal::validate_initial(payload.len(), inner.config.max_journal_bytes)
+            .map_err(|e| RecordError::Rejected(e.to_string()))?;
+        let _target = Journal::create_initialized(
+            destination,
+            inner.config.max_journal_bytes,
+            Some(&payload),
+        )
+        .map_err(creation_error)?;
         Ok(inner.state.seq)
     }
 }
@@ -704,6 +819,257 @@ mod tests {
             .await
             .unwrap()
     }
+    #[tokio::test]
+    async fn record_depth_rejection_preserves_authority_and_accepted_depth_recovers() {
+        let location = path();
+        let snapshot = path();
+        let partition = RecordPartition::create(&location, config()).await.unwrap();
+        let nested = |depth: usize| {
+            let mut value = serde_json::Value::Null;
+            for _ in 1..depth {
+                value = serde_json::Value::Array(vec![value]);
+            }
+            value
+        };
+        let mut accepted = write("nested-ok", "ok", "alpha", ExpectedVersion::Absent);
+        accepted
+            .document
+            .as_mut()
+            .unwrap()
+            .insert("nested".into(), nested(64));
+        partition.write(accepted.clone()).await.unwrap();
+        let wal = std::fs::read(location.join("wal")).unwrap();
+        for depth in [65, 200] {
+            let mut rejected = write("nested-reject", "bad", "alpha", ExpectedVersion::Absent);
+            rejected
+                .document
+                .as_mut()
+                .unwrap()
+                .insert("nested".into(), nested(depth));
+            assert!(matches!(
+                partition.write(rejected).await,
+                Err(RecordError::Rejected(_))
+            ));
+            assert_eq!(std::fs::read(location.join("wal")).unwrap(), wal);
+            assert_eq!(query(&partition, SearchMode::Lexical).await.visible_seq, 1);
+        }
+        partition.checkpoint(&snapshot).await.unwrap();
+        drop(partition);
+        for directory in [&location, &snapshot] {
+            let recovered = RecordPartition::open(directory, config().max_journal_bytes)
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.get("ok").await.unwrap().unwrap().document,
+                accepted.document
+            );
+            assert!(recovered.get("bad").await.unwrap().is_none());
+            drop(recovered);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn record_create_budget_rejection_does_not_occupy_destination() {
+        let location = path();
+        let mut limited = config();
+        limited.max_journal_bytes = 8;
+        assert!(matches!(
+            RecordPartition::create(&location, limited).await,
+            Err(RecordError::Rejected(_))
+        ));
+        assert!(!location.exists());
+        let partition = RecordPartition::create(&location, config()).await.unwrap();
+        assert!(matches!(
+            RecordPartition::create(&location, config()).await,
+            Err(RecordError::Rejected(_))
+        ));
+        assert!(matches!(
+            partition.checkpoint(&location).await,
+            Err(RecordError::Rejected(_))
+        ));
+        drop(partition);
+        let recovered = RecordPartition::open(&location, config().max_journal_bytes)
+            .await
+            .unwrap();
+        assert_eq!(query(&recovered, SearchMode::Lexical).await.visible_seq, 0);
+        drop(recovered);
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "invoked only by parent cancellation test"]
+    async fn record_cancelled_recovery_worker() {
+        let location = PathBuf::from(std::env::var_os("SEEKPOWER_RECORD_BUILD_GATE").unwrap());
+        let task_path = location.clone();
+        let task = tokio::spawn(async move {
+            RecordPartition::open(&task_path, config().max_journal_bytes).await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !location.join("build-entered").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recovery did not enter build"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        // The public future is cancelled, but its owned recovery still holds
+        // all mapped files and the authority lock. A new owner cannot clean it.
+        assert!(Journal::open(&location, config().max_journal_bytes).is_err());
+        std::fs::write(location.join("build-release"), b"continue").unwrap();
+        loop {
+            if let Ok((journal, _)) = Journal::open(&location, config().max_journal_bytes) {
+                drop(journal);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled owner did not drain"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let recovered = RecordPartition::open(&location, config().max_journal_bytes)
+            .await
+            .unwrap();
+        assert_eq!(query(&recovered, SearchMode::Lexical).await.hits.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn record_cancelled_recovery_retains_lock_until_index_handles_are_released() {
+        let location = path();
+        let partition = RecordPartition::create(&location, config()).await.unwrap();
+        partition
+            .write(write("first", "id", "alpha", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        drop(partition);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "record::tests::record_cancelled_recovery_worker",
+            ])
+            .env("SEEKPOWER_RECORD_BUILD_GATE", &location)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "invoked only by parent query cancellation test"]
+    async fn record_cancelled_query_worker() {
+        let location = PathBuf::from(std::env::var_os("SEEKPOWER_RECORD_QUERY_GATE").unwrap());
+        let partition = RecordPartition::open(&location, config().max_journal_bytes)
+            .await
+            .unwrap();
+        let task = tokio::spawn(async move {
+            query(
+                &partition,
+                SearchMode::Hybrid {
+                    similarity_threshold: None,
+                    ann_mode: AnnMode::All,
+                },
+            )
+            .await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !location.join("query-entered").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "query did not enter shard gate"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // Aborting also drops the last public partition owner.
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert!(Journal::open(&location, config().max_journal_bytes).is_err());
+        std::fs::write(location.join("query-release"), b"continue").unwrap();
+        loop {
+            if let Ok((journal, _)) = Journal::open(&location, config().max_journal_bytes) {
+                drop(journal);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled query did not drain"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let recovered = RecordPartition::open(&location, config().max_journal_bytes)
+            .await
+            .unwrap();
+        assert_eq!(query(&recovered, SearchMode::Lexical).await.hits.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn record_cancelled_query_retains_lock_until_shard_task_releases_mmaps() {
+        let location = path();
+        let partition = RecordPartition::create(&location, config()).await.unwrap();
+        partition
+            .write(write("first", "id", "alpha", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        drop(partition);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "record::tests::record_cancelled_query_worker",
+            ])
+            .env("SEEKPOWER_RECORD_QUERY_GATE", &location)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
+    #[tokio::test]
+    async fn record_repeated_recovery_reclaims_only_owned_cache_directories() {
+        let location = path();
+        let partition = RecordPartition::create(&location, config()).await.unwrap();
+        partition
+            .write(write("first", "id", "alpha", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        drop(partition);
+        let unrelated = location.join("cache-not-a-generation");
+        std::fs::create_dir(&unrelated).unwrap();
+        for _ in 0..5 {
+            // Models an interrupted build left by an earlier process.
+            let orphan = location.join(format!("cache-{:032x}", rand::random::<u128>()));
+            std::fs::create_dir(&orphan).unwrap();
+            std::fs::write(orphan.join("partial"), b"incomplete").unwrap();
+            let recovered = RecordPartition::open(&location, config().max_journal_bytes)
+                .await
+                .unwrap();
+            assert!(!orphan.exists());
+            assert!(unrelated.is_dir());
+            assert_eq!(query(&recovered, SearchMode::Lexical).await.hits.len(), 1);
+            let caches = std::fs::read_dir(&location)
+                .unwrap()
+                .filter(|entry| {
+                    let name = entry.as_ref().unwrap().file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with("cache-") && name.len() == 38
+                })
+                .count();
+            assert_eq!(caches, 1);
+            // A competing open cannot clean the currently mapped generation.
+            assert!(
+                RecordPartition::open(&location, config().max_journal_bytes)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(query(&recovered, SearchMode::Lexical).await.hits.len(), 1);
+            drop(recovered);
+        }
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
     #[tokio::test]
     async fn record_durable_replace_delete_retry_aba_and_checkpoint() {
         let path = path();

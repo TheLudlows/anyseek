@@ -987,6 +987,8 @@ impl Search for IndexArc {
             let shard_id = shard.read().await.meta.id;
 
             result_object_list.push(INDEX_RUNTIME.handle().spawn(async move {
+                #[cfg(test)]
+                crate::record::query_test_gate().await;
                 match query_mode_clone {
                     SearchMode::Lexical => {
                         let mut rlo_lexical = shard_clone
