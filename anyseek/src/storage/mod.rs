@@ -7,3 +7,5 @@ mod platform;
 pub(crate) mod partition;
 
 pub(crate) mod segment;
+
+pub(crate) mod payload_pool;

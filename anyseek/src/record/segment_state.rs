@@ -74,33 +74,108 @@ impl PreparedState {
     pub(super) fn read(self,path:&Path,max_bytes:u64)->Result<(RecordConfig,State),RecordError>{
         validate_config(&self.config)?;
         let max_bytes=max_bytes.min(self.config.max_journal_bytes);
-        let mut expanded=encoded_length(&self.state,max_bytes)?;
-        let max_payloads=self.config.max_records.checked_add(self.config.max_operations)
-            .and_then(|n|n.checked_mul(102)).ok_or_else(||storage("payload budget overflow"))?;
+        let max_payloads=payload_limit(&self.config)?;
         let reader=Reader::open(path,self.payload,max_bytes,max_payloads).map_err(storage)?;
-        let mut wire=self.state;
-        let mut references=0usize;
+        let body_limit=self.config.max_record_bytes.min(usize::try_from(max_bytes).map_err(storage)?);
+        hydrate(self.config,self.state,max_bytes,|value|{
+            let position=value.as_u64().and_then(|n|usize::try_from(n).ok()).ok_or_else(||storage("invalid payload reference identity"))?;
+            reader.read(position,body_limit).map_err(storage)
+        })
+    }
+}
+fn payload_limit(config:&RecordConfig)->Result<usize,RecordError>{
+    config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(102)).ok_or_else(||storage("payload budget overflow"))
+}
+fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(&Value)->Result<Vec<u8>,RecordError>)->Result<(RecordConfig,State),RecordError>{
+    validate_config(&config)?;
+    let max_bytes=max_bytes.min(config.max_journal_bytes);
+    let max_payloads=payload_limit(&config)?;
+    let mut expanded=encoded_length(&wire,max_bytes)?;
+    let mut references=0usize;
+    visit(&mut wire,|value|{
+        references=references.checked_add(1).filter(|n|*n<=max_payloads).ok_or_else(||storage("payload reference budget exceeded"))?;
+        let object=value.as_object().ok_or_else(||storage("invalid payload reference"))?;
+        if object.len()!=1{return Err(storage("invalid payload reference fields"));}
+        let bytes=read(object.get("$payload").ok_or_else(||storage("missing payload reference"))?)?;
+        if bytes.len()>config.max_record_bytes{return Err(storage("payload body budget exceeded"));}
+        expanded=expanded.checked_sub(encoded_length(value,max_bytes)?).and_then(|n|n.checked_add(bytes.len() as u64))
+            .filter(|n|*n<=max_bytes).ok_or_else(||storage("expanded payload budget exceeded"))?;
+        *value=serde_json::from_slice(&bytes).map_err(storage)?;Ok(())
+    })?;
+    let mut state=serde_json::from_value(wire).map_err(storage)?;
+    restore_operation_lookup(&mut state)?;validate_restored_state(&config,&state)?;
+    Ok((config,state))
+}
+
+/// State anchor with stable cross-object references. The authenticated manifest
+/// supplies its payload closure; paths are never read from arbitrary user JSON.
+#[derive(Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReferencedState {config:RecordConfig,state:Value}
+impl ReferencedState {
+    pub(super) fn decode(bytes:&[u8],max_bytes:u64)->Result<Self,RecordError>{
+        if bytes.len() as u64>max_bytes{return Err(storage("referenced state metadata budget exceeded"));}
+        serde_json::from_slice(bytes).map_err(storage)
+    }
+    pub(super) fn write(config:&RecordConfig,state:&State,pool:&mut crate::storage::payload_pool::PoolBuilder)->Result<Self,RecordError>{
+        validate_config(config)?;
+        let mut wire=serde_json::to_value(state).map_err(storage)?;
+        encoded_length(&wire,config.max_journal_bytes)?;
         visit(&mut wire,|value|{
-            references=references.checked_add(1).filter(|n|*n<=max_payloads).ok_or_else(||storage("payload reference budget exceeded"))?;
-            let object=value.as_object().ok_or_else(||storage("invalid payload reference"))?;
-            if object.len()!=1{return Err(storage("invalid payload reference fields"));}
-            let position=object.get("$payload").and_then(Value::as_u64)
-                .and_then(|n|usize::try_from(n).ok()).ok_or_else(||storage("invalid payload reference identity"))?;
-            let bytes=reader.read(position,self.config.max_record_bytes.min(usize::try_from(max_bytes).map_err(storage)?)).map_err(storage)?;
-            expanded=expanded.checked_sub(encoded_length(value,max_bytes)?).and_then(|n|n.checked_add(bytes.len() as u64))
-                .filter(|n|*n<=max_bytes).ok_or_else(||storage("expanded payload budget exceeded"))?;
-            *value=serde_json::from_slice(&bytes).map_err(storage)?;Ok(())
+            let bytes=serde_json::to_vec(value).map_err(storage)?;
+            if bytes.len()>config.max_record_bytes{return Err(storage("payload body budget exceeded"));}
+            *value=serde_json::json!({"$payload":pool.intern(&bytes).map_err(storage)?});Ok(())
         })?;
-        let mut state=serde_json::from_value(wire).map_err(storage)?;
-        restore_operation_lookup(&mut state)?;
-        validate_restored_state(&self.config,&state)?;
-        Ok((self.config,state))
+        encoded_length(&wire,config.max_journal_bytes)?;
+        Ok(Self{config:config.clone(),state:wire})
+    }
+    pub(super) fn read(self,pool:&crate::storage::payload_pool::PoolReader,max_bytes:u64)->Result<(RecordConfig,State),RecordError>{
+        let limit=self.config.max_record_bytes.min(usize::try_from(max_bytes.min(self.config.max_journal_bytes)).map_err(storage)?);
+        hydrate(self.config,self.state,max_bytes,|value|{
+            let reference=serde_json::from_value(value.clone()).map_err(storage)?;
+            pool.read_limited(&reference,limit).map_err(storage)
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn successive_record_anchors_share_prior_request_and_source_payloads(){
+        use crate::storage::payload_pool::{Budget,Closure,PoolBuilder,PoolReader};
+        let root=super::super::tests::path();let config=super::super::tests::config();
+        let partition=RecordPartition::create(&root,config.clone()).await.unwrap();
+        let objects=root.join("objects");std::fs::create_dir(&objects).unwrap();
+        let budget=Budget{bytes:config.max_journal_bytes,objects:4,payloads:100,body_bytes:config.max_record_bytes};
+        partition.write(super::super::tests::source_write("initial","source",&[])).await.unwrap();
+        let mut pool=PoolBuilder::begin(&objects,Closure::default(),budget,format!("{:032x}",1)).unwrap();
+        let first={let inner=partition.inner.lock().await;ReferencedState::write(&inner.config,&inner.state,&mut pool).unwrap()};
+        let closure=pool.finish().unwrap();assert_eq!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>(),1);
+        let old=closure.objects.clone();
+        let reader=PoolReader::open(&objects,closure.clone(),budget).unwrap();
+        let narrow=ReferencedState{config:RecordConfig{max_record_bytes:1,..config.clone()},state:first.state.clone()};
+        assert!(narrow.read(&reader,config.max_journal_bytes).unwrap_err().to_string().contains("payload read budget exceeded"));
+        first.read(&reader,config.max_journal_bytes).unwrap();drop(reader);
+        let mut update=super::super::tests::source_write("revision","source",&[]);update.expected=ExpectedVersion::Match(1);
+        update.document.as_mut().unwrap().insert("body".into(),serde_json::json!("revised alpha"));
+        partition.write(update).await.unwrap();
+        let mut pool=PoolBuilder::begin(&objects,closure,budget,format!("{:032x}",2)).unwrap();
+        let inner=partition.inner.lock().await;let expected=serde_json::to_vec(&inner.state).unwrap();
+        let second=ReferencedState::write(&inner.config,&inner.state,&mut pool).unwrap();drop(inner);
+        let closure=pool.finish().unwrap();assert_eq!(closure.objects.len(),2);
+        for (id,descriptor) in old {assert_eq!(closure.objects[&id],descriptor);}
+        assert_eq!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>(),2);
+        let reader=PoolReader::open(&objects,closure,budget).unwrap();
+        let encoded=serde_json::to_vec(&second).unwrap();
+        assert!(ReferencedState::decode(&encoded,1).is_err());
+        let second=ReferencedState::decode(&encoded,config.max_journal_bytes).unwrap();
+        let (_,state)=second.read(&reader,config.max_journal_bytes).unwrap();
+        assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
+        assert_eq!(state.operation_lookup.len(),2);
+        drop(reader);drop(partition);std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn prepared_record_state_preserves_exact_requests_and_raw_payloads() {
         // Exercise the real write planner and authority, not a parallel record API.

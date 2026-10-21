@@ -1,6 +1,6 @@
 # A 批实施设计：本地不可变 Segment、发布与安全回收
 
-状态：实施中，尚未完成 A 批；实际检查点见 §11–14。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
+状态：实施中，尚未完成 A 批；实际检查点见 §11–15。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
 
 ## 1. 交付和不做的事
 
@@ -145,3 +145,15 @@ active Record 路径的显式 `_id` 排序现在在局部 Top-K 和 root 都使�
 新增真实 Record 写入 oracle 覆盖两次轮换后替换、删除、来源依赖隐藏、全文/精确向量/Hybrid 得分和统计；另覆盖预算拒绝后重试、锁等待期间取消后重试及旧频词缓存绕过。最终源码 `cargo test --workspace --features server --all-targets` 退出 0：34 suites、240 passed、0 failed、10 ignored。`cargo build --features server,fault-injection --bin anyseek_server` 成功，`record_service_smoke.py --server target/debug/anyseek_server --browser --faults` 退出 0，34 个 PASS 检查点。分别记录于工作区 `a-view-final-full.log`、`a-view-final-build.log`、`a-view-http-browser-faults.log`。未减少既有测试覆盖；十个忽略项仍是九个父测试调用的进程 worker 和一个异构 AES fixture。
 
 **明确未完成**：轮换仍只有内部测试调用，默认持久化尚未启用 manifest/多段恢复；当前 checkpoint 仍是原完整状态协议。上述能力隔离及进程内切换不代表文件只读打开、持久发布或安全 GC 已完成。构建全过程硬资源限制、规范正文按需访问、默认 manifest/tail 恢复、compaction/GC 仍需贯通。没有推送、创建 PR、改 master 或运行 Windows/系统断电验证。
+
+## 15. A 持久化前置：跨对象规范正文引用
+
+`storage/payload_pool.rs` 为后续认证 manifest 准备明确的对象闭包，引用采用受限对象 ID 与对象内位置，不依赖 record_id/version 作为内容地址。连续构建先对旧对象进行长度/hash/完整字节核对，复用已有正文，仅把新字节追加到新对象；不扫描目录推断权威，不覆盖或删除旧对象。一个旧对象内尚有引用时保留整个对象，后续物理压缩属于 compaction。
+
+`record/segment_state.rs::ReferencedState` 复用受控正文槽位遍历、operation_lookup 重建和完整业务恢复校验。真实两次 Source 修订测试证明当前正文、原请求回执与来源历史共享旧对象，新对象只有新修订正文；恢复结果与真实 State 完全一致。用户正文里的 `$payload` 仍只是普通数据。
+
+预算在打开闭包前累计检查对象/正文数量及字节；单体读取在分配前取 pool、state 配置和本次恢复预算最小值；元数据在反序列化前检查长度。比较读取、创建或追加 I/O 失败后构建器必须废弃；预算预检拒绝不擅自删除旧数据腾空间。独立审查提出的创建失败 poison、较小状态预算前置检查已修复并补测试。
+
+**范围限制**：这是 prepared 引用层，尚未替换默认持久化入口。候选闭包预算不等于整个目录预算，不包括尚未回收的孤儿、历史 manifest 和备份固定对象；State 在内存中仍包含完整正文。生产 manifest 必须原子认证 collection/谱系、状态及索引水位、对象闭包，并贯通 catalog 隔离与输出屏障；这些以及备份固定、compaction/GC 尚未完成。本层不自动删除任何旧对象，也未推送或发布。
+
+最终源码 `cargo test --workspace --features server --all-targets`：34 suites、245 passed、0 failed、10 ignored，退出 0；带 `server,fault-injection` 的服务重新构建成功，真实 `record_service_smoke.py --server target/debug/anyseek_server --browser --faults` 重新运行退出 0，34 个 PASS 检查点。日志为工作区 `a-pool-final-full.log`、`a-pool-final-build.log`、`a-pool-http-browser-faults.log`，不是沿用上一提交结果。Windows 与系统断电仍未运行。
