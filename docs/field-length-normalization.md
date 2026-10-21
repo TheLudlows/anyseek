@@ -1,5 +1,8 @@
 # Field length normalization
 
+[文档索引](README.md) · [当前功能与限制](../FEATURES.md) · [开发与验证](development.md)
+
+
 Index creation accepts `field_length_normalization: "Shared" | "PerField"`. Omission keeps Shared. The setting is immutable for an index; create a new index to change it. Rust callers set `IndexMetaObject::field_length_normalization`. The HTTP index response reports the setting.
 
 PerField keeps the sum of field contributions, global-across-fields term DF, boosts, decoded document lengths, k1 and b. It changes each field denominator to its own mean decoded length. Each shard maintains the sum and the number of physical documents with a nonzero decoded length for each indexed field. Missing/empty fields contribute neither count nor sum; an empty field population uses mean 1. Tombstones remain in length statistics and physical DF, but deleted documents are excluded from hits and exact counts. Duplicate deletion does not alter statistics. Clear resets sums, counts and lookup caches.

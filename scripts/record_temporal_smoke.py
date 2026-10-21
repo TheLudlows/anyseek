@@ -20,7 +20,7 @@ def exercise(call, restart_with, directory, faults):
         os.replace(pending, clock_file)
 
     clock(now)
-    env = {'SEEKPOWER_TEST_CLOCK_FILE': str(clock_file)} if faults else {}
+    env = {'ANYSEEK_TEST_CLOCK_FILE': str(clock_file)} if faults else {}
     restart_with(env)
     config = {'index_name': 'Temporal records', 'schema': [{'field': 'body', 'field_type': 'Text', 'store': True}]}
     call('POST', '/api/v1/index', {'operation_id': operation(), 'collection_id': 'temporal', 'config': config})
@@ -75,7 +75,7 @@ def exercise(call, restart_with, directory, faults):
             call('POST', '/api/v1/index', {'operation_id': operation(), 'collection_id': cid, 'config': config})
             write = {**source, 'operation_id': operation(), 'temporal': {'expire_at_ms': now + 200}}
             original = call('POST', endpoint + '/doc', write)['receipt']
-            restart_with({**env, 'SEEKPOWER_TEMPORAL_FAULT': stage})
+            restart_with({**env, 'ANYSEEK_TEMPORAL_FAULT': stage})
             clock(now + 200)
             if stage.startswith('crash_'):
                 try:

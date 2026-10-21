@@ -1,5 +1,8 @@
 # Configurable weighted reciprocal rank fusion
 
+[文档索引](README.md) · [当前功能与限制](../FEATURES.md) · [开发与验证](development.md)
+
+
 Existing `SearchMode::Hybrid` and HTTP requests without `rrf` retain zero-based
 constant 0.6, equal unit weights, and the existing per-shard candidate window
 `offset + length`. These defaults have **not** been retuned.

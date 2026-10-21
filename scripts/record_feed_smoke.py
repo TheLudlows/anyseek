@@ -54,7 +54,7 @@ def exercise(call, restart_with, directory, faults):
     for index,stage in enumerate(['after_append_unknown','after_durable','crash_after_durable']):
         now+=8*86400000
         clock(now)
-        env={'SEEKPOWER_TEST_CLOCK_FILE':str(clock_file)}
+        env={'ANYSEEK_TEST_CLOCK_FILE':str(clock_file)}
         restart_with(env)
         cid='feed-trim-'+str(index);target='/api/v1/index/'+cid
         call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':cid,'config':config})
@@ -64,7 +64,7 @@ def exercise(call, restart_with, directory, faults):
         clock(now+7*86400000-1)
         assert len(call('POST',target+'/changes',{})['events'])==1
         clock(now+7*86400000)
-        restart_with({**env,'SEEKPOWER_FEED_TRIM_FAULT':stage})
+        restart_with({**env,'ANYSEEK_FEED_TRIM_FAULT':stage})
         if stage.startswith('crash_'):
             try:call('POST',target+'/changes',{})
             except (OSError,http.client.HTTPException):pass

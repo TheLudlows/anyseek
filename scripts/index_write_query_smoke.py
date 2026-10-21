@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the Record client against a running server (default port 8080).
 
-Set SEEKPOWER_API_KEY to the startup master API key. --requests selects a JSON
+Set ANYSEEK_API_KEY to the startup master API key. --requests selects a JSON
 file to save before sending, or to replay after a lost response. Each new file
 creates a new collection. Full process/browser suite: record_service_smoke.py.
 """
@@ -11,11 +11,11 @@ import os
 from pathlib import Path
 import uuid
 
-from seekpower_client import SeekpowerClient, check, operation_id
+from anyseek_client import anyseekClient, check, operation_id
 
 
 def exercise(base, key, request_file):
-    client = SeekpowerClient(base)
+    client = anyseekClient(base)
     client.set_default_key(key)
     client.health()
     request_file = Path(request_file)
@@ -64,9 +64,9 @@ def main():
     parser.add_argument('--port', type=int, default=8080)
     parser.add_argument('--requests', type=Path, required=True, help='save/replay original requests; no API key saved')
     args = parser.parse_args()
-    key = os.environ.get('SEEKPOWER_API_KEY')
+    key = os.environ.get('ANYSEEK_API_KEY')
     if not key:
-        parser.error('set SEEKPOWER_API_KEY to the startup master API key')
+        parser.error('set ANYSEEK_API_KEY to the startup master API key')
     exercise(f'http://127.0.0.1:{args.port}', key, args.requests)
 
 

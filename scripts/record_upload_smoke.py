@@ -50,7 +50,7 @@ def exercise(call,restart_with,faults):
                     elif action=='seal':request=command(action,2,manifest_sha256=call('GET',endpoint+'/doc/doc/generation')['manifest_sha256'])
                     else:request=command(action,3)
                     if action==target:
-                        restart_with({'SEEKPOWER_RECORD_FAULT':fault,'SEEKPOWER_RECORD_FAULT_NONCE':request['operation_id']['nonce']})
+                        restart_with({'ANYSEEK_RECORD_FAULT':fault,'ANYSEEK_RECORD_FAULT_NONCE':request['operation_id']['nonce']})
                         if fault.startswith('crash_'):
                             try:call('POST',endpoint+'/doc',request)
                             except (OSError,http.client.HTTPException):pass

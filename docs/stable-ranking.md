@@ -1,5 +1,8 @@
 # Stable ranking
 
+[文档索引](README.md) · [当前功能与限制](../FEATURES.md) · [开发与验证](development.md)
+
+
 For a fixed index and candidate set, relevance ranking uses descending numeric
 score, then ascending internal document `_id`. This rule is applied in lexical
 heaps, vector TopK (including equal-score admission), the two hybrid branch

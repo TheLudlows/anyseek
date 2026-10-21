@@ -1,5 +1,8 @@
 # SeekPower 验证记录
 
+> 历史资料：保留当时的规划、命令、品牌名与验证证据，不作为当前接入指南。当前入口见 [文档索引](docs/README.md)；后续路线以 [核心路线](docs/implementation-57-core-roadmap.md) 为准。不提供旧格式迁移。
+
+
 记录日期：2026-10-13（Asia/Singapore）。
 
 ## R0：上游完整快照导入

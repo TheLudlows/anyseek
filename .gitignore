@@ -2,14 +2,14 @@
 # will have compiled files and executables
 debug/
 target/
-seekpower/tests/index_test/
-seekpower/tests/index_facet_test/
-seekpower/tests/index_delete_*/
-seekpower/tests/index_get_*/
-seekpower/tests/index_scan32_*/
-seekpower/tests/index_union_*/
-seekpower/tests/index_delete_union*/
-seekpower/tests/index_docid3_*/
+anyseek/tests/index_test/
+anyseek/tests/index_facet_test/
+anyseek/tests/index_delete_*/
+anyseek/tests/index_get_*/
+anyseek/tests/index_scan32_*/
+anyseek/tests/index_union_*/
+anyseek/tests/index_delete_union*/
+anyseek/tests/index_docid3_*/
 .vscode/
 .idea
 
@@ -31,3 +31,7 @@ Cargo.lock
 /tools/opensearch/*
 !/tools/opensearch/opensearch-3.9.0-linux-x64.tar.gz
 !/tools/opensearch/opensearch-3.9.0-linux-x64.tar.gz.sha512
+
+# Python smoke-test bytecode
+__pycache__/
+*.py[cod]

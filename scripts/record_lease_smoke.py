@@ -9,7 +9,7 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
     now=int(time.time()*1000);clock_file=directory/'lease-clock-ms'
     def clock(value):
         pending=clock_file.with_suffix('.next');pending.write_text(str(value));os.replace(pending,clock_file)
-    clock(now);env={'SEEKPOWER_TEST_CLOCK_FILE':str(clock_file)} if faults else {}
+    clock(now);env={'ANYSEEK_TEST_CLOCK_FILE':str(clock_file)} if faults else {}
     restart_with(env)
     config={'index_name':'Leases','schema':[{'field':'body','field_type':'Text','store':True}]}
     def create(cid):
@@ -41,7 +41,7 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
         restart_with(env);assert call('POST',endpoint+'/doc',original)['receipt']==receipt
     if faults:
         endpoint=create('lease-cleanup');request=stage();receipt=call('POST',endpoint+'/doc',request)['receipt']
-        restart_with({**env,'SEEKPOWER_CHECKPOINT_CLEANUP_FAULT':'1'})
+        restart_with({**env,'ANYSEEK_CHECKPOINT_CLEANUP_FAULT':'1'})
         call('POST',endpoint+'/doc',command('abort',1))
         assert call('GET',endpoint+'/doc/doc/generation')['private_cleanup_pending']
         assert call('POST',endpoint+'/doc',request)['receipt']==receipt
@@ -50,7 +50,7 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
         assert call('POST',endpoint+'/doc',request)['receipt']==receipt
         for fault in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
             clock(now);endpoint=create('lease-'+fault.replace('_','-'));request=stage();receipt=call('POST',endpoint+'/doc',request)['receipt']
-            restart_with({**env,'SEEKPOWER_LEASE_FAULT':fault});clock(now+1_800_000)
+            restart_with({**env,'ANYSEEK_LEASE_FAULT':fault});clock(now+1_800_000)
             if fault.startswith('crash_'):
                 try:call('GET',endpoint+'/doc/doc/generation')
                 except (OSError,http.client.HTTPException):pass

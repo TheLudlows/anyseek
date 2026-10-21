@@ -1,6 +1,9 @@
 # 历史裁剪迁移说明（PR #61 之前）
 
-> 本文保留此前裁剪阶段的迁移记录，包含已被替换的 HTTP 协议、隔离模型和格式版本。PR #61 的默认服务使用 Record/catalog 协议；当前接入方式以 [服务 README](seekpower_server/README.md) 和 [FEATURES.md](FEATURES.md) 为准。旧服务根目录不支持直接迁移，请从应用原始记录重建。
+> 历史资料：保留当时的规划、命令、品牌名与验证证据，不作为当前接入指南。当前入口见 [文档索引](docs/README.md)；后续路线以 [核心路线](docs/implementation-57-core-roadmap.md) 为准。不提供旧格式迁移。
+
+
+> 本文保留此前裁剪阶段的迁移记录，包含已被替换的 HTTP 协议、隔离模型和格式版本。PR #61 的默认服务使用 Record/catalog 协议；当前接入方式以 [服务 README](anyseek_server/README.md) 和 [FEATURES.md](FEATURES.md) 为准。旧服务根目录不支持直接迁移，请从应用原始记录重建。
 
 记录已删除接口及调用方调整；不提供旧索引读取、转换或升级流程。当前功能见 [FEATURES.md](FEATURES.md)，合入状态见 [STATUS.md](STATUS.md)。
 

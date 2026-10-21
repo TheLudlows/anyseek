@@ -1,5 +1,8 @@
 # Rust 核心库示例
 
+[文档索引](README.md) · [当前功能与限制](../FEATURES.md) · [开发与验证](development.md)
+
+
 以下示例从原 README 迁移并修正已删除类型的引用，继续纳入 rustdoc 示例入口。请从本仓库使用 path/git 依赖；上游 crates.io 包不包含本分支修改。当前能力及限制见 [功能清单](../FEATURES.md)。
 
 ## Usage of the library
@@ -10,7 +13,7 @@ The single-record Rust API is `index_arc.index_document(document).await?`; the a
 
 Add required crates to your project
 ```text
-cargo add seekpower --path ../seekpower
+cargo add anyseek --path ../anyseek
 cargo add tokio
 cargo add serde_json
 ```
@@ -21,7 +24,7 @@ use std::error::Error;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
-  // your Seekpower code here
+  // your anyseek code here
 
    Ok(())
 }
@@ -29,7 +32,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
 create schema (from JSON)
 ```rust
-use seekpower::index::SchemaField;
+use anyseek::index::SchemaField;
 
 let schema_json = r#"
 [{"field":"title","field_type":"Text","store":false,"index_lexical":false},
@@ -40,7 +43,7 @@ let schema:Vec<SchemaField>=serde_json::from_str(schema_json).unwrap();
 
 create schema (from SchemaField)
 ```rust
-use seekpower::index::{SchemaField,FieldType};
+use anyseek::index::{SchemaField,FieldType};
 
 let schema= vec![
     SchemaField::new("title".to_owned(), false, false,false, FieldType::Text, false,false, 1.0),
@@ -54,9 +57,9 @@ create index
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekpower::index::{IndexMetaObject, Clustering, LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,SchemaField,FieldType,DocumentCompression,create_index};
-use seekpower::vector::Inference;
-use seekpower::vector_similarity::VectorSimilarity;
+use anyseek::index::{IndexMetaObject, Clustering, LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,SchemaField,FieldType,DocumentCompression,create_index};
+use anyseek::vector::Inference;
+use anyseek::vector_similarity::VectorSimilarity;
 
 let index_path=Path::new("C:/index/");
 
@@ -71,8 +74,8 @@ let meta = IndexMetaObject {
     name: "test_index".into(),
     lexical_similarity: LexicalSimilarity::Bm25f,
     tokenizer: TokenizerType::UnicodeAlphanumeric,
-    text_normalization: seekpower::index::TextNormalization::None,
-    field_length_normalization: seekpower::index::FieldLengthNormalization::Shared,
+    text_normalization: anyseek::index::TextNormalization::None,
+    field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
     stop_words: StopwordType::None,
     frequent_words: FrequentwordType::English,
     ngram_indexing: NgramSet::NgramFF as u8,
@@ -93,7 +96,7 @@ open index (alternatively to create index)
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekpower::index::open_index;
+use anyseek::index::open_index;
 
 let index_path=Path::new("C:/index/");
 let mut index_arc=open_index(index_path).await.unwrap();
@@ -106,7 +109,7 @@ index documents (from JSON)
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekpower::index::{open_index, IndexDocuments};
+use anyseek::index::{open_index, IndexDocuments};
 
 let index_path=Path::new("C:/index/");
 let mut index_arc=open_index(index_path).await.unwrap();
@@ -126,7 +129,7 @@ index document (from Document)
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekpower::index::{Document, IndexDocument, open_index};
+use anyseek::index::{Document, IndexDocument, open_index};
 use std::path::Path;
 use serde_json::Value;
 
@@ -148,8 +151,8 @@ commit documents
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekpower::commit::Commit;
-use seekpower::index::open_index;
+use anyseek::commit::Commit;
+use anyseek::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -164,8 +167,8 @@ search index
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekpower::search::{Search, SearchMode, QueryType, ResultType};
-use seekpower::index::open_index;
+use anyseek::search::{Search, SearchMode, QueryType, ResultType};
+use anyseek::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -208,47 +211,47 @@ The interpretation of operator chars within the query string (set `query_type=Qu
 
 Intersection, AND `+`
 ```rust ,no_run
-use seekpower::search::QueryType;
+use anyseek::search::QueryType;
 let query_type=QueryType::Union;
 let query="+red +apple".to_string();
 ```
 
 ```rust ,no_run
-use seekpower::search::QueryType;
+use anyseek::search::QueryType;
 let query_type=QueryType::Intersection;
 let query="red apple".to_string();
 ```
 
 Union, OR
 ```rust ,no_run
-use seekpower::search::QueryType;
+use anyseek::search::QueryType;
 let query_type=QueryType::Union;
 let query="red apple".to_string();
 ```
 
 Phrase `""`
 ```rust ,no_run
-use seekpower::search::QueryType;
+use anyseek::search::QueryType;
 let query_type=QueryType::Union;
 let query="\"red apple\"".to_string();
 ```
 
 ```rust ,no_run
-use seekpower::search::QueryType;
+use anyseek::search::QueryType;
 let query_type=QueryType::Phrase;
 let query="red apple".to_string();
 ```
 
 Except, minus, NOT `-`
 ```rust ,no_run
-use seekpower::search::QueryType;
+use anyseek::search::QueryType;
 let query_type=QueryType::Union;
 let query="apple -red".to_string();
 ```
 
 Mixed phrase and intersection
 ```rust ,no_run
-use seekpower::search::QueryType;
+use anyseek::search::QueryType;
 let query_type=QueryType::Union;
 let query="+\"the who\" +uk".to_string();
 ```
@@ -258,10 +261,10 @@ multi-threaded search
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekpower::search::{QueryType, SearchMode, ResultType, Search};
+use anyseek::search::{QueryType, SearchMode, ResultType, Search};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use seekpower::index::open_index;
+use anyseek::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -330,7 +333,7 @@ for query in query_vec {
 clear index
 ```rust, no_run
 # tokio_test::block_on(async {
-use seekpower::index::open_index;
+use anyseek::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -345,7 +348,7 @@ delete index
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekpower::index::open_index;
+use anyseek::index::open_index;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -361,7 +364,7 @@ iterate through document ID of an index
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekpower::{index::open_index,iterator::GetIterator};
+use anyseek::{index::open_index,iterator::GetIterator};
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -405,8 +408,8 @@ close index
 ```rust ,no_run
 # tokio_test::block_on(async {
 
-use seekpower::index::open_index;
-use seekpower::index::Close;
+use anyseek::index::open_index;
+use anyseek::index::Close;
 use std::path::Path;
 
 let index_path=Path::new("C:/index/");
@@ -417,9 +420,9 @@ index_arc.close().await;
 # });
 ```
 
-seekpower library version string
+anyseek library version string
 ```rust ,no_run
-use seekpower::index::version;
+use anyseek::index::version;
 
 let version=version();
 println!("version {}",version);
@@ -438,7 +441,7 @@ This example combines metadata indexing, filtering, and search:
 
 Add required crates to your project
 ```text
-cargo add seekpower --path ../seekpower
+cargo add anyseek --path ../anyseek
 cargo add tokio
 cargo add serde_json
 ```
@@ -449,7 +452,7 @@ use std::error::Error;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
-  // your Seekpower code here
+  // your anyseek code here
 
    Ok(())
 }
@@ -460,9 +463,9 @@ create index
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use seekpower::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
-use seekpower::vector::Inference;
-use seekpower::vector_similarity::VectorSimilarity;
+use anyseek::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
+use anyseek::vector::Inference;
+use anyseek::vector_similarity::VectorSimilarity;
 
 let index_path=Path::new("C:/index/");//x
 
@@ -478,8 +481,8 @@ let meta = IndexMetaObject {
     name: "test_index".into(),
     lexical_similarity: LexicalSimilarity::Bm25f,
     tokenizer: TokenizerType::AsciiAlphabetic,
-    text_normalization: seekpower::index::TextNormalization::None,
-    field_length_normalization: seekpower::index::FieldLengthNormalization::Shared,
+    text_normalization: anyseek::index::TextNormalization::None,
+    field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
     stop_words: StopwordType::None,
     frequent_words: FrequentwordType::English,
     ngram_indexing: NgramSet::NgramFF as u8,
@@ -501,8 +504,8 @@ index documents
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekpower::index::{IndexDocuments,open_index};
-use seekpower::commit::Commit;
+use anyseek::index::{IndexDocuments,open_index};
+use anyseek::commit::Commit;
 
 let index_path=Path::new("C:/index/");
 let index_arc=open_index(index_path).await.unwrap();
@@ -527,8 +530,8 @@ search index
 # tokio_test::block_on(async {
 
 use std::path::Path;
-use seekpower::index::{IndexDocuments,open_index};
-use seekpower::search::{Search,SearchMode,QueryType,ResultType};
+use anyseek::index::{IndexDocuments,open_index};
+use anyseek::search::{Search,SearchMode,QueryType,ResultType};
 use std::collections::HashSet;
 
 let index_path=Path::new("C:/index/");
@@ -573,9 +576,9 @@ create index
 
     use std::path::Path;
     use std::sync::{Arc, RwLock};
-    use seekpower::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
-    use seekpower::vector::{Embedding, Inference, Precision, Quantization};
-    use seekpower::vector_similarity::VectorSimilarity;
+    use anyseek::index::{IndexMetaObject, Clustering,LexicalSimilarity,TokenizerType,StopwordType,FrequentwordType,AccessType,NgramSet,DocumentCompression,create_index};
+    use anyseek::vector::{Embedding, Inference, Precision, Quantization};
+    use anyseek::vector_similarity::VectorSimilarity;
 
    let index_path=Path::new("tests/index_test/");
 
@@ -589,8 +592,8 @@ create index
         name: "test_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::UnicodeAlphanumeric,
-    text_normalization: seekpower::index::TextNormalization::None,
-    field_length_normalization: seekpower::index::FieldLengthNormalization::Shared,
+    text_normalization: anyseek::index::TextNormalization::None,
+    field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
         stop_words: StopwordType::None ,
         frequent_words: FrequentwordType::English,
         ngram_indexing: NgramSet::SingleTerm as u8 ,
@@ -615,8 +618,8 @@ index documents/vectors
 # tokio_test::block_on(async {
 
     use std::path::Path;
-    use seekpower::index::{IndexDocuments,open_index};
-    use seekpower::commit::Commit;
+    use anyseek::index::{IndexDocuments,open_index};
+    use anyseek::commit::Commit;
 
     // open index
     let index_path=Path::new("tests/index_test/");
@@ -644,11 +647,11 @@ query documents/vectors
 # tokio_test::block_on(async {
 
     use std::path::Path;
-    use seekpower::index::{IndexDocuments,open_index};
-    use seekpower::search::{Search,SearchMode,QueryType,ResultType};
-    use seekpower::vector_similarity::{AnnMode, VectorSimilarity};
-    use seekpower::commit::Commit;
-    use seekpower::vector::Embedding;
+    use anyseek::index::{IndexDocuments,open_index};
+    use anyseek::search::{Search,SearchMode,QueryType,ResultType};
+    use anyseek::vector_similarity::{AnnMode, VectorSimilarity};
+    use anyseek::commit::Commit;
+    use anyseek::vector::Embedding;
     use std::collections::HashSet;
 
   // open index

@@ -10,7 +10,7 @@ def operation():
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
-    with tempfile.TemporaryDirectory(prefix='seekpower-service-', dir=os.environ.get('SEEKPOWER_TEST_ROOT')) as tmp:
+    with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
         sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
         base=f'http://127.0.0.1:{port}'
@@ -39,7 +39,7 @@ def main():
         try:
             if args.faults:
                 for stage in ['published','retired']:
-                    child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','SEEKPOWER_INITIAL_ROOT_PREFIX':'data','SEEKPOWER_INITIAL_FAULT':stage},stdout=log,stderr=log)
+                    child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','ANYSEEK_INITIAL_ROOT_PREFIX':'data','ANYSEEK_INITIAL_FAULT':stage},stdout=log,stderr=log)
                     try:
                         assert child.wait(timeout=30)==87,stage
                     finally:
@@ -137,7 +137,7 @@ def main():
                     call('POST','/api/v1/index/vectors/doc',{**pending,'operation_id':operation(),'record_id':rid})
                     enrichment={**patch,'operation_id':operation(),'record_id':rid}
                     process.kill();process.wait(timeout=20)
-                    start({'SEEKPOWER_RECORD_FAULT':stage,'SEEKPOWER_RECORD_FAULT_NONCE':enrichment['operation_id']['nonce']})
+                    start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':enrichment['operation_id']['nonce']})
                     if stage.startswith('crash_'):
                         try:call('POST','/api/v1/index/vectors/doc',enrichment)
                         except (OSError,http.client.HTTPException):pass
@@ -265,7 +265,7 @@ def main():
                         if action=='publish':call('POST','/api/v1/index/generations/doc',stage)
                         command=stage if action=='stage' else publish
                         process.kill();process.wait(timeout=20)
-                        start({'SEEKPOWER_RECORD_FAULT':fault,'SEEKPOWER_RECORD_FAULT_NONCE':command['operation_id']['nonce']})
+                        start({'ANYSEEK_RECORD_FAULT':fault,'ANYSEEK_RECORD_FAULT_NONCE':command['operation_id']['nonce']})
                         if fault.startswith('crash_'):
                             try:call('POST','/api/v1/index/generations/doc',command)
                             except (OSError,http.client.HTTPException):pass
@@ -313,7 +313,7 @@ def main():
                     call('POST','/api/v1/index/evidence/doc',{**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'routing_key':'route','version':1}]}})
                     deletion={**delete,'operation_id':operation(),'record_id':sid}
                     process.kill();process.wait(timeout=20)
-                    start({'SEEKPOWER_RECORD_FAULT':stage,'SEEKPOWER_RECORD_FAULT_NONCE':deletion['operation_id']['nonce']})
+                    start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':deletion['operation_id']['nonce']})
                     if stage.startswith('crash_'):
                         try:call('DELETE','/api/v1/index/evidence/doc',deletion)
                         except (OSError,http.client.HTTPException):pass
@@ -331,7 +331,7 @@ def main():
                     call('POST','/api/v1/index/evidence/doc',{**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'routing_key':'route','version':1}]}})
                     revision={**source,'operation_id':operation(),'record_id':sid,'expected':{'Match':1},'document':{'body':'revised content'}}
                     process.kill();process.wait(timeout=20)
-                    start({'SEEKPOWER_RECORD_FAULT':stage,'SEEKPOWER_RECORD_FAULT_NONCE':revision['operation_id']['nonce']})
+                    start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':revision['operation_id']['nonce']})
                     if stage.startswith('crash_'):
                         try:call('POST','/api/v1/index/evidence/doc',revision)
                         except (OSError,http.client.HTTPException):pass
@@ -359,7 +359,7 @@ def main():
                 take={'operation_id':operation(),'source_collection_id':origin,'collection_id':target,'backup_id':archive['backup_id']}
                 call('POST','/api/v1/takeovers',take,key=keys['b'],status=403)
                 if stage!='normal':
-                    process.kill();process.wait(timeout=20);start({'SEEKPOWER_TAKEOVER_FAULT':stage})
+                    process.kill();process.wait(timeout=20);start({'ANYSEEK_TAKEOVER_FAULT':stage})
                     try:call('POST','/api/v1/takeovers',take)
                     except (OSError,http.client.HTTPException):pass
                     else:raise AssertionError('expected takeover transport loss')
@@ -385,7 +385,7 @@ def main():
                     w={'operation_id':operation(),'record_id':stage,'routing_key':stage,'expected':'Absent','document':{'body':'fault recovery'}}
                     later={**w,'operation_id':operation(),'record_id':stage+'-later','routing_key':stage+'-later'}
                     process.kill();process.wait(timeout=20)
-                    start({'SEEKPOWER_RECORD_FAULT':stage,'SEEKPOWER_RECORD_FAULT_NONCE':w['operation_id']['nonce']})
+                    start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':w['operation_id']['nonce']})
                     if stage.startswith('crash_'):
                         try: call('POST','/api/v1/index/after-source-delete/doc',w)
                         except (OSError,http.client.HTTPException): pass
@@ -414,13 +414,13 @@ def main():
                     if kind=='restore':
                         body.update({'collection_id':'interrupted-restore','backup_id':backup['backup_id']});endpoint='/api/v1/restore'
                     process.kill();process.wait(timeout=20)
-                    start({'SEEKPOWER_INITIAL_ROOT_PREFIX':kind if kind=='backup' else 'collection-','SEEKPOWER_INITIAL_FAULT':'published'})
+                    start({'ANYSEEK_INITIAL_ROOT_PREFIX':kind if kind=='backup' else 'collection-','ANYSEEK_INITIAL_FAULT':'published'})
                     try: call('POST',endpoint,body)
                     except (OSError,http.client.HTTPException):pass
                     else:raise AssertionError('expected initial publication exit')
                     process.wait(timeout=20);assert process.returncode==87
                     if kind=='backup':
-                        start({'SEEKPOWER_INITIAL_ROOT_PREFIX':'backup-','SEEKPOWER_INITIAL_FAULT':'retired'})
+                        start({'ANYSEEK_INITIAL_ROOT_PREFIX':'backup-','ANYSEEK_INITIAL_FAULT':'retired'})
                         try: call('POST',endpoint,body)
                         except (OSError,http.client.HTTPException):pass
                         else:raise AssertionError('expected interrupted repair')
@@ -428,7 +428,7 @@ def main():
                     # Restore recovery runs before HTTP starts, so no readiness loop
                     # is used for the intentional repair crash.
                     else:
-                        process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','SEEKPOWER_INITIAL_ROOT_PREFIX':'collection-','SEEKPOWER_INITIAL_FAULT':'retired'},stdout=log,stderr=log)
+                        process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','ANYSEEK_INITIAL_ROOT_PREFIX':'collection-','ANYSEEK_INITIAL_FAULT':'retired'},stdout=log,stderr=log)
                         process.wait(timeout=20);assert process.returncode==87
                     start();recovered=call('POST',endpoint,body)
                     if kind=='restore':assert call('GET','/api/v1/index/interrupted-restore/doc/r0')['version']==5
@@ -506,7 +506,7 @@ def main():
                     endpoint='/api/v1/service-backups'
                     if kind=='restore':body['backup_id']=whole['backup_id'];endpoint='/api/v1/service-restores'
                     for stage in [kind+'_children',kind+'_manifest','bundle_published']:
-                        process.kill();process.wait(timeout=20);start({'SEEKPOWER_SERVICE_SNAPSHOT_FAULT':stage})
+                        process.kill();process.wait(timeout=20);start({'ANYSEEK_SERVICE_SNAPSHOT_FAULT':stage})
                         try:call('POST',endpoint,body);raise AssertionError('expected process exit')
                         except (OSError,urllib.error.URLError):pass
                         assert process.wait(timeout=30)==88,stage
@@ -518,7 +518,7 @@ def main():
                     body={'operation_id':operation()};endpoint='/api/v1/service-backups'
                     if kind=='restore':body['backup_id']=whole['backup_id'];endpoint='/api/v1/service-restores'
                     process.kill();process.wait(timeout=20)
-                    start({'SEEKPOWER_INITIAL_ROOT_PREFIX':'service-snapshot-complete','SEEKPOWER_INITIAL_FAULT':'published'})
+                    start({'ANYSEEK_INITIAL_ROOT_PREFIX':'service-snapshot-complete','ANYSEEK_INITIAL_FAULT':'published'})
                     try:call('POST',endpoint,body);raise AssertionError('expected completion-witness exit')
                     except (OSError,urllib.error.URLError):pass
                     assert process.wait(timeout=30)==87
