@@ -54,7 +54,7 @@ impl Descriptor {
         let prepared=segment_state::PreparedState::write(&path.join("payload"),config,state)?;
         write_json(&path.join("state"),&prepared)?;
         let (index,_)=build_at(path,&path.join("search"),config,state).await?;
-        let active=index.read().await.shard_vec[0].read().await.active.clone().ok_or_else(||storage("missing segment statistics"))?;
+        let active=index.read().await.shard_vec[0].read().await.active.as_ref().map(|active|active.clone_local()).ok_or_else(||storage("missing segment statistics"))?;
         write_json(&path.join("statistics"),&SearchState{active})?;
         // No mutable/mapped handle may outlive preparation. Publication and
         // retirement can then use the same discipline on Linux and Windows.
@@ -80,7 +80,7 @@ impl Descriptor {
         let (config,state)=segment_state::PreparedState::decode(&encoded,authority_budget)?.read(&path.join("payload"),authority_budget)?;
         if state.seq!=self.seq{return Err(storage("segment sequence mismatch"));}
         let search:SearchState=serde_json::from_slice(&read_bounded(&path.join("statistics"),budget)?).map_err(storage)?;
-        search.active.validate(retrieval_schema(&config).len()).map_err(storage)?;
+        search.active.validate(retrieval_schema(&config).iter().filter(|field|field.index_lexical || field.index_vector).count()).map_err(storage)?;
         let visible=evidence::visibility(&state.records)?;
         let expected:Vec<_>=state.records.values().filter(|record|visible.get(&record.record_id)==Some(&true) && !(state.evidence_quarantined && temporal::protected(record))).map(|r|r.record_id.clone()).collect();
         if search.active.keys!=expected{return Err(storage("segment visibility mapping mismatch"));}
@@ -105,7 +105,7 @@ mod tests {
     #[tokio::test]
     async fn prepared_segment_reopens_existing_postings_and_original_vectors() {
         use super::super::tests::{path,config,write,query};
-        let root=path();let prepared=path();let settings=config();
+        let root=path();let prepared=path();let mut settings=config();settings.schema.swap(0,1);
         let partition=RecordPartition::create(&root,settings.clone()).await.unwrap();
         let mut request=write("op","a","alpha omega",ExpectedVersion::Absent);
         request.document.as_mut().unwrap().insert("vector".into(),serde_json::json!([7.0,0.0]));
@@ -135,4 +135,63 @@ mod tests {
         assert!(descriptor.open(&prepared,16*settings.max_journal_bytes,settings.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();std::fs::remove_dir_all(prepared).unwrap();
     }
+    #[tokio::test]
+    async fn shared_segment_statistics_match_effective_corpus_after_mutations() {
+        use super::super::tests::{path,config,write,query};
+        let roots=[path(),path(),path()];
+        let a=RecordPartition::create(&roots[0],config()).await.unwrap();
+        let b=RecordPartition::create(&roots[1],config()).await.unwrap();
+        let oracle=RecordPartition::create(&roots[2],config()).await.unwrap();
+        for (partition,id,body) in [(&a,"a","alpha alpha"),(&a,"c","beta"),(&b,"b","alpha omega omega"),(&b,"d","alpha delta")] {
+            let request=write(id,id,body,ExpectedVersion::Absent);
+            partition.write(request.clone()).await.unwrap();oracle.write(request).await.unwrap();
+        }
+        let corpus=std::sync::Arc::new(std::sync::RwLock::new(crate::active::Corpus::default()));
+        for partition in [&a,&b] {
+            partition.inner.lock().await.index.read().await.shard_vec[0].write().await.active.as_mut().unwrap().attach(&corpus).unwrap();
+        }
+        async fn matches(a:&RecordPartition,b:&RecordPartition,oracle:&RecordPartition) {
+            let mut scores=BTreeMap::new();
+            for partition in [a,b] {for hit in query(partition,SearchMode::Lexical).await.hits {scores.insert(hit.record.record_id,hit.score);}}
+            let expected:BTreeMap<_,_>=query(oracle,SearchMode::Lexical).await.hits.into_iter().map(|hit|(hit.record.record_id,hit.score)).collect();
+            assert_eq!(scores,expected);
+        }
+        matches(&a,&b,&oracle).await;
+        let update=write("revision","a","alpha alpha alpha omega",ExpectedVersion::Match(1));
+        a.write(update.clone()).await.unwrap();oracle.write(update).await.unwrap();
+        matches(&a,&b,&oracle).await;
+        let mut deletion=write("delete","d","",ExpectedVersion::Match(1));deletion.document=None;
+        b.write(deletion.clone()).await.unwrap();oracle.write(deletion).await.unwrap();
+        matches(&a,&b,&oracle).await;
+        let insert=write("new","e","alpha",ExpectedVersion::Absent);
+        b.write(insert.clone()).await.unwrap();oracle.write(insert).await.unwrap();
+        matches(&a,&b,&oracle).await;
+        // Compose the actual root search engine from the two physical shards.
+        // This exercises global channel ranking/RRF, rather than merging two
+        // already-fused result lists in the test.
+        let root_index=a.inner.lock().await.index.clone();
+        let second=b.inner.lock().await.index.read().await.shard_vec[0].clone();
+        second.write().await.meta.id=1;
+        {let mut root=root_index.write().await;root.shard_vec.push(second);root.shard_number=2;}
+        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {
+            for order in [vec![],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Ascending}],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}]] {
+              for (offset,length) in [(0,10),(0,1),(1,1)] {
+                let vector=if mode==SearchMode::Lexical{None}else{Some(Embedding::F32(vec![1.0,0.0]))};
+                let expected=oracle.query(RecordQuery{temporal:None,text:"alpha".into(),vector:vector.clone(),mode:mode.clone(),query_type:QueryType::Union,offset,length,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:order.clone()}).await.unwrap();
+                let actual=root_index.search("alpha".into(),vector,QueryType::Union,mode.clone(),true,offset,length,ResultType::TopkCount,true,vec![],vec![],order.clone()).await;
+                assert!(actual.error.is_none(),"{:?}",actual.error);
+                let mut mapped=Vec::new();
+                for hit in actual.results {
+                    let root=root_index.read().await;let shard=root.shard_vec[hit.doc_id%2].read().await;
+                    mapped.push((shard.active.as_ref().unwrap().keys[hit.doc_id/2].clone(),hit.score));
+                }
+                let wanted:Vec<_>=expected.hits.into_iter().map(|hit|(hit.record.record_id,hit.score)).collect();
+                assert_eq!(mapped,wanted,"{mode:?} order={order:?} offset={offset} length={length}");
+                assert_eq!(actual.result_count_total,expected.count_total);
+              }
+            }
+        }
+        drop(root_index);drop(a);drop(b);drop(oracle);for root in roots {std::fs::remove_dir_all(root).unwrap();}
+    }
+
 }

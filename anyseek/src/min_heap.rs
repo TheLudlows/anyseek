@@ -77,6 +77,15 @@ pub(crate) struct MinHeap<'a> {
 }
 
 #[inline]
+pub(crate) fn rank_with_shards(shards:&[RwLockReadGuard<'_,Shard>],a:f32,a_id:usize,b:f32,b_id:usize)->core::cmp::Ordering {
+    if shards.iter().all(|shard|shard.active.is_some()) {
+        let n=shards.len();
+        let a_key=&shards[a_id%n].active.as_ref().unwrap().keys[a_id/n];
+        let b_key=&shards[b_id%n].active.as_ref().unwrap().keys[b_id/n];
+        score_ordering(a,b).then_with(||b_key.cmp(a_key)).then_with(||b_id.cmp(&a_id))
+    } else {rank_ordering(a,a_id,b,b_id)}
+}
+
 pub(crate) fn result_ordering_root(
     shard_vec: &[RwLockReadGuard<'_, Shard>],
     shard_number: usize,
@@ -95,6 +104,11 @@ pub(crate) fn result_ordering_root(
 
     for field in result_sort.iter() {
         if field.idx == usize::MAX {
+            if shard_vec.iter().all(|shard|shard.active.is_some()) {
+                let first=&shard1.active.as_ref().unwrap().keys[doc_id1];
+                let second=&shard2.active.as_ref().unwrap().keys[doc_id2];
+                return if field.order==SortOrder::Descending {first.cmp(second)}else{second.cmp(first)};
+            }
             let order = if field.order == SortOrder::Descending {
                 result1.doc_id.cmp(&result2.doc_id)
             } else {
@@ -524,8 +538,8 @@ pub(crate) fn result_ordering_root(
         }
     }
 
-    if shard_number == 1 && shard1.active.is_some() {
-        return shard1.rank(result1.score, doc_id1, result2.score, doc_id2);
+    if shard_vec.iter().all(|shard|shard.active.is_some()) {
+        return rank_with_shards(shard_vec,result1.score,result1.doc_id,result2.score,result2.doc_id);
     }
     if empty_query && result_sort.is_empty() {
         result1.doc_id.cmp(&result2.doc_id)
@@ -570,6 +584,10 @@ impl<'a> MinHeap<'a> {
     ) -> core::cmp::Ordering {
         for field in self.result_sort.iter() {
             if field.idx == usize::MAX {
+                if let Some(active)=&self.index.active {
+                    let first=&active.keys[result1.doc_id];let second=&active.keys[result2.doc_id];
+                    return if field.order==SortOrder::Descending {first.cmp(second)}else{second.cmp(first)};
+                }
                 let order = if field.order == SortOrder::Descending {
                     result1.doc_id.cmp(&result2.doc_id)
                 } else {

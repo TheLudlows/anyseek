@@ -125,3 +125,13 @@ PR #70 的 head `2b69cb83fa344ebefaa151d6f993ef87b672a0df` / run [39623397174](h
 本轮环境中断后，真实命令确认六个修改/新增源码文件和分支仍在；旧测试 session 40364 及 `/tmp/a1-full.log` 无法恢复，不计通过。已确认旧进程不在后重跑 session 21151，最终日志保存在工作区 `/workspace/anyseek-validation/a1-full.log`，结果如上。
 
 Windows CI 的独立只读诊断：`index.rs` 的 2048 个空词典各预分配 1000 项，隔离分配实验复现与两次失败日志一致的 329744 字节分配，约 644 MiB/collection；多 collection 恢复是明确峰值来源候选。未获得 Windows 提交内存/pagefile 遥测，不能认定唯一根因。建议独立评估按需空词典分配，不改路由或降低覆盖；本检查点未修改该分配策略、master 或重新触发 CI。
+
+## 13. A2 进行中：共享统计与跨段候选 oracle
+
+`active.rs` 新增单份运行期 Corpus 聚合，段仍保留删除/恢复需要的本地 footprints。增删只调整对应贡献，不每次重建整个检索索引；Corpus 不序列化到每个段。`clone_local()` 明确复制本地数据而不共享可变 Corpus，attach/detach 显式登记贡献，不在 Drop 中改变其他视图。当前尚未接入默认生产多段生命周期，整次查询/发布仍须统一屏障；共享锁不能代替 ReadView。
+
+真实两物理 shard 的候选合并与单一有效集合 oracle 覆盖替换、删除、新增、全文/精确向量/Hybrid、升降序及小分页窗口。修复了 oracle 暴露的三个布局相关问题：向量先确定全局候选窗口再展示排序；默认 RRF 候选数量按全局窗口而非 shard 数放大；带字段排序的词法通道先确定全局候选集合再按得分计算 RRF。默认权重/评分公式不变。
+
+active Record 路径的显式 `_id` 排序现在在局部 Top-K 和 root 都使用逻辑 record_id，避免物理 ordinal 因更新或分段变化而改变选中对象；没有 active 的独立 Index API 继续使用物理 DocID。逻辑 ID 平分规则同时用于跨 shard 融合，早于候选截断。prepared 校验的字段编号范围使用 `index_lexical || index_vector`，增加 vector-first schema 覆盖，避免误拒合法向量先行 schema。
+
+独立只读复审通过本轮候选/排序修复；仍明确要求生产接入时处理共享上下文错误的失败关闭、整次查询屏障、段替换与贡献退役原子性。最终源码 `cargo test --workspace --features server --all-targets` 退出 0：34 suites、236 passed、0 failed、10 ignored；日志 `/workspace/anyseek-validation/a2-full.log`。此次没有借用 A1 结果，也未运行 Windows、HTTP/Chromium、系统断电验证。该检查点是实际检索路径的前置正确性实现，尚非默认多段 + tail、manifest 或安全 GC 闭环。
