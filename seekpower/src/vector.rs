@@ -333,12 +333,22 @@ pub fn parse_external_embedding(value: &Value, inference: &Inference) -> Result<
 }
 
 pub(crate) fn validate_document_vectors(index: &crate::index::Index, document: &Document) -> Result<(), String> {
-    for field in index.schema_map.values().filter(|f| f.index_vector) {
+    validate_vectors_in_schema(&index.meta.inference, index.schema_map.values(), document)
+}
+
+/// Pure schema validation shared by Record planning and the physical index API.
+/// It deliberately does not normalize or mutate original caller values.
+pub(crate) fn validate_vectors_in_schema<'a>(
+    inference: &Inference,
+    fields: impl Iterator<Item = &'a crate::index::SchemaField>,
+    document: &Document,
+) -> Result<(), String> {
+    for field in fields.filter(|f| f.index_vector) {
         let value = document.get(&field.field).ok_or_else(|| format!("missing vector field: {}", field.field))?;
         if !matches!((&field.field_type, value), (FieldType::Json, Value::Array(_)) | (FieldType::Binary, Value::String(_))) {
             return Err(format!("invalid vector field type: {}", field.field));
         }
-        parse_external_embedding(value, &index.meta.inference).map_err(|e| format!("{}: {e}", field.field))?;
+        parse_external_embedding(value, inference).map_err(|e| format!("{}: {e}", field.field))?;
     }
     Ok(())
 }

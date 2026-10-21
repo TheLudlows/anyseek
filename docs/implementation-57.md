@@ -6,6 +6,8 @@
 
 本文按当前设计组织，阶段性尝试、旧测试总数和修复过程保留在 Git 历史。HTTP 使用方法见[服务 README](../seekpower_server/README.md)，完整路由见[功能清单](../FEATURES.md)，机器可读验证信息见[验收记录](validation/issue57-p1-checkpoint.json)。
 
+P2 后续设计与当前实施记录见 [P2 实施设计](implementation-57-p2.md)。P2 尚未完成来源语义；四项业务策略仍待确认。PR #61 已合并至 `64b1c8f656394a55f5b8a1239754d03d2872efd5`，此后本地 P2 分支的验证单独记录，不覆盖下面 P1 历史证据。
+
 ## 导航
 
 - [1. 目标与完成范围](#1-目标与完成范围)

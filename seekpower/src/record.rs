@@ -17,6 +17,9 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
+mod mutation;
+mod publication;
+
 /// Failures distinguish rejected requests from operations that require recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordError {
@@ -641,129 +644,16 @@ impl RecordPartition {
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
-                let epoch = current_epoch().max(inner.state.epoch_watermark);
-                if request.operation_id.epoch > epoch
-                    || request.operation_id.epoch.saturating_add(1) < epoch
-                {
-                    return Err(RecordError::OperationExpired);
-                }
-                if request.record_id.is_empty()
-                    || request.routing_key.is_empty()
-                    || request.operation_id.nonce.is_empty()
-                {
-                    return Err(RecordError::Rejected("empty identity".into()));
-                }
-                if let Some(document) = &request.document {
-                    validate_document_depth(document)?;
-                }
-                // serde_json::Value equality ignores object insertion order; the
-                // whole semantic request is compared, not a collision-prone digest.
-                if let Some(old) = inner
-                    .state
-                    .operation_lookup
-                    .get(&request.operation_id)
-                    .map(|&position| &inner.state.operations[position])
-                {
-                    return if serde_json::to_value(&old.request).map_err(storage)?
-                        == serde_json::to_value(&request).map_err(storage)?
-                    {
-                        Ok(old.receipt.clone())
-                    } else {
-                        Err(RecordError::Conflict(
-                            "operation identity reused with another request".into(),
-                        ))
-                    };
-                }
-                if serde_json::to_vec(&request).map_err(storage)?.len()
-                    > inner.config.max_record_bytes
-                    || inner.state.operations.len() >= inner.config.max_operations
-                {
-                    return Err(RecordError::Rejected(
-                        "record/operation budget exceeded".into(),
-                    ));
-                }
-                let previous = inner.state.records.get(&request.record_id);
-                if previous.is_some_and(|r| r.routing_key != request.routing_key) {
-                    return Err(RecordError::Conflict("routing key cannot change".into()));
-                }
-                let matches = match request.expected {
-                    ExpectedVersion::Any => true,
-                    ExpectedVersion::Absent => previous.is_none_or(|r| r.document.is_none()),
-                    ExpectedVersion::Match(v) => previous.is_some_and(|r| r.version == v),
+                let (applied, bytes, snapshot_bytes) = match mutation::prepare(
+                    &inner.state, &inner.config, inner.snapshot_bytes, request, current_epoch(),
+                )? {
+                    mutation::PreparedWrite::Replay(receipt) => return Ok(receipt),
+                    mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes } =>
+                        (applied, bytes, snapshot_bytes),
                 };
-                if !matches {
-                    return Err(RecordError::Conflict("version precondition failed".into()));
-                }
-                if previous.is_none() && inner.state.records.len() >= inner.config.max_records {
-                    return Err(RecordError::Rejected("identity budget exceeded".into()));
-                }
-                if let Some(document) = &request.document {
-                    crate::vector::validate_document_vectors(&*inner.index.read().await, document)
-                        .map_err(RecordError::Rejected)?;
-                }
-                let receipt = WriteReceipt {
-                    seq: inner
-                        .state
-                        .seq
-                        .checked_add(1)
-                        .ok_or_else(|| storage("sequence exhausted"))?,
-                    version: previous
-                        .map_or(Some(1), |r| r.version.checked_add(1))
-                        .ok_or_else(|| storage("version exhausted"))?,
-                    record_id: request.record_id.clone(),
-                };
-                let applied = Applied {
-                    request,
-                    receipt: receipt.clone(),
-                    observed_epoch: epoch,
-                };
-                let next_record = Record {
-                    record_id: applied.request.record_id.clone(),
-                    routing_key: applied.request.routing_key.clone(),
-                    version: receipt.version,
-                    document: applied.request.document.clone(),
-                };
-                // Exact serialized checkpoint accounting, touching only this
-                // operation and record. No complete state clone/serialization.
-                let old_record = inner.state.records.get(&next_record.record_id);
-                let old_size = old_record
-                    .map(serde_json::to_vec)
-                    .transpose()
-                    .map_err(storage)?
-                    .map_or(0, |bytes| bytes.len());
-                let map_overhead = if old_record.is_none() {
-                    serde_json::to_vec(&next_record.record_id)
-                        .map_err(storage)?
-                        .len()
-                        + 1
-                        + usize::from(!inner.state.records.is_empty())
-                } else {
-                    0
-                };
-                let snapshot_bytes = inner.snapshot_bytes - old_size
-                    + serde_json::to_vec(&next_record).map_err(storage)?.len()
-                    + map_overhead
-                    + serde_json::to_vec(&applied).map_err(storage)?.len()
-                    + usize::from(!inner.state.operations.is_empty())
-                    + receipt.seq.to_string().len()
-                    - inner.state.seq.to_string().len()
-                    + epoch.to_string().len()
-                    - inner.state.epoch_watermark.to_string().len();
-                if PartitionJournal::validate_initial(
-                    snapshot_bytes,
-                    inner.config.max_journal_bytes,
-                )
-                .is_err()
-                {
-                    return Err(RecordError::Rejected(
-                        "complete checkpoint budget exceeded".into(),
-                    ));
-                }
-                let bytes = encode_entry(&Entry::Applied(applied.clone()))?;
-                inner
-                    .journal
-                    .validate_append(bytes.len())
+                inner.journal.validate_append(bytes.len())
                     .map_err(|e| RecordError::Rejected(e.to_string()))?;
+                let receipt = applied.receipt.clone();
                 #[cfg(feature = "fault-injection")]
                 let injected = std::env::var("SEEKPOWER_RECORD_FAULT_NONCE")
                     .ok()
@@ -793,56 +683,7 @@ impl RecordPartition {
                 if inner.fail_after_durable {
                     return Err(RecordError::DurablePending(receipt.seq));
                 }
-                let old_location = inner.locations.get(&receipt.record_id).copied();
-                if let Some(document) = &applied.request.document {
-                    let id = inner.ordinals.len();
-                    let shard = inner.index.read().await.shard_vec[0].clone();
-                    shard
-                        .write()
-                        .await
-                        .active
-                        .as_mut()
-                        .unwrap()
-                        .keys
-                        .push(receipt.record_id.clone());
-                    inner
-                        .index
-                        .index_documents(vec![document.clone()])
-                        .await
-                        .map_err(|_| RecordError::DurablePending(receipt.seq))?;
-                    #[cfg(test)]
-                    if inner.fail_publication_stage == 1 {
-                        return Err(RecordError::DurablePending(receipt.seq));
-                    }
-                    inner.ordinals.push(receipt.record_id.clone());
-                    inner.locations.insert(receipt.record_id.clone(), id);
-                } else {
-                    inner.locations.remove(&receipt.record_id);
-                }
-                if let Some(old_id) = old_location {
-                    let shard = inner.index.read().await.shard_vec[0].clone();
-                    let mut shard = shard.write().await;
-                    shard.delete_hashset.insert(old_id);
-                    shard.active.as_mut().unwrap().retire(old_id);
-                    shard.invalidate_frequentword_results();
-                }
-                #[cfg(test)]
-                if inner.fail_publication_stage == 2 {
-                    return Err(RecordError::DurablePending(receipt.seq));
-                }
-                apply(&mut inner.state, &applied)
-                    .map_err(|_| RecordError::DurablePending(receipt.seq))?;
-                inner.snapshot_bytes = snapshot_bytes;
-                #[cfg(test)]
-                assert_eq!(
-                    snapshot_bytes,
-                    encode_entry(&Entry::Checkpoint {
-                        config: inner.config.clone(),
-                        state: inner.state.clone()
-                    })
-                    .unwrap()
-                    .len()
-                );
+                inner.publish(&applied, snapshot_bytes).await?;
                 inner.healthy = true;
                 #[cfg(feature = "fault-injection")]
                 if injected.as_deref() == Some("crash_after_visible") {
@@ -1225,6 +1066,70 @@ mod tests {
             .await
             .unwrap()
     }
+    #[test]
+    fn record_planning_is_read_only_and_recovery_ignores_retry_clock() {
+        let config = config();
+        let mut state = State::default();
+        let checkpoint = encode_entry(&Entry::Checkpoint {
+            config: config.clone(), state: state.clone(),
+        }).unwrap();
+        let mut request = write("planned", "r", "original", ExpectedVersion::Absent);
+        request.operation_id.epoch = 100;
+        let mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes } =
+            mutation::prepare(&state, &config, checkpoint.len(), request.clone(), 100).unwrap()
+        else { panic!("new operation must be planned"); };
+        // Planning has no authority/index side effects, even for accepted input.
+        assert_eq!(checkpoint, encode_entry(&Entry::Checkpoint {
+            config: config.clone(), state: state.clone(),
+        }).unwrap());
+        // The durable decision is sufficient to recover; wall time does not
+        // invalidate an acknowledged write merely because retry admission expired.
+        let Entry::Applied(recovered) = serde_json::from_slice(&bytes).unwrap()
+        else { panic!("expected applied decision"); };
+        apply(&mut state, &recovered).unwrap();
+        assert_eq!(state.records["r"].version, 1);
+        assert_eq!(snapshot_bytes, encode_entry(&Entry::Checkpoint {
+            config: config.clone(), state: state.clone(),
+        }).unwrap().len());
+        assert!(matches!(mutation::prepare(&state, &config, snapshot_bytes,
+            request.clone(), 102), Err(RecordError::OperationExpired)));
+        // The persisted watermark prevents a wall-clock rollback extending retries.
+        state.epoch_watermark = 102;
+        assert!(matches!(mutation::prepare(&state, &config, snapshot_bytes,
+            request, 100), Err(RecordError::OperationExpired)));
+        assert_eq!(applied.receipt, recovered.receipt);
+    }
+
+    #[test]
+    fn record_planning_replays_before_capacity_and_validates_original_vectors() {
+        let mut config = config();
+        config.max_operations = 1;
+        let mut state = State::default();
+        let checkpoint_bytes = encode_entry(&Entry::Checkpoint {
+            config: config.clone(), state: state.clone(),
+        }).unwrap().len();
+        let mut invalid = write("invalid", "r", "original", ExpectedVersion::Absent);
+        invalid.document.as_mut().unwrap().insert("vector".into(), serde_json::json!([0,0]));
+        assert!(matches!(mutation::prepare(&state, &config, checkpoint_bytes,
+            invalid, current_epoch()), Err(RecordError::Rejected(_))));
+        assert_eq!(state.seq, 0);
+        let request = write("valid", "r", "original", ExpectedVersion::Absent);
+        let mutation::PreparedWrite::Append { applied, snapshot_bytes, .. } =
+            mutation::prepare(&state, &config, checkpoint_bytes, request.clone(), current_epoch()).unwrap()
+        else { panic!("new operation"); };
+        apply(&mut state, &applied).unwrap();
+        assert_eq!(state.records["r"].document, request.document);
+        assert!(matches!(mutation::prepare(&state, &config, snapshot_bytes,
+            request.clone(), current_epoch()), Ok(mutation::PreparedWrite::Replay(_))));
+        let mut changed = request;
+        changed.document.as_mut().unwrap().insert("body".into(), serde_json::json!("different"));
+        assert!(matches!(mutation::prepare(&state, &config, snapshot_bytes,
+            changed, current_epoch()), Err(RecordError::Conflict(_))));
+        assert!(matches!(mutation::prepare(&state, &config, snapshot_bytes,
+            write("new", "other", "another", ExpectedVersion::Absent), current_epoch()),
+            Err(RecordError::Rejected(_))));
+    }
+
     #[tokio::test]
     async fn record_vector_only_browse_preserves_live_ids_filters_and_recovery() {
         let location = path();
