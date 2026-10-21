@@ -1,6 +1,6 @@
 # anyseek 开发与验证
 
-核心位于 `anyseek/`，HTTP/OpenAPI/Web UI 位于 `anyseek_server/`。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端仍是 `TheLudlows/seekpower`。
+核心位于 `anyseek/`，HTTP/OpenAPI/Web UI 位于 `anyseek_server/`。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端为 `TheLudlows/anyseek`。
 
 ## 构建与测试
 

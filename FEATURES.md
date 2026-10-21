@@ -77,4 +77,4 @@ collection backups 最多 32 个；service archives 每源根 4 个，生成恢�
 
 尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、物理版本压缩、通用任意历史读取、独立时间候选排名、管理型 Blob、SQLite 云端协调、分布式与对象存储。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
 
-早期移除功能及历史协议见 [MIGRATION](MIGRATION.md)；历史记录不能替代上述当前契约。
+早期移除能力的实际记录见 [历史验证](VALIDATION.md) 与 [Changelog](CHANGELOG.md)；当前接入以服务指南为准，不提供旧格式迁移。
