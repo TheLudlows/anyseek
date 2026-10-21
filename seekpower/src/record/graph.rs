@@ -146,6 +146,40 @@ impl RecordPartition {
         let _admission=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let inner=self.inner.lock().await;
         if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
+        neighbors_view(&inner, request, |_| true)
+    }
+
+    /// Stable-ID entity directory; a changed view invalidates ordinary paging.
+    pub async fn entities(&self,cursor:Option<RecordCursor>,length:usize)->Result<RecordPage,RecordError> {
+        self.advance_time().await?;
+        let _admission=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
+        let inner=self.inner.lock().await;
+        if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
+        if length==0||length>1000{return Err(RecordError::Rejected("entity page length must be 1..1000".into()));}
+        if cursor.as_ref().is_some_and(|c|c.visible_seq!=inner.state.seq){return Err(RecordError::Conflict("entity directory view changed".into()));}
+        let mut rows=inner.graph_cache.entities.iter().filter(|id|cursor.as_ref().is_none_or(|c|id.as_str()>c.after.as_str())&&inner.locations.contains_key(*id));
+        let mut records=Vec::new();let mut bytes=0usize;let mut more=false;
+        for id in rows.by_ref().take(length+1) {
+            let record=&inner.state.records[id];let size=serde_json::to_vec(record).map_err(storage)?.len();
+            if records.len()==length || bytes.saturating_add(size)>4*1024*1024 {
+                if records.is_empty(){return Err(RecordError::Rejected("entity exceeds page response budget".into()));}
+                more=true;break;
+            }
+            bytes+=size;records.push(record.clone());
+        }
+        let next=if more{Some(RecordCursor{visible_seq:inner.state.seq,after:records.last().unwrap().record_id.clone()})}else{None};
+        Ok(RecordPage{records,next,visible_seq:inner.state.seq,evaluation_time_ms:inner.evaluation_time_ms,statistics:inner.statistics()})
+    }
+}
+
+pub(super) fn invalidates(state:&State,request:&RecordWrite)->bool {
+    request.system.as_ref().or_else(||state.records.get(&request.record_id).and_then(|r|r.system.as_ref())).is_some_and(|s|matches!(s.kind,EvidenceKind::Entity|EvidenceKind::Relation))
+    || (request.vector_patch.is_none() && state.records.values().any(|r|r.system.as_ref().is_some_and(|s|endpoints(s).any(|e|e.record_id==request.record_id))))
+}
+
+// Caller owns the partition view. Eligibility uses the same compiled metadata
+// predicate as text/vector retrieval and is applied before per-seed ranking.
+pub(super) fn neighbors_view(inner:&Inner,request:NeighborRequest,eligible:impl Fn(&str)->bool)->Result<NeighborPage,RecordError> {
         if request.seeds.is_empty() || request.seeds.len()>32 || !(1..=128).contains(&request.per_seed) || request.max_candidates==0 || request.max_candidates>inner.config.max_candidates || request.relation_types.len()>16 || request.relation_types.iter().any(|t|t.is_empty()||t.len()>128) {
             return Err(RecordError::Rejected("invalid one-hop resource bounds".into()));
         }
@@ -182,6 +216,7 @@ impl RecordPartition {
                 if !inner.locations.contains_key(edge_id)||!inner.locations.contains_key(neighbor_id){continue;}
                 let edge=&inner.state.records[edge_id];let metadata=edge.system.as_ref().and_then(|s|s.relation.as_ref()).ok_or_else(||storage("invalid adjacency cache"))?;
                 if !request.relation_types.is_empty()&&!request.relation_types.contains(&metadata.relation_type){continue;}
+                if !eligible(neighbor_id) {continue;}
                 if count==request.per_seed {reason=Some("per_seed_limit".into());break 'seeds;}
                 let hit=NeighborHit{seed_id:seed.record_id.clone(),edge:edge.clone(),neighbor:inner.state.records[neighbor_id].clone()};
                 let size=serde_json::to_vec(&hit).map_err(storage)?.len();
@@ -191,31 +226,4 @@ impl RecordPartition {
         }
         if reason.is_some()&&!request.allow_partial {return Err(RecordError::Rejected("exact one-hop query exceeds budget; explicitly allow_partial or narrow query".into()));}
         Ok(NeighborPage{count:RelationCount{value:hits.len(),relation:if reason.is_none(){"exact"}else{"window"}.into()},hits,complete:reason.is_none(),reason,visible_seq:inner.state.seq,evaluation_time_ms:inner.evaluation_time_ms,statistics:inner.statistics()})
-    }
-    /// Stable-ID entity directory; a changed view invalidates ordinary paging.
-    pub async fn entities(&self,cursor:Option<RecordCursor>,length:usize)->Result<RecordPage,RecordError> {
-        self.advance_time().await?;
-        let _admission=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
-        let inner=self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
-        if length==0||length>1000{return Err(RecordError::Rejected("entity page length must be 1..1000".into()));}
-        if cursor.as_ref().is_some_and(|c|c.visible_seq!=inner.state.seq){return Err(RecordError::Conflict("entity directory view changed".into()));}
-        let mut rows=inner.graph_cache.entities.iter().filter(|id|cursor.as_ref().is_none_or(|c|id.as_str()>c.after.as_str())&&inner.locations.contains_key(*id));
-        let mut records=Vec::new();let mut bytes=0usize;let mut more=false;
-        for id in rows.by_ref().take(length+1) {
-            let record=&inner.state.records[id];let size=serde_json::to_vec(record).map_err(storage)?.len();
-            if records.len()==length || bytes.saturating_add(size)>4*1024*1024 {
-                if records.is_empty(){return Err(RecordError::Rejected("entity exceeds page response budget".into()));}
-                more=true;break;
-            }
-            bytes+=size;records.push(record.clone());
-        }
-        let next=if more{Some(RecordCursor{visible_seq:inner.state.seq,after:records.last().unwrap().record_id.clone()})}else{None};
-        Ok(RecordPage{records,next,visible_seq:inner.state.seq,evaluation_time_ms:inner.evaluation_time_ms,statistics:inner.statistics()})
-    }
-}
-
-pub(super) fn invalidates(state:&State,request:&RecordWrite)->bool {
-    request.system.as_ref().or_else(||state.records.get(&request.record_id).and_then(|r|r.system.as_ref())).is_some_and(|s|matches!(s.kind,EvidenceKind::Entity|EvidenceKind::Relation))
-    || (request.vector_patch.is_none() && state.records.values().any(|r|r.system.as_ref().is_some_and(|s|endpoints(s).any(|e|e.record_id==request.record_id))))
 }

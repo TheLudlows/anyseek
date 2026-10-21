@@ -1,6 +1,6 @@
 # Issue #57 P2 实施设计：来源、证据与统一可见性
 
-状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与堆叠基线见第 17 节；已批准不等于已实现。
+状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与需求/测试收敛见第 22–23 节；已批准不等于已实现。
 
 - 产品依据：[issue #57](https://github.com/TheLudlows/seekpower/issues/57)，包含顶部 2026-10-21 确认。
 - 实施入口：[P1-A 与阶段记录](implementation-57.md)。本设计不替换总体路线。
@@ -306,7 +306,7 @@ P2 新测试文件名以下是拟议名称，尚不存在。复用现有 `cargo 
 | D1 | 来源更新使旧派生 stale，默认隐藏，等待上层重算发布；来源删除始终立即隐藏 | 第 14 节先交付条件更新与隐藏；不自动重算，不开放 include_stale 绕过 |
 | D2 | 正文就绪即可发布，先支持全文检索；向量后补，缺向量不参加向量召回，不填零向量 | 第 15 节实现可选向量及版本受控后补；第 16 节实现有界完整 generation staging/publish，最终验证见该节 |
 | D3 | TTL 到期为不可逆逻辑删除，并隐藏依赖派生；不能仅延长 TTL 复活，物理回收异步 | 第 17 节本地 TTL/时间切片；Windows 与系统故障验收单独列示 |
-| D4 | feed 至少保留 7 天；容量不足限制新写，不提前静默丢弃窗口内事件；过期消费者重建同步状态 | 后续 feed 切片，当前未实现 |
+| D4 | feed 至少保留 7 天；容量不足限制新写，不提前静默丢弃窗口内事件；过期消费者重建同步状态 | 第 18 节已实现持久窗口、背压与 bootstrap；当前最终堆叠的验收仍按第 22–23 节 |
 
 管理型大文件 Blob 的必要性按首个实际输入场景决定：如果只需外部引用，不强加上传平台；若要求底座完整保存 PDF/音视频，须将 BlobStore 与备份保护纳入对应切片并确定容量。此为能力选用说明，不把未给定文件规模设成阻塞所有 P2 的问题。
 
@@ -947,3 +947,54 @@ staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保�
 本批未推送、未创建 PR。Windows 本批未运行（未获发布/CI授权）；系统崩溃/断电未验收，需要隔离可丢弃双平台环境和外部确认见证。Linux 进程退出故障不能替代这些验收。
 
 下一独立批次仍为关系与全文/向量同 ReadView 融合。本节不将三项 P2 收尾或总体 P2 标成全部完成。
+
+## 22. 同 ReadView 关系/全文/向量融合（本地检查点完成）
+
+独立本地分支 `feat/57-p2-relation-fusion`，基于租约检查点 `6a05aa2573d651e37536469ce94c9674fd82d205`。没有推送/PR 授权，不修改已有 PR。前述阶段是历史记录，本节与下一节作为最新收敛索引。
+
+### 22.1 实际实现与契约
+
+- 新 `record/fusion.rs` 只编排查询，不新增持久权威状态。通用 `Inner::query_view` 与 `graph::neighbors_view` 由同一 partition guard 调用；请求入口推进时间一次，全文、向量、邻接、回表、统计共用同一 `visible_seq/evaluation_time_ms`。复用 `metadata_filter` 编译结果过滤邻居，包含系统时间字段；不在 HTTP/JS 重写过滤逻辑。
+- 默认 `/query` 接受显式 `relation_fusion`，没有此字段仍走原评分路径。复用 `RrfOptions` 和共享零基 rank 算式，独立取各通道候选后相加；同邻居多条边/多个种子只贡献一次。邻接 rank 为请求 seed 次序、neighbor ID/edge ID 顺序，最终分数相同按 Record ID。不是语义边权排序或检索质量提升承诺。
+- `relation_weight` 有限且正；文本/向量可用原权重 0 禁用，但至少开启其中一个。开启通道必须给显式候选上限，全部通道上限之和不超过 collection max_candidates；关系扫描有界、隐藏/过滤项也计预算。过滤通过后才计 per_seed。默认超限整体失败，显式 allow_partial 才返回邻接窗口。字段排序、Count-only、重复 top-level RRF 配置拒绝。
+- `fusion.count_relation=candidate_window`、候选 union 数与 `relation_complete/relation_reason` 独立披露。完整邻接不表示全文/ANN 全库完整召回；count_total 只是候选 union，分页不改变它。不把 ANN 当 oracle 精确召回。4 MiB 输出预算超限拒绝。
+- 原授权/data 双输出屏障保留，取消只丢弃响应，不取消已接收的时间/可见性维护。source/generation/TTL/端点变更作用于原统一活动索引，无第二份可见集合。查询无新持久状态，WAL 仍 V11；恢复与接管重建相同检索/邻接索引。
+- Web UI 沿用实体关系面板，传递显式 query JSON 和现有 seed/budget 控件；服务负责规则，界面显示候选窗口与不完整原因。实际请求见 [server README](../seekpower_server/README.md#explicit-same-view-relation-fusion)。
+
+### 22.2 审查与最终验证
+
+独立审查已确认共同 guard、过滤/统计/预算及 HTTP 双屏障，指出零关系权重仍遍历的歧义；现拒绝零关系权重。定向 core 两项通过，覆盖独立通道排序 oracle、重复邻居去重、恢复排序、输出屏障、窗口/预算与时间 TTL。generation 切代/间接证据测试追加融合断言。真实 HTTP 融合测试加入已有 graph 恢复/接管/撤权/四故障流程，Chromium 操作真实融合按钮。最终源码全量与默认/fault HTTP/Chromium 均通过；最后独立复审无未修复阻塞。
+
+2026-10-21 最终验证（无新分支推送/PR；全部测试仅临时数据）：
+
+| 命令/范围 | Linux | Windows 本批 |
+| --- | --- | --- |
+| `cargo test --workspace --all-targets --quiet` | **35 suites，221 passed，0 failed，10 ignored** | 未运行 |
+| `cargo build --workspace` | 通过 | 未运行 |
+| `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser` | 通过；真实融合 API/按钮、预算拒绝/partial、撤权/恢复/接管 | 未运行 |
+| `cargo build -p seekpower_server --features fault-injection` 后同 smoke `--faults --browser` | 通过；四种写入故障重试恢复后的融合查询，以及既有 TTL/lease/feed/service 故障矩阵 | 未运行 |
+| `python3 scripts/check_core_boundary.py` | default/no-default-features 通过 | 未运行 |
+| OpenAPI 生成及 RelationFusion/NeighborRequest/RRF 断言 | 通过 | 未运行 |
+| `git diff --check` | 通过 | 不适用 |
+
+10 个 ignored 是 9 个由父测试显式运行的子进程 worker 与 1 个既有额外参数跨构建 fixture，不将 ignored 记为通过。全量在最后 OpenAPI 源码改动后重跑；默认和 fault 服务依次构建/运行，未复用祖先分支 CI。日志 `/tmp/p2-fusion-final-{all,build,http,fault-build,fault-http,boundary,openapi}.log` 为本地证据。原生 Windows 与双平台系统断电仍未验收，后者需要隔离环境及外部确认见证。
+
+## 23. P2 原设计需求—实现—测试收敛表
+
+本表对照 §1–8 与 §19.3 的历史缺口，不以融合一项代表全部验收。所有代码在当前本地堆叠分支，不意味着已合入主干。
+
+| 原计划 | 当前实现/代码责任 | 可核验测试与边界 | 剩余/设计收敛 |
+| --- | --- | --- | --- |
+| P2-1 来源、版本、直接/间接证据与定位 | evidence/enrichment/mutation；Source 历史版本；locator 精确 UTF-8 字节或 inline 页及原内容 hash | source/revision/locator core；record_locator_smoke；删除、stale、精确版本/路由、循环/深度预算、恢复与输出屏障 | 小内联原文已实现；外部 URL 不是已备份原文。管理型大文件 Blob/解析器未提供，按实际输入再决定，不能声称已有 |
+| P2-2 generation/staging 原子发布 | generation/publication/lease；一份完整有界 Stage + Publish/Abort/Renew，持久但未发布不可见；30分钟租约、scope+版本 fence、安全私有清理 | generation/lease core；HTTP/Chromium；取消/重试/多组件退出/新 owner 续租/清理失败重试 | 采用整份 Stage 原子验证代替设计草案 Begin/StageBatch/Seal 流式协议；100 chunks/1 MiB 等现有边界不放宽。不是无限上传/后台 GC，空闲时不承诺即时物理清理 |
+| P2-3 可选向量与后补 | vector_patch/enrichment，精确正文版本与 embedding space，缺向量不占位 | vector_patch/generation core；服务重试/冲突/备份接管流程 | 模型/向量生成任务调度属于上层；没有计算服务或质量承诺 |
+| P2-4 时间/TTL | temporal，固定毫秒 evaluation_time、事件/入库/业务时间、请求驱动不可逆过期及依赖隐藏 | temporal core + record_temporal_smoke，边界/回拨/恢复/输出/统计；融合 temporal oracle | 无独立后台调度服务；§3.5/§7 中后续有预算的独立时间候选/排序通道仍未实现，当前为时间硬过滤；不把物理回收算作 TTL 已完成 |
+| P2-5 显式实体/一跳/共同查询 | graph 重建缓存 + fusion 同 guard，精确双端、过滤/排序/预算窗口 | relation_*、fusion_* core；record_graph_smoke + Chromium；generation/TTL/source失效、撤权、重启/接管 | 同 collection/partition、非关系端点；无自动抽取/消歧、多跳语言。原文未要求的跨分区图不加入 |
+| P2-6 持久 change feed | change_feed + 通用 Applied/Expiration，同权威提交；至少7天、容量背压、scope/floor/bootstrap | feed core + record_feed_smoke；阶段退出/游标过期/恢复/隐藏/私有 staging 不泄露 | UI 是检查器，不是自动同步消费者；消费者自行幂等至少一次处理，过期必须重建 |
+| P2-7 HTTP/UI、恢复、授权与验收 | 默认 record_service/catalog/data 输出；service/collection snapshot 与同服务受控接管 | 完整服务脚本含共享 key/撤权、旧授权不复活、原 owner 封存、恢复故障、实际 Chromium | 新服务缺可信最新删除历史仍隔离；不提供强制绕过/跨服务自动灾备。当前最终本地 SHA 的 Windows 原生测试未运行；系统断电未验收 |
+
+仍存在的 P2 设计覆盖差异：§3 来源设计提出的通用 RecordRevision 受保护历史读取尚未提供（目前专用历史读取只支持 Source）；§3.5 的独立时间候选通道及逐命中通道解释尚未提供（当前时间过滤、融合总分和窗口元信息已实现）。这些应由后续收敛决定落实，不归类成 P3，也不以本批融合替代。
+
+真实尚未完成的验收项：本批 Linux 全套/真实服务与复审已通过；本地关系、定位、租约、融合链最终 SHA 的 Windows 原生 CI 待批准发布后运行；双平台系统崩溃/断电需要可丢弃隔离环境和外部已确认写入/撤权/删除见证，不能用进程退出代替。P1-A 可靠性门槛未因此取消。
+
+非本阶段：P3 通用历史版本/幂等账本长期 GC、Segment compaction 和稳定持续运行容量；P4/P5 对象存储/indexer/cache/云协议；P6 分区扩展。当前只有 Source 提供专用历史证据读取，其他对象历史保存在权威账本，不宣称通用历史 MVCC 读取服务。没有升级迁移/旧格式兼容。原文档中建议的大批流式上传/管理 Blob 是明确未实现的扩展，不能把它们暗记为通过，也不因此自行扩大本批。

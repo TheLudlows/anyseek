@@ -242,3 +242,17 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 Stage 获得 30 分钟租约，期限为持久可信 UTC 毫秒时间 + 1800000。使用 `generation:{"action":"renew","generation_id":"g"}` 及精确 `expected:{"Match":当前控制版本}` 续租；回执 staged_only=true，不发布成员。generation 状态返回 lease_expires_at_ms、lease_fence、lease_requires_renewal、private_cleanup_pending。Publish/Abort/Renew 共用 control version fencing；到期不可续租，新建需新 generation ID。同 owner 重启保留剩余期限，接管后的 scope 变更要求显式续租。
 
 Abort/到期持久退休后，只释放未发布私有 Stage 正文，保留规范化请求摘要和原回执；原 operation_id 重试返回原成功结果但不复活 staging。后续请求安全 checkpoint/reclaim，删除旧 WAL 失败保持 pending、未知发布 fence；不是普通历史 GC，也不删除已有备份。UI 记录页可检查租约，通过原编辑器提交 renew 并保留精确重试请求。完整请求 Stage 前不提供分片上传租约。Journal V11 拒绝旧格式；验证见实施记录第 21 节。
+
+### Explicit same-view relation fusion
+
+`POST /api/v1/index/{id}/query` optionally accepts `relation_fusion`:
+
+```json
+{"query":"alpha","length":10,"relation_fusion":{"neighbors":{"seeds":[{"record_id":"entity-a","routing_key":"route","version":1}],"direction":"both","per_seed":10,"max_candidates":100,"allow_partial":false},"rrf":{"constant":0.6,"keyword_weight":1,"vector_weight":1,"keyword_candidates":100,"vector_candidates":100},"relation_weight":1}}
+```
+
+Add `query_vector` for the vector channel, with existing `all`/`nprobe`/threshold options. No embedding is computed. At least one enabled text/vector channel is required. `relation_weight` must be finite and positive. Existing `RrfOptions` validation applies; an enabled text/vector channel requires its explicit positive candidate budget. The sum of enabled text/vector budgets and `neighbors.max_candidates` must not exceed the collection candidate limit. Top-level `rrf`, field sorting and count-only/zero-length requests are rejected in this mode. Ordinary queries are unchanged.
+
+All channels share one locked partition view, evaluation time, active corpus and metadata/time filters. Filters apply to neighboring result records before per-seed limiting; seeds and edges must also be current and visible. A hidden/filtered adjacency still consumes the scan budget. Relation ranks follow caller seed order then neighbor/edge stable IDs; deduplicate neighbors before zero-based RRF contribution `weight/(constant+rank)`. Edge metadata `weight` is not a ranking input. Final ties use record ID. This is configurable rank fusion, not a relevance-quality claim.
+
+`fusion.count_relation="candidate_window"` and `fusion.candidates` describe the unique candidate union before pagination. Neither `count_total` nor `relation_complete` implies exact corpus recall. `relation_complete` only covers adjacency traversal; without `allow_partial`, exhaustion rejects the entire request, otherwise `relation_reason` identifies the limit. ANN stays approximate. Output is limited to 4 MiB and uses the same field projection, authorization and deletion barriers as ordinary queries. No persistent format changes are introduced by fusion.

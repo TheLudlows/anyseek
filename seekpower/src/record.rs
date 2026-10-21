@@ -23,6 +23,8 @@ mod generation;
 mod temporal;
 mod change_feed;
 mod graph;
+mod fusion;
+pub use fusion::{RelationFusion, FusionWindow};
 pub use graph::{RelationMetadata, RelationDirection, NeighborRequest, NeighborPage, NeighborHit, RelationCount};
 pub use change_feed::{FeedConfig, ChangeKind, ChangeEvent, ChangePage, BootstrapPage};
 pub use temporal::{TemporalMetadata, TemporalFilter, TimeRange};
@@ -394,6 +396,9 @@ pub struct RecordQuery {
 /// Search response; hybrid/ANN counts are deliberately not called exact totals.
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordSearch {
+    /// Present only for explicit relation fusion; counts describe candidate windows.
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub fusion: Option<FusionWindow>,
     /// Fixed trusted UTC milliseconds used to decide TTL visibility.
     pub evaluation_time_ms: u64,
     /// Mode-specific reported total, not an unconditional exact corpus count.
@@ -980,95 +985,15 @@ impl RecordPartition {
     }
     /// Full retrieval contract for service callers, using one published view.
     pub async fn query(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
-        let RecordQuery {
-            temporal,
-            text,
-            vector,
-            mode,
-            query_type,
-            offset,
-            length: limit,
-            result_type,
-            fields,
-            mut filters,
-            sort,
-        } = query;
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
+        let permit = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
-                let _permit = permit;
-                let mut inner = owner.lock().await;
-                inner.advance_time().await?;
-                if !inner.healthy || inner.state.sealed_for.is_some() {
-                    return Err(RecordError::RecoveryRequired);
-                }
-                if offset
-                    .checked_add(limit)
-                    .is_none_or(|n| n > inner.config.max_candidates)
-                {
-                    return Err(RecordError::Rejected("candidate budget exceeded".into()));
-                }
-                if let SearchMode::WeightedHybrid { rrf, .. } = &mode {
-                    if rrf
-                        .keyword_candidates
-                        .is_some_and(|n| n > inner.config.max_candidates)
-                        || rrf
-                            .vector_candidates
-                            .is_some_and(|n| n > inner.config.max_candidates)
-                    {
-                        return Err(RecordError::Rejected(
-                            "fusion candidate budget exceeded".into(),
-                        ));
-                    }
-                }
-                if let Some(temporal) = temporal { filters.extend(temporal::filters(temporal)?); }
-                let result = inner
-                    .index
-                    .search(
-                        text,
-                        vector,
-                        query_type,
-                        mode,
-                        true,
-                        offset,
-                        limit,
-                        result_type,
-                        true,
-                        fields,
-                        filters,
-                        sort,
-                    )
-                    .await;
-                if let Some(error) = result.error {
-                    return Err(storage(error));
-                }
-                let mut hits = Vec::new();
-                for hit in result.results {
-                    let id = inner
-                        .ordinals
-                        .get(hit.doc_id)
-                        .ok_or_else(|| storage("candidate ordinal outside view"))?;
-                    hits.push(RecordHit {
-                        record: inner.state.records[id].clone(),
-                        score: hit.score,
-                    });
-                }
-                Ok(RecordSearch {
-                    evaluation_time_ms: inner.evaluation_time_ms,
-                    count_total: result.result_count_total,
-                    query_terms: result.query_terms,
-                    visible_seq: inner.state.seq,
-                    hits,
-                    statistics: inner.statistics(),
-                })
-            })
-            .await
-            .map_err(storage)?
+        crate::INDEX_RUNTIME.spawn(async move {
+            let _permit = permit;
+            let mut inner = owner.lock().await;
+            inner.advance_time().await?;
+            if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
+            inner.query_view(query).await
+        }).await.map_err(storage)?
     }
     /// Iterate active records by stable identity. Changing the logical position
     /// invalidates continuation rather than silently skipping or duplicating rows.
@@ -1471,6 +1396,54 @@ mod tests {
     fn neighbor_request(id:&str)->NeighborRequest {
         NeighborRequest{seeds:vec![EvidenceRef{locator:None,record_id:id.into(),routing_key:"document-1".into(),version:1}],direction:RelationDirection::Both,relation_types:vec![],per_seed:128,max_candidates:100,allow_partial:false}
     }
+    fn fusion_query() -> RecordQuery {
+        RecordQuery{temporal:None,text:"alpha".into(),vector:Some(Embedding::F32(vec![1.0,0.0])),mode:SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},query_type:QueryType::Union,offset:0,length:20,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![]}
+    }
+    fn fusion_options() -> RelationFusion {
+        let mut neighbors=neighbor_request("a");neighbors.max_candidates=20;
+        RelationFusion{neighbors,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.5,vector_weight:2.0,keyword_candidates:Some(20),vector_candidates:Some(20)},relation_weight:1.5}
+    }
+    #[tokio::test]
+    async fn fusion_rank_oracle_recovery_and_output_barrier() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(entity_write("a","a")).await.unwrap();
+        p.write(write("b","b","alpha alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("c","c","unrelated",ExpectedVersion::Absent)).await.unwrap();
+        for (id,to) in [("ab","b"),("ab2","b"),("ac","c")] {p.write(edge_write(id,id,"a",to)).await.unwrap();}
+        let options=fusion_options();let mut oracle=BTreeMap::<String,f32>::new();
+        for (mode,weight) in [(SearchMode::Lexical,0.5),(SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},2.0)] {
+            let mut q=fusion_query();q.mode=mode.clone();if mode==SearchMode::Lexical{q.vector=None;}
+            let channel=p.query(q).await.unwrap();for(rank,hit)in channel.hits.iter().enumerate(){*oracle.entry(hit.record.record_id.clone()).or_default()+=weight/(3.0+rank as f32);}
+        }
+        *oracle.entry("b".into()).or_default()+=1.5/3.0;*oracle.entry("c".into()).or_default()+=1.5/4.0;
+        let mut expected:Vec<_>=oracle.into_iter().collect();expected.sort_by(|a,b|b.1.total_cmp(&a.1).then_with(||a.0.cmp(&b.0)));
+        let result=p.query_with_relations(fusion_query(),options.clone()).await.unwrap();
+        assert_eq!(result.hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>(),expected);
+        assert_eq!(result.count_total,6);assert!(result.fusion.unwrap().relation_complete);
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.query_with_relations(fusion_query(),options.clone()).await.unwrap().hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>(),expected);
+        let output=p.output_permit().unwrap();let mut deletion=write("delete-b","b","",ExpectedVersion::Match(1));deletion.document=None;p.write(deletion).await.unwrap();
+        assert!(output.deliver(||()).is_err());
+        let result=p.query_with_relations(fusion_query(),options).await.unwrap();assert_eq!(result.statistics.active_records,3);
+        assert!(!result.hits.iter().any(|h|["b","ab","ab2"].contains(&h.record.record_id.as_str())));
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn fusion_budget_and_temporal_predicate_before_ranks() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(entity_write("a","a")).await.unwrap();
+        let mut b=write("b","b","alpha",ExpectedVersion::Absent);b.temporal=Some(TemporalMetadata{event_time_ms:Some(now as i64),expire_at_ms:Some(now+100),..Default::default()});p.write(b).await.unwrap();
+        p.write(write("c","c","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.write(edge_write("ab","ab","a","b")).await.unwrap();p.write(edge_write("ac","ac","a","c")).await.unwrap();
+        let mut options=fusion_options();options.neighbors.max_candidates=1;
+        assert!(p.query_with_relations(fusion_query(),options.clone()).await.is_err());options.neighbors.allow_partial=true;
+        let result=p.query_with_relations(fusion_query(),options).await.unwrap();assert!(!result.fusion.unwrap().relation_complete);
+        let mut q=fusion_query();q.temporal=Some(TemporalFilter{event:Some(TimeRange{from_ms:Some(now as i64),to_ms:Some((now+1) as i64)}),..Default::default()});
+        let result=p.query_with_relations(q,fusion_options()).await.unwrap();assert_eq!(result.hits.len(),1);assert_eq!(result.hits[0].record.record_id,"b");
+        clock.set(now+100);let result=p.query_with_relations(fusion_query(),fusion_options()).await.unwrap();assert_eq!(result.evaluation_time_ms,now+100);assert!(!result.hits.iter().any(|h|h.record.record_id=="b"||h.record.record_id=="ab"));
+        let mut bad=fusion_options();bad.rrf.keyword_candidates=Some(100);assert!(p.query_with_relations(fusion_query(),bad).await.is_err());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn relation_cycles_exact_endpoints_aba_and_rebuild() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
@@ -1518,6 +1491,9 @@ mod tests {
         let receipt=p.write(publish.clone()).await.unwrap();assert_eq!(p.write(publish).await.unwrap(),receipt);
         assert!(permit.deliver(||()).is_err());
         for id in ["old","edge-old","proof"] {assert!(p.get(id).await.unwrap().is_none());}
+        let fused=p.query_with_relations(fusion_query(),fusion_options()).await.unwrap();
+        assert!(!fused.hits.iter().any(|h|["old","edge-old","proof"].contains(&h.record.record_id.as_str())));
+        assert!(fused.hits.iter().any(|h|h.record.record_id=="new"));
         assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,0);
         p.write(edge_write("edge-new","edge-new","a","new")).await.unwrap();
         let mut illegal=edge_write("retarget","edge-new","a","a");illegal.expected=ExpectedVersion::Match(1);
@@ -1525,6 +1501,7 @@ mod tests {
         let mut deletion=source_write("delete-source","s",&[]);deletion.expected=ExpectedVersion::Match(1);deletion.document=None;deletion.system=None;
         p.write(deletion).await.unwrap();
         assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,0);
+        let fused=p.query_with_relations(fusion_query(),fusion_options()).await.unwrap();assert_eq!(fused.hits.len(),1);assert_eq!(fused.hits[0].record.record_id,"a");
         assert_eq!(p.statistics().await.unwrap().active_records,1);
         assert!(p.changes(None,100).await.unwrap().events.last().unwrap().rescan_required);
         p.compact_journal().await.unwrap();drop(p);
@@ -3780,5 +3757,83 @@ mod tests {
         );
         drop(partition);
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+impl Inner {
+    async fn query_view(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
+        let RecordQuery {
+            temporal,
+            text,
+            vector,
+            mode,
+            query_type,
+            offset,
+            length: limit,
+            result_type,
+            fields,
+            mut filters,
+            sort,
+        } = query;
+                if offset
+                    .checked_add(limit)
+                    .is_none_or(|n| n > self.config.max_candidates)
+                {
+                    return Err(RecordError::Rejected("candidate budget exceeded".into()));
+                }
+                if let SearchMode::WeightedHybrid { rrf, .. } = &mode {
+                    if rrf
+                        .keyword_candidates
+                        .is_some_and(|n| n > self.config.max_candidates)
+                        || rrf
+                            .vector_candidates
+                            .is_some_and(|n| n > self.config.max_candidates)
+                    {
+                        return Err(RecordError::Rejected(
+                            "fusion candidate budget exceeded".into(),
+                        ));
+                    }
+                }
+                if let Some(temporal) = temporal { filters.extend(temporal::filters(temporal)?); }
+                let result = self
+                    .index
+                    .search(
+                        text,
+                        vector,
+                        query_type,
+                        mode,
+                        true,
+                        offset,
+                        limit,
+                        result_type,
+                        true,
+                        fields,
+                        filters,
+                        sort,
+                    )
+                    .await;
+                if let Some(error) = result.error {
+                    return Err(storage(error));
+                }
+                let mut hits = Vec::new();
+                for hit in result.results {
+                    let id = self
+                        .ordinals
+                        .get(hit.doc_id)
+                        .ok_or_else(|| storage("candidate ordinal outside view"))?;
+                    hits.push(RecordHit {
+                        record: self.state.records[id].clone(),
+                        score: hit.score,
+                    });
+                }
+                Ok(RecordSearch {
+                    fusion: None,
+                    evaluation_time_ms: self.evaluation_time_ms,
+                    count_total: result.result_count_total,
+                    query_terms: result.query_terms,
+                    visible_seq: self.state.seq,
+                    hits,
+                    statistics: self.statistics(),
+                })
     }
 }

@@ -961,7 +961,7 @@ async fn deletion_plan(
     let (result, permit) = s.catalog.authorized(key, id, move |entry| async move {
         let (seq, records) = match selection {
             DeleteSelection::Query { query } => {
-                if query.query_vector.is_some() || query.similarity_threshold.is_some() || query.query_string.trim().is_empty() {
+                if query.relation_fusion.is_some() || query.query_vector.is_some() || query.similarity_threshold.is_some() || query.query_string.trim().is_empty() {
                     return Err(bad("query deletion requires nonempty lexical text; use explicit all selection to clear"));
                 }
                 // Deletion selects every match, never the caller's display page or ANN sample.
@@ -1318,9 +1318,10 @@ async fn query(
     let (result,permit)=s.catalog.authorized(key,id,move|entry|async move{
         let start=std::time::Instant::now();
         let vector=request.query_vector.as_ref().map(|value|seekpower::vector::parse_external_embedding(value,&entry.config.index.inference)).transpose().map_err(bad)?;
-        let result=p.query(RecordQuery{temporal:request.temporal.clone(),text:request.query_string.clone(),vector,mode,query_type:request.query_type(),offset:request.offset,length:request.length,result_type:request.result_type(),fields:request.field_filter,filters:request.facet_filter,sort:request.result_sort}).await?;
+        let query=RecordQuery{temporal:request.temporal.clone(),text:request.query_string.clone(),vector,mode,query_type:request.query_type(),offset:request.offset,length:request.length,result_type:request.result_type(),fields:request.field_filter,filters:request.facet_filter,sort:request.result_sort};
+        let result=match request.relation_fusion {Some(options)=>p.query_with_relations(query,options).await?,None=>p.query(query).await?};
         let hits:Vec<_>=result.hits.into_iter().map(|mut hit|{if let Some(doc)=hit.record.document.as_mut(){doc.retain(|field,_|entry.config.schema.iter().any(|f|f.field==*field&&f.store)&&(request.fields.is_empty()||request.fields.contains(field)));}hit}).collect();
-        Ok::<_,Error>(json!({"original_query":request.query_string,"query":request.query_string,"time":start.elapsed().as_nanos(),"offset":request.offset,"length":request.length,"count":hits.len(),"count_total":request.count.then_some(result.count_total),"query_terms":result.query_terms,"hits":hits,"visible_seq":result.visible_seq,"evaluation_time_ms":result.evaluation_time_ms,"statistics":result.statistics}))
+        Ok::<_,Error>(json!({"original_query":request.query_string,"query":request.query_string,"time":start.elapsed().as_nanos(),"offset":request.offset,"length":request.length,"count":hits.len(),"count_total":request.count.then_some(result.count_total),"query_terms":result.query_terms,"hits":hits,"visible_seq":result.visible_seq,"evaluation_time_ms":result.evaluation_time_ms,"statistics":result.statistics,"fusion":result.fusion}))
     }).await?;
     protected_data(result, permit, Some(data))
 }
@@ -1898,6 +1899,9 @@ pub(crate) fn generate_openapi() {
     schemas.insert("TemporalFilter".into(),json!({"type":"object","additionalProperties":false,"properties":{"event":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"ingested":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"valid_at_ms":{"type":["integer","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]});
     schemas.get_mut("SearchRequestObject").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
+    schemas.insert("NeighborRequest".into(),json!({"type":"object","additionalProperties":false,"required":["seeds","per_seed","max_candidates"],"properties":{"seeds":{"type":"array","minItems":1,"maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}},"direction":{"type":"string","enum":["in","out","both"]},"relation_types":{"type":"array","maxItems":16,"items":{"type":"string"}},"per_seed":{"type":"integer","minimum":1,"maximum":128},"max_candidates":{"type":"integer","minimum":1},"allow_partial":{"type":"boolean"}}}));
+    schemas.insert("RelationFusion".into(),json!({"type":"object","additionalProperties":false,"required":["neighbors","rrf","relation_weight"],"properties":{"neighbors":{"$ref":"#/components/schemas/NeighborRequest"},"rrf":{"$ref":"#/components/schemas/RrfOptions"},"relation_weight":{"type":"number","exclusiveMinimum":0}}}));
+    schemas.get_mut("SearchRequestObject").unwrap()["properties"]["relation_fusion"]=json!({"anyOf":[{"$ref":"#/components/schemas/RelationFusion"},{"type":"null"}]});
     schemas.insert("RelationMetadata".into(),json!({"type":"object","additionalProperties":false,"required":["from","to","relation_type"],"properties":{"from":{"$ref":"#/components/schemas/EvidenceRef"},"to":{"$ref":"#/components/schemas/EvidenceRef"},"relation_type":{"type":"string","minLength":1,"maxLength":128},"weight":{"type":["number","null"]}}}));
     schemas.insert("EvidenceRef".into(), json!({"type":"object","additionalProperties":false,"required":["record_id","routing_key","version"],"properties":{"record_id":{"type":"string"},"routing_key":{"type":"string"},"version":{"type":"integer","minimum":1}}}));
     schemas.insert("EvidenceLocator".into(),json!({"oneOf":[{"type":"object","additionalProperties":false,"required":["kind","field","start","end"],"properties":{"kind":{"const":"utf8"},"field":{"type":"string"},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":1}}},{"type":"object","additionalProperties":false,"required":["kind","field","page"],"properties":{"kind":{"const":"page"},"field":{"type":"string"},"page":{"type":"integer","minimum":1}}}]}));
@@ -1991,7 +1995,7 @@ pub(crate) fn generate_openapi() {
         ),
         ("/api/v1/index/{id}/evidence","post","Exact inline source excerpt; current source visibility still required",Some(json!({"$ref":"#/components/schemas/EvidenceRef"}))),
         ("/api/v1/index/{id}/entities","post","Visible entity directory, stable ID paging in one view",Some(json!({"type":"object","properties":{"cursor":{"type":["object","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
-        ("/api/v1/index/{id}/neighbors","post","Bounded exact-version one-hop; explicit partial counts are windows",Some(json!({"type":"object","additionalProperties":false,"required":["seeds","per_seed","max_candidates"],"properties":{"seeds":{"type":"array","minItems":1,"maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}},"direction":{"type":"string","enum":["in","out","both"]},"relation_types":{"type":"array","maxItems":16,"items":{"type":"string"}},"per_seed":{"type":"integer","minimum":1,"maximum":128},"max_candidates":{"type":"integer","minimum":1},"allow_partial":{"type":"boolean"}}}))),
+        ("/api/v1/index/{id}/neighbors","post","Bounded exact-version one-hop; explicit partial counts are windows",Some(json!({"$ref":"#/components/schemas/NeighborRequest"}))),
         ("/api/v1/index/{id}/changes", "post", "Ordered content-free notices; 410 requires bootstrap, never silently skip", Some(json!({"type":"object","additionalProperties":false,"properties":{"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
         ("/api/v1/index/{id}/bootstrap", "get", "Get current bootstrap identity prefix; append 16 random hex digits for a new request", None),
         ("/api/v1/index/{id}/bootstrap", "post", "Pinned effective snapshot and atomic feed cut; restart, expiry or hiding requires restart", Some(json!({"type":"object","additionalProperties":false,"required":["request_id"],"properties":{"request_id":{"type":"string","pattern":"^[0-9a-fA-F]{32}$"},"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),

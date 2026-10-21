@@ -105,6 +105,12 @@ def exercise(base,master,call):
         page.locator('#relationSeeds').fill(json.dumps([{'record_id':'graph-a','routing_key':'graph-route','version':1}]))
         page.locator('#expandNeighbors').click();expect(page.locator('#relationStatus')).to_contain_text('exact: 1 visible paths')
         assert 'graph-b' in page.locator('#relationResult').inner_text()
+        page.locator('#fusionQuery').fill(json.dumps({'query':'graphlink','length':10,'relation_fusion':{'rrf':{'constant':3,'keyword_weight':1,'vector_weight':0,'keyword_candidates':100},'relation_weight':1}}))
+        page.locator('#fuseRelations').click();expect(page.locator('#relationStatus')).to_contain_text('Candidate window:')
+        fusion=json.loads(page.locator('#relationResult').inner_text())
+        assert fusion['fusion']['count_relation']=='candidate_window'
+        assert any(hit['record']['record_id']=='graph-b' for hit in fusion['hits'])
+
         page.locator('#recordEnvelopeMode').uncheck()
         print('PASS Chromium: entity/edge envelopes, entity directory and real bounded one-hop')
         page.locator('#backToSearch').click()

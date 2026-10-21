@@ -124,6 +124,11 @@ impl Default for RrfOptions {
     }
 }
 
+/// Shared zero-based rank arithmetic; callers validate finite weight/constant.
+pub(crate) fn rrf_contribution(weight: f32, constant: f32, rank: usize) -> f32 {
+    weight / (constant + rank as f32)
+}
+
 impl RrfOptions {
     /// Reject invalid inputs and combinations capable of overflowing the fused f32 score.
     /// One zero weight disables that channel's contribution; both zero is invalid.
@@ -1180,7 +1185,7 @@ impl Search for IndexArc {
                             result.doc_id,
                             Result {
                                 doc_id: result.doc_id,
-                                score: rrf.keyword_weight / (k + i as f32),
+                                score: rrf_contribution(rrf.keyword_weight, k, i),
                                 #[cfg(feature = "vb")]
                                 lexical_score: result.score,
                                 #[cfg(feature = "vb")]
@@ -1199,7 +1204,7 @@ impl Search for IndexArc {
                         })
                         .enumerate()
                     {
-                        let rrf_score = rrf.vector_weight / (k + i as f32);
+                        let rrf_score = rrf_contribution(rrf.vector_weight, k, i);
 
                         #[cfg(feature = "vb")]
                         rrf_results

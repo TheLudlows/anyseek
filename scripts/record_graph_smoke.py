@@ -21,6 +21,10 @@ def exercise(call,restart_with,faults):
         return write(rid,{'kind':'relation','relation':{'from':ref(left),'to':ref(right),'relation_type':'knows','weight':.5}})
     def query(rid,**kwargs):
         return {'seeds':[ref(rid)],'per_seed':128,'max_candidates':1000,**kwargs}
+    def fused(**kwargs):
+        request={'query':'relation','length':20,'relation_fusion':{'neighbors':query('a'), 'rrf':{'constant':3,'keyword_weight':1,'vector_weight':0,'keyword_candidates':100},'relation_weight':2}}
+        request.update(kwargs)
+        return request
     a=write('a',{'kind':'entity'});b=write('b',{'kind':'entity'})
     call('POST',endpoint+'/doc',a);call('POST',endpoint+'/doc',b)
     ab=edge('ab','a','b');receipt=call('POST',endpoint+'/doc',ab)['receipt']
@@ -30,6 +34,17 @@ def exercise(call,restart_with,faults):
     result=call('POST',endpoint+'/neighbors',query('a'),key=reader)
     assert result['complete'] and result['count']=={'value':2,'relation':'exact'}
     assert result['evaluation_time_ms']==result['statistics']['evaluation_time_ms']
+    fusion=call('POST',endpoint+'/query',fused(),key=reader)
+    assert fusion['fusion']['count_relation']=='candidate_window' and fusion['fusion']['relation_complete']
+    assert fusion['visible_seq']==fusion['statistics']['visible_seq'] and fusion['evaluation_time_ms']==fusion['statistics']['evaluation_time_ms']
+    assert fusion['hits'][0]['record']['record_id']=='b'
+    bad=fused();bad['relation_fusion']['neighbors']['max_candidates']=1
+    call('POST',endpoint+'/query',bad,status=400)
+    bad['relation_fusion']['neighbors']['allow_partial']=True
+    assert not call('POST',endpoint+'/query',bad)['fusion']['relation_complete']
+    bad=fused();bad['relation_fusion']['relation_weight']=0
+    call('POST',endpoint+'/query',bad,status=400)
+
     assert len(call('POST',endpoint+'/neighbors',query('a',direction='out'))['hits'])==1
     call('POST',endpoint+'/neighbors',query('a',per_seed=1),status=400)
     partial=call('POST',endpoint+'/neighbors',query('a',per_seed=1,allow_partial=True))
@@ -49,6 +64,7 @@ def exercise(call,restart_with,faults):
     call('POST',endpoint+'/doc',deletion)
     assert call('POST',endpoint+'/neighbors',query('a'))['count']['value']==0
     restart_with({})
+    assert not any(h['record']['record_id']=='b' for h in call('POST',endpoint+'/query',fused())['hits'])
     assert call('POST',endpoint+'/neighbors',query('a'))['count']['value']==0
     call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'relations-copy','backup_id':archive['backup_id']})
     assert call('POST','/api/v1/index/relations-copy/entities',{})['records']==[]
@@ -56,11 +72,13 @@ def exercise(call,restart_with,faults):
     call('POST',endpoint+'/grants',{'operation_id':operation(),'key_id':'relation-reader','allow':False})
     call('POST',endpoint+'/neighbors',query('a'),key=reader,status=403)
     call('POST',endpoint+'/entities',{},key=reader,status=403)
+    call('POST',endpoint+'/query',fused(),key=reader,status=403)
     takeover={'operation_id':operation(),'source_collection_id':'relations','collection_id':'relations-next','backup_id':archive['backup_id']}
     assert call('POST','/api/v1/takeovers',takeover)['status']=='active'
     endpoint='/api/v1/index/relations-next'
     assert call('POST',endpoint+'/neighbors',query('a'))['count']['value']==0
     call('POST',endpoint+'/entities',{},key=reader,status=403)
+    call('POST',endpoint+'/query',fused(),key=reader,status=403)
     if faults:
         for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
             request=edge('self-'+stage,'a','a')
@@ -76,6 +94,9 @@ def exercise(call,restart_with,faults):
             assert call('POST',endpoint+'/doc',request)['receipt']==first
             ids=[row['edge']['record_id'] for row in call('POST',endpoint+'/neighbors',query('a'))['hits']]
             assert ids.count(request['record_id'])==1
+            fusion=call('POST',endpoint+'/query',fused())
+            assert any(h['record']['record_id']=='a' for h in fusion['hits'])
+            assert not any(h['record']['record_id']=='b' for h in fusion['hits'])
     call('DELETE','/api/v1/backups/'+archive['backup_id'],{'operation_id':operation()})
     call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'relation-reader'})
     print('PASS relations HTTP: exact endpoints, cycles, bounded counts, update/delete hiding, revocation, quarantine, takeover and replay'+(' with process faults' if faults else ''))

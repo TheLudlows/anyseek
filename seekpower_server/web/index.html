@@ -108,6 +108,10 @@
 <label for="relationBudget">Candidate budget</label><input id="relationBudget" type="number" min="1" max="10000" value="1000">
 <label><input id="relationPartial" type="checkbox"> Explicitly allow a partial window</label>
 <button id="expandNeighbors" type="button">Expand one hop</button>
+<label for="fusionQuery">Text/vector query with relation_fusion RRF settings (JSON; current seed controls are used)</label>
+<textarea id="fusionQuery" rows="5">{"query":"alpha","length":10,"relation_fusion":{"rrf":{"constant":0.6,"keyword_weight":1,"vector_weight":1,"keyword_candidates":100,"vector_candidates":100},"relation_weight":1}}</textarea>
+<button id="fuseRelations" type="button">Fuse search and one hop</button>
+<p>Fusion counts are candidate windows, not exact corpus recall. Ranks start at zero; repeated neighbors contribute once. Edge weights do not affect ranking.</p>
 <p id="relationStatus" role="status"></p><pre id="relationResult"></pre>
 </details>
 <button id="backToSearch" type="button">Back to search</button>
