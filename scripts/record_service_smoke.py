@@ -533,6 +533,8 @@ def main():
             from record_graph_smoke import exercise as graph_exercise
             graph_exercise(call,restart_with,args.faults)
             temporal_exercise(call,restart_with,root.parent,args.faults)
+            from record_upload_smoke import exercise as upload_exercise
+            upload_exercise(call,restart_with,args.faults)
             from record_lease_smoke import exercise as lease_exercise
             lease_exercise(call,restart_with,root.parent,False)
             if args.browser:

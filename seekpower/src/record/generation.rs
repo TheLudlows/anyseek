@@ -31,6 +31,19 @@ pub struct GenerationChunk {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GenerationCommand {
+    /// Reserve a fixed complete member list; payload arrives in bounded batches.
+    Begin { /// Never-reused generation identity.
+        generation_id:String, /// Exact source identity/version and route.
+        source:EvidenceRef, /// Ordered complete membership.
+        members:Vec<String> },
+    /// Append previously absent declared members; never searchable until publication.
+    StageBatch { /// Active upload identity.
+        generation_id:String, /// Bounded batch, each member sent exactly once.
+        chunks:Vec<GenerationChunk> },
+    /// Verify complete membership and canonical manifest digest before publication.
+    Seal { /// Active upload identity.
+        generation_id:String, /// SHA-256 of the canonical manifest representation.
+        manifest_sha256:String },
     /// Persist one complete manifest; an existing staging slot must first finish.
     Stage {
         /// Never-reused identity within this document.
@@ -55,18 +68,20 @@ pub enum GenerationCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Staged {
     pub(super) deadline_ms: u64,
-    scope: String,
+    pub(super) scope: String,
     pub(super) id: String,
-    source: EvidenceRef,
-    chunks: Vec<GenerationChunk>,
+    pub(super) source: EvidenceRef,
+    pub(super) chunks: Vec<GenerationChunk>,
+    pub(super) members: Vec<String>,
+    pub(super) sealed: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Manifest {
-    routing_key: String,
+    pub(super) routing_key: String,
     pub(super) version: u64,
-    used: BTreeSet<String>,
-    active: Option<String>,
-    active_members: Vec<String>,
+    pub(super) used: BTreeSet<String>,
+    pub(super) active: Option<String>,
+    pub(super) active_members: Vec<String>,
     pub(super) staged: Option<Staged>,
 }
 impl Manifest { pub(super) fn was_used(&self,id:&str)->bool {self.used.contains(id)} }
@@ -85,6 +100,12 @@ pub struct GenerationStatus {
     pub staged_generation: Option<String>,
     /// Number of complete staged bodies.
     pub staged_members: usize,
+    /// Declared total membership, reserved before any batch is accepted.
+    pub expected_members: usize,
+    /// Only sealed complete uploads may publish.
+    pub sealed: bool,
+    /// Canonical digest of the currently received manifest; compare at Seal.
+    pub manifest_sha256: Option<String>,
     /// Trusted UTC millisecond deadline; equality is expired.
     pub lease_expires_at_ms: Option<u64>,
     /// Current control version required for renewal/publication.
@@ -100,11 +121,11 @@ fn rejected(s: &str) -> RecordError { RecordError::Rejected(s.into()) }
 fn conflict(s: &str) -> RecordError { RecordError::Conflict(s.into()) }
 fn bounded(s: &str) -> bool { !s.is_empty() && s.len() <= 256 }
 pub(super) fn reserved(state: &State) -> usize {
-    state.generations.values().filter_map(|g| g.staged.as_ref()).map(|g| g.chunks.len()).sum()
+    state.generations.values().filter_map(|g| g.staged.as_ref()).map(|g| g.members.len()).sum()
 }
 pub(super) fn reserve_slots(state: &State) -> usize {
     state.records.values().filter(|r| r.system.is_some() && r.document.is_some()).count()
-        + reserved(state) + state.generations.values().filter(|g| g.staged.is_some()).count()
+        + reserved(state) + state.generations.values().filter_map(|g|g.staged.as_ref()).map(|s|if s.sealed{1}else{2}).sum::<usize>()
 }
 pub(super) fn staged_ttl_count(state:&State)->usize {
     state.generations.values().filter_map(|g|g.staged.as_ref()).flat_map(|g|g.chunks.iter()).filter(|c|c.temporal.as_ref().is_some_and(|t|t.expire_at_ms.is_some())).count()
@@ -116,7 +137,7 @@ pub(super) fn reserve_bytes(state: &State) -> usize {
 }
 pub(super) fn occupied(state: &State, id: &str) -> bool {
     state.records.contains_key(id) || state.generations.contains_key(id)
-        || state.generations.values().filter_map(|g| g.staged.as_ref()).any(|s| s.chunks.iter().any(|c| c.record_id == id))
+        || state.generations.values().filter_map(|g| g.staged.as_ref()).any(|s| s.members.iter().any(|c| c == id))
 }
 fn member(stage: &Staged, chunk: &GenerationChunk, route: &str, document_id: &str, ingestion:u64) -> Record {
     let mut refs = vec![stage.source.clone()];
@@ -125,7 +146,7 @@ fn member(stage: &Staged, chunk: &GenerationChunk, route: &str, document_id: &st
         temporal:chunk.temporal.clone().unwrap_or_default(), ingested_at_ms:ingestion, expired_at_ms:None,
         document: Some(chunk.document.clone()), system: Some(EvidenceMetadata { kind: EvidenceKind::Derived, evidence_refs: refs, relation:None }), retired_generation: false, generation_member: Some(GenerationMember { document_id:document_id.into(), generation_id:stage.id.clone() }) }
 }
-fn validate_stage(state: &State, config: &RecordConfig, stage: &Staged, request: &RecordWrite, evaluation:u64) -> Result<(), RecordError> {
+pub(super) fn validate_stage(state: &State, config: &RecordConfig, stage: &Staged, request: &RecordWrite, evaluation:u64) -> Result<(), RecordError> {
     if state.independent_snapshot && stage.chunks.iter().any(|c| c.temporal.as_ref().is_some_and(|t| t.expire_at_ms.is_some())) { return Err(rejected("TTL generation requires a certified live owner")); }
     let source = state.records.get(&stage.source.record_id).ok_or_else(|| conflict("generation source absent"))?;
     if source.version != stage.source.version || source.routing_key != stage.source.routing_key
@@ -171,19 +192,23 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
                 || chunks.iter().any(|c| !bounded(&c.record_id) || c.record_id == request.record_id || occupied(state, &c.record_id)) {
                 return Err(rejected("generation member manifest incomplete, duplicate or occupied"));
             }
-            validate_stage(state, config, &Staged { deadline_ms:lease::deadline(evaluation)?, scope:state.feed.scope.clone(), id:generation_id.clone(), source:source.clone(), chunks:chunks.clone() }, &request, evaluation)?;
+            validate_stage(state, config, &Staged { deadline_ms:lease::deadline(evaluation)?, scope:state.feed.scope.clone(), id:generation_id.clone(), source:source.clone(), chunks:chunks.clone(),members:members.clone(),sealed:true }, &request, evaluation)?;
+        }
+        GenerationCommand::Begin{..}|GenerationCommand::StageBatch{..}|GenerationCommand::Seal{..} => {
+            upload::validate_request(state,config,&request,evaluation)?;
         }
         GenerationCommand::Publish { generation_id } | GenerationCommand::Abort { generation_id } | GenerationCommand::Renew { generation_id } => {
             let stage = old.and_then(|g| g.staged.as_ref()).filter(|s| &s.id == generation_id).ok_or_else(|| conflict("staged generation mismatch"))?;
             if stage.deadline_ms<=evaluation{return Err(conflict("staging lease expired"));}
             if matches!(request.generation,Some(GenerationCommand::Renew{..})){lease::deadline(evaluation)?;}
             if matches!(request.generation, Some(GenerationCommand::Publish { .. })) {
+                if !stage.sealed{return Err(conflict("generation must be sealed before publication"));}
                 if stage.scope!=state.feed.scope{return Err(conflict("restored staging requires renewed fencing lease"));}
                 validate_stage(state, config, stage, &request, evaluation)?;
             }
         }
     }
-    let receipt = WriteReceipt { staged_only: matches!(request.generation, Some(GenerationCommand::Stage { .. }|GenerationCommand::Renew { .. })), seq: state.seq.checked_add(1).ok_or_else(|| storage("sequence exhausted"))?,
+    let receipt = WriteReceipt { staged_only: matches!(request.generation, Some(GenerationCommand::Stage { .. }|GenerationCommand::Begin{..}|GenerationCommand::StageBatch{..}|GenerationCommand::Seal{..}|GenerationCommand::Renew { .. })), seq: state.seq.checked_add(1).ok_or_else(|| storage("sequence exhausted"))?,
         version: old.map_or(Some(1), |g| g.version.checked_add(1)).ok_or_else(|| storage("generation version exhausted"))?, record_id:request.record_id.clone() };
     let applied = Applied { request_digest:None, graph_invalidation:false, request, receipt, observed_epoch:epoch, observed_time_ms:evaluation };
     let mut candidate = state.clone(); super::apply(&mut candidate, &applied)?;
@@ -208,9 +233,12 @@ pub(super) fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordEr
     if applied.receipt.version != old.map_or(1, |g| g.version.saturating_add(1)) { return Err(storage("inconsistent generation version")); }
     let mut manifest = old.cloned().unwrap_or(Manifest { routing_key:request.routing_key.clone(), version:0, used:BTreeSet::new(), active:None, active_members:vec![], staged:None });
     match request.generation.as_ref().unwrap() {
-        GenerationCommand::Stage { generation_id, source, chunks, .. } => {
+        GenerationCommand::Stage { generation_id, source, chunks, members } => {
             if manifest.staged.is_some() || !manifest.used.insert(generation_id.clone()) { return Err(storage("inconsistent generation staging")); }
-            manifest.staged = Some(Staged { deadline_ms:lease::deadline(applied.observed_time_ms)?, scope:state.feed.scope.clone(), id:generation_id.clone(), source:source.clone(), chunks:chunks.clone() });
+            manifest.staged = Some(Staged { deadline_ms:lease::deadline(applied.observed_time_ms)?, scope:state.feed.scope.clone(), id:generation_id.clone(), source:source.clone(), chunks:chunks.clone(),members:members.clone(),sealed:true });
+        }
+        GenerationCommand::Begin{..}|GenerationCommand::StageBatch{..}|GenerationCommand::Seal{..} => {
+            upload::apply(&mut manifest,request,applied.observed_time_ms,&state.feed.scope)?;
         }
         GenerationCommand::Publish { generation_id } => {
             let stage = manifest.staged.take().filter(|s| &s.id == generation_id).ok_or_else(|| storage("missing published stage"))?;
@@ -260,14 +288,16 @@ pub(super) fn validate_state(state: &State, config: &RecordConfig) -> Result<(),
             if !active.insert(member) || state.records.get(member).is_none_or(|r| r.generation_member.as_ref().is_none_or(|m| &m.document_id != id || Some(&m.generation_id) != g.active.as_ref()) || r.retired_generation || r.routing_key != g.routing_key || !r.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Derived)) { return Err(storage("invalid active generation member")); }
         }
         if let Some(s) = &g.staged {
+            upload::validate_history(state,id,g)?;
             if s.scope.is_empty()||s.deadline_ms==0{return Err(storage("invalid staging lease"));}
             locator::validate_retained(state,&s.source)?;
             for reference in s.chunks.iter().flat_map(|c|c.evidence_refs.iter()) {locator::validate_retained(state,reference)?;}
             let source = state.records.get(&s.source.record_id).ok_or_else(|| storage("staged source missing"))?;
             if s.source.version == 0 || s.source.version > source.version || source.routing_key != s.source.routing_key || source.routing_key != g.routing_key
                 || !source.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Source) { return Err(storage("invalid staged source provenance")); }
-            if !g.used.contains(&s.id) || s.chunks.is_empty() || s.chunks.len() > 100 { return Err(storage("invalid staged generation")); }
-            for c in &s.chunks { if let Some(metadata)=&c.temporal { temporal::validate(metadata,0).map_err(storage)?; } if !staged.insert(&c.record_id) || state.records.contains_key(&c.record_id) || state.generations.contains_key(&c.record_id) { return Err(storage("invalid staged member reservation")); } }
+            if !g.used.contains(&s.id) || upload::validate_manifest(s).is_err() { return Err(storage("invalid staged generation")); }
+            for member in &s.members {if !staged.insert(member) || state.records.contains_key(member) || state.generations.contains_key(member){return Err(storage("invalid staged member reservation"));}}
+            for c in &s.chunks { if let Some(metadata)=&c.temporal { temporal::validate(metadata,0).map_err(storage)?; } if !s.members.contains(&c.record_id) { return Err(storage("invalid staged member reservation")); } }
         }
     }
     Ok(())
@@ -283,6 +313,7 @@ impl RecordPartition {
         Ok(Some(GenerationStatus { record_id:id.into(), version:g.version, active_generation:g.active.clone(),
             visible_members:g.active_members.iter().filter(|id| inner.locations.contains_key(*id)).count(),
             lease_expires_at_ms:g.staged.as_ref().map(|s|s.deadline_ms), lease_fence:g.staged.as_ref().map(|_|g.version), lease_requires_renewal:g.staged.as_ref().is_some_and(|s|s.scope!=inner.state.feed.scope), private_cleanup_pending:inner.state.private_cleanup_pending,
+            expected_members:g.staged.as_ref().map_or(0,|s|s.members.len()),sealed:g.staged.as_ref().is_some_and(|s|s.sealed),manifest_sha256:g.staged.as_ref().map(upload::manifest_digest).transpose()?,
             staged_generation:g.staged.as_ref().map(|s| s.id.clone()), staged_members:g.staged.as_ref().map_or(0, |s| s.chunks.len()), visible_seq:inner.state.seq }))
     }
 }

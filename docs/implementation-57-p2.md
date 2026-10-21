@@ -1,6 +1,6 @@
 # Issue #57 P2 实施设计：来源、证据与统一可见性
 
-状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与需求/测试收敛见第 22–23 节；已批准不等于已实现。
+状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施及范围审计校正见第 24 节；已批准不等于已实现。
 
 - 产品依据：[issue #57](https://github.com/TheLudlows/seekpower/issues/57)，包含顶部 2026-10-21 确认。
 - 实施入口：[P1-A 与阶段记录](implementation-57.md)。本设计不替换总体路线。
@@ -986,15 +986,60 @@ staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保�
 | 原计划 | 当前实现/代码责任 | 可核验测试与边界 | 剩余/设计收敛 |
 | --- | --- | --- | --- |
 | P2-1 来源、版本、直接/间接证据与定位 | evidence/enrichment/mutation；Source 历史版本；locator 精确 UTF-8 字节或 inline 页及原内容 hash | source/revision/locator core；record_locator_smoke；删除、stale、精确版本/路由、循环/深度预算、恢复与输出屏障 | 小内联原文已实现；外部 URL 不是已备份原文。管理型大文件 Blob/解析器未提供，按实际输入再决定，不能声称已有 |
-| P2-2 generation/staging 原子发布 | generation/publication/lease；一份完整有界 Stage + Publish/Abort/Renew，持久但未发布不可见；30分钟租约、scope+版本 fence、安全私有清理 | generation/lease core；HTTP/Chromium；取消/重试/多组件退出/新 owner 续租/清理失败重试 | 采用整份 Stage 原子验证代替设计草案 Begin/StageBatch/Seal 流式协议；100 chunks/1 MiB 等现有边界不放宽。不是无限上传/后台 GC，空闲时不承诺即时物理清理 |
+| P2-2 generation/staging 原子发布 | generation/publication/lease；一份完整有界 Stage + Publish/Abort/Renew，持久但未发布不可见；30分钟租约、scope+版本 fence、安全私有清理 | generation/lease core；HTTP/Chromium；取消/重试/多组件退出/新 owner 续租/清理失败重试 | 此融合检查点仍只有整份Stage，不等价于issue明确的分批上传；后续多批次实现见§24。不是无限上传/后台GC，空闲时不承诺即时物理清理 |
 | P2-3 可选向量与后补 | vector_patch/enrichment，精确正文版本与 embedding space，缺向量不占位 | vector_patch/generation core；服务重试/冲突/备份接管流程 | 模型/向量生成任务调度属于上层；没有计算服务或质量承诺 |
-| P2-4 时间/TTL | temporal，固定毫秒 evaluation_time、事件/入库/业务时间、请求驱动不可逆过期及依赖隐藏 | temporal core + record_temporal_smoke，边界/回拨/恢复/输出/统计；融合 temporal oracle | 无独立后台调度服务；§3.5/§7 中后续有预算的独立时间候选/排序通道仍未实现，当前为时间硬过滤；不把物理回收算作 TTL 已完成 |
+| P2-4 时间/TTL | temporal，固定毫秒 evaluation_time、事件/入库/业务时间、请求驱动不可逆过期及依赖隐藏 | temporal core + record_temporal_smoke，边界/回拨/恢复/输出/统计；融合 temporal oracle | 无独立后台调度服务；独立时间候选/排序是§3.5的工程建议而非首版硬门槛；当前为issue要求的时间硬过滤；不把物理回收算作 TTL 已完成 |
 | P2-5 显式实体/一跳/共同查询 | graph 重建缓存 + fusion 同 guard，精确双端、过滤/排序/预算窗口 | relation_*、fusion_* core；record_graph_smoke + Chromium；generation/TTL/source失效、撤权、重启/接管 | 同 collection/partition、非关系端点；无自动抽取/消歧、多跳语言。原文未要求的跨分区图不加入 |
 | P2-6 持久 change feed | change_feed + 通用 Applied/Expiration，同权威提交；至少7天、容量背压、scope/floor/bootstrap | feed core + record_feed_smoke；阶段退出/游标过期/恢复/隐藏/私有 staging 不泄露 | UI 是检查器，不是自动同步消费者；消费者自行幂等至少一次处理，过期必须重建 |
 | P2-7 HTTP/UI、恢复、授权与验收 | 默认 record_service/catalog/data 输出；service/collection snapshot 与同服务受控接管 | 完整服务脚本含共享 key/撤权、旧授权不复活、原 owner 封存、恢复故障、实际 Chromium | 新服务缺可信最新删除历史仍隔离；不提供强制绕过/跨服务自动灾备。当前最终本地 SHA 的 Windows 原生测试未运行；系统断电未验收 |
 
-仍存在的 P2 设计覆盖差异：§3 来源设计提出的通用 RecordRevision 受保护历史读取尚未提供（目前专用历史读取只支持 Source）；§3.5 的独立时间候选通道及逐命中通道解释尚未提供（当前时间过滤、融合总分和窗口元信息已实现）。这些应由后续收敛决定落实，不归类成 P3，也不以本批融合替代。
+经§24原issue审计校正：通用RecordRevision历史API、独立时间候选是内部工程细化/可选能力，当前未实现，不自动扩大首版硬门槛。逐命中通道与原始分数则是issue首版明确要求，当前只有融合总分/窗口元信息，须在后续独立批次补齐。多批次staging也是明确要求，不能把完整Stage当等价替代；实现见§24。
 
 真实尚未完成的验收项：本批 Linux 全套/真实服务与复审已通过；本地关系、定位、租约、融合链最终 SHA 的 Windows 原生 CI 待批准发布后运行；双平台系统崩溃/断电需要可丢弃隔离环境和外部已确认写入/撤权/删除见证，不能用进程退出代替。P1-A 可靠性门槛未因此取消。
 
-非本阶段：P3 通用历史版本/幂等账本长期 GC、Segment compaction 和稳定持续运行容量；P4/P5 对象存储/indexer/cache/云协议；P6 分区扩展。当前只有 Source 提供专用历史证据读取，其他对象历史保存在权威账本，不宣称通用历史 MVCC 读取服务。没有升级迁移/旧格式兼容。原文档中建议的大批流式上传/管理 Blob 是明确未实现的扩展，不能把它们暗记为通过，也不因此自行扩大本批。
+非本阶段：P3 通用历史版本/幂等账本长期 GC、Segment compaction 和稳定持续运行容量；P4/P5 对象存储/indexer/cache/云协议；P6 分区扩展。当前只有 Source 提供专用历史证据读取，其他对象历史保存在权威账本，不宣称通用历史 MVCC 读取服务。没有升级迁移/旧格式兼容。多批次staging属于原issue明确要求（见§24），不能划入P3；无限流式文件上传和管理型Blob则按实际输入需求选用，当前未提供，不把上层URL文件当已备份内容。
+
+## 24. 有界多批次 generation 上传（本地检查点完成）
+
+分支 `feat/57-p2-generation-batches`，基线 `58b571616e8b40572c9e27d305f4c07cda7bf7e5`。本批只补原 issue 明确的大文档分批 staging 缺口；逐命中通道/原始分数解释在下一独立检查点实现。仅本地实施、测试、提交，不推送或修改 PR。
+
+### 24.1 范围审计校正
+
+重新读取 issue #57（更新时间 2026-10-21T01:39:56Z）：原「记忆与知识的更新语义」明确要求大文档分批 staging 后最终发布，不能以此前完整单条 Stage 视为等价完成；「查询与排名」首版结果明确要求命中通道和原始分数。它们是需补齐项。§23 当时把其余设计差异并列为硬缺口不准确，按以下分类收敛：
+
+- 通用任意 RecordRevision 历史读取是本文 §3.2 的内部设计细化；原目标要求来源/证据版本可追踪，不要求无限期历史快照或任意历史审计 API。当前 Source 历史、Derived 不覆盖原身份及失效隐藏的开放语义保持；通用历史 API 未实现，但不自动增加首版硬门槛。
+- 独立时间排名是 §3.5 的工程建议；issue 首版要求范围硬过滤，可选时间召回/近期偏好不等于强制第三排名通道。当前时间仅过滤，独立时间排名未实现，不以新文档扩大原目标。
+- 管理型 Blob 按输入需要选用；issue 允许完整来源由上层系统管理。当前未提供大文件上传/BlobStore，URL 所指文件没有因此被 SeekPower 备份。不得将 Blob 自动划为仅 P4 能做，也不因没有托管大文件而否定内联首版。
+- §6 的 1000 chunks/64 MiB 是工程建议，不是已批准容量承诺；当前保持明确较小可恢复边界。P3 历史 GC/Segment compaction 不进入本批。
+
+### 24.2 实际协议与模块
+
+`record/upload.rs` 负责成员清单、批次累计、摘要和恢复核验；`generation.rs` 继续承担控制版本、资源规划和整代发布；`lease.rs` 复用私有清理/幂等摘要。HTTP/JS 不复制业务规则。
+
+- Begin 固定 source/version、generation ID、routing 和完整有序成员清单，并预留全部成员身份；未接收正文也不能被普通写抢占。StageBatch 只追加尚未收到的声明成员，每批独立 operation_id/expected。不能修改 source、替换已收到正文或添加未声明成员；修正需 Abort + 新 generation。
+- 单命令仍≤1 MiB，整代 received chunk JSON≤4 MiB、成员≤100；总身份、操作、完整 checkpoint/WAL 预算继续生效。不是无限内存暂存或流式文件系统；当前权威状态的内存和复制受这些硬上限约束。未sealed额外预留Seal槽，完整批次成功后仍保有Seal→Publish终结路径。
+- 每批独立 Applied WAL；Seal 校验完整成员及 canonical SHA-256，Publish 仅小型控制命令，均不重复装入全量 chunks。完成 Seal 前所有批次不可搜索，最终仍由既有增量发布一次切换正文、索引、证据和统计。
+- Begin/新批次/Seal/Renew 刷新30分钟租约；相同请求重试仅返回原回执，不延期。恢复owner需显式Renew后才能追加/Seal/Publish，旧fence失败。取消沿用owned executor；未知结果保留原operation_id处理。
+- Abort/过期redact全部私有StageBatch正文，保留原请求摘要/回执，之后安全checkpoint回收旧WAL。Begin仅保留清单和来源元数据，无私有正文。已发布批次不由此回收。
+- checkpoint 恢复不能独立信任 `sealed`：从保留 Stage/Begin/StageBatch/Seal/Renew 决定重建当前 staging，校验摘要、正文、顺序、截止时间，再与状态比较。伪造sealed、篡改Seal摘要、调整chunks顺序均拒绝恢复。journal V12，拒绝旧格式，不提供迁移。
+
+请求与摘要编码见 [server README](../seekpower_server/README.md#bounded-multipart-generations-v12)。现有小文档完整Stage继续可用；两种入口共用一次权威提交和发布路径。
+
+### 24.3 最终验证记录
+
+四项定向core测试通过：两批各低于1 MiB、总正文超过1 MiB、实际Applied逐批且Publish<2 KiB；完整状态重启/检查点；过期后每批redaction与原回执；三类损坏checkpoint实际open拒绝；满额仍能Seal→Publish。独立审查发现并修复sealed来由缺口和少预留Seal槽，复审无未修复阻塞。
+
+最终源码验证全部通过（2026-10-21，Linux）：
+
+| 命令/范围 | Linux | Windows 本批 |
+| --- | --- | --- |
+| `cargo test --workspace --all-targets --quiet` | **35 suites，225 passed，0 failed，10 ignored** | 未运行 |
+| `cargo build --workspace` | 通过 | 未运行 |
+| `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser` | 通过；真实1.2 MB正文分两批、接管中途续传、摘要拒绝、checkpoint/restart与浏览器上传发布 | 未运行 |
+| `cargo build -p seekpower_server --features fault-injection` 后同smoke `--faults --browser` | 通过；Begin/StageBatch/Seal/Publish各四故障点，以及全部既有服务矩阵 | 未运行 |
+| `python3 scripts/check_core_boundary.py` | default/no-default-features通过 | 未运行 |
+| OpenAPI生成/多批协议断言、`git diff --check` | 通过 | 未运行/不适用 |
+
+10 ignored为9个由父测试启动的子进程worker和1个既有跨构建辅助fixture，不单独算通过。初轮到期测试在重开后忘记重新绑定测试时钟而报ClockUncertain，已修正夹具，未放松时钟保证。最终全量在恢复/容量修复后执行；默认服务与fault服务依次构建/验证。日志 `/tmp/p2-batches-final-{all,build,http,fault-build,fault-http,boundary,openapi}.log`。全部删除/封存/退出故障只使用临时数据。
+
+本批仅本地提交；Windows原生未运行，系统断电仍需隔离环境和外部确认见证。下一独立批次仍为逐命中通道/原始分数/RRF贡献，不将本检查点称为全部P2验收完成。

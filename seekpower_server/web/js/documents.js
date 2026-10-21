@@ -57,7 +57,7 @@ async function submitPendingWrites() {
         }
         sessionStorage.removeItem('seekpower.pendingWrites');
         pendingDocumentCommit = null;
-        $('#documentStatus').text(pending.requests.some(r => ['stage','renew'].includes(r.generation?.action))
+        $('#documentStatus').text(pending.requests.some(r => ['stage','begin','stage_batch','seal','renew'].includes(r.generation?.action))
             ? `Wrote ${pending.requests.length} record(s). Staging is durable, not searchable until an explicit publish succeeds.`
             : `Wrote ${pending.requests.length} record(s). All confirmed writes are durable and visible.`);
         $('#retryDocumentCommit,#discardRejectedWrites').prop('hidden', true);

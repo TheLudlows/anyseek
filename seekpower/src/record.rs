@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, Semaphore};
 mod evidence;
 mod enrichment;
 mod generation;
+mod upload;
 mod temporal;
 mod change_feed;
 mod graph;
@@ -297,15 +298,15 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV11")]
+    #[serde(rename = "RecordCheckpointV12")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV11")]
+    #[serde(rename = "RecordAppliedV12")]
     Applied(Applied),
-    #[serde(rename = "RecordExpiredV11")]
+    #[serde(rename = "RecordExpiredV12")]
     Expired(temporal::Expiration),
-    #[serde(rename = "RecordFeedTrimV11")]
+    #[serde(rename = "RecordFeedTrimV12")]
     FeedTrim(change_feed::Trim),
-    #[serde(rename = "RecordLeaseExpiredV11")]
+    #[serde(rename = "RecordLeaseExpiredV12")]
     LeaseExpired(lease::Expiration),
 }
 struct Inner {
@@ -1445,6 +1446,84 @@ mod tests {
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
+    async fn multipart_generation_exceeds_command_limit_with_small_publish() {
+        let root=path();let mut cfg=config();cfg.max_record_bytes=1024*1024;cfg.max_journal_bytes=64*1024*1024;
+        let p=RecordPartition::create(&root,cfg.clone()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let GenerationCommand::Stage{source,members,mut chunks,..}=stage_generation("g",&["one","two"]) else{unreachable!()};
+        for chunk in &mut chunks {chunk.document.insert("payload".into(),serde_json::json!("x".repeat(600_000)));}
+        let begin=generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members});
+        p.write(begin.clone()).await.unwrap();assert!(p.write(write("reserved","one","alpha",ExpectedVersion::Absent)).await.is_err());
+        let first=generation_write("batch1",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks:vec![chunks[1].clone()]});
+        let r=p.write(first.clone()).await.unwrap();assert!(r.staged_only);assert_eq!(p.write(first.clone()).await.unwrap(),r);
+        assert!(p.get("two").await.unwrap().is_none());
+        let incomplete=p.generation_status("doc").await.unwrap().unwrap();assert_eq!(incomplete.expected_members,2);assert_eq!(incomplete.staged_members,1);
+        assert!(p.write(generation_write("earlyseal",ExpectedVersion::Match(2),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:incomplete.manifest_sha256.unwrap()})).await.is_err());
+        assert!(p.write(generation_write("earlypublish",ExpectedVersion::Match(2),GenerationCommand::Publish{generation_id:"g".into()})).await.is_err());
+        let second=generation_write("batch2",ExpectedVersion::Match(2),GenerationCommand::StageBatch{generation_id:"g".into(),chunks:vec![chunks[0].clone()]});
+        p.write(second.clone()).await.unwrap();
+        assert!(serde_json::to_vec(&first).unwrap().len()<1024*1024);assert!(serde_json::to_vec(&second).unwrap().len()<1024*1024);
+        assert!(serde_json::to_vec(&first).unwrap().len()+serde_json::to_vec(&second).unwrap().len()>1024*1024);
+        let status=p.generation_status("doc").await.unwrap().unwrap();
+        assert!(p.write(generation_write("badseal",ExpectedVersion::Match(3),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:"0".repeat(64)})).await.is_err());
+        let seal=generation_write("seal",ExpectedVersion::Match(3),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:status.manifest_sha256.unwrap()});
+        p.write(seal.clone()).await.unwrap();assert!(serde_json::to_vec(&seal).unwrap().len()<1024);
+        drop(p);let p=RecordPartition::open(&root,cfg.max_journal_bytes).await.unwrap();
+        assert!(p.generation_status("doc").await.unwrap().unwrap().sealed);assert!(p.get("one").await.unwrap().is_none());
+        assert_eq!(p.write(first).await.unwrap(),r);
+        let publish=generation_write("publish",ExpectedVersion::Match(4),GenerationCommand::Publish{generation_id:"g".into()});
+        let receipt=p.write(publish.clone()).await.unwrap();assert!(!receipt.staged_only);
+        let inner=p.inner.lock().await;
+        let applied=inner.state.operations.last().unwrap();assert!(encode_entry(&Entry::Applied(applied.clone())).unwrap().len()<2048);
+        let batches:Vec<_>=inner.state.operations.iter().filter(|a|matches!(a.request.generation,Some(GenerationCommand::StageBatch{..}))).collect();assert_eq!(batches.len(),2);
+        assert!(batches.iter().all(|a|encode_entry(&Entry::Applied((*a).clone())).unwrap().len()<1024*1024));drop(inner);
+        for id in ["one","two"]{assert_eq!(p.get(id).await.unwrap().unwrap().document.unwrap()["payload"].as_str().unwrap().len(),600_000);}
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,cfg.max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(publish).await.unwrap(),receipt);assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,2);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn multipart_checkpoint_cannot_forge_seal_or_order() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let GenerationCommand::Stage{source,members,chunks,..}=stage_generation("g",&["one","two"]) else{unreachable!()};
+        p.write(generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members})).await.unwrap();
+        p.write(generation_write("batch",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks})).await.unwrap();
+        let inner=p.inner.lock().await;let state=inner.state.clone();let cfg=inner.config.clone();drop(inner);
+        let mut bad=state.clone();bad.generations.get_mut("doc").unwrap().staged.as_mut().unwrap().sealed=true;
+        let mut order=state;order.generations.get_mut("doc").unwrap().staged.as_mut().unwrap().chunks.reverse();
+        let hash=p.generation_status("doc").await.unwrap().unwrap().manifest_sha256.unwrap();
+        p.write(generation_write("seal",ExpectedVersion::Match(2),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:hash})).await.unwrap();
+        let mut wrong=p.inner.lock().await.state.clone();if let Some(GenerationCommand::Seal{manifest_sha256,..})=&mut wrong.operations.last_mut().unwrap().request.generation{*manifest_sha256="0".repeat(64);}
+        for state in [bad,order,wrong]{let damaged=path();let bytes=encode_entry(&Entry::Checkpoint{config:cfg.clone(),state}).unwrap();drop(PartitionJournal::create(&damaged,cfg.max_journal_bytes,&bytes).unwrap());assert!(RecordPartition::open(&damaged,cfg.max_journal_bytes).await.is_err());std::fs::remove_dir_all(damaged).unwrap();}
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn multipart_completion_reserves_seal_and_publish() {
+        let root=path();let mut cfg=config();cfg.max_operations=7;
+        let p=RecordPartition::create(&root,cfg).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let GenerationCommand::Stage{source,members,chunks,..}=stage_generation("g",&["one"]) else{unreachable!()};
+        p.write(generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members})).await.unwrap();
+        p.write(generation_write("batch",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks})).await.unwrap();
+        let hash=p.generation_status("doc").await.unwrap().unwrap().manifest_sha256.unwrap();
+        p.write(generation_write("seal",ExpectedVersion::Match(2),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:hash})).await.unwrap();
+        p.write(generation_write("publish",ExpectedVersion::Match(3),GenerationCommand::Publish{generation_id:"g".into()})).await.unwrap();assert!(p.get("one").await.unwrap().is_some());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn multipart_expiry_redacts_each_batch_and_retains_retries() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(source_write("s","s",&[])).await.unwrap();
+        let GenerationCommand::Stage{source,members,chunks,..}=stage_generation("g",&["one","two"]) else{unreachable!()};
+        p.write(generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members})).await.unwrap();
+        clock.set(now+100);let batch=generation_write("batch",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks:vec![chunks[0].clone()]});let receipt=p.write(batch.clone()).await.unwrap();
+        clock.set(now+1_800_100);assert!(p.generation_status("doc").await.unwrap().unwrap().staged_generation.is_none());
+        assert_eq!(p.write(batch.clone()).await.unwrap(),receipt);
+        let state=p.inner.lock().await.state.clone();let op=state.operations.iter().find(|o|o.request.operation_id==batch.operation_id).unwrap();assert!(op.request_digest.is_some());
+        assert!(matches!(&op.request.generation,Some(GenerationCommand::StageBatch{chunks,..}) if chunks.is_empty()));lease::validate_state(&state).unwrap();
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock.clone();assert_eq!(p.write(batch).await.unwrap(),receipt);
+        p.write(write("reuse","two","alpha",ExpectedVersion::Absent)).await.unwrap();
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
     async fn relation_cycles_exact_endpoints_aba_and_rebuild() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         p.write(entity_write("entity-a","a")).await.unwrap();
@@ -2298,7 +2377,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV11", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV12", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
