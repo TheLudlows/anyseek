@@ -1,10 +1,12 @@
 # Versioned text normalization
 
+[文档索引](README.md) · [当前功能与限制](../FEATURES.md) · [开发与验证](development.md)
+
+
 New indexes can explicitly select `text_normalization: "OpenCcT2s1_1_9"`.
 Omitting the setting selects `"None"`, preserving existing behavior. Existing
-metadata without the field also means None. Product default activation and
-performance budgets remain undecided in #35; this implementation does not change
-them. No per-query override, update endpoint, or index migration is provided.
+metadata without the field also means None. The default remains None. Issue #35 was closed as not planned when the
+performance investigation stopped; it is not an active implementation dependency. No per-query override, update endpoint, or index migration is provided.
 
 The rule is persisted in index/shard metadata and used by the same tokenizer
 entry point for document and query text, before word segmentation and n-grams.
@@ -18,7 +20,7 @@ matching, followed by the first character mapping. It is a compatibility
 implementation, not an official Rust binding or the complete OpenCC API.
 Official `TSPhrases` and `TSCharacters` data and Apache-2.0 license are embedded
 from commit `556ed22496d650bd0b13b6c163be9814637970ae`. Source URLs, SHA-256
-hashes and version are in `seekpower/data/opencc-1.1.9/provenance.json`.
+hashes and version are in `anyseek/data/opencc-1.1.9/provenance.json`.
 No network access, external converter process, runtime data download or native
 library installation is required. An immutable process-wide LazyLock dictionary
 is initialized once and reused across indexes and queries.

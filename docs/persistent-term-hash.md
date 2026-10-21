@@ -1,5 +1,8 @@
 # Persistent term hashing: index format 8.0
 
+[文档索引](README.md) · [当前功能与限制](../FEATURES.md) · [开发与验证](development.md)
+
+
 Format 8.0 replaces the architecture-selected ahash term-key contract of 7.0.
 It is an incompatible disk format change, not an index migration. Existing 7.0
 indexes (AES or fallback), unknown versions and malformed/missing headers are

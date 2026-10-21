@@ -5,7 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — SeekPower
+## [Unreleased] — anyseek
+
+- 项目品牌及 Rust 包/二进制统一为 anyseek / anyseek_server；当前变更与验证见 [品牌记录](docs/validation/anyseek-brand.md)。远端仓库地址保持不变。
+- PR #61–#67 已合入可靠 Record 与 P2 功能批次，详见 [当前功能](FEATURES.md)；PR #68 为 SQLite 后续核心路线设计，尚未实现。
+
+### 早期裁剪记录（历史顺序，不代表当前接口）
 
 - Reduce the workspace to the search library and HTTP server; preserve the embedded Web UI.
 - Remove the MCP server and Rust SDK distribution projects and their product entry points.
@@ -363,7 +368,7 @@ Entries below describe upstream releases before the SeekPower pruning and are re
 
 ### Added
 
-- Introducing native vector search: SeekStorm now uses [**two separate, first-class, native index architectures**](ARCHITECTURE.md#architecture) for **vector search** and **keyword search**.
+- Introducing native vector search: SeekStorm now uses [**two separate, first-class, native index architectures**](ARCHITECTURE.md) for **vector search** and **keyword search**.
     * **Multi-Vector indexing**: both from multiple fields and from multiple chunks per field.
     * Generate and index embeddings from any text document field.
     * All **field filters** and **facet filter** are directly active **during vector search**, not just as post-search filtering step.

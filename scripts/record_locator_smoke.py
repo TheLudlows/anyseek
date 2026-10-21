@@ -25,7 +25,7 @@ def exercise(call,restart_with,faults):
     if faults:
         for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
             request=derived('d-'+stage)
-            restart_with({'SEEKPOWER_RECORD_FAULT':stage,'SEEKPOWER_RECORD_FAULT_NONCE':request['operation_id']['nonce']})
+            restart_with({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':request['operation_id']['nonce']})
             if stage.startswith('crash_'):
                 try:call('POST',endpoint+'/doc',request)
                 except (OSError,http.client.HTTPException):pass

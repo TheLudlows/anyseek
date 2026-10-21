@@ -1,4 +1,4 @@
-# SeekPower 上游来源与导入基线
+# anyseek 上游来源与导入基线
 
 导入日期：2026-10-13（Asia/Singapore）。
 
@@ -27,7 +27,7 @@
 - [VALIDATION.md](VALIDATION.md)：导入一致性证据与未执行测试。
 - 本文件：来源、固定基线与同步政策。
 
-上游 README、ARCHITECTURE 和 CHANGELOG 保留，不把上游产品描述当作 SeekPower 已完成的演进能力。当前默认主分支保持 `master`，不新建或改名为 `main`。
+在原样导入提交中，上游 README、ARCHITECTURE 和 CHANGELOG 完整保留；当前 README/ARCHITECTURE 已改写为本项目指南，CHANGELOG 的上游发布记录仍保留。不把上游产品描述当作 SeekPower 已完成的演进能力。当前默认主分支保持 `master`，不新建或改名为 `main`。
 
 ## 验证与可复现比较
 
@@ -45,4 +45,4 @@ git diff --exit-code edf6f77e554c472b3729a547b8e08fb84a590a76 1986b14215c82a07fa
 
 ## 后续开发
 
-Seekpower 独立维护和演进，不设上游同步要求。本文件记录历史导入基线，保留上游和第三方许可、必要来源及修改说明。
+anyseek 独立维护和演进，不设上游同步要求。本文件记录历史导入基线，保留上游和第三方许可、必要来源及修改说明。

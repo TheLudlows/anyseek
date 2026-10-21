@@ -4,11 +4,23 @@
 
 实现基线为 `fc4fcfe64fdf86d03c07f82cf1d4889deb896801`，开发分支为 `feat/57-reliable-record-engine`，对应 [PR #61](https://github.com/TheLudlows/seekpower/pull/61)。复用基线已有的 Weighted RRF、canonical scoring order、固定 XXH64 和索引格式 8；PR #60 不在基线中。
 
-本文按当前设计组织，阶段性尝试、旧测试总数和修复过程保留在 Git 历史。HTTP 使用方法见[服务 README](../seekpower_server/README.md)，完整路由见[功能清单](../FEATURES.md)，机器可读验证信息见[验收记录](validation/issue57-p1-checkpoint.json)。
+本文按当前设计组织，阶段性尝试、旧测试总数和修复过程保留在 Git 历史。HTTP 使用方法见[服务 README](../anyseek_server/README.md)，完整路由见[功能清单](../FEATURES.md)，机器可读验证信息见[验收记录](validation/issue57-p1-checkpoint.json)。
 
-P2 后续设计与当前实施记录见 [P2 实施设计](implementation-57-p2.md)。P2 来源/证据基础删除切片已在本地接入默认服务，详见实施设计第 12 节；新增同服务受控接管见第 13 节；独立灾难恢复激活与完整 P2 仍未完成。四项业务策略已确认；来源修订/stale 后续本地批次及其独立验证见第 14 节，generation 的可选向量依赖切片见第 15 节；generation staging/publish 实施见第 16 节；TTL/time 本地功能闭环及分平台验证见第 17 节；持久 feed 的本地实施与验证见第 18 节；实体/显式一跳关系及 P2 真实缺口清单见第 19 节；精确内联来源定位收尾见第 20 节；staging 租约与私有清理见第 21 节；同视图关系融合与完整 P2 需求/测试映射见第 22–23 节；范围审计校正及有界多批次上传见第 24 节；逐命中通道与原始分数解释见第 25 节。PR #61 已合并至 `64b1c8f656394a55f5b8a1239754d03d2872efd5`，此后本地 P2 分支的验证单独记录，不覆盖下面 P1 历史证据。
+## 当前阶段入口
 
-后续核心路线与收口建议见 [Segment、云端权威提交与 collection 扩展设计](implementation-57-core-roadmap.md)（SQLite 元数据路线已确认；设计待审阅，未开始 P3 编码）。
+P1-A（PR #61）及 P2 功能批次（PR #62–#67）已合入 master。以下正文保留 P1 检查点事实，旧命令/源码路径使用当时的 seekpower 名称；当前命令见 [开发指南](development.md)，目录现为 `anyseek/`、`anyseek_server/`。历史证据不改写成新品牌测试结果。
+
+| 阶段 | 实施记录位置 |
+| --- | --- |
+| 来源、删除隐藏、受控接管 | [P2 记录](implementation-57-p2.md) §12–13 |
+| stale、可选向量、generation | 同文 §14–16 |
+| TTL、feed、实体/关系 | 同文 §17–19 |
+| 来源定位、租约、同视图融合 | 同文 §20–23 |
+| 多批上传、命中解释及范围审计 | 同文 §24–25 |
+| P3–P6 设计，未编码 | [核心路线](implementation-57-core-roadmap.md)，SQLite 选择已确认 |
+
+当前能力和主干验证结论统一见 [STATUS](../STATUS.md)。
+
 
 ## 导航
 
@@ -38,7 +50,7 @@ P1 的目标是在现有检索内核上建立可靠记录引擎：已确认写�
 | 服务闭环 | 默认 HTTP/UI、遍历、删除计划、非原子 batch、完整备份恢复 | HTTP/Chromium 与故障注入已通过 |
 | 资源边界 | 明确容量、队列、请求期限和候选上限 | 边界回归已通过；不承诺持续无限运行 |
 
-表内历史双平台结果与本次修复的本地结果分别列于第 10 节，不能互相替代。P2 的来源/generation/证据与可选向量、P3 的长期压缩回收不计入已完成能力。普通 Document 中保存同名属性，也不代表引擎已经实现这些语义。
+表内历史双平台结果与本次修复的本地结果分别列于第 10 节，不能互相替代。本节仅陈述 P1 检查点，P2 已实现能力另见上表；P3 长期压缩回收尚未实现。普通 Document 中保存同名属性，也不代表引擎已经实现这些语义。
 
 ## 2. 架构与权威数据
 
@@ -56,16 +68,16 @@ flowchart TD
 
 | 模块 | 职责 |
 | --- | --- |
-| [record.rs](../seekpower/src/record.rs) | 权威 Record 状态、操作账本、条件写入、增量发布、查询/遍历/统计 |
-| [catalog.rs](../seekpower/src/catalog.rs) | key verifier、collection 状态、grant revision、控制回执、授权屏障 |
-| [catalog/service_snapshot.rs](../seekpower/src/catalog/service_snapshot.rs) | 完整 service/catalog 快照及新根恢复 |
-| [storage/journal.rs](../seekpower/src/storage/journal.rs) | 有校验和与序列的 WAL、持久提交见证、恢复和 writer lock |
-| [storage/partition.rs](../seekpower/src/storage/partition.rs) | 持续 owner lock、完整 checkpoint、代发布和退役 |
-| [storage/platform.rs](../seekpower/src/storage/platform.rs) | Linux/Windows 文件同步、同卷目录发布与清理 |
-| [active.rs](../seekpower/src/active.rs) | 活动文档 N、term df、字段长度及其增量维护 |
-| [search.rs](../seekpower/src/search.rs)、[vector.rs](../seekpower/src/vector.rs)、[min_heap.rs](../seekpower/src/min_heap.rs) | 候选检索、旧版本排除、逻辑 ID 平分排序、融合 |
-| [record_service.rs](../seekpower_server/src/record_service.rs) | 默认 HTTP 契约、请求/控制 admission、授权输出、OpenAPI |
-| [Web UI](../seekpower_server/web/js)、[客户端与回归脚本](../scripts) | 保存原请求、重试、搜索和服务生命周期操作 |
+| [record.rs](../anyseek/src/record.rs) | 权威 Record 状态、操作账本、条件写入、增量发布、查询/遍历/统计 |
+| [catalog.rs](../anyseek/src/catalog.rs) | key verifier、collection 状态、grant revision、控制回执、授权屏障 |
+| [catalog/service_snapshot.rs](../anyseek/src/catalog/service_snapshot.rs) | 完整 service/catalog 快照及新根恢复 |
+| [storage/journal.rs](../anyseek/src/storage/journal.rs) | 有校验和与序列的 WAL、持久提交见证、恢复和 writer lock |
+| [storage/partition.rs](../anyseek/src/storage/partition.rs) | 持续 owner lock、完整 checkpoint、代发布和退役 |
+| [storage/platform.rs](../anyseek/src/storage/platform.rs) | Linux/Windows 文件同步、同卷目录发布与清理 |
+| [active.rs](../anyseek/src/active.rs) | 活动文档 N、term df、字段长度及其增量维护 |
+| [search.rs](../anyseek/src/search.rs)、[vector.rs](../anyseek/src/vector.rs)、[min_heap.rs](../anyseek/src/min_heap.rs) | 候选检索、旧版本排除、逻辑 ID 平分排序、融合 |
+| [record_service.rs](../anyseek_server/src/record_service.rs) | 默认 HTTP 契约、请求/控制 admission、授权输出、OpenAPI |
+| [Web UI](../anyseek_server/web/js)、[客户端与回归脚本](../scripts) | 保存原请求、重试、搜索和服务生命周期操作 |
 
 权威状态保存完整原始 Document、未经归一化的输入向量、配置、稳定身份、版本、墓碑、序列和操作结果。`schema.store` 控制搜索字段投影，不决定原始数据是否持久保存。
 

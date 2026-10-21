@@ -34,20 +34,22 @@ jobs:
           lscpu
       - name: Verify standalone core boundary
         run: python3 scripts/check_core_boundary.py
+      - name: Verify documentation links and product identifiers
+        run: python3 scripts/check_docs_brand.py
       - name: Build retained workspace
         id: build
         run: cargo build --workspace
       - name: Verify retired dependencies removed
         run: |
-          cargo metadata --format-version 1 > /tmp/seekpower-metadata.json
+          cargo metadata --format-version 1 > /tmp/anyseek-metadata.json
           python3 - <<'PYCODE'
           import json
-          with open('/tmp/seekpower-metadata.json') as source:
+          with open('/tmp/anyseek-metadata.json') as source:
               packages = json.load(source)['packages']
               names = {package['name'] for package in packages}
           forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs', 'rkyv', 'tabled', 'colored', 'num-format', 'crossbeam-channel', 'ctrlc', 'half', 'lz4_flex', 'zstd', 'snowball_stemmers_rs', 'gxhash', 'zstd-safe', 'zstd-sys'}
           assert not forbidden, f'retired dependencies remain: {forbidden}'
-          core = next(package for package in packages if package['name'] == 'seekpower')
+          core = next(package for package in packages if package['name'] == 'anyseek')
           assert not any(dependency['name'] == 'aho-corasick' for dependency in core['dependencies']), 'direct highlighter dependency remains'
           # The tokenizer retains regex-syntax; optional API dependencies are checked separately.
           print('PASS no direct highlighter dependency')
@@ -59,15 +61,15 @@ jobs:
           python3 -m playwright install --with-deps chromium
       - name: HTTP API and embedded UI smoke (no SDK)
         env:
-          SEEKPOWER_BROWSER_TEST: "1"
-        run: python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
+          ANYSEEK_BROWSER_TEST: "1"
+        run: python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
       - name: Existing core and server tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --workspace --all-targets
       - name: Generate API reference
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
-          target/debug/seekpower_server generate_openapi=true > /dev/null
+          target/debug/anyseek_server generate_openapi=true > /dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: openapi
@@ -84,7 +86,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      SEEKPOWER_TEST_ROOT: ${{ github.workspace }}/target/p1-native-data
+      ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/p1-native-data
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -103,34 +105,34 @@ jobs:
           uname -a
           findmnt -T "$GITHUB_WORKSPACE" -o SOURCE,FSTYPE,TARGET
       - name: Native journal and child-process crash tests
-        run: cargo test -p seekpower --lib journal_
+        run: cargo test -p anyseek --lib journal_
       - name: Native partition publication and owner-lock tests
-        run: cargo test -p seekpower --lib partition_
+        run: cargo test -p anyseek --lib partition_
       - name: Native existing-index I/O errors and mapping lifecycle
-        run: cargo test -p seekpower --lib commit_io_tests
+        run: cargo test -p anyseek --lib commit_io_tests
       - name: Native record replay, snapshot and response-loss tests
-        run: cargo test -p seekpower --lib record::tests
+        run: cargo test -p anyseek --lib record::tests
       - name: Native catalog authorization and revocation recovery tests
-        run: cargo test -p seekpower --lib catalog_
+        run: cargo test -p anyseek --lib catalog_
       - name: Native service output and admission barriers
-        run: cargo test -p seekpower_server record_service::tests
+        run: cargo test -p anyseek_server record_service::tests
       - name: Build native service
-        run: cargo build -p seekpower_server
+        run: cargo build -p anyseek_server
       - name: Native service HTTP and restart acceptance
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            python scripts/record_service_smoke.py --server target/debug/seekpower_server.exe
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe
           else
-            python3 scripts/record_service_smoke.py --server target/debug/seekpower_server
+            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
           fi
       - name: Build explicit fault-injection service (not release binary)
-        run: cargo build -p seekpower_server --features fault-injection
+        run: cargo build -p anyseek_server --features fault-injection
       - name: Native real HTTP process fault and recovery matrix
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            python scripts/record_service_smoke.py --server target/debug/seekpower_server.exe --faults
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --faults
           else
-            python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --faults
+            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults
           fi

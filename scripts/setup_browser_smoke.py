@@ -77,10 +77,10 @@ def exercise_setup(browser, base, master):
     expect(page.locator('#setupError')).not_to_be_empty()
     expect(page.locator('#newIndexName')).to_have_value('server-rejected')
     expect(page.locator('#createIndexForm button')).to_be_enabled()
-    page.screenshot(path='/tmp/seekpower-setup-desktop.png', full_page=True)
+    page.screenshot(path='/tmp/anyseek-setup-desktop.png', full_page=True)
     page.set_viewport_size({'width': 390, 'height': 844})
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'mobile setup overflows'
-    page.screenshot(path='/tmp/seekpower-setup-mobile.png', full_page=True)
+    page.screenshot(path='/tmp/anyseek-setup-mobile.png', full_page=True)
 
     page.locator('#forgetKey').click()
     expect(page.locator('#setupKey')).to_have_value('')

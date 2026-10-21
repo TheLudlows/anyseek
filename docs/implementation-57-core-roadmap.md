@@ -1,12 +1,12 @@
 # Issue #57 后续核心路线：Segment、云端权威提交与 collection 扩展
 
-状态：**设计待审阅，SQLite 元数据路线已确认，未开始 P3/P4/P5 编码**。2026-10-21。本文依据 [issue #57](https://github.com/TheLudlows/seekpower/issues/57) 原规划、[P1 实施记录](implementation-57.md)、[P2 实施记录](implementation-57-p2.md) 及用户“本轮结束之后加速后续规划，边缘非核心功能可以先遗留，先整理设计文档”的指示。加速指减少串行边角交付、并行推进核心模块，不取消持久化、一致性、权限和恢复门槛。
+状态：**设计已随 PR #68 合入，SQLite 元数据路线已确认，未开始 P3/P4/P5 编码**。2026-10-21。本文依据 [issue #57](https://github.com/TheLudlows/seekpower/issues/57) 原规划、[P1 实施记录](implementation-57.md)、[P2 实施记录](implementation-57-p2.md) 及用户“本轮结束之后加速后续规划，边缘非核心功能可以先遗留，先整理设计文档”的指示。加速指减少串行边角交付、并行推进核心模块，不取消持久化、一致性、权限和恢复门槛。
 
 文中 **[确认]** 是已确认边界，**[建议]** 是本次工程方案，**[待决]** 必须在相应实施前确定；伪接口、布局和序列是设计，不是现有 API。本文不授权合入、部署、真实数据封存或启动新服务。
 
 ## 1. 实际基线与本轮收口
 
-代码基线：`b0c16c0882b48cb21d565322a13ae7c7d60f9825`，包含至 PR #67 的堆叠实现及Windows测试观察顺序修正；功能检查点为`309fcea8d2b9532ab01dbb8f935e6c905f7f52ac`，最终平台head见第10节。master 核验为 `64b1c8f656394a55f5b8a1239754d03d2872efd5`（PR #61）；PR #62–67 为草稿，不能当作已合入。PR #66 最终 head `ecada2d23eb6857e1415d88662e8024a191df9a1`（功能检查点`58b5716`）。当前文档分支只新增设计及导航，不改变功能或 PR 的代码范围。
+设计编写时的代码基线：`b0c16c0882b48cb21d565322a13ae7c7d60f9825`，包含至 PR #67 的堆叠实现及Windows测试观察顺序修正；功能检查点为`309fcea8d2b9532ab01dbb8f935e6c905f7f52ac`，最终平台head见第10节。master 核验为 `64b1c8f656394a55f5b8a1239754d03d2872efd5`（PR #61）；PR #62–67 为草稿，不能当作已合入。PR #66 最终 head `ecada2d23eb6857e1415d88662e8024a191df9a1`（功能检查点`58b5716`）。当前文档分支只新增设计及导航，不改变功能或 PR 的代码范围。
 
 | 分类 | 当前事实 | 下一步影响 |
 | --- | --- | --- |
@@ -17,7 +17,7 @@
 | 验证 | 最终 Linux 35 suites、226 passed、0 failed、10 ignored；默认及故障注入 HTTP/Chromium 通过 | 两个最终 SHA 原生 CI 结果见第10节；系统崩溃/断电仍未验收 |
 | 未实现 | Segment/manifest 驱动的持续回收、对象存储提交、远端 Indexer/cache、跨节点 collection 路由、跨 partition 搜索 | 本文核心路线，不把目录/trait 壳视作交付 |
 
-当前权威与依赖落点：`seekpower/src/record.rs` 的 State/Inner；`record/{mutation,publication,evidence,generation,upload,lease,temporal,change_feed,graph,fusion}.rs`；`storage/{journal,partition,platform}.rs`；`catalog.rs`；服务 `record_service.rs`。Record 语义决定进入通用持久提交，HTTP/UI 只做适配。现有磁盘检索内核与 Record 可重建索引不能混称为已实现统一 Segment manifest。
+当前权威与依赖落点：`anyseek/src/record.rs` 的 State/Inner；`record/{mutation,publication,evidence,generation,upload,lease,temporal,change_feed,graph,fusion}.rs`；`storage/{journal,partition,platform}.rs`；`catalog.rs`；服务 `record_service.rs`。Record 语义决定进入通用持久提交，HTTP/UI 只做适配。现有磁盘检索内核与 Record 可重建索引不能混称为已实现统一 Segment manifest。
 
 本轮功能收口为 PR #66/#67 已列范围。**[建议]** 后续发现非阻塞体验改进进入遗留清单；已确认写入丢失、失效内容泄漏、双活、错误成功、回收破坏恢复等问题仍阻塞相应阶段退出。没有已证明长期磁盘稳定性前，不宣称持续更新删除的正式生产验收完成。
 
@@ -116,7 +116,7 @@ pin 登记与退休竞争采用“登记保护→重读验证 head/退休世代�
 
 **[建议实现契约]** 使用现有核心库内的 `MetadataAuthority` 适配边界封装 SQLite，具体Rust库/SQLite版本在实施时核验并固定，不制造额外产品确认。首版一个权威服务所有者持有本地数据库文件，串行写队列使用短 `BEGIN IMMEDIATE` 事务、条件更新和唯一操作键；同一事务覆盖head/owner/幂等/授权屏障。对象上传和索引构建不占用事务。读连接数/事务时长有界，结束读事务后不得将旧快照当最新授权；最终输出重新经过同一owner的授权/隐藏屏障。BUSY/LOCKED有有界等待和取消，未进入提交前的拒绝与提交结果未知分开；不把任何错误统一当作可安全新ID重试。
 
-**[建议持久化配置，须实施认证]** 本地认证文件系统上采用SQLite WAL模式和每个写连接`synchronous=FULL`，启动回读配置，禁止OFF/NORMAL用于本项目成功写入持久性承诺。SQLite WAL支持读写并行但仍只有一个writer，不能放到网络文件系统上做跨节点共享协调；长读可能阻碍checkpoint，需短读、显式有界checkpoint及WAL容量背压。SQLite WAL是元数据库事务日志，不等同于SeekPower对象业务日志，二者不能混用截断水位。[SQLite WAL说明](https://www.sqlite.org/wal.html)、[同步配置](https://www.sqlite.org/pragma.html#pragma_synchronous)。FULL也不替代底层文件系统/磁盘正确同步及Linux/Windows断电验证；I/O错误后通过可信重开/操作结果判定恢复，不猜测提交失败。
+**[建议持久化配置，须实施认证]** 本地认证文件系统上采用SQLite WAL模式和每个写连接`synchronous=FULL`，启动回读配置，禁止OFF/NORMAL用于本项目成功写入持久性承诺。SQLite WAL支持读写并行但仍只有一个writer，不能放到网络文件系统上做跨节点共享协调；长读可能阻碍checkpoint，需短读、显式有界checkpoint及WAL容量背压。SQLite WAL是元数据库事务日志，不等同于anyseek对象业务日志，二者不能混用截断水位。[SQLite WAL说明](https://www.sqlite.org/wal.html)、[同步配置](https://www.sqlite.org/pragma.html#pragma_synchronous)。FULL也不替代底层文件系统/磁盘正确同步及Linux/Windows断电验证；I/O错误后通过可信重开/操作结果判定恢复，不猜测提交失败。
 
 **[确认范围/限制]** SQLite本地文件不提供多节点共享权威、复制或自动HA。不能让多个节点各持文件副本自主提交，不能靠网络共享SQLite文件或复制`.db`实现协调。初版单权威所有者失效时，需要等待原持久卷上受控恢复；权威不可用则强读/写入/授权输出失败关闭。计算缓存节点丢失可恢复，但**SQLite权威持久卷丢失不承诺零RPO恢复**。对象存储里有所有payload也不能证明哪些操作已提交。
 

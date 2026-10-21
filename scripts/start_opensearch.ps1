@@ -34,7 +34,7 @@ try {
     $env:OPENSEARCH_JAVA_OPTS = "-Xms$HeapSize -Xmx$HeapSize"
     Push-Location $distribution
     try {
-        & $launcher '-Ecluster.name=seekpower-comparison' '-Enode.name=local-comparison' `
+        & $launcher '-Ecluster.name=anyseek-comparison' '-Enode.name=local-comparison' `
             '-Enetwork.host=127.0.0.1' '-Ediscovery.type=single-node' `
             '-Eplugins.security.disabled=true' "-Ehttp.port=$Port"
         if ($LASTEXITCODE -ne 0) {
