@@ -91,10 +91,31 @@ def exercise(base,master,call):
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
         expect(page.locator('#contentBox')).to_contain_text('Derived title')
         page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
-        deletion={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':1},'document':None}
+        revision={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':1},'document':{'title':'Updated source','body':'sourceword revised'}}
+        page.locator('#documentJson').fill(json.dumps(revision));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-derived/status')['visibility']=='stale'
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-derived',status=404)['code']=='not_found'
+        page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
+        expect(page.locator('#contentBox')).to_contain_text('Updated source')
+        expect(page.locator('#contentBox')).not_to_contain_text('Derived title')
+        page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
+        generation={'record_id':'ui-generation','routing_key':'ui-route','expected':'Absent','generation':{'action':'stage','generation_id':'g1','source':{'record_id':'ui-source','routing_key':'ui-route','version':2},'members':['ui-ga','ui-gb'],'chunks':[{'record_id':'ui-ga','document':{'title':'Generation A','body':'generationui'}},{'record_id':'ui-gb','document':{'title':'Generation B','body':'generationui'}}]}}
+        page.locator('#documentJson').fill(json.dumps(generation));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('not searchable')
+        assert call('POST',f'/api/v1/index/{collection}/query',{'query':'generationui'})['count_total']==0
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-generation/generation')['staged_members']==2
+        publish={'record_id':'ui-generation','routing_key':'ui-route','expected':{'Match':1},'generation':{'action':'publish','generation_id':'g1'}}
+        page.locator('#documentJson').fill(json.dumps(publish));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
+        page.locator('#backToSearch').click();page.locator('#searchInput').fill('generationui')
+        expect(page.locator('#contentBox')).to_contain_text('Generation A');expect(page.locator('#contentBox')).to_contain_text('Generation B')
+        page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
+        deletion={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':2},'document':None}
         page.locator('#documentJson').fill(json.dumps(deletion));page.locator('#submitDocuments').click()
         expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
         assert call('POST',f'/api/v1/index/{collection}/query',{'query':'sourceword'})['hits']==[]
+        assert call('POST',f'/api/v1/index/{collection}/query',{'query':'generationui'})['count_total']==0
         assert call('GET',f'/api/v1/index/{collection}/doc/ui-derived',status=404)['code']=='not_found'
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
         expect(page.locator('#contentBox')).not_to_contain_text('Derived title')
@@ -113,6 +134,18 @@ def exercise(base,master,call):
                 assert browse['count_total']==1 and browse['hits'][0]['record']['document']['title']=='Vector',browse
                 count=call('POST',f'/api/v1/index/{vector_collection}/query',{'length':0})
                 assert count['count_total']==1 and count['hits']==[],count
+            page.locator('#recordEnvelopeMode').check()
+            pending={'record_id':'pending-ui','routing_key':'r','expected':'Absent','document':{'title':'Pending vector','body':'alpha'}}
+            page.locator('#documentJson').fill(json.dumps(pending));page.locator('#submitDocuments').click()
+            expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
+            cid=page.evaluate('INDEX_ID')
+            assert call('GET',f'/api/v1/index/{cid}/doc/pending-ui/status')['pending_vector_fields']==['vector']
+            patch={'record_id':'pending-ui','routing_key':'r','expected':{'Match':1},'vector_patch':{'vector':[2,0]}}
+            page.locator('#documentJson').fill(json.dumps(patch));page.locator('#submitDocuments').click()
+            expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
+            assert call('GET',f'/api/v1/index/{cid}/doc/pending-ui/status')['pending_vector_fields']==[]
+            assert call('GET',f'/api/v1/index/{cid}/doc/pending-ui')['version']==1
+            page.locator('#recordEnvelopeMode').uncheck()
             # Known rejection can release only the rejected/unattempted remainder.
             page.locator('#documentJson').fill(json.dumps({'body':'bad vector','vector':[1]}))
             page.locator('#submitDocuments').click();expect(page.locator('#discardRejectedWrites')).to_be_visible()

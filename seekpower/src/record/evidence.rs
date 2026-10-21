@@ -1,6 +1,6 @@
 //! Bounded, same-partition evidence semantics. Authority is the metadata on each
 //! Record, never a second journal or an independently committed dependency graph.
-use super::{Record, RecordError, RecordWrite};
+use super::{ExpectedVersion, Record, RecordError, RecordWrite};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -8,7 +8,7 @@ const MAX_REFERENCES: usize = 32;
 const MAX_DEPTH: usize = 16;
 const MAX_VISITED: usize = 10_000;
 
-/// Immutable source or derived content in the first evidence slice.
+/// Versioned original source or immutable derived content.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceKind {
@@ -30,8 +30,8 @@ pub struct EvidenceRef {
     pub version: u64,
 }
 /// Engine-validated metadata, distinct from arbitrary business document fields.
-/// Update/recreate, generations, TTL and feed policies are intentionally not
-/// exposed until their business semantics are decided.
+/// Sources support exact-version updates; derived recomputation uses a new
+/// identity. Generations, TTL and feed are separate implementation slices.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceMetadata {
@@ -72,7 +72,7 @@ fn visit(
     }
     let mut height = 0;
     let result = if let Some(record) = records.get(id) {
-        let mut visible = record.document.is_some();
+        let mut visible = record.document.is_some() && !record.retired_generation;
         if let Some(system) = &record.system {
             if system.evidence_refs.len() > MAX_REFERENCES {
                 return Err(rejected("evidence reference budget exceeded"));
@@ -129,9 +129,18 @@ pub(super) fn validate(
     }
     if old.is_some_and(|r| r.system.is_some()) {
         if request.document.is_some() {
-            return Err(rejected(
-                "source/derived update or recreate unsupported pending policy decision",
-            ));
+            let previous = old.unwrap();
+            if previous.document.is_none() { return Err(rejected("deleted evidence cannot be recreated")); }
+            if previous.system.as_ref().unwrap().kind != EvidenceKind::Source {
+                return Err(rejected("derived recomputation requires a new identity and current evidence"));
+            }
+            if !matches!(request.expected, ExpectedVersion::Match(v) if v == previous.version) {
+                return Err(RecordError::Conflict("source update requires exact current version".into()));
+            }
+            if request.system.as_ref().is_some_and(|system| Some(system) != previous.system.as_ref()) {
+                return Err(rejected("source metadata kind/dependencies cannot change"));
+            }
+            return Ok(());
         }
         if old.is_some_and(|r| r.document.is_none()) {
             return Err(RecordError::Conflict(
@@ -219,4 +228,70 @@ pub(super) fn descendants(
         }
     }
     Ok(affected)
+}
+
+
+pub(super) fn retained_revision(record: &Record) -> bool {
+    record.document.is_some() && record.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Source)
+}
+
+
+/// Visibility reason derived from current authoritative versions, never supplied
+/// or cleared by clients. Deleted ancestry always overrides stale ancestry.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceVisibility {
+    /// The record contributes to every applicable retrieval channel.
+    Visible,
+    /// Some exact evidence version has been superseded; default reads hide it.
+    Stale,
+    /// This record or an evidence ancestor was explicitly deleted.
+    Deleted,
+    /// Missing or invalid evidence; fail closed.
+    Unavailable,
+    /// Independent restored evidence lacks current deletion authority.
+    Quarantined,
+}
+pub(super) fn status(records: &BTreeMap<String, Record>, id: &str) -> Result<EvidenceVisibility, RecordError> {
+    use EvidenceVisibility::*;
+    if visit(id, records, 0, &mut BTreeSet::new(), &mut BTreeMap::new())? { return Ok(Visible); }
+    let mut seen = BTreeSet::new(); let mut queue = vec![id];
+    let mut stale = false; let mut unavailable = false; let mut deleted = false;
+    while let Some(id) = queue.pop() {
+        if !seen.insert(id) { continue; }
+        if seen.len() > MAX_VISITED { return Err(rejected("evidence traversal budget exceeded")); }
+        let Some(record) = records.get(id) else { unavailable = true; continue; };
+        deleted |= record.document.is_none();
+        stale |= record.retired_generation;
+        if let Some(system) = &record.system {
+            for reference in &system.evidence_refs {
+                match records.get(&reference.record_id) {
+                    Some(target) if target.system.is_some() && target.routing_key == reference.routing_key => stale |= target.version != reference.version,
+                    _ => unavailable = true,
+                }
+                queue.push(&reference.record_id);
+            }
+        }
+    }
+    Ok(if deleted { Deleted } else if unavailable { Unavailable } else if stale { Stale } else { Unavailable })
+}
+
+pub(super) fn validate_history(records: &BTreeMap<String, Record>, history: &[Record]) -> Result<(), RecordError> {
+    let mut seen = BTreeSet::new();
+    let mut counts = BTreeMap::<&str, u64>::new();
+    for revision in history {
+        let Some(current) = records.get(&revision.record_id) else { return Err(rejected("orphan source revision")); };
+        if !retained_revision(revision) || revision.version == 0 || revision.version >= current.version
+            || revision.routing_key != current.routing_key || revision.system != current.system
+            || !seen.insert((&revision.record_id, revision.version)) {
+            return Err(rejected("inconsistent source revision history"));
+        }
+        *counts.entry(&revision.record_id).or_default() += 1;
+    }
+    for record in records.values().filter(|r| r.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Source)) {
+        if counts.get(record.record_id.as_str()).copied().unwrap_or(0) != record.version.saturating_sub(1) {
+            return Err(rejected("incomplete source revision history"));
+        }
+    }
+    Ok(())
 }

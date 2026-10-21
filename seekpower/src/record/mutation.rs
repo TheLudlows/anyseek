@@ -53,6 +53,11 @@ pub(super) fn prepare(
             ))
         };
     }
+    if request.generation.is_some() { return generation::prepare(state, config, request, epoch); }
+    if state.generations.contains_key(&request.record_id)
+        || (!state.records.contains_key(&request.record_id) && generation::occupied(state, &request.record_id)) {
+        return Err(RecordError::Conflict("identity reserved by generation".into()));
+    }
     if state.evidence_quarantined
         && (request.system.is_some()
             || state
@@ -65,25 +70,31 @@ pub(super) fn prepare(
                 .into(),
         ));
     }
-    evidence::validate(&state.records, &request)?;
+    if request.vector_patch.is_some() {
+        enrichment::validate(state, config, &request)?;
+    } else {
+        evidence::validate(&state.records, &request)?;
+    }
+    let next_document = enrichment::document(state.records.get(&request.record_id), &request)?;
+    if let Some(document) = &next_document {
+        validate_document_depth(document)?;
+        if serde_json::to_vec(document).map_err(storage)?.len() > config.max_record_bytes {
+            return Err(RecordError::Rejected("enriched record byte budget exceeded".into()));
+        }
+    }
     // One fixed bounded delete command/receipt per live typed identity. This
     // reserve is retained even when an ancestor already hides that identity.
-    let typed_live = state
-        .records
-        .values()
-        .filter(|r| r.system.is_some() && r.document.is_some())
-        .count();
-    let deleting_typed = request.document.is_none()
+    let deleting_typed = next_document.is_none()
         && state
             .records
             .get(&request.record_id)
             .is_some_and(|r| r.system.is_some());
     let creating_typed =
         request.system.is_some() && !state.records.contains_key(&request.record_id);
-    let reserved_slots = typed_live + usize::from(creating_typed) - usize::from(deleting_typed);
+    let reserved_slots = generation::reserve_slots(state) + usize::from(creating_typed) - usize::from(deleting_typed);
     // 8 KiB covers JSON escaping of bounded IDs/nonce, envelope, receipt, and
     // journal frame overhead. No evidence edges are copied into delete requests.
-    let reserve_bytes = reserved_slots * 8192;
+    let reserve_bytes = reserved_slots * 8192 + generation::reserved(state) * 32768;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
         || state
             .operations
@@ -97,6 +108,15 @@ pub(super) fn prepare(
         ));
     }
     let previous = state.records.get(&request.record_id);
+    let live_sources = state.records.values().filter(|r| evidence::retained_revision(r)).count();
+    let adding_history = request.vector_patch.is_none() && previous.is_some_and(evidence::retained_revision);
+    let new_source = previous.is_none() && request.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Source);
+    let deleting_source = adding_history && next_document.is_none();
+    if state.source_revisions.len() + usize::from(adding_history) + live_sources
+        + usize::from(new_source) - usize::from(deleting_source) > config.max_records {
+        return Err(RecordError::Rejected("source revision budget reserves final deletion slots".into()));
+    }
+
     if previous.is_some_and(|r| r.routing_key != request.routing_key) {
         return Err(RecordError::Conflict("routing key cannot change".into()));
     }
@@ -108,10 +128,10 @@ pub(super) fn prepare(
     if !matches {
         return Err(RecordError::Conflict("version precondition failed".into()));
     }
-    if previous.is_none() && state.records.len() >= config.max_records {
+    if previous.is_none() && state.records.len() + state.generations.len() + generation::reserved(state) >= config.max_records {
         return Err(RecordError::Rejected("identity budget exceeded".into()));
     }
-    if let Some(document) = &request.document {
+    if let Some(document) = &next_document {
         crate::vector::validate_vectors_in_schema(
             &config.index.inference,
             config.schema.iter(),
@@ -120,12 +140,13 @@ pub(super) fn prepare(
         .map_err(RecordError::Rejected)?;
     }
     let receipt = WriteReceipt {
+        staged_only: false,
         seq: state
             .seq
             .checked_add(1)
             .ok_or_else(|| storage("sequence exhausted"))?,
         version: previous
-            .map_or(Some(1), |r| r.version.checked_add(1))
+            .map_or(Some(1), |r| if request.vector_patch.is_some() { Some(r.version) } else { r.version.checked_add(1) })
             .ok_or_else(|| storage("version exhausted"))?,
         record_id: request.record_id.clone(),
     };
@@ -138,7 +159,9 @@ pub(super) fn prepare(
         record_id: applied.request.record_id.clone(),
         routing_key: applied.request.routing_key.clone(),
         version: receipt.version,
-        document: applied.request.document.clone(),
+        document: next_document,
+        retired_generation: previous.is_some_and(|r| r.retired_generation),
+        generation_member: previous.and_then(|r| r.generation_member.clone()),
         system: applied
             .request
             .system
@@ -162,7 +185,10 @@ pub(super) fn prepare(
     } else {
         0
     };
-    let snapshot_bytes = current_snapshot_bytes - old_size
+    let history_bytes = if adding_history {
+        old_size + usize::from(!state.source_revisions.is_empty())
+    } else { 0 };
+    let snapshot_bytes = current_snapshot_bytes + history_bytes - old_size
         + serde_json::to_vec(&next_record).map_err(storage)?.len()
         + map_overhead
         + serde_json::to_vec(&applied).map_err(storage)?.len()

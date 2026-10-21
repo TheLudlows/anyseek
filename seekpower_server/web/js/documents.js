@@ -55,7 +55,9 @@ async function submitPendingWrites() {
         }
         sessionStorage.removeItem('seekpower.pendingWrites');
         pendingDocumentCommit = null;
-        $('#documentStatus').text(`Wrote ${pending.requests.length} record(s). All confirmed writes are durable and visible.`);
+        $('#documentStatus').text(pending.requests.some(r => r.generation?.action === 'stage')
+            ? `Wrote ${pending.requests.length} record(s). Staging is durable, not searchable until an explicit publish succeeds.`
+            : `Wrote ${pending.requests.length} record(s). All confirmed writes are durable and visible.`);
         $('#retryDocumentCommit,#discardRejectedWrites').prop('hidden', true);
         $('#documentJson,#documentFile').val('');
     } catch (error) {
@@ -87,8 +89,8 @@ $(function () {
             if(sessionValue('seekpower.pendingWrites'))throw new Error('Resolve the retained writes in their original collection before submitting another batch.');
             pendingDocumentCommit={collection:INDEX_ID,unresolved:false,requests:documents.map(document=>{
                 if ($('#recordEnvelopeMode').prop('checked')) {
-                    if (!Object.hasOwn(document,'document') || !document.record_id || !document.routing_key || !document.expected)
-                        throw new Error('Each envelope requires record_id, routing_key, expected and explicit document (null deletes).');
+                    if ((!Object.hasOwn(document,'document') && !Object.hasOwn(document,'vector_patch') && !Object.hasOwn(document,'generation')) || !document.record_id || !document.routing_key || !document.expected)
+                        throw new Error('Each envelope requires record_id, routing_key, expected and explicit document (null deletes) or vector_patch/generation.');
                     if (Object.hasOwn(document,'operation_id')) throw new Error('Operation IDs are managed by this editor.');
                     return {...document, operation_id:newOperationId()};
                 }

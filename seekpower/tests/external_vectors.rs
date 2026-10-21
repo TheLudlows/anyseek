@@ -69,7 +69,7 @@ fn external_config_and_numeric_validation() {
 async fn external_write_query_reopen_contract() {
     let path = Path::new("tests/index_external_contract"); let _ = fs::remove_dir_all(path);
     let index = create_index(path, meta(), &schema(), 11, true, Some(1)).await.unwrap();
-    let missing: Document = serde_json::from_value(json!({"body":"missing"})).unwrap();
+    let missing: Document = serde_json::from_value(json!({"body":"invalid vector","vector":null})).unwrap();
     assert!(index.index_document(missing.clone()).await.is_err());
     assert!(index.index_documents(vec![document("partial",json!([1,0,0])), missing.clone()]).await.is_err());
     index.commit().await.unwrap();
@@ -88,6 +88,9 @@ async fn external_write_query_reopen_contract() {
         assert!(result.error.is_none(),"{:?}",result.error);
         assert_eq!(result.results[0].doc_id,0);
     }
+    let pending: Document = serde_json::from_value(json!({"body":"alpha pending"})).unwrap();
+    index.index_document(pending).await.unwrap(); index.commit().await.unwrap();
+    assert_eq!(query(&index,SearchMode::Lexical,None).await.results.len(),2);
     index.close().await.unwrap(); drop(index);
     let reopened = open_index(path).await.unwrap();
     let result = query(&reopened,SearchMode::Vector { similarity_threshold:Some(0.7),ann_mode:AnnMode::All },

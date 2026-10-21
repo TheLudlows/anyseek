@@ -11,21 +11,24 @@ impl Inner {
         applied: &Applied,
         snapshot_bytes: usize,
     ) -> Result<(), RecordError> {
+        if applied.request.generation.is_some() { return self.publish_generation(applied, snapshot_bytes).await; }
         let receipt = &applied.receipt;
-        let hiding = applied.request.document.is_none()
-            && self
+        let document = enrichment::document(self.state.records.get(&receipt.record_id), &applied.request)?;
+        let hiding = applied.request.vector_patch.is_none() && self
                 .state
                 .records
                 .get(&receipt.record_id)
                 .is_some_and(|r| r.system.is_some());
-        let affected = if hiding {
+        let mut affected = if hiding {
             evidence::descendants(&self.state.records, &receipt.record_id)
                 .map_err(|_| RecordError::DurablePending(receipt.seq))?
         } else {
             std::collections::BTreeSet::new()
         };
+        // Updating the source replaces its own ordinal but keeps the new source visible.
+        if document.is_some() { affected.remove(&receipt.record_id); }
         let old_location = self.locations.get(&receipt.record_id).copied();
-        if let Some(document) = &applied.request.document {
+        if let Some(document) = &document {
             let id = self.ordinals.len();
             let shard = self.index.read().await.shard_vec[0].clone();
             shard
@@ -81,6 +84,36 @@ impl Inner {
             .unwrap()
             .len()
         );
+        Ok(())
+    }
+}
+
+impl Inner {
+    async fn publish_generation(&mut self, applied: &Applied, snapshot_bytes: usize) -> Result<(), RecordError> {
+        let mut next = self.state.clone();
+        apply(&mut next, applied).map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
+        if matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) {
+            let visible = evidence::visibility(&next.records).map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
+            let retired: Vec<_> = self.locations.keys().filter(|id| visible.get(*id) != Some(&true)).cloned().collect();
+            for id in retired {
+                if let Some(ordinal) = self.locations.remove(&id) {
+                    let shard = self.index.read().await.shard_vec[0].clone(); let mut shard = shard.write().await;
+                    shard.delete_hashset.insert(ordinal); shard.active.as_mut().unwrap().retire(ordinal); shard.invalidate_frequentword_results();
+                }
+            }
+            for (id, record) in next.records.iter().filter(|(id, _)| !self.state.records.contains_key(*id)) {
+                if visible.get(id) != Some(&true) { return Err(RecordError::DurablePending(applied.receipt.seq)); }
+                let ordinal = self.ordinals.len();
+                self.index.read().await.shard_vec[0].write().await.active.as_mut().unwrap().keys.push(id.clone());
+                self.index.index_documents(vec![record.document.clone().unwrap()]).await.map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
+                self.ordinals.push(id.clone()); self.locations.insert(id.clone(), ordinal);
+                #[cfg(test)]
+                if self.fail_publication_stage == 1 { return Err(RecordError::DurablePending(applied.receipt.seq)); }
+            }
+        }
+        self.state = next; self.snapshot_bytes = snapshot_bytes;
+        #[cfg(test)]
+        assert_eq!(snapshot_bytes, encode_entry(&Entry::Checkpoint { config:self.config.clone(), state:self.state.clone() }).unwrap().len());
         Ok(())
     }
 }
