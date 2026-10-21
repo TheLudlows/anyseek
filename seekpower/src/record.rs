@@ -22,12 +22,19 @@ mod enrichment;
 mod generation;
 mod temporal;
 mod change_feed;
+mod graph;
+mod fusion;
+pub use fusion::{RelationFusion, FusionWindow};
+pub use graph::{RelationMetadata, RelationDirection, NeighborRequest, NeighborPage, NeighborHit, RelationCount};
 pub use change_feed::{FeedConfig, ChangeKind, ChangeEvent, ChangePage, BootstrapPage};
 pub use temporal::{TemporalMetadata, TemporalFilter, TimeRange};
 pub use generation::{GenerationChunk, GenerationCommand, GenerationMember, GenerationStatus};
 mod output;
 pub use evidence::{EvidenceKind, EvidenceMetadata, EvidenceRef, EvidenceVisibility};
 pub use output::DataOutputPermit;
+mod lease;
+mod locator;
+pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
 mod publication;
 mod recovery;
@@ -257,6 +264,8 @@ pub struct WriteReceipt {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Applied {
+    request_digest: Option<String>,
+    graph_invalidation: bool,
     request: RecordWrite,
     receipt: WriteReceipt,
     observed_epoch: u64,
@@ -273,6 +282,8 @@ struct State {
     epoch_watermark: u64,
     time_watermark_ms: u64,
     expirations: Vec<temporal::Expiration>,
+    lease_expirations: Vec<lease::Expiration>,
+    private_cleanup_pending: bool,
     // Independent snapshots cannot prove the absence of later source deletes.
     // This persistent restore gate is deliberately not cleared by ordinary writes.
     evidence_quarantined: bool,
@@ -286,14 +297,16 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV8")]
+    #[serde(rename = "RecordCheckpointV11")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV8")]
+    #[serde(rename = "RecordAppliedV11")]
     Applied(Applied),
-    #[serde(rename = "RecordExpiredV8")]
+    #[serde(rename = "RecordExpiredV11")]
     Expired(temporal::Expiration),
-    #[serde(rename = "RecordFeedTrimV8")]
+    #[serde(rename = "RecordFeedTrimV11")]
     FeedTrim(change_feed::Trim),
+    #[serde(rename = "RecordLeaseExpiredV11")]
+    LeaseExpired(lease::Expiration),
 }
 struct Inner {
     config: RecordConfig,
@@ -306,6 +319,7 @@ struct Inner {
     clock: Arc<dyn temporal::Clock>,
     evaluation_time_ms: u64,
     feed_cache: change_feed::Cache,
+    graph_cache: graph::Cache,
     bootstrap: Option<change_feed::Bootstrap>,
     bootstrap_epoch: String,
     output: Arc<std::sync::RwLock<output::OutputState>>,
@@ -382,6 +396,9 @@ pub struct RecordQuery {
 /// Search response; hybrid/ANN counts are deliberately not called exact totals.
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordSearch {
+    /// Present only for explicit relation fusion; counts describe candidate windows.
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub fusion: Option<FusionWindow>,
     /// Fixed trusted UTC milliseconds used to decide TTL visibility.
     pub evaluation_time_ms: u64,
     /// Mode-specific reported total, not an unconditional exact corpus count.
@@ -696,6 +713,7 @@ impl RecordPartition {
                 clock: temporal::clock()?,
                 evaluation_time_ms: 0,
                 feed_cache: change_feed::Cache::default(),
+                graph_cache: graph::Cache::default(),
                 bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),
                 output,
                 #[cfg(test)]
@@ -747,6 +765,7 @@ impl RecordPartition {
             match serde_json::from_slice(&bytes).map_err(storage)? {
                 Entry::Applied(applied) => apply(&mut state, &applied)?,
                 Entry::Expired(event) => temporal::apply(&mut state, &event)?,
+                Entry::LeaseExpired(event) => lease::apply(&mut state,&event)?,
                 Entry::FeedTrim(trim) => change_feed::apply_trim(&mut state,&config.change_feed,&trim)?,
                 Entry::Checkpoint { .. } => {
                     return Err(storage("unexpected checkpoint in operation stream"));
@@ -754,7 +773,9 @@ impl RecordPartition {
             }
         }
         evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
+        locator::validate_history(&state).map_err(storage)?;
         generation::validate_state(&state, &config)?;
+        lease::validate_state(&state)?;
         temporal::validate_state(&state)?;
         if state.records.len() > config.max_records
             || state.source_revisions.len() + state.records.values().filter(|r| evidence::retained_revision(r)).count() > config.max_records
@@ -768,6 +789,7 @@ impl RecordPartition {
         })?
         .len();
         let feed_cache = change_feed::Cache::rebuild(&state,&config.change_feed)?;
+        let graph_cache=graph::Cache::rebuild(&state)?;
         let (index, ordinals) = build(path, &config, &state).await?;
         let output = Arc::new(std::sync::RwLock::new(output::OutputState {
             revision: 0, fenced: state.sealed_for.is_some(),
@@ -790,6 +812,7 @@ impl RecordPartition {
                 clock: temporal::clock()?,
                 evaluation_time_ms: 0,
                 feed_cache,
+                graph_cache,
                 bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),                output,
                 #[cfg(test)]
                 fail_after_durable: false,
@@ -837,7 +860,7 @@ impl RecordPartition {
                 if injected.as_deref() == Some("before_append") {
                     return Err(RecordError::Rejected("injected before append".into()));
                 }
-                let hides_evidence = matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) || inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some());
+                let hides_evidence = matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) || (inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some()) || (applied.request.vector_patch.is_none() && inner.graph_cache.references(&applied.request.record_id)));
                 inner.healthy = false;
                 {
                     let mut output = inner.output.write().map_err(|_| RecordError::RecoveryRequired)?;
@@ -962,95 +985,15 @@ impl RecordPartition {
     }
     /// Full retrieval contract for service callers, using one published view.
     pub async fn query(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
-        let RecordQuery {
-            temporal,
-            text,
-            vector,
-            mode,
-            query_type,
-            offset,
-            length: limit,
-            result_type,
-            fields,
-            mut filters,
-            sort,
-        } = query;
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
+        let permit = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
-                let _permit = permit;
-                let mut inner = owner.lock().await;
-                inner.advance_time().await?;
-                if !inner.healthy || inner.state.sealed_for.is_some() {
-                    return Err(RecordError::RecoveryRequired);
-                }
-                if offset
-                    .checked_add(limit)
-                    .is_none_or(|n| n > inner.config.max_candidates)
-                {
-                    return Err(RecordError::Rejected("candidate budget exceeded".into()));
-                }
-                if let SearchMode::WeightedHybrid { rrf, .. } = &mode {
-                    if rrf
-                        .keyword_candidates
-                        .is_some_and(|n| n > inner.config.max_candidates)
-                        || rrf
-                            .vector_candidates
-                            .is_some_and(|n| n > inner.config.max_candidates)
-                    {
-                        return Err(RecordError::Rejected(
-                            "fusion candidate budget exceeded".into(),
-                        ));
-                    }
-                }
-                if let Some(temporal) = temporal { filters.extend(temporal::filters(temporal)?); }
-                let result = inner
-                    .index
-                    .search(
-                        text,
-                        vector,
-                        query_type,
-                        mode,
-                        true,
-                        offset,
-                        limit,
-                        result_type,
-                        true,
-                        fields,
-                        filters,
-                        sort,
-                    )
-                    .await;
-                if let Some(error) = result.error {
-                    return Err(storage(error));
-                }
-                let mut hits = Vec::new();
-                for hit in result.results {
-                    let id = inner
-                        .ordinals
-                        .get(hit.doc_id)
-                        .ok_or_else(|| storage("candidate ordinal outside view"))?;
-                    hits.push(RecordHit {
-                        record: inner.state.records[id].clone(),
-                        score: hit.score,
-                    });
-                }
-                Ok(RecordSearch {
-                    evaluation_time_ms: inner.evaluation_time_ms,
-                    count_total: result.result_count_total,
-                    query_terms: result.query_terms,
-                    visible_seq: inner.state.seq,
-                    hits,
-                    statistics: inner.statistics(),
-                })
-            })
-            .await
-            .map_err(storage)?
+        crate::INDEX_RUNTIME.spawn(async move {
+            let _permit = permit;
+            let mut inner = owner.lock().await;
+            inner.advance_time().await?;
+            if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
+            inner.query_view(query).await
+        }).await.map_err(storage)?
     }
     /// Iterate active records by stable identity. Changing the logical position
     /// invalidates continuation rather than silently skipping or duplicating rows.
@@ -1290,7 +1233,7 @@ mod tests {
             expected, document:None, vector_patch:None, system:None, temporal:None, generation:Some(generation) }
     }
     fn stage_generation(id: &str, members: &[&str]) -> GenerationCommand {
-        GenerationCommand::Stage { generation_id:id.into(), source:EvidenceRef { record_id:"s".into(), routing_key:"document-1".into(), version:1 },
+        GenerationCommand::Stage { generation_id:id.into(), source:EvidenceRef { locator:None, record_id:"s".into(), routing_key:"document-1".into(), version:1 },
             members:members.iter().map(|s| (*s).into()).collect(), chunks:members.iter().map(|id| GenerationChunk { record_id:(*id).into(),
                 document:serde_json::from_value(serde_json::json!({"body":"generationword alpha"})).unwrap(), temporal:None, evidence_refs:vec![] }).collect() }
     }
@@ -1305,6 +1248,297 @@ mod tests {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
         p.inner.lock().await.clock=clock.clone(); (clock,now)
+    }
+    #[tokio::test]
+    async fn staging_lease_renew_expire_redact_and_exact_retry() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(source_write("source","s",&[])).await.unwrap();
+        let stage=generation_write("lease-stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]));
+        let receipt=p.write(stage.clone()).await.unwrap();let status=p.generation_status("doc").await.unwrap().unwrap();assert_eq!(status.lease_expires_at_ms,Some(now+1_800_000));
+        clock.set(now+900_000);let renew=generation_write("renew",ExpectedVersion::Match(1),GenerationCommand::Renew{generation_id:"g".into()});
+        let renewed=p.write(renew.clone()).await.unwrap();assert_eq!(p.write(renew).await.unwrap(),renewed);
+        assert!(p.write(generation_write("old-owner",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()})).await.is_err());
+        clock.set(now+1_800_000);assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,1);
+        clock.set(now+2_700_000);let status=p.generation_status("doc").await.unwrap().unwrap();assert_eq!(status.staged_members,0);assert_eq!(status.version,3);assert!(!status.private_cleanup_pending);
+        assert_eq!(p.write(stage.clone()).await.unwrap(),receipt);
+        let mut changed=stage.clone();if let Some(GenerationCommand::Stage{chunks,..})=&mut changed.generation {chunks[0].document.insert("body".into(),serde_json::json!("different"));}
+        assert!(matches!(p.write(changed).await,Err(RecordError::Conflict(_))));
+        let state=p.inner.lock().await.state.clone();assert!(state.operations[1].request_digest.is_some());assert!(state.lease_expirations.len()==1);
+        if let Some(GenerationCommand::Stage{chunks,members,..})=&state.operations[1].request.generation {assert!(chunks.is_empty()&&members.is_empty());}else{panic!();}
+        assert_eq!(p.changes(None,100).await.unwrap().events.len(),1);
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock;
+        assert_eq!(p.write(stage).await.unwrap(),receipt);assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_renew_publish_race_has_one_fenced_winner() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        p.write(generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]))).await.unwrap();
+        let (renew,publish)=tokio::join!(p.write(generation_write("renew-race",ExpectedVersion::Match(1),GenerationCommand::Renew{generation_id:"g".into()})),p.write(generation_write("publish-race",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()})));
+        assert_ne!(renew.is_ok(),publish.is_ok());
+        if renew.is_ok(){assert!(p.get("chunk").await.unwrap().is_none());p.write(generation_write("publish-current",ExpectedVersion::Match(2),GenerationCommand::Publish{generation_id:"g".into()})).await.unwrap();}
+        assert!(p.get("chunk").await.unwrap().is_some());
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(p.get("chunk").await.unwrap().is_some());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_cleanup_failure_stays_pending_and_retries() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let stage=generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]));let receipt=p.write(stage.clone()).await.unwrap();
+        p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort{generation_id:"g".into()})).await.unwrap();
+        std::fs::write(root.join(".test-cleanup-failure"),b"fail old generation retirement").unwrap();
+        assert!(p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        assert_eq!(p.write(stage.clone()).await.unwrap(),receipt);
+        assert!(p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        std::fs::remove_file(root.join(".test-cleanup-failure")).unwrap();
+        assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        let generations:Vec<_>=std::fs::read_dir(&root).unwrap().filter_map(Result::ok).filter(|e|e.file_name().to_string_lossy().starts_with("generation-")).collect();
+        assert_eq!(generations.len(),1);
+        assert_eq!(p.write(stage).await.unwrap(),receipt);
+        // Windows byte-range owner locks forbid a second reader of the live WAL.
+        // Finish retry assertions under the owner, then inspect persisted bytes after close.
+        drop(p);
+        assert!(!std::fs::read(generations[0].path().join("wal")).unwrap().windows(b"generationword alpha".len()).any(|w|w==b"generationword alpha"));
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_abort_releases_private_payload_but_keeps_canonical_retry() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let mut stage=generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]));
+        if let Some(GenerationCommand::Stage{chunks,..})=&mut stage.generation{chunks[0].document.insert("extra".into(),serde_json::json!({"b":2,"a":1}));}
+        let receipt=p.write(stage.clone()).await.unwrap();
+        p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort{generation_id:"g".into()})).await.unwrap();
+        if let Some(GenerationCommand::Stage{chunks,..})=&mut stage.generation{chunks[0].document.insert("extra".into(),serde_json::json!({"a":1,"b":2}));}
+        assert_eq!(p.write(stage.clone()).await.unwrap(),receipt);
+        assert!(p.write(generation_write("spent",ExpectedVersion::Match(2),stage_generation("g",&["chunk"]))).await.is_err());
+        p.write(generation_write("new",ExpectedVersion::Match(2),stage_generation("g2",&["chunk"]))).await.unwrap();
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert_eq!(p.write(stage).await.unwrap(),receipt);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_expiry_durable_pending_and_owner_scope_fence() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(source_write("s","s",&[])).await.unwrap();p.write(generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]))).await.unwrap();
+        // A new certified owner's scope differs; it must explicitly renew.
+        p.inner.lock().await.state.feed.scope="other-owner".into();
+        assert!(p.generation_status("doc").await.unwrap().unwrap().lease_requires_renewal);
+        assert!(p.write(generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()})).await.is_err());
+        p.write(generation_write("renew",ExpectedVersion::Match(1),GenerationCommand::Renew{generation_id:"g".into()})).await.unwrap();
+        assert!(!p.generation_status("doc").await.unwrap().unwrap().lease_requires_renewal);
+        clock.set(now+1_800_000);p.inner.lock().await.fail_after_durable=true;
+        assert!(matches!(p.generation_status("doc").await,Err(RecordError::DurablePending(_))));
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock;
+        assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn locator_utf8_pages_history_and_delete_barrier() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        let mut source=source_write("located-source","s",&[]);
+        source.document.as_mut().unwrap().insert("body".into(),serde_json::json!("A中éZ"));
+        source.document.as_mut().unwrap().insert("pages".into(),serde_json::json!(["第一页","page two"]));
+        p.write(source.clone()).await.unwrap();
+        let reference=EvidenceRef{record_id:"s".into(),routing_key:"document-1".into(),version:1,locator:Some(EvidenceLocator::Utf8{field:"body".into(),start:1,end:6})};
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"中é");
+        let mut derived=source_write("located-derived","d",&[("s",1)]);derived.system.as_mut().unwrap().evidence_refs[0]=reference.clone();
+        let receipt=p.write(derived.clone()).await.unwrap();assert_eq!(p.write(derived).await.unwrap(),receipt);
+        let before=p.statistics().await.unwrap().visible_seq;
+        for (start,end) in [(2,4),(1,5),(6,6),(0,99)] {
+            let mut bad=source_write(&format!("invalid-{start}-{end}"),"bad",&[("s",1)]);
+            bad.system.as_mut().unwrap().evidence_refs[0].locator=Some(EvidenceLocator::Utf8{field:"body".into(),start,end});
+            assert!(p.write(bad).await.is_err());
+        }
+        assert_eq!(p.statistics().await.unwrap().visible_seq,before);
+        let mut page=reference.clone();page.locator=Some(EvidenceLocator::Page{field:"pages".into(),page:2});
+        assert_eq!(p.evidence_excerpt(page.clone()).await.unwrap().text,"page two");
+        page.locator=Some(EvidenceLocator::Page{field:"pages".into(),page:0});assert!(p.evidence_excerpt(page).await.is_err());
+        let original=p.evidence_excerpt(reference.clone()).await.unwrap();
+        source.operation_id=OperationId::new("source-revision".into());source.expected=ExpectedVersion::Match(1);
+        source.document.as_mut().unwrap().insert("body".into(),serde_json::json!("short"));p.write(source).await.unwrap();
+        assert!(p.get("d").await.unwrap().is_none());
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().content_sha256,original.content_sha256);
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"中é");
+        let mut corrupt=p.inner.lock().await.state.clone();corrupt.records.get_mut("d").unwrap().system.as_mut().unwrap().evidence_refs[0].locator=Some(EvidenceLocator::Utf8{field:"body".into(),start:1,end:2});
+        assert!(locator::validate_history(&corrupt).is_err());
+        let permit=p.output_permit().unwrap();let mut deletion=write("delete-source","s","",ExpectedVersion::Match(2));deletion.document=None;p.write(deletion).await.unwrap();
+        assert!(permit.deliver(||()).is_err());assert!(p.evidence_excerpt(reference.clone()).await.is_err());
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(p.evidence_excerpt(reference).await.is_err());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn locator_generation_and_ttl_keep_source_gates() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        let mut source=source_write("source","s",&[]);source.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});p.write(source).await.unwrap();
+        let mut stage=stage_generation("g",&["chunk"]);
+        if let GenerationCommand::Stage{source,..}=&mut stage {source.locator=Some(EvidenceLocator::Utf8{field:"body".into(),start:0,end:8});}
+        p.write(generation_write("stage",ExpectedVersion::Absent,stage)).await.unwrap();
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock.clone();
+        p.write(generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()})).await.unwrap();
+        let reference=p.get("chunk").await.unwrap().unwrap().system.unwrap().evidence_refs[0].clone();
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"evidence");
+        let mut next=stage_generation("g2",&["next"]);if let GenerationCommand::Stage{source,..}=&mut next {*source=reference.clone();}
+        p.write(generation_write("stage-next",ExpectedVersion::Match(2),next)).await.unwrap();
+        let mut update=source_write("update","s",&[]);update.expected=ExpectedVersion::Match(1);update.document.as_mut().unwrap().insert("body".into(),serde_json::json!("x"));p.write(update).await.unwrap();
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock.clone();
+        assert!(p.write(generation_write("publish-stale",ExpectedVersion::Match(3),GenerationCommand::Publish{generation_id:"g2".into()})).await.is_err());
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"evidence");
+        clock.set(now+100);assert!(p.evidence_excerpt(reference).await.is_err());assert!(p.get("chunk").await.unwrap().is_none());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    fn entity_write(nonce:&str,id:&str)->RecordWrite {
+        let mut request=write(nonce,id,"alpha entity",ExpectedVersion::Absent);
+        request.system=Some(EvidenceMetadata{kind:EvidenceKind::Entity,relation:None,evidence_refs:vec![]});request
+    }
+    fn edge_write(nonce:&str,id:&str,from:&str,to:&str)->RecordWrite {
+        let mut request=write(nonce,id,"alpha edge",ExpectedVersion::Absent);
+        let endpoint=|id:&str|EvidenceRef{locator:None,record_id:id.into(),routing_key:"document-1".into(),version:1};
+        request.system=Some(EvidenceMetadata{kind:EvidenceKind::Relation,relation:Some(RelationMetadata{from:endpoint(from),to:endpoint(to),relation_type:"knows".into(),weight:Some(0.5)}),evidence_refs:vec![]});request
+    }
+    fn neighbor_request(id:&str)->NeighborRequest {
+        NeighborRequest{seeds:vec![EvidenceRef{locator:None,record_id:id.into(),routing_key:"document-1".into(),version:1}],direction:RelationDirection::Both,relation_types:vec![],per_seed:128,max_candidates:100,allow_partial:false}
+    }
+    fn fusion_query() -> RecordQuery {
+        RecordQuery{temporal:None,text:"alpha".into(),vector:Some(Embedding::F32(vec![1.0,0.0])),mode:SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},query_type:QueryType::Union,offset:0,length:20,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![]}
+    }
+    fn fusion_options() -> RelationFusion {
+        let mut neighbors=neighbor_request("a");neighbors.max_candidates=20;
+        RelationFusion{neighbors,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.5,vector_weight:2.0,keyword_candidates:Some(20),vector_candidates:Some(20)},relation_weight:1.5}
+    }
+    #[tokio::test]
+    async fn fusion_rank_oracle_recovery_and_output_barrier() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(entity_write("a","a")).await.unwrap();
+        p.write(write("b","b","alpha alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("c","c","unrelated",ExpectedVersion::Absent)).await.unwrap();
+        for (id,to) in [("ab","b"),("ab2","b"),("ac","c")] {p.write(edge_write(id,id,"a",to)).await.unwrap();}
+        let options=fusion_options();let mut oracle=BTreeMap::<String,f32>::new();
+        for (mode,weight) in [(SearchMode::Lexical,0.5),(SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},2.0)] {
+            let mut q=fusion_query();q.mode=mode.clone();if mode==SearchMode::Lexical{q.vector=None;}
+            let channel=p.query(q).await.unwrap();for(rank,hit)in channel.hits.iter().enumerate(){*oracle.entry(hit.record.record_id.clone()).or_default()+=weight/(3.0+rank as f32);}
+        }
+        *oracle.entry("b".into()).or_default()+=1.5/3.0;*oracle.entry("c".into()).or_default()+=1.5/4.0;
+        let mut expected:Vec<_>=oracle.into_iter().collect();expected.sort_by(|a,b|b.1.total_cmp(&a.1).then_with(||a.0.cmp(&b.0)));
+        let result=p.query_with_relations(fusion_query(),options.clone()).await.unwrap();
+        assert_eq!(result.hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>(),expected);
+        assert_eq!(result.count_total,6);assert!(result.fusion.unwrap().relation_complete);
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.query_with_relations(fusion_query(),options.clone()).await.unwrap().hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>(),expected);
+        let output=p.output_permit().unwrap();let mut deletion=write("delete-b","b","",ExpectedVersion::Match(1));deletion.document=None;p.write(deletion).await.unwrap();
+        assert!(output.deliver(||()).is_err());
+        let result=p.query_with_relations(fusion_query(),options).await.unwrap();assert_eq!(result.statistics.active_records,3);
+        assert!(!result.hits.iter().any(|h|["b","ab","ab2"].contains(&h.record.record_id.as_str())));
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn fusion_budget_and_temporal_predicate_before_ranks() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(entity_write("a","a")).await.unwrap();
+        let mut b=write("b","b","alpha",ExpectedVersion::Absent);b.temporal=Some(TemporalMetadata{event_time_ms:Some(now as i64),expire_at_ms:Some(now+100),..Default::default()});p.write(b).await.unwrap();
+        p.write(write("c","c","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.write(edge_write("ab","ab","a","b")).await.unwrap();p.write(edge_write("ac","ac","a","c")).await.unwrap();
+        let mut options=fusion_options();options.neighbors.max_candidates=1;
+        assert!(p.query_with_relations(fusion_query(),options.clone()).await.is_err());options.neighbors.allow_partial=true;
+        let result=p.query_with_relations(fusion_query(),options).await.unwrap();assert!(!result.fusion.unwrap().relation_complete);
+        let mut q=fusion_query();q.temporal=Some(TemporalFilter{event:Some(TimeRange{from_ms:Some(now as i64),to_ms:Some((now+1) as i64)}),..Default::default()});
+        let result=p.query_with_relations(q,fusion_options()).await.unwrap();assert_eq!(result.hits.len(),1);assert_eq!(result.hits[0].record.record_id,"b");
+        clock.set(now+100);let result=p.query_with_relations(fusion_query(),fusion_options()).await.unwrap();assert_eq!(result.evaluation_time_ms,now+100);assert!(!result.hits.iter().any(|h|h.record.record_id=="b"||h.record.record_id=="ab"));
+        let mut bad=fusion_options();bad.rrf.keyword_candidates=Some(100);assert!(p.query_with_relations(fusion_query(),bad).await.is_err());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn relation_cycles_exact_endpoints_aba_and_rebuild() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(entity_write("entity-a","a")).await.unwrap();
+        let normal=write("node-b","b","alpha",ExpectedVersion::Absent);p.write(normal.clone()).await.unwrap();
+        let original_feed=p.changes(None,100).await.unwrap().events;
+        let edge=edge_write("edge-ab","ab","a","b");let receipt=p.write(edge.clone()).await.unwrap();
+        assert_eq!(p.write(edge).await.unwrap(),receipt);
+        p.write(edge_write("edge-ba","ba","b","a")).await.unwrap();
+        p.write(edge_write("edge-aa","aa","a","a")).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().hits.len(),3);
+        assert_eq!(p.entities(None,10).await.unwrap().records.len(),1);
+        assert_eq!(&p.changes(None,100).await.unwrap().events[..2],original_feed.as_slice());
+        let output=p.output_permit().unwrap();
+        let mut replace=normal;replace.operation_id=OperationId::new("node-b-update".into());replace.expected=ExpectedVersion::Match(1);
+        p.write(replace).await.unwrap();assert!(output.deliver(||()).is_err());
+        assert!(p.get("ab").await.unwrap().is_none());assert!(p.get("ba").await.unwrap().is_none());
+        let result=p.neighbors(neighbor_request("a")).await.unwrap();assert_eq!(result.hits.len(),1);assert_eq!(result.hits[0].edge.record_id,"aa");
+        assert_eq!(result.count.value,1);assert!(result.complete);assert_eq!(result.statistics.active_records,3);
+        assert!(p.changes(None,100).await.unwrap().events.last().unwrap().rescan_required);
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,1);
+        assert!(matches!(p.write(edge_write("stale-edge","new","a","b")).await,Err(RecordError::Conflict(_))));
+        let mut deletion=write("delete-b","b","alpha",ExpectedVersion::Match(2));deletion.document=None;
+        assert_eq!(p.write(deletion).await.unwrap().version,3);
+        assert_eq!(p.write(write("recreate-b","b","alpha",ExpectedVersion::Match(3))).await.unwrap().version,4);
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,1);
+        assert!(p.get("ab").await.unwrap().is_none());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn relation_generation_switch_and_transitive_proof_recovery() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(source_write("s","s",&[])).await.unwrap();
+        p.write(entity_write("a","a")).await.unwrap();
+        p.write(generation_write("stage1",ExpectedVersion::Absent,stage_generation("g1",&["old"]))).await.unwrap();
+        p.write(generation_write("publish1",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g1".into()})).await.unwrap();
+        p.write(edge_write("edge-old","edge-old","a","old")).await.unwrap();
+        p.write(source_write("proof","proof",&[("edge-old",1)])).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,1);
+        p.write(generation_write("stage2",ExpectedVersion::Match(2),stage_generation("g2",&["new"]))).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,1);
+        let permit=p.output_permit().unwrap();
+        let publish=generation_write("publish2",ExpectedVersion::Match(3),GenerationCommand::Publish{generation_id:"g2".into()});
+        let receipt=p.write(publish.clone()).await.unwrap();assert_eq!(p.write(publish).await.unwrap(),receipt);
+        assert!(permit.deliver(||()).is_err());
+        for id in ["old","edge-old","proof"] {assert!(p.get(id).await.unwrap().is_none());}
+        let fused=p.query_with_relations(fusion_query(),fusion_options()).await.unwrap();
+        assert!(!fused.hits.iter().any(|h|["old","edge-old","proof"].contains(&h.record.record_id.as_str())));
+        assert!(fused.hits.iter().any(|h|h.record.record_id=="new"));
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,0);
+        p.write(edge_write("edge-new","edge-new","a","new")).await.unwrap();
+        let mut illegal=edge_write("retarget","edge-new","a","a");illegal.expected=ExpectedVersion::Match(1);
+        assert!(p.write(illegal).await.is_err());
+        let mut deletion=source_write("delete-source","s",&[]);deletion.expected=ExpectedVersion::Match(1);deletion.document=None;deletion.system=None;
+        p.write(deletion).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,0);
+        let fused=p.query_with_relations(fusion_query(),fusion_options()).await.unwrap();assert_eq!(fused.hits.len(),1);assert_eq!(fused.hits[0].record.record_id,"a");
+        assert_eq!(p.statistics().await.unwrap().active_records,1);
+        assert!(p.changes(None,100).await.unwrap().events.last().unwrap().rescan_required);
+        p.compact_journal().await.unwrap();drop(p);
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,0);
+        assert_eq!(p.statistics().await.unwrap().active_records,1);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn relation_endpoint_depth_rejected_before_durable_append() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(source_write("root","s",&[])).await.unwrap();let mut parent="s".to_string();
+        for n in 1..=16 {let id=format!("d{n}");p.write(source_write(&id,&id,&[(&parent,1)])).await.unwrap();parent=id;}
+        p.write(entity_write("a","a")).await.unwrap();
+        let before=p.statistics().await.unwrap();let permit=p.output_permit().unwrap();
+        assert!(matches!(p.write(edge_write("too-deep","edge","a",&parent)).await,Err(RecordError::Rejected(_))));
+        let after=p.statistics().await.unwrap();assert_eq!(before.visible_seq,after.visible_seq);assert_eq!(before.active_records,after.active_records);assert!(permit.deliver(||()).is_ok());
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert_eq!(p.statistics().await.unwrap().active_records,18);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn relation_budget_source_expiry_and_common_statistics() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(entity_write("a","a")).await.unwrap();
+        let mut source=source_write("s","s",&[]);source.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});p.write(source).await.unwrap();
+        p.write(edge_write("as","as","a","s")).await.unwrap();p.write(edge_write("aa","aa","a","a")).await.unwrap();
+        let mut limited=neighbor_request("a");limited.per_seed=1;
+        assert!(matches!(p.neighbors(limited.clone()).await,Err(RecordError::Rejected(_))));
+        limited.allow_partial=true;let page=p.neighbors(limited).await.unwrap();assert!(!page.complete);assert_eq!(page.count.relation,"window");assert_eq!(page.count.value,1);
+        clock.set(now+100);let page=p.neighbors(neighbor_request("a")).await.unwrap();assert!(page.complete);assert_eq!(page.count.value,1);assert_eq!(page.hits[0].edge.record_id,"aa");
+        assert_eq!(page.evaluation_time_ms,page.statistics.evaluation_time_ms);assert_eq!(page.statistics.active_records,2);
+        let mut illegal=edge_write("edge-endpoint","bad","a","aa");assert!(matches!(p.write(illegal.clone()).await,Err(RecordError::Rejected(_))));
+        illegal.system.as_mut().unwrap().relation.as_mut().unwrap().weight=Some(f64::INFINITY);assert!(p.write(illegal).await.is_err());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn feed_order_retry_retention_and_restore_scope() {
@@ -1627,7 +1861,7 @@ mod tests {
             let reference = if indirect { p.write(source_write("dependent", "dependent", &[("old",1)])).await.unwrap(); "dependent" } else { "old" };
             let mut next = stage_generation("g2", &["new"]);
             if let GenerationCommand::Stage { chunks, .. } = &mut next {
-                chunks[0].evidence_refs.push(EvidenceRef { record_id:reference.into(), routing_key:"document-1".into(), version:1 });
+                chunks[0].evidence_refs.push(EvidenceRef { locator:None, record_id:reference.into(), routing_key:"document-1".into(), version:1 });
             }
             p.write(generation_write("stage2", ExpectedVersion::Match(2), next)).await.unwrap();
             let before = p.statistics().await.unwrap(); let permit = p.output_permit().unwrap();
@@ -1950,9 +2184,9 @@ mod tests {
     fn source_write(nonce: &str, id: &str, dependencies: &[(&str, u64)]) -> RecordWrite {
         let mut request = write(nonce, id, "evidence original", ExpectedVersion::Absent);
         request.system = Some(EvidenceMetadata {
-            kind: if dependencies.is_empty() { EvidenceKind::Source } else { EvidenceKind::Derived },
+            kind: if dependencies.is_empty() { EvidenceKind::Source } else { EvidenceKind::Derived }, relation:None,
             evidence_refs: dependencies.iter().map(|(id, version)| EvidenceRef {
-                record_id: (*id).into(), routing_key: "document-1".into(), version: *version,
+                locator:None, record_id: (*id).into(), routing_key: "document-1".into(), version: *version,
             }).collect(),
         });
         request
@@ -2067,7 +2301,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV8", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV11", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
@@ -3526,5 +3760,83 @@ mod tests {
         );
         drop(partition);
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+impl Inner {
+    async fn query_view(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
+        let RecordQuery {
+            temporal,
+            text,
+            vector,
+            mode,
+            query_type,
+            offset,
+            length: limit,
+            result_type,
+            fields,
+            mut filters,
+            sort,
+        } = query;
+                if offset
+                    .checked_add(limit)
+                    .is_none_or(|n| n > self.config.max_candidates)
+                {
+                    return Err(RecordError::Rejected("candidate budget exceeded".into()));
+                }
+                if let SearchMode::WeightedHybrid { rrf, .. } = &mode {
+                    if rrf
+                        .keyword_candidates
+                        .is_some_and(|n| n > self.config.max_candidates)
+                        || rrf
+                            .vector_candidates
+                            .is_some_and(|n| n > self.config.max_candidates)
+                    {
+                        return Err(RecordError::Rejected(
+                            "fusion candidate budget exceeded".into(),
+                        ));
+                    }
+                }
+                if let Some(temporal) = temporal { filters.extend(temporal::filters(temporal)?); }
+                let result = self
+                    .index
+                    .search(
+                        text,
+                        vector,
+                        query_type,
+                        mode,
+                        true,
+                        offset,
+                        limit,
+                        result_type,
+                        true,
+                        fields,
+                        filters,
+                        sort,
+                    )
+                    .await;
+                if let Some(error) = result.error {
+                    return Err(storage(error));
+                }
+                let mut hits = Vec::new();
+                for hit in result.results {
+                    let id = self
+                        .ordinals
+                        .get(hit.doc_id)
+                        .ok_or_else(|| storage("candidate ordinal outside view"))?;
+                    hits.push(RecordHit {
+                        record: self.state.records[id].clone(),
+                        score: hit.score,
+                    });
+                }
+                Ok(RecordSearch {
+                    fusion: None,
+                    evaluation_time_ms: self.evaluation_time_ms,
+                    count_total: result.result_count_total,
+                    query_terms: result.query_terms,
+                    visible_seq: self.state.seq,
+                    hits,
+                    statistics: self.statistics(),
+                })
     }
 }

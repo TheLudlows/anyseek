@@ -95,6 +95,24 @@ def exercise(base,master,call):
         page.locator('#feedRead').click()
         expect(page.locator('#feedStatus')).to_contain_text('Change page ready')
         print('PASS Chromium: real snapshot bootstrap and feed continuation')
+        graph_records=[{'record_id':rid,'routing_key':'graph-route','expected':'Absent','document':{'body':'graphnode'},'system':{'kind':'entity'}} for rid in ['graph-a','graph-b']]
+        graph_records.append({'record_id':'graph-edge','routing_key':'graph-route','expected':'Absent','document':{'body':'graphlink'},'system':{'kind':'relation','relation':{'from':{'record_id':'graph-a','routing_key':'graph-route','version':1},'to':{'record_id':'graph-b','routing_key':'graph-route','version':1},'relation_type':'knows'}}})
+        page.locator('#recordEnvelopeMode').check();page.locator('#documentJson').fill(json.dumps(graph_records));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('Wrote 3 record(s)')
+        page.locator('summary').filter(has_text='Entities and explicit one-hop relations').click()
+        page.locator('#listEntities').click();expect(page.locator('#relationStatus')).to_contain_text('Entity page')
+        assert 'graph-a' in page.locator('#relationResult').inner_text()
+        page.locator('#relationSeeds').fill(json.dumps([{'record_id':'graph-a','routing_key':'graph-route','version':1}]))
+        page.locator('#expandNeighbors').click();expect(page.locator('#relationStatus')).to_contain_text('exact: 1 visible paths')
+        assert 'graph-b' in page.locator('#relationResult').inner_text()
+        page.locator('#fusionQuery').fill(json.dumps({'query':'graphlink','length':10,'relation_fusion':{'rrf':{'constant':3,'keyword_weight':1,'vector_weight':0,'keyword_candidates':100},'relation_weight':1}}))
+        page.locator('#fuseRelations').click();expect(page.locator('#relationStatus')).to_contain_text('Candidate window:')
+        fusion=json.loads(page.locator('#relationResult').inner_text())
+        assert fusion['fusion']['count_relation']=='candidate_window'
+        assert any(hit['record']['record_id']=='graph-b' for hit in fusion['hits'])
+
+        page.locator('#recordEnvelopeMode').uncheck()
+        print('PASS Chromium: entity/edge envelopes, entity directory and real bounded one-hop')
         page.locator('#backToSearch').click()
         page.locator('#searchInput').fill('browser alpha')
         expect(page.locator('#contentBox')).to_contain_text('Browser title')
@@ -108,6 +126,11 @@ def exercise(base,master,call):
         ]
         page.locator('#documentJson').fill(json.dumps(envelopes))
         page.locator('#submitDocuments').click();expect(page.locator('#documentStatus')).to_contain_text('Wrote 2 record(s)')
+        page.locator('summary').filter(has_text='Source evidence excerpts').click()
+        page.locator('#evidenceRef').fill(json.dumps({'record_id':'ui-source','routing_key':'ui-route','version':1,'locator':{'kind':'utf8','field':'body','start':0,'end':6}}))
+        page.locator('#readEvidence').click();expect(page.locator('#evidenceResult')).to_contain_text('content_sha256')
+        expect(page.locator('#evidenceResult')).to_contain_text('source')
+        print('PASS Chromium: exact source excerpt and content hash')
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
         expect(page.locator('#contentBox')).to_contain_text('Derived title')
         page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
@@ -125,7 +148,15 @@ def exercise(base,master,call):
         expect(page.locator('#documentStatus')).to_contain_text('not searchable')
         assert call('POST',f'/api/v1/index/{collection}/query',{'query':'generationui'})['count_total']==0
         assert call('GET',f'/api/v1/index/{collection}/doc/ui-generation/generation')['staged_members']==2
-        publish={'record_id':'ui-generation','routing_key':'ui-route','expected':{'Match':1},'generation':{'action':'publish','generation_id':'g1'}}
+        page.locator('summary').filter(has_text='Staging lease status').click()
+        page.locator('#leaseDocument').fill('ui-generation');page.locator('#inspectLease').click()
+        expect(page.locator('#leaseResult')).to_contain_text('lease_expires_at_ms')
+        renewal={'record_id':'ui-generation','routing_key':'ui-route','expected':{'Match':1},'generation':{'action':'renew','generation_id':'g1'}}
+        page.locator('#documentJson').fill(json.dumps(renewal));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('not searchable')
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-generation/generation')['lease_fence']==2
+        print('PASS Chromium: staging lease inspection and durable renewal without publication')
+        publish={'record_id':'ui-generation','routing_key':'ui-route','expected':{'Match':2},'generation':{'action':'publish','generation_id':'g1'}}
         page.locator('#documentJson').fill(json.dumps(publish));page.locator('#submitDocuments').click()
         expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('generationui')

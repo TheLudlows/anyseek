@@ -14,11 +14,11 @@ impl Inner {
         if applied.request.generation.is_some() { return self.publish_generation(applied, snapshot_bytes).await; }
         let receipt = &applied.receipt;
         let document = enrichment::document(self.state.records.get(&receipt.record_id), &applied.request)?;
-        let hiding = applied.request.vector_patch.is_none() && self
+        let hiding = applied.request.vector_patch.is_none() && (self
                 .state
                 .records
                 .get(&receipt.record_id)
-                .is_some_and(|r| r.system.is_some());
+                .is_some_and(|r| r.system.is_some()) || self.graph_cache.references(&receipt.record_id));
         let mut affected = if hiding {
             evidence::descendants(&self.state.records, &receipt.record_id)
                 .map_err(|_| RecordError::DurablePending(receipt.seq))?
@@ -73,6 +73,7 @@ impl Inner {
             return Err(RecordError::DurablePending(receipt.seq));
         }
         apply(&mut self.state, applied).map_err(|_| RecordError::DurablePending(receipt.seq))?;
+        self.graph_cache.insert(&self.state.records[&receipt.record_id]).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         self.snapshot_bytes = snapshot_bytes;
         #[cfg(test)]
         assert_eq!(

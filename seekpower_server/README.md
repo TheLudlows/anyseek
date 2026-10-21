@@ -217,3 +217,42 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 创建 config 可携带 `change_feed:{retention_ms:604800000,max_events:100000,max_bytes:67108864}`。保留期至少七天；事件与紧急失效预留达到配额时新写入返回 429 `feed_full`，不会提前丢事件。既有 Record/journal 配额也继续有效。逻辑 feed 裁剪不删除原幂等账本，不等于 P3 物理历史回收。
 
 独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[实施记录第 18 节](../docs/implementation-57-p2.md)。本批尚未发布分支或获得 Windows 原生验证，不能把已有 PR 的 CI 当作本批通过。
+
+## P2 实体与显式一跳关系（本地批次）
+
+通过现有 RecordWrite 创建 `system:{"kind":"entity"}`，或 `system:{"kind":"relation","relation":{"from":{"record_id":"a","routing_key":"r","version":1},"to":{"record_id":"b","routing_key":"r","version":1},"relation_type":"knows","weight":0.5}}`。正文仍在 document；weight 可选，仅为调用方声明，不自动改变检索分数。evidence_refs 单独声明证据，端点不自动视为内容证据。
+
+端点必须是同 collection/partition 当前可见的精确非关系版本。关系与双端的来源、generation、TTL 共同控制可见性；端点替换、删除和 ABA 不会把旧边重新绑定。实体/关系正文可以 Match 精确更新，但 system 声明不可变，重算或重绑定使用新 Record ID。
+
+- `POST /api/v1/index/{id}/entities`：`{"cursor":null,"length":100}`，稳定 ID 分页；视图变化拒绝旧 cursor。
+- `POST /api/v1/index/{id}/neighbors`：`{"seeds":[{"record_id":"a","routing_key":"r","version":1}],"direction":"both","relation_types":[],"per_seed":128,"max_candidates":1000,"allow_partial":false}`。
+
+一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据和授权输出屏障与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
+
+本批 journal 为 V9，拒绝旧 V8 等格式；无迁移。未实现关系与全文/向量的单次融合查询、模型实体消歧或完整图语言。测试状态见[实施记录第 19 节](../docs/implementation-57-p2.md#19-实体与显式一跳关系)。
+
+## P2 精确来源摘录（本地收尾批次）
+
+`POST /api/v1/index/{id}/evidence` 接受 `{record_id,routing_key,version,locator}`。locator 可为 `{"kind":"utf8","field":"body","start":0,"end":5}`（UTF-8 字节半开区间，必须字符边界），或 `{"kind":"page","field":"pages","page":1}`（源字段为字符串数组、一基页码）。仅定位已持久内联 Source，不下载 URL 或解析 PDF；关系 endpoints/seeds 不接受 locator。派生 evidence_refs 和 generation source 可携带该定位。
+
+响应返回选中文本及完整字段/页的 SHA-256、固定 text/plain UTF-8 表示、精确 reference、共同水位与时间。Source 修订后可显式读取保留旧修订，普通 stale 派生仍隐藏；当前 source 已删除/过期/隔离时拒绝摘录，授权及输出屏障继续适用。定位写入和恢复均校验范围，journal V10 拒绝旧格式，无升级迁移。UI 记录页可输入精确 reference 查看摘录。分平台结果见实施记录第 20 节。
+
+## P2 staging 租约与私有清理（本地批次）
+
+Stage 获得 30 分钟租约，期限为持久可信 UTC 毫秒时间 + 1800000。使用 `generation:{"action":"renew","generation_id":"g"}` 及精确 `expected:{"Match":当前控制版本}` 续租；回执 staged_only=true，不发布成员。generation 状态返回 lease_expires_at_ms、lease_fence、lease_requires_renewal、private_cleanup_pending。Publish/Abort/Renew 共用 control version fencing；到期不可续租，新建需新 generation ID。同 owner 重启保留剩余期限，接管后的 scope 变更要求显式续租。
+
+Abort/到期持久退休后，只释放未发布私有 Stage 正文，保留规范化请求摘要和原回执；原 operation_id 重试返回原成功结果但不复活 staging。后续请求安全 checkpoint/reclaim，删除旧 WAL 失败保持 pending、未知发布 fence；不是普通历史 GC，也不删除已有备份。UI 记录页可检查租约，通过原编辑器提交 renew 并保留精确重试请求。完整请求 Stage 前不提供分片上传租约。Journal V11 拒绝旧格式；验证见实施记录第 21 节。
+
+### Explicit same-view relation fusion
+
+`POST /api/v1/index/{id}/query` optionally accepts `relation_fusion`:
+
+```json
+{"query":"alpha","length":10,"relation_fusion":{"neighbors":{"seeds":[{"record_id":"entity-a","routing_key":"route","version":1}],"direction":"both","per_seed":10,"max_candidates":100,"allow_partial":false},"rrf":{"constant":0.6,"keyword_weight":1,"vector_weight":1,"keyword_candidates":100,"vector_candidates":100},"relation_weight":1}}
+```
+
+Add `query_vector` for the vector channel, with existing `all`/`nprobe`/threshold options. No embedding is computed. At least one enabled text/vector channel is required. `relation_weight` must be finite and positive. Existing `RrfOptions` validation applies; an enabled text/vector channel requires its explicit positive candidate budget. The sum of enabled text/vector budgets and `neighbors.max_candidates` must not exceed the collection candidate limit. Top-level `rrf`, field sorting and count-only/zero-length requests are rejected in this mode. Ordinary queries are unchanged.
+
+All channels share one locked partition view, evaluation time, active corpus and metadata/time filters. Filters apply to neighboring result records before per-seed limiting; seeds and edges must also be current and visible. A hidden/filtered adjacency still consumes the scan budget. Relation ranks follow caller seed order then neighbor/edge stable IDs; deduplicate neighbors before zero-based RRF contribution `weight/(constant+rank)`. Edge metadata `weight` is not a ranking input. Final ties use record ID. This is configurable rank fusion, not a relevance-quality claim.
+
+`fusion.count_relation="candidate_window"` and `fusion.candidates` describe the unique candidate union before pagination. Neither `count_total` nor `relation_complete` implies exact corpus recall. `relation_complete` only covers adjacency traversal; without `allow_partial`, exhaustion rejects the entire request, otherwise `relation_reason` identifies the limit. ANN stays approximate. Output is limited to 4 MiB and uses the same field projection, authorization and deletion barriers as ordinary queries. No persistent format changes are introduced by fusion.

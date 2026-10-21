@@ -89,6 +89,31 @@
 <button id="feedRead" type="button">Read changes</button>
 <p id="feedStatus" role="status"></p><pre id="feedResult"></pre>
 </details>
+<details><summary>Staging lease status</summary>
+<p>Staging leases last 30 minutes. Inspect the current control version, then submit {"generation":{"action":"renew","generation_id":"..."},"expected":{"Match":version}} with record_id and routing_key in the record editor. Renewal is durable but does not publish. Expired staging cannot be renewed; a new generation ID is required.</p>
+<label for="leaseDocument">Document control ID</label><input id="leaseDocument"><button type="button" id="inspectLease">Inspect lease</button><pre id="leaseResult"></pre>
+</details>
+<details><summary>Source evidence excerpts</summary>
+<label for="evidenceRef">Exact source excerpt reference (JSON; UTF-8 byte range or one-based inline text page)</label>
+<textarea id="evidenceRef" rows="3" placeholder='{"record_id":"source","routing_key":"route","version":1,"locator":{"kind":"utf8","field":"body","start":0,"end":5}}'></textarea>
+<button id="readEvidence" type="button">Read source excerpt</button><pre id="evidenceResult"></pre>
+</details>
+<details><summary>Entities and explicit one-hop relations</summary>
+<p>Declare an entity using system.kind="entity". For an edge use system.kind="relation" and system.relation={from:{record_id,routing_key,version},to:{record_id,routing_key,version},relation_type,weight}. Both exact endpoints must be visible in this collection. Evidence is declared separately in evidence_refs. Changing an endpoint version hides old edges; rebind using a new edge identity. No automatic entity merging or graph traversal.</p>
+<button id="listEntities" type="button">List entities</button><button id="nextEntities" type="button" disabled>Next entity page</button>
+<label for="relationSeeds">Exact seed references (JSON array)</label><textarea id="relationSeeds" rows="3" placeholder='[{"record_id":"entity-a","routing_key":"route","version":1}]'></textarea>
+<label for="relationDirection">Direction</label><select id="relationDirection"><option value="both">Both</option><option value="out">Outgoing</option><option value="in">Incoming</option></select>
+<label for="relationTypes">Relation types (JSON array; [] means all)</label><input id="relationTypes" value="[]">
+<label for="relationLimit">Paths per seed</label><input id="relationLimit" type="number" min="1" max="128" value="10">
+<label for="relationBudget">Candidate budget</label><input id="relationBudget" type="number" min="1" max="10000" value="1000">
+<label><input id="relationPartial" type="checkbox"> Explicitly allow a partial window</label>
+<button id="expandNeighbors" type="button">Expand one hop</button>
+<label for="fusionQuery">Text/vector query with relation_fusion RRF settings (JSON; current seed controls are used)</label>
+<textarea id="fusionQuery" rows="5">{"query":"alpha","length":10,"relation_fusion":{"rrf":{"constant":0.6,"keyword_weight":1,"vector_weight":1,"keyword_candidates":100,"vector_candidates":100},"relation_weight":1}}</textarea>
+<button id="fuseRelations" type="button">Fuse search and one hop</button>
+<p>Fusion counts are candidate windows, not exact corpus recall. Ranks start at zero; repeated neighbors contribute once. Edge weights do not affect ranking.</p>
+<p id="relationStatus" role="status"></p><pre id="relationResult"></pre>
+</details>
 <button id="backToSearch" type="button">Back to search</button>
 </section>
 <div class=h100 id=landingSearch>

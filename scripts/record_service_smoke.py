@@ -528,12 +528,19 @@ def main():
             def restart_with(env):
                 if process.poll() is None:process.kill();process.wait(timeout=20)
                 start(env)
+            from record_locator_smoke import exercise as locator_exercise
+            locator_exercise(call,restart_with,args.faults)
+            from record_graph_smoke import exercise as graph_exercise
+            graph_exercise(call,restart_with,args.faults)
             temporal_exercise(call,restart_with,root.parent,args.faults)
+            from record_lease_smoke import exercise as lease_exercise
+            lease_exercise(call,restart_with,root.parent,False)
             if args.browser:
                 # The capacity test intentionally fills all 32 backup slots.
                 # Retire our completed evidence fixture before the UI creates its own.
                 from record_service_browser import exercise
                 exercise(base,master,call)
+            if args.faults:lease_exercise(call,restart_with,root.parent,True,only_faults=True)
             from record_feed_smoke import exercise as feed_exercise
             feed_exercise(call,restart_with,root.parent,args.faults)
         finally:

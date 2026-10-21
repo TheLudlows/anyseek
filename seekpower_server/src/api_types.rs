@@ -17,6 +17,10 @@ pub const DEFAULT_NPROBE: usize = 200;
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequestObject {
+    /// Opt-in one-hop plus lexical/vector fusion, with explicit candidate windows.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub relation_fusion: Option<seekpower::record::RelationFusion>,
     /// UTC millisecond event/ingestion ranges and business-valid point.
     #[serde(default)]
     #[schema(value_type = Object)]
@@ -120,6 +124,7 @@ impl SearchRequestObject {
         if self.all == Some(true) && self.nprobe.is_some() {
             return Err("all=true cannot be combined with nprobe".into());
         }
+        if self.relation_fusion.is_some() && self.rrf.is_some() {return Err("specify RRF once in relation_fusion".into());}
         if let Some(rrf) = &self.rrf {
             rrf.validate()?;
             if self.query_vector.is_none() || self.query_string.trim().is_empty() {

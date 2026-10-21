@@ -158,7 +158,7 @@ fn projected(state: &State, applied: &Applied) -> Option<ChangeEvent> {
             _ => ChangeKind::RecordChanged,
         }
     };
-    let rescan_required = matches!(
+    let rescan_required = applied.graph_invalidation || matches!(
         kind,
         ChangeKind::SourceUpdated | ChangeKind::SourceDeleted | ChangeKind::GenerationPublished
     ) || (request.document.is_none()
