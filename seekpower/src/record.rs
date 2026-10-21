@@ -1294,9 +1294,12 @@ mod tests {
         assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
         let generations:Vec<_>=std::fs::read_dir(&root).unwrap().filter_map(Result::ok).filter(|e|e.file_name().to_string_lossy().starts_with("generation-")).collect();
         assert_eq!(generations.len(),1);
-        assert!(!std::fs::read(generations[0].path().join("wal")).unwrap().windows(b"generationword alpha".len()).any(|w|w==b"generationword alpha"));
         assert_eq!(p.write(stage).await.unwrap(),receipt);
-        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        // Windows byte-range owner locks forbid a second reader of the live WAL.
+        // Finish retry assertions under the owner, then inspect persisted bytes after close.
+        drop(p);
+        assert!(!std::fs::read(generations[0].path().join("wal")).unwrap().windows(b"generationword alpha".len()).any(|w|w==b"generationword alpha"));
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]

@@ -998,3 +998,7 @@ staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保�
 真实尚未完成的验收项：本批 Linux 全套/真实服务与复审已通过；本地关系、定位、租约、融合链最终 SHA 的 Windows 原生 CI 待批准发布后运行；双平台系统崩溃/断电需要可丢弃隔离环境和外部已确认写入/撤权/删除见证，不能用进程退出代替。P1-A 可靠性门槛未因此取消。
 
 非本阶段：P3 通用历史版本/幂等账本长期 GC、Segment compaction 和稳定持续运行容量；P4/P5 对象存储/indexer/cache/云协议；P6 分区扩展。当前只有 Source 提供专用历史证据读取，其他对象历史保存在权威账本，不宣称通用历史 MVCC 读取服务。没有升级迁移/旧格式兼容。原文档中建议的大批流式上传/管理 Blob 是明确未实现的扩展，不能把它们暗记为通过，也不因此自行扩大本批。
+
+## CI 平台修正：staging 清理测试（2026-10-21）
+
+PR #66 run39601083564 与后续 PR #67 run39601191368 的 Windows 原生检查发现：`staging_cleanup_failure_stays_pending_and_retries` 在仍持有 WAL owner 字节范围锁时用独立文件句柄读取 WAL，被 Windows 正确拒绝（错误33）。这是测试观察顺序错误；未放松生产 owner 锁或同步保证。修正为先在 owner 内验证重试，再关闭 owner，检查清理后的持久字节并重开验证 pending 状态。Linux 原结果不替代修正后最终 SHA 的双平台重跑；系统崩溃/断电仍未验收。
