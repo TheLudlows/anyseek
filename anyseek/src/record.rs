@@ -38,6 +38,8 @@ mod locator;
 pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
 mod publication;
+mod segment_state;
+mod segment;
 mod recovery;
 pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
 
@@ -569,6 +571,9 @@ async fn build(
     state: &State,
 ) -> Result<(IndexArc, Vec<String>), RecordError> {
     let cache = path.join(format!("cache-{:032x}", rand::random::<u128>()));
+    build_at(path,&cache,config,state).await
+}
+async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Result<(IndexArc,Vec<String>),RecordError>{
     let index = create_index(
         &cache,
         config.index.clone(),
@@ -617,6 +622,34 @@ async fn build(
         index,
         records.into_iter().map(|r| r.record_id.clone()).collect(),
     ))
+}
+fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordError>{
+    validate_config(config)?;
+        evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
+        locator::validate_history(&state).map_err(storage)?;
+        generation::validate_state(&state, &config)?;
+        lease::validate_state(&state)?;
+        temporal::validate_state(&state)?;
+        if state.records.len() > config.max_records
+            || state.source_revisions.len() + state.records.values().filter(|r| evidence::retained_revision(r)).count() > config.max_records
+            || state.operations.len() > config.max_operations
+        {
+            return Err(storage("recovered state exceeds configured limits"));
+        }
+    Ok(())
+}
+fn restore_operation_lookup(state:&mut State)->Result<(),RecordError>{
+    state.operation_lookup.clear();
+        for (position, operation) in state.operations.iter().enumerate() {
+            if state
+                .operation_lookup
+                .insert(operation.request.operation_id.clone(), position)
+                .is_some()
+            {
+                return Err(storage("duplicate checkpoint operation identity"));
+            }
+        }
+    Ok(())
 }
 fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
     if applied.receipt.seq != state.seq + 1 || applied.observed_time_ms < state.time_watermark_ms {
@@ -763,15 +796,7 @@ impl RecordPartition {
         journal
             .restrict_budget(config.max_journal_bytes)
             .map_err(storage)?;
-        for (position, operation) in state.operations.iter().enumerate() {
-            if state
-                .operation_lookup
-                .insert(operation.request.operation_id.clone(), position)
-                .is_some()
-            {
-                return Err(storage("duplicate checkpoint operation identity"));
-            }
-        }
+        restore_operation_lookup(&mut state)?;
         for bytes in entries {
             match serde_json::from_slice(&bytes).map_err(storage)? {
                 Entry::Applied(applied) => apply(&mut state, &applied)?,
@@ -783,17 +808,7 @@ impl RecordPartition {
                 }
             }
         }
-        evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
-        locator::validate_history(&state).map_err(storage)?;
-        generation::validate_state(&state, &config)?;
-        lease::validate_state(&state)?;
-        temporal::validate_state(&state)?;
-        if state.records.len() > config.max_records
-            || state.source_revisions.len() + state.records.values().filter(|r| evidence::retained_revision(r)).count() > config.max_records
-            || state.operations.len() > config.max_operations
-        {
-            return Err(storage("recovered state exceeds configured limits"));
-        }
+        validate_restored_state(&config,&state)?;
         let snapshot_bytes = encode_entry(&Entry::Checkpoint {
             config: config.clone(),
             state: state.clone(),
@@ -1192,14 +1207,14 @@ mod tests {
     };
     use crate::vector::Inference;
     use crate::vector_similarity::AnnMode;
-    fn path() -> PathBuf {
+    pub(super) fn path() -> PathBuf {
         let base = std::env::var_os("ANYSEEK_TEST_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         std::fs::create_dir_all(&base).unwrap();
         base.join(format!("anyseek-record-{:032x}", rand::random::<u128>()))
     }
-    fn config() -> RecordConfig {
+    pub(super) fn config() -> RecordConfig {
         RecordConfig {change_feed:FeedConfig::default(),index:IndexMetaObject{id:0,name:"records".into(),lexical_similarity:LexicalSimilarity::Bm25f,
             tokenizer:TokenizerType::UnicodeAlphanumeric,text_normalization:TextNormalization::None,
             field_length_normalization:FieldLengthNormalization::Shared,stop_words:StopwordType::None,
@@ -1212,7 +1227,7 @@ mod tests {
             ])).unwrap(),embedding_space_id:Some("test-model-f32-cosine-v1".into()),max_records:32,max_record_bytes:4096,
             max_operations:100,max_journal_bytes:1024*1024,max_candidates:100}
     }
-    fn write(nonce: &str, id: &str, body: &str, expected: ExpectedVersion) -> RecordWrite {
+    pub(super) fn write(nonce: &str, id: &str, body: &str, expected: ExpectedVersion) -> RecordWrite {
         RecordWrite {
             vector_patch: None,
             generation: None,
@@ -1229,7 +1244,7 @@ mod tests {
             ),
         }
     }
-    async fn query(p: &RecordPartition, mode: SearchMode) -> RecordSearch {
+    pub(super) async fn query(p: &RecordPartition, mode: SearchMode) -> RecordSearch {
         let vector = if mode == SearchMode::Lexical {
             None
         } else {
@@ -1276,11 +1291,11 @@ mod tests {
         std::fs::remove_dir_all(location).unwrap();
     }
 
-    fn generation_write(nonce: &str, expected: ExpectedVersion, generation: GenerationCommand) -> RecordWrite {
+    pub(super) fn generation_write(nonce: &str, expected: ExpectedVersion, generation: GenerationCommand) -> RecordWrite {
         RecordWrite { operation_id:OperationId::new(nonce.into()), record_id:"doc".into(), routing_key:"document-1".into(),
             expected, document:None, vector_patch:None, system:None, temporal:None, generation:Some(generation) }
     }
-    fn stage_generation(id: &str, members: &[&str]) -> GenerationCommand {
+    pub(super) fn stage_generation(id: &str, members: &[&str]) -> GenerationCommand {
         GenerationCommand::Stage { generation_id:id.into(), source:EvidenceRef { locator:None, record_id:"s".into(), routing_key:"document-1".into(), version:1 },
             members:members.iter().map(|s| (*s).into()).collect(), chunks:members.iter().map(|id| GenerationChunk { record_id:(*id).into(),
                 document:serde_json::from_value(serde_json::json!({"body":"generationword alpha"})).unwrap(), temporal:None, evidence_refs:vec![] }).collect() }
@@ -2333,7 +2348,7 @@ mod tests {
         assert!(p.recovery_identity().await.unwrap().seal.is_none());
         drop(p); std::fs::remove_dir_all(root).unwrap();
     }
-    fn source_write(nonce: &str, id: &str, dependencies: &[(&str, u64)]) -> RecordWrite {
+    pub(super) fn source_write(nonce: &str, id: &str, dependencies: &[(&str, u64)]) -> RecordWrite {
         let mut request = write(nonce, id, "evidence original", ExpectedVersion::Absent);
         request.system = Some(EvidenceMetadata {
             kind: if dependencies.is_empty() { EvidenceKind::Source } else { EvidenceKind::Derived }, relation:None,

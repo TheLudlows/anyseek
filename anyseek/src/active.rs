@@ -6,7 +6,7 @@ use crate::{
 };
 use ahash::AHashMap;
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ActiveStatistics {
     pub keys: Vec<String>,
     footprints: AHashMap<usize, Footprint>,
@@ -14,11 +14,29 @@ pub(crate) struct ActiveStatistics {
     fields: Vec<(u64, u64)>,
     shared_sum: u64,
 }
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Footprint {
     terms: Vec<u64>,
     fields: Vec<(usize, u32)>,
 }
 impl ActiveStatistics {
+    /// Validate a persisted footprint closure without re-tokenizing payloads.
+    pub(crate) fn validate(&self,field_count:usize)->Result<(),String>{
+        if self.footprints.len()!=self.keys.len(){return Err("incomplete active footprints".into());}
+        let mut rebuilt=Self::default();
+        for (&id,footprint) in &self.footprints {
+            if id>=self.keys.len() || footprint.terms.windows(2).any(|v|v[0]>=v[1])
+                || footprint.fields.iter().any(|(field,_)|*field>=field_count)
+                || footprint.fields.iter().map(|(field,_)|*field).collect::<std::collections::BTreeSet<_>>().len()!=footprint.fields.len(){
+                return Err("invalid active footprint".into());
+            }
+            rebuilt.insert(id,footprint.terms.clone(),footprint.fields.clone());
+        }
+        if self.df!=rebuilt.df || self.fields!=rebuilt.fields || self.shared_sum!=rebuilt.shared_sum {
+            return Err("inconsistent active statistics".into());
+        }
+        Ok(())
+    }
     pub fn insert(&mut self, id: usize, mut terms: Vec<u64>, fields: Vec<(usize, u32)>) {
         terms.sort_unstable();
         terms.dedup();

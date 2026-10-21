@@ -5,3 +5,5 @@ pub(crate) mod journal;
 mod platform;
 
 pub(crate) mod partition;
+
+pub(crate) mod segment;

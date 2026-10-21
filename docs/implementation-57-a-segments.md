@@ -111,3 +111,17 @@ A 可开始设计内分批实现，但不得绕过当前主干 CI 失败的诊�
 ### 独立的合入主干 CI 结果
 
 PR #70 的 head `2b69cb83fa344ebefaa151d6f993ef87b672a0df` / run [39623397174](https://github.com/TheLudlows/anyseek/actions/runs/39623397174)，及 master `f73d3eb27ff4bf97149031069f49cac3e01966ab` / run [39623936785](https://github.com/TheLudlows/anyseek/actions/runs/39623936785)，均为 build-and-smoke、Ubuntu 原生成功，Windows 原生失败。两次均在真实 HTTP 故障矩阵重新启动服务时报告 `memory allocation of 329744 bytes failed`；PR 是 `record_upload_smoke.py:53`，master 是 `record_lease_smoke.py:59`，调用 `record_service_smoke.py:25` 检测进程退出。说明实际分配失败，尚未证明根因；需分别测量多 collection 恢复的资源峰值和 runner 提交内存，不能无证据归为偶发。没有重跑、改主干或降低覆盖。
+
+## 12. A1 进行中：payload 与 prepared 检索闭包
+
+新增 `storage/segment.rs` 的有界 payload 编码、引用、校验与逐字节去重；`record/segment_state.rs` 只替换引擎拥有的正文槽位，不解释用户 JSON 中的同名字段。保留正文顺序、原始向量、同正文 version 的补向量修订、来源历史、私有 generation 与精确操作请求。读取受调用方预算约束，分别检查元数据、单体、引用数量及累计展开字节；任何追加/比较 I/O 失败后 writer 必须废弃。
+
+`record/segment.rs` 已能从真实 Record 状态构建包含 payload、引用状态、既有 postings/vector 文件和活动统计的 prepared 闭包，校验文件清单/hash/schema/文档映射后直接打开既有索引，不重新分词。活动统计由 footprint 校验自洽；状态恢复复用幂等查找表重建和业务结构校验。独立审查发现的累计展开预算、I/O poison、恢复后 operation_lookup 丢失、目录遍历无界问题已修复。
+
+**仍为内部 prepared 路径，不是已上线的不可变多段存储。** 当前预算参数只保证最终闭包接受上限，尚不是检索索引构建全过程的硬资源配额；检索打开仍复用可写 IndexArc，生产接入前必须限制 mutator。当前生产 State 仍持有原始对象，尚未切换为规范 payload 按需访问；默认多段 + tail、manifest 原子发布恢复、compaction/GC 均未完成。不得将本检查点称为完整 A1 或 A。
+
+恢复后最终源码执行 `cargo test --workspace --features server --all-targets`：34 suites、234 passed、0 failed、10 ignored，退出码 0。七个新增专项覆盖精确请求/原始向量/来源历史/私有成员、引用损坏与放大预算、writer poison、真实全文和向量索引重开与重试冲突。忽略项沿用现有父进程 worker/AES fixture；未减少覆盖。本轮尚未重跑 HTTP/Chromium/fault-injection，Windows 原生、容器、系统断电均未运行。
+
+本轮环境中断后，真实命令确认六个修改/新增源码文件和分支仍在；旧测试 session 40364 及 `/tmp/a1-full.log` 无法恢复，不计通过。已确认旧进程不在后重跑 session 21151，最终日志保存在工作区 `/workspace/anyseek-validation/a1-full.log`，结果如上。
+
+Windows CI 的独立只读诊断：`index.rs` 的 2048 个空词典各预分配 1000 项，隔离分配实验复现与两次失败日志一致的 329744 字节分配，约 644 MiB/collection；多 collection 恢复是明确峰值来源候选。未获得 Windows 提交内存/pagefile 遥测，不能认定唯一根因。建议独立评估按需空词典分配，不改路由或降低覆盖；本检查点未修改该分配策略、master 或重新触发 CI。
