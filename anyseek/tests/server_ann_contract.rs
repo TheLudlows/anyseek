@@ -1,6 +1,7 @@
+#![cfg(feature = "server")]
 use anyseek::search::SearchMode;
 use anyseek::vector_similarity::AnnMode;
-use anyseek_server::api_types::SearchRequestObject;
+use anyseek::server::api_types::SearchRequestObject;
 use serde_json::{Value, json};
 use std::num::NonZeroUsize;
 

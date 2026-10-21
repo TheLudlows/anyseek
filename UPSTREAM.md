@@ -22,7 +22,7 @@
 
 在原样导入提交之后，单独增加以下 SeekPower 文档：
 
-- [SEEKPOWER_PLAN.md](SEEKPOWER_PLAN.md)：裁剪、单机可靠性与分布式演进计划。
+- [早期规划（导入阶段历史版本）](https://github.com/TheLudlows/anyseek/blob/452ff222efed9f53b6663040cc14ccb1d87914c6/SEEKPOWER_PLAN.md)：裁剪、单机可靠性与分布式演进计划。
 - [STATUS.md](STATUS.md)：已完成/未完成的执行状态。
 - [VALIDATION.md](VALIDATION.md)：导入一致性证据与未执行测试。
 - 本文件：来源、固定基线与同步政策。

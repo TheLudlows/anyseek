@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 /// either numerical range facet filter (range start/end) or
 /// string facet filter (vector of strings) at least one (boolean OR) must match.
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::search::FacetFilter")]
+#[serde(remote = "crate::search::FacetFilter")]
 pub enum FacetFilter {
     /// U8 range filter
     U8 {
@@ -134,7 +134,7 @@ pub enum FacetFilter {
 
 /// FieldType defines the type of a field in the document: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, point, string, stringset, text.
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::index::FieldType")]
+#[serde(remote = "crate::index::FieldType")]
 pub enum FieldType {
     /// Unsigned 8-bit integer
     U8,
@@ -198,18 +198,18 @@ pub enum FieldType {
 
 /// Iterator
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::iterator::IteratorResult")]
+#[serde(remote = "crate::iterator::IteratorResult")]
 pub struct IteratorResult {
     /// number of actually skipped documents
     pub skip: usize,
     /// document IDs, and optionally the documents themselves
     #[schema(value_type = Vec<IteratorResultItem>)]
-    pub results: Vec<anyseek::iterator::IteratorResultItem>,
+    pub results: Vec<crate::iterator::IteratorResultItem>,
 }
 
 /// Iterator result
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::iterator::IteratorResultItem")]
+#[serde(remote = "crate::iterator::IteratorResultItem")]
 pub struct IteratorResultItem {
     /// document ID
     pub doc_id: u64,
@@ -219,7 +219,7 @@ pub struct IteratorResultItem {
 
 /// Vector precision
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::vector::Precision")]
+#[serde(remote = "crate::vector::Precision")]
 pub enum Precision {
     /// No vector embedding, e.g. for lexical fields or fields without indexing.
     None = 0,
@@ -231,7 +231,7 @@ pub enum Precision {
 
 /// Quantization method for embeddings.
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::vector::Quantization")]
+#[serde(remote = "crate::vector::Quantization")]
 pub enum Quantization {
     /// Affine Scalar Quantization (SQ) f32 to i8 (8 bit per dimension).
     /// Affine quantization (or asymmetric quantization) maps high-precision floating-point numbers (e.g., FP32) to lower-precision integers (e.g., INT8)
@@ -339,18 +339,18 @@ pub struct RangeU8 {
 /// Specifies the sort order for the search results.
 #[derive(ToSchema, Serialize)]
 #[serde(deny_unknown_fields)]
-#[serde(remote = "anyseek::search::ResultSort")]
+#[serde(remote = "crate::search::ResultSort")]
 pub struct ResultSort {
     /// name of the facet field to sort by
     pub field: String,
     /// Sort order: Ascending or Descending
     #[schema(value_type = SortOrder)]
-    pub order: anyseek::search::SortOrder,
+    pub order: crate::search::SortOrder,
 }
 
 /// Specifies the sort order for the search results.
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::search::SortOrder")]
+#[serde(remote = "crate::search::SortOrder")]
 pub enum SortOrder {
     /// Ascending sort order
     Ascending = 0,
@@ -364,7 +364,7 @@ pub enum SortOrder {
 /// but become impossible when stopwords are removed.
 /// The lists of stop_words and frequent_words should not overlap.
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::index::StopwordType")]
+#[serde(remote = "crate::index::StopwordType")]
 pub enum StopwordType {
     /// No stopwords
     None,
@@ -403,7 +403,7 @@ pub enum StopwordType {
 /// - Supports mixed Latin and Chinese texts
 /// - Requires feature #[cfg(feature = "zh")]
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::index::TokenizerType")]
+#[serde(remote = "crate::index::TokenizerType")]
 pub enum TokenizerType {
     /// Only ASCII alphabetic chars are recognized as token.
     AsciiAlphabetic = 0,
@@ -429,7 +429,7 @@ pub enum TokenizerType {
 
 /// Similarity measure for comparing vector embeddings.
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::vector_similarity::VectorSimilarity")]
+#[serde(remote = "crate::vector_similarity::VectorSimilarity")]
 pub enum VectorSimilarity {
     /// Cosine Similarity
     /// Cosine similarity measures only the direction (angle) between vectors.
@@ -455,7 +455,7 @@ pub enum WriteDocuments {
 
 /// Versioned pre-tokenization rule. None preserves current behavior.
 #[derive(Serialize, ToSchema)]
-#[serde(remote = "anyseek::index::TextNormalization")]
+#[serde(remote = "crate::index::TextNormalization")]
 pub enum TextNormalization {
     /// No extra normalization.
     None,
@@ -465,7 +465,7 @@ pub enum TextNormalization {
 
 /// Immutable field length normalization policy.
 #[derive(Serialize, ToSchema)]
-#[serde(remote = "anyseek::index::FieldLengthNormalization")]
+#[serde(remote = "crate::index::FieldLengthNormalization")]
 pub enum FieldLengthNormalization {
     /// Historical shared length average.
     Shared,
@@ -475,7 +475,7 @@ pub enum FieldLengthNormalization {
 
 /// Zero-based reciprocal rank fusion. Omitted fields preserve legacy defaults.
 #[derive(ToSchema, Serialize)]
-#[serde(remote = "anyseek::search::RrfOptions")]
+#[serde(remote = "crate::search::RrfOptions")]
 pub struct RrfOptions {
     /// Positive finite smoothing constant; one-based k=60 is 61 here.
     #[schema(default = 0.6, exclusive_minimum = 0)]

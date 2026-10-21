@@ -1,5 +1,6 @@
+#![cfg(feature = "server")]
 //! Aggregate removal must retain metadata dictionaries, filters and sort heaps.
-use anyseek_server::api_types::{SearchRequestObject, CreateIndexRequest, GetDocumentRequest};
+use anyseek::server::api_types::{SearchRequestObject, CreateIndexRequest, GetDocumentRequest};
 use anyseek::{
     commit::Commit,
     index::{AccessType, Close, Clustering, Document, DocumentCompression,
@@ -41,7 +42,7 @@ async fn search(index: &IndexArc, options: Value, realtime: bool) -> ResultObjec
         .map(|v| serde_json::from_value(v).unwrap()).unwrap_or(anyseek::search::ResultType::TopkCount);
     let r: SearchRequestObject = serde_json::from_value(value).unwrap();
     let result = index.search(r.query_string.clone(), None, r.query_type(),
-        r.search_mode(std::num::NonZeroUsize::new(anyseek_server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(), true, r.offset, r.length, result_type, realtime,
+        r.search_mode(std::num::NonZeroUsize::new(anyseek::server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(), true, r.offset, r.length, result_type, realtime,
         r.field_filter,  r.facet_filter, r.result_sort).await;
     assert!(result.error.is_none(), "{:?}", result.error);
     result

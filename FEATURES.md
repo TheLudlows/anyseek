@@ -1,6 +1,6 @@
 # 当前功能与边界
 
-默认 HTTP/Web UI 使用 Record/catalog 路径；低层 Rust 索引库保留独立 API。P1-A 及 P2 来源/证据、generation、时间/TTL、feed、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续回收仍未验收。[服务使用](anyseek_server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
+默认 HTTP/Web UI 使用 Record/catalog 路径；低层 Rust 索引库保留独立 API。P1-A 及 P2 来源/证据、generation、时间/TTL、feed、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续回收仍未验收。[服务使用](anyseek/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
 
 ## 检索和数据
 
@@ -25,7 +25,7 @@
 
 ## 默认 HTTP 路由
 
-`{id}` 是稳定 collection ID，`{record_id}` 是稳定 Record ID，均为字符串。除 live 外使用 apikey header。默认路由以 [record_service.rs](anyseek_server/src/record_service.rs) 为准；准确路由清单可生成 OpenAPI 查验。
+`{id}` 是稳定 collection ID，`{record_id}` 是稳定 Record ID，均为字符串。除 live 外使用 apikey header。默认路由以 [record_service.rs](anyseek/server/record_service.rs) 为准；准确路由清单可生成 OpenAPI 查验。
 
 | 方法 | 路径 | 当前契约 |
 | --- | --- | --- |
@@ -67,7 +67,7 @@
 
 UI 增加实体目录/一跳关系检查及有界 bootstrap/feed 检查与响应丢失重试；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、链接/原文/图片预览、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面支持 staging 租约检查和 renew 条件写入；未发布私有正文在 abort/到期后安全清理并保留摘要回执。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 key/grant 或逐条更新/删除管理页面。
 
-完整冒烟为 `scripts/record_service_smoke.py`，`--browser` 启用 Chromium，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 留在服务 crate。
+完整冒烟为 `scripts/record_service_smoke.py`，`--browser` 启用 Chromium，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 留在可选 `anyseek::server` 模块。
 
 ## 资源与未完成项
 
@@ -77,4 +77,4 @@ collection backups 最多 32 个；service archives 每源根 4 个，生成恢�
 
 尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、物理版本压缩、通用任意历史读取、独立时间候选排名、管理型 Blob、SQLite 云端协调、分布式与对象存储。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
 
-早期移除功能及历史协议见 [MIGRATION](MIGRATION.md)；历史记录不能替代上述当前契约。
+早期移除能力的实际记录见 [历史验证](VALIDATION.md) 与 [Changelog](CHANGELOG.md)；当前接入以服务指南为准，不提供旧格式迁移。

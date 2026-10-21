@@ -4,11 +4,11 @@
 
 实现基线为 `fc4fcfe64fdf86d03c07f82cf1d4889deb896801`，开发分支为 `feat/57-reliable-record-engine`，对应 [PR #61](https://github.com/TheLudlows/seekpower/pull/61)。复用基线已有的 Weighted RRF、canonical scoring order、固定 XXH64 和索引格式 8；PR #60 不在基线中。
 
-本文按当前设计组织，阶段性尝试、旧测试总数和修复过程保留在 Git 历史。HTTP 使用方法见[服务 README](../anyseek_server/README.md)，完整路由见[功能清单](../FEATURES.md)，机器可读验证信息见[验收记录](validation/issue57-p1-checkpoint.json)。
+本文按当前设计组织，阶段性尝试、旧测试总数和修复过程保留在 Git 历史。HTTP 使用方法见[服务 README](../anyseek/server/README.md)，完整路由见[功能清单](../FEATURES.md)，机器可读验证信息见[验收记录](validation/issue57-p1-checkpoint.json)。
 
 ## 当前阶段入口
 
-P1-A（PR #61）及 P2 功能批次（PR #62–#67）已合入 master。以下正文保留 P1 检查点事实，旧命令/源码路径使用当时的 seekpower 名称；当前命令见 [开发指南](development.md)，目录现为 `anyseek/`、`anyseek_server/`。历史证据不改写成新品牌测试结果。
+P1-A（PR #61）及 P2 功能批次（PR #62–#67）已合入 master。以下正文保留 P1 检查点事实，旧命令/源码路径使用当时的 seekpower 名称；当前命令见 [开发指南](development.md)，单 package 目录为 `anyseek/`，服务位于 `anyseek/server/`。历史证据不改写成新品牌测试结果。
 
 | 阶段 | 实施记录位置 |
 | --- | --- |
@@ -76,8 +76,8 @@ flowchart TD
 | [storage/platform.rs](../anyseek/src/storage/platform.rs) | Linux/Windows 文件同步、同卷目录发布与清理 |
 | [active.rs](../anyseek/src/active.rs) | 活动文档 N、term df、字段长度及其增量维护 |
 | [search.rs](../anyseek/src/search.rs)、[vector.rs](../anyseek/src/vector.rs)、[min_heap.rs](../anyseek/src/min_heap.rs) | 候选检索、旧版本排除、逻辑 ID 平分排序、融合 |
-| [record_service.rs](../anyseek_server/src/record_service.rs) | 默认 HTTP 契约、请求/控制 admission、授权输出、OpenAPI |
-| [Web UI](../anyseek_server/web/js)、[客户端与回归脚本](../scripts) | 保存原请求、重试、搜索和服务生命周期操作 |
+| [record_service.rs](../anyseek/server/record_service.rs) | 默认 HTTP 契约、请求/控制 admission、授权输出、OpenAPI |
+| [Web UI](../anyseek/web/js)、[客户端与回归脚本](../scripts) | 保存原请求、重试、搜索和服务生命周期操作 |
 
 权威状态保存完整原始 Document、未经归一化的输入向量、配置、稳定身份、版本、墓碑、序列和操作结果。`schema.store` 控制搜索字段投影，不决定原始数据是否持久保存。
 

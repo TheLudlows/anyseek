@@ -1,4 +1,5 @@
-use anyseek_server::api_types::{SearchRequestObject, CreateIndexRequest};
+#![cfg(feature = "server")]
+use anyseek::server::api_types::{SearchRequestObject, CreateIndexRequest};
 use anyseek::{
     commit::Commit,
     index::{AccessType, Close, Clustering, Document, DocumentCompression,

@@ -31,7 +31,7 @@ P1 + P2 是首个功能版本目标；长期持续更新删除的生产验收另
 | 恢复 | collection 与完整 service/catalog 备份，新位置恢复，历史 key 禁用/清 grants | 新来源版本、证据、generation、事件保留水位、Blob 依赖纳入同一恢复切面 |
 | schema | 创建 collection 时冻结；自定义 JSON document，schema 控制索引/投影 | 系统字段独立命名空间；非向量普通字段当前不是严格通用 schema 校验器 |
 
-源码：[record.rs](../anyseek/src/record.rs)、[active.rs](../anyseek/src/active.rs)、[catalog.rs](../anyseek/src/catalog.rs)、[journal.rs](../anyseek/src/storage/journal.rs)、[partition.rs](../anyseek/src/storage/partition.rs)、[vector.rs](../anyseek/src/vector.rs)、[record_service.rs](../anyseek_server/src/record_service.rs)、[api_types.rs](../anyseek_server/src/api_types.rs)、[service_snapshot.rs](../anyseek/src/catalog/service_snapshot.rs)。`record.rs` 顶部“尚未接入 HTTP”是历史注释，实际默认路由已接入；本轮不改功能文件。
+源码：[record.rs](../anyseek/src/record.rs)、[active.rs](../anyseek/src/active.rs)、[catalog.rs](../anyseek/src/catalog.rs)、[journal.rs](../anyseek/src/storage/journal.rs)、[partition.rs](../anyseek/src/storage/partition.rs)、[vector.rs](../anyseek/src/vector.rs)、[record_service.rs](../anyseek/server/record_service.rs)、[api_types.rs](../anyseek/server/api_types.rs)、[service_snapshot.rs](../anyseek/src/catalog/service_snapshot.rs)。`record.rs` 顶部“尚未接入 HTTP”是历史注释，实际默认路由已接入；本轮不改功能文件。
 
 ### 1.2 可靠性前置项
 
@@ -959,7 +959,7 @@ staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保�
 - `relation_weight` 有限且正；文本/向量可用原权重 0 禁用，但至少开启其中一个。开启通道必须给显式候选上限，全部通道上限之和不超过 collection max_candidates；关系扫描有界、隐藏/过滤项也计预算。过滤通过后才计 per_seed。默认超限整体失败，显式 allow_partial 才返回邻接窗口。字段排序、Count-only、重复 top-level RRF 配置拒绝。
 - `fusion.count_relation=candidate_window`、候选 union 数与 `relation_complete/relation_reason` 独立披露。完整邻接不表示全文/ANN 全库完整召回；count_total 只是候选 union，分页不改变它。不把 ANN 当 oracle 精确召回。4 MiB 输出预算超限拒绝。
 - 原授权/data 双输出屏障保留，取消只丢弃响应，不取消已接收的时间/可见性维护。source/generation/TTL/端点变更作用于原统一活动索引，无第二份可见集合。查询无新持久状态，WAL 仍 V11；恢复与接管重建相同检索/邻接索引。
-- Web UI 沿用实体关系面板，传递显式 query JSON 和现有 seed/budget 控件；服务负责规则，界面显示候选窗口与不完整原因。实际请求见 [server README](../anyseek_server/README.md#同视图关系融合)。
+- Web UI 沿用实体关系面板，传递显式 query JSON 和现有 seed/budget 控件；服务负责规则，界面显示候选窗口与不完整原因。实际请求见 [server README](../anyseek/server/README.md#同视图关系融合)。
 
 ### 22.2 审查与最终验证
 
@@ -1023,7 +1023,7 @@ staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保�
 - Abort/过期redact全部私有StageBatch正文，保留原请求摘要/回执，之后安全checkpoint回收旧WAL。Begin仅保留清单和来源元数据，无私有正文。已发布批次不由此回收。
 - checkpoint 恢复不能独立信任 `sealed`：从保留 Stage/Begin/StageBatch/Seal/Renew 决定重建当前 staging，校验摘要、正文、顺序、截止时间，再与状态比较。伪造sealed、篡改Seal摘要、调整chunks顺序均拒绝恢复。journal V12，拒绝旧格式，不提供迁移。
 
-请求与摘要编码见 [server README](../anyseek_server/README.md#有界多批-generation-上传)。现有小文档完整Stage继续可用；两种入口共用一次权威提交和发布路径。
+请求与摘要编码见 [server README](../anyseek/server/README.md#有界多批-generation-上传)。现有小文档完整Stage继续可用；两种入口共用一次权威提交和发布路径。
 
 ### 24.3 最终验证记录
 
@@ -1052,7 +1052,7 @@ staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保�
 - `RecordHit.channels` 统一输出 channel/rank/rank_basis/raw_score/rrf_contribution。普通全文/向量保留原始引擎分数；browse无raw相关性；融合的零权重或未命中通道无条目。rank不是全库精确召回证明。
 - Hybrid各通道rank来自融合前；普通查询为offset+返回位置，指定字段排序时明确requested_order。关系去重后按稳定邻接顺序赋rank，仅有RRF贡献，不将边weight伪造成相似度。贡献按实际顺序相加与最终score相符。
 - 默认HTTP透传同一结果，仍经过catalog/data双屏障与原投影；解释不携带额外正文。UI普通命中新增可展开解释，关系面板显示完整结果，均用text渲染。无新增持久状态，journal仍V12。
-- 请求/响应契约见 [server README](../anyseek_server/README.md#逐命中检索解释)。独立审查无阻塞；根据审查建议补充零权重、分页rank、字段排序basis断言。最终全量、默认与故障注入HTTP/Chromium均通过。
+- 请求/响应契约见 [server README](../anyseek/server/README.md#逐命中检索解释)。独立审查无阻塞；根据审查建议补充零权重、分页rank、字段排序basis断言。最终全量、默认与故障注入HTTP/Chromium均通过。
 
 至此代码范围收敛为已审计的两个明确缺口：§24多批次上传、§25逐命中解释。实现不等于整体验收：最终堆叠Windows原生以及双平台系统崩溃/断电仍需验证；可选能力和P3/P4后续范围按§24.1，不继续由新文档扩大需求。
 

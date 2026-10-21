@@ -1,10 +1,10 @@
 # anyseek 文档索引
 
-按阅读目的进入，不把历史计划当作已实现功能。项目品牌为小写 **anyseek**，远端仓库仍为 [TheLudlows/seekpower](https://github.com/TheLudlows/seekpower)。
+按阅读目的进入，不把历史计划当作已实现功能。项目品牌为小写 **anyseek**，远端仓库为 [TheLudlows/anyseek](https://github.com/TheLudlows/anyseek)。
 
 | 目的 | 文档 |
 | --- | --- |
-| 首次运行 | [README](../README.md)、[HTTP/UI 服务指南](../anyseek_server/README.md)、[请求示例](../anyseek_server/test_api.rest) |
+| 首次运行 | [README](../README.md)、[HTTP/UI 服务指南](../anyseek/server/README.md)、[请求示例](../anyseek/server/test_api.rest) |
 | 确认可用能力与边界 | [功能清单](../FEATURES.md)、[当前状态](../STATUS.md)、[当前架构](../ARCHITECTURE.md) |
 | 开发与验证 | [开发指南](development.md)、[Rust 库示例](library-examples.md) |
 | 检索配置 | [过滤与排序](../FACETED_SEARCH.md)、[N-gram](../NGRAM_SEARCH.md)、[文本归一化](text-normalization.md)、[字段长度归一化](field-length-normalization.md) |
@@ -16,6 +16,10 @@
 
 ## 历史资料
 
-[早期规划](../SEEKPOWER_PLAN.md)、[历史裁剪说明](../MIGRATION.md)、[早期状态](history/early-status.md)、[历史验证](../VALIDATION.md)、[字段长度阶段验证](validation/stage-c-field-lengths.md) 和 [Changelog](../CHANGELOG.md) 保留原始命令、提交、失败及测试计数。旧名称表示当时的事实，不代表另一个受支持的发行入口。
+[历史验证](../VALIDATION.md)、[字段长度阶段原始证据](validation/stage-c-field-lengths.json) 和 [Changelog](../CHANGELOG.md) 保留原始命令、提交、失败及测试计数。旧名称表示当时的事实，不代表另一个受支持的发行入口。
 
 维护约定：当前用法放服务/开发指南；当前状态只在 STATUS 汇总；实现细节和实际测试放对应阶段记录；未来能力明确标设计。变更当前 API 时同步服务指南和可执行示例，不复制另一份独立接口规范。SQLite 尚未编码，系统断电仍未验收。
+
+已删除被现行指南取代的旧迁移说明和早期规划，删除范围与保留依据见 [历史验证中的 README 收敛记录](../VALIDATION.md#2026-10-21readme-清理检查点-3af29ab)。
+
+- [单 package 整合验证](validation/single-package.md)：模块边界、feature 矩阵及平台限制。
