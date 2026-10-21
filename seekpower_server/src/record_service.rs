@@ -7,7 +7,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use seekpower::{
@@ -64,6 +64,9 @@ impl From<RecordError> for Error {
     fn from(e: RecordError) -> Self {
         let (status, code) = match &e {
             RecordError::Busy => (StatusCode::TOO_MANY_REQUESTS, "busy"),
+            RecordError::FeedFull => (StatusCode::TOO_MANY_REQUESTS, "feed_full"),
+            RecordError::CursorExpired(_) => (StatusCode::GONE, "cursor_expired"),
+            RecordError::BootstrapExpired => (StatusCode::GONE, "bootstrap_expired"),
             RecordError::ClockUncertain => (StatusCode::SERVICE_UNAVAILABLE, "clock_uncertain"),
             RecordError::Rejected(_) => (StatusCode::BAD_REQUEST, "rejected"),
             RecordError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
@@ -505,6 +508,7 @@ fn record_config(
     let schema = request.schema.into_iter().map(Into::into).collect();
     let inference = request.vector.map(Inference::from).unwrap_or_default();
     Ok(RecordConfig {
+        change_feed: request.change_feed,
         index: IndexMetaObject {
             id: 0,
             name: request.index_name,
@@ -824,6 +828,47 @@ async fn iterate(
         })
         .await?;
     protected_data(result.map_err(Into::into), permit, Some(data))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangesRequest {
+    #[serde(default)] after: Option<String>,
+    #[serde(default = "page_length")] length: usize,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapRequest {
+    request_id: String,
+    #[serde(default)] after: Option<String>,
+    #[serde(default = "page_length")] length: usize,
+}
+async fn changes(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>, bytes: Bytes) -> Result<Response, Error> {
+    let request: ChangesRequest = parse(&bytes)?;
+    let key=s.authenticate(&headers).await?;
+    let p=s.record(&key,&id).await?;
+    let data=p.output_permit()?;
+    let (result,permit)=s.catalog.authorized(key,id,move |_| async move {p.changes(request.after,request.length).await}).await?;
+    protected_data(result.map_err(Into::into),permit,Some(data))
+}
+async fn bootstrap_identity(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, Error> {
+    let key=s.authenticate(&headers).await?;
+    let p=s.record(&key,&id).await?;
+    let (result,permit)=s.catalog.authorized(key,id,move |_| async move {p.bootstrap_identity().await}).await?;
+    protected(result.map(|prefix|json!({"request_id_prefix":prefix})).map_err(Into::into),permit)
+}
+async fn bootstrap(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>, bytes: Bytes) -> Result<Response, Error> {
+    let request: BootstrapRequest = parse(&bytes)?;
+    let key=s.authenticate(&headers).await?;
+    let p=s.record(&key,&id).await?;
+    let data=p.output_permit()?;
+    let (result,permit)=s.catalog.authorized(key,id,move |_| async move {p.bootstrap(request.request_id,request.after,request.length).await}).await?;
+    protected_data(result.map_err(Into::into),permit,Some(data))
+}
+async fn release_bootstrap(State(s): State<Arc<Service>>, headers: HeaderMap, Path((id,request_id)): Path<(String,String)>) -> Result<Response, Error> {
+    let key=s.authenticate(&headers).await?;
+    let p=s.record(&key,&id).await?;
+    let (result,permit)=s.catalog.authorized(key,id,move |_| async move {p.release_bootstrap(&request_id).await}).await?;
+    protected(result.map(|_|json!({"released":true})).map_err(Into::into),permit)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1352,6 +1397,9 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index/{id}/doc/{record_id}", get(read))
         .route("/api/v1/index/{id}/query", post(query))
         .route("/api/v1/index/{id}/iterator", post(iterate))
+        .route("/api/v1/index/{id}/changes", post(changes))
+        .route("/api/v1/index/{id}/bootstrap", get(bootstrap_identity).post(bootstrap))
+        .route("/api/v1/index/{id}/bootstrap/{request_id}", delete(release_bootstrap))
         .route("/api/v1/index/{id}/batch", post(batch))
         .route("/api/v1/index/{id}/delete-plan", post(deletion_plan))
         .route(
@@ -1912,6 +1960,10 @@ pub(crate) fn generate_openapi() {
             "Master: control-plane operation status",
             None,
         ),
+        ("/api/v1/index/{id}/changes", "post", "Ordered content-free notices; 410 requires bootstrap, never silently skip", Some(json!({"type":"object","additionalProperties":false,"properties":{"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
+        ("/api/v1/index/{id}/bootstrap", "get", "Get current bootstrap identity prefix; append 16 random hex digits for a new request", None),
+        ("/api/v1/index/{id}/bootstrap", "post", "Pinned effective snapshot and atomic feed cut; restart, expiry or hiding requires restart", Some(json!({"type":"object","additionalProperties":false,"required":["request_id"],"properties":{"request_id":{"type":"string","pattern":"^[0-9a-fA-F]{32}$"},"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
+        ("/api/v1/index/{id}/bootstrap/{request_id}", "delete", "Release bounded snapshot pin after consumption", None),
         (
             "/api/v1/index/{id}/iterator",
             "post",

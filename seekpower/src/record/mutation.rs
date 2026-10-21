@@ -13,6 +13,7 @@ pub(super) enum PreparedWrite {
         bytes: Vec<u8>,
         snapshot_bytes: usize,
         reserve_bytes: usize,
+        feed_reserve: usize,
     },
 }
 
@@ -102,6 +103,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     // journal frame overhead. No evidence edges are copied into delete requests.
     let previous_ttl=state.records.get(&request.record_id).is_some_and(temporal::live_ttl);
     let next_ttl=next_document.is_some() && temporal.expire_at_ms.is_some();
+    let feed_reserve = reserved_slots + state.records.values().filter(|r| temporal::live_ttl(r)).count() + generation::staged_ttl_count(state) + usize::from(next_ttl) - usize::from(previous_ttl);
     let reserve_bytes = reserved_slots * 8192 + generation::reserved(state) * 32768
         + temporal::reserve_bytes(state) + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
@@ -223,5 +225,6 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         bytes,
         snapshot_bytes,
         reserve_bytes,
+        feed_reserve,
     })
 }

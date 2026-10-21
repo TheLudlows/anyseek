@@ -148,8 +148,8 @@ pub(super) struct ExpiredTarget {
 /// A single committed expiration cause; future change feed can project this exact seq.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Expiration {
-    seq: u64,
-    evaluation_time_ms: u64,
+    pub(super) seq: u64,
+    pub(super) evaluation_time_ms: u64,
     targets: Vec<ExpiredTarget>,
 }
 pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordError> {
@@ -206,6 +206,7 @@ impl Inner {
             self.evaluation_time_ms = evaluation;
             return Ok(());
         }
+        self.trim_feed(evaluation)?;
         let targets: Vec<_> = self
             .state
             .records
@@ -236,6 +237,8 @@ impl Inner {
             state: candidate.clone(),
         })?
         .len();
+        let feed_point = change_feed::pending_expiry(&self.state,event.seq,event.evaluation_time_ms)?;
+        self.feed_cache.validate(&self.config.change_feed,Some(&feed_point),change_feed::reserve(&candidate))?;
         let reserve = generation::reserve_bytes(&candidate);
         PartitionJournal::validate_initial(snapshot_bytes + reserve, self.config.max_journal_bytes)
             .map_err(storage)?;
@@ -283,6 +286,7 @@ impl Inner {
             shard.invalidate_frequentword_results();
         }
         self.state = candidate;
+        self.feed_cache.push(Some(feed_point));
         self.snapshot_bytes = snapshot_bytes;
         self.evaluation_time_ms = evaluation;
         self.output

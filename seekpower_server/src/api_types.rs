@@ -207,6 +207,10 @@ pub struct SearchResultObject {
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateIndexRequest {
+    /// At least seven-day change retention and hard admission budgets.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub change_feed: seekpower::record::FeedConfig,
     /// Name displayed in index listings.
     pub index_name: String,
     /// Explicit field definitions; names must be nonempty and unique.

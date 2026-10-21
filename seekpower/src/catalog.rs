@@ -1087,7 +1087,7 @@ mod tests {
     #[test]
     fn catalog_takeover_finalize_reserve_covers_maximum_json_escaping() {
         let identity = "\u{1}".repeat(256);
-        let certificate = crate::record::SealCertificate { lineage: "a".repeat(32), final_seq: u64::MAX,
+        let certificate = crate::record::SealCertificate { source_feed_scope: "c".repeat(32), lineage: "a".repeat(32), final_seq: u64::MAX,
             final_state_digest: "b".repeat(64), request: crate::record::SealRequest {
                 intent_id: "c".repeat(64), target_collection_id: identity.clone(), backup_digest: "d".repeat(64) } };
         let event = Applied { request: CatalogRequest { operation_id: OperationId { epoch: u64::MAX, nonce: identity.clone() },

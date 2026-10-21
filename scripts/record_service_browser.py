@@ -75,6 +75,26 @@ def exercise(base,master,call):
         expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
         assert page.evaluate("sessionStorage.getItem('seekpower.pendingWrites')") is None
         assert call('GET',f'/api/v1/index/{collection}')['indexed_doc_count']==1
+        page.locator('summary').filter(has_text='Change feed and snapshot bootstrap').click()
+        def lose_bootstrap(route):
+            response=route.fetch();assert response.status==200
+            route.abort('failed')
+        page.route('**/api/v1/index/*/bootstrap',lambda route: lose_bootstrap(route) if route.request.method=='POST' else route.continue_())
+        page.locator('#feedBootstrap').click()
+        expect(page.locator('#feedStatus')).to_contain_text('Retry the snapshot page')
+        page.unroute('**/api/v1/index/*/bootstrap')
+        def lose_release(route):
+            response=route.fetch();assert response.status==200
+            route.abort('failed')
+        page.route('**/api/v1/index/*/bootstrap/*',lose_release,times=1)
+        page.locator('#feedNext').click()
+        expect(page.locator('#feedStatus')).to_contain_text('Snapshot complete')
+        expect(page.locator('#feedStatus')).to_contain_text('Release unconfirmed')
+        expect(page.locator('#feedNext')).to_be_disabled()
+        assert 'continuation' in page.locator('#feedResult').inner_text()
+        page.locator('#feedRead').click()
+        expect(page.locator('#feedStatus')).to_contain_text('Change page ready')
+        print('PASS Chromium: real snapshot bootstrap and feed continuation')
         page.locator('#backToSearch').click()
         page.locator('#searchInput').fill('browser alpha')
         expect(page.locator('#contentBox')).to_contain_text('Browser title')
