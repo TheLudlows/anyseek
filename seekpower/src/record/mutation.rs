@@ -23,6 +23,9 @@ pub(super) fn prepare(
     request: RecordWrite,
     wall_epoch: u64,
 ) -> Result<PreparedWrite, RecordError> {
+    prepare_at(state,config,current_snapshot_bytes,request,wall_epoch,state.time_watermark_ms)
+}
+pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_bytes:usize, request:RecordWrite, wall_epoch:u64, evaluation_time_ms:u64)->Result<PreparedWrite,RecordError> {
     let epoch = wall_epoch.max(state.epoch_watermark);
     if request.operation_id.epoch > epoch || request.operation_id.epoch.saturating_add(1) < epoch {
         return Err(RecordError::OperationExpired);
@@ -53,17 +56,18 @@ pub(super) fn prepare(
             ))
         };
     }
-    if request.generation.is_some() { return generation::prepare(state, config, request, epoch); }
+    if request.generation.is_some() { return generation::prepare(state, config, request, epoch, evaluation_time_ms); }
     if state.generations.contains_key(&request.record_id)
         || (!state.records.contains_key(&request.record_id) && generation::occupied(state, &request.record_id)) {
         return Err(RecordError::Conflict("identity reserved by generation".into()));
     }
     if state.evidence_quarantined
         && (request.system.is_some()
+            || request.temporal.as_ref().is_some_and(|t| t.expire_at_ms.is_some())
             || state
                 .records
                 .get(&request.record_id)
-                .is_some_and(|r| r.system.is_some()))
+                .is_some_and(temporal::protected))
     {
         return Err(RecordError::Rejected(
             "restored evidence quarantined; deletion-history reconciliation not yet supported"
@@ -75,6 +79,8 @@ pub(super) fn prepare(
     } else {
         evidence::validate(&state.records, &request)?;
     }
+    let temporal = temporal::retained(state.records.get(&request.record_id), &request, evaluation_time_ms)?;
+    if state.independent_snapshot && temporal.expire_at_ms.is_some() { return Err(RecordError::Rejected("TTL requires a certified live owner".into())); }
     let next_document = enrichment::document(state.records.get(&request.record_id), &request)?;
     if let Some(document) = &next_document {
         validate_document_depth(document)?;
@@ -94,7 +100,10 @@ pub(super) fn prepare(
     let reserved_slots = generation::reserve_slots(state) + usize::from(creating_typed) - usize::from(deleting_typed);
     // 8 KiB covers JSON escaping of bounded IDs/nonce, envelope, receipt, and
     // journal frame overhead. No evidence edges are copied into delete requests.
-    let reserve_bytes = reserved_slots * 8192 + generation::reserved(state) * 32768;
+    let previous_ttl=state.records.get(&request.record_id).is_some_and(temporal::live_ttl);
+    let next_ttl=next_document.is_some() && temporal.expire_at_ms.is_some();
+    let reserve_bytes = reserved_slots * 8192 + generation::reserved(state) * 32768
+        + temporal::reserve_bytes(state) + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
         || state
             .operations
@@ -150,16 +159,19 @@ pub(super) fn prepare(
             .ok_or_else(|| storage("version exhausted"))?,
         record_id: request.record_id.clone(),
     };
+    if next_ttl && receipt.version == u64::MAX { return Err(RecordError::Rejected("TTL requires a reserved tombstone version".into())); }
     let applied = Applied {
         request,
         receipt: receipt.clone(),
         observed_epoch: epoch,
+        observed_time_ms: evaluation_time_ms,
     };
     let next_record = Record {
         record_id: applied.request.record_id.clone(),
         routing_key: applied.request.routing_key.clone(),
         version: receipt.version,
         document: next_document,
+        temporal, ingested_at_ms: if applied.request.document.is_none() { previous.map_or(evaluation_time_ms, |r| r.ingested_at_ms) } else { evaluation_time_ms }, expired_at_ms: None,
         retired_generation: previous.is_some_and(|r| r.retired_generation),
         generation_member: previous.and_then(|r| r.generation_member.clone()),
         system: applied
@@ -196,7 +208,8 @@ pub(super) fn prepare(
         + receipt.seq.to_string().len()
         - state.seq.to_string().len()
         + epoch.to_string().len()
-        - state.epoch_watermark.to_string().len();
+        - state.epoch_watermark.to_string().len()
+        + evaluation_time_ms.max(state.time_watermark_ms).to_string().len() - state.time_watermark_ms.to_string().len();
     if PartitionJournal::validate_initial(snapshot_bytes + reserve_bytes, config.max_journal_bytes)
         .is_err()
     {

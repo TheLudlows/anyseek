@@ -40,7 +40,7 @@ impl Inner {
                 .keys
                 .push(receipt.record_id.clone());
             self.index
-                .index_documents(vec![document.clone()])
+                .index_documents(vec![temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms })])
                 .await
                 .map_err(|_| RecordError::DurablePending(receipt.seq))?;
             #[cfg(test)]
@@ -105,7 +105,7 @@ impl Inner {
                 if visible.get(id) != Some(&true) { return Err(RecordError::DurablePending(applied.receipt.seq)); }
                 let ordinal = self.ordinals.len();
                 self.index.read().await.shard_vec[0].write().await.active.as_mut().unwrap().keys.push(id.clone());
-                self.index.index_documents(vec![record.document.clone().unwrap()]).await.map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
+                self.index.index_documents(vec![temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)]).await.map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
                 self.ordinals.push(id.clone()); self.locations.insert(id.clone(), ordinal);
                 #[cfg(test)]
                 if self.fail_publication_stage == 1 { return Err(RecordError::DurablePending(applied.receipt.seq)); }

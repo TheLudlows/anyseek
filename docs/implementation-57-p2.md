@@ -1,6 +1,6 @@
 # Issue #57 P2 实施设计：来源、证据与统一可见性
 
-状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与堆叠基线见第 16 节；已批准不等于已实现。
+状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与堆叠基线见第 17 节；已批准不等于已实现。
 
 - 产品依据：[issue #57](https://github.com/TheLudlows/seekpower/issues/57)，包含顶部 2026-10-21 确认。
 - 实施入口：[P1-A 与阶段记录](implementation-57.md)。本设计不替换总体路线。
@@ -305,7 +305,7 @@ P2 新测试文件名以下是拟议名称，尚不存在。复用现有 `cargo 
 | --- | --- | --- |
 | D1 | 来源更新使旧派生 stale，默认隐藏，等待上层重算发布；来源删除始终立即隐藏 | 第 14 节先交付条件更新与隐藏；不自动重算，不开放 include_stale 绕过 |
 | D2 | 正文就绪即可发布，先支持全文检索；向量后补，缺向量不参加向量召回，不填零向量 | 第 15 节实现可选向量及版本受控后补；第 16 节实现有界完整 generation staging/publish，最终验证见该节 |
-| D3 | TTL 到期为不可逆逻辑删除，并隐藏依赖派生；不能仅延长 TTL 复活，物理回收异步 | 后续 temporal 切片，当前未实现 |
+| D3 | TTL 到期为不可逆逻辑删除，并隐藏依赖派生；不能仅延长 TTL 复活，物理回收异步 | 第 17 节本地 TTL/时间切片；Windows 与系统故障验收单独列示 |
 | D4 | feed 至少保留 7 天；容量不足限制新写，不提前静默丢弃窗口内事件；过期消费者重建同步状态 | 后续 feed 切片，当前未实现 |
 
 管理型大文件 Blob 的必要性按首个实际输入场景决定：如果只需外部引用，不强加上传平台；若要求底座完整保存 PDF/音视频，须将 BlobStore 与备份保护纳入对应切片并确定容量。此为能力选用说明，不把未给定文件规模设成阻塞所有 P2 的问题。
@@ -671,3 +671,63 @@ target/debug/seekpower_server generate_openapi=true
 ```
 
 Windows 本批原生未运行；Linux/Windows 系统崩溃/断电未验收。需要隔离环境及外部确认见证；进程退出测试不能替代。仍仅本地实现和提交，发布/CI 待单独协调。
+
+
+## 17. TTL / 时间本地功能闭环（本地验证完成，等待用户检视）
+
+### 分支、范围与发布隔离
+
+本批本地分支 `feat/57-p2-temporal-ttl` 从 `87ac2bb5d0f989e33a0e5bbb54b3b6cd1ef238eb` 开始。该基线已单独发布草稿 [PR #63](https://github.com/TheLudlows/seekpower/pull/63)，base 为未合入 PR #62 的 `feat/57-p2-source-evidence`，仅三个后续提交；[CI 39578995252](https://github.com/TheLudlows/seekpower/actions/runs/39578995252) 的 Linux build/HTTP/Chromium、Linux 和 Windows 原生持久化/服务故障任务全部通过，head 与远端均为上述 SHA。**这些证据不覆盖本节 TTL 修改。** 本批未获发布授权，仍仅本地实施，不混入 PR #63、不修改 PR #62、不合入。
+
+[确认] TTL 到期不可逆逻辑删除，直接及间接依赖隐藏；仅延长 TTL 不得复活。当前检查点已接入核心转换、时间过滤、默认 HTTP/UI 和恢复结构校验；最终 Linux 本地回归通过，Windows 原生和系统故障验收尚未运行，详见本节末尾。
+
+### 已写入代码的职责与边界
+
+- `record/temporal.rs` 负责时间值校验、可替换时钟、owned 到期命令及持久墓碑。沿用 Record 单一 journal、partition guard 和增量活动索引；没有第二权威 TTL 数据库或独立调度服务。
+- `RecordWrite.temporal` / `GenerationChunk.temporal` 保存可选 `event_time_ms`、半开有效区间 `valid_from_ms` / `valid_to_ms` 和 `expire_at_ms`；Record 保存 `ingested_at_ms`、`expired_at_ms`。默认 HTTP/UI 和 OpenAPI 已接入，实际示例见服务 README。向量后补不更改时间元数据；完整替换省略 temporal 时继承原值。到期后身份永久保留，重试原 operation_id 仍返回原回执，新操作不能复活它。
+- [工程选择] 本批使用 UTC Unix **毫秒**，有效区间 `[from,to)`；业务时间可表示公元 1–9999 年，TTL 使用 1970 年起非负毫秒。原设计中微秒/RFC3339 是建议，并非用户承诺，本批不同时开放多种精度和字符串解析。event/ingested 范围与显式 valid_at_ms 条件在各检索通道候选选择前合并为 AND，不进行 TopK 后过滤；缺失 event 不匹配 event 条件。
+- 到期条件为 `evaluation_time >= expire_at_ms`。新视图/写入先排空到期记录；一次 Expired 提交包含同一评估时间、水位与精确旧版本目标。持久后才删除活动 ordinal、活动 BM25 统计与缓存。失败保持关闭；原有 fixed-time 视图可按设计完成，不把 TTL 屏障冒充来源显式删除/授权撤销的即时输出屏障。
+- 到期墓碑递增版本、保留来源历史与过期原因；WAL/checkpoint 均保存时间水位和过期记录；恢复校验完整连续提交 seq、时间单调性、过期原因与终态墓碑/版本的一一对应，供未来 feed 投影，但**没有 change-feed API 或 7 天保留实现**。格式标签升为 V7，拒绝旧格式，不提供迁移。
+- 普通写入、staging/publish 预留到期空间；TTL Record ID/routing key 限 256 字节，避免过期时重存长 ID 超出固定预留。复杂转义长 ID 拒绝已有回归；当前不是长期容量或吞吐承诺。
+- 备份不证明后续未发生删除。TTL 身份与 typed evidence 一样在独立快照中隔离；复制独立快照不推进其权威状态，避免破坏归档摘要。受控接管封存前推进原 owner 时间，最终状态由已有协议复制，目标服务前再检查时间。完整 service/catalog 恢复沿用既有安全协议；真实 HTTP 额外核验到期墓碑和撤销授权在最终状态接管后不复活。
+
+### 时钟与资源的诚实边界
+
+[工程选择] 进程内 wall clock 与 monotonic elapsed 的差异超过 5 分钟返回 `clock_uncertain`（HTTP 503）；小幅回退在进程内由已观察评估时间、恢复后由已持久水位钳制，不复活墓碑。启动后无法凭机器自身识别停机期间错误向前跳时，**依赖可信系统 UTC 时钟**，不承诺跨重启识别所有时钟异常。测试注入可控 Clock；显式 fault-injection 构建另支持 `SEEKPOWER_TEST_CLOCK_FILE`，普通发行构建不读取它。
+
+当前每次推进扫描有界 Record 集合，到期批次克隆/编码完整候选状态以校验 checkpoint 预算，随后增量退役索引；不是每次写入重建全文/向量索引。全量状态大小和身份上限沿用当前 P2 有界实现，不声称具备 P3 长期回收能力。
+
+### 独立审查与最终验证
+
+独立审查覆盖过滤端点、缺失时间、候选过滤、向量后补时间保留、generation 与恢复、旧视图及授权边界。已修复固定预留与长 ID、备份复制误推进时钟、独立 owner 的 generation TTL 旁路。真实故障矩阵发现并修复错误分类被数据 fence 覆盖：仅无正文的 durable_pending/outcome_unknown 错误不附数据许可，但保留所有授权交付检查；成功响应和其他错误仍附数据屏障，服务单元测试覆盖最终交付和 body poll 时撤权。静态定点复核未发现剩余阻塞项。
+
+新增确定性回归覆盖截止前 1 ms / 截止时刻、多级依赖隐藏、墓碑版本、旧操作幂等、禁止复活、时钟回退、持久后发布失败与恢复、长转义 ID 拒绝、备份隔离及复制不改变权威 cut、generation 到期拒绝发布、恢复缺失/重复过期原因、到期前条件续期、到期时竞争更新/向量补充失败、共同评估时间及各检索通道时间过滤。TTL 判定没有 sleep 依赖。既有统计不变测试新增可控时钟，避免将不同评估时间误认成状态差异。
+
+最终源码验证（2026-10-21，本地 Linux；本节文档更新后未改功能代码）：
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `cargo build --workspace` | 通过 |
+| `cargo test --workspace --all-targets --quiet` | **35 suites，202 passed，0 failed，10 ignored** |
+| 默认真实 HTTP + Chromium | 通过；含时间窗口、缺 event、有效期端点、只计数、重启、共同时间，以及 UI envelope/时间控件 |
+| 显式 fault-injection 构建 + HTTP + Chromium | 通过；含到期后追加结果未知、已持久未发布、持久后/可见后进程退出、重启幂等、不可复活、最终状态接管、旧授权拒绝与时钟大幅回退 |
+| 核心边界，默认及 no-default-features 独立构建 | 通过 |
+| OpenAPI 生成及 temporal schema 引用断言 | 通过 |
+| 本批 Windows 原生 | **未运行**，本分支尚无推送/CI 发布授权 |
+| Linux/Windows 系统崩溃、断电 | **未运行**；进程退出不等同系统故障 |
+
+10 个 ignored 中，9 个是由父测试显式启动的子进程 worker，1 个是需要额外环境参数的既有跨构建 fixture，不单独算通过。最终汇总日志为 `/tmp/p2-ttl-acceptance.log`；各检查日志为 `/tmp/p2-ttl-acceptance-{build,http,fault-build,fault-http,tests,boundary,openapi}.log`。这些是本地执行证据，不是公开 CI。
+
+```sh
+cargo build --workspace
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
+cargo build -p seekpower_server --features fault-injection
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --faults --browser
+cargo test --workspace --all-targets --quiet
+python3 scripts/check_core_boundary.py
+target/debug/seekpower_server generate_openapi=true
+```
+
+原生 CI 已调用的服务 smoke 入口会执行新增 `record_temporal_smoke.py`；Windows 使用 `.exe`。需要用户另行批准发布本分支并触发 Linux/Windows CI，不能用 PR #63 的结果覆盖本批。系统崩溃/断电需要隔离 VM/机器、可丢弃文件系统磁盘、外部 reset/power-cut 以及故障域之外的确认见证；不重启用户或共享环境。
+
+本批是有界 TTL/时间功能闭环，未实现 feed 的 7 天窗口与背压、实体关系、后台物理回收或 P3 持续压缩。请求驱动过期意味着空闲时不主动写墓碑，但任何新数据视图/写入前必须执行到期转换，不能暴露已到期正文。无 TTL 独立定时服务，不承诺长期稳定磁盘占用或无界规模。保持 PR #62/#63 草稿不变，本分支只本地提交，等待用户检视与后续发布授权。

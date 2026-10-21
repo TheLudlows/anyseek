@@ -1,6 +1,6 @@
 # Seekpower Record HTTP 服务
 
-默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。这是 #57 的有界 P1-A 实现；原生进程恢复已有验证，系统崩溃/断电验收、P2 来源语义和 P3 持续回收尚未完成。[实施与验证记录](../docs/implementation-57.md) 区分各阶段证据。
+默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。这是 #57 的有界 P1-A 与分批 P2 实现；已接入来源/证据、来源修订、generation、可选向量及本地 TTL/时间批次。完整 P2、系统崩溃/断电验收和 P3 持续回收尚未完成。[实施与验证记录](../docs/implementation-57.md) 区分各阶段证据。
 
 ## 构建与启动
 
@@ -178,3 +178,31 @@ Web UI 的 “Take over a collection” 输入同样字段，先保存请求，�
 - `GET /api/v1/index/{id}/doc/{record_id}/generation` 只返回版本、active/staged 身份和成员数。已发布成员保持精确证据并支持向量后补；换代使旧代及其派生隐藏。Abort 释放未发布成员 ID，generation ID 不可复用。
 
 Web UI envelope 模式可运行上述流程并保存原操作重试。完整示例、预留预算、恢复与验证边界见[第 16 节实施记录](../docs/implementation-57-p2.md)。
+
+## P2 时间条件与不可逆 TTL
+
+本地 TTL 批次使用 UTC Unix **毫秒**，与用户 schema 中既有 `Timestamp` 秒字段分开。完整 Record 写入和 generation 的每个 chunk 可携带：
+
+```json
+{"temporal":{"event_time_ms":1735689600000,"valid_from_ms":1735689600000,"valid_to_ms":1767225600000,"expire_at_ms":1893456000000}}
+```
+
+`temporal` 是系统元数据，不放入自定义 `document`。业务有效期是半开区间 `[valid_from_ms,valid_to_ms)`，缺失边界无界；它不会自动删除数据。`expire_at_ms` 必须严格晚于可信评估时间。完整替换省略 temporal 时继承旧值；到期前可通过合法的完整条件替换修改/清除 TTL，来源仍要求精确 Match，derived/chunk 仍不允许原地正文重算。向量后补不能改变时间元数据或 `ingested_at_ms`。
+
+到期会持久化新版本墓碑，隐藏直接及间接依赖，更新所有活动检索通道/统计。即便使用 `Any`/`Absent`、延长 TTL 或清空 temporal，也不能复活到期身份；用新身份创建新内容。原 operation_id 重试仍返回原回执，回执不是当前仍可见的保证。`/doc/{record_id}/status` 的 `visibility=expired` 不返回历史正文。源 TTL 可隐藏整文派生；chunk TTL 作用于该身份及其下游，不隐式给同 generation 其他成员添加 TTL。staging 期间到期的 chunk 不可 publish，需要 abort 后重新准备。
+
+查询可附加以下条件，全部在全文/向量/hybrid 候选选择前 AND；不做 TopK 后过滤：
+
+```json
+{"query":"example","temporal":{"event":{"from_ms":1735689600000,"to_ms":1767225600000},"ingested":{"from_ms":1735689600000},"valid_at_ms":1750000000000}}
+```
+
+所有窗口均为 `[from_ms,to_ms)`；缺失 event 的记录不匹配 event 条件。`valid_at_ms` 只决定业务有效期过滤，不改变 TTL 的当前可信时间，不支持查询已过期历史。空/反向范围拒绝，时间值限制公元 1–9999 年（TTL 非负）。不提供隐式按当前业务有效期隐藏；未传条件时仅按权限、来源、generation 和 TTL 决定可见性。
+
+查询、iterator page、status 和 statistics 返回同 guard 取得的 `evaluation_time_ms`。单次查询不混合时间视图；iterator 若过期提交改变 seq 会拒绝旧 cursor。查询 `count_total` 维持模式原有精确/近似边界，`statistics.active_records` 是该视图的全局活动集合，不是时间过滤后的命中数。内部 `__seekpower_time_` 字段仅存在可重建检索缓存中，该前缀不能用于 schema；原始 document 不被内部字段改写。
+
+到期采用请求驱动的 owned 提交，取消请求不会中断已接管提交。持久化结果不确定返回 `outcome_unknown`，已持久未应用返回 `durable_pending`，之后数据读写失败关闭直到重开恢复；保留这两类错误回执不绕过任何授权输出检查。恢复后重试查询或原写操作，不为重试生成新 operation_id。旧固定时间读视图可完成；来源显式删除和撤权仍即时阻断未交付输出。
+
+时钟依赖可信系统 UTC。进程内 wall/monotonic 差异或对持久水位的回拨超过 5 分钟返回 `clock_uncertain`；小幅回拨钳制为进程内已观察时间或恢复后的已持久水位，不能复活墓碑。停机期间错误向前跳时无法由同一机器自身鉴别。旧备份中的 TTL/来源证据保持隔离，不推进归档权威状态；同服务受控接管复制最终完整状态和过期历史，再为新视图处理到期，不能强制解除历史不明的隔离。
+
+当前 journal 为 V7，拒绝旧格式；无迁移。Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示实际评估时间。TTL 本批的平台和故障验证状态见 [实施记录第 17 节](../docs/implementation-57-p2.md)，不把 PR #63 的 CI 当成本批验收。

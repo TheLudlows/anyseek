@@ -17,6 +17,10 @@ pub const DEFAULT_NPROBE: usize = 200;
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequestObject {
+    /// UTC millisecond event/ingestion ranges and business-valid point.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub temporal: Option<seekpower::record::TemporalFilter>,
     /// Optional weighted RRF for text plus vector queries; ranks start at zero.
     #[serde(default, deserialize_with = "present_value", skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<api_schema::RrfOptions>, nullable = false)]

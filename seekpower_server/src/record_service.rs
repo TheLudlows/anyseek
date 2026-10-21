@@ -64,6 +64,7 @@ impl From<RecordError> for Error {
     fn from(e: RecordError) -> Self {
         let (status, code) = match &e {
             RecordError::Busy => (StatusCode::TOO_MANY_REQUESTS, "busy"),
+            RecordError::ClockUncertain => (StatusCode::SERVICE_UNAVAILABLE, "clock_uncertain"),
             RecordError::Rejected(_) => (StatusCode::BAD_REQUEST, "rejected"),
             RecordError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             RecordError::OperationExpired => (StatusCode::GONE, "operation_expired"),
@@ -186,6 +187,10 @@ fn protected<T: Serialize>(result: Result<T, Error>, permit: OutputPermit) -> Re
 fn protected_data<T: Serialize>(
     result: Result<T, Error>, permit: OutputPermit, data: Option<DataOutputPermit>,
 ) -> Result<Response, Error> {
+    // Persistence outcome errors contain no result body. Preserve their retry
+    // classification after a data fence, while retaining every authorization
+    // handoff check. Successful data and other errors keep the data barrier.
+    let data = if matches!(&result, Err(Error(_, "durable_pending" | "outcome_unknown", _))) { None } else { data };
     let encoded = match result {
         Ok(value) => serde_json::to_vec(&value)
             .map(|bytes| (StatusCode::OK, bytes))
@@ -894,7 +899,7 @@ async fn deletion_plan(
                 }
                 // Deletion selects every match, never the caller's display page or ANN sample.
                 query.search_mode(default_nprobe).map_err(bad)?;
-                let result = p.query(RecordQuery { text:query.query_string.clone(), vector:None, mode:seekpower::search::SearchMode::Lexical,
+                let result = p.query(RecordQuery { temporal:query.temporal.clone(), text:query.query_string.clone(), vector:None, mode:seekpower::search::SearchMode::Lexical,
                     query_type:query.query_type(), offset:0, length:entry.config.max_candidates, result_type:seekpower::search::ResultType::TopkCount,
                     fields:query.field_filter, filters:query.facet_filter, sort:vec![] }).await?;
                 if result.hits.len() != result.count_total { return Err(bad("deletion selection exceeds candidate budget")); }
@@ -1246,9 +1251,9 @@ async fn query(
     let (result,permit)=s.catalog.authorized(key,id,move|entry|async move{
         let start=std::time::Instant::now();
         let vector=request.query_vector.as_ref().map(|value|seekpower::vector::parse_external_embedding(value,&entry.config.index.inference)).transpose().map_err(bad)?;
-        let result=p.query(RecordQuery{text:request.query_string.clone(),vector,mode,query_type:request.query_type(),offset:request.offset,length:request.length,result_type:request.result_type(),fields:request.field_filter,filters:request.facet_filter,sort:request.result_sort}).await?;
+        let result=p.query(RecordQuery{temporal:request.temporal.clone(),text:request.query_string.clone(),vector,mode,query_type:request.query_type(),offset:request.offset,length:request.length,result_type:request.result_type(),fields:request.field_filter,filters:request.facet_filter,sort:request.result_sort}).await?;
         let hits:Vec<_>=result.hits.into_iter().map(|mut hit|{if let Some(doc)=hit.record.document.as_mut(){doc.retain(|field,_|entry.config.schema.iter().any(|f|f.field==*field&&f.store)&&(request.fields.is_empty()||request.fields.contains(field)));}hit}).collect();
-        Ok::<_,Error>(json!({"original_query":request.query_string,"query":request.query_string,"time":start.elapsed().as_nanos(),"offset":request.offset,"length":request.length,"count":hits.len(),"count_total":request.count.then_some(result.count_total),"query_terms":result.query_terms,"hits":hits,"visible_seq":result.visible_seq,"statistics":result.statistics}))
+        Ok::<_,Error>(json!({"original_query":request.query_string,"query":request.query_string,"time":start.elapsed().as_nanos(),"offset":request.offset,"length":request.length,"count":hits.len(),"count_total":request.count.then_some(result.count_total),"query_terms":result.query_terms,"hits":hits,"visible_seq":result.visible_seq,"evaluation_time_ms":result.evaluation_time_ms,"statistics":result.statistics}))
     }).await?;
     protected_data(result, permit, Some(data))
 }
@@ -1624,6 +1629,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_fenced_persistence_errors_keep_classification_but_not_revoked_output() {
+        use http_body::Body as _;
+        for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
+            let (service,path,_)=setup().await;
+            let record=service.record("a","c").await.unwrap(); let data=record.output_permit().unwrap();
+            let (_,permit)=service.catalog.authorized("a".into(),"c".into(),|_|async{}).await.unwrap();
+            record.seal_for_takeover(seekpower::record::SealRequest{intent_id:"a".repeat(64),backup_digest:"b".repeat(64),target_collection_id:"next".into()}).await.unwrap();
+            assert!(protected_data(Ok(json!({"body":"secret"})),permit.clone(),Some(data.clone())).is_err());
+            assert!(protected_data::<Value>(Err(bad("other error")),permit.clone(),Some(data.clone())).is_err());
+            let response=protected_data::<Value>(Err(error.clone().into()),permit.clone(),Some(data.clone())).unwrap();
+            assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
+            let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
+            assert_eq!(value["code"],Error::from(error.clone()).1); assert_eq!(value.as_object().unwrap().len(),2);
+            let mut body=protected_data::<Value>(Err(error.into()),permit.clone(),Some(data)).unwrap().into_body();
+            service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-output".into()),command:CatalogCommand::RevokeKey{key_id:"a".into()}}).await.unwrap();
+            assert!(deliver(&permit,None,||()).is_err());
+            assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Err(_))));
+            drop(body);drop(record);drop(service);std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn service_unconsumed_bodies_retain_request_admission() {
         use tower::ServiceExt;
         let (service, path, _) = setup().await;
@@ -1793,6 +1820,11 @@ pub(crate) fn generate_openapi() {
     schemas.get_mut("RecordWrite").unwrap()["properties"]["generation"] = json!({"type":"object","required":["action","generation_id"],"description":"Stage complete members/chunks/source, then Publish or Abort at exact document control version. See generation protocol documentation."});
     schemas.get_mut("RecordWrite").unwrap()["properties"]["vector_patch"] = json!({"type":"object","minProperties":1,"description":"Fill absent vector fields with exact Match version; omit document/system. Preserves body version."});
     schemas.get_mut("RecordWrite").unwrap()["properties"]["system"] = json!({"$ref":"#/components/schemas/EvidenceMetadata"});
+    schemas.insert("TemporalMetadata".into(),json!({"type":"object","additionalProperties":false,"description":"UTC Unix milliseconds. TTL is irreversible; business validity is independent.","properties":{"event_time_ms":{"type":["integer","null"],"minimum":-62135596800000i64,"maximum":253402300799999i64},"valid_from_ms":{"type":["integer","null"]},"valid_to_ms":{"type":["integer","null"]},"expire_at_ms":{"type":["integer","null"],"minimum":0,"maximum":253402300799999i64}}}));
+    schemas.insert("TimeRange".into(),json!({"type":"object","additionalProperties":false,"description":"Half-open [from_ms,to_ms); missing endpoints are unbounded.","properties":{"from_ms":{"type":["integer","null"]},"to_ms":{"type":["integer","null"]}}}));
+    schemas.insert("TemporalFilter".into(),json!({"type":"object","additionalProperties":false,"properties":{"event":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"ingested":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"valid_at_ms":{"type":["integer","null"]}}}));
+    schemas.get_mut("RecordWrite").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]});
+    schemas.get_mut("SearchRequestObject").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
     schemas.insert("EvidenceRef".into(), json!({"type":"object","additionalProperties":false,"required":["record_id","routing_key","version"],"properties":{"record_id":{"type":"string"},"routing_key":{"type":"string"},"version":{"type":"integer","minimum":1}}}));
     schemas.insert("EvidenceMetadata".into(), json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["source","derived"]},"evidence_refs":{"type":"array","maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}}}}));
     schemas.insert("CollectionCreate".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","collection_id","config"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"collection_id":{"type":"string"},"config":{"$ref":"#/components/schemas/CreateIndexRequest"},"embedding_space_id":{"type":["string","null"]}}}));

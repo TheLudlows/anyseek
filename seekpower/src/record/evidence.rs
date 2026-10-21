@@ -247,6 +247,8 @@ pub enum EvidenceVisibility {
     Stale,
     /// This record or an evidence ancestor was explicitly deleted.
     Deleted,
+    /// This record or its ancestry reached an irreversible TTL deadline.
+    Expired,
     /// Missing or invalid evidence; fail closed.
     Unavailable,
     /// Independent restored evidence lacks current deletion authority.
@@ -256,12 +258,13 @@ pub(super) fn status(records: &BTreeMap<String, Record>, id: &str) -> Result<Evi
     use EvidenceVisibility::*;
     if visit(id, records, 0, &mut BTreeSet::new(), &mut BTreeMap::new())? { return Ok(Visible); }
     let mut seen = BTreeSet::new(); let mut queue = vec![id];
-    let mut stale = false; let mut unavailable = false; let mut deleted = false;
+    let mut stale = false; let mut unavailable = false; let mut deleted = false; let mut expired = false;
     while let Some(id) = queue.pop() {
         if !seen.insert(id) { continue; }
         if seen.len() > MAX_VISITED { return Err(rejected("evidence traversal budget exceeded")); }
         let Some(record) = records.get(id) else { unavailable = true; continue; };
-        deleted |= record.document.is_none();
+        deleted |= record.document.is_none() && record.expired_at_ms.is_none();
+        expired |= record.expired_at_ms.is_some();
         stale |= record.retired_generation;
         if let Some(system) = &record.system {
             for reference in &system.evidence_refs {
@@ -273,7 +276,7 @@ pub(super) fn status(records: &BTreeMap<String, Record>, id: &str) -> Result<Evi
             }
         }
     }
-    Ok(if deleted { Deleted } else if unavailable { Unavailable } else if stale { Stale } else { Unavailable })
+    Ok(if deleted { Deleted } else if expired { Expired } else if unavailable { Unavailable } else if stale { Stale } else { Unavailable })
 }
 
 pub(super) fn validate_history(records: &BTreeMap<String, Record>, history: &[Record]) -> Result<(), RecordError> {
