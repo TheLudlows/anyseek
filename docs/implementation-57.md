@@ -1,906 +1,280 @@
-# Issue #57 implementation record
+# P1 可靠记录引擎实现
 
-Status: **bounded P1-A implementation and native process-recovery validation complete; host/power-failure qualification pending**. Baseline:
-`fc4fcfe64fdf86d03c07f82cf1d4889deb896801` (#56, #58, #59 included; #60 excluded).
-Working branch: `feat/57-reliable-record-engine`. Branch push and Linux/Windows CI are authorized. PR, merge, deployment and issue edits are not.
+本文说明 [Issue #57](https://github.com/TheLudlows/seekpower/issues/57) 的 P1 当前实现、关键约束和验收边界。当前代码完成了 **P1-A 的有界功能闭环**：默认 HTTP/Web UI 已接入 Record/catalog，成功写入同时满足持久化和可见性。**P1 整体验收尚未完成，Linux/Windows 的系统崩溃与断电矩阵仍未运行。**
 
-This is the implementation/validation entry point, not a replacement roadmap.
-The product contract remains [issue #57](https://github.com/TheLudlows/seekpower/issues/57).
-Current capabilities remain in [FEATURES](../FEATURES.md). Historical validation
-remains in [VALIDATION](../VALIDATION.md).
+实现基线为 `fc4fcfe64fdf86d03c07f82cf1d4889deb896801`，开发分支为 `feat/57-reliable-record-engine`，对应 [PR #61](https://github.com/TheLudlows/seekpower/pull/61)。复用基线已有的 Weighted RRF、canonical scoring order、固定 XXH64 和索引格式 8；PR #60 不在基线中。
 
-## Current checkpoint — complete service backup and safe new-root recovery
+本文按当前设计组织，阶段性尝试、旧测试总数和修复过程保留在 Git 历史。HTTP 使用方法见[服务 README](../seekpower_server/README.md)，完整路由见[功能清单](../FEATURES.md)，机器可读验证信息见[验收记录](validation/issue57-p1-checkpoint.json)。
 
-Status: implementation complete for the defined bounded P1-A slice; final-source
-local regression and Linux/Windows native CI passed. System/power-loss acceptance
-remains **not run**, so this is not an unrestricted reliability release claim.
-Parent checkpoint `9ebd0bd8e47f15fed057624c4bd3e1c937d6b0ee` passed all jobs in
-[run 39543087466](https://github.com/TheLudlows/seekpower/actions/runs/39543087466).
-The following describes the new source, not that previous CI result.
+## 导航
 
-Final-source Linux results: **162 passed, 0 failed, 10 ignored, 35 suites** with
-`SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet`.
-Default workspace and `fault-injection` server builds passed. Real HTTP/Chromium
-passed both default and `--faults` builds. Core boundary passed default and
-`--no-default-features`; OpenAPI generated 19 paths / 25 operations. Logs:
-`/tmp/seekpower-service-backup-final-tests.log`, `...-final-default-e2e.log`,
-`...-faults2.log`, `...-boundary.log`. Native CI for this new code is pending.
+- [1. 目标与完成范围](#1-目标与完成范围)
+- [2. 架构与权威数据](#2-架构与权威数据)
+- [3. 稳定身份、条件写入和重试](#3-稳定身份条件写入和重试)
+- [4. 写入发布与共同读视图](#4-写入发布与共同读视图)
+- [5. WAL、检查点与恢复](#5-wal检查点与恢复)
+- [6. 共享授权与撤销](#6-共享授权与撤销)
+- [7. 服务、客户端与生命周期](#7-服务客户端与生命周期)
+- [8. 备份与恢复](#8-备份与恢复)
+- [9. 资源边界与设计取舍](#9-资源边界与设计取舍)
+- [10. 验证方法与结果](#10-验证方法与结果)
+- [11. P1 剩余验收与后续阶段](#11-p1-剩余验收与后续阶段)
 
-Windows follow-up: [run 39544650754](https://github.com/TheLudlows/seekpower/actions/runs/39544650754)
-on `bc38e06e3982deca0c6311eca4da619b3fc0aeb2` completed with Linux build/browser/full
-suite and native jobs passing; Windows failed at real HTTP service backup with
-Win32 OS error 3. Deep generated archive/backup/preparation paths exceeded the
-traditional Win32 path boundary. The raw `MoveFileExW` adapter now canonicalizes
-the existing parent and appends the leaf, producing an absolute extended-length
-path, including relative/UNC roots. Empty relative parent maps to `.`. No locks,
-write-through flags, same-volume requirement or no-overwrite policy were relaxed.
-Native fixtures cover >260-character publication and Windows bare relative roots.
-Corrected-source local full suite: **163 passed, 0 failed, 10 ignored, 35 suites**;
-default and fault-feature builds plus real HTTP/Chromium passed. Logs use prefix
-`/tmp/seekpower-service-backup-windows-final-` (`tests.log`, `e2e.log`, `faults.log`).
-Static review found no blocker; corrected-SHA Windows execution remains pending.
+## 1. 目标与完成范围
 
-Final implementation SHA: `b5cc072bf686e4b8f062a5cde144d837f52c40bd`.
-[Run 39545366574](https://github.com/TheLudlows/seekpower/actions/runs/39545366574)
-completed **success**: Linux build/Chromium/full suite, Linux native persistence
-and real HTTP faults, Windows native persistence and real HTTP faults. This
-includes the previously failing Windows full-service snapshot and new deep-path
-fixture. Job logs identify Linux 6.17.0-1022-azure on `/dev/sda1` ext4 and Windows
-Server 2025 / 10.0.26100 on D: NTFS. The preceding “pending” notes are historical
-checkpoints; this paragraph records their final result. This final documentation
-update does not change production code or tests.
+P1 的目标是在现有检索内核上建立可靠记录引擎：已确认写入在支持的故障模型下可恢复，检索不会混合不同记录版本，错误不会伪装成成功。首版每个 collection 使用一个持久 partition 和一个内部搜索 shard；可创建多个 collection，但不提供跨 collection 事务或全局序列。
 
-| Defined P1-A acceptance item | Result |
+| 能力 | 当前实现 | 验收状态 |
+| --- | --- | --- |
+| 稳定身份与条件写入 | record_id、固定 routing_key、版本、删除墓碑、防 ABA | 原生进程与 HTTP 回归已通过 |
+| 幂等与错误分类 | 原 operation_id 重试、独立回执、明确未知和待恢复结果 | 响应丢失与重启回归已通过 |
+| 可靠提交与恢复 | WAL、冗余见证、完整 checkpoint、在线代切换 | Linux/Windows 原生进程验证已通过；主机断电未验收 |
+| 共同读视图 | 原始记录、活动版本、全文/向量/过滤、统计在同一发布位置读取 | 增量状态与有效记录重建对照已通过 |
+| 共享授权 | key 与数据独立、共享 grants、提交和输出撤销屏障 | 交错、取消、重启及真实 HTTP 验证已通过 |
+| 服务闭环 | 默认 HTTP/UI、遍历、删除计划、非原子 batch、完整备份恢复 | HTTP/Chromium 与故障注入已通过 |
+| 资源边界 | 明确容量、队列、请求期限和候选上限 | 边界回归已通过；不承诺持续无限运行 |
+
+表内历史双平台结果与本次修复的本地结果分别列于第 10 节，不能互相替代。P2 的来源/generation/证据与可选向量、P3 的长期压缩回收不计入已完成能力。普通 Document 中保存同名属性，也不代表引擎已经实现这些语义。
+
+## 2. 架构与权威数据
+
+```mermaid
+flowchart TD
+    Client["HTTP / Web UI / 客户端"] --> Service["Record service：鉴权、admission、输出屏障"]
+    Service --> Catalog["Catalog：身份、授权、collection 生命周期"]
+    Catalog --> Record["Record partition：版本、原文、回执、共同读视图"]
+    Catalog --> Storage["PartitionJournal / Journal：checkpoint + WAL"]
+    Record --> Storage
+    Record --> Index["派生索引：全文、向量、metadata、活动统计"]
+    Storage --> Recovery["恢复与完整备份"]
+    Recovery --> Index
+```
+
+| 模块 | 职责 |
 | --- | --- |
-| Incremental durable+visible Record path, versions/ABA, operation retry and active statistics | Passed local full suite and both native platforms |
-| Default HTTP/UI, shared keys, revocation publication/output barriers | Passed real HTTP on Linux/Windows; Chromium on Linux |
-| Iterator, deletion planning/batch, collection retirement, local snapshot retirement | Passed lifecycle and restart tests |
-| Live checkpoint/WAL retirement and bounded resource admission | Passed native persistence/process tests; declared limits remain enforced |
-| Service-root interrupted initialization and complete service/catalog backup/new-root recovery | Passed real HTTP, independent review and process-fault matrix on both platforms |
-| Original data/configuration/operation history and authorization-safe recovery | Passed restore, old-key denial, historical-control conflict, used-target retry and content-binding tests |
-| Host/filesystem crash and power-loss witness matrix | **Not run — environment required** |
+| [record.rs](../seekpower/src/record.rs) | 权威 Record 状态、操作账本、条件写入、增量发布、查询/遍历/统计 |
+| [catalog.rs](../seekpower/src/catalog.rs) | key verifier、collection 状态、grant revision、控制回执、授权屏障 |
+| [catalog/service_snapshot.rs](../seekpower/src/catalog/service_snapshot.rs) | 完整 service/catalog 快照及新根恢复 |
+| [storage/journal.rs](../seekpower/src/storage/journal.rs) | 有校验和与序列的 WAL、持久提交见证、恢复和 writer lock |
+| [storage/partition.rs](../seekpower/src/storage/partition.rs) | 持续 owner lock、完整 checkpoint、代发布和退役 |
+| [storage/platform.rs](../seekpower/src/storage/platform.rs) | Linux/Windows 文件同步、同卷目录发布与清理 |
+| [active.rs](../seekpower/src/active.rs) | 活动文档 N、term df、字段长度及其增量维护 |
+| [search.rs](../seekpower/src/search.rs)、[vector.rs](../seekpower/src/vector.rs)、[min_heap.rs](../seekpower/src/min_heap.rs) | 候选检索、旧版本排除、逻辑 ID 平分排序、融合 |
+| [record_service.rs](../seekpower_server/src/record_service.rs) | 默认 HTTP 契约、请求/控制 admission、授权输出、OpenAPI |
+| [Web UI](../seekpower_server/web/js)、[客户端与回归脚本](../scripts) | 保存原请求、重试、搜索和服务生命周期操作 |
 
-### Scope and protocol
+权威状态保存完整原始 Document、未经归一化的输入向量、配置、稳定身份、版本、墓碑、序列和操作结果。`schema.store` 控制搜索字段投影，不决定原始数据是否持久保存。
 
-Master-only POST `/api/v1/service-backups` freezes the existing catalog barrier
-used by all authorized Record operations. It checkpoints the full catalog,
-all retained collection partitions (including logically deleted collections),
-and all non-retired local collection backups. Existing service archives, derived
-index caches and abandoned preparation/trash are excluded; archives do not
-recursively include themselves. A deleted, never-activated collection with no
-physical data is explicitly represented as absent, with its identity/configuration
-tombstone preserved. Missing data from an activated collection fails closed.
-An unfinished collection intent must first finish recovery; the backup rejects it
-rather than silently omitting its dependencies.
+倒排、向量索引、metadata 和搜索 docstore 是可重建派生数据。现有 `index.bin`、`vector.bin`、`docstore.bin` 等可变文件不承担多文件原子提交；恢复从权威状态重建它们。低层 `Commit::commit` / `Close::close` 已返回 I/O `Result`，但直接调用低层索引 API 不自动获得 Record 服务的可靠性契约。
 
-The manifest records protocol version, request-derived identity, source catalog
-sequence, every Record/collection-backup sequence, explicit absent identities,
-and SHA-256 of each object's canonical authoritative journal payload. These
-hashes bind the catalog, configuration, originals, versions, tombstones and
-operation ledgers to their generated relative paths. The catalog cut is shared;
-Record sequences are local watermarks, not a global distributed clock.
+## 3. 稳定身份、条件写入和重试
 
-All children and the manifest are certified in a private staging tree. Handles
-and mmap owners are closed before the platform's outer durable directory rename.
-Only afterwards is a separately durable completion witness published. Merely
-seeing a directory is not proof of completion. An uncertified initial witness
-is distinguished by a typed storage error, repaired only under target ownership;
-certified corruption fails closed. An incomplete unpublished tree can be rebuilt
-only before a manifest cut exists. Once the manifest exists, retry preserves its
-cut. The tests exercise children, manifest, outer publication, and completion
-witness publication boundaries independently.
+### Record 契约
 
-Master-only POST `/api/v1/service-restores` validates the complete archive and
-publishes a new sibling `restored-service-<request hash>` root. It does not replace,
-start or switch the running service. Source control ownership and the new root's
-external owner lock protect publication. Ordinary startup rejects archives and
-uncertified restored roots, including a missing manifest indicated by the catalog
-marker. Restoring is recovery into a new location, not historical format migration.
+`collection_id` 与 `record_id` 是字符串业务身份；内部 DocID 仅是索引地址。RecordWrite 包含：
 
-### Authorization and retries
+| 字段 | 语义 |
+| --- | --- |
+| `operation_id: {epoch, nonce}` | 一次逻辑操作的重试身份；发送前保存 |
+| `record_id` | collection 内唯一记录身份 |
+| `routing_key` | 首次创建后固定；删除再创建也不能静默改变 |
+| `expected` | `"Absent"`、`{"Match": version}` 或 `"Any"` |
+| `document` | 必须显式提供；对象为完整替换，`null` 为删除 |
 
-All historical non-master identities stay disabled, historical grants are cleared,
-and access is rebuilt for the **current trusted master only**. The original
-catalog is retained as audit material, including previous authority histories;
-it is never loaded as active authorization. A current-master verifier that
-collides with a historical non-master identity is rejected. Users needing shared
-access create fresh key identities and explicitly grant them after recovery.
+记录版本与 partition 序列分开：版本标识同一记录的修订，序列标识 partition 内发布顺序。删除保留版本墓碑，重建继续递增版本，旧 `Match` 不会因身份复用而接受新内容。`Absent` 表示当前没有活动记录；`Any` 不检查版本，但仍检查身份、routing key 和其他约束。
 
-Historical control operation IDs return an explicit conflict (also through
-operation lookup), not a misleading successful AddKey/Grant receipt. Data Record
-operation receipts, versions and ABA protection remain intact. The restored
-catalog marker establishes a new authority incarnation. Same-request recovery
-retries read immutable provenance/completion records even while the destination
-is running or has legitimately changed; they never reapply the restore.
+### 幂等窗口
 
-The retained Web UI includes master backup/recovery controls, shows the resulting
-new stopped root and retains original request IDs for uncertain retries. It does
-not automatically start/deploy the restored root. Existing setup/editor/search
-and known-rejected creation/write handling remain in place.
+操作 epoch 为自 Unix epoch 起的 UTC 日数。引擎接受当前日和前一日，正常当日签发至少有 24 小时重试窗口，并持久保存已观察 epoch 水位，避免时钟回退复活过期请求。外部控制请求不能使用保留的 `sys:` nonce 命名空间。
 
-### Resource and validation boundaries
+同一 operation_id 和相同完整语义请求返回原回执，不推进版本或序列；同一 ID 更换内容返回冲突。Record 操作比较完整语义请求，不依赖有碰撞风险的短摘要判等。操作查询缺席、超时或过期都不证明此前未执行；客户端不能据此换 ID 补写。当前 Record checkpoint 保留账本，尚无持续账本 GC。
 
-Before creating a service archive, authoritative payload is preflighted against
-1 GiB (with per-object overhead allowance). Existing per-partition/catalog limits
-remain enforced. A source has at most four complete/in-progress service archives;
-the managed parent has at most four generated restored roots. Limits reject
-without silent eviction. Reclamation of service archives/restored roots is an
-explicit offline operator task in this slice; no live-root deletion route is
-introduced. Collection-backup retirement remains available. Sustainable data
-history/operation-ledger GC is still P3, not an extra P1-A feature.
+### 错误与重试行为
 
-Independent static review identified and verified fixes for absent deleted
-intents, original restore retry after destination mutation, and completion-witness
-initialization interruption. Regression includes actual HTTP sharing/revocation,
-new-root startup, old-key denial, historical control conflict, Record replay,
-restoration from copied collection backups, and Chromium backup/restore actions.
-Final test results and exact SHA-native CI are recorded below/on the validation
-ledger when complete. Hosted process exits do not simulate a filesystem crash.
-
-Remaining environment-only acceptance: isolated Linux and Windows VMs/machines
-with disposable filesystem-backed disks, externally forced reset/power cut and
-an external acknowledged-write witness, checking acknowledged data and revocation
-survival across reboot. No user/shared environment has been restarted. P2 typed
-source/evidence semantics, P3 sustainable reclamation and cloud protocol work are
-outside this slice. No PR, merge, deployment or issue change is performed.
-
-## Previous checkpoint — root recovery, backup retirement and pending creation
-
-Status: local final-source checks passed; current native CI rerun pending. This is a bounded
-P1-A checkpoint, not full P1 completion. Previous source `41f5f601ac3c7bbcb049f7a76ed5d6ba7bb552b9`
-passed all three jobs in [native CI run 39541649752](https://github.com/TheLudlows/seekpower/actions/runs/39541649752).
-Windows logs identify Windows Server 2025 / 10.0.26100 and D: NTFS. This is native
-process-recovery evidence, **not host crash or power-loss certification**.
-
-Changes in this checkpoint:
-
-- Service initialization now owns a stable external root lock before recovery,
-  and continues in an owned task after caller cancellation. An interrupted
-  initial catalog root is repaired using its complete original journal; a second
-  server cannot interfere. Root-owned unaddressable preparation directories are
-  reclaimed on startup; sibling service roots are never scanned.
-- Master GET `/api/v1/backups` lists local collection snapshots and retirement
-  state. DELETE `/api/v1/backups/{id}` durably tombstones the identity before
-  physical reclamation. Prepared restores pin their source; a completed restore
-  remains retryable after its source snapshot is retired. IDs are canonical
-  lowercase hex on both platforms. Retirement survives restart, cannot create a
-  new snapshot under the old ID, and frees the 32-live-backup capacity.
-- Cleanup includes interrupted initial-repair staging. Recovered trash must
-  complete another durable rename before removal, even if its owner file was
-  already removed. Cleanup failures return `cleanup_pending`, not a false
-  physical-deletion acknowledgement. Stable repair locks are removed only after
-  permanent retirement under the parent owner lock.
-- Invalid creation configuration is rejected before catalog Prepare. UI may
-  discard only this explicit `creation_rejected` result, including after reload.
-  Lost creation responses keep the original ID/configuration for retry; absence
-  or timeout never unlocks an uncertain request.
-
-Independent review found and fixed a Windows case-alias bypass of restore pins,
-recovered-trash durability and interrupted-repair staging omissions. Regression
-coverage includes canonical-ID rejection, catalog pin/retirement replay,
-partially deleted trash, actual service-root publication/repair exits and real
-Chromium lost-creation-response and rejected-creation flows.
-
-Local final-source commands/results (Linux overlayfs, explicit test root):
-
-- `cargo test --workspace --all-targets --quiet`: **161 passed, 0 failed,
-  10 ignored, 35 suites**; `/tmp/seekpower-root-final3-tests.log`.
-- Default workspace build and fault-feature server build passed.
-- `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser`:
-  passed, `/tmp/seekpower-root-e2e.log`.
-- Same command after fault-feature build with `--faults`: passed,
-  `/tmp/seekpower-root-faults.log`. All final production edits precede this run.
-- Generated OpenAPI: 17 mounted paths, 23 operations. `git diff --check`: passed.
-
-### Finite P1-A acceptance ledger
-
-| Contract / deliverable | Testable completion condition | Current status |
+| 结果 | HTTP | 保证及调用方动作 |
 | --- | --- | --- |
-| Durable + visible single-partition write | Original-ID retry, unknown vs rejection, durable pending, recovery and ABA tests plus real HTTP | Implemented; previous SHA passed both native platforms; current SHA rerun pending |
-| Shared authorization and common read view | Shared-key HTTP, revoke/output interleavings, restart authorization, statistics/query tests | Implemented; final-source rerun pending |
-| Default service/UI and lifecycle | Real HTTP iterator/deletion/restore and Chromium original-request retries | Implemented; current local HTTP/Chromium passed |
-| Live checkpoint / bounded operation retention | Checkpoint crash matrix; epoch-expired retry rejected; explicit record/op/WAL limits | Implemented; no unbounded running claim |
-| Service-root interrupted initialization | Two successive publication/repair exits followed by original master recovery | Current local real-process test passed; native CI rerun pending |
-| Backup management | Durable retirement, pending restore pin, exact replay, bounded live snapshots, cleanup restart | Implemented; current local HTTP passed; native CI rerun pending |
-| Complete service/catalog backup | One certified manifest binds complete catalog/config/record snapshots; interrupted backup never advertised; new-root restore tested | **Remaining**; current backup covers individual collections only |
-| Resource acceptance | Reject at declared limits without unintended files; reclaim safe staging and retired backups | Implemented for this bounded slice; data operation-ledger GC and physical-history compaction remain P3 |
-| Platform fault evidence | Linux and Windows native integration/process faults on final SHA; separately execute filesystem/system-fault matrix | Previous SHA native pass; current rerun pending; system faults not run |
-
-Full service/catalog backup must not silently revive grants revoked after the
-backup. It requires a complete publication/restore protocol and authorization
-reconciliation; copying live catalog files is not an acceptable substitute.
-Remaining P1-A work is this complete backup/restore contract, final native CI,
-and the declared I/O/system-failure acceptance gaps. P2 typed sources/evidence,
-P3 sustainable history reclamation, cloud protocols and performance research are
-not additions to this checkpoint. Power-loss testing needs an isolated Linux and
-Windows VM or machine with disposable real filesystem disks, externally forced
-reset/power cut, and an external acknowledged-write witness; hosted process-exit
-CI cannot provide that evidence. No user machine was accessed.
-
-## Previous checkpoint — lifecycle operations and native service faults (in progress)
-
-Parent implementation checkpoint: `b51e0cd84f334096e0be009e0430466b833d4611`.
-CI-only correction: `c46ec26b6c12f312783d3223b2fe97b4f2f0125a`.
-This stage fills previously unmounted capabilities through the Record/catalog
-path. It adds no old-format migration or legacy route compatibility layer.
-
-Actual changes:
-
-- `RecordPartition::page` and POST `iterator` expose stable identity pages of
-  original active records with projection, statistics and a continuation bound to
-  the visible sequence. Concurrent changes invalidate the cursor with 409; this
-  does not claim a pinned historical read view across multiple HTTP requests.
-- POST `delete-plan` selects all records, explicit IDs, or all lexical query
-  matches from one view. Returned targets carry immutable routing and exact
-  `Match` versions. The client must save the plan and assign one original
-  operation ID per target before POST `batch`. Regenerating the selection on
-  retry is unsafe. Plans are read-only and not durable server-side jobs.
-- POST `batch` executes 1..100 independent conditional writes/deletes, explicitly
-  non-atomically, with per-row outcomes. Unknown/application/recovery failures
-  stop the remaining rows (`not_attempted`); conflicts/rejections do not roll
-  back prior confirmed writes. Original-ID replay cannot delete an intervening
-  replacement or an ABA-recreated record.
-- Master DELETE collection durably retains its identity tombstone and removes
-  all grants before acknowledging. It never reuses IDs, reopens deleted data or
-  deletes an open mmap directory. Physical reclamation remains deferred to P3.
-  Ordinary shared identities can delete records but cannot retire a collection
-  or change its authorization control plane.
-- POST collection `backup` creates an independent local Record checkpoint,
-  including originals, vectors, full configuration, versions/tombstones and
-  operation receipts. Its generated ID is derived from collection + original
-  operation ID; retry returns the same point even after source changes. There is
-  a 32-backup hard limit, never silent backup eviction. No arbitrary paths or
-  archive uploads are accepted. This is a local collection backup, not off-host
-  replication or a full service/catalog identity backup.
-- Master POST `restore` creates a new collection identity from a local backup.
-  PrepareRestore persists complete configuration and the generated backup ID;
-  startup completes the physical copy before activation. Old key/grant state is
-  deliberately not restored, preventing revival of revoked permissions. The
-  restoring master receives a fresh grant; normal grant management shares it.
-- Independent review found an interrupted initial directory publication could
-  strand backup retries or prepared restores. `resume_initial` now validates an
-  unserved, checksum-valid generation-0 root, closes Windows handles, durably
-  retires it to a deterministic staging name, durably republishes it and only
-  then appends its certificate. Repeated repair interruption is recoverable.
-  Certified corruption, ambiguous roots and missing active collections fail
-  closed; they never become permission to create empty data. Uncertain rename/
-  certificate results retain `outcome_unknown` classification.
-- The UI permits discarding only a known-rejected and unsent remainder; confirmed
-  prefixes stay saved. Unknown/expired outcomes retain original requests. The
-  existing editor/search/setup layout is retained.
-
-Real service fault testing uses the explicit `fault-injection` build feature,
-absent from default binaries, with process-start environment selectors and no
-remote activation endpoint. It covers known pre-append rejection, uncertain
-append, durable-but-unpublished failure, process exits after durability/visibility,
-and backup/restore publication plus repeated repair interruption. These are
-process-fault and error-path tests, not power-loss certification.
-
-CI evidence and platform distinction:
-
-- `b51e0cd`: workflow validation failed before jobs ran (job env could not use
-  `runner.temp`). Corrected to `github.workspace` on `c46ec26`.
-- [Run 39539953102](https://github.com/TheLudlows/seekpower/actions/runs/39539953102),
-  exact SHA `c46ec26b6c12f312783d3223b2fe97b4f2f0125a`: Linux build/browser/full suite
-  and native persistence job **passed**. Windows native compilation and earlier
-  journal/partition/index I/O steps passed; Record tests **failed** (18 passed,
-  1 failed, 4 ignored). The failing fixture read the locked WAL through a second
-  handle. It now compares bytes only after releasing the owner, then reopens;
-  production locks are unchanged. Later Windows catalog/service steps did not run.
-- [Run 39541205670](https://github.com/TheLudlows/seekpower/actions/runs/39541205670),
-  SHA `111760529c14df68a8bd218ef90c4fc26e764243`: Linux native lifecycle/fault matrix
-  passed. Windows Record step now passed; catalog exposed the same locked-WAL
-  fixture assumption (11 passed, 1 failed, 1 ignored). Both fixtures are corrected;
-  a fresh native run is required. The production lock protocol was not weakened.
-- Follow-up resource correction: new backup requests rejected at the 32-backup
-  limit no longer create unused repair-lock files. The real HTTP regression
-  asserts repeated rejections leave the root directory entry set unchanged.
-  Native CI also records actual Windows/Linux filesystem evidence.
-- Final-source local results and subsequent native CI results are recorded in the
-  validation ledger. Until the corrected SHA runs, Windows remains **failed**,
-  not passed. Linux and Windows host/system-crash tests remain **not run**.
-- Trigger: push only this development branch, verify remote SHA, then
-  `gh workflow run ci.yml --repo TheLudlows/seekpower --ref feat/57-reliable-record-engine`.
-  Existing default-branch `workflow_dispatch` supports this; no PR or master edit
-  is needed. The workflow uses `contents: read`.
-
-Final-source Linux results: `cargo test --workspace --all-targets --quiet`:
-**159 passed, 0 failed, 10 ignored, 35 suites**. `cargo build --workspace --quiet`
-and `cargo build -p seekpower_server --features fault-injection --quiet` passed.
-Default HTTP/Chromium and fault-enabled HTTP/Chromium commands passed using
-`SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data` (overlayfs) and
-`PLAYWRIGHT_BROWSERS_PATH=/workspace/playwright-browsers`. Scripts:
-`python3 scripts/record_service_smoke.py --server target/debug/seekpower_server
---browser` and the fault build with additional `--faults`. Logs:
-`/tmp/seekpower-lifecycle-final3-tests.log`, `...-final2-e2e.log`,
-`...-final2-faults.log`. OpenAPI generation passed (15 paths, 21 operations).
-
-Remaining: full service/catalog backup portability and backup retirement tools,
-initial service-root interrupted-publication recovery, data-ledger/physical-history
-reclamation, permanently rejected pending-creation UI resolution, broader I/O
-failure certification and native Windows/system-fault acceptance. P1-A is still
-in progress. Typed source dependencies and immediate derived-data hiding remain
-P2; no arbitrary metadata is treated as an evidence graph.
-
-## Previous checkpoint — default Record HTTP/UI integration
-
-Parent checkpoint: `40d5ee35b0453e8e4ff58d84706000e9a0bc4eb5`.
-Default startup now opens the durable catalog and recovers its registered Record
-partitions before serving requests. It never mounts the legacy per-key index
-router. Prepared creation intents are completed before activation; missing active
-partitions fail startup. The initial data root must be absent, or already a valid
-catalog; existing empty/legacy directories are not silently imported.
-
-Actual changes and decisions:
-
-- `record_service.rs` authenticates API keys, orchestrates collection creation and
-  recovery, and serves original records, conditional writes, query, operation
-  status and online checkpoint. Only the bootstrap master identity may register
-  or revoke keys, manage grants or inspect catalog operation status. An ordinary
-  key may create a new collection but cannot enlarge access to existing data.
-  Revocation preserves collections and other authorized keys.
-- The catalog output permit now captures an active identity plus all grant
-  revisions represented by a response. HTTP checks it at final application
-  status/header handoff and again when handing the bounded body frame to Hyper.
-  Success, conflict, not-found, serialization and oversized-response errors use
-  the same barrier. Bytes already handed to the network cannot be retracted.
-- Writes and control work survive requester cancellation. Sixteen control tasks
-  and 64 admitted requests bound service concurrency; request admission remains
-  held through body consumption/disconnect. A 30-second deadline reports
-  `outcome_unknown`; clients must retry their original operation identity.
-- Internal activation identities use a reserved `sys:` namespace, rejected for
-  external commands, and generated directory IDs rather than arbitrary-length
-  collection IDs. Master creation is part of the initial durable snapshot.
-- `RecordQuery` carries existing AND/OR, filters, sorting, pagination, count,
-  vector budget and RRF semantics into one Record read view. Query hits carry
-  stable Record envelopes. Direct reads retain complete original documents;
-  search projection follows schema storage and requested fields.
-- The existing Web UI uses string collection IDs, an explicit embedding space
-  for vector collections and per-record conditional writes. Pending creation and
-  write requests are saved before sending and replayed unchanged after response
-  loss/reload. Multi-document input is a sequence of independent writes, not an
-  atomic batch. No raw API key is duplicated in pending request storage.
-- API reference generation describes the new mounted routes. Historical legacy
-  tests remain library regression tests, not proof of default HTTP integration.
-
-Independent review fixes: reserved activation identity collisions/length,
-protected error responses, bounded control admission, response-body admission
-lifetime, and serialization/size-error output barriers. Regression coverage uses
-real TCP revocation interleavings plus bounded-body unit tests. No new graph,
-account platform, migration or performance investigation was added.
-
-Validation: final-source commands and results are recorded below and in
-[the validation ledger](validation/issue57-p1-checkpoint.json). Native CI now runs
-service barrier tests and HTTP/restart tests on Linux and Windows; Linux also
-runs Chromium. These workflow changes have not been published or executed on
-Windows. Process kills are not system-crash or power-loss certification.
-
-Remaining acceptance gates (P1-A is **not complete**): iterator, bulk/ID-list/query
-and all-record deletion, collection deletion lifecycle, independent HTTP backup/
-restore, comprehensive failure injection through actual HTTP, further legacy
-panic/decoder audit, and Windows native/system-fault certification. These routes
-are currently unmounted rather than delegated to an unauthorized legacy path.
-The UI still needs an explicit resolution/discard flow for permanently rejected
-pending requests; automatic identity regeneration would be unsafe. Cross-origin
-CORS/trailing-slash compatibility is not yet restored. Typed source dependencies
-and immediate derived-data hiding remain P2; arbitrary JSON metadata is not an
-implemented dependency graph.
-
-Final-source Linux validation for this checkpoint:
-
-- `cargo test --workspace --all-targets --quiet`: **158 passed, 0 failed,
-  10 ignored, 35 suites**. Log `/tmp/seekpower-service-final-tests.log`.
-- `cargo build --workspace --quiet`: passed. Existing dead-code warnings from
-  unmounted legacy service modules remain.
-- `SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data
-  PLAYWRIGHT_BROWSERS_PATH=/workspace/playwright-browsers python3
-  scripts/record_service_smoke.py --server target/debug/seekpower_server --browser`:
-  passed, real HTTP and Chromium, with data on overlayfs. Log
-  `/tmp/seekpower-service-final-e2e.log`.
-- `python3 scripts/check_core_boundary.py` (with the configured Cargo PATH):
-  passed, including isolated core builds. The initial invocation lacked Cargo
-  on PATH and was rerun with the executor toolchain environment.
-- `target/debug/seekpower_server generate_openapi=true`: passed; 10 mounted API
-  paths, no legacy bulk/iterator routes advertised.
-- Linux native process/restart tests: passed. Linux host/system-crash: **not run**.
-  Windows native tests and Windows system-crash: **not run**. To execute the new
-  Windows CI path requires authorization to publish the branch and invoke the
-  workflow (or a separately provided Windows runner); neither was done here.
-
-## Previous checkpoint — durable catalog and authorization barriers
-
-Parent checkpoint: `837bac35d7c629ab3ca1ff6ed62658038668333b`.
-This is the executable catalog dependency for service integration. **The default
-HTTP/UI path has not been switched. There is no new HTTP end-to-end acceptance
-claim, and P1-A remains incomplete.** Existing HTTP key deletion still follows the
-legacy ownership model until that service replacement is completed; this branch
-must not be represented as a shared-collection service release.
-
-Actual changes:
-
-- `catalog.rs` stores independent keys, collection creation intents, complete
-  collection configuration, grant revisions and idempotent control-plane results.
-  It reuses `PartitionJournal`, including its owner lock, witnesses, publication
-  certificates, online checkpoint and old-WAL retirement. It does not duplicate
-  filesystem synchronization code or store authoritative grants in plain JSON.
-- `PrepareCollection` persists a generated relative directory and complete config
-  before data creation. It is invisible to authorized data operations until
-  `ActivateCollection`. The service must create/recover the actual RecordPartition
-  and verify it before issuing Activate; this orchestration is still pending.
-  Recovery exposes prepared intents, never registers arbitrary directories.
-- Key and collection identities are never reused. Revoking a key removes its
-  grants and leaves collections and other keys intact. A creator revoked during
-  initialization cannot strand data: privileged activation can complete without
-  restoring that key's grant, and a valid key can be granted access separately.
-- `authorized` runs owned work under a catalog publication barrier, including
-  nested Record writes that survive cancellation. Dropping the requester does
-  not release the barrier prematurely. A panicking work task fences authority.
-- `OutputPermit::deliver` checks the captured grant revision under a synchronous
-  read guard held through the actual bounded output handoff. Revoke takes the
-  corresponding write barrier. Revoke/regrant cannot revive a previously captured
-  permit. Dropping the catalog invalidates outstanding permits. Wiring this into
-  the HTTP body handoff remains necessary; checking before returning JSON alone
-  is insufficient. Already handed-off network bytes cannot be retracted.
-- Catalog commands and operation lookup are privileged library interfaces. The
-  service must authenticate control-plane callers; these are not unauthenticated
-  public HTTP routes. No account platform or read/write role split was added.
-- `record.rs` shares configuration validation with Prepare, including finite
-  boosts, vector/schema rules and checkpoint admission. Catalog entries also
-  undergo recovery-decoder roundtrip before durability. Future-epoch Record
-  operation lookups now reject consistently with writes.
-
-Retention and resource policy:
-
-- Both data and catalog operation IDs accept the current and previous UTC day.
-  `expires_at_unix_seconds` exposes the start of epoch + 2; an ID issued in its
-  own day has at least 24 hours. Future and expired IDs reject explicitly.
-- Catalog retains up to 10,000 results and a 16 MiB journal generation. Online
-  checkpoint removes only expired receipts, persists the epoch watermark, and
-  preserves all identity tombstones, collection intents/config and grant revisions.
-  Clock rollback cannot resurrect removed retry identities. WAL admission retries
-  after safe compaction; unexpired ledger exhaustion applies backpressure.
-- If capacity prevents a revoke, no success is returned and authorization is
-  fenced. Recovery preserves the actual durable state; the caller must retry
-  the original revoke ID. Uncertain persistence also fences existing outputs.
-- Record checkpoint still retains its bounded operation ledger rather than
-  reclaiming it. Data-operation retention/reclamation and physical-version bounds
-  must be finalized together; this change does not silently remove retry results
-  or claim unbounded continuous operation.
-- Catalog mutations currently clone bounded control-plane state. Record writes
-  remain incremental. The global catalog barrier serializes authorized work;
-  per-collection concurrency and HTTP response-size/deadline enforcement remain
-  explicit service integration work, not performance tuning claims.
-
-Regression coverage includes real Record writes/get/operation lookup through
-catalog authorization, shared-key revoke and reopen, durable data preservation,
-prepared intent replay, creator revocation during creation, illegal configuration
-rejection with unchanged WAL, cancellation barriers, grant ABA, panic fencing,
-output handoff ordering, capacity-failed revoke, uncertain revoke replay, online
-checkpoint/retry preservation, expired receipt reclamation and clock rollback.
-Eight subprocess exit boundaries cover revoke WAL/witness publication; these
-are process-failure tests, not system/power-loss certification.
-
-Final-code Linux validation (overlayfs, Rust 1.99.1):
-
-- `SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet`:
-  **154 passed, 0 failed, 10 ignored**, across 35 suites. Nine ignored subprocess
-  workers are invoked by parent tests; the existing opt-in AES test remains
-  ignored. Final log: `/tmp/seekpower-catalog-final2.log`.
-- `cargo build --workspace --quiet`: passed on final source;
-  `/tmp/seekpower-catalog-build-final.log`.
-- New catalog tests: 12 passed plus one subprocess worker ignored by default.
-  Initial fixture failures (missing schema `store`) were fixed before full runs.
-- Independent read-only review identified invalid-config recovery, revoked
-  creator activation, and revoke-at-capacity defects; all fixed with regression
-  coverage. Followup static review found no new blocking persistence/revision
-  defect in its scope. This is not a service integration review.
-- HTTP/UI smoke was not rerun for this dependency-only change. The prior legacy
-  smoke cannot establish new service integration; new HTTP end-to-end is pending.
-
-Native Windows compilation/tests and both platforms' system crash verification
-remain **not run**. The native CI matrix includes catalog tests only as a local
-change; it has not been published or dispatched.
-
-Next required work: default server startup and HTTP/UI use of this authority;
-prepared collection creation/recovery orchestration; public key management and
-shared grants; operation-status authorization; body delivery integration; real
-service crash/restart/revocation end-to-end tests; full platform acceptance. No
-permission denial is blocking local work. This checkpoint is a dependency slice,
-not completion of those service tasks.
-
-## Historical checkpoint — incremental publication and online WAL generations (validated locally)
-
-Parent checkpoint: `7fa0fd3f4b60bad336674b54fbbb49013aedc956`. This stage replaces
-the per-write reference rebuild with the actual existing-engine append path.
-**The library path is incremental; the HTTP/UI default path is still legacy.**
-P1-A is not complete and there is no reliable-service release claim.
-
-Actual module changes:
-
-- `active.rs`, `index.rs`, `field_length.rs`, `realtime_search.rs`, `search.rs`:
-  maintain active-document footprints, exact active term df and compressed field
-  lengths separately from physical posting/encoding counters. Committed,
-  realtime, ngram and normalization paths use the same active statistics.
-  Active pruning uses conservative finite bounds; equal-score pruning cannot
-  assume a physical ID lower bound is a logical record-ID bound.
-- `min_heap.rs`, `vector.rs`, `search.rs`: record-ID ordering enters candidate
-  heaps, vector selection, fusion and empty-query selection before truncation.
-  Physical IDs remain internal addresses. Longest-field encoding is selected
-  from the schema (honoring an explicit choice; otherwise first lexical field)
-  and persisted, so recovery cannot change the encoding decision.
-- `record.rs`: writes append one physical version, retire its predecessor before
-  publication, and publish authoritative data, lookup positions and statistics
-  under the same guard. Index failures after WAL durability still fence every
-  read/write view. Writes no longer clone/serialize the whole state or rebuild
-  the index. Exact checkpoint-byte accounting changes by this operation/record;
-  an indexed operation ledger replaces linear dedup scans. Full snapshots and
-  startup reconstruction remain intentionally proportional to retained state.
-- `RecordSearch.statistics` and `statistics()` report the same published sequence,
-  active record count, retained identities/operations, physical versions and
-  complete-checkpoint bytes. ANN/fusion hit counts are not promoted to exact
-  corpus counts. Physical history remains bounded by retained operation/journal
-  limits; long-running physical index compaction remains P3 work.
-- `storage/partition.rs`: a stable owner lock spans local WAL generations.
-  `compact_journal()` publishes a complete checkpoint online, preserves the
-  serving index, then retires the old WAL generation. Independent `checkpoint`
-  destinations retain their backup/restore semantics. No cloud protocol or
-  format migration was added.
-- `commit.rs`, `vector.rs`: release mmap before complete-block file extension;
-  address realtime vectors correctly after a partially committed block.
-  The native CI matrix now also includes partition-generation tests.
-
-Local publication protocol and resource boundary:
-
-1. Build the complete new generation in a unique prepared directory. Sync its
-   initial snapshot and WAL witnesses, then publish the generation directory.
-2. Only after directory publication succeeds, append a publication certificate
-   using the same three-witness journal. A valid certificate implies the earlier
-   namespace durability step completed; merely seeing a directory is insufficient.
-   Initial root creation writes its certificate only after final root publication,
-   while continuously holding the owner lock through return to the creator.
-3. Recovery chooses the highest certified generation. Journal corruption fails
-   closed; it never falls back on corruption. Only a complete single-frame
-   generation without a certificate is known not to have served writes and may
-   be discarded. A root without any publication certificate is refused: it did
-   not finish creation and cannot have acknowledged record writes.
-4. After a successful switch, close old journal handles before removal. Before
-   allocating another generation, unfinished reclamation must succeed. There
-   can be current plus one prepared/old generation, each bounded by the journal
-   budget (plus fixed metadata); cleanup errors cannot permit unbounded rotation.
-5. A non-certified higher generation is durably renamed out of the selection
-   namespace before recursive deletion. Recovery also re-renames leftover
-   `.prepare` directories durably before deleting their contents, because a
-   prior retirement may have failed after rename but before parent sync.
-6. Unknown publication outcomes fence the instance. Known pre-publication
-   failures preserve the existing view. These are local filesystem guarantees
-   under the stated fault model, still awaiting native system-crash validation.
-7. Recovery may use a larger external read budget to load a checkpoint, but
-   restores the persisted journal write limit before accepting new operations.
-   Reopening cannot silently expand the configured resource boundary.
-
-Regression coverage added:
-
-- Stable ties beyond K, including replacement with a later physical ID; lexical,
-  vector, hybrid, weighted fusion and empty query; commit/reopen/append.
-- Shared and per-field statistics, ngrams, empty fields, deletion/replacement,
-  compared with a clean effective-record index before/after commit and reopen.
-- Physical 65535/65536 crossing, automatic flush, facet growth, partial commit
-  then vector append. The fixture seeds retired history through the real engine;
-  the final boundary crossing uses the authoritative Record write path. It is
-  not 65K separately durable operations or a capacity benchmark.
-- Failure after index append and after retirement fences get/search/statistics;
-  recovery replays the durable replacement and preserves retry/ABA contracts.
-- Online checkpoint preserves originals, tombstones, retries and logical seq;
-  process exits cover preparation, un-certified publication, certification,
-  switch, partial old-generation deletion and completed reclamation.
-- Repeated interruption while discarding un-certified generations; injected
-  post-rename sync failure and repeated recovery cleanup sync failures; corrupt
-  certified generation refuses fallback; creator retains owner lock through return.
-
-Final-code Linux validation (overlayfs; Rust 1.99.1):
-
-- `SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet`:
-  **142 passed, 0 failed, 9 ignored**, across 35 suites. Eight ignored subprocess
-  helpers are invoked by their parent tests; one existing opt-in AES test remains
-  ignored. Log: `/tmp/seekpower-incremental-final4.log`.
-- `cargo build --workspace --quiet`: passed after the final persisted-budget fix.
-- `python3 scripts/http_smoke.py --server target/debug/seekpower_server`: passed
-  after the final build; Chromium not run. This covers the existing service, not
-  integration of the new Record path. Log: `/tmp/seekpower-incremental-http-final.log`.
-- Independent read-only reviews found and drove corrections to equal-score
-  pruning, partial-block vector addresses, mmap extension, publication witnesses,
-  owner-lock lifetime and interrupted reclamation. Regression tests cover these.
-
-Windows native compilation/tests and both platforms' system/power-loss tests
-remain **not run**. The local CI job has not been published or dispatched;
-process exits and simulated I/O failures do not constitute system-crash certification.
-
-Remaining P1-A work: default HTTP/UI integration, independent collection/grant
-catalog, shared-key authorization plus revocation/publication/output barriers,
-configured retention/deadline policy, and complete dual-platform acceptance.
-Startup and explicit checkpoints may reconstruct/serialize retained state;
-per-write rebuilding is removed. Abandoned **root-level** initialization siblings
-outside a partition still require catalog-level safe reclamation. Source-derived
-visibility is still pending the typed P2 interfaces, not implicit JSON metadata.
-
-## Historical checkpoint — independent review corrections (completed locally)
-
-Parent checkpoint: `6fd41b2c9210df59ff539e9c6cef240959352124`. This follow-up
-addresses the independent persistence review before incremental publication.
-It does **not** complete P1-A or enable the reliable path in HTTP/UI.
-
-Actual changes:
-
-- Authoritative records reject JSON nesting above 64 before serialization or
-  WAL writes. Each encoded entry is checked with the recovery decoder before
-  admission, including complete checkpoints. Accepted depth is tested through
-  reopen and independent snapshot restoration; rejected writes leave WAL bytes
-  and visible sequence unchanged.
-- Creation and independent checkpoints prepare their complete initial frame and
-  synchronized witnesses before publishing the directory. Budget errors and
-  pre-publication failures are definite rejections; failures after attempting
-  directory publication remain `outcome_unknown`. No empty authority is
-  published merely to reserve a destination.
-- Recovery holds the exclusive journal lock while removing only recognized
-  `cache-<32 hex digits>` directories before reconstruction. Unknown files and
-  directory names are retained; a cache-name symlink fails closed. Repeated
-  recovery, interrupted-build debris and competing opens are covered.
-- Owned create/open/search tasks retain the authority and admission guards until
-  their indexing/search tasks finish, even after caller cancellation. The
-  journal field drops after index handles. Independent follow-up review found
-  that field order alone was insufficient for detached hybrid search tasks;
-  a controlled shard gate now verifies cancellation plus dropping the last
-  public partition owner does not release the journal lock prematurely.
-- Initialization process-exit tests cover interrupted log sync, torn first
-  witness, fully prepared-but-unpublished state, and published state. These are
-  process-exit tests, not filesystem/system-crash certification.
-
-Validation on Linux/overlayfs, with `SEEKPOWER_TEST_ROOT` set to
-`/workspace/seekpower/target/p1-native-data`:
-
-- `cargo test --workspace --all-targets --quiet`: **131 passed, 0 failed,
-  7 ignored**, 35 suites. Six ignored tests are subprocess workers explicitly
-  invoked by parent tests; the seventh is the existing opt-in AES cross-build
-  test. Log: `/tmp/seekpower-p1-review-final.log` in this executor.
-- After the final publication-error classification refinement,
-  `cargo test -p seekpower --lib journal_ --quiet`: **6 passed, 0 failed,
-  3 ignored** (subprocess workers invoked by parent tests).
-- Controlled cancellation tests: **2 passed**. An earlier test harness used the
-  single-shard lexical shortcut and never entered the asynchronous shard gate;
-  it was corrected to use hybrid search. The corrected targeted and full suite
-  both pass; there are no remaining failing tests in this checkpoint.
-- `cargo check --workspace --quiet`: passed after the final error-classification change.
-- `git diff --check`: passed. Remote master was read-only rechecked at
-  `fc4fcfe64fdf86d03c07f82cf1d4889deb896801`; no upstream baseline drift.
-- Independent read-only review covered the original checkpoint, corrections,
-  cancellation follow-up, and final publication error stages. No new blocking
-  defect was found within this correction scope; this is not full P1 acceptance.
-
-Windows native compilation, native tests, and system-crash tests remain **not
-run**; Linux system-crash tests also remain **not run**. The existing local Windows CI job is
-still unpublished; no runner was dispatched or user machine accessed.
-
-Review constraints for the next incremental change:
-
-- Keep physical posting/doc counters for decoding; introduce separate active
-  document count, term df and field-length sums. All committed, realtime, ngram,
-  upper-bound and cache paths must read the same published statistics.
-- Logical record-ID tie ordering must enter lexical/vector candidate heaps and
-  fusion before truncation. Final output sorting cannot repair lost candidates.
-- Freeze and persist the longest-field encoding decision across replacement,
-  deletion and recovery. Do not reinterpret existing postings by changing it.
-- Invalidate warmup caches at the same publication boundary and bound physical
-  history, tombstones and dedup state as well as live records.
-
-Remaining: incremental publication/resource accounting, default HTTP/UI path,
-shared-key collection registry and revocation/output barriers, live checkpoint
-rollover/WAL reclamation, native Windows validation and both platforms' system
-fault validation. Prepared directories from failed initialization remain
-identifiable but require future safe parent/catalog-level reclamation. The
-current per-write rebuild and full-state serialization remain a bounded
-reference, **not a production implementation**.
-
-## Confirmed scope
-
-Linux **and Windows** require native reliability acceptance, not merely builds.
-API keys can share a collection with the same access capability; no account
-platform or granular roles. Revocation does not delete the collection. Source
-deletion hides derived content immediately; revocation blocks access immediately.
-Cross-collection evidence dependencies are unsupported in the initial scope.
-No legacy migration, old-format reader, cloud protocol or performance study.
-
-P1-A must integrate stable IDs, conditional replacement/delete, durable operations,
-idempotency, a common read view and active scoring statistics with the existing
-lexical/vector/filter engine, complete checkpoints and recovery. It is not done
-when types, a journal, or a separate API exist. P2 supplies source generations,
-evidence and optional vectors. P3 supplies long-running compaction/reclamation.
-
-## Historical stage 1 — persistence prerequisites
-
-Actual changes:
-
-- Core commit/docstore/vector/segment file errors propagate as `io::Result`.
-  Short-write-sensitive calls use `write_all`; file sync errors propagate.
-- Explicit commit drains all shard tasks, including after one fails.
-- Document indexing waits for the spawned indexing task and propagates its
-  result, including automatic block commit errors.
-- HTTP commit propagates storage failure as HTTP 500; shutdown logs close failures and exits unsuccessfully.
-- Local journal prototype uses checksummed frames and a synchronized commit
-  witness. Bytes beyond the witness are uncommitted; corruption inside its
-  extent is an error. A second writer is refused using a file lock.
-
-### Local journal decision and limitations
-
-The log is synchronized before publishing its end/sequence in three separate
-witness files. Each commit overwrites the oldest two witnesses one at a time,
-syncing each; success requires two durable copies. Recovery selects the highest
-valid position, validates its complete log extent, and repairs redundancy before
-accepting another write. One torn witness cannot discard an acknowledged commit;
-two invalid witnesses or inconsistent positions fail closed. This replaced an
-initial two-slot fail-closed prototype during self-review, before any publication.
-Recovery repairs invalid witnesses before touching older valid copies; a child
-process regression covers interruption during that repair. The fault model
-assumes a write to one witness file does not corrupt another;
-native filesystem/system-crash certification is still required.
-
-After write/sync failure the live journal refuses further writes until reopen.
-Capacity/size rejection happens before entering the uncertain write phase.
-File locking protects against concurrent cooperating writers, not external file
-modification. No WAL truncation/rotation or checkpoint reclamation exists yet.
-
-### Linux/Windows platform review
-
-- Linux: sync files, sync the prepared directory, rename within the same parent,
-  then sync the parent directory. `fsync(file)` alone does not persist its parent
-  entry ([Linux fsync documentation](https://man7.org/linux/man-pages/man2/fsync.2.html)).
-- Windows: sync file handles before closing; publish a unique prepared directory
-  using `MoveFileExW(MOVEFILE_WRITE_THROUGH)` without replacement or cross-volume
-  copy. No live mmap generation is replaced. This is an implementation candidate,
-  **not a certified atomic/durable directory protocol**. Its crash behavior must
-  be tested on native Windows; the documented write-through behavior alone is
-  insufficient evidence for all required guarantees.
-  [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers),
-  [MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw).
-- Fixed journal/witness handles use `File::sync_all`; locks stay held for the
-  writer lifetime. Fault tests must kill a process while handles remain open.
-- Existing index code still mutates mapped files in place. Result propagation
-  alone does not make those files atomic checkpoints or a common read view.
-- All Windows file deletion tests must release handles/mappings first; Linux
-  unlink-while-open behavior must not be assumed portable.
-
-### Validation ledger
-
-| Check | Linux | Windows native |
+| 成功 | 200 | 写入已持久且可见；返回原操作身份、回执与过期时间 |
+| `rejected` | 400 | 本次校验或容量拒绝；不能解除更早请求的未知状态 |
+| `conflict` | 409 | 版本、routing key 或操作内容冲突；同样不证明早先未知请求未执行 |
+| `busy` | 429 | admission 拒绝，可能发生在回执查询之前；保留原请求重试 |
+| `operation_expired` | 410 | 超出支持窗口；不能生成新身份猜测性补写 |
+| `outcome_unknown` | 503 | 持久化或请求结果不确定；保留原请求，通过恢复和查账判定 |
+| `durable_pending` | 503 | 权威操作已持久，派生应用未完成；实例需恢复 |
+| `recovery_required` | 503 | 实例已封锁，不能继续提供可信读写 |
+| `storage_error` | 503 | 存储失败；不把失败转换成成功或空数据库 |
+
+这张表描述结果分类，不承诺所有失败都发生在回执查询之后。尤其是一次响应丢失后，再次收到拒绝、冲突或繁忙，只描述本次尝试，不能推翻先前可能已经提交的事实。
+
+## 4. 写入发布与共同读视图
+
+### 写入流程
+
+1. 获取 admission；由独立持有所有权的任务接管操作。HTTP 取消或超时不会取消已接管的持久工作。
+2. 在 partition 锁内检查健康状态、epoch、身份和请求结构；查找相同 operation_id 的原结果。
+3. 校验版本条件、routing key、向量、记录/账本/WAL 预算，以及写入后能否生成完整 checkpoint。
+4. 追加权威操作并同步 WAL 与见证。进入此阶段后的不确定错误封锁实例，不能继续以旧视图服务。
+5. 增量写入新的物理索引版本，撤销旧活动版本和统计，更新原始记录及身份映射。
+6. 在同一锁内发布逻辑序列、活动统计和操作回执，恢复健康状态后返回成功。
+
+正常写入只更新受影响的记录、账本索引和 checkpoint 字节计数，不逐写重建全库，也不每次克隆/序列化完整状态。完整快照与启动重建仍按保留状态规模执行。WAL 持久后，任一派生应用失败都返回 `durable_pending` 并阻止部分视图泄漏；恢复重放已持久操作后才能继续。
+
+### 读视图、统计与排序
+
+Record partition 的锁覆盖候选检索、版本映射、权威原文回表和统计读取。一次查询对应同一个 `visible_seq`；实时和已提交索引、向量、过滤、原文及统计不能来自不同发布位置。它是受锁保护的当前视图，不是供调用方无限持有的历史 MVCC 快照。
+
+活动 N、term df 和字段长度与物理 posting/编码计数分离。替换和删除移除旧版本贡献，实时、已提交、N-gram 和归一化路径读取共同活动统计；剪枝上界采取保守策略，不能只修正最终分数。
+
+稳定逻辑 record_id 在词法候选堆、向量选择和融合中参与平分排序，早于候选截断。旧版本在候选选择中排除，不能占满 Top-K 后才过滤。物理 DocID 的先后顺序不能替代业务 ID 顺序。
+
+空查询直接使用现有迭代候选逻辑，保留删除检查、metadata 过滤、字段排序和稳定 ID 排序。因此没有词法字段的纯向量 collection 也可用 `{}` 浏览，并支持分页和 `length:0` 计数。这个分支位于词法字段/segment 提前返回之前，不依赖旧服务的浏览捷径。
+
+Vector/Hybrid 继续受 ANN 探测和 RRF 候选窗口约束；窗口内计数不声称全库精确并集，窗口内字段重排不保证全库字段 Top-K。搜索字段投影遵循 `schema.store` 和请求 `fields`；按 ID 读取与 iterator 可以访问完整权威原文。
+
+## 5. WAL、检查点与恢复
+
+### Journal 提交见证
+
+WAL 帧带长度、校验和与顺序约束。日志同步后，在三个独立见证文件中逐个更新最旧的两份并同步；成功需要两份持久见证。恢复选择最高有效位置，验证其完整日志范围，再修复冗余后接受新写入。见证范围外的尾部不视为已提交数据；认证范围内损坏必须报错。
+
+单个见证撕裂不能丢弃已确认提交；两个无效见证或不一致位置失败关闭。恢复先修复无效见证，不先覆盖较旧的有效副本。这个协议假设写一个见证文件不会损坏另一文件，不能从进程测试直接推导主机掉电保证。writer lock 防止遵守协议的并发写者，不防止外部任意修改文件。
+
+### 完整 checkpoint 与在线代切换
+
+完整 checkpoint 包含配置、当前记录、版本墓碑、序列、epoch 水位及操作账本。`compact_journal()` 保留当前服务索引，执行：
+
+1. 在唯一准备目录写完整新代，完成快照、WAL 与见证同步。
+2. 持久发布代目录；只有发布成功后，才写入同样受见证保护的 `PUBLISHED` 证书。
+3. 切换当前 journal，关闭旧句柄；持久退役旧代后回收其文件。
+
+仅看到新目录不代表发布完成。恢复选择最高已认证代；已认证新代损坏不会静默回退旧代。未认证、可证明尚未服务写入的准备状态才允许清理。首次根发布也必须完成认证；中断初始化由严格恢复流程继续，不能把不完整目录重置为空数据库。
+
+owner lock 跨越完整代生命周期及创建返回。未完成清理必须先成功，才能分配下一代，避免失败重试无限积累目录。清理准备项和遗留 trash 时再次完成持久重命名屏障，防止之前 rename 成功、父目录同步失败后直接删除内容。恢复使用更大读预算也不能扩大已持久保存的写入预算。
+
+### 启动与平台适配
+
+服务启动先取得外部根锁，恢复 catalog 与已登记 partitions，再提供请求。只清理当前根拥有的不可寻址准备目录和派生缓存，不扫描/删除其他服务根。异步恢复或 hybrid 查询的调用者取消后，相关任务必须释放 mmap 和索引句柄，才能释放允许另一恢复过程接管的锁。
+
+Linux 同步文件和准备目录，同父目录 rename 后同步父目录。Windows 使用同卷、无覆盖的 `MoveFileExW(MOVEFILE_WRITE_THROUGH)`，移动前关闭内部 journal、owner 和 mmap 句柄；路径通过已有父目录 canonicalize 加目标 leaf 构造扩展长度绝对路径，覆盖深路径、UNC 和相对根。文件同步错误和短写错误向上传播，提交失败仍等待所有 shard 任务结束。
+
+这是当前本地文件系统实现，不是对象存储 root/CAS 协议，也不是旧索引格式迁移工具。
+
+## 6. 共享授权与撤销
+
+catalog 独立保存 key 身份、verifier、collection 生命周期和 grant revision，不保存调用方原始 API key。数据不归单个 key 目录所有；多个 key 可共享 collection，撤销其中一个不会删除数据或影响其他有效授权。master 管理身份和 grants；普通 key 可创建 collection 并访问已授权数据，首版不细分读写角色。
+
+创建采用持久 `Prepare → 初始化 Record partition → Activate`。初始化期间创建者被撤销，不会通过 Activate 恢复旧授权，也不能复用创建身份。删除 collection 是独立 master 操作：持久墓碑、撤销 grants、拒绝身份复用，物理回收后置。
+
+当前 catalog 全局 mutex 覆盖完整授权工作，确定写入提交与撤销的先后。任务取消不提前释放发布屏障；授权任务 panic 或撤销持久化不确定会封锁授权状态。容量不足导致撤销失败时，不返回撤销成功，也不能继续把可能不安全的旧授权当作正常状态使用。
+
+响应持有带身份和 grant revision 的 `OutputPermit`，最终状态/头交付和 body frame 交付均复核。成功响应、冲突及序列化/超预算错误共用屏障；revoke 后重新 grant 不能使旧 permit 复活。已经交给传输层的字节无法收回。
+
+该设计用串行屏障简化正确性，代价是不同 collection 的完整读写也会相互等待；尚未实现 collection 间公平调度或更细粒度并发隔离。
+
+## 7. 服务、客户端与生命周期
+
+默认启动挂载 `record_service.rs`，实际 OpenAPI 为 19 个 path、25 个 operation。旧 `http_server.rs`、`keys.rs`、`operations.rs` 尚在源码中，但未挂载，不提供旧按 key 目录或数字 DocID HTTP 协议的兼容入口。服务只接受新的可恢复根或尚不存在的初始路径，不导入旧服务目录。
+
+| 操作 | 实现语义 |
+| --- | --- |
+| 写入/替换/删除 | 完整 RecordWrite；成功即 durable + visible |
+| PATCH collection | 在线完整 checkpoint，不是写入成功后的第二次确认 |
+| iterator | 稳定 ID 正向分页；cursor 绑定 visible_seq，写入后旧 cursor 返回 409 |
+| delete-plan | all/ids/词法 query 选取目标及精确版本；客户端保存计划并分配每项原 operation_id |
+| batch | 1..100 个独立操作，逐项结果，非原子；不确定/待恢复错误停止未尝试尾部 |
+| collection 删除 | master 持久删除身份、撤销访问；不立即删除仍可能被映射的数据 |
+
+Web UI 在发送前把原请求保存在 sessionStorage。写入还在发送前保存“未确认”状态：丢响应或刷新后，后续 `rejected`、`conflict`、`busy` 不会解锁丢弃或重新分配身份；收到成功回执后才推进已完成位置。没有经历未知结果的明确写入拒绝，可以释放被拒绝及未发送的余项。创建只在明确的 `creation_rejected` 时释放请求。
+
+Python 客户端要求调用者提供完整请求，不在重试中分配身份。小型 smoke 先保存请求文件，再发送；复用同一文件会重放同一逻辑操作。旧 `http_smoke.py` 已删除，由 `record_service_smoke.py` 覆盖默认服务；README、REST 示例和 OpenAPI 使用同一当前协议。
+
+## 8. 备份与恢复
+
+### Collection 快照
+
+独立快照包含 Record 配置、原文/向量、版本墓碑与回执。同一 backup operation_id 重试保留原快照，不因来源后来改变而重新取点。master 恢复到新 collection 身份，不恢复历史 grants。
+
+备份退役先持久记录身份墓碑，再删除文件。未完成 restore 会 pin 来源；已完成 restore 的重试不再依赖来源仍存在。备份 ID 仅接受规范小写 hex，防止 Windows 大小写别名绕过 pin/退役判断。物理清理未完成返回 `cleanup_pending`，不能宣称文件已删除。
+
+### 完整 service/catalog 快照
+
+完整备份在 catalog 屏障下冻结一致切面，包含完整 catalog、所有保留 collection（含逻辑删除者）及未退役 collection backups。已删除且从未激活、确无物理数据的 intent 显式记为缺席；已激活数据缺失则报错。旧 service archives、派生缓存和准备垃圾不递归纳入。
+
+manifest 记录协议版本、请求派生身份、catalog 与各 partition 水位、缺席身份和权威 payload 的 SHA-256。子对象及 manifest 在私有 staging 完成认证，释放句柄后发布外层目录，再写独立完成见证。仅看到外层目录不等于成功；未认证完成见证可以按严格初始化流程修复，已认证内容损坏则失败关闭。
+
+完整恢复只发布到新的、尚未启动的 sibling root，不覆盖或切换运行服务。历史非 master key 禁用、历史 grants 清空，只授予当前可信 master 初始访问；历史 catalog 保留为审计材料。历史控制操作 ID 显式冲突，Record 数据版本和回执保留。共享访问需创建新 key 身份并重新授权。
+
+目标根正常运行或写入之后，原恢复请求重试只核对不可变完成记录和来源身份，返回原结果，绝不再次覆盖目标。普通启动拒绝直接服务 archive 或未认证恢复根。UI 返回新根位置，不自动启动或部署它。
+
+## 9. 资源边界与设计取舍
+
+| 边界 | 当前值或行为 |
+| --- | --- |
+| Record 身份、累计保留操作、候选 | 各 10,000；身份包含墓碑，checkpoint 不释放数据操作额度 |
+| 单操作 / HTTP body / 响应 | 1 MiB / 2 MiB / 16 MiB |
+| Record WAL 代 / 完整 checkpoint 单帧 | 256 MiB / 16 MiB；每次写前检查完整可恢复状态能否容纳 |
+| catalog | 16 MiB 代、10,000 操作；安全回收过期控制回执并保留 epoch 水位 |
+| 服务请求 / 控制任务 / partition admission | 64 / 16 / 8；饱和返回 busy |
+| 请求期限 | 30 秒；超时可返回 outcome_unknown，不取消已接管写入 |
+| collection backups | 32 个；支持持久退役 |
+| service archives / 生成恢复根 | 每源根 4 个 archive/准备项，每托管父目录 4 个生成根 |
+| 完整备份预检 | 权威 payload 1 GiB，加每对象开销预留 |
+
+请求 admission 持续到 body 消费或断开，避免仅生成响应就释放额度。达到容量边界显式拒绝，不静默淘汰回执或备份。Service archives 和生成根由明确的离线操作回收，没有删除运行根的接口。
+
+当前用有限状态和背压保证实现边界；这不是容量或吞吐承诺。checkpoint 回收旧 WAL 代，不等于 Record 操作账本 GC 或物理索引历史压缩。全局 catalog 锁、完整快照大小、累计操作上限和启动全量重建都是已知限制。
+
+## 10. 验证方法与结果
+
+### 验证证据
+
+| 源码范围 | 环境 | 实际结果 |
 | --- | --- | --- |
-| Workspace compilation after Result plumbing | Passed `cargo check --workspace --quiet` | Not run |
-| Journal recovery, corruption, writer lock, capacity | Passed (5 tests, including child exits and repair interruption) | Not run |
-| Existing core/service regressions | Passed: 125 tests, 0 failed, 4 ignored across 35 suites | Not run |
-| Child-process crash recovery | Passed: 8 journal write boundaries, 1 repair interruption and 5 record/response-loss boundaries | Not run |
-| System/power-loss recovery | Not run | Not run |
+| 修复前 PR head `9cb4be40b5e5b3cbca63a438f49df8482c90cbdb` | Linux CI / ext4 | [CI 39545934556](https://github.com/TheLudlows/seekpower/actions/runs/39545934556)：构建、Chromium、完整测试及原生持久化/HTTP 故障通过；完整套件 163 passed、0 failed、10 ignored |
+| 同一修复前 head | Windows Server 2025 / NTFS | 同一 CI 的原生持久化、Record/catalog、输出屏障、HTTP 和进程故障任务通过；包含深路径和相对根 fixture |
+| 本文所在修复提交，基于上述 head | 本地 Linux / overlayfs，2026-10-21 | 完整 workspace：35 suites，166 passed、0 failed、10 ignored；默认构建、HTTP/Chromium、fault-injection HTTP、独立核心边界、OpenAPI 生成通过 |
+| 本次修复的远端 Linux/Windows | PR 工作流 | 尚待本次提交的 CI 验证；不能用上行旧 head 的结果替代 |
+| 任一版本的系统/文件系统崩溃、断电 | Linux / Windows | 未运行 |
 
-Commands use installed Rust with `PATH=/workspace/.cargo/bin:$PATH`,
-`RUSTUP_HOME=/workspace/.rustup`, `CARGO_HOME=/workspace/.cargo` on this executor.
-A test build initially found a match arm expecting `()` after the Commit result
-change; test callers are being updated to assert successful results.
+本地第一次完整测试因沙箱禁止绑定 TCP 端口而失败；启用测试所需本地网络权限后重跑完整套件，得到上述通过结果。10 个 ignored 中，9 个是由父测试显式启动的子进程 worker，1 个是需要额外环境参数的既有跨构建 fixture；不把它们单独算作已通过测试。
 
-### Gates recorded at the original checkpoint
+本次新增回归覆盖纯向量空查询的活动 ID、替换/删除、排序、过滤、分页、只计数、checkpoint 与恢复；也覆盖“已成功写入后的忙拒绝”仍可获得原回执，以及 UI 在真实写成功但响应丢失后，连续拒绝/冲突/繁忙和刷新仍保留原身份。迁移后的 Python 客户端在真实 HTTP 套件内执行两次同一请求文件，验证幂等。
 
-- Core journal/Record/version/dedup now use existing-engine publication (Stage 2);
-  HTTP/UI do not yet use that path, so no durable service guarantee is added.
-- Fence reads/writes after partial application; distinguish rejected, durable
-  pending, and unknown outcomes. Add cancellation and response-loss tests.
-- Independent complete snapshot/recovery and configuration persistence now exist;
-  live checkpoint-root publication/manifest and WAL rollover remain outstanding.
-- Common scoring context/visibility, version ABA, bounded operation retention.
-- Shared-collection authorization and response/commit revocation barriers.
-- Native Windows CI job has been prepared locally; it has not run.
-  Workflow edits can be prepared locally, but triggering a remote run would
-  require publication outside the current authorized scope.
+### 可复现命令
 
-## Historical stage 2 — initial record/reference-view integration
+```sh
+cargo build --workspace
+SEEKPOWER_TEST_ROOT=/path/on/test/filesystem cargo test --workspace --all-targets
+python3 scripts/check_core_boundary.py
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
+cargo build -p seekpower_server --features fault-injection
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --faults
+target/debug/seekpower_server generate_openapi=true
+```
 
-`record.rs` uses the existing retrieval engine, not a replacement scorer. It
-persists original Documents (including fields excluded by search projections and
-unnormalized vector values), immutable routing keys, revisions/tombstones,
-operation results, configuration and logical sequence. A bounded serial guard
-covers ranking and authoritative record lookup. Accepted writes continue in an
-owned task even if the caller disconnects. Successful writes are witnessed and
-published; post-durability application failure fences the instance until reopen.
+Windows 使用 `.exe`；Chromium 需要 Python Playwright 和浏览器运行时。`SEEKPOWER_TEST_ROOT` 应位于待验证的实际文件系统。故障注入只在显式 feature 构建启用，不通过公开 HTTP 打开。
 
-Implementation decisions awaiting full P1 acceptance:
+核心测试入口为 `journal_`、`partition_`、`commit_io_tests`、`record::tests`、`catalog_`；服务屏障入口为 `record_service::tests`。工作流定义见 [ci.yml](../.github/workflows/ci.yml)。
 
-- Current/previous UTC-day operation epochs provide at least 24 hours of retry
-  retention. The full `(epoch, nonce)` is the identity; expired epochs explicitly
-  fail. Observed clock epoch is persisted with writes. Operation count and WAL
-  bytes are bounded; there is no silent result eviction or infinite retention
-  guarantee. Retention configurability/clock fault coverage remain outstanding.
-- The bounded correctness reference rebuilds the effective record set into one
-  existing-engine shard after each write, then publishes it. This establishes
-  active BM25 statistics/pruning and excludes obsolete vector candidates without
-  maintaining two independently visible states. It is **not a production write
-  strategy**: incremental publication, fair scheduling and recovery resource
-  measurement are still P1 gates. Limits currently cap identities at 10,000,
-  schema fields at 64 and dimensions at 4,096; these are prototype bounds, not
-  measured service capacity promises.
-- `checkpoint(new_path)` writes a complete independent snapshot including
-  versions and dedup results. Restore uses the same `open` path. No live WAL
-  checkpoint-root rollover, incremental checkpoint reuse or log reclamation is
-  implemented. The initial checkpoint and whole journal remain authoritative.
-- Search returns original records with versions and a common position. It does
-  not label hybrid/ANN window counts as exact totals. Full diagnostic/count,
-  iterator, projection and deadline contracts are not complete.
-- The module is **not yet wired into the HTTP/UI default path**. Shared-key
-  grants, revocation/send barriers, service integration and UI retry handling
-  remain unfinished; P1-A must not be marked complete on these core tests alone.
+| 必须维持的性质 | 主要回归位置 |
+| --- | --- |
+| WAL 见证撕裂、损坏、锁、恢复修复中断 | journal / partition 单元与子进程测试 |
+| 已持久未发布封锁、版本 ABA、响应丢失、原始数据保留 | record 测试及真实 HTTP fault matrix |
+| 增量统计、稳定排序、物理块边界和取消任务生命周期 | record 测试、既有 search/vector 集成测试 |
+| 共享授权、撤销与提交/输出交错、重启后授权 | catalog / record_service 测试 |
+| 创建、遍历、非原子删除、备份退役、新根恢复 | record_service_smoke.py |
+| 请求身份保留、未知重试、词法/向量/混合 UI | record_service_browser.py |
+| 核心无 HTTP DTO/schema 和终端依赖 | check_core_boundary.py，默认及 no-default-features |
 
-Tests currently cover all three retrieval modes, raw input retention, replacement,
-delete/recreate ABA, conflicting/repeated operation IDs, concurrent version
-conditions, active-score equality to a clean effective-data index, complete
-snapshot restore and post-durability application failure/replay. Record-level
-native child-process and response-loss tests pass on Linux (5 boundaries).
+## 11. P1 剩余验收与后续阶段
 
-Validation fixture fixes: vector schema must explicitly declare `store` and
-`index_lexical`. Reopen fixtures must use the existing 11-bit segment layout
-(`open_index` currently hardcodes that layout); the initial 4-bit fixture failed
-on reopen and was corrected, not suppressed. P1 record checkpoints persist
-configuration and rebuild derived indexes, rather than trusting such bare files.
+P1 尚缺的可靠性证据是 Linux 和 Windows 的真实系统/文件系统崩溃与断电矩阵。需要隔离 VM 或机器、可丢弃文件系统磁盘、外部强制 reset/power-cut 能力，以及故障域之外记录已确认写入和撤销的见证。重启后必须核对已确认数据、授权撤销、未知操作、恢复错误与继续服务能力。进程 kill/exit、注入 I/O 失败和调用 fsync 不能代替这一验收。
 
-No applicable files were found in repository `.agents/skills` or workspace
-`.agents` during this stage. No historical performance investigation was resumed.
+验收结论还必须限定于本实现的容量、调度和恢复边界；当前没有证明跨 collection 公平调度、长期稳定磁盘占用或任意规模下的恢复时间。放宽这些边界需要实现和相应验证，不能只修改文档数值。
 
-## 2026-10-21 local checkpoint
+| 后续阶段 | 不属于当前已实现能力 |
+| --- | --- |
+| P2 | 类型化 source/evidence、直接及间接来源隐藏、document generation、可选向量、时间/实体/关系、TTL/change feed |
+| P3 | 不可变多索引段、跨段统计上下文、读者保护、持续压缩与安全回收 |
+| P4–P6 | 对象存储权威协议、集群接管与公平性、跨 partition 查询、split/merge 与自动调度 |
 
-Status: **tested core checkpoint; P1-A still in progress**. No external publication.
-The source baseline remains `fc4fcfe64fdf86d03c07f82cf1d4889deb896801`.
-
-Commands and actual results:
-
-- `cargo check --workspace --quiet`: passed.
-- `cargo test --workspace --all-targets --quiet`: **125 passed, 0 failed,
-  4 ignored, 35 test suites**. Three ignored tests are child-process workers that
-  the parent tests execute explicitly; the other is the existing opt-in
-  cross-build term-hash fixture. No ignored test was counted as a standalone pass.
-- `cargo build --workspace --quiet`: passed.
-- `python3 scripts/http_smoke.py --server target/debug/seekpower_server`: passed,
-  including embedded UI/static checks. Browser/Chromium interaction was **not**
-  enabled for this invocation. This validates the retained HTTP path, not the
-  unfinished reliable-record HTTP integration.
-- `SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test -p
-  seekpower --lib --quiet`: passed: 32 tests, 0 failed, 2 ignored before the additional repair test.
-  Final full-workspace run with the same environment: 125 passed, 0 failed,
-  4 ignored; new journal/record/commit fixtures used overlayfs.
-- `git diff --check`: passed before local commit.
-
-Executor: Linux 6.18.55 x86_64; Rust 1.99.1. `/tmp` is **tmpfs** and `/workspace`
-is **overlayfs**. New storage/record tests now accept `SEEKPOWER_TEST_ROOT`; the
-filesystem rerun places them on overlayfs. Neither tmpfs nor a container process
-exit proves host power-loss durability. Linux native process tests are distinct
-from Linux filesystem/system-crash certification, which remains **not run**.
-Windows compilation, native integration/process crashes, and system-crash tests
-are all **not run**. The local CI matrix explicitly includes `windows-latest`
-and `ubuntu-latest` and runs the existing-index I/O/mapping tests, journal crash
-boundaries and record restore/response-loss tests. It has not been published or
-triggered; doing so is outside this checkpoint's authorization. No user's machine
-was accessed. The platform directory-publication candidate still needs native
-filesystem certification, including initialization failure boundaries.
-
-Self-review findings retained as open gates:
-
-1. HTTP/UI must use this same Record path; key grants and revocation barriers
-   still need implementation. Existing key revocation remains legacy behavior
-   until that integration, so this branch is not a shared-collection release.
-2. Full effective-set rebuilding is a bounded correctness reference only.
-   Incremental updates, complete query diagnostics, iterator/projection,
-   request deadlines and fair resource accounting remain to be finished.
-3. Index initialization/decoding still contains legacy panic/error paths outside
-   the converted commit chain. They require further audit before P1 acceptance.
-4. Independent snapshots do not replace live checkpoint-root rollover or WAL
-   retirement. Recovery still reads the bounded complete journal. Recovery now
-   reclaims recognized derived caches under its lock; general physical-history
-   and abandoned preparation reclamation remain unfinished.
-5. Operation retention currently uses fixed day epochs with a persisted observed
-   epoch watermark and count backpressure; configurable policy and clock-fault
-   validation are not complete.
-6. Source/evidence semantics and cross-collection rejection belong to the pending
-   typed P2 interfaces. Arbitrary Document metadata is not an implemented evidence
-   graph and has no source-deletion guarantee at this checkpoint.
+P1 文档维护当前可靠记录契约和验收事实；不会因为这些后续目标写入规划，就把 P1-A、全部 P1 或整个 #57 标为完成。

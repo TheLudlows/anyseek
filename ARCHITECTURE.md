@@ -1,57 +1,47 @@
 # 当前架构
 
-Seekpower 保留一个 Rust 核心库和一个 HTTP/Web UI 服务。当前是单机实现，本机 shard/level 用于并行与增量索引，不代表分布式路由或副本。
+Seekpower 由 Rust 核心库和 HTTP/Web UI 服务组成。默认服务已接入 Record/catalog，每个 collection 一个持久 partition 和一个内部搜索 shard。低层索引库仍保留自身 API 和本机多 shard 实现，不代表服务已支持分布式分片。
 
 ## 模块边界
 
 | 层 | 代码 | 职责 |
 | --- | --- | --- |
-| UI | `seekpower_server/web/` | 搜索、分页、原文/链接预览、日期交互 |
-| 服务 | `http_server.rs`、`operations.rs`、`keys.rs`、`server.rs` | HTTP 参数、API key、索引作用域、启动、日志与退出 |
-| 核心入口 | `index.rs`、`search.rs`、`iterator.rs` | schema、文档操作、三类查询与遍历 |
-| 全文 | `tokenizer.rs`、`index_posting.rs`、`intersection*.rs`、`union.rs` | 分词、倒排、布尔/短语、BM25 与剪枝 |
-| 向量 | `vector.rs`、`vector_similarity.rs`、`clustering.rs` | 外部向量校验、量化、相似度、聚类与 IVF 检索 |
-| 存储 | `commit.rs`、`doc_store.rs`、`compress_postinglist.rs` | 本地提交、文档压缩、posting 编码 |
-| 过滤 | `metadata_filter.rs` | 共享 schema 校验、每分片字典编译、候选元数据判定 |
-| 统计 | `info.rs` | 收集索引信息；服务记录启动索引概况 |
+| UI | `seekpower_server/web/` | 创建/写入原请求保存与重试、搜索、分页、预览、日期过滤、服务备份恢复 |
+| 默认服务 | `record_service.rs`、`server.rs`、`main.rs` | HTTP 契约、身份入口、admission、响应授权屏障、启动恢复 |
+| 控制权威 | `catalog.rs`、`catalog/service_snapshot.rs` | key verifier、collection 生命周期、grant revision、控制回执和完整服务快照 |
+| 数据权威 | `record.rs` | 原始 Document/向量、稳定 ID、版本、墓碑、幂等、共同可见视图 |
+| 持久化 | `storage/journal.rs`、`partition.rs`、`platform.rs` | WAL、见证、代切换、目录同步/发布、owner lock |
+| 派生索引 | `index.rs`、`commit.rs`、`doc_store.rs` | 现有倒排、向量、文档投影和 metadata 存储的构建/提交 |
+| 检索 | `search.rs`、`vector.rs`、`iterator.rs`、`min_heap.rs` | 三路检索、候选、排序、遍历；Record 的稳定身份在截断前参与平分排序 |
+| 活动统计 | `active.rs`、`field_length.rs` | 活动版本 N/df/字段长度；与物理编码计数分离 |
+| 过滤/分词 | `metadata_filter.rs`、`tokenizer.rs` | 共享元数据判定与文本处理 |
 
-源码路径分别相对于 [核心目录](seekpower/src) 或 [服务目录](seekpower_server/src)。HTTP 请求/响应对象位于服务的 `api_types.rs`，创建字段和向量配置在服务边界转换为核心类型；`api_schema.rs` 为复用的核心值提供 OpenAPI 描述。核心不再依赖 utoipa 或数字/终端格式化库。`info::collect_index_info` 返回数字、枚举和时间组成的 `IndexInfo`；服务输出普通日志，不再渲染终端表格。核心使用 `log` 门面，不安装日志输出器，默认静默；服务初始化日志输出并支持 `RUST_LOG`。模型运行时与文件解析器仍在应用侧。
+路径相对于核心或服务的 src。`api_types.rs` 和 `api_schema.rs` 保留服务公共配置/查询 DTO 及 OpenAPI 描述；核心不依赖 HTTP schema。`http_server.rs`、`keys.rs`、`operations.rs` 是尚未清理的旧服务模块，默认启动不挂载它们。它们不提供受支持的兼容服务。
 
-## 查询执行
+## 写入与查询
 
-HTTP 根据文本与向量输入推导 Lexical、Vector 或 Hybrid；Rust 核心调用方仍显式选择。Lexical 使用倒排，Vector 使用外部查询向量；Hybrid 收集两路候选，汇总本机分片结果后按文档 ID 执行 RRF。已提供 weighted RRF、两路独立候选预算与权重；没有公开的多策略自动规划器。
+写入先校验身份、条件版本、向量、记录和完整快照容量，再同步权威操作日志；随后增量应用搜索索引、撤销旧活动统计、发布共同序列，最后返回成功。索引应用失败返回 durable_pending 并封锁该实例；日志结果不确定返回 outcome_unknown，需要恢复和原 ID 重试。已接管工作不随 HTTP 请求取消而中断。
 
-词法路径支持元数据过滤、文档命中计数和字段排序；向量路径支持检索字段选择、聚类探测与相似度阈值。三种模式复用元数据过滤谓词；向量评分/Top-K 前排除不匹配及已删除记录。ANN 保留已有簇探测规则，可能因未探测簇中的有效记录而返回不足 K。Hybrid 默认按融合分数排序，也可按字段重排候选；候选截断后的重排不保证全库字段排序 Top-K。详见 [功能边界](FEATURES.md)。
+Record partition 的 mutex 覆盖候选检索和原始数据回表。同一个查询只看到一个发布位置；替换/删除在 Top-K 前过滤旧版本。空查询使用同一删除检查、metadata 过滤和候选堆，纯向量 collection 不依赖词法字段也能浏览。
 
-## 数据与文件
+服务根据文本/向量选择 Lexical、Vector、Hybrid。Hybrid 两路候选通过 RRF 融合，支持权重和各路预算；ANN 可能因簇探测返回不足 K。候选窗口计数和候选内字段重排不等于全库精确结果。查询原始数据经 schema.store 和 fields 投影后输出；直接读取和 iterator 可返回完整权威 Record。
 
-服务目录按 API key、索引、本机 shard/level 组织。主要文件如下；实际文件位于索引或其 shard/level 下，以源码打开/提交逻辑为准。
+## 授权与生命周期
 
-| 文件 | 用途 |
-| --- | --- |
-| `apikey.json` | key 身份与目录关联 |
-| `schema.json`、`index.json` | 字段定义、索引元数据与配置 |
-| `index.bin` | 词项 posting、文档 ID 与位置编码 |
-| `vector.bin` | 向量及聚类数据 |
-| `docstore.bin` | 压缩的已存储文档字段 |
-| `facet.bin`、`facet.json` | 过滤/排序值及词典（不维护统计聚合） |
-| `delete.bin` | 删除标记 |
+API key 身份独立于 collection 数据目录。master 管理身份和 grants，普通 key 可访问其授权集合；撤销不删除数据。catalog 当前持有全局 mutex 执行完整授权工作，确定撤销和写入提交先后；代价是跨 collection 的查询/写入也会等待。OutputPermit 捕获 grant revision，在最终响应和 body frame 交付时复核，撤销再授权不能复活旧响应。
 
-Rust 核心与 HTTP 均使用 Mmap 访问已提交的数据，由操作系统管理驻留页；未提交写入和计算缓存仍在内存。文档压缩可选 None、Snappy，默认 Snappy。分词、高频词、N-gram、SIMD 和 posting 压缩仍保留。
+创建为持久 Prepare → 初始化 partition → Activate。删除 collection 保留墓碑并撤销 grants，物理回收后置。全服务备份在 catalog 屏障下取得一致切面。恢复发布到新未启动根，历史 key 禁用和 grants 清空，当前 master 获取初始访问。
 
-## 持久化边界
+## 权威与派生文件
 
-数据先进入内存，HTTP 搜索默认包含未提交数据，Rust 核心仍显式选择 realtime；显式提交与内部自动提交将数据写入本地索引。未提交数据在异常退出时可能丢失。已有磁盘重开能力不能等同于经过故障注入验证的 WAL、原子检查点或一致快照。
+服务根由外部稳定 owner lock 保护，内部 catalog 使用 generation-* 下的 WAL 和 commit 见证；collection 数据位于 catalog 生成的 collection-* 路径。Record checkpoint 保留配置、当前记录、墓碑、逻辑水位和操作账本。backup-*、service-backup-* 是独立快照，完整服务 manifest 和外层完成见证认证目录发布。
 
-稳定业务 ID/版本、共同可见视图、可恢复日志、结构化错误、资源边界和分布式协议见 [后续计划](SEEKPOWER_PLAN.md)，尚未完成。当前文件布局与功能清单不能作为无限容量、固定延迟或高可用承诺。
+派生 cache-* 中继续使用 schema/index 配置、index.bin、vector.bin、docstore.bin、facet 文件等。启动从权威日志重建派生索引，不把这组可变文件当作多文件原子事务。原始 Document 和未经归一化的输入向量独立保留，搜索 docstore 的投影不能替代它们。持久词项哈希使用固定 XXH64，当前低层索引格式为 8。
 
-本实现来源及许可见 [UPSTREAM.md](UPSTREAM.md) 和 [LICENSE](LICENSE)。
+Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发布并在移动前关闭内部句柄。恢复对已认证的新状态损坏报错，不静默回退旧代或重置为空数据库。低层 commit/close 传播 I/O Result，但仍不是权威事务协议。
 
+## 当前边界
 
+这是有界 P1-A 功能闭环：Record 累计账本 10,000 项、完整 checkpoint 16 MiB 等限制见 [FEATURES](FEATURES.md)。checkpoint 回收旧 WAL 代，不等于持续账本/物理版本 GC。系统断电、P2 来源语义、P3 不可变段和持续回收、对象存储与分布式尚未完成。原生进程故障测试不能替代主机掉电验收。
 
-聚合查询类型、统计计算及输出已删除。`FacetField` 直接读写字段名及有序值字典，没有统计槽或兼容序列化器。索引格式为 7.0，根索引和分片均要求版本精确匹配；不读取或升级旧格式。量化内部数值范围仍保留。
-
-
-## #57 本地实施状态
-
-现有 Commit 调用链已传播文件写入、映射和同步错误，单条索引调用等待其任务完成。`record.rs` 的进行中原型以权威日志驱动同一检索内核，使用有界有效集合重建验证版本、统计和读取一致性。它尚未接入 HTTP/UI；现有服务不因此获得 durable 写入或共享 collection 授权保证。完整改动、平台验收和剩余门槛见 [实施记录](docs/implementation-57.md)。
+[实施和平台验证](docs/implementation-57.md) · [服务契约](seekpower_server/README.md) · [上游来源](UPSTREAM.md) · [许可](LICENSE)
