@@ -30,6 +30,8 @@ pub use generation::{GenerationChunk, GenerationCommand, GenerationMember, Gener
 mod output;
 pub use evidence::{EvidenceKind, EvidenceMetadata, EvidenceRef, EvidenceVisibility};
 pub use output::DataOutputPermit;
+mod locator;
+pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
 mod publication;
 mod recovery;
@@ -289,13 +291,13 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV9")]
+    #[serde(rename = "RecordCheckpointV10")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV9")]
+    #[serde(rename = "RecordAppliedV10")]
     Applied(Applied),
-    #[serde(rename = "RecordExpiredV9")]
+    #[serde(rename = "RecordExpiredV10")]
     Expired(temporal::Expiration),
-    #[serde(rename = "RecordFeedTrimV9")]
+    #[serde(rename = "RecordFeedTrimV10")]
     FeedTrim(change_feed::Trim),
 }
 struct Inner {
@@ -759,6 +761,7 @@ impl RecordPartition {
             }
         }
         evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
+        locator::validate_history(&state).map_err(storage)?;
         generation::validate_state(&state, &config)?;
         temporal::validate_state(&state)?;
         if state.records.len() > config.max_records
@@ -1297,7 +1300,7 @@ mod tests {
             expected, document:None, vector_patch:None, system:None, temporal:None, generation:Some(generation) }
     }
     fn stage_generation(id: &str, members: &[&str]) -> GenerationCommand {
-        GenerationCommand::Stage { generation_id:id.into(), source:EvidenceRef { record_id:"s".into(), routing_key:"document-1".into(), version:1 },
+        GenerationCommand::Stage { generation_id:id.into(), source:EvidenceRef { locator:None, record_id:"s".into(), routing_key:"document-1".into(), version:1 },
             members:members.iter().map(|s| (*s).into()).collect(), chunks:members.iter().map(|id| GenerationChunk { record_id:(*id).into(),
                 document:serde_json::from_value(serde_json::json!({"body":"generationword alpha"})).unwrap(), temporal:None, evidence_refs:vec![] }).collect() }
     }
@@ -1313,17 +1316,72 @@ mod tests {
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
         p.inner.lock().await.clock=clock.clone(); (clock,now)
     }
+    #[tokio::test]
+    async fn locator_utf8_pages_history_and_delete_barrier() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        let mut source=source_write("located-source","s",&[]);
+        source.document.as_mut().unwrap().insert("body".into(),serde_json::json!("A中éZ"));
+        source.document.as_mut().unwrap().insert("pages".into(),serde_json::json!(["第一页","page two"]));
+        p.write(source.clone()).await.unwrap();
+        let reference=EvidenceRef{record_id:"s".into(),routing_key:"document-1".into(),version:1,locator:Some(EvidenceLocator::Utf8{field:"body".into(),start:1,end:6})};
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"中é");
+        let mut derived=source_write("located-derived","d",&[("s",1)]);derived.system.as_mut().unwrap().evidence_refs[0]=reference.clone();
+        let receipt=p.write(derived.clone()).await.unwrap();assert_eq!(p.write(derived).await.unwrap(),receipt);
+        let before=p.statistics().await.unwrap().visible_seq;
+        for (start,end) in [(2,4),(1,5),(6,6),(0,99)] {
+            let mut bad=source_write(&format!("invalid-{start}-{end}"),"bad",&[("s",1)]);
+            bad.system.as_mut().unwrap().evidence_refs[0].locator=Some(EvidenceLocator::Utf8{field:"body".into(),start,end});
+            assert!(p.write(bad).await.is_err());
+        }
+        assert_eq!(p.statistics().await.unwrap().visible_seq,before);
+        let mut page=reference.clone();page.locator=Some(EvidenceLocator::Page{field:"pages".into(),page:2});
+        assert_eq!(p.evidence_excerpt(page.clone()).await.unwrap().text,"page two");
+        page.locator=Some(EvidenceLocator::Page{field:"pages".into(),page:0});assert!(p.evidence_excerpt(page).await.is_err());
+        let original=p.evidence_excerpt(reference.clone()).await.unwrap();
+        source.operation_id=OperationId::new("source-revision".into());source.expected=ExpectedVersion::Match(1);
+        source.document.as_mut().unwrap().insert("body".into(),serde_json::json!("short"));p.write(source).await.unwrap();
+        assert!(p.get("d").await.unwrap().is_none());
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().content_sha256,original.content_sha256);
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"中é");
+        let mut corrupt=p.inner.lock().await.state.clone();corrupt.records.get_mut("d").unwrap().system.as_mut().unwrap().evidence_refs[0].locator=Some(EvidenceLocator::Utf8{field:"body".into(),start:1,end:2});
+        assert!(locator::validate_history(&corrupt).is_err());
+        let permit=p.output_permit().unwrap();let mut deletion=write("delete-source","s","",ExpectedVersion::Match(2));deletion.document=None;p.write(deletion).await.unwrap();
+        assert!(permit.deliver(||()).is_err());assert!(p.evidence_excerpt(reference.clone()).await.is_err());
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(p.evidence_excerpt(reference).await.is_err());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn locator_generation_and_ttl_keep_source_gates() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        let mut source=source_write("source","s",&[]);source.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});p.write(source).await.unwrap();
+        let mut stage=stage_generation("g",&["chunk"]);
+        if let GenerationCommand::Stage{source,..}=&mut stage {source.locator=Some(EvidenceLocator::Utf8{field:"body".into(),start:0,end:8});}
+        p.write(generation_write("stage",ExpectedVersion::Absent,stage)).await.unwrap();
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock.clone();
+        p.write(generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()})).await.unwrap();
+        let reference=p.get("chunk").await.unwrap().unwrap().system.unwrap().evidence_refs[0].clone();
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"evidence");
+        let mut next=stage_generation("g2",&["next"]);if let GenerationCommand::Stage{source,..}=&mut next {*source=reference.clone();}
+        p.write(generation_write("stage-next",ExpectedVersion::Match(2),next)).await.unwrap();
+        let mut update=source_write("update","s",&[]);update.expected=ExpectedVersion::Match(1);update.document.as_mut().unwrap().insert("body".into(),serde_json::json!("x"));p.write(update).await.unwrap();
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock.clone();
+        assert!(p.write(generation_write("publish-stale",ExpectedVersion::Match(3),GenerationCommand::Publish{generation_id:"g2".into()})).await.is_err());
+        assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"evidence");
+        clock.set(now+100);assert!(p.evidence_excerpt(reference).await.is_err());assert!(p.get("chunk").await.unwrap().is_none());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
     fn entity_write(nonce:&str,id:&str)->RecordWrite {
         let mut request=write(nonce,id,"alpha entity",ExpectedVersion::Absent);
         request.system=Some(EvidenceMetadata{kind:EvidenceKind::Entity,relation:None,evidence_refs:vec![]});request
     }
     fn edge_write(nonce:&str,id:&str,from:&str,to:&str)->RecordWrite {
         let mut request=write(nonce,id,"alpha edge",ExpectedVersion::Absent);
-        let endpoint=|id:&str|EvidenceRef{record_id:id.into(),routing_key:"document-1".into(),version:1};
+        let endpoint=|id:&str|EvidenceRef{locator:None,record_id:id.into(),routing_key:"document-1".into(),version:1};
         request.system=Some(EvidenceMetadata{kind:EvidenceKind::Relation,relation:Some(RelationMetadata{from:endpoint(from),to:endpoint(to),relation_type:"knows".into(),weight:Some(0.5)}),evidence_refs:vec![]});request
     }
     fn neighbor_request(id:&str)->NeighborRequest {
-        NeighborRequest{seeds:vec![EvidenceRef{record_id:id.into(),routing_key:"document-1".into(),version:1}],direction:RelationDirection::Both,relation_types:vec![],per_seed:128,max_candidates:100,allow_partial:false}
+        NeighborRequest{seeds:vec![EvidenceRef{locator:None,record_id:id.into(),routing_key:"document-1".into(),version:1}],direction:RelationDirection::Both,relation_types:vec![],per_seed:128,max_candidates:100,allow_partial:false}
     }
     #[tokio::test]
     async fn relation_cycles_exact_endpoints_aba_and_rebuild() {
@@ -1735,7 +1793,7 @@ mod tests {
             let reference = if indirect { p.write(source_write("dependent", "dependent", &[("old",1)])).await.unwrap(); "dependent" } else { "old" };
             let mut next = stage_generation("g2", &["new"]);
             if let GenerationCommand::Stage { chunks, .. } = &mut next {
-                chunks[0].evidence_refs.push(EvidenceRef { record_id:reference.into(), routing_key:"document-1".into(), version:1 });
+                chunks[0].evidence_refs.push(EvidenceRef { locator:None, record_id:reference.into(), routing_key:"document-1".into(), version:1 });
             }
             p.write(generation_write("stage2", ExpectedVersion::Match(2), next)).await.unwrap();
             let before = p.statistics().await.unwrap(); let permit = p.output_permit().unwrap();
@@ -2060,7 +2118,7 @@ mod tests {
         request.system = Some(EvidenceMetadata {
             kind: if dependencies.is_empty() { EvidenceKind::Source } else { EvidenceKind::Derived }, relation:None,
             evidence_refs: dependencies.iter().map(|(id, version)| EvidenceRef {
-                record_id: (*id).into(), routing_key: "document-1".into(), version: *version,
+                locator:None, record_id: (*id).into(), routing_key: "document-1".into(), version: *version,
             }).collect(),
         });
         request
@@ -2175,7 +2233,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV9", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV10", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();

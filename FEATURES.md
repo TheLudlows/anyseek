@@ -42,6 +42,7 @@
 | GET | `/api/v1/index/{id}/doc/{record_id}` | 原始 Record；可用 `?fields=body,title` 投影 |
 | POST | `/api/v1/index/{id}/query` | Lexical/Vector/Hybrid/空查询；返回 hits[].record |
 | POST | `/api/v1/index/{id}/iterator` | `{cursor?,length?,fields?}`；不支持旧 skip/take 协议 |
+| POST | `/api/v1/index/{id}/evidence` | 受保护精确来源版本的 UTF-8 区间/内联页摘录及摘要 |
 | POST | `/api/v1/index/{id}/entities` | 稳定 ID 实体目录，同视图分页 |
 | POST | `/api/v1/index/{id}/neighbors` | 精确版本 seeds、有预算一跳、exact/window 计数 |
 | POST | `/api/v1/index/{id}/changes` | 至少七天内容无关通知；过期游标明确要求重建 |
@@ -72,6 +73,6 @@ Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 
-尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、物理版本压缩、关系与全文/向量单请求融合、来源精确片段定位与管理型 Blob、分布式与对象存储。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
+尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、物理版本压缩、关系与全文/向量单请求融合、staging 租约清理与管理型 Blob、分布式与对象存储。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
 
 早期移除功能及历史协议见 [MIGRATION](MIGRATION.md)；历史记录不能替代上述当前契约。

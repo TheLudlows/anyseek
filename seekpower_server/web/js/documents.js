@@ -194,7 +194,7 @@ $(function(){
 
 let graphState=null;
 let graphBusy=false;
-function resetGraph(){graphState=null;$('#relationResult,#relationStatus').text('');$('#nextEntities').prop('disabled',true);}
+function resetGraph(){graphState=null;$('#relationResult,#relationStatus,#evidenceResult').text('');$('#nextEntities').prop('disabled',true);}
 async function inspectGraph(action){
     if(graphBusy)return;graphBusy=true;
     $('#listEntities,#nextEntities,#expandNeighbors').prop('disabled',true);
@@ -221,4 +221,16 @@ $(function(){
     $('#listEntities').on('click',()=>inspectGraph('entities'));
     $('#nextEntities').on('click',()=>inspectGraph('next'));
     $('#expandNeighbors').on('click',()=>inspectGraph('neighbors'));
+});
+
+$(function(){
+    $('#readEvidence').on('click',async function(){
+        const collection=INDEX_ID,key=API_KEY,current=()=>collection===INDEX_ID&&key===API_KEY;
+        $(this).prop('disabled',true);$('#evidenceResult').text('');
+        try{
+            const result=await setupApi('POST',`api/v1/index/${encodeURIComponent(collection)}/evidence`,key,JSON.parse($('#evidenceRef').val()));
+            if(current())$('#evidenceResult').text(JSON.stringify(result,null,2));
+        }catch(error){if(current())$('#evidenceResult').text(error.message);}
+        finally{$(this).prop('disabled',false);}
+    });
 });

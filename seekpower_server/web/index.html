@@ -89,6 +89,11 @@
 <button id="feedRead" type="button">Read changes</button>
 <p id="feedStatus" role="status"></p><pre id="feedResult"></pre>
 </details>
+<details><summary>Source evidence excerpts</summary>
+<label for="evidenceRef">Exact source excerpt reference (JSON; UTF-8 byte range or one-based inline text page)</label>
+<textarea id="evidenceRef" rows="3" placeholder='{"record_id":"source","routing_key":"route","version":1,"locator":{"kind":"utf8","field":"body","start":0,"end":5}}'></textarea>
+<button id="readEvidence" type="button">Read source excerpt</button><pre id="evidenceResult"></pre>
+</details>
 <details><summary>Entities and explicit one-hop relations</summary>
 <p>Declare an entity using system.kind="entity". For an edge use system.kind="relation" and system.relation={from:{record_id,routing_key,version},to:{record_id,routing_key,version},relation_type,weight}. Both exact endpoints must be visible in this collection. Evidence is declared separately in evidence_refs. Changing an endpoint version hides old edges; rebind using a new edge identity. No automatic entity merging or graph traversal.</p>
 <button id="listEntities" type="button">List entities</button><button id="nextEntities" type="button" disabled>Next entity page</button>

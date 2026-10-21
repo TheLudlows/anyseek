@@ -32,6 +32,9 @@ pub struct EvidenceRef {
     pub routing_key: String,
     /// Exact immutable revision, never implicitly rebound to a newer revision.
     pub version: u64,
+    /// Optional exact inline source location; never interpreted on ordinary endpoints.
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub locator: Option<super::EvidenceLocator>,
 }
 /// Engine-validated metadata, distinct from arbitrary business document fields.
 /// Sources support exact-version updates; derived recomputation uses a new
@@ -198,6 +201,7 @@ pub(super) fn validate(
                 "evidence version or route mismatch".into(),
             ));
         }
+        super::locator::validate(reference,target)?;
         if target.system.is_none()
             || !visit(
                 &reference.record_id,

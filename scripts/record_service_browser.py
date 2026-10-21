@@ -120,6 +120,11 @@ def exercise(base,master,call):
         ]
         page.locator('#documentJson').fill(json.dumps(envelopes))
         page.locator('#submitDocuments').click();expect(page.locator('#documentStatus')).to_contain_text('Wrote 2 record(s)')
+        page.locator('summary').filter(has_text='Source evidence excerpts').click()
+        page.locator('#evidenceRef').fill(json.dumps({'record_id':'ui-source','routing_key':'ui-route','version':1,'locator':{'kind':'utf8','field':'body','start':0,'end':6}}))
+        page.locator('#readEvidence').click();expect(page.locator('#evidenceResult')).to_contain_text('content_sha256')
+        expect(page.locator('#evidenceResult')).to_contain_text('source')
+        print('PASS Chromium: exact source excerpt and content hash')
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
         expect(page.locator('#contentBox')).to_contain_text('Derived title')
         page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()

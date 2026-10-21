@@ -230,3 +230,9 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据和授权输出屏障与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
 
 本批 journal 为 V9，拒绝旧 V8 等格式；无迁移。未实现关系与全文/向量的单次融合查询、模型实体消歧或完整图语言。测试状态见[实施记录第 19 节](../docs/implementation-57-p2.md#19-实体与显式一跳关系)。
+
+## P2 精确来源摘录（本地收尾批次）
+
+`POST /api/v1/index/{id}/evidence` 接受 `{record_id,routing_key,version,locator}`。locator 可为 `{"kind":"utf8","field":"body","start":0,"end":5}`（UTF-8 字节半开区间，必须字符边界），或 `{"kind":"page","field":"pages","page":1}`（源字段为字符串数组、一基页码）。仅定位已持久内联 Source，不下载 URL 或解析 PDF；关系 endpoints/seeds 不接受 locator。派生 evidence_refs 和 generation source 可携带该定位。
+
+响应返回选中文本及完整字段/页的 SHA-256、固定 text/plain UTF-8 表示、精确 reference、共同水位与时间。Source 修订后可显式读取保留旧修订，普通 stale 派生仍隐藏；当前 source 已删除/过期/隔离时拒绝摘录，授权及输出屏障继续适用。定位写入和恢复均校验范围，journal V10 拒绝旧格式，无升级迁移。UI 记录页可输入精确 reference 查看摘录。分平台结果见实施记录第 20 节。

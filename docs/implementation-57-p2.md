@@ -856,3 +856,50 @@ Windows 本批未运行，尚未获本分支推送/CI授权；系统崩溃/断�
 | P2-7 集成 | 各切片真实服务/UI、备份接管、审查与回归逐批记录 | 本批最终平台验证、上述定位/融合/必要 staging 生命周期等仍需后续收敛；不能称完整 P2 已完成 |
 
 P3 操作/版本历史持续回收、Segment compaction 另属后续阶段，不以本批解决；P4/P5 云对象存储/indexer/cache、P6 分区亦未实现。系统断电是验收环境缺口，不能与上述功能缺口混为一项，也不能用进程退出或原生 CI 替代。本地分批结束供用户检视，不自动扩大当前关系切片或合入主干。
+
+## 20. P2 收尾第一批：精确内联来源定位
+
+本地 `feat/57-p2-source-locators` 基于关系检查点 `2d985c1b5a1238af047698a80eda029c246fb069`。关系分支保持原提交，新收尾不混入关系 PR，也未获发布授权。
+
+### 20.1 原计划与分批边界
+
+§3.2/P2-1 要求精确 source revision/locator、原文和摘要及受保护历史证据读取；现有精确 ID/version 与 source_revisions 已具备，缺 locator 校验及读取。§3.4/§7/P2-2 要求 staging 截止/租约/fence 和安全回收，当前只有持久整份 staging 与显式 abort。P2-5 要求关系候选和全文/向量同 ReadView 融合，当前独立一跳与 query 不能串接冒充原子视图。这三项分为定位、租约清理、同视图查询三个本地检查点；本节只交付第一项。P3 通用历史账本/版本 GC、Segment compaction 不进入收尾。
+
+本批工程选择：只定位已持久保存的内联文本，不增加解析器/上传服务。UTF-8 字节半开区间对应一个 top-level string 字段；页码对应上层给出的文本页字符串数组。数组自身提供可信可校验的页数边界，底座不验证它是否忠实对应某个外部 PDF。普通 document 中的 URL/MIME 标签不是已认证原文。未新增业务策略默认。
+
+### 20.2 实际模型和接口
+
+`EvidenceRef` 增加可选 `locator`：
+
+```json
+{"record_id":"source","routing_key":"route","version":1,
+ "locator":{"kind":"utf8","field":"body","start":1,"end":6}}
+```
+
+若原文为 `A中éZ`，上述字节区间取 `中é`；start/end 必须为合法 UTF-8 边界，start < end <= 字节长度，不接受字符索引。页定位为 `{"kind":"page","field":"pages","page":2}`，仅接受该字段为字符串数组且 1 <= page <= len；不解析 PDF，空页可返回空文本。字段名非空且至多 256 UTF-8 字节。locator 只能指向 Source，间接派生依赖仍使用无 locator 的精确 Record 引用；关系端点/seeds 拒绝 locator。沿用一个 source 身份至多一个 evidence_ref 的预算/去重规则，generation source locator 自动继承，重复同 source 的不同 locator 不悄悄合并。
+
+`POST /api/v1/index/{id}/evidence` 接受完整上述 EvidenceRef，返回 `reference,text,content_sha256,media_type,visible_seq,evaluation_time_ms`。SHA-256 是完整文本字段（utf8）或完整所选页（page）的 UTF-8 字节摘要，不是摘录片段摘要；media_type 固定 `text/plain; charset=utf-8` 描述实际支持的内联表示，不把用户字段当认证文件类型。摘要由权威正文确定性计算，不新增内容副本或双权威 hash 状态。
+
+写入验证器先验证精确当前版本及位置，再交现有 WAL/发布器；operation_id 重试包括 locator 语义。`locator.rs` 单独管理位置/内容验证及摘录，evidence/generation 调用其规则，HTTP/UI 不复制规则。恢复用当前 Record 或 source_revisions 的精确历史正文验证已持久 locator；staging 中的 source/chunk 引用也校验。V10 journal 拒绝旧 V9 等格式，无迁移。
+
+普通 get/query 仍隐藏 stale 派生；显式历史摘录仅允许当前 source 仍有效时访问保留的精确旧修订。当前删除、TTL、恢复隔离、封存均拒绝，不以“历史审计”绕过。每次 HTTP 重新授权并复用双输出屏障，source 更新/删除使已准备输出许可失效；撤权始终复核。备份/接管使用原权威状态及当前删除水位，不新增灾备激活入口。UI 记录页提供精确 reference 输入、摘录与摘要展示，身份切换清空，不新增本地持久缓存。
+
+### 20.3 验证状态与后续
+
+2026-10-21 本地 Linux 最终源码验证完成，独立审查未发现阻塞缺陷：
+
+| 命令/范围 | Linux | Windows 本批 |
+| --- | --- | --- |
+| `cargo test --workspace --all-targets --quiet` | **35 suites，214 passed，0 failed，10 ignored** | 未运行 |
+| `cargo build --workspace` | 通过 | 未运行 |
+| `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser` | 通过，真实摘录/摘要 UI、源修订/删除/撤权、恢复隔离/接管 | 未运行 |
+| `cargo build -p seekpower_server --features fault-injection` 后 smoke `--faults --browser` | 通过，定位引用在 unknown/durable_pending/持久后退出/可见后退出的精确重试；同时回归既有来源/generation/关系/TTL/feed 矩阵 | 未运行 |
+| `python3 scripts/check_core_boundary.py` | default/no-default-features 独立构建通过 | 未运行 |
+| `target/debug/seekpower_server generate_openapi=true` 与 locator schema/route 断言 | 通过 | 未运行 |
+| `git diff --check` | 通过 | 不适用 |
+
+10 个 ignored 仍为 9 个父测试启动的子进程 worker 和 1 个既有额外参数跨构建 fixture。新增核心测试覆盖 Unicode 字节边界/页边界、拒绝前无提交、精确历史正文摘要、损坏历史 locator 拒绝恢复验证、删除输出屏障、TTL 和 staged source 更新后重启/拒绝发布。HTTP 使用临时 collection/keys/archives，不操作真实用户数据。
+
+首轮 Chromium 因折叠面板内输入框未展开超时，HTTP 已通过但未将该轮算全通过；现将摘录控件放到独立面板并明确展开，最终默认和 fault 两轮浏览器测试均成功。测试日志 `/tmp/p2-locator-final-{all,build,http,fault-build,fault-http,boundary,openapi}.log` 仅为本地证据。Windows 本批未运行（没有本分支发布/CI授权），系统断电未验收（需隔离环境与外部确认见证），不使用关系或 feed 的结果替代。
+
+后续独立批次：staging 租约及安全清理；关系与全文/向量同视图融合。管理型 Blob 仍依真实大文件需求选择，不能把外部 URL 当已备份文件。通用非 Source 的任意历史修订读取未新增；本批只提供计划所需的精确内联 Source 摘录。

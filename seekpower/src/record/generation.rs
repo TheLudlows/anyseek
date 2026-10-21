@@ -235,6 +235,8 @@ pub(super) fn validate_state(state: &State, config: &RecordConfig) -> Result<(),
             if !active.insert(member) || state.records.get(member).is_none_or(|r| r.generation_member.as_ref().is_none_or(|m| &m.document_id != id || Some(&m.generation_id) != g.active.as_ref()) || r.retired_generation || r.routing_key != g.routing_key || !r.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Derived)) { return Err(storage("invalid active generation member")); }
         }
         if let Some(s) = &g.staged {
+            locator::validate_retained(state,&s.source)?;
+            for reference in s.chunks.iter().flat_map(|c|c.evidence_refs.iter()) {locator::validate_retained(state,reference)?;}
             let source = state.records.get(&s.source.record_id).ok_or_else(|| storage("staged source missing"))?;
             if s.source.version == 0 || s.source.version > source.version || source.routing_key != s.source.routing_key || source.routing_key != g.routing_key
                 || !source.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Source) { return Err(storage("invalid staged source provenance")); }
