@@ -72,7 +72,7 @@ fn visit(
     }
     let mut height = 0;
     let result = if let Some(record) = records.get(id) {
-        let mut visible = record.document.is_some();
+        let mut visible = record.document.is_some() && !record.retired_generation;
         if let Some(system) = &record.system {
             if system.evidence_refs.len() > MAX_REFERENCES {
                 return Err(rejected("evidence reference budget exceeded"));
@@ -262,6 +262,7 @@ pub(super) fn status(records: &BTreeMap<String, Record>, id: &str) -> Result<Evi
         if seen.len() > MAX_VISITED { return Err(rejected("evidence traversal budget exceeded")); }
         let Some(record) = records.get(id) else { unavailable = true; continue; };
         deleted |= record.document.is_none();
+        stale |= record.retired_generation;
         if let Some(system) = &record.system {
             for reference in &system.evidence_refs {
                 match records.get(&reference.record_id) {

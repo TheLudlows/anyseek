@@ -53,6 +53,11 @@ pub(super) fn prepare(
             ))
         };
     }
+    if request.generation.is_some() { return generation::prepare(state, config, request, epoch); }
+    if state.generations.contains_key(&request.record_id)
+        || (!state.records.contains_key(&request.record_id) && generation::occupied(state, &request.record_id)) {
+        return Err(RecordError::Conflict("identity reserved by generation".into()));
+    }
     if state.evidence_quarantined
         && (request.system.is_some()
             || state
@@ -79,11 +84,6 @@ pub(super) fn prepare(
     }
     // One fixed bounded delete command/receipt per live typed identity. This
     // reserve is retained even when an ancestor already hides that identity.
-    let typed_live = state
-        .records
-        .values()
-        .filter(|r| r.system.is_some() && r.document.is_some())
-        .count();
     let deleting_typed = next_document.is_none()
         && state
             .records
@@ -91,10 +91,10 @@ pub(super) fn prepare(
             .is_some_and(|r| r.system.is_some());
     let creating_typed =
         request.system.is_some() && !state.records.contains_key(&request.record_id);
-    let reserved_slots = typed_live + usize::from(creating_typed) - usize::from(deleting_typed);
+    let reserved_slots = generation::reserve_slots(state) + usize::from(creating_typed) - usize::from(deleting_typed);
     // 8 KiB covers JSON escaping of bounded IDs/nonce, envelope, receipt, and
     // journal frame overhead. No evidence edges are copied into delete requests.
-    let reserve_bytes = reserved_slots * 8192;
+    let reserve_bytes = reserved_slots * 8192 + generation::reserved(state) * 32768;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
         || state
             .operations
@@ -128,7 +128,7 @@ pub(super) fn prepare(
     if !matches {
         return Err(RecordError::Conflict("version precondition failed".into()));
     }
-    if previous.is_none() && state.records.len() >= config.max_records {
+    if previous.is_none() && state.records.len() + state.generations.len() + generation::reserved(state) >= config.max_records {
         return Err(RecordError::Rejected("identity budget exceeded".into()));
     }
     if let Some(document) = &next_document {
@@ -140,6 +140,7 @@ pub(super) fn prepare(
         .map_err(RecordError::Rejected)?;
     }
     let receipt = WriteReceipt {
+        staged_only: false,
         seq: state
             .seq
             .checked_add(1)
@@ -159,6 +160,8 @@ pub(super) fn prepare(
         routing_key: applied.request.routing_key.clone(),
         version: receipt.version,
         document: next_document,
+        retired_generation: previous.is_some_and(|r| r.retired_generation),
+        generation_member: previous.and_then(|r| r.generation_member.clone()),
         system: applied
             .request
             .system

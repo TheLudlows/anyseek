@@ -1304,6 +1304,7 @@ mod tests {
         activate(&catalog).await;
         let write = RecordWrite {
             vector_patch: None,
+            generation: None,
             system: None,
             operation_id: OperationId::new("write".into()),
             record_id: "r".into(),

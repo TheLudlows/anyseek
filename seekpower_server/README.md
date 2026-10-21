@@ -146,13 +146,13 @@ python3 scripts/record_service_smoke.py --server target/debug/seekpower_server -
 
 示例 epoch 仅作结构说明，实际按当前 UTC 日生成并随原请求保存。派生记录用自己的稳定 ID 和 `system:{"kind":"derived","evidence_refs":[{"record_id":"source-1","routing_key":"document-1","version":1}]}`。来源与派生均要求满足 collection 既有 schema/向量约束；向量字段可以缺失，缺失内容不参加向量召回。
 
-删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；权限撤销与数据输出各自复核。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建、TTL/generation/feed 暂不支持，不能把 business document 中的同名字段当作已实现语义。
+删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；权限撤销与数据输出各自复核。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建、TTL/feed 暂不支持，不能把 business document 中的同名字段当作已实现语义。
 
 Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。当前仍存活的原服务可以通过下面的受控接管创建已核验的新目标；这不会清除任意独立恢复目录的隔离。
 
 `GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样执行授权与数据输出屏障。状态包括 visible、stale、deleted、unavailable、quarantined。
 
-Record 权威格式使用 V5 entry 标签，拒绝 V4/V3/V2/P1 目录；不提供升级迁移或旧格式兼容。
+Record 权威格式使用 V6 entry 标签，拒绝 V5/V4/V3/V2/P1 目录；不提供升级迁移或旧格式兼容。
 
 
 ### 同服务受控接管
@@ -166,4 +166,15 @@ Web UI 的 “Take over a collection” 输入同样字段，先保存请求，�
 
 正文可先写入，不需零向量占位。沿用写入端点提交 `operation_id,record_id,routing_key,expected:{"Match":当前正文版本},vector_patch:{"vector":[2,0]}`，省略 document/system；仅填充尚未存在的 schema 向量字段。正文版本保持不变，提交序号推进；重复请求必须保留 operation_id。已删除、stale 或隔离 typed 记录不可补写，来源正文版本改变后旧请求冲突。
 
-状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；独立文档 generation staging/publish 仍未实现，见[第 15 节实施记录](../docs/implementation-57-p2.md)。
+状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[第 15 节实施记录](../docs/implementation-57-p2.md)。
+
+
+### 文档 generation
+
+使用同一写入端点，record_id 代表独立文档 control ID，省略 document/system/vector_patch，传入 generation：
+
+- Stage：`{action:"stage",generation_id,source:{record_id,routing_key,version},members:[成员ID],chunks:[{record_id,document,evidence_refs?}]}`。清单必须完整，1..100 成员，同 Source routing group；首次 expected 为 Absent，后续 Match 当前 control version。单次 envelope 仍受 1 MiB 上限。
+- Publish/Abort：`{action:"publish"或"abort",generation_id}`，必须 Match control version。成功 staging 回执 `staged_only:true`，表示仅持久、不可搜索；首次 stage version 1，publish 后 version 2。替换前重新验证来源及最终依赖可见性。
+- `GET /api/v1/index/{id}/doc/{record_id}/generation` 只返回版本、active/staged 身份和成员数。已发布成员保持精确证据并支持向量后补；换代使旧代及其派生隐藏。Abort 释放未发布成员 ID，generation ID 不可复用。
+
+Web UI envelope 模式可运行上述流程并保存原操作重试。完整示例、预留预算、恢复与验证边界见[第 16 节实施记录](../docs/implementation-57-p2.md)。

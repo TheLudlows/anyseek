@@ -100,10 +100,22 @@ def exercise(base,master,call):
         expect(page.locator('#contentBox')).to_contain_text('Updated source')
         expect(page.locator('#contentBox')).not_to_contain_text('Derived title')
         page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
+        generation={'record_id':'ui-generation','routing_key':'ui-route','expected':'Absent','generation':{'action':'stage','generation_id':'g1','source':{'record_id':'ui-source','routing_key':'ui-route','version':2},'members':['ui-ga','ui-gb'],'chunks':[{'record_id':'ui-ga','document':{'title':'Generation A','body':'generationui'}},{'record_id':'ui-gb','document':{'title':'Generation B','body':'generationui'}}]}}
+        page.locator('#documentJson').fill(json.dumps(generation));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('not searchable')
+        assert call('POST',f'/api/v1/index/{collection}/query',{'query':'generationui'})['count_total']==0
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-generation/generation')['staged_members']==2
+        publish={'record_id':'ui-generation','routing_key':'ui-route','expected':{'Match':1},'generation':{'action':'publish','generation_id':'g1'}}
+        page.locator('#documentJson').fill(json.dumps(publish));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
+        page.locator('#backToSearch').click();page.locator('#searchInput').fill('generationui')
+        expect(page.locator('#contentBox')).to_contain_text('Generation A');expect(page.locator('#contentBox')).to_contain_text('Generation B')
+        page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
         deletion={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':2},'document':None}
         page.locator('#documentJson').fill(json.dumps(deletion));page.locator('#submitDocuments').click()
         expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
         assert call('POST',f'/api/v1/index/{collection}/query',{'query':'sourceword'})['hits']==[]
+        assert call('POST',f'/api/v1/index/{collection}/query',{'query':'generationui'})['count_total']==0
         assert call('GET',f'/api/v1/index/{collection}/doc/ui-derived',status=404)['code']=='not_found'
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
         expect(page.locator('#contentBox')).not_to_contain_text('Derived title')

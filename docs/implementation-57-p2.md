@@ -1,6 +1,6 @@
 # Issue #57 P2 实施设计：来源、证据与统一可见性
 
-状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与堆叠基线见第 15 节；已批准不等于已实现。
+状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与堆叠基线见第 16 节；已批准不等于已实现。
 
 - 产品依据：[issue #57](https://github.com/TheLudlows/seekpower/issues/57)，包含顶部 2026-10-21 确认。
 - 实施入口：[P1-A 与阶段记录](implementation-57.md)。本设计不替换总体路线。
@@ -304,7 +304,7 @@ P2 新测试文件名以下是拟议名称，尚不存在。复用现有 `cargo 
 | 编号 | 已批准语义 | 实施边界 |
 | --- | --- | --- |
 | D1 | 来源更新使旧派生 stale，默认隐藏，等待上层重算发布；来源删除始终立即隐藏 | 第 14 节先交付条件更新与隐藏；不自动重算，不开放 include_stale 绕过 |
-| D2 | 正文就绪即可发布，先支持全文检索；向量后补，缺向量不参加向量召回，不填零向量 | 第 15 节实现可选向量及版本受控后补；generation staging/publish 尚未实现 |
+| D2 | 正文就绪即可发布，先支持全文检索；向量后补，缺向量不参加向量召回，不填零向量 | 第 15 节实现可选向量及版本受控后补；第 16 节实现有界完整 generation staging/publish，最终验证见该节 |
 | D3 | TTL 到期为不可逆逻辑删除，并隐藏依赖派生；不能仅延长 TTL 复活，物理回收异步 | 后续 temporal 切片，当前未实现 |
 | D4 | feed 至少保留 7 天；容量不足限制新写，不提前静默丢弃窗口内事件；过期消费者重建同步状态 | 后续 feed 切片，当前未实现 |
 
@@ -594,3 +594,80 @@ target/debug/seekpower_server generate_openapi=true
 日志：`/tmp/p2-vectors-final-tests.log`、`/tmp/p2-vectors-build.log`、`/tmp/p2-vectors-http.log`、`/tmp/p2-vectors-boundary.log`、`/tmp/p2-vectors-fault-build.log`、`/tmp/p2-vectors-fault-http.log`、`/tmp/p2-vectors-openapi.log`。新分支 **Windows 原生未运行**；Linux/Windows **系统崩溃/断电未验收**，仍需隔离环境及外部确认见证。未沿用旧分支原生 CI 当作本批通过。
 
 下一批是 generation 本身：权威 staging 清单及有界完整性验证、持久但不可见的成员、精确 source revision 绑定、原子替换 active generation 与全部检索/统计集合、重试/并发发布/恢复/备份接管，复用本批的向量规则。不能用逐成员普通写入冒充原子 generation 发布。本批没有 staging/publish API、TTL/feed、关系或持续回收。
+
+## 16. 完整 generation staging / 原子发布（本地完成，等待用户检视）
+
+本地分支 `feat/57-p2-generations` 堆叠在 `8f5e4ab81afac233cc9d46c9c212530d65f80f5e`，经 `084320af` 依赖未合入 PR #62 `20531fa`。未推送、未修改 PR #62、未创建 PR。本批实现真实 generation 闭环，不包含 TTL/feed/关系或持续回收。
+
+### 权威模型与契约
+
+- `record/generation.rs` 集中处理 staging 清单、发布/取消、控制版本、资源预留及恢复校验。命令仍走现有 Record planner → owned executor → 单 WAL → 增量发布；HTTP/UI 不复制业务规则。
+- `State.generations` 是文档控制状态的唯一权威。每个 document control ID 有固定 routing_key、单调 control version、最多一个 staged generation、一个 active generation 和已使用 generation ID 集合。control ID 与普通 Record、staged member ID 共用 collection 身份空间，不能互相占用。
+- Stage 接收**完整** manifest：精确 Source 引用、显式 members 清单及对应 chunks；1..100 个成员，唯一且集合完全一致。所有成员自动继承 Source 依赖，可另附既有精确证据；只接受同 collection、同 Source routing group。上层负责解析/切块/模型。
+- Staging 正文只存于权威 manifest，未进入 records/正文读取/全文/向量/iterator/活动统计。成功回执 `staged_only:true` 明确仅表示 durable；元数据接口可读 staged 成员数，不可读 staged 正文。单次 stage envelope 仍受 `max_record_bytes` 限制，不提供无界流式上传。
+- Publish/Abort 必须 Match 文档当前 control version，并指定当前 staged generation ID；Any 不允许。首次 Stage Absent 得到 version 1，Publish Match 1 得到 version 2，下一 Stage Match 2 得到 version 3，以此递增。原 operation_id 重试返回原回执，不重新解释为另一次发布。
+- Publish 在 append 前重新验证 Source/额外证据，并计算**替换后的最终可见集合**。如果新成员直接或间接依赖将被退役的旧代，拒绝并保留旧 active、seq、统计和输出许可。不会先持久提交再发现新代自失效。
+- 一个 durable Applied 操作将 staged 正文移入 records，保留 `generation_member:{document_id,generation_id}` 永久归属，退役旧代；旧正文仍保留，`retired_generation` 使其及间接派生默认 stale/隐藏。新代所有正文/全文/向量可用集合、活动 BM25 统计、缓存与候选删除集在同一 partition guard 下增量切换。单查询不能跨代；旧响应经数据许可复核，不能越过来源删除/撤权屏障。
+- 无全 collection 索引重建。generation 事务规划采用受 collection 上限约束的 State 候选快照与完整 checkpoint 字节核算；发布做有界全图可见性验证，再只添加新成员、退役受影响 ordinal。普通 Record 写入仍走原增量路径。这不是无界批事务或性能优化结论。
+- 显式单成员删除仍是原 Record 删除语义，可减少 active generation 的 visible_members；整代**发布**保证完整，后续显式删除不会伪装成新 generation。来源更新/删除立即使关联成员 stale/隐藏，已失效 staging 不允许 Publish。Abort 可释放 staged 正文与其未发布成员 ID，generation ID 保留为 spent；**已发布成员 ID 永不复用**。
+- 可选向量规则复用第 15 节：正文就绪即可发布；缺向量不召回、不补零，后补须匹配成员正文版本。后补不改变 control version、正文版本或证据关系，旧代/失效成员不允许后补。
+
+### 持久化、恢复与容量
+
+Stage、Publish、Abort 与其他写入共享同一 seq、operation ledger、WAL/checkpoint。取消调用不会取消已接受 owned executor；未知结果必须保留原 operation_id 重试。durable 后索引发布失败会 fence 整个分区，不返回部分成员；重启按完整权威决定重建统一视图。
+
+身份预算包括普通/tombstone records、文档 control、staged 预留成员。每个 staged 成员保留 32 KiB 发布 envelope 开销及 8 KiB 最终 typed 删除空间，另为待完成 staging 保留提交/取消槽；普通写也尊重这些预留。来源删除、Abort 不被普通写耗尽预留空间。generation ID 保留集合有界；满额拒绝新 staging，不隐式丢历史。历史回收属于后续工作。
+
+恢复校验控制/成员归属、active/retired 一致性、Source 身份/路由/版本范围、staged 身份唯一性及容量。完整 State 进入 collection/service 备份和最终封存水位接管；独立恢复的 typed 内容及 generation 命令保持隔离，不能凭旧备份发布。权威 entry 标签 **V6**，拒绝 V5 等旧格式，无升级迁移。
+
+### 已实现接口与 UI
+
+现有写入端点 `POST /api/v1/index/{id}/doc` 增加可选 `generation`，须省略 document/system/vector_patch。以下为请求结构示例，实际 epoch 使用当前值并保存原请求重试：
+
+```json
+{
+  "operation_id": {"epoch": 20747, "nonce": "stage-doc"},
+  "record_id": "doc-1", "routing_key": "route-1", "expected": "Absent",
+  "generation": {
+    "action": "stage", "generation_id": "g1",
+    "source": {"record_id": "source-1", "routing_key": "route-1", "version": 1},
+    "members": ["chunk-a", "chunk-b"],
+    "chunks": [
+      {"record_id": "chunk-a", "document": {"body": "First chunk"}},
+      {"record_id": "chunk-b", "document": {"body": "Second chunk"}}
+    ]
+  }
+}
+```
+
+```json
+{
+  "operation_id": {"epoch": 20747, "nonce": "publish-doc"},
+  "record_id": "doc-1", "routing_key": "route-1", "expected": {"Match": 1},
+  "generation": {"action": "publish", "generation_id": "g1"}
+}
+```
+
+将 action 改成 abort 并匹配当前 control version 可取消 staging；控制身份和 spent generation ID 保留。`GET /api/v1/index/{id}/doc/{record_id}/generation` 返回 control version、active/staged generation、visible/staged member counts 与 visible_seq；同时执行 Catalog 授权和数据输出屏障。collection statistics 增加 staged_records，不计入 active_records。
+
+Web UI 保留现有 editor/search；envelope 模式支持完整 stage/publish/abort 请求，并为 stage 显示“durable, not searchable”，不错误宣称已可见。重试继续保存整个原始请求与 operation_id。
+
+### 验证与审查（本地完成）
+
+独立审查发现并推动修复 Publish 自失效缺口；已补直接/间接旧代证据的失败前无副作用回归。另收紧非 active 成员必须 retired 的恢复验证，并澄清 Abort 释放未发布 member ID、已发布 ID 永不复用。已完成定向契约和最终源码全量：Linux **194 passed / 0 failed / 10 ignored，35 suites**，退出 0。新增取消调用回归确认已接受的 Stage/Publish 仍由 owned executor 完成，原请求重试获得相同回执。最终默认真实 HTTP/Chromium、核心依赖边界、OpenAPI generation 路由/envelope 检查均通过。审查最后两项已定点复核，无剩余阻塞。
+
+故障注入构建及完整 HTTP/Chromium 均退出 0。接续原 session `22798` 核验终态，未重复启动或中断；日志 `/tmp/p2-generation-fault-http.log`。Stage/Publish 各覆盖 after_append_unknown、after_durable、crash_after_durable、crash_after_visible，恢复后分别验证 staging 不可见、发布成员完整可见及原请求重试。来源删除、后补向量、接管和完整服务备份恢复回归保持通过。最终测试日志 `/tmp/p2-generation-final-tests.log`；默认服务 `/tmp/p2-generation-final-http.log`；构建 `/tmp/p2-generation-final-build.log`、`/tmp/p2-generation-fault-build.log`；核心边界 `/tmp/p2-generation-boundary.log`；OpenAPI `/tmp/p2-generation-openapi.log`。本批形成有界 generation 功能闭环，随代码本地提交；不代表完整 P2 或双平台可靠性验收完成。10 个 ignored 仍为既有辅助程序，本批无新增忽略。
+
+最终验证命令（均退出 0）：
+
+```bash
+cargo test --workspace --all-targets --quiet
+cargo build --workspace
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
+python3 scripts/check_core_boundary.py
+cargo build -p seekpower_server --features fault-injection
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --faults --browser
+target/debug/seekpower_server generate_openapi=true
+```
+
+Windows 本批原生未运行；Linux/Windows 系统崩溃/断电未验收。需要隔离环境及外部确认见证；进程退出测试不能替代。仍仅本地实现和提交，发布/CI 待单独协调。

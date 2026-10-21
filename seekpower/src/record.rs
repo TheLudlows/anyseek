@@ -19,6 +19,8 @@ use tokio::sync::{Mutex, Semaphore};
 
 mod evidence;
 mod enrichment;
+mod generation;
+pub use generation::{GenerationChunk, GenerationCommand, GenerationMember, GenerationStatus};
 mod output;
 pub use evidence::{EvidenceKind, EvidenceMetadata, EvidenceRef, EvidenceVisibility};
 pub use output::DataOutputPermit;
@@ -186,6 +188,9 @@ pub struct RecordWrite {
     /// Mutually exclusive with document/system; preserves body version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_patch: Option<Document>,
+    /// Durable staging / atomic publication command on a document control ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<GenerationCommand>,
     /// Optional engine-owned source/evidence semantics; business document fields
     /// with the same name have no effect on visibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,14 +207,21 @@ pub struct Record {
     pub version: u64,
     /// Original unnormalized input, absent for a tombstone.
     pub document: Option<Document>,
+    /// Engine-owned retirement when a newer document generation is published.
+    pub retired_generation: bool,
+    /// Published generation provenance, retained even after retirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_member: Option<GenerationMember>,
     /// Optional engine-owned source/evidence semantics; business document fields
     /// with the same name have no effect on visibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<EvidenceMetadata>,
 }
-/// A confirmed durable and published operation.
+/// A confirmed durable operation. Staging explicitly does not publish content.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WriteReceipt {
+    /// True only for durable generation staging; members are not searchable.
+    pub staged_only: bool,
     /// Logical partition operation position, independent of physical WAL frames.
     pub seq: u64,
     /// Record revision after this operation.
@@ -236,6 +248,7 @@ struct State {
     evidence_quarantined: bool,
     records: BTreeMap<String, Record>,
     source_revisions: Vec<Record>,
+    generations: BTreeMap<String, generation::Manifest>,
     // Vec avoids JSON's restriction on structured map keys. Bounded by config.
     operations: Vec<Applied>,
     #[serde(skip)]
@@ -243,9 +256,9 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV5")]
+    #[serde(rename = "RecordCheckpointV6")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV5")]
+    #[serde(rename = "RecordAppliedV6")]
     Applied(Applied),
 }
 struct Inner {
@@ -361,8 +374,10 @@ pub struct RecordStatistics {
     pub visible_seq: u64,
     /// Non-tombstoned records contributing to scoring statistics.
     pub active_records: usize,
-    /// Stable identities, including tombstones needed for ABA prevention.
+    /// Stable identities including tombstones, generation controls and staged reservations.
     pub retained_identities: usize,
+    /// Durable generation members not yet published into retrieval.
+    pub staged_records: usize,
     /// Retry results currently retained by the operation ledger.
     pub retained_operations: usize,
     /// Immutable prior source bodies retained independently of retry expiry.
@@ -380,7 +395,8 @@ impl Inner {
         RecordStatistics {
             visible_seq: self.state.seq,
             active_records: self.locations.len(),
-            retained_identities: self.state.records.len(),
+            retained_identities: self.state.records.len() + self.state.generations.len() + generation::reserved(&self.state),
+            staged_records: generation::reserved(&self.state),
             retained_operations: self.state.operations.len(),
             retained_source_revisions: self.state.source_revisions.len(),
             physical_versions: self.ordinals.len(),
@@ -530,6 +546,12 @@ fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
         return Err(storage("non-contiguous record sequence"));
     }
     let r = &applied.request;
+    if applied.receipt.record_id != r.record_id || state.operation_lookup.contains_key(&r.operation_id) {
+        return Err(storage("inconsistent committed operation identity"));
+    }
+    if r.generation.is_some() {
+        generation::apply(state, applied)?;
+    } else {
     let previous = state.records.get(&r.record_id);
     if applied.receipt.version != previous.map_or(1, |r| if applied.request.vector_patch.is_some() { r.version } else { r.version.saturating_add(1) })
         || applied.receipt.record_id != r.record_id
@@ -549,9 +571,12 @@ fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
             routing_key: r.routing_key.clone(),
             version: applied.receipt.version,
             document,
+            retired_generation: previous.is_some_and(|r| r.retired_generation),
+            generation_member: previous.and_then(|r| r.generation_member.clone()),
             system: r.system.clone().or_else(|| previous.and_then(|p| p.system.clone())),
         },
     );
+    }
     state.seq = applied.receipt.seq;
     state.epoch_watermark = state.epoch_watermark.max(applied.observed_epoch);
     state
@@ -671,6 +696,7 @@ impl RecordPartition {
             }
         }
         evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
+        generation::validate_state(&state, &config)?;
         if state.records.len() > config.max_records
             || state.source_revisions.len() + state.records.values().filter(|r| evidence::retained_revision(r)).count() > config.max_records
             || state.operations.len() > config.max_operations
@@ -745,7 +771,7 @@ impl RecordPartition {
                 if injected.as_deref() == Some("before_append") {
                     return Err(RecordError::Rejected("injected before append".into()));
                 }
-                let hides_evidence = inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some());
+                let hides_evidence = matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) || inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some());
                 inner.healthy = false;
                 {
                     let mut output = inner.output.write().map_err(|_| RecordError::RecoveryRequired)?;
@@ -1154,6 +1180,7 @@ mod tests {
     fn write(nonce: &str, id: &str, body: &str, expected: ExpectedVersion) -> RecordWrite {
         RecordWrite {
             vector_patch: None,
+            generation: None,
             system: None,            operation_id: OperationId::new(nonce.into()),
             record_id: id.into(),
             routing_key: "document-1".into(),
@@ -1175,6 +1202,149 @@ mod tests {
         p.search("alpha".into(), vector, mode, vec![], 10)
             .await
             .unwrap()
+    }
+    fn generation_write(nonce: &str, expected: ExpectedVersion, generation: GenerationCommand) -> RecordWrite {
+        RecordWrite { operation_id:OperationId::new(nonce.into()), record_id:"doc".into(), routing_key:"document-1".into(),
+            expected, document:None, vector_patch:None, system:None, generation:Some(generation) }
+    }
+    fn stage_generation(id: &str, members: &[&str]) -> GenerationCommand {
+        GenerationCommand::Stage { generation_id:id.into(), source:EvidenceRef { record_id:"s".into(), routing_key:"document-1".into(), version:1 },
+            members:members.iter().map(|s| (*s).into()).collect(), chunks:members.iter().map(|id| GenerationChunk { record_id:(*id).into(),
+                document:serde_json::from_value(serde_json::json!({"body":"generationword alpha"})).unwrap(), evidence_refs:vec![] }).collect() }
+    }
+    #[tokio::test]
+    async fn generation_stage_publish_switch_and_enrich() {
+        let root = path(); let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(source_write("source", "s", &[])).await.unwrap();
+        let stage = generation_write("stage", ExpectedVersion::Absent, stage_generation("g1", &["a","b"]));
+        let receipt = p.write(stage.clone()).await.unwrap(); assert!(receipt.staged_only); assert_eq!(receipt.version,1);
+        assert_eq!(p.write(stage).await.unwrap(), receipt);
+        assert!(p.get("a").await.unwrap().is_none()); assert_eq!(p.statistics().await.unwrap().active_records,1);
+        assert!(p.write(write("steal", "a", "body", ExpectedVersion::Absent)).await.is_err());
+        p.compact_journal().await.unwrap(); drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,2);
+        assert!(p.get("a").await.unwrap().is_none());
+        let publish = generation_write("publish", ExpectedVersion::Match(1), GenerationCommand::Publish { generation_id:"g1".into() });
+        let mut competing = publish.clone(); competing.operation_id = OperationId::new("competing".into());
+        let (a,b) = tokio::join!(p.write(publish),p.write(competing)); assert_ne!(a.is_ok(), b.is_ok());
+        assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,2);
+        assert_eq!(p.statistics().await.unwrap().active_records,3);
+        assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(),2);
+        assert_eq!(query(&p, SearchMode::Vector { similarity_threshold:None,ann_mode:AnnMode::All }).await.hits.len(),1);
+        let mut patch = write("fill-a", "a", "", ExpectedVersion::Match(1)); patch.document = None;
+        patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
+        p.write(patch.clone()).await.unwrap();
+        p.write(source_write("downstream", "downstream", &[("a",1)])).await.unwrap();
+        p.write(generation_write("stage2", ExpectedVersion::Match(2), stage_generation("g2", &["c","d"]))).await.unwrap();
+        let old_output = p.output_permit().unwrap();
+        p.write(generation_write("publish2", ExpectedVersion::Match(3), GenerationCommand::Publish { generation_id:"g2".into() })).await.unwrap();
+        assert!(old_output.deliver(|| ()).is_err());
+        for id in ["a","b","downstream"] { assert!(p.get(id).await.unwrap().is_none()); assert_eq!(p.record_status(id).await.unwrap().unwrap().visibility,EvidenceVisibility::Stale); }
+        assert_eq!(p.statistics().await.unwrap().active_records,3);
+        assert_eq!(query(&p, SearchMode::Lexical).await.hits.iter().map(|h| h.record.record_id.as_str()).collect::<Vec<_>>(), vec!["c","d"]);
+        patch.operation_id = OperationId::new("late-fill".into()); assert!(p.write(patch).await.is_err());
+        p.compact_journal().await.unwrap(); drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.generation_status("doc").await.unwrap().unwrap().active_generation.as_deref(),Some("g2"));
+        assert!(p.get("a").await.unwrap().is_none()); assert!(p.get("c").await.unwrap().is_some());
+        drop(p); std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn generation_manifest_failure_abort_and_source_barrier() {
+        let root = path(); let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(source_write("s", "s", &[])).await.unwrap();
+        let mut incomplete = stage_generation("bad", &["a","b"]);
+        if let GenerationCommand::Stage { chunks, .. } = &mut incomplete { chunks.pop(); }
+        assert!(p.write(generation_write("bad", ExpectedVersion::Absent, incomplete)).await.is_err());
+        assert!(p.generation_status("doc").await.unwrap().is_none());
+        p.write(generation_write("stage", ExpectedVersion::Absent, stage_generation("g1", &["a","b"]))).await.unwrap();
+        p.write(write("source-update", "s", "new source", ExpectedVersion::Match(1))).await.unwrap();
+        assert!(p.write(generation_write("publish", ExpectedVersion::Match(1), GenerationCommand::Publish { generation_id:"g1".into() })).await.is_err());
+        p.write(generation_write("abort", ExpectedVersion::Match(1), GenerationCommand::Abort { generation_id:"g1".into() })).await.unwrap();
+        assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
+        assert!(p.write(generation_write("reuse", ExpectedVersion::Match(2), stage_generation("g1", &["a","b"]))).await.is_err());
+        drop(p); std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn generation_rejects_replacement_that_retires_its_evidence() {
+        for indirect in [false,true] {
+            let root = path(); let p = RecordPartition::create(&root, config()).await.unwrap();
+            p.write(source_write("s", "s", &[])).await.unwrap();
+            p.write(generation_write("stage1", ExpectedVersion::Absent, stage_generation("g1", &["old"]))).await.unwrap();
+            p.write(generation_write("publish1", ExpectedVersion::Match(1), GenerationCommand::Publish { generation_id:"g1".into() })).await.unwrap();
+            let reference = if indirect { p.write(source_write("dependent", "dependent", &[("old",1)])).await.unwrap(); "dependent" } else { "old" };
+            let mut next = stage_generation("g2", &["new"]);
+            if let GenerationCommand::Stage { chunks, .. } = &mut next {
+                chunks[0].evidence_refs.push(EvidenceRef { record_id:reference.into(), routing_key:"document-1".into(), version:1 });
+            }
+            p.write(generation_write("stage2", ExpectedVersion::Match(2), next)).await.unwrap();
+            let before = p.statistics().await.unwrap(); let permit = p.output_permit().unwrap();
+            assert!(matches!(p.write(generation_write("publish2", ExpectedVersion::Match(3), GenerationCommand::Publish { generation_id:"g2".into() })).await, Err(RecordError::Conflict(_))));
+            assert_eq!(before,p.statistics().await.unwrap()); assert!(permit.deliver(|| ()).is_ok());
+            assert_eq!(p.generation_status("doc").await.unwrap().unwrap().active_generation.as_deref(),Some("g1"));
+            assert!(p.get("old").await.unwrap().is_some()); assert!(p.get("new").await.unwrap().is_none());
+            drop(p); std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn generation_reserves_source_delete_and_abort_under_pressure() {
+        let root=path(); let mut settings=config(); settings.max_records=4; settings.max_operations=6;
+        let p=RecordPartition::create(&root,settings).await.unwrap(); p.write(source_write("s","s",&[])).await.unwrap();
+        p.write(generation_write("stage",ExpectedVersion::Absent,stage_generation("g1",&["a","b"]))).await.unwrap();
+        assert!(p.write(write("pressure","other","alpha",ExpectedVersion::Absent)).await.is_err());
+        let mut delete=write("delete","s","",ExpectedVersion::Match(1)); delete.document=None; p.write(delete).await.unwrap();
+        assert!(p.write(generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish { generation_id:"g1".into() })).await.is_err());
+        p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort { generation_id:"g1".into() })).await.unwrap();
+        assert_eq!(p.statistics().await.unwrap().active_records,0);
+        drop(p); let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
+        drop(p); std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn generation_cancelled_call_still_commits_owned_stage_and_publish() {
+        let root=path(); let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(source_write("s","s",&[])).await.unwrap();
+        for command in [generation_write("stage",ExpectedVersion::Absent,stage_generation("g1",&["a","b"])),
+            generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish { generation_id:"g1".into() })] {
+            let available=p.admission.available_permits(); let guard=p.inner.lock().await;
+            let owned=p.clone(); let request=command.clone();
+            let task=tokio::spawn(async move { owned.write(request).await });
+            tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                while p.admission.available_permits()==available { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            task.abort(); assert!(task.await.unwrap_err().is_cancelled()); drop(guard);
+            let receipt=tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                loop { if let Some(r)=p.operation(&command.operation_id).await.unwrap() { break r; } tokio::task::yield_now().await; }
+            }).await.unwrap();
+            assert_eq!(p.write(command).await.unwrap(),receipt);
+            assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,if receipt.staged_only {0} else {2});
+        }
+        drop(p); std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn generation_partial_publication_fences_and_recovers_whole_set() {
+        let root = path(); let archive = path(); let target = path();
+        let p = RecordPartition::create(&root, config()).await.unwrap(); p.write(source_write("s", "s", &[])).await.unwrap();
+        p.write(generation_write("stage", ExpectedVersion::Absent, stage_generation("g1", &["a","b"]))).await.unwrap();
+        p.checkpoint(&archive).await.unwrap();
+        let backup = RecordPartition::open(&archive, config().max_journal_bytes).await.unwrap();
+        assert!(backup.write(generation_write("unsafe", ExpectedVersion::Match(1), GenerationCommand::Publish { generation_id:"g1".into() })).await.is_err());
+        let publish = generation_write("publish", ExpectedVersion::Match(1), GenerationCommand::Publish { generation_id:"g1".into() });
+        p.inner.lock().await.fail_publication_stage = 1;
+        assert!(matches!(p.write(publish.clone()).await, Err(RecordError::DurablePending(_))));
+        assert!(p.get("a").await.is_err()); drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert!(!p.write(publish.clone()).await.unwrap().staged_only);
+        assert!(p.get("a").await.unwrap().is_some()); assert!(p.get("b").await.unwrap().is_some());
+        let binding = seal_request(backup.recovery_identity().await.unwrap().digest);
+        let seal = p.seal_for_takeover(binding.clone()).await.unwrap(); p.create_takeover_successor(&backup,&target,binding).await.unwrap();
+        let next = RecordPartition::open(&target, config().max_journal_bytes).await.unwrap(); next.certify_takeover_successor(&seal).await.unwrap();
+        assert_eq!(next.generation_status("doc").await.unwrap().unwrap().visible_members,2);
+        assert_eq!(next.write(publish).await.unwrap().version,2);
+        let mut delete = write("delete-source", "s", "", ExpectedVersion::Match(1)); delete.document=None; next.write(delete).await.unwrap();
+        assert_eq!(next.generation_status("doc").await.unwrap().unwrap().visible_members,0);
+        drop(next); drop(p); drop(backup); for path in [root, archive, target] { std::fs::remove_dir_all(path).unwrap(); }
     }
     #[tokio::test]
     async fn optional_vectors_enrich_exact_revision_and_recover() {
@@ -1540,7 +1710,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV5", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV6", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
@@ -2074,6 +2244,7 @@ mod tests {
                     .await
                     .unwrap(),
                 Some(WriteReceipt {
+                    staged_only: false,
                     seq: 1,
                     version: 1,
                     record_id: "business-id".into()

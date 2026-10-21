@@ -722,9 +722,9 @@ async fn write(
     let value: Value = parse(&bytes)?;
     if !value
         .as_object()
-        .is_some_and(|v| v.contains_key("document") || v.get("vector_patch").is_some_and(Value::is_object))
+        .is_some_and(|v| v.contains_key("document") || v.get("vector_patch").is_some_and(Value::is_object) || v.get("generation").is_some_and(Value::is_object))
     {
-        return Err(bad("document or vector_patch must be explicit; null document means deletion"));
+        return Err(bad("document, vector_patch or generation must be explicit; null document means deletion"));
     }
     let request: RecordWrite = serde_json::from_value(value).map_err(bad)?;
     let key = s.authenticate(&headers).await?;
@@ -735,6 +735,15 @@ async fn write(
         .authorized(key, id, move |_| async move { p.write(request).await })
         .await?;
     protected(result.map(|receipt|json!({"receipt":receipt,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()})).map_err(Into::into),permit)
+}
+async fn generation_status(
+    State(s): State<Arc<Service>>, headers: HeaderMap, Path((id, record_id)): Path<(String, String)>,
+) -> Result<Response, Error> {
+    let key = s.authenticate(&headers).await?;
+    let p = s.record(&key, &id).await?;
+    let data = p.output_permit()?;
+    let (result, permit) = s.catalog.authorized(key, id, move |_| async move { p.generation_status(&record_id).await }).await?;
+    protected_data(result.map_err(Error::from).and_then(|status| status.ok_or_else(not_found)), permit, Some(data))
 }
 async fn record_status(
     State(s): State<Arc<Service>>, headers: HeaderMap, Path((id, record_id)): Path<(String, String)>,
@@ -829,10 +838,10 @@ async fn batch(
         .and_then(Value::as_array)
         .is_some_and(|rows| {
             rows.iter()
-                .all(|r| r.as_object().is_some_and(|o| o.contains_key("document") || o.get("vector_patch").is_some_and(Value::is_object)))
+                .all(|r| r.as_object().is_some_and(|o| o.contains_key("document") || o.get("vector_patch").is_some_and(Value::is_object) || o.get("generation").is_some_and(Value::is_object)))
         })
     {
-        return Err(bad("every write must contain explicit document or vector_patch"));
+        return Err(bad("every write must contain explicit document, vector_patch or generation"));
     }
     let request: BatchRequest = serde_json::from_value(value).map_err(bad)?;
     if request.writes.is_empty() || request.writes.len() > 100 {
@@ -1320,6 +1329,7 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/restore", post(restore))
         .route("/api/v1/takeovers", post(takeover::takeover))
         .route("/api/v1/index/{id}/doc/{record_id}/status", get(record_status))
+        .route("/api/v1/index/{id}/doc/{record_id}/generation", get(generation_status))
         .route("/api/v1/backups", get(list_backups))
         .route("/api/v1/service-backups", post(service_backup))
         .route("/api/v1/service-restores", post(service_restore))
@@ -1779,7 +1789,8 @@ pub(crate) fn generate_openapi() {
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","routing_key","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"routing_key":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["required"] = json!(["operation_id","record_id","routing_key","expected"]);
-    schemas.get_mut("RecordWrite").unwrap()["anyOf"] = json!([{"required":["document"]},{"required":["vector_patch"]}]);
+    schemas.get_mut("RecordWrite").unwrap()["anyOf"] = json!([{"required":["document"]},{"required":["vector_patch"]},{"required":["generation"]}]);
+    schemas.get_mut("RecordWrite").unwrap()["properties"]["generation"] = json!({"type":"object","required":["action","generation_id"],"description":"Stage complete members/chunks/source, then Publish or Abort at exact document control version. See generation protocol documentation."});
     schemas.get_mut("RecordWrite").unwrap()["properties"]["vector_patch"] = json!({"type":"object","minProperties":1,"description":"Fill absent vector fields with exact Match version; omit document/system. Preserves body version."});
     schemas.get_mut("RecordWrite").unwrap()["properties"]["system"] = json!({"$ref":"#/components/schemas/EvidenceMetadata"});
     schemas.insert("EvidenceRef".into(), json!({"type":"object","additionalProperties":false,"required":["record_id","routing_key","version"],"properties":{"record_id":{"type":"string"},"routing_key":{"type":"string"},"version":{"type":"integer","minimum":1}}}));
@@ -1788,6 +1799,7 @@ pub(crate) fn generate_openapi() {
     let mut paths = serde_json::Map::new();
     for (path, method, summary, schema) in [
         ("/api/v1/live", "get", "Server version", None),
+        ("/api/v1/index/{id}/doc/{record_id}/generation", "get", "Protected generation control version and staged/visible member counts; never staged bodies", None),
         ("/api/v1/index/{id}/doc/{record_id}/status", "get", "Content-free visibility reason and exact current version; stale bodies remain hidden", None),
         ("/api/v1/apikey", "get", "List granted collections", None),
         (

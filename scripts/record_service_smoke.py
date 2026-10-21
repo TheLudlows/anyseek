@@ -212,6 +212,63 @@ def main():
             call('GET','/api/v1/index/revisions/doc/i/status',key=keys['b'],status=403)
             call('DELETE','/api/v1/index/revisions',{'operation_id':operation()})
             print('PASS source revisions HTTP: conditional update/retry, transitive stale, counts, restart, deletion and status authorization')
+            # Real generation staging, whole-set replacement and delayed vectors.
+            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'generations','embedding_space_id':'generation-f32','config':{'index_name':'Generations','schema':[{'field':'body','field_type':'Text'},{'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}})
+            call('POST','/api/v1/index/generations/grants',{'operation_id':operation(),'key_id':'b','allow':True})
+            call('POST','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'gs','routing_key':'gr','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
+            def genstage(doc,gid,ids,expected,source='gs'):
+                return {'operation_id':operation(),'record_id':doc,'routing_key':'gr','expected':expected,'generation':{'action':'stage','generation_id':gid,'source':{'record_id':source,'routing_key':'gr','version':1},'members':ids,'chunks':[{'record_id':rid,'document':{'body':'generationword '+gid}} for rid in ids]}}
+            def genpublish(doc,gid,version):
+                return {'operation_id':operation(),'record_id':doc,'routing_key':'gr','expected':{'Match':version},'generation':{'action':'publish','generation_id':gid}}
+            gs=genstage('gd','g1',['ga','gb'],'Absent')
+            staged=call('POST','/api/v1/index/generations/doc',gs,key=keys['b'])['receipt'];assert staged['staged_only']
+            assert call('POST','/api/v1/index/generations/doc',gs)['receipt']==staged
+            assert call('POST','/api/v1/index/generations/query',{'query':'generationword'})['count_total']==0
+            call('GET','/api/v1/index/generations/doc/ga',status=404)
+            call('PATCH','/api/v1/index/generations');restart()
+            assert call('GET','/api/v1/index/generations/doc/gd/generation')['staged_members']==2
+            gp=genpublish('gd','g1',1)
+            assert not call('POST','/api/v1/index/generations/doc',gp,key=keys['b'])['receipt']['staged_only']
+            assert call('POST','/api/v1/index/generations/query',{'query':'generationword'})['count_total']==2
+            call('POST','/api/v1/index/generations/doc',genstage('gd','g2',['gc','gd2'],{'Match':2}))
+            assert {h['record']['record_id'] for h in call('POST','/api/v1/index/generations/query',{'query':'generationword'})['hits']}=={'ga','gb'}
+            gp2=genpublish('gd','g2',3);published=call('POST','/api/v1/index/generations/doc',gp2)['receipt']
+            restart();assert call('POST','/api/v1/index/generations/doc',gp2)['receipt']==published
+            assert {h['record']['record_id'] for h in call('POST','/api/v1/index/generations/query',{'query':'generationword'})['hits']}=={'gc','gd2'}
+            assert call('GET','/api/v1/index/generations/doc/ga/status')['visibility']=='stale'
+            call('POST','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'gc','routing_key':'gr','expected':{'Match':1},'vector_patch':{'vector':[1,0]}})
+            assert len(call('POST','/api/v1/index/generations/query',{'query_vector':[1,0],'all':True})['hits'])==1
+            call('POST','/api/v1/index/generations/doc',genstage('gd','g3',['ge','gf'],{'Match':4}))
+            call('POST','/api/v1/index/generations/grants',{'operation_id':operation(),'key_id':'b','allow':False})
+            call('GET','/api/v1/index/generations/doc/gd/generation',key=keys['b'],status=403)
+            call('POST','/api/v1/index/generations/doc',genpublish('gd','g3',5),key=keys['b'],status=403)
+            call('DELETE','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'gs','routing_key':'gr','expected':{'Match':1},'document':None})
+            assert call('POST','/api/v1/index/generations/query',{'query':'generationword'})['count_total']==0
+            call('POST','/api/v1/index/generations/doc',genpublish('gd','g3',5),status=409)
+            print('PASS generation HTTP: durable hidden staging, whole-set switch, retry/restart, optional vectors, source delete and grant revocation')
+            if args.faults:
+                import http.client
+                call('POST','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'fault-source','routing_key':'gr','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
+                for action in ['stage','publish']:
+                    for fault in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
+                        doc=action+'-'+fault;ids=[doc+'-a',doc+'-b']
+                        stage=genstage(doc,'g1',ids,'Absent','fault-source');publish=genpublish(doc,'g1',1)
+                        if action=='publish':call('POST','/api/v1/index/generations/doc',stage)
+                        command=stage if action=='stage' else publish
+                        process.kill();process.wait(timeout=20)
+                        start({'SEEKPOWER_RECORD_FAULT':fault,'SEEKPOWER_RECORD_FAULT_NONCE':command['operation_id']['nonce']})
+                        if fault.startswith('crash_'):
+                            try:call('POST','/api/v1/index/generations/doc',command)
+                            except (OSError,http.client.HTTPException):pass
+                            else:raise AssertionError('expected generation transport loss')
+                            process.wait(timeout=20);assert process.returncode==86
+                        else:assert call('POST','/api/v1/index/generations/doc',command,status=503)['code'] in ['outcome_unknown','durable_pending']
+                        restart();receipt=call('POST','/api/v1/index/generations/doc',command)['receipt']
+                        assert receipt['staged_only']==(action=='stage')
+                        status=call('GET','/api/v1/index/generations/doc/'+doc+'/generation')
+                        assert status['visible_members']==(0 if action=='stage' else 2)
+                        for rid in ids:call('GET','/api/v1/index/generations/doc/'+rid,status=404 if action=='stage' else 200)
+                print('PASS generation HTTP faults: stage stays hidden, publish recovers complete members at all four durable/response boundaries')
             # P2 immutable source/evidence through the same authorized Record API.
             ec={'operation_id':operation(),'collection_id':'evidence','config':{'index_name':'Evidence','schema':[{'field':'body','field_type':'Text','store':True}]}}
             call('POST','/api/v1/index',ec)
@@ -420,6 +477,8 @@ def main():
                 call('GET','/api/v1/index/shared',status=403)
                 call('GET','/api/v1/index/evidence/doc/direct',status=404)
                 assert call('GET','/api/v1/index/evidence')['evidence_quarantined'] is True
+                manifest=call('GET','/api/v1/index/generations/doc/gd/generation');assert manifest['staged_members']==2 and manifest['visible_members']==0
+                call('POST','/api/v1/index/generations/doc',genpublish('gd','g3',5),status=400)
                 call('POST','/api/v1/apikey',add_key,status=409)
                 old=add_key['operation_id'];call('GET',f"/api/v1/catalog/operation/{old['epoch']}/{old['nonce']}",status=409)
                 assert call('POST','/api/v1/index/after-source-delete/doc',writes[0])['receipt']['version']==1
