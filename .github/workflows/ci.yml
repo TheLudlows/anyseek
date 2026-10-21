@@ -92,6 +92,8 @@ jobs:
         run: rustc --version --verbose
       - name: Native journal and child-process crash tests
         run: cargo test -p seekpower --lib journal_
+      - name: Native partition publication and owner-lock tests
+        run: cargo test -p seekpower --lib partition_
       - name: Native existing-index I/O errors and mapping lifecycle
         run: cargo test -p seekpower --lib commit_io_tests
       - name: Native record replay, snapshot and response-loss tests

@@ -2,7 +2,7 @@
   "date": "2026-10-21",
   "baseline": "fc4fcfe64fdf86d03c07f82cf1d4889deb896801",
   "branch": "feat/57-reliable-record-engine",
-  "status": "P1-A in progress; independent review corrections complete locally",
+  "status": "P1-A in progress; incremental library and online WAL checkpoint validated locally; HTTP/UI remains legacy",
   "linux": {
     "platform": "Linux 6.18.55 x86_64",
     "rust": "1.99.1",
@@ -11,21 +11,23 @@
     "workspace_command": "SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet",
     "workspace_result": {
       "suites": 35,
-      "passed": 131,
+      "passed": 142,
       "failed": 0,
-      "ignored": 7
+      "ignored": 9
     },
-    "build": "Previous checkpoint: cargo build --workspace --quiet passed; no HTTP changes in this correction",
-    "http_smoke": "Previous checkpoint: passed; not rerun for storage-only correction",
+    "build": "cargo build --workspace --quiet: passed after final source change",
+    "http_smoke": "python3 scripts/http_smoke.py --server target/debug/seekpower_server: passed after final build; legacy HTTP/UI path only, Chromium not run",
     "chromium": "not run",
     "process_exit_boundaries": {
       "journal_write": 8,
       "journal_repair": 1,
       "record_and_response_loss": 5,
-      "initialization": 4
+      "initialization": 4,
+      "online_checkpoint": 8,
+      "interrupted_uncertified_generation_cleanup": 2
     },
     "system_crash": "not run",
-    "workspace_log": "/tmp/seekpower-p1-review-final.log",
+    "workspace_log": "/tmp/seekpower-incremental-final4.log",
     "controlled_cancellation_tests": {
       "passed": 2,
       "failed": 0,
@@ -36,7 +38,19 @@
     },
     "final_publication_error_classification_regression": "cargo test -p seekpower --lib journal_ --quiet: 6 passed, 0 failed, 3 subprocess workers ignored by default and explicitly invoked",
     "resolved_test_harness_failure": "query gate initially bypassed by single-shard lexical shortcut; corrected to Hybrid and passed targeted/full suite",
-    "check": "cargo check --workspace --quiet: passed after final publication-error change"
+    "check": "Full workspace build and tests after final source change",
+    "new_regressions": [
+      "incremental active statistics versus effective-record rebuild",
+      "stable logical-ID ties before candidate truncation",
+      "physical block boundary and partial-commit vector append",
+      "post-durable partial publication fencing",
+      "online checkpoint retry/ABA/original data",
+      "uncertain namespace sync and repeated cleanup sync failures",
+      "corrupt certified generation fails without fallback",
+      "root creation owner lock spans return",
+      "recovery read budget cannot expand persisted write budget"
+    ],
+    "http_smoke_log": "/tmp/seekpower-incremental-http-final.log"
   },
   "windows": {
     "native_compilation": "not run",
@@ -46,15 +60,13 @@
   },
   "external_state_changes": "none; local branch and commit only",
   "remaining": [
-    "HTTP/UI integration",
-    "shared-key grants and revocation barriers",
-    "incremental publication and resource accounting",
-    "live checkpoint-root rollover and WAL retirement",
-    "complete recovery/error audit",
-    "Linux and Windows system-crash certification",
-    "safe parent/catalog-level reclamation of failed initialization preparations"
+    "HTTP/UI default-path integration",
+    "shared collection catalog, key grants and revocation barriers",
+    "configured retention/deadline policy",
+    "Linux and Windows native reliability acceptance; system-crash tests",
+    "safe catalog-level reclamation of failed root initialization preparations"
   ],
-  "review_checkpoint_parent": "6fd41b2c9210df59ff539e9c6cef240959352124",
+  "review_checkpoint_parent": "7fa0fd3f4b60bad336674b54fbbb49013aedc956",
   "independent_review": {
     "mode": "read-only",
     "original_findings": [
@@ -64,6 +76,7 @@
     ],
     "followup_finding": "cancelled hybrid query may retain mmap after journal lock is released",
     "all_findings": "corrected and regression tested on Linux",
-    "final_static_review": "no new blocking defect in correction scope"
+    "final_static_review": "no new blocking defect in correction scope",
+    "incremental_and_generation_findings": "Corrected with regression coverage; final static persistence review found no new blocker in reviewed scope. Native Windows/system faults remain unvalidated."
   }
 }

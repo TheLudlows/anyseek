@@ -270,6 +270,14 @@ impl Journal {
         Ok(())
     }
 
+    pub(crate) fn restrict_budget(&mut self, max_bytes: u64) -> io::Result<()> {
+        if self.end > max_bytes {
+            return Err(corrupt("journal exceeds persisted resource budget"));
+        }
+        self.max_bytes = self.max_bytes.min(max_bytes);
+        Ok(())
+    }
+
     pub(crate) fn validate_append(&self, length: usize) -> io::Result<()> {
         if self.needs_recovery {
             return Err(io::Error::other("journal requires recovery"));

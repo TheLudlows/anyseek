@@ -380,7 +380,8 @@ struct Item {
 }
 
 #[derive(Clone)]
-pub(crate) struct TopK {
+pub(crate) struct TopK<'a> {
+    keys: Option<&'a [String]>,
     items: Vec<Item>,
     len: usize,
     k: usize,
@@ -395,7 +396,7 @@ pub(crate) struct TopK {
     full_scans: usize,
 }
 
-impl TopK {
+impl TopK<'_> {
     fn new(
         k: usize,
         similarity_threshold_option: Option<f32>,
@@ -403,6 +404,7 @@ impl TopK {
         similarity_normalization: f32,
     ) -> Self {
         Self {
+            keys: None,
             items: vec![
                 Item {
                     doc_id: 0,
@@ -468,7 +470,7 @@ impl TopK {
         // Keep the existing count/threshold semantics; this additional rejection
         // changes only selection work, not scores or candidate membership.
         if self.len == self.k && self.worst_rank_bound.is_some_and(|(bound_score, bound_id)|
-            min_heap::rank_ordering(score, doc_id, bound_score, bound_id).is_le()) {
+            crate::active::rank_with_keys(self.keys, score, doc_id, bound_score, bound_id).is_le()) {
             return false;
         }
 
@@ -519,7 +521,7 @@ impl TopK {
                 return true;
             }
 
-            if min_heap::rank_ordering(item.score, item.doc_id, min_v, min_id).is_lt() {
+            if crate::active::rank_with_keys(self.keys, item.score, item.doc_id, min_v, min_id).is_lt() {
                 min_v = item.score;
                 min_id = item.doc_id;
                 min_i = i;
@@ -527,7 +529,7 @@ impl TopK {
         }
 
         self.worst_rank_bound = Some((min_v, min_id));
-        if min_heap::rank_ordering(score, doc_id, min_v, min_id).is_gt() {
+        if crate::active::rank_with_keys(self.keys, score, doc_id, min_v, min_id).is_gt() {
             self.lowest_similarity_score = min_v;
             self.items[min_i] = Item {
                 doc_id,
@@ -1123,9 +1125,11 @@ impl Shard {
         vector_similarity: &VectorSimilarity,
         field_filter_set: &AHashSet<u16>,
         facet_filter: &[FilterSparse],
-        top_k: &mut TopK,
+        top_k: &mut TopK<'_>,
     ) {
-        let level_id = self.level_index.len();
+        let level_id = if self.is_last_level_incomplete {
+            self.level_index.len() - 1
+        } else { self.level_index.len() };
         let enable_scale = self.quantization != Quantization::None
             && (self.vector_similarity != VectorSimilarity::Cosine || self.quantization == Quantization::TurboQuantI8);
 
@@ -1257,6 +1261,7 @@ impl SearchVectorShard for ShardArc {
             1.0
         };
         let mut top_k = TopK::new(length, similarity_threshold, vector_similarity, similarity_normalization);
+        top_k.keys = shard_ref.active.as_ref().map(|active| active.keys.as_slice());
 
         if include_uncommitted && shard_ref.uncommitted && !shard_ref.block_vector_buffer.is_empty()
         {
@@ -1477,7 +1482,7 @@ impl SearchVectorShard for ShardArc {
             offset += level_vectors_count as usize * vector_size;
         }
 
-        top_k.items[..top_k.len].sort_by(|a, b| min_heap::rank_ordering(b.score, b.doc_id, a.score, a.doc_id));
+        top_k.items[..top_k.len].sort_by(|a, b| shard_ref.rank(b.score, b.doc_id, a.score, a.doc_id));
 
         for item in top_k.items[..top_k.len].iter() {
             let result = min_heap::Result {

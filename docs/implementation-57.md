@@ -9,7 +9,122 @@ The product contract remains [issue #57](https://github.com/TheLudlows/seekpower
 Current capabilities remain in [FEATURES](../FEATURES.md). Historical validation
 remains in [VALIDATION](../VALIDATION.md).
 
-## Latest local checkpoint — independent review corrections (completed locally)
+## Latest checkpoint — incremental publication and online WAL generations (validated locally)
+
+Parent checkpoint: `7fa0fd3f4b60bad336674b54fbbb49013aedc956`. This stage replaces
+the per-write reference rebuild with the actual existing-engine append path.
+**The library path is incremental; the HTTP/UI default path is still legacy.**
+P1-A is not complete and there is no reliable-service release claim.
+
+Actual module changes:
+
+- `active.rs`, `index.rs`, `field_length.rs`, `realtime_search.rs`, `search.rs`:
+  maintain active-document footprints, exact active term df and compressed field
+  lengths separately from physical posting/encoding counters. Committed,
+  realtime, ngram and normalization paths use the same active statistics.
+  Active pruning uses conservative finite bounds; equal-score pruning cannot
+  assume a physical ID lower bound is a logical record-ID bound.
+- `min_heap.rs`, `vector.rs`, `search.rs`: record-ID ordering enters candidate
+  heaps, vector selection, fusion and empty-query selection before truncation.
+  Physical IDs remain internal addresses. Longest-field encoding is selected
+  from the schema (honoring an explicit choice; otherwise first lexical field)
+  and persisted, so recovery cannot change the encoding decision.
+- `record.rs`: writes append one physical version, retire its predecessor before
+  publication, and publish authoritative data, lookup positions and statistics
+  under the same guard. Index failures after WAL durability still fence every
+  read/write view. Writes no longer clone/serialize the whole state or rebuild
+  the index. Exact checkpoint-byte accounting changes by this operation/record;
+  an indexed operation ledger replaces linear dedup scans. Full snapshots and
+  startup reconstruction remain intentionally proportional to retained state.
+- `RecordSearch.statistics` and `statistics()` report the same published sequence,
+  active record count, retained identities/operations, physical versions and
+  complete-checkpoint bytes. ANN/fusion hit counts are not promoted to exact
+  corpus counts. Physical history remains bounded by retained operation/journal
+  limits; long-running physical index compaction remains P3 work.
+- `storage/partition.rs`: a stable owner lock spans local WAL generations.
+  `compact_journal()` publishes a complete checkpoint online, preserves the
+  serving index, then retires the old WAL generation. Independent `checkpoint`
+  destinations retain their backup/restore semantics. No cloud protocol or
+  format migration was added.
+- `commit.rs`, `vector.rs`: release mmap before complete-block file extension;
+  address realtime vectors correctly after a partially committed block.
+  The native CI matrix now also includes partition-generation tests.
+
+Local publication protocol and resource boundary:
+
+1. Build the complete new generation in a unique prepared directory. Sync its
+   initial snapshot and WAL witnesses, then publish the generation directory.
+2. Only after directory publication succeeds, append a publication certificate
+   using the same three-witness journal. A valid certificate implies the earlier
+   namespace durability step completed; merely seeing a directory is insufficient.
+   Initial root creation writes its certificate only after final root publication,
+   while continuously holding the owner lock through return to the creator.
+3. Recovery chooses the highest certified generation. Journal corruption fails
+   closed; it never falls back on corruption. Only a complete single-frame
+   generation without a certificate is known not to have served writes and may
+   be discarded. A root without any publication certificate is refused: it did
+   not finish creation and cannot have acknowledged record writes.
+4. After a successful switch, close old journal handles before removal. Before
+   allocating another generation, unfinished reclamation must succeed. There
+   can be current plus one prepared/old generation, each bounded by the journal
+   budget (plus fixed metadata); cleanup errors cannot permit unbounded rotation.
+5. A non-certified higher generation is durably renamed out of the selection
+   namespace before recursive deletion. Recovery also re-renames leftover
+   `.prepare` directories durably before deleting their contents, because a
+   prior retirement may have failed after rename but before parent sync.
+6. Unknown publication outcomes fence the instance. Known pre-publication
+   failures preserve the existing view. These are local filesystem guarantees
+   under the stated fault model, still awaiting native system-crash validation.
+7. Recovery may use a larger external read budget to load a checkpoint, but
+   restores the persisted journal write limit before accepting new operations.
+   Reopening cannot silently expand the configured resource boundary.
+
+Regression coverage added:
+
+- Stable ties beyond K, including replacement with a later physical ID; lexical,
+  vector, hybrid, weighted fusion and empty query; commit/reopen/append.
+- Shared and per-field statistics, ngrams, empty fields, deletion/replacement,
+  compared with a clean effective-record index before/after commit and reopen.
+- Physical 65535/65536 crossing, automatic flush, facet growth, partial commit
+  then vector append. The fixture seeds retired history through the real engine;
+  the final boundary crossing uses the authoritative Record write path. It is
+  not 65K separately durable operations or a capacity benchmark.
+- Failure after index append and after retirement fences get/search/statistics;
+  recovery replays the durable replacement and preserves retry/ABA contracts.
+- Online checkpoint preserves originals, tombstones, retries and logical seq;
+  process exits cover preparation, un-certified publication, certification,
+  switch, partial old-generation deletion and completed reclamation.
+- Repeated interruption while discarding un-certified generations; injected
+  post-rename sync failure and repeated recovery cleanup sync failures; corrupt
+  certified generation refuses fallback; creator retains owner lock through return.
+
+Final-code Linux validation (overlayfs; Rust 1.99.1):
+
+- `SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet`:
+  **142 passed, 0 failed, 9 ignored**, across 35 suites. Eight ignored subprocess
+  helpers are invoked by their parent tests; one existing opt-in AES test remains
+  ignored. Log: `/tmp/seekpower-incremental-final4.log`.
+- `cargo build --workspace --quiet`: passed after the final persisted-budget fix.
+- `python3 scripts/http_smoke.py --server target/debug/seekpower_server`: passed
+  after the final build; Chromium not run. This covers the existing service, not
+  integration of the new Record path. Log: `/tmp/seekpower-incremental-http-final.log`.
+- Independent read-only reviews found and drove corrections to equal-score
+  pruning, partial-block vector addresses, mmap extension, publication witnesses,
+  owner-lock lifetime and interrupted reclamation. Regression tests cover these.
+
+Windows native compilation/tests and both platforms' system/power-loss tests
+remain **not run**. The local CI job has not been published or dispatched;
+process exits and simulated I/O failures do not constitute system-crash certification.
+
+Remaining P1-A work: default HTTP/UI integration, independent collection/grant
+catalog, shared-key authorization plus revocation/publication/output barriers,
+configured retention/deadline policy, and complete dual-platform acceptance.
+Startup and explicit checkpoints may reconstruct/serialize retained state;
+per-write rebuilding is removed. Abandoned **root-level** initialization siblings
+outside a partition still require catalog-level safe reclamation. Source-derived
+visibility is still pending the typed P2 interfaces, not implicit JSON metadata.
+
+## Historical checkpoint — independent review corrections (completed locally)
 
 Parent checkpoint: `6fd41b2c9210df59ff539e9c6cef240959352124`. This follow-up
 addresses the independent persistence review before incremental publication.
@@ -101,7 +216,7 @@ lexical/vector/filter engine, complete checkpoints and recovery. It is not done
 when types, a journal, or a separate API exist. P2 supplies source generations,
 evidence and optional vectors. P3 supplies long-running compaction/reclamation.
 
-## Stage 1 — persistence prerequisites (in progress)
+## Historical stage 1 — persistence prerequisites
 
 Actual changes:
 
@@ -169,7 +284,7 @@ Commands use installed Rust with `PATH=/workspace/.cargo/bin:$PATH`,
 A test build initially found a match arm expecting `()` after the Commit result
 change; test callers are being updated to assert successful results.
 
-### Remaining work / gates
+### Gates recorded at the original checkpoint
 
 - Core journal/Record/version/dedup now use existing-engine publication (Stage 2);
   HTTP/UI do not yet use that path, so no durable service guarantee is added.
@@ -183,7 +298,7 @@ change; test callers are being updated to assert successful results.
   Workflow edits can be prepared locally, but triggering a remote run would
   require publication outside the current authorized scope.
 
-## Stage 2 — record/reference-view integration (in progress)
+## Historical stage 2 — initial record/reference-view integration
 
 `record.rs` uses the existing retrieval engine, not a replacement scorer. It
 persists original Documents (including fields excluded by search projections and

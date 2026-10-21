@@ -772,6 +772,7 @@ impl Search for IndexArc {
         let original_query = query_string.clone();
 
         if enable_empty_query
+            && index_ref.shard_vec[0].read().await.active.is_none()
             && query_string.is_empty()
             && query_vector.is_none()
             && facet_filter.is_empty()
@@ -1138,6 +1139,10 @@ impl Search for IndexArc {
                 }
             };
         }
+        let rank_shards = futures::future::join_all(index_ref.shard_vec.iter().map(|s| s.read())).await;
+        let rank = |a, a_id, b, b_id| if rank_shards.len() == 1 {
+            rank_shards[0].rank(a, a_id, b, b_id)
+        } else { rank_ordering(a, a_id, b, b_id) };
         if aggregate_results {
             match search_mode {
                 SearchMode::Lexical => {
@@ -1163,7 +1168,7 @@ impl Search for IndexArc {
                     let mut rrf_results: AHashMap<usize, Result> = AHashMap::new();
                     for (i, result) in result_object_results_lexical
                         .iter()
-                        .sorted_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id))
+                        .sorted_by(|a, b| rank(b.score, b.doc_id, a.score, a.doc_id))
                         .take(if rrf.keyword_weight == 0.0 {
                             0
                         } else {
@@ -1186,7 +1191,7 @@ impl Search for IndexArc {
                     }
                     for (i, result) in result_object_results_vector
                         .iter()
-                        .sorted_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id))
+                        .sorted_by(|a, b| rank(b.score, b.doc_id, a.score, a.doc_id))
                         .take(if rrf.vector_weight == 0.0 {
                             0
                         } else {
@@ -1261,9 +1266,7 @@ impl Search for IndexArc {
                         continue;
                     }
 
-                    if let Some(idx) = index_ref.shard_vec[0]
-                        .read()
-                        .await
+                    if let Some(idx) = rank_shards[0]
                         .facets_map
                         .get(&rs.field)
                     {
@@ -1273,11 +1276,9 @@ impl Search for IndexArc {
                         });
                     }
                 }
-                let shard_vec =
-                    futures::future::join_all(index_ref.shard_vec.iter().map(|s| s.read())).await;
                 result_object.results.sort_by(|a, b| {
                     result_ordering_root(
-                        &shard_vec,
+                        &rank_shards,
                         shard_number,
                         query_string.is_empty() && query_vector.is_none(),
                         &result_sort_index,
@@ -1286,14 +1287,16 @@ impl Search for IndexArc {
                     )
                 });
             } else {
-                if query_string.is_empty() && query_vector.is_none() {
+                if rank_shards.len() == 1 && rank_shards[0].active.is_some() {
+                    result_object.results.sort_by(|a, b| rank(b.score, b.doc_id, a.score, a.doc_id));
+                } else if query_string.is_empty() && query_vector.is_none() {
                     result_object
                         .results
                         .sort_by_key(|b| cmp::Reverse(b.doc_id));
                 } else {
                     result_object
                         .results
-                        .sort_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id));
+                        .sort_by(|a, b| rank(b.score, b.doc_id, a.score, a.doc_id));
                 }
             }
 
@@ -1884,7 +1887,7 @@ impl SearchLexicalShard for ShardArc {
                                         let live_df = if shard_ref.uncommitted {
                                             shard_ref.segments_level0[key0 as usize].segment.get(&key_hash).map_or(0, |p| p.posting_count as u32)
                                         } else { 0 };
-                                        let posting_count = posting_count + live_df;
+                                        let posting_count = shard_ref.scoring_df(key_hash, posting_count + live_df);
                                         let component_scoring = non_unique_term.ngram_type != NgramType::SingleTerm
                                             && shard_ref.meta.lexical_similarity == LexicalSimilarity::Bm25f;
                                         let component_df = |term: &str| if component_scoring { shard_ref.get_ngram_component_df(term) } else { 0 };
@@ -1896,7 +1899,7 @@ impl SearchLexicalShard for ShardArc {
                                             || shard_ref.meta.lexical_similarity
                                                 == LexicalSimilarity::Bm25fProximity
                                         {
-                                            idf = (((shard_ref.indexed_doc_count as f32
+                                            idf = (((shard_ref.scoring_count() as f32
                                                 - posting_count as f32
                                                 + 0.5)
                                                 / (posting_count as f32 + 0.5))
@@ -1906,35 +1909,35 @@ impl SearchLexicalShard for ShardArc {
                                             || non_unique_term.ngram_type == NgramType::NgramRF
                                             || non_unique_term.ngram_type == NgramType::NgramFR
                                         {
-                                            idf_ngram1 = (((shard_ref.indexed_doc_count as f32
+                                            idf_ngram1 = (((shard_ref.scoring_count() as f32
                                                 - posting_count_ngram_1 as f32
                                                 + 0.5)
                                                 / (posting_count_ngram_1 as f32 + 0.5))
                                                 + 1.0)
                                                 .ln();
 
-                                            idf_ngram2 = (((shard_ref.indexed_doc_count as f32
+                                            idf_ngram2 = (((shard_ref.scoring_count() as f32
                                                 - posting_count_ngram_2 as f32
                                                 + 0.5)
                                                 / (posting_count_ngram_2 as f32 + 0.5))
                                                 + 1.0)
                                                 .ln();
                                         } else {
-                                            idf_ngram1 = (((shard_ref.indexed_doc_count as f32
+                                            idf_ngram1 = (((shard_ref.scoring_count() as f32
                                                 - posting_count_ngram_1 as f32
                                                 + 0.5)
                                                 / (posting_count_ngram_1 as f32 + 0.5))
                                                 + 1.0)
                                                 .ln();
 
-                                            idf_ngram2 = (((shard_ref.indexed_doc_count as f32
+                                            idf_ngram2 = (((shard_ref.scoring_count() as f32
                                                 - posting_count_ngram_2 as f32
                                                 + 0.5)
                                                 / (posting_count_ngram_2 as f32 + 0.5))
                                                 + 1.0)
                                                 .ln();
 
-                                            idf_ngram3 = (((shard_ref.indexed_doc_count as f32
+                                            idf_ngram3 = (((shard_ref.scoring_count() as f32
                                                 - posting_count_ngram_3 as f32
                                                 + 0.5)
                                                 / (posting_count_ngram_3 as f32 + 0.5))
@@ -2213,14 +2216,16 @@ impl SearchLexicalShard for ShardArc {
                     .truncate(search_result.topk_candidates.current_heap_size);
             }
             if result_sort.is_empty() {
-                if query_string.is_empty() {
+                if shard_ref.active.is_some() {
+                    result_object.results.sort_by(|a, b| shard_ref.rank(b.score, b.doc_id, a.score, a.doc_id));
+                } else if query_string.is_empty() {
                     result_object
                         .results
                         .sort_by_key(|b| cmp::Reverse(b.doc_id));
                 } else {
                     result_object
                         .results
-                        .sort_by(|a, b| rank_ordering(b.score, b.doc_id, a.score, a.doc_id));
+                        .sort_by(|a, b| shard_ref.rank(b.score, b.doc_id, a.score, a.doc_id));
                 }
             } else {
                 result_object

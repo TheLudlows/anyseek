@@ -151,6 +151,9 @@ impl Shard {
             self.last_level_docstore_file_start_pos = self.docstore_file.stream_position()?;
         };
 
+        // Extending a complete previous block also grows the file. Release
+        // that mapping before writes, not only before incomplete-block truncate.
+        self.index_file_mmap = MmapOptions::new().len(1).map_anon()?.make_read_only()?;
         if self.committed_doc_count / ROARING_BLOCK_SIZE == 0 {
             write_u16(
                 self.longest_field_id as u16,

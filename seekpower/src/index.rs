@@ -867,6 +867,7 @@ pub struct Shard {
 
     pub(crate) delete_file: File,
     pub(crate) delete_hashset: AHashSet<usize>,
+    pub(crate) active: Option<crate::active::ActiveStatistics>,
 
     pub(crate) index_file: File,
     pub(crate) index_path_string: String,
@@ -1699,6 +1700,7 @@ pub(crate) fn create_shard(
                 docstore_file,
                 delete_file,
                 delete_hashset: AHashSet::new(),
+                active: None,
                 index_file,
                 index_path_string: index_path_string.to_owned(),
                 index_file_mmap,
@@ -1902,8 +1904,11 @@ pub(crate) fn get_max_score(
     // A representative selected under an earlier average length is not a
     // score upper bound after append/reopen. Use BM25's analytic saturation
     // bound, independent of document lengths and stored representatives.
-    let n = index.indexed_doc_count as f32;
-    let idf = |df: u32| (1.0 + (n - df as f32 + 0.5) / (df as f32 + 0.5)).ln().max(0.0);
+    let n = index.scoring_count() as f32;
+    let idf = |df: u32| {
+        let df = if index.active.is_some() { 0 } else { df };
+        (1.0 + (n - df as f32 + 0.5) / (df as f32 + 0.5)).ln().max(0.0)
+    };
     let whole = idf(posting_count) as f64;
     let component_sum = match ngram_type {
         NgramType::SingleTerm => 0.0,
@@ -3454,6 +3459,11 @@ impl IndexDocumentShard2 for ShardArc {
         shard_mut.invalidate_frequentword_results();
 
 
+        if let Some(active) = &mut shard_mut.active {
+            active.insert(docid_local,
+                document_item.unique_terms.values().map(|term| term.key_hash).collect(),
+                document_item.field_vec.iter().map(|value| (value.0, value.2)).collect());
+        }
         let mut longest_field_id: usize = 0;
         let mut longest_field_length: u32 = 0;
         for value in document_item.field_vec {
@@ -3501,7 +3511,7 @@ impl IndexDocumentShard2 for ShardArc {
             shard_mut.store_document(docid_local, document_item.document);
         }
 
-        if do_commit {
+        if do_commit && shard_mut.active.is_none() {
             drop(shard_mut);
             warmup(self).await;
         }

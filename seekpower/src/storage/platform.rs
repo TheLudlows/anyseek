@@ -25,6 +25,8 @@ pub(super) fn publish_directory(prepared: &Path, target: &Path) -> Result<(), Pu
     {
         fs::File::open(prepared)?.sync_all()?;
         fs::rename(prepared, target).map_err(PublishError::RenameAttempted)?;
+        #[cfg(test)]
+        fail_after_rename()?;
         fs::File::open(
             target
                 .parent()
@@ -60,6 +62,8 @@ pub(super) fn publish_directory(prepared: &Path, target: &Path) -> Result<(), Pu
         {
             return Err(PublishError::RenameAttempted(io::Error::last_os_error()));
         }
+        #[cfg(test)]
+        fail_after_rename()?;
         Ok(())
     }
     #[cfg(not(any(unix, windows)))]
@@ -70,4 +74,14 @@ pub(super) fn publish_directory(prepared: &Path, target: &Path) -> Result<(), Pu
         )
         .into())
     }
+}
+
+#[cfg(test)]
+fn fail_after_rename() -> Result<(), PublishError> {
+    if std::env::var("SEEKPOWER_PUBLISH_FAIL").as_deref() == Ok("after_rename") {
+        return Err(PublishError::RenameAttempted(io::Error::other(
+            "injected post-rename synchronization failure",
+        )));
+    }
+    Ok(())
 }

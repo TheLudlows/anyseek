@@ -3,3 +3,5 @@
 
 pub(crate) mod journal;
 mod platform;
+
+pub(crate) mod partition;

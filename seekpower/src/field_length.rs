@@ -18,6 +18,9 @@ impl Shard {
     }
     #[inline(always)]
     pub(crate) fn length_component(&self, field_id: usize, code: u8) -> f32 {
+        if let Some(component) = self.active_component(field_id, code) {
+            return component;
+        }
         match self.meta.field_length_normalization {
             FieldLengthNormalization::Shared => self.bm25_component_cache[code as usize],
             FieldLengthNormalization::PerField => {
@@ -27,6 +30,9 @@ impl Shard {
     }
     #[inline(always)]
     pub(crate) fn field_length_average(&self, field_id: usize, shared: f32) -> f32 {
+        if let Some(average) = self.active_average(field_id) {
+            return average;
+        }
         if self.meta.field_length_normalization == FieldLengthNormalization::Shared {
             return shared;
         }
