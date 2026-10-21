@@ -1,6 +1,6 @@
 # Issue #57 implementation record
 
-Status: **in progress — P1-A is not complete**. Baseline:
+Status: **bounded P1-A implementation and native process-recovery validation complete; host/power-failure qualification pending**. Baseline:
 `fc4fcfe64fdf86d03c07f82cf1d4889deb896801` (#56, #58, #59 included; #60 excluded).
 Working branch: `feat/57-reliable-record-engine`. Branch push and Linux/Windows CI are authorized. PR, merge, deployment and issue edits are not.
 
@@ -12,7 +12,7 @@ remains in [VALIDATION](../VALIDATION.md).
 ## Current checkpoint — complete service backup and safe new-root recovery
 
 Status: implementation complete for the defined bounded P1-A slice; final-source
-local regression and native CI are being completed. System/power-loss acceptance
+local regression and Linux/Windows native CI passed. System/power-loss acceptance
 remains **not run**, so this is not an unrestricted reliability release claim.
 Parent checkpoint `9ebd0bd8e47f15fed057624c4bd3e1c937d6b0ee` passed all jobs in
 [run 39543087466](https://github.com/TheLudlows/seekpower/actions/runs/39543087466).
@@ -39,6 +39,26 @@ Corrected-source local full suite: **163 passed, 0 failed, 10 ignored, 35 suites
 default and fault-feature builds plus real HTTP/Chromium passed. Logs use prefix
 `/tmp/seekpower-service-backup-windows-final-` (`tests.log`, `e2e.log`, `faults.log`).
 Static review found no blocker; corrected-SHA Windows execution remains pending.
+
+Final implementation SHA: `b5cc072bf686e4b8f062a5cde144d837f52c40bd`.
+[Run 39545366574](https://github.com/TheLudlows/seekpower/actions/runs/39545366574)
+completed **success**: Linux build/Chromium/full suite, Linux native persistence
+and real HTTP faults, Windows native persistence and real HTTP faults. This
+includes the previously failing Windows full-service snapshot and new deep-path
+fixture. Job logs identify Linux 6.17.0-1022-azure on `/dev/sda1` ext4 and Windows
+Server 2025 / 10.0.26100 on D: NTFS. The preceding “pending” notes are historical
+checkpoints; this paragraph records their final result. This final documentation
+update does not change production code or tests.
+
+| Defined P1-A acceptance item | Result |
+| --- | --- |
+| Incremental durable+visible Record path, versions/ABA, operation retry and active statistics | Passed local full suite and both native platforms |
+| Default HTTP/UI, shared keys, revocation publication/output barriers | Passed real HTTP on Linux/Windows; Chromium on Linux |
+| Iterator, deletion planning/batch, collection retirement, local snapshot retirement | Passed lifecycle and restart tests |
+| Live checkpoint/WAL retirement and bounded resource admission | Passed native persistence/process tests; declared limits remain enforced |
+| Service-root interrupted initialization and complete service/catalog backup/new-root recovery | Passed real HTTP, independent review and process-fault matrix on both platforms |
+| Original data/configuration/operation history and authorization-safe recovery | Passed restore, old-key denial, historical-control conflict, used-target retry and content-binding tests |
+| Host/filesystem crash and power-loss witness matrix | **Not run — environment required** |
 
 ### Scope and protocol
 
