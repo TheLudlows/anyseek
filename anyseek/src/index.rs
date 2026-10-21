@@ -1119,13 +1119,13 @@ pub(crate) async fn create_index_root(
     let segment_number_mask1 = (1u32 << segment_number_bits1) - 1;
 
     let index_path_buf = index_path.to_path_buf();
-    let index_path_string = index_path_buf.to_str().unwrap();
+    let index_path_string = index_path_buf.to_str().ok_or_else(|| "index path must be UTF-8".to_string())?;
 
     if !index_path.exists() {
         if !mute {
             log::info!("index path created: {} ", index_path_string);
         }
-        fs::create_dir_all(index_path).unwrap();
+        fs::create_dir_all(index_path).map_err(|e| format!("cannot create index directory: {e}"))?;
     }
 
     match File::options()
@@ -1301,6 +1301,11 @@ pub(crate) async fn create_index_root(
                     let turbo_quant_clone = turbo_quant.clone();
                     result_object_list.push(tokio::spawn(async move {
                         let shard_path = index_path_clone2.join("shards").join(i.to_string());
+                        #[cfg(test)]
+                        if shard_path.join(".test-builder-wait").exists() {
+                            std::fs::write(shard_path.join(".test-builder-entered"),b"entered").map_err(|e|e.to_string())?;
+                            while shard_path.join(".test-builder-wait").exists() {tokio::task::yield_now().await;}
+                        }
                         let mut shard_meta = meta_clone.clone();
                         shard_meta.id = i as u64;
 
@@ -1312,8 +1317,7 @@ pub(crate) async fn create_index_root(
                             segment_number_bits1,
                             mute,
                             longest_field_id_option,
-                        )
-                        .unwrap();
+                        )?;
                         shard.shard_number = shard_number;
                         shard.vector_dimensions = vector_dimensions;
                         shard.vector_dimensions_original = vector_dimensions_original;
@@ -1326,13 +1330,20 @@ pub(crate) async fn create_index_root(
                         shard.turbo_quant = turbo_quant_clone;
 
                         let shard_arc = Arc::new(RwLock::new(shard));
-                        (shard_arc, i)
+                        Ok::<_,String>((shard_arc, i))
                     }));
                 }
-                for result_object_shard in result_object_list {
-                    let ro_shard = result_object_shard.await.unwrap();
-                    shard_vec.push(ro_shard.0);
+                // Drain all accepted builders on failure; do not leave sibling
+                // mutations running after their parent returns an error.
+                let mut failure=None;
+                for task in result_object_list {
+                    match task.await {
+                        Ok(Ok((shard,_)))=>shard_vec.push(shard),
+                        Ok(Err(error))=>{failure.get_or_insert(error);},
+                        Err(error)=>{failure.get_or_insert_with(||format!("index builder failed: {error}"));},
+                    }
                 }
+                if let Some(error)=failure{return Err(error);}
             }
 
             let mut index = Index {
@@ -1373,7 +1384,7 @@ pub(crate) async fn create_index_root(
                 turbo_quant,
             };
 
-            let file_len = index.index_file.metadata().unwrap().len();
+            let file_len = index.index_file.metadata().map_err(|e| format!("cannot stat index: {e}"))?.len();
             if file_len == 0 {
                 write_u16(
                     INDEX_FORMAT_VERSION_MAJOR,
@@ -1385,9 +1396,9 @@ pub(crate) async fn create_index_root(
                     &mut index.compressed_index_segment_block_buffer,
                     2,
                 );
-                let _ = index.index_file.write(
+                index.index_file.write_all(
                     &index.compressed_index_segment_block_buffer[0..INDEX_HEADER_SIZE as usize],
-                );
+                ).map_err(|e|format!("cannot write index header: {e}"))?;
             } else {
                 index.index_file.read_exact(
                     &mut index.compressed_index_segment_block_buffer[0..INDEX_HEADER_SIZE as usize],
@@ -1417,16 +1428,14 @@ pub(crate) async fn create_index_root(
 
             if serialize_schema {
                 serde_json::to_writer(
-                    &File::create(Path::new(index_path).join(SCHEMA_FILENAME)).unwrap(),
+                    &File::create(Path::new(index_path).join(SCHEMA_FILENAME)).map_err(|e|e.to_string())?,
                     &schema,
-                )
-                .unwrap();
+                ).map_err(|e|e.to_string())?;
 
                 serde_json::to_writer(
-                    &File::create(Path::new(index_path).join(META_FILENAME)).unwrap(),
+                    &File::create(Path::new(index_path).join(META_FILENAME)).map_err(|e|e.to_string())?,
                     &index.meta,
-                )
-                .unwrap();
+                ).map_err(|e|e.to_string())?;
             }
 
             let index_arc = Arc::new(RwLock::new(index));
@@ -1461,10 +1470,10 @@ pub(crate) fn create_shard(
     let segment_number_mask1 = (1u32 << segment_number_bits1) - 1;
 
     let index_path_buf = index_path.to_path_buf();
-    let index_path_string = index_path_buf.to_str().unwrap();
+    let index_path_string = index_path_buf.to_str().ok_or_else(|| "index path must be UTF-8".to_string())?;
 
     if !index_path.exists() {
-        fs::create_dir_all(index_path).unwrap();
+        fs::create_dir_all(index_path).map_err(|e| format!("cannot create index directory: {e}"))?;
     }
 
     match File::options()
@@ -1481,7 +1490,7 @@ pub(crate) fn create_shard(
                 .create(true)
                 .truncate(false)
                 .open(Path::new(index_path).join(DOCSTORE_FILENAME))
-                .unwrap();
+                .map_err(|e| format!("cannot open {}: {e}", DOCSTORE_FILENAME))?;
 
             let delete_file = File::options()
                 .read(true)
@@ -1489,7 +1498,7 @@ pub(crate) fn create_shard(
                 .create(true)
                 .truncate(false)
                 .open(Path::new(index_path).join(DELETE_FILENAME))
-                .unwrap();
+                .map_err(|e| format!("cannot open {}: {e}", DELETE_FILENAME))?;
 
             let facets_file = File::options()
                 .read(true)
@@ -1497,7 +1506,7 @@ pub(crate) fn create_shard(
                 .create(true)
                 .truncate(false)
                 .open(Path::new(index_path).join(FACET_FILENAME))
-                .unwrap();
+                .map_err(|e| format!("cannot open {}: {e}", FACET_FILENAME))?;
 
             let vector_file = File::options()
                 .read(true)
@@ -1505,7 +1514,7 @@ pub(crate) fn create_shard(
                 .create(true)
                 .truncate(false)
                 .open(Path::new(index_path).join(VECTOR_FILENAME))
-                .unwrap();
+                .map_err(|e| format!("cannot open {}: {e}", VECTOR_FILENAME))?;
 
             let mut document_length_compressed_array: Vec<[u8; ROARING_BLOCK_SIZE]> = Vec::new();
             let mut indexed_field_vec: Vec<IndexedField> = Vec::new();
@@ -1588,8 +1597,8 @@ pub(crate) fn create_shard(
 
             let index_file_mmap;
             let docstore_file_mmap = {
-                index_file_mmap = unsafe { Mmap::map(&index_file).expect("Unable to create Mmap") };
-                unsafe { Mmap::map(&docstore_file).expect("Unable to create Mmap") }
+                index_file_mmap = unsafe { Mmap::map(&index_file).map_err(|e| format!("cannot map index: {e}"))? };
+                unsafe { Mmap::map(&docstore_file).map_err(|e| format!("cannot map docstore: {e}"))? }
             };
 
             if !facets_vec.is_empty()
@@ -1607,19 +1616,19 @@ pub(crate) fn create_shard(
             }
 
             let facets_file_mmap = if !facets_vec.is_empty() {
-                if facets_file.metadata().unwrap().len() == 0 {
+                if facets_file.metadata().map_err(|e| format!("cannot stat facets: {e}"))?.len() == 0 {
                     facets_file
-                        .set_len((facets_size_sum * ROARING_BLOCK_SIZE) as u64)
-                        .expect("Unable to set len");
+                        .set_len(facets_size_sum.checked_mul(ROARING_BLOCK_SIZE).and_then(|n|u64::try_from(n).ok()).ok_or_else(||"facet allocation overflow".to_string())?)
+                        .map_err(|e| format!("cannot extend facets: {e}"))?;
                 }
 
-                unsafe { MmapMut::map_mut(&facets_file).expect("Unable to create Mmap") }
+                unsafe { MmapMut::map_mut(&facets_file).map_err(|e| format!("cannot map facets: {e}"))? }
             } else {
-                unsafe { MmapMut::map_mut(&facets_file).expect("Unable to create Mmap") }
+                unsafe { MmapMut::map_mut(&facets_file).map_err(|e| format!("cannot map facets: {e}"))? }
             };
 
             let vector_file_mmap =
-                unsafe { Mmap::map(&vector_file).expect("Unable to create Mmap") };
+                unsafe { Mmap::map(&vector_file).map_err(|e| format!("cannot map vector file: {e}"))? };
 
             let facets_len = facets_vec.len();
 
@@ -1795,7 +1804,7 @@ pub(crate) fn create_shard(
                 turbo_quant: TurboQuant::new(0, 1234),
             };
 
-            let file_len = index.index_file.metadata().unwrap().len();
+            let file_len = index.index_file.metadata().map_err(|e| format!("cannot stat index: {e}"))?.len();
             if file_len == 0 {
                 write_u16(
                     INDEX_FORMAT_VERSION_MAJOR,
@@ -1807,9 +1816,9 @@ pub(crate) fn create_shard(
                     &mut index.compressed_index_segment_block_buffer,
                     2,
                 );
-                let _ = index.index_file.write(
+                index.index_file.write_all(
                     &index.compressed_index_segment_block_buffer[0..INDEX_HEADER_SIZE as usize],
-                );
+                ).map_err(|e|format!("cannot write index header: {e}"))?;
             } else {
                 index.index_file.read_exact(
                     &mut index.compressed_index_segment_block_buffer[0..INDEX_HEADER_SIZE as usize],
@@ -1855,16 +1864,14 @@ pub(crate) fn create_shard(
 
             if serialize_schema {
                 serde_json::to_writer(
-                    &File::create(Path::new(index_path).join(SCHEMA_FILENAME)).unwrap(),
+                    &File::create(Path::new(index_path).join(SCHEMA_FILENAME)).map_err(|e|e.to_string())?,
                     &schema,
-                )
-                .unwrap();
+                ).map_err(|e|e.to_string())?;
 
                 serde_json::to_writer(
-                    &File::create(Path::new(index_path).join(META_FILENAME)).unwrap(),
+                    &File::create(Path::new(index_path).join(META_FILENAME)).map_err(|e|e.to_string())?,
                     &index.meta,
-                )
-                .unwrap();
+                ).map_err(|e|e.to_string())?;
             }
 
             Ok(index)

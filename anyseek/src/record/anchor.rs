@@ -334,6 +334,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_index_file_creation_returns_error_and_drains_builders() {
+        use crate::index::{INDEX_FILENAME,INDEX_FORMAT_VERSION_MAJOR,INDEX_FORMAT_VERSION_MINOR,DOCSTORE_FILENAME,VECTOR_FILENAME,SCHEMA_FILENAME};
+        for blocked in [DOCSTORE_FILENAME,VECTOR_FILENAME,SCHEMA_FILENAME] {
+            let root=path();let shard=root.join("shards/0");std::fs::create_dir_all(&shard).unwrap();
+            let header=[INDEX_FORMAT_VERSION_MAJOR.to_le_bytes(),INDEX_FORMAT_VERSION_MINOR.to_le_bytes()].concat();
+            std::fs::write(root.join(INDEX_FILENAME),&header).unwrap();std::fs::write(shard.join(INDEX_FILENAME),&header).unwrap();
+            std::fs::create_dir(shard.join(blocked)).unwrap();
+            let sibling=root.join("shards/1");std::fs::create_dir_all(&sibling).unwrap();
+            std::fs::write(sibling.join(INDEX_FILENAME),&header).unwrap();
+            std::fs::write(sibling.join(".test-builder-wait"),b"hold accepted sibling").unwrap();
+            let target=root.clone();let cfg=config();
+            let mut task=tokio::spawn(async move {create_index(&target,cfg.index,&retrieval_schema(&config()),11,true,Some(2)).await});
+            tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                while !sibling.join(".test-builder-entered").exists(){tokio::task::yield_now().await;}
+            }).await.unwrap();
+            // A real gate holds the successful sibling after the failing
+            // shard was accepted. The parent must not return while it is held.
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(25),&mut task).await.is_err());
+            std::fs::remove_file(sibling.join(".test-builder-wait")).unwrap();
+            let result=task.await;
+            assert!(matches!(result,Ok(Err(_))),"{blocked}: builder must return an error, not panic");
+            // The other accepted builder has completed before the error returns.
+            assert!(sibling.join(SCHEMA_FILENAME).is_file());
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn empty_tail_does_not_preallocate_dictionary_buckets() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         let inner=p.inner.lock().await;let index=inner.index.test_index().read().await;

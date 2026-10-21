@@ -1,6 +1,6 @@
 # A 批实施设计：本地不可变 Segment、发布与安全回收
 
-状态：实施中，尚未完成 A 批；实际检查点见 §11–17。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
+状态：实施中，尚未完成 A 批；实际检查点见 §11–18。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
 
 ## 1. 交付和不做的事
 
@@ -183,3 +183,11 @@ active Record 路径的显式 `_id` 排序现在在局部 Top-K 和 root 都使�
 验证包括十轮新增/修订/flush/reopen、跨轮旧文件校验和不变、超过段数阈值 compaction、全文/向量/混合评分与共同 oracle、tail 重试、选中段损坏关闭服务；另覆盖旧段与 tail 的同 version 向量 patch 后来源级联失效、flush/reopen 不复活及 feed 不增加业务事件。
 
 **仍需完成**：当前全量 compaction 在持有 partition 执行屏障时进行，不宣称后台无停顿；逐段文件验收预算不是整个构建过程硬内存/磁盘限额。原文 State 仍驻内存，备份保持独立 inline 权威状态。全过程资源预算与失败回归仍是 A 的未完成验收项；Windows 原生、系统断电未运行。最终源码 Linux：`cargo test --workspace --features server --all-targets` 34 suites、250 passed、0 failed、10 ignored；`cargo test --doc` 44 passed；带 `server,fault-injection` 构建成功；真实 HTTP/Chromium `--browser --faults` 退出 0、34 PASS。十个忽略项归属不变。日志为 `a-multisegment-final-full.log`、`a-multisegment-doc.log`、`a-multisegment-build.log`、`a-multisegment-http-browser-faults.log`。独立审查未发现新阻塞，建议的同 version 向量补写/来源失效交错已补入最终回归。
+
+## 18. A 构建资源失败前置修复（本地验证完成）
+
+`create_index_root/create_shard` 的目录、docstore/delete/facet/vector 文件打开、metadata、mmap 及 schema/meta 序列化失败改为 `Result`；索引头使用 `write_all` 并传播失败，不再忽略短写。并行 shard 构建失败后收集错误并等待全部已接受任务结束，避免调用方清理候选目录时仍有兄弟任务写入。
+
+临时数据测试分别用目录占据 docstore、vector、schema 文件路径，验证错误正常返回而非 panic。第一 shard 失败时通过测试专用 gate 阻塞第二 shard，父调用必须等待 gate 释放、第二 shard 完成后才返回；关闭后删除目录验证句柄生命周期。该 gate 不进入生产构建。
+
+本步骤仅修复错误传播，**不是全过程资源预算已完成**。内存分配 abort、tokenizer/term/posting 的增长预留、文件扩展前统一扣账及发布峰值仍需接通。受控分配请求与逻辑文件长度预算也不等于进程 RSS 或文件系统实际占用上限。最终源码 Linux 验证：`cargo test --workspace --features server --all-targets` 为 34 suites、251 passed、0 failed、10 ignored；`cargo test --doc` 为 44 passed；`cargo build --features server,fault-injection --bin anyseek_server` 成功；真实 HTTP/Chromium `--browser --faults` 退出 0、34 PASS。十个忽略项归属与前述一致。独立审查提出的兄弟任务等待验证已用 gate 回归补齐。日志：`a-resource-io-final-full.log`、`a-resource-io-doc.log`、`a-resource-io-build.log`、`a-resource-io-http-browser-faults.log`。Windows 原生及系统崩溃/断电仍未运行。
