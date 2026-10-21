@@ -99,3 +99,15 @@ A 可开始设计内分批实现，但不得绕过当前主干 CI 失败的诊�
 ## 10. 设计检查点
 
 独立只读审查后明确：搜索与原始读取投影分离；持久后应用失败封锁读写；默认多段查询启用必须晚于最小发布/恢复骨架。文档链接与 `git diff --check` 通过，仅设计和导航变更。PR #70 Windows run 39623397174 已观察到多批 generation 故障重启时内存分配失败，两个 Linux job 通过；新 master run 39623936785 尚在运行，需独立诊断，不把本设计当作该问题修复。
+
+## 11. A 前置实现检查点：移除检索 JSON 副本
+
+本地 `feat/57-a-segments`，设计提交 `780372fb6de71fd3c38bfc601ccc063ef42520fd` 后开始代码。`record.rs::retrieval_schema` 仅关闭派生索引的 store，原始配置保持不变；默认 Record 查询从权威 State 回表，HTTP 仍用原 schema.store/fields 投影。独立低层 Index API 不改。不存在存储格式迁移，恢复仍按既有权威日志重建当前派生索引。
+
+新增真实 Record 测试覆盖 store:true 的正文/向量、额外未索引字段、全文/向量检索、checkpoint/reopen、原操作回执；确认原始向量不被归一化副本替代，派生索引 stored_field_names 为空。独立审查通过。最终代码 Linux：`cargo test --workspace --features server --all-targets` 为 34 suites、227 passed、0 failed、10 ignored；`cargo build --features server --bin anyseek_server` 成功；`record_service_smoke.py --browser` 26 个 PASS 检查点；文档链接/diff 检查通过。十个 ignored 仍为九个父测试进程 worker 和一个异构 AES fixture，并未视作全部运行。
+
+仅为去冗余前置，尚未实现 Segment codec/PayloadRef、manifest、多段 tail、compaction 或 GC，不宣称 A1/A 完成。此次未重跑 fault-injection HTTP，Windows/容器/系统断电未运行；后续实际持久化改动必须完整故障矩阵。本次修改不修复或宣称消除下述 Windows 失败。
+
+### 独立的合入主干 CI 结果
+
+PR #70 的 head `2b69cb83fa344ebefaa151d6f993ef87b672a0df` / run [39623397174](https://github.com/TheLudlows/anyseek/actions/runs/39623397174)，及 master `f73d3eb27ff4bf97149031069f49cac3e01966ab` / run [39623936785](https://github.com/TheLudlows/anyseek/actions/runs/39623936785)，均为 build-and-smoke、Ubuntu 原生成功，Windows 原生失败。两次均在真实 HTTP 故障矩阵重新启动服务时报告 `memory allocation of 329744 bytes failed`；PR 是 `record_upload_smoke.py:53`，master 是 `record_lease_smoke.py:59`，调用 `record_service_smoke.py:25` 检测进程退出。说明实际分配失败，尚未证明根因；需分别测量多 collection 恢复的资源峰值和 runner 提交内存，不能无证据归为偶发。没有重跑、改主干或降低覆盖。

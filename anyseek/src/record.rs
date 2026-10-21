@@ -555,6 +555,14 @@ async fn detach(index: &IndexArc) {
         shard.write().await.index_option = None;
     }
 }
+// Search files contain candidates and scoring data, never a second copy of
+// authoritative Record JSON. Public schema.store still controls HTTP projection.
+fn retrieval_schema(config: &RecordConfig) -> Vec<SchemaField> {
+    let mut schema = temporal::schema(config);
+    for field in &mut schema { field.store = false; }
+    schema
+}
+
 async fn build(
     path: &Path,
     config: &RecordConfig,
@@ -564,7 +572,7 @@ async fn build(
     let index = create_index(
         &cache,
         config.index.clone(),
-        &temporal::schema(config),
+        &retrieval_schema(config),
         11,
         true,
         Some(1),
@@ -1231,6 +1239,43 @@ mod tests {
             .await
             .unwrap()
     }
+    #[tokio::test]
+    async fn record_retrieval_files_do_not_duplicate_authoritative_json() {
+        let location = path();
+        let mut settings = config();
+        for field in &mut settings.schema { field.store = true; }
+        let p = RecordPartition::create(&location, settings.clone()).await.unwrap();
+        let request = write("unique-payload", "a", "alpha", ExpectedVersion::Absent);
+        let original = request.document.clone().unwrap();
+        let receipt = p.write(request.clone()).await.unwrap();
+        for checkpoint in [false, true] {
+            if checkpoint { p.compact_journal().await.unwrap(); }
+            let inner = p.inner.lock().await;
+            let index = inner.index.read().await;
+            assert!(index.stored_field_names.is_empty());
+            for shard in &index.shard_vec {
+                assert!(shard.read().await.stored_field_names.is_empty());
+            }
+            drop(index);
+            drop(inner);
+            assert_eq!(p.get("a").await.unwrap().unwrap().document.as_ref(), Some(&original));
+            let result = query(&p, SearchMode::Lexical).await;
+            assert_eq!(result.hits.len(), 1);
+            assert_eq!(result.hits[0].record.document.as_ref(), Some(&original));
+            assert_eq!(p.configuration().await.unwrap().schema[0].store, true);
+        }
+        drop(p);
+        let p = RecordPartition::open(&location, settings.max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(request).await.unwrap(), receipt);
+        assert_eq!(p.get("a").await.unwrap().unwrap().document.as_ref(), Some(&original));
+        assert!(p.inner.lock().await.index.read().await.stored_field_names.is_empty());
+        let result = query(&p, SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All }).await;
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].record.document.as_ref(), Some(&original));
+        drop(p);
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
     fn generation_write(nonce: &str, expected: ExpectedVersion, generation: GenerationCommand) -> RecordWrite {
         RecordWrite { operation_id:OperationId::new(nonce.into()), record_id:"doc".into(), routing_key:"document-1".into(),
             expected, document:None, vector_patch:None, system:None, temporal:None, generation:Some(generation) }
