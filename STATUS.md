@@ -13,4 +13,4 @@
 
 不将 #57、全部 P1/P2 或生产可靠性标为完成。不提供模型推理、解析切块、SQL/JOIN、完整图语言、旧格式升级迁移。PR #60 不在基线中；#57 保持开放。
 
-当前能力见 [FEATURES](FEATURES.md)，使用方法见 [服务指南](anyseek_server/README.md)，开发验证见 [开发指南](docs/development.md)。历史合入与测试总数保存在 [早期状态](docs/history/early-status.md)、[历史验证](VALIDATION.md) 和各阶段记录中，不覆盖它们当时的事实。
+当前能力见 [FEATURES](FEATURES.md)，使用方法见 [服务指南](anyseek/server/README.md)，开发验证见 [开发指南](docs/development.md)。历史合入与测试总数保存在 [早期状态](docs/history/early-status.md)、[历史验证](VALIDATION.md) 和各阶段记录中，不覆盖它们当时的事实。

@@ -38,7 +38,7 @@ jobs:
         run: python3 scripts/check_docs_brand.py
       - name: Build retained workspace
         id: build
-        run: cargo build --workspace
+        run: cargo build --workspace --features server
       - name: Verify retired dependencies removed
         run: |
           cargo metadata --format-version 1 > /tmp/anyseek-metadata.json
@@ -65,7 +65,7 @@ jobs:
         run: python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
       - name: Existing core and server tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --features server --all-targets
       - name: Generate API reference
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
@@ -115,9 +115,9 @@ jobs:
       - name: Native catalog authorization and revocation recovery tests
         run: cargo test -p anyseek --lib catalog_
       - name: Native service output and admission barriers
-        run: cargo test -p anyseek_server record_service::tests
+        run: cargo test -p anyseek --features server record_service::tests
       - name: Build native service
-        run: cargo build -p anyseek_server
+        run: cargo build -p anyseek --features server
       - name: Native service HTTP and restart acceptance
         shell: bash
         run: |
@@ -127,7 +127,7 @@ jobs:
             python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
           fi
       - name: Build explicit fault-injection service (not release binary)
-        run: cargo build -p anyseek_server --features fault-injection
+        run: cargo build -p anyseek --features server,fault-injection
       - name: Native real HTTP process fault and recovery matrix
         shell: bash
         run: |

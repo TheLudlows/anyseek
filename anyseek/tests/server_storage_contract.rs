@@ -1,6 +1,7 @@
+#![cfg(feature = "server")]
 //! Retired storage options fail explicitly; retained API defaults are stable.
 use anyseek::index::{AccessType, Close, create_index, open_index};
-use anyseek_server::api_types::CreateIndexRequest;
+use anyseek::server::api_types::CreateIndexRequest;
 use serde_json::json;
 use std::{fs, path::Path};
 

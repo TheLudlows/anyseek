@@ -1,6 +1,6 @@
 //! HTTP contracts, including an optional vector-search probe budget.
-use crate::api_schema;
-use anyseek::{
+use super::api_schema;
+use crate::{
     index::{Document, FieldType, SchemaField, StopwordType, TokenizerType, TextNormalization},
     search::{FacetFilter, QueryType, ResultSort, ResultType, SearchMode},
     vector::{Inference, Precision, Quantization},
@@ -20,15 +20,15 @@ pub struct SearchRequestObject {
     /// Opt-in one-hop plus lexical/vector fusion, with explicit candidate windows.
     #[serde(default)]
     #[schema(value_type = Object)]
-    pub relation_fusion: Option<anyseek::record::RelationFusion>,
+    pub relation_fusion: Option<crate::record::RelationFusion>,
     /// UTC millisecond event/ingestion ranges and business-valid point.
     #[serde(default)]
     #[schema(value_type = Object)]
-    pub temporal: Option<anyseek::record::TemporalFilter>,
+    pub temporal: Option<crate::record::TemporalFilter>,
     /// Optional weighted RRF for text plus vector queries; ranks start at zero.
     #[serde(default, deserialize_with = "present_value", skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<api_schema::RrfOptions>, nullable = false)]
-    pub rrf: Option<anyseek::search::RrfOptions>,
+    pub rrf: Option<crate::search::RrfOptions>,
     /// Text query; supports +, - and quoted phrases. Omit for vector search or browsing.
     #[serde(default, rename = "query")]
     pub query_string: String,
@@ -215,7 +215,7 @@ pub struct CreateIndexRequest {
     /// At least seven-day change retention and hard admission budgets.
     #[serde(default)]
     #[schema(value_type = Object)]
-    pub change_feed: anyseek::record::FeedConfig,
+    pub change_feed: crate::record::FeedConfig,
     /// Name displayed in index listings.
     pub index_name: String,
     /// Explicit field definitions; names must be nonempty and unique.
@@ -232,7 +232,7 @@ pub struct CreateIndexRequest {
     /// Immutable length denominator policy; Shared is the default.
     #[serde(default)]
     #[schema(value_type = api_schema::FieldLengthNormalization)]
-    pub field_length_normalization: anyseek::index::FieldLengthNormalization,
+    pub field_length_normalization: crate::index::FieldLengthNormalization,
     /// Optional stopword removal; default None preserves all words.
     #[serde(default)]
     #[schema(value_type = api_schema::StopwordType)]
@@ -496,7 +496,7 @@ pub struct IndexResponseObject {
     /// Immutable length denominator policy; Shared is the default.
     #[serde(default)]
     #[schema(value_type = api_schema::FieldLengthNormalization)]
-    pub field_length_normalization: anyseek::index::FieldLengthNormalization,
+    pub field_length_normalization: crate::index::FieldLengthNormalization,
     /// Index ID within the authenticated key scope.
     pub id: u64,
     /// Display name.

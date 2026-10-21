@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y g++
 
 COPY . /anyseek
 
-RUN cargo build --release
+RUN cargo build --release --features server --bin anyseek_server
 
 FROM debian:bookworm-slim
 

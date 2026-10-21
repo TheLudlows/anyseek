@@ -1,11 +1,11 @@
 # anyseek Record HTTP 服务
 
-默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、受控接管、来源修订、generation 多批上传/整代发布、可选向量、TTL、feed、实体/关系融合及逐命中解释。系统崩溃/断电验收与 P3 持续回收仍未完成。[当前状态](../STATUS.md) 与 [阶段证据](../docs/implementation-57.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、受控接管、来源修订、generation 多批上传/整代发布、可选向量、TTL、feed、实体/关系融合及逐命中解释。系统崩溃/断电验收与 P3 持续回收仍未完成。[当前状态](../../STATUS.md) 与 [阶段证据](../../docs/implementation-57.md) 区分实现和验收。
 
 ## 构建与启动
 
 ```sh
-cargo build --workspace
+cargo build --workspace --features server
 export MASTER_KEY_SECRET='replace-with-your-private-secret'
 target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 ```
@@ -80,7 +80,7 @@ curl "$BASE/api/v1/index/demo/doc/welcome" -H "apikey: $API_KEY"
 
 文本选择 Lexical，单向量选择 Vector，文本加向量选择 Hybrid；`rrf` 提供加权融合和独立候选预算。空对象 `{}` 浏览活动记录，包括纯向量 collection；`length:0` 可仅统计词法/浏览结果。`count:false` 返回 `count_total:null`。默认返回 10 条，支持 offset、stored 字段投影、过滤和排序。查询字段投影只输出 schema 中 `store:true` 的字段；按 ID 读取和 iterator 可读取完整权威原始数据，并可显式投影。
 
-Vector/Hybrid 默认每 level 探测最多 `default_nprobe` 个簇，`nprobe` 可覆盖，`all:true` 扫描全部簇。`all:true` 与 `nprobe` 不可同时指定；这些参数必须伴随 query_vector。ANN/Hybrid 的 count_total 不是全库精确并集，候选窗口内按字段重排也不保证全库字段 Top-K。全簇扫描仍使用配置的存储精度/量化。默认值的历史校准见 [记录](../docs/ann-default-calibration.json)，不是本可靠服务的性能承诺。
+Vector/Hybrid 默认每 level 探测最多 `default_nprobe` 个簇，`nprobe` 可覆盖，`all:true` 扫描全部簇。`all:true` 与 `nprobe` 不可同时指定；这些参数必须伴随 query_vector。ANN/Hybrid 的 count_total 不是全库精确并集，候选窗口内按字段重排也不保证全库字段 Top-K。全簇扫描仍使用配置的存储精度/量化。默认值的历史校准见 [记录](../../docs/ann-default-calibration.json)，不是本可靠服务的性能承诺。
 
 POST `iterator` 接收 `{cursor?,length?,fields?}`，按稳定 ID 正向分页；写入改变 visible_seq 后继续旧 cursor 返回 409。旧 skip/take 双向 HTTP 协议不再支持，低层 Rust iterator 另有自己的 API。
 
@@ -120,20 +120,20 @@ Service archive/root 清理是明确的离线操作，不提供删除运行根�
 ## 开发验证
 
 ```sh
-cargo test --workspace --all-targets
+cargo test --workspace --features server --all-targets
 python3 scripts/check_core_boundary.py
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
 ```
 
-浏览器测试需 Python Playwright 和 Chromium。故障矩阵需先构建 `cargo build -p anyseek_server --features fault-injection`，再运行同一 smoke 脚本的 `--faults`。正常构建默认关闭故障注入。
+浏览器测试需 Python Playwright 和 Chromium。故障矩阵需先构建 `cargo build -p anyseek --features server,fault-injection`，再运行同一 smoke 脚本的 `--faults`。正常构建默认关闭故障注入。
 
 小型调用方示例使用 `scripts/anyseek_client.py`：设置 `ANYSEEK_API_KEY` 后运行 `python3 scripts/index_write_query_smoke.py --port 8080 --requests requests.json`；重复执行同一命令重试保存的请求，不生成新身份。旧 `http_smoke.py` 已由完整 Record smoke 取代。
 
-`generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。路由清单见 [FEATURES](../FEATURES.md)，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
+`generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。路由清单见 [FEATURES](../../FEATURES.md)，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
 
 ## 来源与证据
 
-当前来源、删除隐藏与接管已合入；历史平台结果与系统断电限制见 [实施记录](../docs/implementation-57-p2.md#12-来源证据删除切片本地实现等待用户检视)。
+当前来源、删除隐藏与接管已合入；历史平台结果与系统断电限制见 [实施记录](../../docs/implementation-57-p2.md#12-来源证据删除切片本地实现等待用户检视)。
 
 沿用 `POST /api/v1/index/{collection_id}/doc`，在完整 Record 请求上增加可选 `system`：
 
@@ -161,14 +161,14 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 
 使用 `POST /api/v1/takeovers`，请求为 `operation_id`、`source_collection_id`、新的 `collection_id` 和 `backup_id`。只接受当前服务中仍有完整权威历史的源及同谱系备份。此操作会永久关闭原 collection，目标追平最终封存水位，保留全部已确认写入，**不是回退到备份时点**；旧 grants 不复制。返回 `status:"active"`、`recovery:"final_sealed_waterline"` 和最终 certificate。
 
-Web UI 的 “Take over a collection” 输入同样字段，先保存请求，响应丢失/重载后原样重试。相同目标不得换源或备份；中断后服务按持久意图续办，目标认证前不开放。完整服务备份拒绝未完成接管。独立恢复目录（含空或纯普通记录备份）不能冒充当前删除权威；没有强制解除隔离、跨服务自动灾备或双活入口。详见 [接管边界与验证](../docs/implementation-57-p2.md#13-同服务受控接管恢复进行中)。
+Web UI 的 “Take over a collection” 输入同样字段，先保存请求，响应丢失/重载后原样重试。相同目标不得换源或备份；中断后服务按持久意图续办，目标认证前不开放。完整服务备份拒绝未完成接管。独立恢复目录（含空或纯普通记录备份）不能冒充当前删除权威；没有强制解除隔离、跨服务自动灾备或双活入口。详见 [接管边界与验证](../../docs/implementation-57-p2.md#13-同服务受控接管恢复进行中)。
 
 
 ### 可选向量与后补
 
 正文可先写入，不需零向量占位。沿用写入端点提交 `operation_id,record_id,routing_key,expected:{"Match":当前正文版本},vector_patch:{"vector":[2,0]}`，省略 document/system；仅填充尚未存在的 schema 向量字段。正文版本保持不变，提交序号推进；重复请求必须保留 operation_id。已删除、stale 或隔离 typed 记录不可补写，来源正文版本改变后旧请求冲突。
 
-状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[第 15 节实施记录](../docs/implementation-57-p2.md)。
+状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[第 15 节实施记录](../../docs/implementation-57-p2.md)。
 
 
 ### 文档 generation
@@ -179,7 +179,7 @@ Web UI 的 “Take over a collection” 输入同样字段，先保存请求，�
 - Publish/Abort：`{action:"publish"或"abort",generation_id}`，必须 Match control version。成功 staging 回执 `staged_only:true`，表示仅持久、不可搜索；首次 stage version 1，publish 后 version 2。替换前重新验证来源及最终依赖可见性。
 - `GET /api/v1/index/{id}/doc/{record_id}/generation` 只返回版本、active/staged 身份和成员数。已发布成员保持精确证据并支持向量后补；换代使旧代及其派生隐藏。Abort 释放未发布成员 ID，generation ID 不可复用。
 
-Web UI envelope 模式可运行上述流程并保存原操作重试。完整示例、预留预算、恢复与验证边界见[第 16 节实施记录](../docs/implementation-57-p2.md)。
+Web UI envelope 模式可运行上述流程并保存原操作重试。完整示例、预留预算、恢复与验证边界见[第 16 节实施记录](../../docs/implementation-57-p2.md)。
 
 ## 时间条件与不可逆 TTL
 
@@ -207,7 +207,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 时钟依赖可信系统 UTC。进程内 wall/monotonic 差异或对持久水位的回拨超过 5 分钟返回 `clock_uncertain`；小幅回拨钳制为进程内已观察时间或恢复后的已持久水位，不能复活墓碑。停机期间错误向前跳时无法由同一机器自身鉴别。旧备份中的 TTL/来源证据保持隔离，不推进归档权威状态；同服务受控接管复制最终完整状态和过期历史，再为新视图处理到期，不能强制解除历史不明的隔离。
 
-Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示实际评估时间。TTL 平台和故障验证证据见 [实施记录第 17 节](../docs/implementation-57-p2.md)。
+Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示实际评估时间。TTL 平台和故障验证证据见 [实施记录第 17 节](../../docs/implementation-57-p2.md)。
 
 
 ## change feed 与快照续传
@@ -218,7 +218,7 @@ Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示�
 
 创建 config 可携带 `change_feed:{retention_ms:604800000,max_events:100000,max_bytes:67108864}`。保留期至少七天；事件与紧急失效预留达到配额时新写入返回 429 `feed_full`，不会提前丢事件。既有 Record/journal 配额也继续有效。逻辑 feed 裁剪不删除原幂等账本，不等于 P3 物理历史回收。
 
-独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[实施记录第 18 节](../docs/implementation-57-p2.md)。当前主干验证结论见 [STATUS](../STATUS.md)，历史分支结果不能代替本次源码验证。
+独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[实施记录第 18 节](../../docs/implementation-57-p2.md)。当前主干验证结论见 [STATUS](../../STATUS.md)，历史分支结果不能代替本次源码验证。
 
 ## 实体与显式一跳关系
 
@@ -231,7 +231,7 @@ Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示�
 
 一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据和授权输出屏障与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
 
-关系与全文/向量同视图融合见后文；不提供模型实体消歧或完整图语言。测试状态见[实施记录第 19 节](../docs/implementation-57-p2.md#19-实体与显式一跳关系)。
+关系与全文/向量同视图融合见后文；不提供模型实体消歧或完整图语言。测试状态见[实施记录第 19 节](../../docs/implementation-57-p2.md#19-实体与显式一跳关系)。
 
 ## 精确来源摘录
 

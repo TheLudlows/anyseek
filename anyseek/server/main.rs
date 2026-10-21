@@ -3,7 +3,7 @@
 #![allow(clippy::approx_constant)]
 
 //! anyseek HTTP service and embedded search UI.
-//! Build from this repository; see anyseek_server/README.md for startup and authentication,
+//! Build from this repository; see anyseek/server/README.md for startup and authentication,
 //! FEATURES.md for the complete route inventory, and test_api.rest for HTTP examples.
 
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ pub static MASTER_KEY_SECRET: LazyLock<String> =
 
 #[doc(hidden)]
 mod operations;
-use anyseek_server::{api_schema, api_types};
+use anyseek::server::{api_schema, api_types};
 #[doc(hidden)]
 mod http_server;
 #[doc(hidden)]

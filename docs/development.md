@@ -1,14 +1,18 @@
 # anyseek 开发与验证
 
-核心位于 `anyseek/`，HTTP/OpenAPI/Web UI 位于 `anyseek_server/`。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端为 `TheLudlows/anyseek`。
+仅有一个 `anyseek` Cargo package：核心库位于 `anyseek/src/`，服务实现及 HTTP 契约位于 `anyseek/server/`，Web UI 位于 `anyseek/web/`。默认关闭 `server` feature；嵌入库不引入 HTTP/OpenAPI/服务日志依赖。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端为 `TheLudlows/anyseek`。
 
 ## 构建与测试
 
 从仓库根运行，使用已安装 Rust 工具链：
 
 ```sh
-cargo build --workspace
-cargo test --workspace --all-targets
+cargo check -p anyseek
+cargo check -p anyseek --no-default-features
+cargo build --workspace --features server
+cargo test --workspace --features server --all-targets
+cargo test -p anyseek --lib
+cargo test -p anyseek --no-default-features --lib
 cargo test --workspace --doc
 cargo doc --workspace --no-deps
 python3 scripts/check_core_boundary.py
@@ -25,11 +29,11 @@ python3 scripts/check_docs_brand.py
 python3 -m pip install playwright
 python3 -m playwright install chromium
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
-cargo build -p anyseek_server --features fault-injection
+cargo build -p anyseek --features server,fault-injection
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser --faults
 ```
 
-Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测试；测试后重新 `cargo build --workspace` 得到默认二进制。测试环境变量前缀为 `ANYSEEK_`（例如 `ANYSEEK_TEST_ROOT`、`ANYSEEK_BROWSER_TEST`）；正常服务主密钥仍为 `MASTER_KEY_SECRET`。
+Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测试；测试后重新 `cargo build --workspace --features server` 得到默认二进制。测试环境变量前缀为 `ANYSEEK_`（例如 `ANYSEEK_TEST_ROOT`、`ANYSEEK_BROWSER_TEST`）；正常服务主密钥仍为 `MASTER_KEY_SECRET`。
 
 ## API 与文档
 
@@ -37,7 +41,7 @@ Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测�
 target/debug/anyseek_server generate_openapi=true
 ```
 
-生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 归服务 crate；低层 Rust Index API 与默认 Record 服务的持久化契约不同。参见 [服务指南](../anyseek_server/README.md) 和 [Rust 示例](library-examples.md)。
+生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 归可选 `anyseek::server` 模块；低层 Rust Index API 与默认 Record 服务的持久化契约不同。参见 [服务指南](../anyseek/server/README.md) 和 [Rust 示例](library-examples.md)。
 
 ## 验证边界
 

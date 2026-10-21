@@ -6,7 +6,7 @@ anyseek 由 Rust 核心库和 HTTP/Web UI 服务组成。默认服务已接入 R
 
 | 层 | 代码 | 职责 |
 | --- | --- | --- |
-| UI | `anyseek_server/web/` | 创建/写入原请求保存与重试、搜索、分页、预览、日期过滤、服务备份恢复 |
+| UI | `anyseek/web/` | 创建/写入原请求保存与重试、搜索、分页、预览、日期过滤、服务备份恢复 |
 | 默认服务 | `record_service.rs`、`server.rs`、`main.rs` | HTTP 契约、身份入口、admission、响应授权屏障、启动恢复 |
 | 控制权威 | `catalog.rs`、`catalog/service_snapshot.rs` | key verifier、collection 生命周期、grant revision、控制回执和完整服务快照 |
 | 数据权威 | `record.rs` | 原始 Document/向量、稳定 ID、版本、墓碑、幂等、共同可见视图 |
@@ -52,4 +52,4 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 这是 P1-A 与 P2 的有界单机功能实现：Record 累计账本 10,000 项、完整 checkpoint 16 MiB 等限制见 [FEATURES](FEATURES.md)。checkpoint 回收旧 WAL 代，不等于持续账本/物理版本 GC。P2 的 source/evidence、generation、TTL、feed、显式关系和同视图融合已实现。系统断电验收、P3 不可变段和持续回收、SQLite 元数据协调、对象存储与分布式尚未完成。原生进程故障测试不能替代主机掉电验收。
 
-[实施和平台验证](docs/implementation-57.md) · [服务契约](anyseek_server/README.md) · [上游来源](UPSTREAM.md) · [许可](LICENSE)
+[实施和平台验证](docs/implementation-57.md) · [服务契约](anyseek/server/README.md) · [上游来源](UPSTREAM.md) · [许可](LICENSE)

@@ -1,5 +1,6 @@
+#![cfg(feature = "server")]
 //! Stored records remain lossless when presentation leaves the search core.
-use anyseek_server::api_types::{SearchRequestObject, GetDocumentRequest};
+use anyseek::server::api_types::{SearchRequestObject, GetDocumentRequest};
 use anyseek::{
     commit::Commit,
     index::{AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
