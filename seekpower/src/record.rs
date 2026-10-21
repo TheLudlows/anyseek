@@ -21,6 +21,8 @@ mod evidence;
 mod enrichment;
 mod generation;
 mod temporal;
+mod change_feed;
+pub use change_feed::{FeedConfig, ChangeKind, ChangeEvent, ChangePage, BootstrapPage};
 pub use temporal::{TemporalMetadata, TemporalFilter, TimeRange};
 pub use generation::{GenerationChunk, GenerationCommand, GenerationMember, GenerationStatus};
 mod output;
@@ -36,6 +38,12 @@ pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
 pub enum RecordError {
     /// Trusted clock moved outside the supported calibration budget.
     ClockUncertain,
+    /// Retained feed plus mandatory invalidation reserve is full.
+    FeedFull,
+    /// Cursor is outside retained history or belongs to another recovery scope.
+    CursorExpired(u64),
+    /// Bootstrap pin is gone, expired, or invalidated; discard partial state.
+    BootstrapExpired,
     /// Admission refused before operation lookup; prior attempts may have succeeded.
     Busy,
     /// Invalid request or an exhausted resource budget; no write accepted.
@@ -66,6 +74,9 @@ fn storage(error: impl std::fmt::Display) -> RecordError {
 /// Immutable collection configuration, persisted with authoritative state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecordConfig {
+    /// Durable replay window and admission budgets.
+    #[serde(default)]
+    pub change_feed: FeedConfig,
     /// Existing retrieval configuration; this partition uses one shard.
     pub index: IndexMetaObject,
     /// Search schema. `store` controls projections, not authoritative retention.
@@ -85,6 +96,7 @@ pub struct RecordConfig {
 }
 /// Shared admission check for collection intent and physical initialization.
 pub fn validate_config(config: &RecordConfig) -> Result<(), RecordError> {
+    change_feed::validate_config(&config.change_feed)?;
     if config.schema.is_empty()
         || config.schema.len() > 64
         || config
@@ -253,6 +265,7 @@ struct Applied {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct State {
     lineage: String,
+    feed: change_feed::FeedState,
     sealed_for: Option<SealCertificate>,
     takeover_proof: Option<SealCertificate>,
     independent_snapshot: bool,
@@ -273,12 +286,14 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV7")]
+    #[serde(rename = "RecordCheckpointV8")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV7")]
+    #[serde(rename = "RecordAppliedV8")]
     Applied(Applied),
-    #[serde(rename = "RecordExpiredV7")]
+    #[serde(rename = "RecordExpiredV8")]
     Expired(temporal::Expiration),
+    #[serde(rename = "RecordFeedTrimV8")]
+    FeedTrim(change_feed::Trim),
 }
 struct Inner {
     config: RecordConfig,
@@ -290,6 +305,9 @@ struct Inner {
     healthy: bool,
     clock: Arc<dyn temporal::Clock>,
     evaluation_time_ms: u64,
+    feed_cache: change_feed::Cache,
+    bootstrap: Option<change_feed::Bootstrap>,
+    bootstrap_epoch: String,
     output: Arc<std::sync::RwLock<output::OutputState>>,
     #[cfg(test)]
     fail_after_durable: bool,
@@ -649,7 +667,7 @@ impl RecordPartition {
                 field.longest = true;
             }
         }
-        let state = State { lineage: format!("{:032x}", rand::random::<u128>()), ..State::default() };
+        let state = State { feed: change_feed::FeedState {scope:format!("{:032x}",rand::random::<u128>()),floor:0}, lineage: format!("{:032x}", rand::random::<u128>()), ..State::default() };
         let entry = encode_entry(&Entry::Checkpoint {
             config: config.clone(),
             state: state.clone(),
@@ -677,6 +695,8 @@ impl RecordPartition {
                 healthy: true,
                 clock: temporal::clock()?,
                 evaluation_time_ms: 0,
+                feed_cache: change_feed::Cache::default(),
+                bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),
                 output,
                 #[cfg(test)]
                 fail_after_durable: false,
@@ -727,6 +747,7 @@ impl RecordPartition {
             match serde_json::from_slice(&bytes).map_err(storage)? {
                 Entry::Applied(applied) => apply(&mut state, &applied)?,
                 Entry::Expired(event) => temporal::apply(&mut state, &event)?,
+                Entry::FeedTrim(trim) => change_feed::apply_trim(&mut state,&config.change_feed,&trim)?,
                 Entry::Checkpoint { .. } => {
                     return Err(storage("unexpected checkpoint in operation stream"));
                 }
@@ -746,6 +767,7 @@ impl RecordPartition {
             state: state.clone(),
         })?
         .len();
+        let feed_cache = change_feed::Cache::rebuild(&state,&config.change_feed)?;
         let (index, ordinals) = build(path, &config, &state).await?;
         let output = Arc::new(std::sync::RwLock::new(output::OutputState {
             revision: 0, fenced: state.sealed_for.is_some(),
@@ -767,7 +789,8 @@ impl RecordPartition {
                 healthy: true,
                 clock: temporal::clock()?,
                 evaluation_time_ms: 0,
-                output,
+                feed_cache,
+                bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),                output,
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
@@ -793,13 +816,15 @@ impl RecordPartition {
                     return Err(RecordError::RecoveryRequired);
                 }
                 inner.advance_time().await?;
-                let (applied, bytes, snapshot_bytes, reserve_bytes) = match mutation::prepare_at(
+                let (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve) = match mutation::prepare_at(
                     &inner.state, &inner.config, inner.snapshot_bytes, request, current_epoch(), inner.evaluation_time_ms,
                 )? {
                     mutation::PreparedWrite::Replay(receipt) => return Ok(receipt),
-                    mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes } =>
-                        (applied, bytes, snapshot_bytes, reserve_bytes),
+                    mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve } =>
+                        (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve),
                 };
+                let feed_point = change_feed::pending(&inner.state,&applied)?;
+                inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;
                 inner.journal.validate_append_with_reserve(bytes.len(), reserve_bytes)
                     .map_err(|e| RecordError::Rejected(e.to_string()))?;
                 let receipt = applied.receipt.clone();
@@ -840,6 +865,7 @@ impl RecordPartition {
                     return Err(RecordError::DurablePending(receipt.seq));
                 }
                 inner.publish(&applied, snapshot_bytes).await?;
+                inner.feed_cache.push(feed_point);
                 inner.healthy = true;
                 inner.output.write().map_err(|_| RecordError::RecoveryRequired)?.fenced = false;
                 #[cfg(feature = "fault-injection")]
@@ -1188,6 +1214,7 @@ impl RecordPartition {
         // Preserve originals, but do not silently revive typed evidence when the
         // snapshot is opened/restored under a different owner/root.
         snapshot_state.independent_snapshot = true;
+        snapshot_state.feed.scope = format!("{:032x}",rand::random::<u128>());
         snapshot_state.evidence_quarantined |= snapshot_state.records.values().any(temporal::protected);
         let payload = encode_entry(&Entry::Checkpoint {
             config: inner.config.clone(),
@@ -1219,7 +1246,7 @@ mod tests {
         base.join(format!("seekpower-record-{:032x}", rand::random::<u128>()))
     }
     fn config() -> RecordConfig {
-        RecordConfig {index:IndexMetaObject{id:0,name:"records".into(),lexical_similarity:LexicalSimilarity::Bm25f,
+        RecordConfig {change_feed:FeedConfig::default(),index:IndexMetaObject{id:0,name:"records".into(),lexical_similarity:LexicalSimilarity::Bm25f,
             tokenizer:TokenizerType::UnicodeAlphanumeric,text_normalization:TextNormalization::None,
             field_length_normalization:FieldLengthNormalization::Shared,stop_words:StopwordType::None,
             frequent_words:FrequentwordType::None,ngram_indexing:0,document_compression:DocumentCompression::Snappy,
@@ -1278,6 +1305,123 @@ mod tests {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
         p.inner.lock().await.clock=clock.clone(); (clock,now)
+    }
+    #[tokio::test]
+    async fn feed_order_retry_retention_and_restore_scope() {
+        let root=path(); let copy=path(); let p=RecordPartition::create(&root,config()).await.unwrap();
+        let (clock,now)=test_clock(&p).await;
+        let first=write("feed-first","a","alpha",ExpectedVersion::Absent);
+        p.write(first.clone()).await.unwrap();
+        let page=p.changes(None,1).await.unwrap(); assert_eq!(page.events.len(),1);
+        assert_eq!(page.events[0].kind,ChangeKind::RecordChanged);
+        p.write(first.clone()).await.unwrap(); assert!(p.changes(Some(page.next.clone()),1).await.unwrap().events.is_empty());
+        p.write(write("feed-second","b","beta",ExpectedVersion::Absent)).await.unwrap();
+        let all=p.changes(None,1).await.unwrap(); assert_eq!(all.events[0].seq,1);
+        let second=p.changes(Some(all.next),1).await.unwrap(); assert_eq!(second.events[0].seq,2);
+        p.checkpoint(&copy).await.unwrap();
+        let restored=RecordPartition::open(&copy,config().max_journal_bytes).await.unwrap();
+        assert!(matches!(restored.changes(Some(second.next.clone()),1).await,Err(RecordError::CursorExpired(_))));
+        drop(restored);
+        clock.set(now+7*86_400_000+1);
+        assert!(matches!(p.changes(None,10).await,Err(RecordError::CursorExpired(2))));
+        assert!(p.changes(Some(second.next.clone()),10).await.unwrap().events.is_empty());
+        assert_eq!(p.write(first).await.unwrap().seq,1);
+        p.compact_journal().await.unwrap();drop(p);
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        p.inner.lock().await.clock=clock;
+        assert!(matches!(p.changes(None,10).await,Err(RecordError::CursorExpired(2))));
+        drop(p);std::fs::remove_dir_all(root).unwrap();std::fs::remove_dir_all(copy).unwrap();
+    }
+    #[tokio::test]
+    async fn feed_backpressure_preserves_reserved_source_deletion() {
+        let root=path();let mut cfg=config(); cfg.change_feed.max_events=3;
+        let p=RecordPartition::create(&root,cfg).await.unwrap();
+        p.write(source_write("feed-source","s",&[])).await.unwrap();
+        p.write(write("feed-normal","n","alpha",ExpectedVersion::Absent)).await.unwrap();
+        assert!(matches!(p.write(write("feed-full","x","alpha",ExpectedVersion::Absent)).await,Err(RecordError::FeedFull)));
+        let mut delete=source_write("feed-delete","s",&[]);delete.document=None;delete.system=None;delete.expected=ExpectedVersion::Match(1);
+        p.write(delete).await.unwrap();
+        let events=p.changes(None,10).await.unwrap().events;
+        assert_eq!(events.len(),3);assert_eq!(events[2].kind,ChangeKind::SourceDeleted);assert!(events[2].rescan_required);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn feed_ttl_reserved_event_and_private_generation_commands() {
+        let root=path();let mut cfg=config();cfg.change_feed.max_events=2;
+        let p=RecordPartition::create(&root,cfg).await.unwrap();let(clock,now)=test_clock(&p).await;
+        let mut request=write("feed-ttl","t","alpha",ExpectedVersion::Absent);
+        request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+1),..Default::default()});
+        p.write(request).await.unwrap();
+        assert!(matches!(p.write(write("full","x","alpha",ExpectedVersion::Absent)).await,Err(RecordError::FeedFull)));
+        clock.set(now+1);let events=p.changes(None,10).await.unwrap().events;
+        assert_eq!(events.len(),2);assert_eq!(events[1].kind,ChangeKind::TtlExpired);assert!(events[1].record_id.is_none());
+        assert_eq!(p.statistics().await.unwrap().active_records,0);drop(p);std::fs::remove_dir_all(root).unwrap();
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(source_write("feed-source","s",&[])).await.unwrap();
+        p.write(generation_write("feed-stage",ExpectedVersion::Absent,stage_generation("g",&["c"]))).await.unwrap();
+        let staged=p.changes(None,10).await.unwrap();assert_eq!(staged.events.len(),1);assert_eq!(staged.visible_seq,2);
+        p.write(generation_write("feed-publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()})).await.unwrap();
+        let page=p.changes(Some(staged.next),10).await.unwrap();assert_eq!(page.events.len(),1);assert_eq!(page.events[0].kind,ChangeKind::GenerationPublished);
+        let before=serde_json::to_value(p.changes(None,10).await.unwrap().events).unwrap();
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(serde_json::to_value(p.changes(None,10).await.unwrap().events).unwrap(),before);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn feed_trim_checkpoint_budget_does_not_block_expiration() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        for i in 0..10 {p.write(write(&format!("trim-{i}"),&format!("r{i}"),"alpha",ExpectedVersion::Absent)).await.unwrap();}
+        let mut request=write("trim-ttl","t","alpha",ExpectedVersion::Absent);
+        request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+7*86_400_000),..Default::default()});p.write(request).await.unwrap();
+        // Narrow the in-memory checkpoint budget to the exact pre-maintenance
+        // state plus emergency reserve. WAL still has space: exercise the
+        // checkpoint admission branch independently of physical WAL admission.
+        {let mut inner=p.inner.lock().await;
+            inner.config.max_journal_bytes=100_000;
+            loop {
+                let size=encode_entry(&Entry::Checkpoint{config:inner.config.clone(),state:inner.state.clone()}).unwrap().len()+generation::reserve_bytes(&inner.state);
+                let mut minimum=size as u64;
+                while PartitionJournal::validate_initial(size,minimum).is_err(){minimum+=1;}
+                if inner.config.max_journal_bytes==minimum {break;}inner.config.max_journal_bytes=minimum;
+            }
+        }
+        clock.set(now+7*86_400_000);p.advance_time().await.unwrap();
+        let inner=p.inner.lock().await;assert!(inner.healthy);assert_eq!(inner.state.feed.floor,0);
+        assert!(inner.state.records["t"].expired_at_ms.is_some());drop(inner);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn feed_bootstrap_release_and_lease_rotate_retry_identity() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        let id=format!("{}aaaaaaaaaaaaaaaa",p.bootstrap_identity().await.unwrap());
+        p.bootstrap(id.clone(),None,1).await.unwrap();p.release_bootstrap(&id).await.unwrap();
+        assert!(matches!(p.bootstrap(id,None,1).await,Err(RecordError::BootstrapExpired)));
+        let id=format!("{}bbbbbbbbbbbbbbbb",p.bootstrap_identity().await.unwrap());
+        p.bootstrap(id.clone(),None,1).await.unwrap();clock.set(now+300_000);
+        assert!(matches!(p.bootstrap(id,None,1).await,Err(RecordError::BootstrapExpired)));
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn feed_bootstrap_cut_concurrent_write_hiding_and_restart() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(source_write("boot-source","s",&[])).await.unwrap();
+        p.write(source_write("boot-derived","d",&[("s",1)])).await.unwrap();
+        let id=format!("{}aaaaaaaaaaaaaaaa",p.bootstrap_identity().await.unwrap());
+        let first=p.bootstrap(id.clone(),None,1).await.unwrap();assert!(first.next.is_some());
+        p.write(write("boot-new","n","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let retry=p.bootstrap(id.clone(),None,1).await.unwrap();assert_eq!(retry.visible_seq,first.visible_seq);
+        assert_eq!(retry.records[0].record_id,first.records[0].record_id);
+        let next=p.bootstrap(id.clone(),first.next.clone(),1).await.unwrap();assert_eq!(next.visible_seq,2);assert!(next.next.is_none());
+        let tail=p.changes(Some(first.continuation.clone()),10).await.unwrap();assert_eq!(tail.events.len(),1);assert_eq!(tail.events[0].record_id.as_deref(),Some("n"));
+        let mut delete=source_write("boot-delete","s",&[]);delete.document=None;delete.system=None;delete.expected=ExpectedVersion::Match(1);
+        p.write(delete).await.unwrap();
+        assert!(matches!(p.bootstrap(id.clone(),first.next.clone(),1).await,Err(RecordError::BootstrapExpired)));
+        assert!(matches!(p.bootstrap(id.clone(),None,1).await,Err(RecordError::BootstrapExpired)));
+        let fresh=format!("{}bbbbbbbbbbbbbbbb",p.bootstrap_identity().await.unwrap());
+        let current=p.bootstrap(fresh,None,1).await.unwrap();assert_eq!(current.records.len(),1);assert_eq!(current.records[0].record_id,"n");
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert!(matches!(p.bootstrap(id,first.next,1).await,Err(RecordError::BootstrapExpired)));
+        drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn ttl_boundary_cascade_retry_and_irreversible_recovery() {
@@ -1712,6 +1856,7 @@ mod tests {
         let receipt = p.write(latest.clone()).await.unwrap();
         let mut deletion = write("del", "source", "unused", ExpectedVersion::Match(1)); deletion.document = None;
         p.write(deletion).await.unwrap();
+        let old_feed = p.changes(None,100).await.unwrap();
         let old_output = p.output_permit().unwrap();
         let old_owner = p.clone();
         let seal = p.seal_for_takeover(binding.clone()).await.unwrap();
@@ -1732,6 +1877,11 @@ mod tests {
         p.create_takeover_successor(&backup, &target, binding.clone()).await.unwrap();
         let next = RecordPartition::open(&target, config().max_journal_bytes).await.unwrap();
         next.certify_takeover_successor(&seal).await.unwrap();
+        assert!(matches!(next.changes(Some(old_feed.next),100).await,Err(RecordError::CursorExpired(_))));
+        let next_feed=next.changes(None,100).await.unwrap();
+        assert_eq!(next_feed.events.len(),old_feed.events.len());
+        assert_ne!(next_feed.events[0].scope,old_feed.events[0].scope);
+        assert_eq!(next_feed.events[0].partition_id,old_feed.events[0].partition_id);
         assert_eq!(next.write(latest).await.unwrap(), receipt);
         assert!(next.get("derived").await.unwrap().is_none());
         assert_eq!(query(&next, SearchMode::Lexical).await.hits.len(), 1);
@@ -1917,7 +2067,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV7", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV8", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();

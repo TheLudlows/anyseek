@@ -146,7 +146,7 @@ python3 scripts/record_service_smoke.py --server target/debug/seekpower_server -
 
 示例 epoch 仅作结构说明，实际按当前 UTC 日生成并随原请求保存。派生记录用自己的稳定 ID 和 `system:{"kind":"derived","evidence_refs":[{"record_id":"source-1","routing_key":"document-1","version":1}]}`。来源与派生均要求满足 collection 既有 schema/向量约束；向量字段可以缺失，缺失内容不参加向量召回。
 
-删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；权限撤销与数据输出各自复核。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建、TTL/feed 暂不支持，不能把 business document 中的同名字段当作已实现语义。
+删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；权限撤销与数据输出各自复核。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建暂不支持，不能把 business document 中的同名字段当作已实现语义。
 
 Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。当前仍存活的原服务可以通过下面的受控接管创建已核验的新目标；这不会清除任意独立恢复目录的隔离。
 
@@ -205,4 +205,15 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 时钟依赖可信系统 UTC。进程内 wall/monotonic 差异或对持久水位的回拨超过 5 分钟返回 `clock_uncertain`；小幅回拨钳制为进程内已观察时间或恢复后的已持久水位，不能复活墓碑。停机期间错误向前跳时无法由同一机器自身鉴别。旧备份中的 TTL/来源证据保持隔离，不推进归档权威状态；同服务受控接管复制最终完整状态和过期历史，再为新视图处理到期，不能强制解除历史不明的隔离。
 
-当前 journal 为 V7，拒绝旧格式；无迁移。Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示实际评估时间。TTL 本批的平台和故障验证状态见 [实施记录第 17 节](../docs/implementation-57-p2.md)，不把 PR #63 的 CI 当成本批验收。
+当前 journal 为 V8，拒绝旧格式；无迁移。Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示实际评估时间。TTL 本批的平台和故障验证状态见 [实施记录第 17 节](../docs/implementation-57-p2.md)，不把 PR #63 的 CI 当成本批验收。
+
+
+## P2 change feed 与快照续传
+
+本地 feed 批次提供 `POST /api/v1/index/{id}/changes`，请求 `{"after":null,"length":100}`。事件只包含已提交身份/版本/操作 ID 和失效原因，不提供历史正文。每 partition 有序、至少一次；使用 `(scope,seq,event_index)` 幂等消费，再保存响应 next。`rescan_required` 表示需重建有效视图，不能只删除事件中一个 ID。
+
+游标过期返回 410 `cursor_expired`，不自动跳到尾部。重建流程：GET 同路径前缀的 `/bootstrap` 取得 request_id_prefix，追加 16 个随机 hex；POST `/bootstrap`，传 `request_id,after:null,length`，使用返回 next 继续同切点分页。完整快照应用成功后保存 continuation，再 DELETE `/bootstrap/{request_id}` 释放 pin，随后从 continuation 消费 changes。重启/释放/到期/隐藏后旧 bootstrap 请求返回 410 `bootstrap_expired`，必须丢弃不完整页重新开始。每 partition 一份五分钟有界 pin，所有接口要求当前 collection 授权。
+
+创建 config 可携带 `change_feed:{retention_ms:604800000,max_events:100000,max_bytes:67108864}`。保留期至少七天；事件与紧急失效预留达到配额时新写入返回 429 `feed_full`，不会提前丢事件。既有 Record/journal 配额也继续有效。逻辑 feed 裁剪不删除原幂等账本，不等于 P3 物理历史回收。
+
+独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[实施记录第 18 节](../docs/implementation-57-p2.md)。本批尚未发布分支或获得 Windows 原生验证，不能把已有 PR 的 CI 当作本批通过。

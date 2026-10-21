@@ -731,3 +731,74 @@ target/debug/seekpower_server generate_openapi=true
 原生 CI 已调用的服务 smoke 入口会执行新增 `record_temporal_smoke.py`；Windows 使用 `.exe`。需要用户另行批准发布本分支并触发 Linux/Windows CI，不能用 PR #63 的结果覆盖本批。系统崩溃/断电需要隔离 VM/机器、可丢弃文件系统磁盘、外部 reset/power-cut 以及故障域之外的确认见证；不重启用户或共享环境。
 
 本批是有界 TTL/时间功能闭环，未实现 feed 的 7 天窗口与背压、实体关系、后台物理回收或 P3 持续压缩。请求驱动过期意味着空闲时不主动写墓碑，但任何新数据视图/写入前必须执行到期转换，不能暴露已到期正文。无 TTL 独立定时服务，不承诺长期稳定磁盘占用或无界规模。保持 PR #62/#63 草稿不变，本分支只本地提交，等待用户检视与后续发布授权。
+
+## 18. 持久 change feed（本地功能闭环，尚未发布）
+
+独立本地分支 `feat/57-p2-change-feed` 基于 TTL 提交 `49ef3c6661298ebf35d7fa4f2a827d5eea412910`。本分支未推送，PR #62/#63 未修改；这是堆叠的本地批次，不意味着 TTL 已合入主干或完整 P2 完成。环境恢复已通过实际 shell、工作树及编译命令确认，原改动保留。
+
+### 18.1 权威边界与模块职责
+
+`record/change_feed.rs` 从已有 `State.operations` / `State.expirations` 唯一持久账本确定性投影事件，不另写第二份事件 WAL。`mutation` / `generation` 规划提交后应保留的失效通知配额，`RecordPartition` 在追加前做 feed 准入，并在业务发布时更新可重建的事件位置/字节缓存。TTL 用相同权威提交序列；恢复从原账本重建缓存并核验配额。HTTP/UI 只适配调用、授权和响应，不重复投影规则。
+
+每个对外相关命令至多一个事件，以 `(scope, seq, event_index)` 去重，目前 event_index 为 0；每 partition 有序、至少一次，序列可有私有 staging/abort 导致的间隙。事件种类为 `record_changed`、`record_deleted`、`source_created`、`source_updated`、`source_deleted`、`vector_ready`、`generation_published`、`ttl_expired`。正文/向量不进入事件，隐藏内容不可通过历史事件取回；只有已提交公开身份、版本、操作 ID、已发布 generation ID 和必要失效信息。
+
+来源修订/删除、typed 身份删除、整代发布及 TTL 聚合事件设置 `rescan_required=true`，不展开无界依赖闭包。消费者应重建有效视图；其它变更按当前授权回表取得正文，可能已不可见。缺向量补充保留原 body version，但产生独立提交序列通知。私有 staging/abort 不暴露成员身份或正文。查询授权、来源隐藏和最终输出屏障继续有效。
+
+### 18.2 保留、背压和恢复
+
+collection 创建配置新增 `change_feed`：`retention_ms` 默认 604800000，范围 7–365 天；`max_events` 默认 100000，范围 1–100000；`max_bytes` 默认 67108864，范围 1024–67108864。配置不可在线更改。容量包含已保留事件和未来删除/到期通知的预留；普通写入无法满足时返回 HTTP 429 `feed_full`，追加前明确拒绝，不能提前删除窗口内事件。既有 journal/operation/record 配额仍分别生效。
+
+活跃 typed 身份、staging 控制及 TTL 保守预留通知槽和每槽 8 KiB；TTL 与 typed 可重复保留以确保安全。删除及到期消费已预留预算。保留时间使用可信提交评估时间（UTC Unix 毫秒），在七天边界及之后才可丢弃前缀；时钟异常继承 TTL 的失败关闭规则。`FeedTrim` 是同 journal 的持久元数据转换，包含旧 floor、新 floor 和评估时间，不伪造业务 seq。恢复验证裁剪是当时可到期的完整前缀。WAL 或 checkpoint 无空余预算时延后裁剪，不能占用或阻塞删除/TTL 预留。
+
+裁剪后的 `floor` 表示已丢弃事件前缀末端，游标早于 floor 或 scope 不符返回 HTTP 410 `cursor_expired`，必须 bootstrap，不静默跳到尾部。未传游标等于从 0 开始，历史已裁剪时同样返回 410。响应 `next` 只应在幂等消费整页后持久保存。
+
+**逻辑窗口不等于物理历史回收。** 原 operations/expirations 仍因幂等、版本、恢复而保留；checkpoint 可安全切换/回收 WAL 文件，但不提供 P3 无界持续运行。达到原账本配额仍需明确背压，不能删回执掩盖容量限制。
+
+### 18.3 bootstrap、scope 与输出
+
+bootstrap 在 partition guard 内原子捕获有效 Record 集合、seq、固定 evaluation_time 和对应 feed continuation。每 partition 同时一个 pin，租期五分钟；总序列化记录预算不超过 `max_journal_bytes`，分页最多 1000 条，约 4 MiB（单个合法大记录不拆分），HTTP 总响应仍受既有上限约束。只返回当前有效记录，不包括 staging、墓碑或隔离内容。
+
+协议：
+
+1. `GET /api/v1/index/{id}/bootstrap` 取得 `request_id_prefix`（16 hex）。客户端追加随机 16 hex，生成本次 `request_id`。
+2. `POST .../bootstrap`，例如 `{"request_id":"<prefix><random16>","after":null,"length":100}`。响应包含 records、next、continuation、visible_seq、evaluation_time_ms、expires_at_ms。
+3. 同 request_id 和 after 重试得到同快照页；next 非空则逐页读取。只有所有页成功应用后，才将 continuation 作为 feed cut 保存。新普通写入不会导致快照漏写：它们由 cut 之后的 feed 提供。
+4. 完成后 `DELETE .../bootstrap/{request_id}` 释放 pin，再 `POST .../changes`，请求 `{"after":"<continuation>","length":100}`。
+5. 重启、释放、租期到期或来源隐藏使运行期 prefix 轮换；旧请求包括首分页重试返回 410 `bootstrap_expired`。丢弃所有未完成页，重新取得 prefix，不能把旧页与新切点混合。不同请求争用有效 pin 返回 Busy。源删除/修订会使 pin 数据许可失效；TTL 保持已确认的单查询固定评估时间语义。
+
+每页重新走 catalog 授权；HTTP 在调用前捕获数据许可，交付头部/正文时再检查授权与数据屏障。UI 提供分页面板，显示当前快照和内容无关事件，错误时清空展示，传输失败保留原快照请求供精确重试，授权/过期错误丢弃不完整状态；仅为有界人工检查工具，不是自动同步客户端，feed 面板不新增正文或 key 持久化存储（既有连接界面仍使用 sessionStorage 保存 API key）。
+
+同 owner 重开保留 feed scope。独立备份副本换 scope；受控接管将原完整最终状态复制到新 owner，并用原 scope 与 intent 派生新 scope，因此旧游标必须重建。SealCertificate 持久绑定 source_feed_scope，目标认证仅在验证派生 scope 后归一化该字段进行原最终摘要核对，不能泛化为忽略 feed 状态。partition_id 保留来源谱系，不表示允许双写。完整 service/catalog 备份沿用实际复制对象清单和 hash 校验；恢复不复活旧 grants。当前 journal 为 V8，旧 V7 等格式明确拒绝，不实现升级迁移。
+
+### 18.4 审查、验证和限制
+
+独立审查修复了三项：checkpoint 预算不足的 trim 不应挡住 TTL；bootstrap 首分页响应丢失后不得静默换切点；快照已完成后的释放失败必须单独重试清理，不能误重读首页。新增 core 测试覆盖有序与幂等、恢复后稳定投影、七天裁剪/旧回执保留、scope 变更、容量及删除/TTL 预留、staging 私有、generation 发布、bootstrap 并发切点/隐藏/释放/到期/重启，以及精确 checkpoint 预算边界。HTTP 新用例位于 `scripts/record_feed_smoke.py`，由现有原生矩阵的 smoke 入口自动执行；Chromium 操作真实 bootstrap/feed 按钮。
+
+最终默认源码验证（2026-10-21，本地 Linux）：
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `cargo test --workspace --all-targets --quiet` | **35 suites，208 passed，0 failed，10 ignored** |
+| `cargo build --workspace` | 通过 |
+| 默认真实 HTTP + Chromium | 通过；包括 feed 背压、预留删除、同切点 bootstrap、首分页响应丢失重试、释放响应丢失后保留 continuation、撤权与恢复 |
+| `python3 scripts/check_core_boundary.py` | 默认及 no-default-features 独立构建通过 |
+| OpenAPI 生成与新增路由/配置断言 | 通过 |
+| 显式 fault-injection 构建 + HTTP + Chromium | 通过；包括七天边界、trim 结果未知/持久未发布/持久后进程退出及恢复、旧回执保留、过期游标重建与同一浏览器矩阵 |
+
+10 个 ignored 中，9 个为父测试显式启动的子进程 worker，1 个为既有额外参数跨构建 fixture，不单独算通过。最终默认验证汇总 `/tmp/p2-feed-acceptance.log`，详细日志 `/tmp/p2-feed-acceptance-{tests,build,http,openapi}.log`；核心边界 `/tmp/p2-feed-boundary.log`。这些为本地证据，不是公开 CI。
+
+验证过程中一次故障测试误用了被 `cargo test --all-targets` 重新生成的默认二进制，启动故障 worker 超时；已终止该临时 fixture，补充测试超时清理，并把验证顺序改为显式构建后立即测试，禁止共享 binary 的并行 feature 覆盖。未把这次失败算通过。
+
+```sh
+cargo test --workspace --all-targets --quiet
+cargo build --workspace
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
+python3 scripts/check_core_boundary.py
+target/debug/seekpower_server generate_openapi=true
+cargo build -p seekpower_server --features fault-injection
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --faults --browser
+```
+
+故障终态汇总 `/tmp/p2-feed-fault-acceptance.log`，构建和 HTTP/Chromium 日志 `/tmp/p2-feed-fault-acceptance-{build,http}.log`。不把旧 TTL 的结果算作本批通过。Windows 原生未运行（本分支尚未获发布/CI授权）；系统崩溃/断电未运行，进程退出不是替代。系统级测试仍需隔离可丢弃 Linux/Windows VM 或机器、外部 reset/power-cut、故障域外确认见证，不重启共享环境。
+
+本批未实现显式实体/一跳关系、P3 长期回收、跨 partition 全局排序、跨服务灾备自动激活或后台订阅服务，不扩大为模型/性能专项。本地终态通过，随代码提交供检视；推送、草稿 PR 和 Windows CI 仍需单独授权。

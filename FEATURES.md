@@ -42,6 +42,9 @@
 | GET | `/api/v1/index/{id}/doc/{record_id}` | 原始 Record；可用 `?fields=body,title` 投影 |
 | POST | `/api/v1/index/{id}/query` | Lexical/Vector/Hybrid/空查询；返回 hits[].record |
 | POST | `/api/v1/index/{id}/iterator` | `{cursor?,length?,fields?}`；不支持旧 skip/take 协议 |
+| POST | `/api/v1/index/{id}/changes` | 至少七天内容无关通知；过期游标明确要求重建 |
+| GET / POST | `/api/v1/index/{id}/bootstrap` | 获取运行期身份 / 固定切点分页及 feed continuation |
+| DELETE | `/api/v1/index/{id}/bootstrap/{request_id}` | 释放有界快照 pin，旧请求身份失效 |
 | POST | `/api/v1/index/{id}/delete-plan` | all/ids/lexical query 选择；返回精确版本目标 |
 | POST | `/api/v1/index/{id}/batch` | `{writes:[...]}`，1..100 独立操作，非原子 |
 | GET | `/api/v1/index/{id}/operation/{epoch}/{nonce}` | 已授权数据回执查询，缺席不证明失败 |
@@ -57,7 +60,7 @@
 
 ## Web UI 和工具
 
-UI 保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、链接/原文/图片预览、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 key/grant 或逐条更新/删除管理页面。
+UI 增加有界 bootstrap/feed 检查与响应丢失重试；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、链接/原文/图片预览、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 key/grant 或逐条更新/删除管理页面。
 
 完整冒烟为 `scripts/record_service_smoke.py`，`--browser` 启用 Chromium，显式 fault-injection 构建可运行 `--faults`。`scripts/seekpower_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 留在服务 crate。
 
@@ -67,6 +70,6 @@ Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 
-尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、物理版本压缩、完整时间/实体/关系语义、TTL/change feed、分布式与对象存储。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
+尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、物理版本压缩、完整实体/关系语义、分布式与对象存储。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
 
 早期移除功能及历史协议见 [MIGRATION](MIGRATION.md)；历史记录不能替代上述当前契约。

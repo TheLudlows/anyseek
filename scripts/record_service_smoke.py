@@ -40,7 +40,10 @@ def main():
             if args.faults:
                 for stage in ['published','retired']:
                     child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','SEEKPOWER_INITIAL_ROOT_PREFIX':'data','SEEKPOWER_INITIAL_FAULT':stage},stdout=log,stderr=log)
-                    assert child.wait(timeout=30)==87,stage
+                    try:
+                        assert child.wait(timeout=30)==87,stage
+                    finally:
+                        if child.poll() is None:child.kill();child.wait(timeout=20)
             start()
             # A second owner and a changed bootstrap secret must never rebuild this root.
             for secret in ['issue57-service-test','wrong-master']:
@@ -531,6 +534,8 @@ def main():
                 # Retire our completed evidence fixture before the UI creates its own.
                 from record_service_browser import exercise
                 exercise(base,master,call)
+            from record_feed_smoke import exercise as feed_exercise
+            feed_exercise(call,restart_with,root.parent,args.faults)
         finally:
             if process and process.poll() is None:process.kill();process.wait(timeout=20)
             log.close()
