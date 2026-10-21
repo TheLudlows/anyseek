@@ -17,7 +17,7 @@ use seekpower::{
     index::{Clustering, DocumentCompression},
     record::{
         OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
-        RecordWrite,
+        RecordWrite, DataOutputPermit,
     },
     vector::Inference,
 };
@@ -141,6 +141,7 @@ async fn owned<T: Send + 'static>(
 struct AuthorizedBody {
     bytes: Option<Bytes>,
     permit: OutputPermit,
+    data: Option<DataOutputPermit>,
 }
 impl http_body::Body for AuthorizedBody {
     type Data = Bytes;
@@ -153,14 +154,15 @@ impl http_body::Body for AuthorizedBody {
             return Poll::Ready(None);
         }
         let permit = self.permit.clone();
+        let data = self.data.clone();
         Poll::Ready(
-            match permit.deliver(|| self.bytes.take().map(http_body::Frame::data)) {
+            match deliver(&permit, data.as_ref(), || self.bytes.take().map(http_body::Frame::data)) {
                 Ok(frame) => frame.map(Ok),
                 Err(e) => {
                     self.bytes = None;
                     Some(Err(std::io::Error::new(
                         std::io::ErrorKind::PermissionDenied,
-                        e.to_string(),
+                        e.2,
                     )))
                 }
             },
@@ -170,9 +172,18 @@ impl http_body::Body for AuthorizedBody {
 fn response<T: Serialize>(value: T, permit: OutputPermit) -> Result<Response, Error> {
     protected(Ok(value), permit)
 }
-fn protected<T: Serialize>(
-    result: Result<T, Error>,
-    permit: OutputPermit,
+fn deliver<T>(permit: &OutputPermit, data: Option<&DataOutputPermit>, handoff: impl FnOnce() -> T) -> Result<T, Error> {
+    // Lock order is catalog output -> data output, never a partition mutex.
+    permit.deliver(|| match data {
+        Some(data) => data.deliver(handoff).map_err(Error::from),
+        None => Ok(handoff()),
+    }).map_err(Error::from)?
+}
+fn protected<T: Serialize>(result: Result<T, Error>, permit: OutputPermit) -> Result<Response, Error> {
+    protected_data(result, permit, None)
+}
+fn protected_data<T: Serialize>(
+    result: Result<T, Error>, permit: OutputPermit, data: Option<DataOutputPermit>,
 ) -> Result<Response, Error> {
     let encoded = match result {
         Ok(value) => serde_json::to_vec(&value)
@@ -196,7 +207,7 @@ fn protected<T: Serialize>(
                 .into_bytes(),
         ),
     };
-    permit.deliver(|| ())?;
+    deliver(&permit, data.as_ref(), || ())?;
     let mut response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
@@ -204,9 +215,11 @@ fn protected<T: Serialize>(
         .body(Body::new(AuthorizedBody {
             bytes: Some(bytes.into()),
             permit: permit.clone(),
+            data: data.clone(),
         }))
         .unwrap();
     response.extensions_mut().insert(permit);
+    if let Some(data) = data { response.extensions_mut().insert(data); }
     Ok(response)
 }
 
@@ -512,7 +525,7 @@ fn index_info(entry: &CollectionEntry, stats: seekpower::record::RecordStatistic
     json!({"id":entry.collection_id,"name":entry.config.index.name,"schema":schema,
         "text_normalization":entry.config.index.text_normalization,"field_length_normalization":entry.config.index.field_length_normalization,
         "indexed_doc_count":stats.active_records,"committed_doc_count":stats.active_records,"version":crate::VERSION,"statistics":stats,
-        "embedding_space_id":entry.config.embedding_space_id})
+        "embedding_space_id":entry.config.embedding_space_id,"evidence_quarantined":stats.evidence_quarantined})
 }
 async fn create_key(
     State(s): State<Arc<Service>>,
@@ -660,8 +673,10 @@ async fn list_collections(
     let key = s.authenticate(&headers).await?;
     let (entries, permit) = s.catalog.listing(&key).await?;
     let mut info = vec![];
+    let mut data = vec![];
     for entry in entries {
         let p = s.record(&key, &entry.collection_id).await?;
+        data.push(p.output_permit()?);
         let id = entry.collection_id.clone();
         let (value, _) = s
             .catalog
@@ -673,10 +688,10 @@ async fn list_collections(
             .await?;
         match value {
             Ok(stats) => info.push(index_info(&entry, stats)),
-            Err(e) => return protected::<Value>(Err(e.into()), permit),
+            Err(e) => return protected_data::<Value>(Err(e.into()), permit, Some(DataOutputPermit::combine(data))),
         }
     }
-    response(info, permit)
+    protected_data(Ok(info), permit, Some(DataOutputPermit::combine(data)))
 }
 async fn info(
     State(s): State<Arc<Service>>,
@@ -685,13 +700,14 @@ async fn info(
 ) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
+    let data = p.output_permit()?;
     let (value, permit) = s
         .catalog
         .authorized(key, id, move |entry| async move {
             p.statistics().await.map(|stats| index_info(&entry, stats))
         })
         .await?;
-    protected(value.map_err(Into::into), permit)
+    protected_data(value.map_err(Into::into), permit, Some(data))
 }
 async fn write(
     State(s): State<Arc<Service>>,
@@ -724,6 +740,7 @@ async fn read(
 ) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
+    let data = p.output_permit()?;
     let (result, permit) = s
         .catalog
         .authorized(key, id, move |_| async move { p.get(&record_id).await })
@@ -740,7 +757,7 @@ async fn read(
             }
             record
         });
-    protected(value, permit)
+    protected_data(value, permit, Some(data))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -764,6 +781,7 @@ async fn iterate(
     let request: PageRequest = parse(&bytes)?;
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
+    let data = p.output_permit()?;
     let (result, permit) = s
         .catalog
         .authorized(key, id, move |_| async move {
@@ -778,7 +796,7 @@ async fn iterate(
             Ok::<_, RecordError>(page)
         })
         .await?;
-    protected(result.map_err(Into::into), permit)
+    protected_data(result.map_err(Into::into), permit, Some(data))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -845,6 +863,7 @@ async fn deletion_plan(
     let default_nprobe = s.default_nprobe;
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
+    let data = p.output_permit()?;
     let (result, permit) = s.catalog.authorized(key, id, move |entry| async move {
         let (seq, records) = match selection {
             DeleteSelection::Query { query } => {
@@ -872,7 +891,7 @@ async fn deletion_plan(
         let targets: Vec<_> = records.into_iter().map(|r| json!({"record_id":r.record_id,"routing_key":r.routing_key,"expected":{"Match":r.version},"document":null})).collect();
         Ok::<_,Error>(json!({"visible_seq":seq,"targets":targets,"atomic":false,"instruction":"Persist targets with one original operation_id each before executing /batch; retries must reuse the saved requests, never regenerate the selection."}))
     }).await?;
-    protected(result, permit)
+    protected_data(result, permit, Some(data))
 }
 
 async fn operation(
@@ -999,13 +1018,13 @@ async fn service_restore(
         service_budget(parent,"restored-service-",&target)?;
         if let Some(receipt)=Catalog::completed_service_restore(&target)? {
             if receipt.identity!=id || receipt.restored_from.as_ref()!=Some(&request.backup_id){return Err(bad("restore request identity reused"));}
-            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}),s.permit(&key).await?);
+            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}),s.permit(&key).await?);
         }
 
         let guard=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(parent.join(format!(".seekpower-service-{name}.lock"))).map_err(storage)?;
         guard.try_lock().map_err(storage)?;
         let receipt=Catalog::restore_service(s.root.join(format!("service-backup-{}",request.backup_id)),target.clone(),id,master_verifier()).await?;
-        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}),s.permit(&key).await?)
+        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}),s.permit(&key).await?)
     }).await
 }
 async fn backup(
@@ -1126,8 +1145,9 @@ async fn restore(
         let entry = s.catalog.collections().await?.into_iter().find(|e|e.collection_id==id).ok_or_else(not_found)?;
         if entry.deleted { return Err(bad("restored collection has since been deleted")); }
         s.finish_collection(entry).await?;
-        let (_, permit) = s.catalog.authorized(key, id.clone(), |_|async {}).await?;
-        response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()}), permit)
+        let (_, permit) = s.catalog.authorized(key.clone(), id.clone(), |_|async {}).await?;
+        let stats = s.record(&key, &id).await?.statistics().await?;
+        response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds(),"evidence_quarantined":stats.evidence_quarantined}), permit)
     }).await
 }
 
@@ -1196,6 +1216,7 @@ async fn query(
     let request: SearchRequestObject = parse(&bytes)?;
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
+    let data = p.output_permit()?;
     let mode = request.search_mode(s.default_nprobe).map_err(bad)?;
     if request.query_vector.is_none() && request.similarity_threshold.is_some() {
         return Err(bad("similarity_threshold requires query_vector"));
@@ -1207,17 +1228,18 @@ async fn query(
         let hits:Vec<_>=result.hits.into_iter().map(|mut hit|{if let Some(doc)=hit.record.document.as_mut(){doc.retain(|field,_|entry.config.schema.iter().any(|f|f.field==*field&&f.store)&&(request.fields.is_empty()||request.fields.contains(field)));}hit}).collect();
         Ok::<_,Error>(json!({"original_query":request.query_string,"query":request.query_string,"time":start.elapsed().as_nanos(),"offset":request.offset,"length":request.length,"count":hits.len(),"count_total":request.count.then_some(result.count_total),"query_terms":result.query_terms,"hits":hits,"visible_seq":result.visible_seq,"statistics":result.statistics}))
     }).await?;
-    protected(result, permit)
+    protected_data(result, permit, Some(data))
 }
 
 // Last application handoff, covering status/headers as well as the later body
 // frame handoff. No await is permitted after the final authorization check.
 async fn delivery_gate(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let response = next.run(request).await;
+    let data = response.extensions().get::<DataOutputPermit>().cloned();
     match response.extensions().get::<OutputPermit>().cloned() {
-        Some(permit) => match permit.deliver(|| response) {
+        Some(permit) => match deliver(&permit, data.as_ref(), || response) {
             Ok(response) => response,
-            Err(e) => Error::from(e).into_response(),
+            Err(e) => e.into_response(),
         },
         None => response,
     }
@@ -1501,6 +1523,82 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn service_real_http_source_delete_blocks_prepared_error_and_success_bodies() {
+        for target in ["r", "missing", "listing"] {
+            let (service, path, headers) = setup().await;
+            for doc in [
+                json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}}),
+                json!({"operation_id":OperationId::new("derived".into()),"record_id":"r","routing_key":"route","expected":"Absent","document":{"body":"secret-original"},"system":{"kind":"derived","evidence_refs":[{"record_id":"s","routing_key":"route","version":1}]}}),
+            ] {
+                write(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&doc).unwrap().into()).await.unwrap();
+            }
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let e = entered.clone();
+            let r = release.clone();
+            let app = router(service.clone())
+                .layer(axum::middleware::from_fn(
+                    move |request: axum::extract::Request, next: axum::middleware::Next| {
+                        let e = e.clone();
+                        let r = r.clone();
+                        async move {
+                            let hold = request.headers().contains_key("x-test-hold");
+                            let result = next.run(request).await;
+                            if hold {
+                                e.notify_one();
+                                r.notified().await;
+                            }
+                            result
+                        }
+                    },
+                ))
+                .layer(axum::middleware::from_fn(delivery_gate));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let uri = if target == "listing" { "/api/v1/apikey".to_string() } else { format!("/api/v1/index/c/doc/{target}") };
+            let key = STANDARD.encode([7; 32]);
+            let pending = tokio::spawn(raw(
+                address,
+                format!(
+                    "GET {uri} HTTP/1.1\r\nHost: localhost\r\napikey: {key}\r\nx-test-hold: yes\r\nConnection: close\r\n\r\n"
+                ),
+            ));
+            entered.notified().await;
+            let body =
+                json!({"operation_id":OperationId::new("delete-source".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null}).to_string();
+            let acknowledgment=raw(address,format!("DELETE /api/v1/index/c/doc HTTP/1.1\r\nHost: localhost\r\napikey: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",headers["apikey"].to_str().unwrap(),body.len())).await;
+            assert!(String::from_utf8_lossy(&acknowledgment).starts_with("HTTP/1.1 200"));
+            release.notify_one();
+            let received = pending.await.unwrap();
+            let text = String::from_utf8_lossy(&received);
+            assert!(
+                !text.contains("secret-original") && !text.contains("not_found") && !text.contains("indexed_doc_count"),
+                "protected body escaped source deletion: {text}"
+            );
+            server.abort();
+            let _ = server.await;
+            drop(service);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn service_source_delete_blocks_body_after_response_header_handoff() {
+        use http_body::Body as _;
+        let (service, path, headers) = setup().await;
+        let source = json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}});
+        write(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&source).unwrap().into()).await.unwrap();
+        let response = read(State(service.clone()), headers.clone(), Path(("c".into(), "s".into())), Query(ReadParams { fields: String::new() })).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let delete=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null});
+        write(State(service.clone()), headers, Path("c".into()), serde_json::to_vec(&delete).unwrap().into()).await.unwrap();
+        let mut body=response.into_body();
+        let frame=std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await;
+        assert!(matches!(frame, Some(Err(_))));
+        drop(body);drop(service);std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn service_unconsumed_bodies_retain_request_admission() {
         use tower::ServiceExt;
         let (service, path, _) = setup().await;
@@ -1636,6 +1734,9 @@ pub(crate) fn generate_openapi() {
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","routing_key","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"routing_key":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
+    schemas.get_mut("RecordWrite").unwrap()["properties"]["system"] = json!({"$ref":"#/components/schemas/EvidenceMetadata"});
+    schemas.insert("EvidenceRef".into(), json!({"type":"object","additionalProperties":false,"required":["record_id","routing_key","version"],"properties":{"record_id":{"type":"string"},"routing_key":{"type":"string"},"version":{"type":"integer","minimum":1}}}));
+    schemas.insert("EvidenceMetadata".into(), json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["source","derived"]},"evidence_refs":{"type":"array","maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}}}}));
     schemas.insert("CollectionCreate".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","collection_id","config"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"collection_id":{"type":"string"},"config":{"$ref":"#/components/schemas/CreateIndexRequest"},"embedding_space_id":{"type":["string","null"]}}}));
     let mut paths = serde_json::Map::new();
     for (path, method, summary, schema) in [

@@ -181,7 +181,7 @@ $(function () {
                     $('#serviceBackupId').val(result.backup_id);
                     $('#serviceRecoveryStatus').text('Service backup created: ' + result.backup_id);
                 } else {
-                    $('#serviceRecoveryStatus').text('Restored to new stopped root: ' + result.target_root + '. Current master only; historical keys remain disabled.');
+                    $('#serviceRecoveryStatus').text('Restored to new stopped root: ' + result.target_root + '. Current master only; historical keys remain disabled. Source/evidence content remains quarantined until deletion-history reconciliation is available.');
                 }
             } catch (error) {
                 $('#serviceRecoveryStatus').text((error.message || 'Recovery request failed.') + ' Retry preserves the original request; no running service is replaced.');

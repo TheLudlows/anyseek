@@ -79,6 +79,26 @@ def exercise(base,master,call):
         page.locator('#searchInput').fill('browser alpha')
         expect(page.locator('#contentBox')).to_contain_text('Browser title')
         page.reload(wait_until="domcontentloaded");expect(page.locator('#indexName')).to_have_text('browser-records')
+        # New source/evidence path through the actual editor, with stable IDs.
+        page.locator('#writeDocuments').click()
+        page.locator('#recordEnvelopeMode').check()
+        envelopes=[
+            {'record_id':'ui-source','routing_key':'ui-route','expected':'Absent','document':{'title':'Source title','body':'sourceword'},'system':{'kind':'source'}},
+            {'record_id':'ui-derived','routing_key':'ui-route','expected':'Absent','document':{'title':'Derived title','body':'sourceword'},'system':{'kind':'derived','evidence_refs':[{'record_id':'ui-source','routing_key':'ui-route','version':1}]}},
+        ]
+        page.locator('#documentJson').fill(json.dumps(envelopes))
+        page.locator('#submitDocuments').click();expect(page.locator('#documentStatus')).to_contain_text('Wrote 2 record(s)')
+        page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
+        expect(page.locator('#contentBox')).to_contain_text('Derived title')
+        page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
+        deletion={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':1},'document':None}
+        page.locator('#documentJson').fill(json.dumps(deletion));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
+        assert call('POST',f'/api/v1/index/{collection}/query',{'query':'sourceword'})['hits']==[]
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-derived',status=404)['code']=='not_found'
+        page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
+        expect(page.locator('#contentBox')).not_to_contain_text('Derived title')
+        print('PASS Chromium: source/derived envelopes, source deletion hides derived search and original reads')
         # Keep existing Vector/Hybrid setup, with explicit model/space identity.
         for mode in ['Vector','Hybrid']:
             page.locator('#manageIndexes').click();expect(page.locator('#newIndexName')).to_be_enabled()

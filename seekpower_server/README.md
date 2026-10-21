@@ -128,3 +128,26 @@ python3 scripts/record_service_smoke.py --server target/debug/seekpower_server -
 小型调用方示例使用 `scripts/seekpower_client.py`：设置 `SEEKPOWER_API_KEY` 后运行 `python3 scripts/index_write_query_smoke.py --port 8080 --requests requests.json`；重复执行同一命令重试保存的请求，不生成新身份。旧 `http_smoke.py` 已由完整 Record smoke 取代。
 
 `generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。路由清单见 [FEATURES](../FEATURES.md)，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
+
+## P2 本地来源/证据切片
+
+此切片尚未通过 Windows 原生或系统断电验收，完整设计与限制见 [实施记录](../docs/implementation-57-p2.md#12-来源证据删除切片本地实现等待用户检视)。
+
+沿用 `POST /api/v1/index/{collection_id}/doc`，在完整 Record 请求上增加可选 `system`：
+
+```json
+{
+  "operation_id": {"epoch": 20747, "nonce": "save-source"},
+  "record_id": "source-1", "routing_key": "document-1", "expected": "Absent",
+  "document": {"body": "Original source text"},
+  "system": {"kind": "source"}
+}
+```
+
+示例 epoch 仅作结构说明，实际按当前 UTC 日生成并随原请求保存。派生记录用自己的稳定 ID 和 `system:{"kind":"derived","evidence_refs":[{"record_id":"source-1","routing_key":"document-1","version":1}]}`。来源与派生均要求满足 collection 既有 schema/向量约束；本切片未实现可选向量。
+
+删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；权限撤销与数据输出各自复核。引用只允许当前 collection，未知 collection 字段明确拒绝。source/derived 更新、重建、TTL/generation/feed 暂不支持，不能把 business document 中的同名字段当作已实现语义。
+
+Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。完整恢复激活仍待后续可信删除历史核对协议。
+
+Record 权威格式使用 V2 entry 标签，拒绝 P1 目录；不提供升级迁移或旧格式兼容。

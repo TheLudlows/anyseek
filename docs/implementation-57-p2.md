@@ -371,3 +371,68 @@ python3 scripts/record_service_smoke.py --server target/debug/seekpower_server -
 以上全部退出 0。环境设置 `PATH=/workspace/.cargo/bin:$PATH`、`RUSTUP_HOME=/workspace/.rustup`、`CARGO_HOME=/workspace/.cargo`；浏览器使用 `PLAYWRIGHT_BROWSERS_PATH=/workspace/playwright-browsers`。完整日志位于 `/tmp/seekpower-p2-foundation-tests.log`、`-build.log`、`-http-browser.log`、`-boundary.log`、`-fault-build.log`、`-fault-http.log`（共同前缀 `/tmp/seekpower-p2-foundation`）。10 个 ignored 与 P1 相同：9 个由父测试启动的崩溃/取消 worker 入口，1 个需显式 fixture 的跨构建哈希辅助程序；没有新增忽略测试。无功能性测试失败，编译仍有既有 warning，未做无关清理。
 
 本次 HTTP/UI 是已存在生产路径的重构回归，不是新来源能力端到端验收。来源创建/证据、级联删除、输出数据屏障、来源恢复验证尚未实现，下一检查点必须贯通这些功能再称 P2-1 完成。没有新推送/CI 授权，不把旧 P1 Windows 结果当成本次通过。
+
+## 12. 来源/证据删除切片（本地实现，等待用户检视）
+
+状态：**本地基础删除切片及 Linux 最终回归完成，供用户检视；不是完整 P2 或整个 P2-1 验收完成**。基于本地 `42f6604`，不启用 D1–D4。最终代码结果在本节末记录，所有前面草案示例不能替代本节实际接口。
+
+### 当前实际模型与范围
+
+复用通用 Record 的 `record_id/routing_key/version/document`，新增可选顶层 `system`，其结构为 `{kind:"source"|"derived",evidence_refs:[{record_id,routing_key,version}]}`。不存在独立 source_id 权威表；source 是受校验的 typed Record，与普通 Record 共享身份命名空间、版本、操作账本和唯一 WAL。普通 document 仍可自定义，里面的同名属性不产生系统语义。
+
+首片只允许 source/derived 创建与删除。source 不带 evidence_refs；derived 必须有 1–32 个同 collection 精确引用，只能指向已可见 typed Record。间接依赖、路由及版本一并校验。跨 collection 字段/未知系统属性明确拒绝；自引用、重复引用、不可见证据及超深图拒绝。图最大深度 16，单次访问最多 10,000 节点；恢复共享带高度的 memo，不对每个节点重复遍历整图。
+
+**更新、重建及转换 typed 身份明确不支持**，普通替换也不能清掉 system 绕过。删除省略 system，由引擎保留原元数据与递增墓碑版本。重复请求仍返回原 receipt；使用新 operation_id 重删墓碑返回冲突。源内容被冻结，引用始终精确，不需要在策略未定时自行选择 stale 行为。未实现 locator、历史修订读取 API、generation、向量后补、TTL、entity/relation 或 feed，不将其标为完成。
+
+### 删除、统计与输出
+
+- `record/evidence.rs` 只校验系统模型、计算有界依赖可见性与删除闭包，不做 I/O、不保有独立权威状态。
+- planner 完成引用/版本/预算验证；executor 仍唯一 durable 提交。删除成功前将 root 及所有依赖节点从 locations、物理候选删除集和活动统计中一起退役，同时失效评分缓存。保留派生原文与元数据供恢复，不通过把所有派生 document 写 null 冒充级联语义。
+- 各通道在现有引擎候选阶段排除退役 ordinal，get/page/query/count/统计使用同一 guard。恢复从 metadata+tombstone 推导有效集合，再构建可重建索引；普通写入仍增量发布，不逐次重建全文/向量索引。
+- `record/output.rs` 保存进程内的派生数据输出屏障。读取前捕获许可；source/derived 删除使旧许可失效，未知/持久后失败保持 fenced。最后 owner 释放时也关闭旧许可，防止重新打开后继续输出上一 owner 的内容。
+- HTTP 在同一次同步交付中先持 catalog 授权读锁，再持数据许可读锁；两者覆盖 status/header 和 body frame。collection 列表聚合全部涉及的许可，避免旧 active_records 经列表泄漏。聚合按锁身份排序去重，不递归取锁；交付期间不 await、不重入 partition。缓存不绕过该路径。
+- 写成功回执/operation lookup 只返回操作 ID、版本和 seq，不含旧来源正文；删除回执不会被自己的数据屏障取消。已经交给网络的字节不能收回。
+
+### 删除预留与格式
+
+每个 live typed 身份预留 1 个 operation 槽和 8 KiB WAL/checkpoint 空间（即使已被间接隐藏仍保留），普通写不能占用。typed record_id/routing_key 限 256 UTF-8 字节，nonce 限 128 字节；删除必须省略 system，使最坏 JSON 转义/回执/帧开销可被固定预算覆盖。初始 identity 总上限、命令/响应预算仍有效；预留量与 16 MiB 完整 checkpoint 帧上限共同限制实际容量，不能承诺每个配置都能装满 10,000 个 typed 身份。真实磁盘满/同步失败仍可能 unknown/fenced，这不是静默成功或可用性保证。
+
+Record 权威 entry 标签更新为 `RecordCheckpointV2` / `RecordAppliedV2`；P1 标签明确拒绝，无升级转换。上层 catalog/索引自身版本不伪装成完整 Record 协议兼容。源格式不匹配时打开失败，不重新初始化覆盖目录。
+
+### 恢复与备份的明确限制
+
+同一 live partition 的 WAL 重放/在线 checkpoint 切换完整恢复原来的可见性，包括已确认 source tombstone 和间接隐藏；不会任意隔离正常重启后的有效来源。
+
+**独立备份不是“恢复后立即重新开放所有来源”的完整交付。** 任何包含 typed 身份的独立 checkpoint 均保存 `evidence_quarantined:true`；collection/service snapshot 的复制与恢复持续保留此状态。源/派生原始输入、版本、操作结果、tombstone 都保留，但 typed 内容不进入读取/检索/计数，typed 写入也拒绝。普通无依赖记录仍按原功能恢复。服务 info/restore 回应和 UI 明示隔离状态。
+
+原因：早于删除的备份无法证明不存在快照后的删除。目前没有可信删除历史核对/解除隔离接口，**因此 typed 备份暂不能恢复为可搜索内容**。这项限制防止静默复活，不应包装成完整备份恢复能力。后续需交付设计 §5.1 的可信抑制清单/水位核对和显式激活协议后才解除；现阶段不猜测恢复时可以忽略哪些删除。历史 key/grant 的隔离继续沿用 P1，不因为来源恢复而恢复授权。
+
+### 默认 HTTP/UI 与实测场景
+
+原 `/api/v1/index/{id}/doc` 写入/删除入口接收 system；读/搜索/iterator 返回的 Record 外壳带该元数据。Web UI 保留普通 JSON 导入，新增显式 Record envelope 选项，可输入稳定 ID、来源引用与 document:null 删除；operation_id 仍由 UI 生成、先持久保存并在失败后原样重试。规则由核心校验，UI 不自己判断闭包/版本合法性。
+
+核心新增测试覆盖多级删除、原始数据保留、全文/向量/hybrid、统计、操作重放、在线 checkpoint/WAL 与独立快照、旧 owner 输出、durable_pending、引用版本/路由/深度/范围、满操作槽/写入压力下删除预留、P1 格式拒绝。真实 HTTP 覆盖共享 key 删除、旧快照隔离、源删除后重启、未知写入/进程退出与原请求重试。服务交错测试暂停已准备响应，完成删除，再交付成功/错误/collection 列表；另测 status 已交付但 body 尚未 poll 的删除屏障。Chromium 实际输入 source/derived envelope、搜索与删除，核对派生内容消失。
+
+独立只读审查发现并修复：旧备份自动复活风险、删除预算不足、共享 DAG 恢复重复遍历、collection 列表旧统计绕过输出屏障。修复后独立审查者完成定点复核，未发现本切片剩余阻塞；明确确认独立备份隔离尚不等于完整恢复激活能力。
+
+| 验证 | 当前状态 |
+| --- | --- |
+| Linux 全量最终源码 | 通过：176 passed / 0 failed / 10 ignored，35 suites |
+| Linux 默认及 fault-injection 真实 HTTP/Chromium、核心依赖边界 | 全部通过，退出 0 |
+| Windows 原生 P2 | 未运行；本分支未授权推送或 CI |
+| Linux/Windows 系统崩溃/断电 | 未运行；无隔离环境与外部见证 |
+
+阶段结束只提交本地供用户检视，不推送、不创建 PR、不合入、不部署。P2-1 剩余恢复激活/引用定位等边界和四项业务决策继续列为未完成，不以基础删除闭环替代完整阶段。
+
+最终源码验证命令（环境与 §11 相同；测试完成后只更新文档）：
+
+```bash
+SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p2-native-data cargo test --workspace --all-targets --quiet
+cargo build --workspace
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
+python3 scripts/check_core_boundary.py
+cargo build -p seekpower_server --features fault-injection
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --faults --browser
+```
+
+对应本地日志：`/tmp/p2-source-final2-tests.log`、`/tmp/p2-source-final2-build.log`、`/tmp/p2-source-final-http.log`、`/tmp/p2-source-final-boundary.log`、`/tmp/p2-source-final-fault-build.log`、`/tmp/p2-source-final-fault-http.log`。最终测试全部退出 0。10 个 ignored 沿用既有 9 个子进程 worker 入口及 1 个显式 fixture 的跨构建哈希辅助程序，无新增忽略项。故障注入包含 source 删除的 append unknown、durable pending、durable/visible 后进程退出和恢复重试；这些证据不代表系统崩溃或断电可靠性验收。文档链接/围栏/JSON 示例检查及 `git diff --check` 通过。

@@ -153,6 +153,53 @@ def main():
             call('POST','/api/v1/restore',{**restore,'operation_id':operation(),'collection_id':'after-source-delete'})
             assert call('GET','/api/v1/index/after-source-delete/doc/r0')['version']==5
             call('POST','/api/v1/restore',{**restore,'backup_id':'../escape'},status=400)
+            # P2 immutable source/evidence through the same authorized Record API.
+            ec={'operation_id':operation(),'collection_id':'evidence','config':{'index_name':'Evidence','schema':[{'field':'body','field_type':'Text','store':True}]}}
+            call('POST','/api/v1/index',ec)
+            call('POST','/api/v1/index/evidence/grants',{'operation_id':operation(),'key_id':'b','allow':True})
+            source={'operation_id':operation(),'record_id':'source','routing_key':'route','expected':'Absent','document':{'body':'evidenceword original'},'system':{'kind':'source'}}
+            direct={**source,'operation_id':operation(),'record_id':'direct','system':{'kind':'derived','evidence_refs':[{'record_id':'source','routing_key':'route','version':1}]}}
+            indirect={**direct,'operation_id':operation(),'record_id':'indirect','system':{'kind':'derived','evidence_refs':[{'record_id':'direct','routing_key':'route','version':1}]}}
+            for w in [source,direct,indirect]:call('POST','/api/v1/index/evidence/doc',w,key=keys['b'])
+            assert call('POST','/api/v1/index/evidence/query',{'query':'evidenceword'})['count_total']==3
+            early=call('POST','/api/v1/index/evidence/backup',{'operation_id':operation()})
+            delete={'operation_id':operation(),'record_id':'source','routing_key':'route','expected':{'Match':1},'document':None}
+            receipt=call('DELETE','/api/v1/index/evidence/doc',delete)['receipt']
+            assert call('DELETE','/api/v1/index/evidence/doc',delete,key=keys['b'])['receipt']==receipt
+            for rid in ['source','direct','indirect']:call('GET','/api/v1/index/evidence/doc/'+rid,key=keys['b'],status=404)
+            assert call('POST','/api/v1/index/evidence/query',{'query':'evidenceword'},key=keys['b'])['hits']==[]
+            assert call('POST','/api/v1/index/evidence/iterator',{},key=keys['b'])['statistics']['active_records']==0
+            call('POST','/api/v1/index/evidence/doc',{**source,'operation_id':operation()},status=400)
+            call('POST','/api/v1/index/evidence/doc',{**direct,'operation_id':operation(),'record_id':'late'},status=409)
+            badscope={**direct,'operation_id':operation(),'record_id':'bad','system':{'kind':'derived','evidence_refs':[{'collection_id':'other','record_id':'source','routing_key':'route','version':1}]}}
+            call('POST','/api/v1/index/evidence/doc',badscope,status=400)
+            call('PATCH','/api/v1/index/evidence');restart()
+            assert call('POST','/api/v1/index/evidence/query',{},key=keys['b'])['hits']==[]
+            restored_evidence=call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'evidence-old','backup_id':early['backup_id']})
+            assert restored_evidence['evidence_quarantined'] is True
+            call('GET','/api/v1/index/evidence-old/doc/source',status=404)
+            assert call('POST','/api/v1/index/evidence-old/query',{})['hits']==[]
+            print('PASS source HTTP: shared keys, precise transitive evidence, deletion/read/query/iterator, checkpoint restart, old snapshot quarantine')
+            if args.faults:
+                import http.client
+                for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
+                    sid='source-'+stage;did='derived-'+stage
+                    call('POST','/api/v1/index/evidence/doc',{**source,'operation_id':operation(),'record_id':sid})
+                    call('POST','/api/v1/index/evidence/doc',{**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'routing_key':'route','version':1}]}})
+                    deletion={**delete,'operation_id':operation(),'record_id':sid}
+                    process.kill();process.wait(timeout=20)
+                    start({'SEEKPOWER_RECORD_FAULT':stage,'SEEKPOWER_RECORD_FAULT_NONCE':deletion['operation_id']['nonce']})
+                    if stage.startswith('crash_'):
+                        try:call('DELETE','/api/v1/index/evidence/doc',deletion)
+                        except (OSError,http.client.HTTPException):pass
+                        else:raise AssertionError('expected source delete transport loss')
+                        process.wait(timeout=20);assert process.returncode==86
+                    else:
+                        assert call('DELETE','/api/v1/index/evidence/doc',deletion,status=503)['code'] in ['outcome_unknown','durable_pending']
+                        call('GET','/api/v1/index/evidence/doc/'+did,status=503)
+                    restart();call('GET','/api/v1/index/evidence/doc/'+did,status=404)
+                    assert call('DELETE','/api/v1/index/evidence/doc',deletion)['receipt']['version']==2
+                print('PASS source HTTP faults: unknown/durable pending/process loss recover deletion and retry without derived resurrection')
             if args.faults:
                 import http.client
                 for stage in ['before_append','after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
@@ -258,6 +305,8 @@ def main():
                 call('GET','/api/v1/index/after-source-delete',key=keys['b'],status=403)
                 call('GET','/api/v1/index/after-source-delete')
                 call('GET','/api/v1/index/shared',status=403)
+                call('GET','/api/v1/index/evidence/doc/direct',status=404)
+                assert call('GET','/api/v1/index/evidence')['evidence_quarantined'] is True
                 call('POST','/api/v1/apikey',add_key,status=409)
                 old=add_key['operation_id'];call('GET',f"/api/v1/catalog/operation/{old['epoch']}/{old['nonce']}",status=409)
                 assert call('POST','/api/v1/index/after-source-delete/doc',writes[0])['receipt']['version']==1

@@ -17,6 +17,10 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
+mod evidence;
+mod output;
+pub use evidence::{EvidenceKind, EvidenceMetadata, EvidenceRef};
+pub use output::DataOutputPermit;
 mod mutation;
 mod publication;
 
@@ -175,6 +179,10 @@ pub struct RecordWrite {
     pub expected: ExpectedVersion,
     /// Complete original input including original vector fields; None deletes.
     pub document: Option<Document>,
+    /// Optional engine-owned source/evidence semantics; business document fields
+    /// with the same name have no effect on visibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<EvidenceMetadata>,
 }
 /// Authoritative record. Deleted identities retain version and routing key.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,6 +195,10 @@ pub struct Record {
     pub version: u64,
     /// Original unnormalized input, absent for a tombstone.
     pub document: Option<Document>,
+    /// Optional engine-owned source/evidence semantics; business document fields
+    /// with the same name have no effect on visibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<EvidenceMetadata>,
 }
 /// A confirmed durable and published operation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -208,6 +220,9 @@ struct Applied {
 struct State {
     seq: u64,
     epoch_watermark: u64,
+    // Independent snapshots cannot prove the absence of later source deletes.
+    // This persistent restore gate is deliberately not cleared by ordinary writes.
+    evidence_quarantined: bool,
     records: BTreeMap<String, Record>,
     // Vec avoids JSON's restriction on structured map keys. Bounded by config.
     operations: Vec<Applied>,
@@ -216,7 +231,9 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
+    #[serde(rename = "RecordCheckpointV2")]
     Checkpoint { config: RecordConfig, state: State },
+    #[serde(rename = "RecordAppliedV2")]
     Applied(Applied),
 }
 struct Inner {
@@ -227,6 +244,7 @@ struct Inner {
     locations: BTreeMap<String, usize>,
     snapshot_bytes: usize,
     healthy: bool,
+    output: Arc<std::sync::RwLock<output::OutputState>>,
     #[cfg(test)]
     fail_after_durable: bool,
     #[cfg(test)]
@@ -235,12 +253,20 @@ struct Inner {
     // releasing the partition lock, so a concurrent opener can clean caches.
     journal: PartitionJournal,
 }
+// A permit may outlive the last partition handle. It must not survive owner
+// release and permit old data to be delivered after a new owner deletes it.
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.output.write() { state.fenced = true; }
+    }
+}
 /// Serial single-partition implementation. Queries and writes share
 /// one guard through candidate retrieval and authoritative record lookup.
 #[derive(Clone)]
 pub struct RecordPartition {
     inner: Arc<Mutex<Inner>>,
     admission: Arc<Semaphore>,
+    output: Arc<std::sync::RwLock<output::OutputState>>,
 }
 /// Stateless continuation at one logical position. A changed position conflicts;
 /// a cursor never silently combines pages from different views.
@@ -313,6 +339,9 @@ pub struct RecordStatistics {
     pub retained_operations: usize,
     /// Physical indexed versions, including candidates filtered as retired.
     pub physical_versions: usize,
+    /// Source/evidence data in an independent snapshot is withheld until a
+    /// trusted deletion-history reconciliation protocol is available.
+    pub evidence_quarantined: bool,
     /// Exact size of the complete authoritative checkpoint payload.
     pub checkpoint_bytes: usize,
 }
@@ -324,6 +353,7 @@ impl Inner {
             retained_identities: self.state.records.len(),
             retained_operations: self.state.operations.len(),
             physical_versions: self.ordinals.len(),
+            evidence_quarantined: self.state.evidence_quarantined,
             checkpoint_bytes: self.snapshot_bytes,
         }
     }
@@ -440,11 +470,10 @@ async fn build(
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     }
-    let records: Vec<_> = state
-        .records
-        .values()
-        .filter(|r| r.document.is_some())
-        .collect();
+    let visible = evidence::visibility(&state.records)?;
+    let records: Vec<_> = state.records.values().filter(|record|
+        visible.get(&record.record_id) == Some(&true)
+        && !(state.evidence_quarantined && record.system.is_some())).collect();
     for record in &records {
         index.read().await.shard_vec[0]
             .write()
@@ -485,6 +514,7 @@ fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
             routing_key: r.routing_key.clone(),
             version: applied.receipt.version,
             document: r.document.clone(),
+            system: r.system.clone().or_else(|| previous.and_then(|p| p.system.clone())),
         },
     );
     state.seq = applied.receipt.seq;
@@ -496,6 +526,13 @@ fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
     Ok(())
 }
 impl RecordPartition {
+    /// Capture before reading data, then use with the authorization permit at
+    /// output. A concurrent deletion cancels this response rather than mixing views.
+    pub fn output_permit(&self) -> Result<DataOutputPermit, RecordError> {
+        let state = self.output.read().map_err(|_| RecordError::RecoveryRequired)?;
+        if state.fenced { return Err(RecordError::RecoveryRequired); }
+        Ok(DataOutputPermit::new(self.output.clone(), state.revision))
+    }
     /// Create a new authoritative partition. Parent directory must exist.
     pub async fn create(path: &Path, config: RecordConfig) -> Result<Self, RecordError> {
         let path = path.to_owned();
@@ -528,7 +565,9 @@ impl RecordPartition {
         let journal = PartitionJournal::create(path, config.max_journal_bytes, &entry)
             .map_err(creation_error)?;
         let (index, ordinals) = build(path, &config, &state).await?;
+        let output = Arc::new(std::sync::RwLock::new(output::OutputState::default()));
         Ok(Self {
+            output: output.clone(),
             inner: Arc::new(Mutex::new(Inner {
                 journal,
                 config,
@@ -542,6 +581,7 @@ impl RecordPartition {
                 ordinals,
                 snapshot_bytes: entry.len(),
                 healthy: true,
+                output,
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
@@ -606,7 +646,9 @@ impl RecordPartition {
         })?
         .len();
         let (index, ordinals) = build(path, &config, &state).await?;
+        let output = Arc::new(std::sync::RwLock::new(output::OutputState::default()));
         Ok(Self {
+            output: output.clone(),
             inner: Arc::new(Mutex::new(Inner {
                 journal,
                 config,
@@ -620,6 +662,7 @@ impl RecordPartition {
                 ordinals,
                 snapshot_bytes,
                 healthy: true,
+                output,
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
@@ -644,14 +687,14 @@ impl RecordPartition {
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
-                let (applied, bytes, snapshot_bytes) = match mutation::prepare(
+                let (applied, bytes, snapshot_bytes, reserve_bytes) = match mutation::prepare(
                     &inner.state, &inner.config, inner.snapshot_bytes, request, current_epoch(),
                 )? {
                     mutation::PreparedWrite::Replay(receipt) => return Ok(receipt),
-                    mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes } =>
-                        (applied, bytes, snapshot_bytes),
+                    mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes } =>
+                        (applied, bytes, snapshot_bytes, reserve_bytes),
                 };
-                inner.journal.validate_append(bytes.len())
+                inner.journal.validate_append_with_reserve(bytes.len(), reserve_bytes)
                     .map_err(|e| RecordError::Rejected(e.to_string()))?;
                 let receipt = applied.receipt.clone();
                 #[cfg(feature = "fault-injection")]
@@ -663,7 +706,15 @@ impl RecordPartition {
                 if injected.as_deref() == Some("before_append") {
                     return Err(RecordError::Rejected("injected before append".into()));
                 }
+                let hides_evidence = applied.request.document.is_none()
+                    && inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some());
                 inner.healthy = false;
+                {
+                    let mut output = inner.output.write().map_err(|_| RecordError::RecoveryRequired)?;
+                    output.fenced = true;
+                    if hides_evidence { output.revision = output.revision.checked_add(1)
+                        .ok_or_else(|| storage("data barrier revision exhausted"))?; }
+                }
                 inner
                     .journal
                     .append(&bytes)
@@ -685,6 +736,7 @@ impl RecordPartition {
                 }
                 inner.publish(&applied, snapshot_bytes).await?;
                 inner.healthy = true;
+                inner.output.write().map_err(|_| RecordError::RecoveryRequired)?.fenced = false;
                 #[cfg(feature = "fault-injection")]
                 if injected.as_deref() == Some("crash_after_visible") {
                     std::process::exit(86);
@@ -734,7 +786,7 @@ impl RecordPartition {
             .state
             .records
             .get(id)
-            .filter(|r| r.document.is_some())
+            .filter(|r| inner.locations.contains_key(&r.record_id))
             .cloned())
     }
     /// Search the existing lexical/vector/hybrid engine and read original records
@@ -885,7 +937,7 @@ impl RecordPartition {
             .state
             .records
             .range((start, std::ops::Bound::Unbounded))
-            .filter(|(_, record)| record.document.is_some());
+            .filter(|(_, record)| inner.locations.contains_key(&record.record_id));
         let records: Vec<_> = rows
             .by_ref()
             .take(limit)
@@ -1000,9 +1052,14 @@ impl RecordPartition {
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
+        let mut snapshot_state = inner.state.clone();
+        // A snapshot cut cannot attest to deletions that occur after that cut.
+        // Preserve originals, but do not silently revive typed evidence when the
+        // snapshot is opened/restored under a different owner/root.
+        snapshot_state.evidence_quarantined |= snapshot_state.records.values().any(|r| r.system.is_some());
         let payload = encode_entry(&Entry::Checkpoint {
             config: inner.config.clone(),
-            state: inner.state.clone(),
+            state: snapshot_state,
         })?;
         PartitionJournal::validate_initial(payload.len(), inner.config.max_journal_bytes)
             .map_err(|e| RecordError::Rejected(e.to_string()))?;
@@ -1044,7 +1101,7 @@ mod tests {
     }
     fn write(nonce: &str, id: &str, body: &str, expected: ExpectedVersion) -> RecordWrite {
         RecordWrite {
-            operation_id: OperationId::new(nonce.into()),
+            system: None,            operation_id: OperationId::new(nonce.into()),
             record_id: id.into(),
             routing_key: "document-1".into(),
             expected,
@@ -1066,6 +1123,155 @@ mod tests {
             .await
             .unwrap()
     }
+    fn source_write(nonce: &str, id: &str, dependencies: &[(&str, u64)]) -> RecordWrite {
+        let mut request = write(nonce, id, "evidence original", ExpectedVersion::Absent);
+        request.system = Some(EvidenceMetadata {
+            kind: if dependencies.is_empty() { EvidenceKind::Source } else { EvidenceKind::Derived },
+            evidence_refs: dependencies.iter().map(|(id, version)| EvidenceRef {
+                record_id: (*id).into(), routing_key: "document-1".into(), version: *version,
+            }).collect(),
+        });
+        request
+    }
+
+    #[tokio::test]
+    async fn source_delete_hides_transitive_content_statistics_outputs_and_recovers() {
+        let root = path(); let backup = path();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(source_write("source", "s", &[])).await.unwrap();
+        p.write(source_write("direct", "d", &[("s", 1)])).await.unwrap();
+        p.write(source_write("indirect", "i", &[("d", 1)])).await.unwrap();
+        p.write(write("ordinary", "o", "evidence original", ExpectedVersion::Absent)).await.unwrap();
+        let output = p.output_permit().unwrap();
+        assert_eq!(p.statistics().await.unwrap().active_records, 4);
+        assert_eq!(p.page(None, 10).await.unwrap().records.len(), 4);
+        let mut delete = write("delete-source", "s", "", ExpectedVersion::Match(1));
+        delete.document = None;
+        let receipt = p.write(delete.clone()).await.unwrap();
+        assert_eq!(p.write(delete.clone()).await.unwrap(), receipt);
+        assert!(output.deliver(|| ()).is_err());
+        for id in ["s", "d", "i"] { assert!(p.get(id).await.unwrap().is_none()); }
+        let result = p.search("evidence".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap();
+        assert_eq!(result.hits.iter().map(|h|h.record.record_id.as_str()).collect::<Vec<_>>(), vec!["o"]);
+        assert_eq!(result.statistics.active_records, 1);
+        for mode in [SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All },
+                     SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All }] {
+            let result = p.search("evidence".into(), Some(Embedding::F32(vec![1.0, 0.0])), mode, vec![], 10).await.unwrap();
+            assert_eq!(result.hits.iter().map(|h| h.record.record_id.as_str()).collect::<Vec<_>>(), vec!["o"]);
+            assert_eq!(result.statistics.active_records, 1);
+        }
+
+        assert_eq!(p.page(None, 10).await.unwrap().records.len(), 1);
+        assert!(p.write(source_write("late", "late", &[("d", 1)])).await.is_err());
+        let mut update = source_write("update", "d", &[("s", 1)]); update.expected = ExpectedVersion::Any;
+        assert!(p.write(update).await.is_err());
+        assert!(p.write(source_write("recreate", "s", &[])).await.is_err());
+        p.compact_journal().await.unwrap();
+        p.checkpoint(&backup).await.unwrap();
+        let old_owner = p.output_permit().unwrap(); drop(p);
+        assert!(old_owner.deliver(|| ()).is_err());
+        for root in [&root, &backup] {
+            let restored = RecordPartition::open(root, config().max_journal_bytes).await.unwrap();
+            assert_eq!(restored.statistics().await.unwrap().active_records, 1);
+            assert!(restored.get("i").await.unwrap().is_none());
+            assert_eq!(restored.operation(&delete.operation_id).await.unwrap(), Some(receipt.clone()));
+            assert_eq!(restored.inner.lock().await.state.records["i"].document.as_ref().unwrap()["body"], "evidence original");
+            drop(restored);
+        }
+        std::fs::remove_dir_all(root).unwrap(); std::fs::remove_dir_all(backup).unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_durable_failure_fences_old_output_and_replays_hiding() {
+        let root = path();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(source_write("s", "s", &[])).await.unwrap();
+        p.write(source_write("d", "d", &[("s", 1)])).await.unwrap();
+        let output = p.output_permit().unwrap();
+        p.inner.lock().await.fail_after_durable = true;
+        let mut delete = write("delete", "s", "", ExpectedVersion::Match(1)); delete.document = None;
+        assert!(matches!(p.write(delete).await, Err(RecordError::DurablePending(_))));
+        assert!(output.deliver(|| ()).is_err());
+        assert!(p.get("d").await.is_err()); drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert!(p.get("d").await.unwrap().is_none());
+        assert_eq!(p.statistics().await.unwrap().active_records, 0);
+        drop(p); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_delete_reserved_capacity_and_old_snapshot_quarantine() {
+        let root = path(); let backup = path();
+        let mut cfg = config(); cfg.max_operations = 3;
+        let p = RecordPartition::create(&root, cfg.clone()).await.unwrap();
+        p.write(source_write("s", "s", &[])).await.unwrap();
+        p.checkpoint(&backup).await.unwrap();
+        p.write(write("ordinary", "o", "one", ExpectedVersion::Absent)).await.unwrap();
+        assert!(p.write(write("full", "x", "two", ExpectedVersion::Absent)).await.is_err());
+        let mut delete = write("delete", "s", "", ExpectedVersion::Match(1)); delete.document=None;
+        p.write(delete).await.unwrap(); // reserved operation slot remains available
+        let old = RecordPartition::open(&backup, cfg.max_journal_bytes).await.unwrap();
+        assert!(old.statistics().await.unwrap().evidence_quarantined);
+        assert!(old.get("s").await.unwrap().is_none());
+        assert!(old.write(source_write("bypass", "new-source", &[])).await.is_err());
+        assert!(old.inner.lock().await.state.records["s"].document.is_some());
+        drop(old); drop(p);
+        std::fs::remove_dir_all(root).unwrap(); std::fs::remove_dir_all(backup).unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_delete_has_wal_and_checkpoint_reserve_after_ordinary_pressure() {
+        let root = path(); let mut cfg = config(); cfg.max_journal_bytes = 24 * 1024;
+        let p = RecordPartition::create(&root, cfg.clone()).await.unwrap();
+        p.write(source_write("s", "s", &[])).await.unwrap();
+        let mut rejected = false;
+        for n in 0..100 {
+            let result = p.write(write(&format!("fill-{n}"), "o", &"x".repeat(1500), ExpectedVersion::Any)).await;
+            if matches!(result, Err(RecordError::Rejected(_))) { rejected = true; break; }
+            result.unwrap();
+        }
+        assert!(rejected);
+        let mut delete = write("delete", "s", "", ExpectedVersion::Match(1)); delete.document=None;
+        p.write(delete).await.unwrap();
+        p.compact_journal().await.unwrap(); drop(p);
+        let p = RecordPartition::open(&root, cfg.max_journal_bytes).await.unwrap();
+        assert!(p.get("s").await.unwrap().is_none());
+        drop(p); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_protocol_rejects_p1_checkpoint_without_migration() {
+        let root = path(); let cfg = config();
+        let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV2", "Checkpoint", 1);
+        let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
+        assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_references_are_precise_scoped_immutable_and_bounded() {
+        let root = path();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(source_write("s", "s", &[])).await.unwrap();
+        assert!(p.write(source_write("wrong-version", "bad", &[("s", 2)])).await.is_err());
+        let mut wrong = source_write("wrong-route", "bad", &[("s", 1)]);
+        wrong.system.as_mut().unwrap().evidence_refs[0].routing_key = "wrong".into();
+        assert!(p.write(wrong).await.is_err());
+        assert!(p.write(source_write("missing", "bad", &[("other-collection-record", 1)])).await.is_err());
+        assert!(p.write(source_write("self", "self", &[("self", 1)])).await.is_err());
+        assert!(p.write(source_write("many", "many", &vec![("s", 1); 33])).await.is_err());
+        let mut previous = "s".to_string();
+        for depth in 1..=16 {
+            let id = format!("d{depth}"); p.write(source_write(&id, &id, &[(&previous, 1)])).await.unwrap(); previous = id;
+        }
+        assert!(p.write(source_write("too-deep", "deep", &[(&previous, 1)])).await.is_err());
+        assert_eq!(p.statistics().await.unwrap().active_records, 17);
+        let value = serde_json::json!({"kind":"derived","evidence_refs":[{"collection_id":"other","record_id":"s","routing_key":"document-1","version":1}]});
+        assert!(serde_json::from_value::<EvidenceMetadata>(value).is_err());
+        drop(p); std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn record_planning_is_read_only_and_recovery_ignores_retry_clock() {
         let config = config();
@@ -1075,7 +1281,7 @@ mod tests {
         }).unwrap();
         let mut request = write("planned", "r", "original", ExpectedVersion::Absent);
         request.operation_id.epoch = 100;
-        let mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes } =
+        let mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, .. } =
             mutation::prepare(&state, &config, checkpoint.len(), request.clone(), 100).unwrap()
         else { panic!("new operation must be planned"); };
         // Planning has no authority/index side effects, even for accepted input.

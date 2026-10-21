@@ -12,6 +12,18 @@ impl Inner {
         snapshot_bytes: usize,
     ) -> Result<(), RecordError> {
         let receipt = &applied.receipt;
+        let hiding = applied.request.document.is_none()
+            && self
+                .state
+                .records
+                .get(&receipt.record_id)
+                .is_some_and(|r| r.system.is_some());
+        let affected = if hiding {
+            evidence::descendants(&self.state.records, &receipt.record_id)
+                .map_err(|_| RecordError::DurablePending(receipt.seq))?
+        } else {
+            std::collections::BTreeSet::new()
+        };
         let old_location = self.locations.get(&receipt.record_id).copied();
         if let Some(document) = &applied.request.document {
             let id = self.ordinals.len();
@@ -43,6 +55,15 @@ impl Inner {
             shard.delete_hashset.insert(old_id);
             shard.active.as_mut().unwrap().retire(old_id);
             shard.invalidate_frequentword_results();
+        }
+        for id in affected {
+            if let Some(ordinal) = self.locations.remove(&id) {
+                let shard = self.index.read().await.shard_vec[0].clone();
+                let mut shard = shard.write().await;
+                shard.delete_hashset.insert(ordinal);
+                shard.active.as_mut().unwrap().retire(ordinal);
+                shard.invalidate_frequentword_results();
+            }
         }
         #[cfg(test)]
         if self.fail_publication_stage == 2 {

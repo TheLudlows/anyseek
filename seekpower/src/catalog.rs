@@ -1191,6 +1191,7 @@ mod tests {
         let records = RecordPartition::create(&data_path, config()).await.unwrap();
         activate(&catalog).await;
         let write = RecordWrite {
+            system: None,
             operation_id: OperationId::new("write".into()),
             record_id: "r".into(),
             routing_key: "r".into(),

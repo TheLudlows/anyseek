@@ -12,6 +12,7 @@ pub(super) enum PreparedWrite {
         applied: Applied,
         bytes: Vec<u8>,
         snapshot_bytes: usize,
+        reserve_bytes: usize,
     },
 }
 
@@ -52,8 +53,44 @@ pub(super) fn prepare(
             ))
         };
     }
+    if state.evidence_quarantined
+        && (request.system.is_some()
+            || state
+                .records
+                .get(&request.record_id)
+                .is_some_and(|r| r.system.is_some()))
+    {
+        return Err(RecordError::Rejected(
+            "restored evidence quarantined; deletion-history reconciliation not yet supported"
+                .into(),
+        ));
+    }
+    evidence::validate(&state.records, &request)?;
+    // One fixed bounded delete command/receipt per live typed identity. This
+    // reserve is retained even when an ancestor already hides that identity.
+    let typed_live = state
+        .records
+        .values()
+        .filter(|r| r.system.is_some() && r.document.is_some())
+        .count();
+    let deleting_typed = request.document.is_none()
+        && state
+            .records
+            .get(&request.record_id)
+            .is_some_and(|r| r.system.is_some());
+    let creating_typed =
+        request.system.is_some() && !state.records.contains_key(&request.record_id);
+    let reserved_slots = typed_live + usize::from(creating_typed) - usize::from(deleting_typed);
+    // 8 KiB covers JSON escaping of bounded IDs/nonce, envelope, receipt, and
+    // journal frame overhead. No evidence edges are copied into delete requests.
+    let reserve_bytes = reserved_slots * 8192;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
-        || state.operations.len() >= config.max_operations
+        || state
+            .operations
+            .len()
+            .saturating_add(1)
+            .saturating_add(reserved_slots)
+            > config.max_operations
     {
         return Err(RecordError::Rejected(
             "record/operation budget exceeded".into(),
@@ -102,6 +139,11 @@ pub(super) fn prepare(
         routing_key: applied.request.routing_key.clone(),
         version: receipt.version,
         document: applied.request.document.clone(),
+        system: applied
+            .request
+            .system
+            .clone()
+            .or_else(|| previous.and_then(|p| p.system.clone())),
     };
     // Exact serialized checkpoint accounting, touching only this
     // operation and record. No complete state clone/serialization.
@@ -129,7 +171,9 @@ pub(super) fn prepare(
         - state.seq.to_string().len()
         + epoch.to_string().len()
         - state.epoch_watermark.to_string().len();
-    if PartitionJournal::validate_initial(snapshot_bytes, config.max_journal_bytes).is_err() {
+    if PartitionJournal::validate_initial(snapshot_bytes + reserve_bytes, config.max_journal_bytes)
+        .is_err()
+    {
         return Err(RecordError::Rejected(
             "complete checkpoint budget exceeded".into(),
         ));
@@ -139,5 +183,6 @@ pub(super) fn prepare(
         applied,
         bytes,
         snapshot_bytes,
+        reserve_bytes,
     })
 }

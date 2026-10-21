@@ -373,6 +373,9 @@ impl PartitionJournal {
     pub(crate) fn validate_append(&self, length: usize) -> io::Result<()> {
         self.journal.validate_append(length)
     }
+    pub(crate) fn validate_append_with_reserve(&self, length: usize, reserve: usize) -> io::Result<()> {
+        self.journal.validate_append_with_reserve(length, reserve)
+    }
     pub(crate) fn append(&mut self, payload: &[u8]) -> io::Result<u64> {
         self.journal.append(payload)
     }
