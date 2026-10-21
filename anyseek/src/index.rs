@@ -118,7 +118,7 @@ pub(crate) const SPEEDUP_FLAG: bool = true;
 pub(crate) const SORT_FLAG: bool = true;
 
 pub(crate) const MAX_QUERY_TERM_NUMBER: usize = 100;
-pub(crate) const SEGMENT_KEY_CAPACITY: usize = 1000;
+
 
 /// A document is a flattened, single level of key-value pairs, where key is an arbitrary string, and value represents any valid JSON value.
 pub type Document = IndexMap<String, Value>;
@@ -1838,7 +1838,9 @@ pub(crate) fn create_shard(
             index.segment_number_mask1 = segment_number_mask1;
             index.segments_level0 = vec![
                 SegmentLevel0 {
-                    segment: AHashMap::with_capacity(SEGMENT_KEY_CAPACITY),
+                    // Empty immutable segments and fresh tails must not reserve a
+                    // full dictionary for each of the 2048 routing buckets.
+                    segment: AHashMap::new(),
                     ..Default::default()
                 };
                 index.segment_number1

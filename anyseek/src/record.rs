@@ -581,6 +581,9 @@ async fn build(
     Ok((view::RetrievalView::single(index),ordinals))
 }
 async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Result<(IndexArc,Vec<String>),RecordError>{
+    build_at_selected(path,cache,config,state,None).await
+}
+async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(IndexArc,Vec<String>),RecordError>{
     let index = create_index(
         &cache,
         config.index.clone(),
@@ -616,6 +619,7 @@ async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Res
     let visible = evidence::visibility(&state.records)?;
     let records: Vec<_> = state.records.values().filter(|record|
         visible.get(&record.record_id) == Some(&true)
+        && selected.is_none_or(|keys|keys.contains(&record.record_id))
         && !(state.evidence_quarantined && temporal::protected(record))).collect();
     for record in &records {
         index.read().await.shard_vec[0]
@@ -808,7 +812,7 @@ impl RecordPartition {
             Entry::Checkpoint{config,state}=>(config,state,None,None,Default::default()),
             Entry::Anchor(reference)=>{
                 let loaded=reference.load(path,max_journal_bytes).await?;
-                (loaded.config,loaded.state,Some((loaded.index,loaded.ordinals)),Some(reference),loaded.payloads)
+                (loaded.config,loaded.state,Some((loaded.index,loaded.ordinals,loaded.locations)),Some(reference),loaded.payloads)
             },
             _=>return Err(storage("missing initial checkpoint")),
         };
@@ -837,11 +841,12 @@ impl RecordPartition {
         .len();
         let feed_cache = change_feed::Cache::rebuild(&state,&config.change_feed)?;
         let graph_cache=graph::Cache::rebuild(&state)?;
-        let (mut index,mut ordinals)=match prepared {
-            Some((index,ordinals))=>(view::RetrievalView::single(index),ordinals),
-            None=>build(path,&config,&state).await?,
+        let (mut index,mut ordinals,mut locations)=match prepared {
+            Some((index,ordinals,locations))=>(view::RetrievalView::single(index),ordinals,locations),
+            None=>{let (index,ordinals)=build(path,&config,&state).await?;
+                let locations=ordinals.iter().enumerate().map(|(i,key)|(key.clone(),i)).collect();
+                (index,ordinals,locations)},
         };
-        let mut locations:BTreeMap<_,_>=ordinals.iter().enumerate().map(|(id,key)|(key.clone(),id)).collect();
         if selected.is_some(){
             let target=path.join(format!("cache-{:032x}",rand::random::<u128>()));
             let (tail,_)=build_at(path,&target,&config,&State::default()).await?;

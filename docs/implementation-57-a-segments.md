@@ -1,6 +1,6 @@
 # A 批实施设计：本地不可变 Segment、发布与安全回收
 
-状态：实施中，尚未完成 A 批；实际检查点见 §11–16。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
+状态：实施中，尚未完成 A 批；实际检查点见 §11–17。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
 
 ## 1. 交付和不做的事
 
@@ -8,7 +8,7 @@
 
 A 不引入 SQLite、对象存储、独立远程 Indexer/cache、多节点、自动 split/merge、模型或性能专项；不支持旧格式升级迁移。保留现有 HTTP/UI、授权和恢复隔离。先保留当前容量限制，替换完整快照限制时须给出独立的操作/字节/段数预算和验收，不仅提高常数。
 
-## 2. 当前实际差距
+## 2. 实施基线差距（后续落地见阶段记录）
 
 - `record.rs::State` 同时保存 records、source_revisions、generations、operations；`Applied.request` 内又可能保存完整原请求正文。当前全量 JSON checkpoint 会携带这些内容，不能直接封装为每个 Segment 的元数据。
 - `record.rs::build` 每次恢复创建 cache 并重新索引活动记录；单 `Inner.index`、ordinals/locations 绑定一个可变索引。A 需真正加载已认证段，仅重放 anchor 后的尾部，不能全量重建才可服务。
@@ -171,3 +171,15 @@ active Record 路径的显式 `_id` 排序现在在局部 Top-K 和 root 都使�
 **尚未完成**：当前 checkpoint 仍全量构建有效检索段，不能视为多轮增量冻结或最终 compaction。对象闭包上限是验收预算，不是全过程硬内存/磁盘预算；内存 State 仍保留完整正文。多段增量发布、等价 compaction 与构建硬限制继续实施。Windows 原生及系统崩溃/断电未运行，Linux 进程故障测试不能替代。
 
 最终源码 Linux 验证：`cargo test --workspace --features server --all-targets` 为 34 suites、247 passed、0 failed、10 ignored；`cargo test --doc` 为 44 passed；`cargo build --features server,fault-injection --bin anyseek_server` 成功；真实 `record_service_smoke.py --server target/debug/anyseek_server --browser --faults` 退出 0、34 PASS。十个忽略项仍是九个父测试调用的进程 worker 和一个异构 AES fixture。日志为工作区 `a-anchor-full.log`、`a-anchor-doc.log`、`a-anchor-build.log`、`a-anchor-http-browser-faults.log`，不是沿用此前提交结果。
+
+## 17. A 默认多轮冻结与有界段数 compaction（本地验证完成）
+
+认证 anchor 选择独立 `segment-<id>` 检索闭包；状态/payload 引用与各段活动统计在同一证书下发布。后续 flush 只取当前 tail 的有效记录构建新段，旧段文件不复制、不重写；索引内旧物理版本通过 manifest 活动 footprint 和恢复时重建的删除集合排除。加载显式区分全部物理 ordinal 与活跃 locations，防止同一 ID 的旧版本被最后一次 map 插入错误选中。所有段加上新 tail 重新附着共同 Corpus，沿用既有稳定排序。
+
+最多选择八个冻结段；到达上限后的下一次 flush 构建等价有效集合索引，原子替换所选段，不推进业务 seq/version/feed。全无效段可从下一证书移除；空集合保留一个空索引承载 schema。GC 保护证书列出的所有段，不能只按查询根和 tail 路径推断可达性。候选构建/校验失败不推进证书，旧段仅在新证书成功后退休。私有 staging 清理仍强制重写闭包，不复用含已取消正文的对象。
+
+构建空索引不再为 2048 个路由桶各预分配 1000 个词项容量，按首次写入分配。该变更不改变 hash/评分/格式；它消除一项明确的空桶预分配，但不据此宣称旧 Windows 分配失败已经解决。新增空 tail 字典容量回归。
+
+验证包括十轮新增/修订/flush/reopen、跨轮旧文件校验和不变、超过段数阈值 compaction、全文/向量/混合评分与共同 oracle、tail 重试、选中段损坏关闭服务；另覆盖旧段与 tail 的同 version 向量 patch 后来源级联失效、flush/reopen 不复活及 feed 不增加业务事件。
+
+**仍需完成**：当前全量 compaction 在持有 partition 执行屏障时进行，不宣称后台无停顿；逐段文件验收预算不是整个构建过程硬内存/磁盘限额。原文 State 仍驻内存，备份保持独立 inline 权威状态。全过程资源预算与失败回归仍是 A 的未完成验收项；Windows 原生、系统断电未运行。最终源码 Linux：`cargo test --workspace --features server --all-targets` 34 suites、250 passed、0 failed、10 ignored；`cargo test --doc` 44 passed；带 `server,fault-injection` 构建成功；真实 HTTP/Chromium `--browser --faults` 退出 0、34 PASS。十个忽略项归属不变。日志为 `a-multisegment-final-full.log`、`a-multisegment-doc.log`、`a-multisegment-build.log`、`a-multisegment-http-browser-faults.log`。独立审查未发现新阻塞，建议的同 version 向量补写/来源失效交错已补入最终回归。

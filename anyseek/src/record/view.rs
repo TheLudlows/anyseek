@@ -242,6 +242,14 @@ impl RetrievalView {
             })
         })
     }
+    pub(super) async fn local_statistics(&self)->Result<Vec<crate::active::ActiveStatistics>,RecordError>{
+        let root=self.query.read().await;
+        let mut result=Vec::new();
+        for shard in &root.shard_vec {
+            result.push(shard.read().await.active.as_ref().ok_or_else(||storage("missing view statistics"))?.clone_local());
+        }
+        Ok(result)
+    }
     pub(super) async fn storage_paths(&self)->Vec<PathBuf>{
         vec![PathBuf::from(&self.query.read().await.index_path_string),PathBuf::from(&self.tail.read().await.index_path_string)]
     }

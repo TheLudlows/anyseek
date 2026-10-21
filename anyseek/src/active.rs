@@ -74,6 +74,10 @@ impl ActiveStatistics {
     /// Validate a persisted footprint closure without re-tokenizing payloads.
     pub(crate) fn validate(&self,field_count:usize)->Result<(),String>{
         if self.footprints.len()!=self.keys.len(){return Err("incomplete active footprints".into());}
+        self.validate_sparse(field_count)
+    }
+    pub(crate) fn is_live(&self, id:usize)->bool {self.footprints.contains_key(&id)}
+    pub(crate) fn validate_sparse(&self,field_count:usize)->Result<(),String>{
         let mut rebuilt=Self::default();
         for (&id,footprint) in &self.footprints {
             if id>=self.keys.len() || footprint.terms.windows(2).any(|v|v[0]>=v[1])
@@ -83,7 +87,10 @@ impl ActiveStatistics {
             }
             rebuilt.insert(id,footprint.terms.clone(),footprint.fields.clone());
         }
-        if self.df!=rebuilt.df || self.fields!=rebuilt.fields || self.shared_sum!=rebuilt.shared_sum {
+        // Retired high-numbered fields may leave zero trailing counters.
+        let mut fields=self.fields.clone();while fields.last()==Some(&(0,0)){fields.pop();}
+        while rebuilt.fields.last()==Some(&(0,0)){rebuilt.fields.pop();}
+        if self.df!=rebuilt.df || fields!=rebuilt.fields || self.shared_sum!=rebuilt.shared_sum {
             return Err("inconsistent active statistics".into());
         }
         Ok(())
