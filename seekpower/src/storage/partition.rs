@@ -444,6 +444,35 @@ mod tests {
             rand::random::<u128>()
         ))
     }
+    #[cfg(windows)]
+    #[test]
+    fn partition_publication_supports_bare_relative_root() {
+        let path = PathBuf::from(format!(
+            "seekpower-relative-{:032x}",
+            rand::random::<u128>()
+        ));
+        drop(PartitionJournal::create(&path, 4096, b"relative-original").unwrap());
+        let (journal, entries) = PartitionJournal::open(&path, 4096).unwrap();
+        assert_eq!(entries, vec![b"relative-original".to_vec()]);
+        drop(journal);
+        fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn partition_publication_supports_deep_service_snapshot_paths() {
+        let base = root();
+        let parent = base
+            .join("service-backup-".to_owned() + &"a".repeat(64))
+            .join("backup-".to_owned() + &"b".repeat(64))
+            .join("nested-".to_owned() + &"c".repeat(64));
+        fs::create_dir_all(&parent).unwrap();
+        let path = parent.join("snapshot");
+        assert!(path.as_os_str().len() > 260);
+        drop(PartitionJournal::create(&path, 4096, b"full-original").unwrap());
+        let (journal, entries) = PartitionJournal::open(&path, 4096).unwrap();
+        assert_eq!(entries, vec![b"full-original".to_vec()]);
+        drop(journal);
+        fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn partition_retirement_resumes_staging_and_partial_trash() {
         for prefix in ["", ".initial-resume-", ".retired-", ".retired-retry-"] {

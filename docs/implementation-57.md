@@ -26,6 +26,20 @@ passed both default and `--faults` builds. Core boundary passed default and
 `/tmp/seekpower-service-backup-final-tests.log`, `...-final-default-e2e.log`,
 `...-faults2.log`, `...-boundary.log`. Native CI for this new code is pending.
 
+Windows follow-up: [run 39544650754](https://github.com/TheLudlows/seekpower/actions/runs/39544650754)
+on `bc38e06e3982deca0c6311eca4da619b3fc0aeb2` completed with Linux build/browser/full
+suite and native jobs passing; Windows failed at real HTTP service backup with
+Win32 OS error 3. Deep generated archive/backup/preparation paths exceeded the
+traditional Win32 path boundary. The raw `MoveFileExW` adapter now canonicalizes
+the existing parent and appends the leaf, producing an absolute extended-length
+path, including relative/UNC roots. Empty relative parent maps to `.`. No locks,
+write-through flags, same-volume requirement or no-overwrite policy were relaxed.
+Native fixtures cover >260-character publication and Windows bare relative roots.
+Corrected-source local full suite: **163 passed, 0 failed, 10 ignored, 35 suites**;
+default and fault-feature builds plus real HTTP/Chromium passed. Logs use prefix
+`/tmp/seekpower-service-backup-windows-final-` (`tests.log`, `e2e.log`, `faults.log`).
+Static review found no blocker; corrected-SHA Windows execution remains pending.
+
 ### Scope and protocol
 
 Master-only POST `/api/v1/service-backups` freezes the existing catalog barrier

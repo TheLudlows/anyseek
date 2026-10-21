@@ -41,7 +41,25 @@ pub(super) fn publish_directory(prepared: &Path, target: &Path) -> Result<(), Pu
         use std::os::windows::ffi::OsStrExt;
         use winapi::um::winbase::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
         let wide = |path: &Path| -> io::Result<Vec<u16>> {
-            let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+            // std::fs accepts long Windows paths, but the raw Win32 call below
+            // needs an extended-length absolute path. Canonicalize the existing
+            // parent (the destination itself does not yet exist), preserving
+            // same-volume rename and WRITE_THROUGH rather than falling back to
+            // copying. This also handles relative roots and UNC parents.
+            let parent = path
+                .parent()
+                .ok_or_else(|| io::Error::other("missing publication parent"))?;
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            let parent = parent.canonicalize()?;
+            let absolute = parent.join(
+                path.file_name()
+                    .ok_or_else(|| io::Error::other("missing publication name"))?,
+            );
+            let mut value: Vec<u16> = absolute.as_os_str().encode_wide().collect();
             if value.contains(&0) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"));
             }

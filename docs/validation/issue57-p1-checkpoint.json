@@ -11,7 +11,7 @@
     "workspace_command": "SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet",
     "workspace_result": {
       "suites": 35,
-      "passed": 162,
+      "passed": 163,
       "failed": 0,
       "ignored": 10
     },
@@ -28,7 +28,7 @@
       "catalog_revoke": 8
     },
     "system_crash": "not run",
-    "workspace_log": "/tmp/seekpower-service-backup-final-tests.log",
+    "workspace_log": "/tmp/seekpower-service-backup-windows-final-tests.log",
     "controlled_cancellation_tests": {
       "passed": 2,
       "failed": 0,
@@ -75,10 +75,10 @@
       "failed": 0,
       "ignored_subprocess_workers": 1
     },
-    "http_log": "/tmp/seekpower-service-backup-final-default-e2e.log",
+    "http_log": "/tmp/seekpower-service-backup-windows-final-e2e.log",
     "service_barrier_tests": "4 passed: real TCP revocation vs success/error handoff, reserved internal IDs/recovery, unconsumed-body admission, protected oversize/serialization errors",
     "openapi": "passed: 19 paths / 25 operations",
-    "fault_http_log": "/tmp/seekpower-service-backup-faults2.log",
+    "fault_http_log": "/tmp/seekpower-service-backup-windows-final-faults.log",
     "service_fault_matrix": "explicit fault-injection feature: before_append rejection; after_append_unknown; after_durable pending; crash_after_durable; crash_after_visible; backup and restore initial publication and repeated repair exits; full service backup/restore children, manifest, outer publication and COMPLETE initial publication boundaries",
     "backup_resource_regression": "32-backup budget: repeated rejected requests leave directory/repair-file set unchanged",
     "core_boundary": "passed default and --no-default-features standalone build and dependency graph"
@@ -111,7 +111,8 @@
     "service_findings": "Fixed and regression tested: internal activation namespace/length, protected error body handoff, bounded control admission, retained response admission, serialization/oversize authorization bypass",
     "lifecycle_findings": "reviewed iterator/batch/delete-plan/collection deletion; backup review found uncertified root retry dead end, repaired via strict initialization republish; followup found uncertain repair errors flattened to Storage, corrected classification",
     "root_and_retirement": "Fixed Windows backup case-alias pin bypass, uncertain trash retirement cleanup, missing initial repair staging cleanup. Static follow-up: no remaining blocker in reviewed scope.",
-    "service_snapshot": "Fixed: absent deleted uninitialized intent; immutable completion lookup after legitimate restored-root mutation; typed uncertified COMPLETE recovery. Final static follow-up: no remaining blocker in reviewed scope."
+    "service_snapshot": "Fixed: absent deleted uninitialized intent; immutable completion lookup after legitimate restored-root mutation; typed uncertified COMPLETE recovery. Final static follow-up: no remaining blocker in reviewed scope.",
+    "windows_long_paths": "Static review: correct existing-parent canonicalization plus leaf, retained WRITE_THROUGH/no replacement/same-volume, bare relative parent handled; native CI pending"
   },
   "ci_runs": [
     {
@@ -146,6 +147,13 @@
       "linux_build_browser_full_suite": "passed",
       "linux_native": "passed",
       "windows_native": "passed"
+    },
+    {
+      "sha": "bc38e06e3982deca0c6311eca4da619b3fc0aeb2",
+      "url": "https://github.com/TheLudlows/seekpower/actions/runs/39544650754",
+      "linux_build_browser_full_suite": "passed",
+      "linux_native": "passed",
+      "windows_native": "failed: real HTTP full service backup OS error 3 on deep path; raw MoveFileExW extended-path correction and native regression added; rerun pending"
     }
   ],
   "deferred_p3": [
