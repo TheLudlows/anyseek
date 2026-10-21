@@ -22,6 +22,8 @@ mod enrichment;
 mod generation;
 mod temporal;
 mod change_feed;
+mod graph;
+pub use graph::{RelationMetadata, RelationDirection, NeighborRequest, NeighborPage, NeighborHit, RelationCount};
 pub use change_feed::{FeedConfig, ChangeKind, ChangeEvent, ChangePage, BootstrapPage};
 pub use temporal::{TemporalMetadata, TemporalFilter, TimeRange};
 pub use generation::{GenerationChunk, GenerationCommand, GenerationMember, GenerationStatus};
@@ -257,6 +259,7 @@ pub struct WriteReceipt {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Applied {
+    graph_invalidation: bool,
     request: RecordWrite,
     receipt: WriteReceipt,
     observed_epoch: u64,
@@ -286,13 +289,13 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV8")]
+    #[serde(rename = "RecordCheckpointV9")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV8")]
+    #[serde(rename = "RecordAppliedV9")]
     Applied(Applied),
-    #[serde(rename = "RecordExpiredV8")]
+    #[serde(rename = "RecordExpiredV9")]
     Expired(temporal::Expiration),
-    #[serde(rename = "RecordFeedTrimV8")]
+    #[serde(rename = "RecordFeedTrimV9")]
     FeedTrim(change_feed::Trim),
 }
 struct Inner {
@@ -306,6 +309,7 @@ struct Inner {
     clock: Arc<dyn temporal::Clock>,
     evaluation_time_ms: u64,
     feed_cache: change_feed::Cache,
+    graph_cache: graph::Cache,
     bootstrap: Option<change_feed::Bootstrap>,
     bootstrap_epoch: String,
     output: Arc<std::sync::RwLock<output::OutputState>>,
@@ -696,6 +700,7 @@ impl RecordPartition {
                 clock: temporal::clock()?,
                 evaluation_time_ms: 0,
                 feed_cache: change_feed::Cache::default(),
+                graph_cache: graph::Cache::default(),
                 bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),
                 output,
                 #[cfg(test)]
@@ -768,6 +773,7 @@ impl RecordPartition {
         })?
         .len();
         let feed_cache = change_feed::Cache::rebuild(&state,&config.change_feed)?;
+        let graph_cache=graph::Cache::rebuild(&state)?;
         let (index, ordinals) = build(path, &config, &state).await?;
         let output = Arc::new(std::sync::RwLock::new(output::OutputState {
             revision: 0, fenced: state.sealed_for.is_some(),
@@ -790,6 +796,7 @@ impl RecordPartition {
                 clock: temporal::clock()?,
                 evaluation_time_ms: 0,
                 feed_cache,
+                graph_cache,
                 bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),                output,
                 #[cfg(test)]
                 fail_after_durable: false,
@@ -837,7 +844,7 @@ impl RecordPartition {
                 if injected.as_deref() == Some("before_append") {
                     return Err(RecordError::Rejected("injected before append".into()));
                 }
-                let hides_evidence = matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) || inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some());
+                let hides_evidence = matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) || (inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some()) || (applied.request.vector_patch.is_none() && inner.graph_cache.references(&applied.request.record_id)));
                 inner.healthy = false;
                 {
                     let mut output = inner.output.write().map_err(|_| RecordError::RecoveryRequired)?;
@@ -1305,6 +1312,107 @@ mod tests {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
         p.inner.lock().await.clock=clock.clone(); (clock,now)
+    }
+    fn entity_write(nonce:&str,id:&str)->RecordWrite {
+        let mut request=write(nonce,id,"alpha entity",ExpectedVersion::Absent);
+        request.system=Some(EvidenceMetadata{kind:EvidenceKind::Entity,relation:None,evidence_refs:vec![]});request
+    }
+    fn edge_write(nonce:&str,id:&str,from:&str,to:&str)->RecordWrite {
+        let mut request=write(nonce,id,"alpha edge",ExpectedVersion::Absent);
+        let endpoint=|id:&str|EvidenceRef{record_id:id.into(),routing_key:"document-1".into(),version:1};
+        request.system=Some(EvidenceMetadata{kind:EvidenceKind::Relation,relation:Some(RelationMetadata{from:endpoint(from),to:endpoint(to),relation_type:"knows".into(),weight:Some(0.5)}),evidence_refs:vec![]});request
+    }
+    fn neighbor_request(id:&str)->NeighborRequest {
+        NeighborRequest{seeds:vec![EvidenceRef{record_id:id.into(),routing_key:"document-1".into(),version:1}],direction:RelationDirection::Both,relation_types:vec![],per_seed:128,max_candidates:100,allow_partial:false}
+    }
+    #[tokio::test]
+    async fn relation_cycles_exact_endpoints_aba_and_rebuild() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(entity_write("entity-a","a")).await.unwrap();
+        let normal=write("node-b","b","alpha",ExpectedVersion::Absent);p.write(normal.clone()).await.unwrap();
+        let original_feed=p.changes(None,100).await.unwrap().events;
+        let edge=edge_write("edge-ab","ab","a","b");let receipt=p.write(edge.clone()).await.unwrap();
+        assert_eq!(p.write(edge).await.unwrap(),receipt);
+        p.write(edge_write("edge-ba","ba","b","a")).await.unwrap();
+        p.write(edge_write("edge-aa","aa","a","a")).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().hits.len(),3);
+        assert_eq!(p.entities(None,10).await.unwrap().records.len(),1);
+        assert_eq!(&p.changes(None,100).await.unwrap().events[..2],original_feed.as_slice());
+        let output=p.output_permit().unwrap();
+        let mut replace=normal;replace.operation_id=OperationId::new("node-b-update".into());replace.expected=ExpectedVersion::Match(1);
+        p.write(replace).await.unwrap();assert!(output.deliver(||()).is_err());
+        assert!(p.get("ab").await.unwrap().is_none());assert!(p.get("ba").await.unwrap().is_none());
+        let result=p.neighbors(neighbor_request("a")).await.unwrap();assert_eq!(result.hits.len(),1);assert_eq!(result.hits[0].edge.record_id,"aa");
+        assert_eq!(result.count.value,1);assert!(result.complete);assert_eq!(result.statistics.active_records,3);
+        assert!(p.changes(None,100).await.unwrap().events.last().unwrap().rescan_required);
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,1);
+        assert!(matches!(p.write(edge_write("stale-edge","new","a","b")).await,Err(RecordError::Conflict(_))));
+        let mut deletion=write("delete-b","b","alpha",ExpectedVersion::Match(2));deletion.document=None;
+        assert_eq!(p.write(deletion).await.unwrap().version,3);
+        assert_eq!(p.write(write("recreate-b","b","alpha",ExpectedVersion::Match(3))).await.unwrap().version,4);
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,1);
+        assert!(p.get("ab").await.unwrap().is_none());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn relation_generation_switch_and_transitive_proof_recovery() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(source_write("s","s",&[])).await.unwrap();
+        p.write(entity_write("a","a")).await.unwrap();
+        p.write(generation_write("stage1",ExpectedVersion::Absent,stage_generation("g1",&["old"]))).await.unwrap();
+        p.write(generation_write("publish1",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g1".into()})).await.unwrap();
+        p.write(edge_write("edge-old","edge-old","a","old")).await.unwrap();
+        p.write(source_write("proof","proof",&[("edge-old",1)])).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,1);
+        p.write(generation_write("stage2",ExpectedVersion::Match(2),stage_generation("g2",&["new"]))).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,1);
+        let permit=p.output_permit().unwrap();
+        let publish=generation_write("publish2",ExpectedVersion::Match(3),GenerationCommand::Publish{generation_id:"g2".into()});
+        let receipt=p.write(publish.clone()).await.unwrap();assert_eq!(p.write(publish).await.unwrap(),receipt);
+        assert!(permit.deliver(||()).is_err());
+        for id in ["old","edge-old","proof"] {assert!(p.get(id).await.unwrap().is_none());}
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,0);
+        p.write(edge_write("edge-new","edge-new","a","new")).await.unwrap();
+        let mut illegal=edge_write("retarget","edge-new","a","a");illegal.expected=ExpectedVersion::Match(1);
+        assert!(p.write(illegal).await.is_err());
+        let mut deletion=source_write("delete-source","s",&[]);deletion.expected=ExpectedVersion::Match(1);deletion.document=None;deletion.system=None;
+        p.write(deletion).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,0);
+        assert_eq!(p.statistics().await.unwrap().active_records,1);
+        assert!(p.changes(None,100).await.unwrap().events.last().unwrap().rescan_required);
+        p.compact_journal().await.unwrap();drop(p);
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.neighbors(neighbor_request("a")).await.unwrap().count.value,0);
+        assert_eq!(p.statistics().await.unwrap().active_records,1);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn relation_endpoint_depth_rejected_before_durable_append() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(source_write("root","s",&[])).await.unwrap();let mut parent="s".to_string();
+        for n in 1..=16 {let id=format!("d{n}");p.write(source_write(&id,&id,&[(&parent,1)])).await.unwrap();parent=id;}
+        p.write(entity_write("a","a")).await.unwrap();
+        let before=p.statistics().await.unwrap();let permit=p.output_permit().unwrap();
+        assert!(matches!(p.write(edge_write("too-deep","edge","a",&parent)).await,Err(RecordError::Rejected(_))));
+        let after=p.statistics().await.unwrap();assert_eq!(before.visible_seq,after.visible_seq);assert_eq!(before.active_records,after.active_records);assert!(permit.deliver(||()).is_ok());
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert_eq!(p.statistics().await.unwrap().active_records,18);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn relation_budget_source_expiry_and_common_statistics() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(entity_write("a","a")).await.unwrap();
+        let mut source=source_write("s","s",&[]);source.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});p.write(source).await.unwrap();
+        p.write(edge_write("as","as","a","s")).await.unwrap();p.write(edge_write("aa","aa","a","a")).await.unwrap();
+        let mut limited=neighbor_request("a");limited.per_seed=1;
+        assert!(matches!(p.neighbors(limited.clone()).await,Err(RecordError::Rejected(_))));
+        limited.allow_partial=true;let page=p.neighbors(limited).await.unwrap();assert!(!page.complete);assert_eq!(page.count.relation,"window");assert_eq!(page.count.value,1);
+        clock.set(now+100);let page=p.neighbors(neighbor_request("a")).await.unwrap();assert!(page.complete);assert_eq!(page.count.value,1);assert_eq!(page.hits[0].edge.record_id,"aa");
+        assert_eq!(page.evaluation_time_ms,page.statistics.evaluation_time_ms);assert_eq!(page.statistics.active_records,2);
+        let mut illegal=edge_write("edge-endpoint","bad","a","aa");assert!(matches!(p.write(illegal.clone()).await,Err(RecordError::Rejected(_))));
+        illegal.system.as_mut().unwrap().relation.as_mut().unwrap().weight=Some(f64::INFINITY);assert!(p.write(illegal).await.is_err());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn feed_order_retry_retention_and_restore_scope() {
@@ -1950,7 +2058,7 @@ mod tests {
     fn source_write(nonce: &str, id: &str, dependencies: &[(&str, u64)]) -> RecordWrite {
         let mut request = write(nonce, id, "evidence original", ExpectedVersion::Absent);
         request.system = Some(EvidenceMetadata {
-            kind: if dependencies.is_empty() { EvidenceKind::Source } else { EvidenceKind::Derived },
+            kind: if dependencies.is_empty() { EvidenceKind::Source } else { EvidenceKind::Derived }, relation:None,
             evidence_refs: dependencies.iter().map(|(id, version)| EvidenceRef {
                 record_id: (*id).into(), routing_key: "document-1".into(), version: *version,
             }).collect(),
@@ -2067,7 +2175,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV8", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV9", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();

@@ -829,6 +829,22 @@ async fn iterate(
         .await?;
     protected_data(result.map_err(Into::into), permit, Some(data))
 }
+async fn entities(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
+    let request:PageRequest=parse(&bytes)?;
+    let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
+    let(result,permit)=s.catalog.authorized(key,id,move |_|async move {
+        let mut page=p.entities(request.cursor,request.length).await?;
+        if !request.fields.is_empty(){for record in &mut page.records {if let Some(doc)=record.document.as_mut(){doc.retain(|field,_|request.fields.contains(field));}}}
+        Ok::<_,RecordError>(page)
+    }).await?;
+    protected_data(result.map_err(Into::into),permit,Some(data))
+}
+async fn neighbors(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
+    let request:seekpower::record::NeighborRequest=parse(&bytes)?;
+    let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
+    let(result,permit)=s.catalog.authorized(key,id,move |_|async move {p.neighbors(request).await}).await?;
+    protected_data(result.map_err(Into::into),permit,Some(data))
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChangesRequest {
@@ -1398,6 +1414,8 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index/{id}/query", post(query))
         .route("/api/v1/index/{id}/iterator", post(iterate))
         .route("/api/v1/index/{id}/changes", post(changes))
+        .route("/api/v1/index/{id}/entities",post(entities))
+        .route("/api/v1/index/{id}/neighbors",post(neighbors))
         .route("/api/v1/index/{id}/bootstrap", get(bootstrap_identity).post(bootstrap))
         .route("/api/v1/index/{id}/bootstrap/{request_id}", delete(release_bootstrap))
         .route("/api/v1/index/{id}/batch", post(batch))
@@ -1873,9 +1891,11 @@ pub(crate) fn generate_openapi() {
     schemas.insert("TemporalFilter".into(),json!({"type":"object","additionalProperties":false,"properties":{"event":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"ingested":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"valid_at_ms":{"type":["integer","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]});
     schemas.get_mut("SearchRequestObject").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
+    schemas.insert("RelationMetadata".into(),json!({"type":"object","additionalProperties":false,"required":["from","to","relation_type"],"properties":{"from":{"$ref":"#/components/schemas/EvidenceRef"},"to":{"$ref":"#/components/schemas/EvidenceRef"},"relation_type":{"type":"string","minLength":1,"maxLength":128},"weight":{"type":["number","null"]}}}));
     schemas.insert("EvidenceRef".into(), json!({"type":"object","additionalProperties":false,"required":["record_id","routing_key","version"],"properties":{"record_id":{"type":"string"},"routing_key":{"type":"string"},"version":{"type":"integer","minimum":1}}}));
-    schemas.insert("EvidenceMetadata".into(), json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["source","derived"]},"evidence_refs":{"type":"array","maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}}}}));
+    schemas.insert("EvidenceMetadata".into(), json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["source","derived","entity","relation"]},"evidence_refs":{"type":"array","maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}}}}));
     schemas.insert("CollectionCreate".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","collection_id","config"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"collection_id":{"type":"string"},"config":{"$ref":"#/components/schemas/CreateIndexRequest"},"embedding_space_id":{"type":["string","null"]}}}));
+    schemas.get_mut("EvidenceMetadata").unwrap()["properties"]["relation"]=json!({"anyOf":[{"$ref":"#/components/schemas/RelationMetadata"},{"type":"null"}]});
     let mut paths = serde_json::Map::new();
     for (path, method, summary, schema) in [
         ("/api/v1/live", "get", "Server version", None),
@@ -1960,6 +1980,8 @@ pub(crate) fn generate_openapi() {
             "Master: control-plane operation status",
             None,
         ),
+        ("/api/v1/index/{id}/entities","post","Visible entity directory, stable ID paging in one view",Some(json!({"type":"object","properties":{"cursor":{"type":["object","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
+        ("/api/v1/index/{id}/neighbors","post","Bounded exact-version one-hop; explicit partial counts are windows",Some(json!({"type":"object","additionalProperties":false,"required":["seeds","per_seed","max_candidates"],"properties":{"seeds":{"type":"array","minItems":1,"maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}},"direction":{"type":"string","enum":["in","out","both"]},"relation_types":{"type":"array","maxItems":16,"items":{"type":"string"}},"per_seed":{"type":"integer","minimum":1,"maximum":128},"max_candidates":{"type":"integer","minimum":1},"allow_partial":{"type":"boolean"}}}))),
         ("/api/v1/index/{id}/changes", "post", "Ordered content-free notices; 410 requires bootstrap, never silently skip", Some(json!({"type":"object","additionalProperties":false,"properties":{"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
         ("/api/v1/index/{id}/bootstrap", "get", "Get current bootstrap identity prefix; append 16 random hex digits for a new request", None),
         ("/api/v1/index/{id}/bootstrap", "post", "Pinned effective snapshot and atomic feed cut; restart, expiry or hiding requires restart", Some(json!({"type":"object","additionalProperties":false,"required":["request_id"],"properties":{"request_id":{"type":"string","pattern":"^[0-9a-fA-F]{32}$"},"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),

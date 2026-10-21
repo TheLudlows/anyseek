@@ -9,6 +9,7 @@ function loadPendingWrites() {
 }
 function resetDocumentEditor() {
     resetFeed();
+    resetGraph();
     pendingDocumentCommit = null;
     CURRENT_SCHEMA = {};
     $('#documentJson,#documentFile').val('');
@@ -189,4 +190,35 @@ $(function(){
     $('#feedBootstrap').on('click',()=>inspectFeed('start'));
     $('#feedNext').on('click',()=>inspectFeed('next'));
     $('#feedRead').on('click',()=>inspectFeed('changes'));
+});
+
+let graphState=null;
+let graphBusy=false;
+function resetGraph(){graphState=null;$('#relationResult,#relationStatus').text('');$('#nextEntities').prop('disabled',true);}
+async function inspectGraph(action){
+    if(graphBusy)return;graphBusy=true;
+    $('#listEntities,#nextEntities,#expandNeighbors').prop('disabled',true);
+    const collection=INDEX_ID,key=API_KEY,base=`api/v1/index/${encodeURIComponent(collection)}`;
+    const current=()=>collection===INDEX_ID&&key===API_KEY;
+    try{
+        if(!graphState||graphState.collection!==collection||graphState.key!==key)resetGraph();
+        let result;
+        if(action==='neighbors'){
+            result=await setupApi('POST',`${base}/neighbors`,key,{seeds:JSON.parse($('#relationSeeds').val()),direction:$('#relationDirection').val(),relation_types:JSON.parse($('#relationTypes').val()),per_seed:Number($('#relationLimit').val()),max_candidates:Number($('#relationBudget').val()),allow_partial:$('#relationPartial').prop('checked')});
+            if(!current())return;
+            $('#relationStatus').text(`${result.count.relation}: ${result.count.value} visible paths; view ${result.visible_seq}, evaluation ${result.evaluation_time_ms}.${result.complete?'':` Incomplete: ${result.reason}.`}`);
+        }else{
+            result=await setupApi('POST',`${base}/entities`,key,{cursor:action==='next'?graphState?.next:null,length:20});
+            if(!current())return;
+            graphState={collection,key,next:result.next};
+            $('#relationStatus').text(`Entity page; view ${result.visible_seq}, evaluation ${result.evaluation_time_ms}.`);
+        }
+        $('#relationResult').text(JSON.stringify(result,null,2));
+    }catch(error){if(current()){resetGraph();$('#relationStatus').text(error.message);}}
+    finally{graphBusy=false;$('#listEntities,#expandNeighbors').prop('disabled',false);$('#nextEntities').prop('disabled',!graphState?.next);}
+}
+$(function(){
+    $('#listEntities').on('click',()=>inspectGraph('entities'));
+    $('#nextEntities').on('click',()=>inspectGraph('next'));
+    $('#expandNeighbors').on('click',()=>inspectGraph('neighbors'));
 });

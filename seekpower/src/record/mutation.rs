@@ -163,6 +163,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     };
     if next_ttl && receipt.version == u64::MAX { return Err(RecordError::Rejected("TTL requires a reserved tombstone version".into())); }
     let applied = Applied {
+        graph_invalidation:graph::invalidates(state,&request),
         request,
         receipt: receipt.clone(),
         observed_epoch: epoch,

@@ -89,6 +89,18 @@
 <button id="feedRead" type="button">Read changes</button>
 <p id="feedStatus" role="status"></p><pre id="feedResult"></pre>
 </details>
+<details><summary>Entities and explicit one-hop relations</summary>
+<p>Declare an entity using system.kind="entity". For an edge use system.kind="relation" and system.relation={from:{record_id,routing_key,version},to:{record_id,routing_key,version},relation_type,weight}. Both exact endpoints must be visible in this collection. Evidence is declared separately in evidence_refs. Changing an endpoint version hides old edges; rebind using a new edge identity. No automatic entity merging or graph traversal.</p>
+<button id="listEntities" type="button">List entities</button><button id="nextEntities" type="button" disabled>Next entity page</button>
+<label for="relationSeeds">Exact seed references (JSON array)</label><textarea id="relationSeeds" rows="3" placeholder='[{"record_id":"entity-a","routing_key":"route","version":1}]'></textarea>
+<label for="relationDirection">Direction</label><select id="relationDirection"><option value="both">Both</option><option value="out">Outgoing</option><option value="in">Incoming</option></select>
+<label for="relationTypes">Relation types (JSON array; [] means all)</label><input id="relationTypes" value="[]">
+<label for="relationLimit">Paths per seed</label><input id="relationLimit" type="number" min="1" max="128" value="10">
+<label for="relationBudget">Candidate budget</label><input id="relationBudget" type="number" min="1" max="10000" value="1000">
+<label><input id="relationPartial" type="checkbox"> Explicitly allow a partial window</label>
+<button id="expandNeighbors" type="button">Expand one hop</button>
+<p id="relationStatus" role="status"></p><pre id="relationResult"></pre>
+</details>
 <button id="backToSearch" type="button">Back to search</button>
 </section>
 <div class=h100 id=landingSearch>

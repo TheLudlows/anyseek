@@ -528,6 +528,8 @@ def main():
             def restart_with(env):
                 if process.poll() is None:process.kill();process.wait(timeout=20)
                 start(env)
+            from record_graph_smoke import exercise as graph_exercise
+            graph_exercise(call,restart_with,args.faults)
             temporal_exercise(call,restart_with,root.parent,args.faults)
             if args.browser:
                 # The capacity test intentionally fills all 32 backup slots.

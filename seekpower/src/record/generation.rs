@@ -109,7 +109,7 @@ fn member(stage: &Staged, chunk: &GenerationChunk, route: &str, document_id: &st
     refs.extend(chunk.evidence_refs.iter().filter(|r| **r != stage.source).cloned());
     Record { record_id: chunk.record_id.clone(), routing_key: route.into(), version: 1,
         temporal:chunk.temporal.clone().unwrap_or_default(), ingested_at_ms:ingestion, expired_at_ms:None,
-        document: Some(chunk.document.clone()), system: Some(EvidenceMetadata { kind: EvidenceKind::Derived, evidence_refs: refs }), retired_generation: false, generation_member: Some(GenerationMember { document_id:document_id.into(), generation_id:stage.id.clone() }) }
+        document: Some(chunk.document.clone()), system: Some(EvidenceMetadata { kind: EvidenceKind::Derived, evidence_refs: refs, relation:None }), retired_generation: false, generation_member: Some(GenerationMember { document_id:document_id.into(), generation_id:stage.id.clone() }) }
 }
 fn validate_stage(state: &State, config: &RecordConfig, stage: &Staged, request: &RecordWrite, evaluation:u64) -> Result<(), RecordError> {
     if state.independent_snapshot && stage.chunks.iter().any(|c| c.temporal.as_ref().is_some_and(|t| t.expire_at_ms.is_some())) { return Err(rejected("TTL generation requires a certified live owner")); }
@@ -166,7 +166,7 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
     }
     let receipt = WriteReceipt { staged_only: matches!(request.generation, Some(GenerationCommand::Stage { .. })), seq: state.seq.checked_add(1).ok_or_else(|| storage("sequence exhausted"))?,
         version: old.map_or(Some(1), |g| g.version.checked_add(1)).ok_or_else(|| storage("generation version exhausted"))?, record_id:request.record_id.clone() };
-    let applied = Applied { request, receipt, observed_epoch:epoch, observed_time_ms:evaluation };
+    let applied = Applied { graph_invalidation:false, request, receipt, observed_epoch:epoch, observed_time_ms:evaluation };
     let mut candidate = state.clone(); super::apply(&mut candidate, &applied)?;
     validate_state(&candidate, config)?;
     if matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) {

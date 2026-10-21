@@ -16,6 +16,10 @@ pub enum EvidenceKind {
     Source,
     /// Caller-supplied content supported by precise source/derived references.
     Derived,
+    /// Explicit caller-declared entity, without model resolution.
+    Entity,
+    /// Explicit directed edge with separately declared evidence.
+    Relation,
 }
 /// A precise reference in the current collection. Cross-collection references
 /// are not accepted; routing is verified rather than inferred from an opaque ID.
@@ -32,11 +36,14 @@ pub struct EvidenceRef {
 /// Engine-validated metadata, distinct from arbitrary business document fields.
 /// Sources support exact-version updates; derived recomputation uses a new
 /// identity. Generations, TTL and feed are separate implementation slices.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceMetadata {
     /// Source or derived record.
     pub kind: EvidenceKind,
+    /// Required only for explicit relation records.
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub relation: Option<super::RelationMetadata>,
     /// Direct dependencies; indirect dependencies are checked transitively.
     #[serde(default)]
     pub evidence_refs: Vec<EvidenceRef>,
@@ -74,12 +81,14 @@ fn visit(
     let result = if let Some(record) = records.get(id) {
         let mut visible = record.document.is_some() && !record.retired_generation;
         if let Some(system) = &record.system {
+            super::graph::validate_metadata(system)?;
             if system.evidence_refs.len() > MAX_REFERENCES {
                 return Err(rejected("evidence reference budget exceeded"));
             }
-            for reference in &system.evidence_refs {
+            for (reference,typed) in system.evidence_refs.iter().map(|r|(r,true)).chain(super::graph::endpoints(system).map(|r|(r,false))) {
                 let matches = records.get(&reference.record_id).is_some_and(|target| {
-                    target.system.is_some()
+                    (target.system.is_some() || !typed)
+                        && (typed || target.system.as_ref().is_none_or(|s|s.kind!=EvidenceKind::Relation))
                         && target.version == reference.version
                         && target.routing_key == reference.routing_key
                 });
@@ -116,6 +125,7 @@ pub(super) fn validate(
     records: &BTreeMap<String, Record>,
     request: &RecordWrite,
 ) -> Result<(), RecordError> {
+    if let Some(system)=&request.system {super::graph::validate_metadata(system)?;}
     let old = records.get(&request.record_id);
     if request.system.is_some() || old.is_some_and(|r| r.system.is_some()) {
         if request.record_id.len() > 256
@@ -131,7 +141,7 @@ pub(super) fn validate(
         if request.document.is_some() {
             let previous = old.unwrap();
             if previous.document.is_none() { return Err(rejected("deleted evidence cannot be recreated")); }
-            if previous.system.as_ref().unwrap().kind != EvidenceKind::Source {
+            if !matches!(previous.system.as_ref().unwrap().kind,EvidenceKind::Source|EvidenceKind::Entity|EvidenceKind::Relation) {
                 return Err(rejected("derived recomputation requires a new identity and current evidence"));
             }
             if !matches!(request.expected, ExpectedVersion::Match(v) if v == previous.version) {
@@ -139,6 +149,9 @@ pub(super) fn validate(
             }
             if request.system.as_ref().is_some_and(|system| Some(system) != previous.system.as_ref()) {
                 return Err(rejected("source metadata kind/dependencies cannot change"));
+            }
+            if previous.system.as_ref().unwrap().kind!=EvidenceKind::Source && !visit(&request.record_id,records,0,&mut BTreeSet::new(),&mut BTreeMap::new())? {
+                return Err(rejected("hidden declaration requires a new identity and current references"));
             }
             return Ok(());
         }
@@ -170,6 +183,7 @@ pub(super) fn validate(
         }
         _ => {}
     }
+    super::graph::validate_new(records,system)?;
     let mut seen = BTreeSet::new();
     let mut memo = BTreeMap::new();
     for reference in &system.evidence_refs {
@@ -210,7 +224,7 @@ pub(super) fn descendants(
             if system.evidence_refs.len() > MAX_REFERENCES {
                 return Err(rejected("evidence reference budget exceeded"));
             }
-            for reference in &system.evidence_refs {
+            for reference in system.evidence_refs.iter().chain(super::graph::endpoints(system)) {
                 reverse.entry(&reference.record_id).or_default().push(id);
             }
         }
@@ -267,9 +281,9 @@ pub(super) fn status(records: &BTreeMap<String, Record>, id: &str) -> Result<Evi
         expired |= record.expired_at_ms.is_some();
         stale |= record.retired_generation;
         if let Some(system) = &record.system {
-            for reference in &system.evidence_refs {
+            for (reference,typed) in system.evidence_refs.iter().map(|r|(r,true)).chain(super::graph::endpoints(system).map(|r|(r,false))) {
                 match records.get(&reference.record_id) {
-                    Some(target) if target.system.is_some() && target.routing_key == reference.routing_key => stale |= target.version != reference.version,
+                    Some(target) if (target.system.is_some() || !typed) && target.routing_key == reference.routing_key => stale |= target.version != reference.version,
                     _ => unavailable = true,
                 }
                 queue.push(&reference.record_id);
@@ -297,4 +311,9 @@ pub(super) fn validate_history(records: &BTreeMap<String, Record>, history: &[Re
         }
     }
     Ok(())
+}
+
+/// An edge adds a visibility dependency level beyond its endpoint's own graph.
+pub(super) fn endpoint_visible(records:&BTreeMap<String,Record>,id:&str)->Result<bool,RecordError> {
+    visit(id,records,1,&mut BTreeSet::new(),&mut BTreeMap::new())
 }

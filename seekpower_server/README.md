@@ -217,3 +217,16 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 创建 config 可携带 `change_feed:{retention_ms:604800000,max_events:100000,max_bytes:67108864}`。保留期至少七天；事件与紧急失效预留达到配额时新写入返回 429 `feed_full`，不会提前丢事件。既有 Record/journal 配额也继续有效。逻辑 feed 裁剪不删除原幂等账本，不等于 P3 物理历史回收。
 
 独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[实施记录第 18 节](../docs/implementation-57-p2.md)。本批尚未发布分支或获得 Windows 原生验证，不能把已有 PR 的 CI 当作本批通过。
+
+## P2 实体与显式一跳关系（本地批次）
+
+通过现有 RecordWrite 创建 `system:{"kind":"entity"}`，或 `system:{"kind":"relation","relation":{"from":{"record_id":"a","routing_key":"r","version":1},"to":{"record_id":"b","routing_key":"r","version":1},"relation_type":"knows","weight":0.5}}`。正文仍在 document；weight 可选，仅为调用方声明，不自动改变检索分数。evidence_refs 单独声明证据，端点不自动视为内容证据。
+
+端点必须是同 collection/partition 当前可见的精确非关系版本。关系与双端的来源、generation、TTL 共同控制可见性；端点替换、删除和 ABA 不会把旧边重新绑定。实体/关系正文可以 Match 精确更新，但 system 声明不可变，重算或重绑定使用新 Record ID。
+
+- `POST /api/v1/index/{id}/entities`：`{"cursor":null,"length":100}`，稳定 ID 分页；视图变化拒绝旧 cursor。
+- `POST /api/v1/index/{id}/neighbors`：`{"seeds":[{"record_id":"a","routing_key":"r","version":1}],"direction":"both","relation_types":[],"per_seed":128,"max_candidates":1000,"allow_partial":false}`。
+
+一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据和授权输出屏障与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
+
+本批 journal 为 V9，拒绝旧 V8 等格式；无迁移。未实现关系与全文/向量的单次融合查询、模型实体消歧或完整图语言。测试状态见[实施记录第 19 节](../docs/implementation-57-p2.md#19-实体与显式一跳关系)。

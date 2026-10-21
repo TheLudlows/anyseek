@@ -802,3 +802,57 @@ python3 scripts/record_service_smoke.py --server target/debug/seekpower_server -
 故障终态汇总 `/tmp/p2-feed-fault-acceptance.log`，构建和 HTTP/Chromium 日志 `/tmp/p2-feed-fault-acceptance-{build,http}.log`。不把旧 TTL 的结果算作本批通过。Windows 原生未运行（本分支尚未获发布/CI授权）；系统崩溃/断电未运行，进程退出不是替代。系统级测试仍需隔离可丢弃 Linux/Windows VM 或机器、外部 reset/power-cut、故障域外确认见证，不重启共享环境。
 
 本批未实现显式实体/一跳关系、P3 长期回收、跨 partition 全局排序、跨服务灾备自动激活或后台订阅服务，不扩大为模型/性能专项。本地终态通过，随代码提交供检视；推送、草稿 PR 和 Windows CI 仍需单独授权。
+
+## 19. 实体与显式一跳关系
+
+本地分支 `feat/57-p2-relations` 堆叠于 feed `43a898ffa330966a0d644000600ae22754f41346`，不发布本分支。#62–#65 的堆叠依赖不因本地开发自动合入。以下为本批工程契约，不把建议写成新增用户决策；验收以 19.2 的实际记录为准。
+
+- Entity/Relation 继续是唯一 Record 权威对象，使用 `system.kind=entity|relation`；业务字段仍在自定义 document。实体没有自动名称合并/模型消歧。关系额外声明 `system.relation={from,to,relation_type,weight?}`，from/to 复用精确 `{record_id,routing_key,version}`，只引用当前 collection/partition 的已可见非 Relation 端点。未知 collection/partition 字段拒绝；不猜路由，不隐式重绑定版本。relation_type 非空、有长度上限，weight 可选且有限，不自动充当全文/向量分数。
+- 边、双端及其证据/来源/generation/TTL 必须同时有效，统一决定普通 get/query/iterator、活动统计、邻接输出。端点版本变化即隐藏旧边，ABA 不能恢复旧引用。关联关系不是内容证据；需 evidence_refs 显式声明依据。普通图循环、自环合法，证据/可见性依赖环拒绝；首版不允许以关系为关系端点，不提供任意遍历语言。
+- 实体/关系正文可精确 Match 条件替换，system 类型、证据和端点声明不可变；重新绑定端点或重算失效依据使用新身份，与当前派生重算边界一致。删除/TTL 不复活。该保守声明契约便于未来另增显式关系修订命令，不提前把隐式重绑定引入普通替换。
+- 一跳请求使用至多 32 个按调用顺序排列且不重复的精确 seeds、in/out/both、至多 16 个 relation_type、每 seed 至多 128 条、总候选预算不超过 collection max_candidates、总响应字节预算。稳定按 seed 顺序、neighbor ID/edge ID 排序，自环在 both 仅一次。只计有效边路径，不把隐藏端点/边名字或数量返回。默认精确模式超预算拒绝；仅显式 allow_partial 才返回 complete=false 和窗口计数，不把窗口当全图精确数。
+- 实体目录、正反邻接为可丢弃重建缓存，无独立 journal。增量提交更新目录，端点/来源失效复用可见性闭包和输出屏障；重开、checkpoint、备份/接管从权威 Record 重建。feed 复用原业务提交，关系变化/端点失效提供必要 rescan，不双写新流。HTTP/UI 薄适配，同查询固定 seq/evaluation_time/统计，撤权与显式隐藏在输出复核。
+
+实施顺序：权威模型和合法性 → 可见性/增量统计/输出与恢复 → 有界实体目录和一跳 API → 默认 HTTP/UI 与故障/并发测试 → 独立审查和最终全套 → 更新完整 P2 缺口清单。Windows 原生与系统断电分别记录，不借用 TTL/feed CI。
+
+### 19.1 实际落点与一致性
+
+`record/graph.rs` 负责精确端点验证、实体目录和双向邻接可重建缓存、有界一跳读取；`evidence.rs` 在共同依赖闭包中检查双端及证据。普通端点更新也进入 publication 的失效集合与数据输出屏障。generation 切换和 TTL 沿用整体有效集合计算，正文、全文/向量可用集合和活动统计同时退役失效关系及其下游。
+
+`Applied.graph_invalidation` 在规划时确定并持久化，feed 重放使用该值，不能因后来新增边改变历史事件。邻接缓存没有独立持久日志，重开/接管由 Record 重建；元数据不可重绑定使增量插入与恢复一致。邻接读取惰性归并两个有序集合，预算外不先复制整张邻接表；保留墓碑邻接以保持重建前后候选预算一致，仍受 max_records 总限额。
+
+服务新增受保护 `POST .../entities` 与 `POST .../neighbors`，UI 只传递请求和展示结果。响应共同水位、时间、统计；重新授权与数据屏障不移到浏览器。具体 JSON 与约束见 server README。本批 journal 升为 V9；拒绝旧 V8 等格式，不提供历史迁移。
+
+独立审查发现新关系额外依赖一层可能把深度 16 端点扩成 17，并在持久后才失败；现从 depth=1 校验端点，在追加前拒绝，已补无 seq/统计/输出许可变化及重启回归。复审未发现新的阻塞缺陷。其他覆盖包括 A→B/B→A 与自环、精确条件重试、普通端点删除/重建 ABA、generation staging 不影响旧边/发布退役旧边及间接派生、source 删除、TTL、实体/关系 system 不可变、feed 失效历史稳定、checkpoint 重建、备份隔离与受控接管。
+
+### 19.2 验证状态
+
+2026-10-21 最终本地 Linux 源码验证已完成，独立复审及增量复审未发现未修复的阻塞缺陷。本批新增四个核心关系测试，真实 HTTP 脚本为 `scripts/record_graph_smoke.py`，由现有 smoke 入口执行；Chromium 操作真实实体/边编辑、实体目录和一跳按钮。
+
+| 验证命令 | Linux 实际结果 | Windows 本批 |
+| --- | --- | --- |
+| `cargo test --workspace --all-targets --quiet` | **35 suites，212 passed，0 failed，10 ignored** | 未运行 |
+| `cargo build --workspace` | 通过 | 未运行 |
+| `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser` | 通过；包含实体/边、预算、版本变化隐藏、备份隔离/接管和撤权 | 未运行 |
+| `cargo build -p seekpower_server --features fault-injection` 后立即运行上述 smoke `--faults --browser` | 通过；关系写入 append unknown、durable pending、持久后/可见后进程退出与精确重试，同时重跑 generation/source/TTL/feed/接管故障矩阵 | 未运行 |
+| `python3 scripts/check_core_boundary.py` | default/no-default-features 独立构建通过 | 未运行 |
+| `target/debug/seekpower_server generate_openapi=true` 及关系 schema/path 断言 | 通过 | 未运行 |
+| `git diff --check` | 通过 | 不适用 |
+
+10 个 ignored：9 个由父测试显式启动的子进程 worker，1 个既有额外参数跨构建 fixture；不单独算通过。最终全量在补完 ABA 删除/重建断言后重跑，未用修改前结果冒充最终验证。默认测试、默认服务、fault 构建/服务顺序执行，避免 feature 二进制相互覆盖。日志：`/tmp/p2-relations-final-{all,build,http,fault-build,fault-http,boundary,openapi}.log`，仅为本地证据。此检查点只本地提交，未推送或创建关系 PR。
+
+Windows 本批未运行，尚未获本分支推送/CI授权；系统崩溃/断电未运行，需要隔离可丢弃双平台环境、外部 reset/power-cut 及故障域外确认见证。上游 TTL #64 和 feed #65 的原生 CI 已成功，但不作为本批结果；进程故障也不能替代系统断电。
+
+### 19.3 对照原 P2 清单的真实缺口
+
+| 原阶段 | 当前已实现 | 尚未完成或受限范围 |
+| --- | --- | --- |
+| P2-1 来源/证据 | 来源精确版本、直接/间接依赖、删除与 stale 隐藏、共享授权及输出屏障、同服务接管 | 内容 hash/media_type 与精确字节/页码 locator 的专用契约尚未实现；普通 document 字段不能冒充引擎校验定位。管理型大文件 Blob 未提供，是否选用按实际输入需求确定 |
+| P2-2 generation | 持久 staging、完整清单、整代原子发布/abort、旧代退休、失败重放/幂等 | 没有租约/fence 和自动过期 staging 清理；当前必须显式 abort，受总容量背压，不承诺无限运行 |
+| P2-3 可选向量 | 正文先发布，缺向量不召回，精确版本后补、原始向量保存 | 未提供异步任务领取或失败原因上报服务；上层负责计算与重试，不在底座执行模型 |
+| P2-4 时间/TTL | event/ingested/valid 过滤、固定 evaluation_time、不可逆过期和依赖隐藏、持久可信时间与恢复 | 到期由操作入口触发，尚无独立后台调度器；无请求时不承诺及时物理回收。独立时间召回融合未新增 |
+| P2-5 实体/一跳 | 本批实体声明、精确双端、邻接、有界稳定枚举及 exact/window、默认 HTTP/UI | 一跳接口与全文/向量是分开请求，尚未实现单 ReadView 的关系融合查询/评分解释；客户端串接不能宣称同视图。模型抽取、消歧、完整图语言明确非目标 |
+| P2-6 feed | 同权威事件、七天窗口和背压、bootstrap 同切点/租期、scope、恢复/撤权 | UI 是有界检查器，未提供后台重算/订阅服务；历史账本并未随逻辑事件裁剪物理 GC |
+| P2-7 集成 | 各切片真实服务/UI、备份接管、审查与回归逐批记录 | 本批最终平台验证、上述定位/融合/必要 staging 生命周期等仍需后续收敛；不能称完整 P2 已完成 |
+
+P3 操作/版本历史持续回收、Segment compaction 另属后续阶段，不以本批解决；P4/P5 云对象存储/indexer/cache、P6 分区亦未实现。系统断电是验收环境缺口，不能与上述功能缺口混为一项，也不能用进程退出或原生 CI 替代。本地分批结束供用户检视，不自动扩大当前关系切片或合入主干。
