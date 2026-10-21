@@ -471,3 +471,79 @@ PR #6 可审查、尚未合入。S1.4 高亮/配额及 S1.5 仍待执行，Issue
 本地验证通过：68 项 workspace Rust 测试；独立核心默认/无默认特性构建与依赖边界；HTTP 冒烟；生成 OpenAPI JSON/YAML 与仓库完全一致。HTTP 回归增加旧 v2 路径与未知路径响应一致性，确认已删除文件入口不会写入文档；原有 N-gram、全文、向量/混合、提交与重开回归通过。CI 增加 gxhash 依赖禁入检查。本地 HTTP 不启用 Chromium，浏览器回归由 CI 执行。
 
 命令使用 `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_CODEGEN_UNITS=1` 与 `-j2`。此前实际使用 gxhash 的索引需从原始文档重建，不提供旧哈希格式转换。
+
+
+## 2026-10-21：归并早期状态快照
+
+以下保留原状态表的提交、PR、测试数量及当时措辞；“本分支”“最近”均指原记录时点，不代表当前状态。
+
+## 早期执行状态（历史快照）
+
+本页保留原记录，不代表当前能力；命令与路径采用当时名称。当前状态见 [STATUS](STATUS.md)。
+
+### 早期合入记录（历史快照，不代表当前接口）
+
+S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 已合入。PR #11 聚合裁剪已合入 `97bea80`。PR #12 共享过滤已合入 `ea32aa1`。PR #13 已合入 `7bd1602`；PR #14 HTTP/OpenAPI 与结构化信息/日志边界已合入 `74d5012`。PR #15 首次 key 初始化与索引创建界面已合入 `08bf119`。PR #16 按需内存与 JSON 写入界面已合入 `4a459f9`。PR #17 C1～C5 已合入 `ebe7151`。PR #18 N-gram 修复与 D1～D3、PR #19 UI 外链清理已合入；PR #20 D5 已合入 `d1254da`；本分支执行 E1/E2，固定 AHash 并清理旧路由专用提示。
+
+| 批次 | 范围 | 状态 | 本批已通过测试数 |
+| --- | --- | --- | --- |
+| S1.1 / [#2](https://github.com/TheLudlows/seekpower/pull/2) | workspace、MCP/SDK 与 HTTP 冒烟迁移 | 已合入 `61f1130` | 45 |
+| S1.2 / [#3](https://github.com/TheLudlows/seekpower/pull/3) | 外置模型、推理和切块，外部向量 API/UI | 已合入 `fc47cf8` | 48 |
+| S1.3 / [#4](https://github.com/TheLudlows/seekpower/pull/4) | 外置文件解析/导入和 PDF 运行时 | 已合入 `567d8a2` | 48 |
+| S1.4a / [#5](https://github.com/TheLudlows/seekpower/pull/5) | 移除纠错、补全和查询改写 | 已合入 `e5e0850` | 50 |
+| S1.4b / [#6](https://github.com/TheLudlows/seekpower/pull/6) | 移除地理搜索，保留普通元数据 | 已合入 `fb90463` | 53 |
+| S1.4c / [#7](https://github.com/TheLudlows/seekpower/pull/7) | 移除高亮/摘要，保留原文展示 | 已合入 `8026d37` | 55 |
+| S1.4d / [#8](https://github.com/TheLudlows/seekpower/pull/8) | 移除配额/限流，保留鉴权和 key 作用域 | 已合入 `ff79175` | 57 |
+| S1.5 / [#9](https://github.com/TheLudlows/seekpower/pull/9) | 依赖、参数、文档与 UI 闭环 | 已合入 `4df02a8` | 58 |
+| B1/B2 / [#10](https://github.com/TheLudlows/seekpower/pull/10) | 删除二进制查询；搜索/遍历统一 POST JSON | 已合入 `af56be6` | 58 |
+| 聚合裁剪 / [#11](https://github.com/TheLudlows/seekpower/pull/11) | 删除统计聚合；保留过滤/排序和日期输入 | 已合入 `97bea80` | 58 |
+| 共享过滤 / [#12](https://github.com/TheLudlows/seekpower/pull/12) | 三种检索模式共享元数据过滤 | 已合入 `ea32aa1` | 60 |
+| 兼容清理 / [#13](https://github.com/TheLudlows/seekpower/pull/13) | 删除旧索引兼容与历史基准描述 | 已合入 `7bd1602` | 62 |
+| 核心边界 / [#14](https://github.com/TheLudlows/seekpower/pull/14) | HTTP/OpenAPI 下移，结构化信息与日志 | 已合入 `74d5012` | 63 |
+| 启动与界面 / [#15](https://github.com/TheLudlows/seekpower/pull/15) | 首次随机 key、界面连接与创建索引 | 已合入 `08bf119` | 63 |
+| 内存与写入 / [#16](https://github.com/TheLudlows/seekpower/pull/16) | 按需分配缓冲、JSON 写入与提交界面 | 已合入 `4a459f9` | 64 |
+| C1～C5 / [#17](https://github.com/TheLudlows/seekpower/pull/17) | 闲置代码、控制台/demo key/表格、历史资源、重复入口裁剪 | 已合入 `ebe7151` | 64 |
+| N-gram / D1～D3 | 修复独立 N-gram 标志；删除 half、LZ4/Zstd、RAM 全量加载 | 已合入 PR #18 | 68 |
+
+| UI 外链 / [#19](https://github.com/TheLudlows/seekpower/pull/19) | 删除上游宣传与文档链接 | 已合入 `3c3de11` | 68 |
+| D5 / [#20](https://github.com/TheLudlows/seekpower/pull/20) | 删除同义词、词干器、接口和 Snowball 依赖 | 已合入 `d1254da` | 68 |
+| E1/E2 | 固定 AHash、清理旧协议专用提示 | 本分支实施 | 见 VALIDATION.md |
+
+### 最近已合入验证
+
+PR #17 的 [CI 38507685545](https://github.com/TheLudlows/seekpower/actions/runs/38507685545) 全部通过：独立核心边界、workspace 构建、依赖检查、64 项 Rust 测试、HTTP/Chromium、三种模式 JSON 写入、9 个 UI 静态资源及 OpenAPI 精确对比。早期批次记录见 本文件前述验证记录。
+
+## 2026-10-21：README 清理检查点 3af29ab
+
+以下为提交 `3af29ab6fb62abee46bcac21864c97103f0fa900` 当时的范围和验证；“未推送”仅描述该检查点。
+
+## README 与冗余文档收敛
+
+状态：本地文档批次，未推送。基线为已合入 PR #69 的 `452ff222efed9f53b6663040cc14ccb1d87914c6`；分支 `docs/anyseek-readme-cleanup`。已只读确认远端仓库为 TheLudlows/anyseek，本批未执行仓库改名或合并。
+
+### 实际改动
+
+README 按通用 AI 记忆/知识底座目标重写，分开当前 P1-A/P2 能力、资源/可靠性边界、快速开始、HTTP/Rust 接入与后续设计。保留 Web UI；模型、解析、embedding 和重算明确留在上层。Segment、SQLite 元数据和对象存储明确未实现，系统断电未验收。
+
+| 删除文档 | 原因 | 仍有效内容的现行落点 |
+| --- | --- | --- |
+| MIGRATION.md | 旧裁剪协议、格式7、向量必填及旧授权接口已过时；项目不提供升级迁移，继续保留易误导接入 | 服务指南、FEATURES 和 P1/P2 记录定义当前接口与恢复；VALIDATION/CHANGELOG 保留历史变更证据 |
+| SEEKPOWER_PLAN.md | S1/S2/D 旧计划已被 issue #57 和核心路线替代，含“稳定ID未实施”等错误当前状态 | core-roadmap 定义 P3–P6；保留跨 partition 各通道全局排名后 RRF、全局统计/安全剪枝、分片失败等后续正确性约束 |
+
+未找到 ANYSEEK_PLAN.md，无需删除替代副本。不增加同内容归档文件；需要旧原文时访问基线 Git 历史。UPSTREAM 的历史规划链接固定到删除前提交，VALIDATION 中的历史文件名保留并说明其性质。
+
+其他文档按用途保留：FEATURES/ARCHITECTURE/服务指南是当前契约；P1/P2 与 core-roadmap 是实现证据和有效设计；VALIDATION、CHANGELOG、早期状态及机器验证文件保留历史事实；检索专题和 Rust 示例仍被指南/测试使用；第三方来源和 LICENSE 不删除。文档索引和状态页同步，功能代码、脚本、CI 配置均未修改。
+
+### 验证
+
+- `python3 scripts/check_docs_brand.py`：通过：25 份 Markdown 文件/标题链接、92 个执行面品牌检查。
+- `git diff --check`：通过。
+- 独立文档审查：通过，无必要阻塞项。
+- 本批仅 Markdown，无运行时代码/接口/构建变更，不重跑全量 Rust 或 HTTP。此前品牌 CI 和新 master CI 分别跟踪，不能作为本批新测试结果。
+- Linux/Windows 系统崩溃与断电仍未验收。
+
+## 2026-10-21：文档精简与单 package 发布准备
+
+基于 `2d81a431ccd91d252c303c9b12a7e671b49ae38a`，仅处理已批准的三份文档：删除 `docs/validation/stage-c-field-lengths.md`，保留同名 JSON 的冻结数据与测量边界；将早期状态和 README 清理报告完整归并到本文件以上两节，再删除原文件。其余设计、专题、法律归属和机器证据不删除。当前状态页区分已通过的主干 CI 与尚待运行的本分支 CI。单 package 的实现及 Linux 测试见 [验证记录](docs/validation/single-package.md)。
+
+本次文档精简验证：`python3 scripts/check_docs_brand.py` 通过（23 份 Markdown、91 个执行面）；`git diff --check` 通过；独立只读审查通过，确认两份历史报告完整保留、Stage C JSON 与基线字节一致。仅 Markdown 改动，不将前述功能测试冒称本次重新运行。
