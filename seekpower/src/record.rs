@@ -237,6 +237,28 @@ pub struct RecordPartition {
     inner: Arc<Mutex<Inner>>,
     admission: Arc<Semaphore>,
 }
+/// Stateless continuation at one logical position. A changed position conflicts;
+/// a cursor never silently combines pages from different views.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordCursor {
+    /// Position captured on the first page.
+    pub visible_seq: u64,
+    /// Exclusive stable identity boundary.
+    pub after: String,
+}
+/// One bounded page of active records in stable identity order.
+#[derive(Clone, Debug, Serialize)]
+pub struct RecordPage {
+    /// Position shared by records and statistics.
+    pub visible_seq: u64,
+    /// Exact original active records.
+    pub records: Vec<Record>,
+    /// Continuation, absent at end of view.
+    pub next: Option<RecordCursor>,
+    /// Active statistics captured under the same guard.
+    pub statistics: RecordStatistics,
+}
 /// A record hit from one complete visible position.
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordHit {
@@ -740,11 +762,31 @@ impl RecordPartition {
                     .journal
                     .validate_append(bytes.len())
                     .map_err(|e| RecordError::Rejected(e.to_string()))?;
+                #[cfg(feature = "fault-injection")]
+                let injected = std::env::var("SEEKPOWER_RECORD_FAULT_NONCE")
+                    .ok()
+                    .filter(|nonce| nonce == &applied.request.operation_id.nonce)
+                    .and_then(|_| std::env::var("SEEKPOWER_RECORD_FAULT").ok());
+                #[cfg(feature = "fault-injection")]
+                if injected.as_deref() == Some("before_append") {
+                    return Err(RecordError::Rejected("injected before append".into()));
+                }
                 inner.healthy = false;
                 inner
                     .journal
                     .append(&bytes)
                     .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+                #[cfg(feature = "fault-injection")]
+                match injected.as_deref() {
+                    Some("after_append_unknown") => {
+                        return Err(RecordError::OutcomeUnknown(
+                            "injected uncertain append outcome".into(),
+                        ));
+                    }
+                    Some("after_durable") => return Err(RecordError::DurablePending(receipt.seq)),
+                    Some("crash_after_durable") => std::process::exit(86),
+                    _ => {}
+                }
                 #[cfg(test)]
                 if inner.fail_after_durable {
                     return Err(RecordError::DurablePending(receipt.seq));
@@ -800,6 +842,10 @@ impl RecordPartition {
                     .len()
                 );
                 inner.healthy = true;
+                #[cfg(feature = "fault-injection")]
+                if injected.as_deref() == Some("crash_after_visible") {
+                    std::process::exit(86);
+                }
                 #[cfg(test)]
                 if std::env::var("SEEKPOWER_RECORD_CRASH").as_deref() == Ok("published") {
                     std::process::exit(74);
@@ -960,6 +1006,89 @@ impl RecordPartition {
             .await
             .map_err(storage)?
     }
+    /// Iterate active records by stable identity. Changing the logical position
+    /// invalidates continuation rather than silently skipping or duplicating rows.
+    pub async fn page(
+        &self,
+        cursor: Option<RecordCursor>,
+        limit: usize,
+    ) -> Result<RecordPage, RecordError> {
+        let _permit = self
+            .admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
+        let inner = self.inner.lock().await;
+        if !inner.healthy {
+            return Err(RecordError::RecoveryRequired);
+        }
+        if limit == 0 || limit > inner.config.max_candidates {
+            return Err(RecordError::Rejected(
+                "page size outside candidate budget".into(),
+            ));
+        }
+        if cursor
+            .as_ref()
+            .is_some_and(|c| c.visible_seq != inner.state.seq)
+        {
+            return Err(RecordError::Conflict(
+                "iterator view changed; restart traversal".into(),
+            ));
+        }
+        let start = cursor.map_or(std::ops::Bound::Unbounded, |c| {
+            std::ops::Bound::Excluded(c.after)
+        });
+        let mut rows = inner
+            .state
+            .records
+            .range((start, std::ops::Bound::Unbounded))
+            .filter(|(_, record)| record.document.is_some());
+        let records: Vec<_> = rows
+            .by_ref()
+            .take(limit)
+            .map(|(_, record)| record.clone())
+            .collect();
+        let next = rows.next().and_then(|_| {
+            records.last().map(|record| RecordCursor {
+                visible_seq: inner.state.seq,
+                after: record.record_id.clone(),
+            })
+        });
+        Ok(RecordPage {
+            visible_seq: inner.state.seq,
+            records,
+            next,
+            statistics: inner.statistics(),
+        })
+    }
+
+    /// Resume a never-served initial directory after interrupted publication.
+    /// The caller must exclusively own its parent catalog, including across
+    /// missing-target windows. Certified corruption is never permission to reset.
+    pub async fn resume_initialization(path: &Path, budget: u64) -> Result<(), RecordError> {
+        let path = path.to_owned();
+        crate::INDEX_RUNTIME
+            .spawn(async move {
+                PartitionJournal::resume_initial(&path, budget).map_err(|e| match e {
+                    CreateError::NotPublished(e) => storage(e),
+                    CreateError::PublicationUnknown(e) => {
+                        RecordError::OutcomeUnknown(e.to_string())
+                    }
+                })
+            })
+            .await
+            .map_err(storage)?
+    }
+
+    /// Return the immutable configuration from this recovered partition.
+    pub async fn configuration(&self) -> Result<RecordConfig, RecordError> {
+        let inner = self.inner.lock().await;
+        if !inner.healthy {
+            return Err(RecordError::RecoveryRequired);
+        }
+        Ok(inner.config.clone())
+    }
+
     /// Read resource and active-version counts at one published position.
     pub async fn statistics(&self) -> Result<RecordStatistics, RecordError> {
         let _permit = self
@@ -1088,7 +1217,7 @@ mod tests {
     async fn record_depth_rejection_preserves_authority_and_accepted_depth_recovers() {
         let location = path();
         let snapshot = path();
-        let partition = RecordPartition::create(&location, config()).await.unwrap();
+        let mut partition = RecordPartition::create(&location, config()).await.unwrap();
         let nested = |depth: usize| {
             let mut value = serde_json::Value::Null;
             for _ in 1..depth {
@@ -1103,7 +1232,11 @@ mod tests {
             .unwrap()
             .insert("nested".into(), nested(64));
         partition.write(accepted.clone()).await.unwrap();
+        drop(partition); // Windows enforces the journal owner byte-range lock.
         let wal = std::fs::read(location.join("generation-0000000000000000").join("wal")).unwrap();
+        partition = RecordPartition::open(&location, config().max_journal_bytes)
+            .await
+            .unwrap();
         for depth in [65, 200] {
             let mut rejected = write("nested-reject", "bad", "alpha", ExpectedVersion::Absent);
             rejected
@@ -1115,11 +1248,15 @@ mod tests {
                 partition.write(rejected).await,
                 Err(RecordError::Rejected(_))
             ));
+            assert_eq!(query(&partition, SearchMode::Lexical).await.visible_seq, 1);
+            drop(partition);
             assert_eq!(
                 std::fs::read(location.join("generation-0000000000000000").join("wal")).unwrap(),
                 wal
             );
-            assert_eq!(query(&partition, SearchMode::Lexical).await.visible_seq, 1);
+            partition = RecordPartition::open(&location, config().max_journal_bytes)
+                .await
+                .unwrap();
         }
         partition.checkpoint(&snapshot).await.unwrap();
         drop(partition);

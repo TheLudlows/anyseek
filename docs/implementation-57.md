@@ -2,14 +2,110 @@
 
 Status: **in progress — P1-A is not complete**. Baseline:
 `fc4fcfe64fdf86d03c07f82cf1d4889deb896801` (#56, #58, #59 included; #60 excluded).
-Working branch: `feat/57-reliable-record-engine`. No PR or issue publication is authorized yet.
+Working branch: `feat/57-reliable-record-engine`. Branch push and Linux/Windows CI are authorized. PR, merge, deployment and issue edits are not.
 
 This is the implementation/validation entry point, not a replacement roadmap.
 The product contract remains [issue #57](https://github.com/TheLudlows/seekpower/issues/57).
 Current capabilities remain in [FEATURES](../FEATURES.md). Historical validation
 remains in [VALIDATION](../VALIDATION.md).
 
-## Latest checkpoint — default Record HTTP/UI integration (in progress)
+## Latest checkpoint — lifecycle operations and native service faults (in progress)
+
+Parent implementation checkpoint: `b51e0cd84f334096e0be009e0430466b833d4611`.
+CI-only correction: `c46ec26b6c12f312783d3223b2fe97b4f2f0125a`.
+This stage fills previously unmounted capabilities through the Record/catalog
+path. It adds no old-format migration or legacy route compatibility layer.
+
+Actual changes:
+
+- `RecordPartition::page` and POST `iterator` expose stable identity pages of
+  original active records with projection, statistics and a continuation bound to
+  the visible sequence. Concurrent changes invalidate the cursor with 409; this
+  does not claim a pinned historical read view across multiple HTTP requests.
+- POST `delete-plan` selects all records, explicit IDs, or all lexical query
+  matches from one view. Returned targets carry immutable routing and exact
+  `Match` versions. The client must save the plan and assign one original
+  operation ID per target before POST `batch`. Regenerating the selection on
+  retry is unsafe. Plans are read-only and not durable server-side jobs.
+- POST `batch` executes 1..100 independent conditional writes/deletes, explicitly
+  non-atomically, with per-row outcomes. Unknown/application/recovery failures
+  stop the remaining rows (`not_attempted`); conflicts/rejections do not roll
+  back prior confirmed writes. Original-ID replay cannot delete an intervening
+  replacement or an ABA-recreated record.
+- Master DELETE collection durably retains its identity tombstone and removes
+  all grants before acknowledging. It never reuses IDs, reopens deleted data or
+  deletes an open mmap directory. Physical reclamation remains deferred to P3.
+  Ordinary shared identities can delete records but cannot retire a collection
+  or change its authorization control plane.
+- POST collection `backup` creates an independent local Record checkpoint,
+  including originals, vectors, full configuration, versions/tombstones and
+  operation receipts. Its generated ID is derived from collection + original
+  operation ID; retry returns the same point even after source changes. There is
+  a 32-backup hard limit, never silent backup eviction. No arbitrary paths or
+  archive uploads are accepted. This is a local collection backup, not off-host
+  replication or a full service/catalog identity backup.
+- Master POST `restore` creates a new collection identity from a local backup.
+  PrepareRestore persists complete configuration and the generated backup ID;
+  startup completes the physical copy before activation. Old key/grant state is
+  deliberately not restored, preventing revival of revoked permissions. The
+  restoring master receives a fresh grant; normal grant management shares it.
+- Independent review found an interrupted initial directory publication could
+  strand backup retries or prepared restores. `resume_initial` now validates an
+  unserved, checksum-valid generation-0 root, closes Windows handles, durably
+  retires it to a deterministic staging name, durably republishes it and only
+  then appends its certificate. Repeated repair interruption is recoverable.
+  Certified corruption, ambiguous roots and missing active collections fail
+  closed; they never become permission to create empty data. Uncertain rename/
+  certificate results retain `outcome_unknown` classification.
+- The UI permits discarding only a known-rejected and unsent remainder; confirmed
+  prefixes stay saved. Unknown/expired outcomes retain original requests. The
+  existing editor/search/setup layout is retained.
+
+Real service fault testing uses the explicit `fault-injection` build feature,
+absent from default binaries, with process-start environment selectors and no
+remote activation endpoint. It covers known pre-append rejection, uncertain
+append, durable-but-unpublished failure, process exits after durability/visibility,
+and backup/restore publication plus repeated repair interruption. These are
+process-fault and error-path tests, not power-loss certification.
+
+CI evidence and platform distinction:
+
+- `b51e0cd`: workflow validation failed before jobs ran (job env could not use
+  `runner.temp`). Corrected to `github.workspace` on `c46ec26`.
+- [Run 39539953102](https://github.com/TheLudlows/seekpower/actions/runs/39539953102),
+  exact SHA `c46ec26b6c12f312783d3223b2fe97b4f2f0125a`: Linux build/browser/full suite
+  and native persistence job **passed**. Windows native compilation and earlier
+  journal/partition/index I/O steps passed; Record tests **failed** (18 passed,
+  1 failed, 4 ignored). The failing fixture read the locked WAL through a second
+  handle. It now compares bytes only after releasing the owner, then reopens;
+  production locks are unchanged. Later Windows catalog/service steps did not run.
+- Final-source local results and subsequent native CI results are recorded in the
+  validation ledger. Until the corrected SHA runs, Windows remains **failed**,
+  not passed. Linux and Windows host/system-crash tests remain **not run**.
+- Trigger: push only this development branch, verify remote SHA, then
+  `gh workflow run ci.yml --repo TheLudlows/seekpower --ref feat/57-reliable-record-engine`.
+  Existing default-branch `workflow_dispatch` supports this; no PR or master edit
+  is needed. The workflow uses `contents: read`.
+
+Final-source Linux results: `cargo test --workspace --all-targets --quiet`:
+**159 passed, 0 failed, 10 ignored, 35 suites**. `cargo build --workspace --quiet`
+and `cargo build -p seekpower_server --features fault-injection --quiet` passed.
+Default HTTP/Chromium and fault-enabled HTTP/Chromium commands passed using
+`SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data` (overlayfs) and
+`PLAYWRIGHT_BROWSERS_PATH=/workspace/playwright-browsers`. Scripts:
+`python3 scripts/record_service_smoke.py --server target/debug/seekpower_server
+--browser` and the fault build with additional `--faults`. Logs:
+`/tmp/seekpower-lifecycle-final-tests.log`, `...-final-e2e.log`,
+`...-final-faults.log`. OpenAPI generation passed (15 paths, 21 operations).
+
+Remaining: full service/catalog backup portability and backup retirement tools,
+initial service-root interrupted-publication recovery, data-ledger/physical-history
+reclamation, permanently rejected pending-creation UI resolution, broader I/O
+failure certification and native Windows/system-fault acceptance. P1-A is still
+in progress. Typed source dependencies and immediate derived-data hiding remain
+P2; no arbitrary metadata is treated as an evidence graph.
+
+## Previous checkpoint — default Record HTTP/UI integration
 
 Parent checkpoint: `40d5ee35b0453e8e4ff58d84706000e9a0bc4eb5`.
 Default startup now opens the durable catalog and recovers its registered Record

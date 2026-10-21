@@ -1,6 +1,6 @@
 # 当前功能清单
 
-本地 P1 实施进展见 [#57 实施与验证记录](docs/implementation-57.md)。可靠 Record 模块已在本地接入增量索引、活动统计及在线 WAL 检查点测试，默认 HTTP/UI 已接入独立持久授权目录与 Record 路径，共享 key、撤销输出屏障和浏览器原请求重试已有本地端到端测试；iterator、批量删除和 collection 删除尚未接入；下表不能据此扩展为可靠服务承诺。
+本地 P1 实施进展见 [#57 实施与验证记录](docs/implementation-57.md)。可靠 Record 模块已在本地接入增量索引、活动统计及在线 WAL 检查点测试，默认 HTTP/UI 已接入独立持久授权目录与 Record 路径，共享 key、撤销输出屏障和浏览器原请求重试已有本地端到端测试；现已补充 iterator、条件删除计划/批量执行、collection 逻辑删除及本地 collection 备份恢复，双平台原生验收仍在进行；下表不能据此扩展为可靠服务承诺。
 
 核查日期：2026-10-15（Asia/Shanghai）。基于主干 `4e171b5`，本分支收敛 HTTP 参数；Rust 核心配置与索引格式保持不变。
 

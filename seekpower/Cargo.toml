@@ -19,6 +19,8 @@ publish = false
 default = ["zh","vb"]
 zh = []
 vb = []
+# Explicit test binaries only; no remote activation endpoint.
+fault-injection = []
 
 [lib]
 name = "seekpower"

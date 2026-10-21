@@ -2,7 +2,7 @@
   "date": "2026-10-21",
   "baseline": "fc4fcfe64fdf86d03c07f82cf1d4889deb896801",
   "branch": "feat/57-reliable-record-engine",
-  "status": "P1-A in progress; default Record/catalog HTTP and UI integrated; service feature parity and Windows native acceptance pending",
+  "status": "P1-A in progress; lifecycle HTTP and local collection backup/restore plus process-fault matrix implemented; Windows corrected-SHA run pending",
   "linux": {
     "platform": "Linux 6.18.55 x86_64",
     "rust": "1.99.1",
@@ -11,13 +11,13 @@
     "workspace_command": "SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet",
     "workspace_result": {
       "suites": 35,
-      "passed": 158,
+      "passed": 159,
       "failed": 0,
       "ignored": 10
     },
     "build": "cargo build --workspace --quiet: passed on final source",
-    "http_smoke": "SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data PLAYWRIGHT_BROWSERS_PATH=/workspace/playwright-browsers python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser: passed",
-    "chromium": "passed: real UI collection creation, lexical/vector/hybrid, lost write response and reload/retry without duplicate",
+    "http_smoke": "default build real HTTP + Chromium passed; iterator, planned conditional deletion/batch, immutable local collection backup/new-identity restore and collection deletion across restart",
+    "chromium": "passed: existing lexical/vector/hybrid setup/editor/search, original-write retry after response loss and reload, known-rejected remainder discard",
     "process_exit_boundaries": {
       "journal_write": 8,
       "journal_repair": 1,
@@ -28,7 +28,7 @@
       "catalog_revoke": 8
     },
     "system_crash": "not run",
-    "workspace_log": "/tmp/seekpower-service-final-tests.log",
+    "workspace_log": "/tmp/seekpower-lifecycle-final-tests.log",
     "controlled_cancellation_tests": {
       "passed": 2,
       "failed": 0,
@@ -69,35 +69,34 @@
       "online checkpoint preserves grant revisions and unexpired retry results",
       "expired receipts reclaimed with persistent epoch watermark"
     ],
-    "build_log": "/tmp/seekpower-service-final-build.log",
+    "build_log": "/tmp/seekpower-lifecycle-final-build.log",
     "catalog_test_result": {
       "passed": 12,
       "failed": 0,
       "ignored_subprocess_workers": 1
     },
-    "http_log": "/tmp/seekpower-service-final-e2e.log",
+    "http_log": "/tmp/seekpower-lifecycle-final-e2e.log",
     "service_barrier_tests": "4 passed: real TCP revocation vs success/error handoff, reserved internal IDs/recovery, unconsumed-body admission, protected oversize/serialization errors",
-    "openapi": "generation passed; 10 actual mounted API paths"
+    "openapi": "passed: 15 mounted paths, 21 operations",
+    "fault_http_log": "/tmp/seekpower-lifecycle-final-faults.log",
+    "service_fault_matrix": "explicit fault-injection feature: before_append rejection; after_append_unknown; after_durable pending; crash_after_durable; crash_after_visible; backup and restore initial publication and repeated repair exits"
   },
   "windows": {
-    "native_compilation": "not run",
-    "native_tests": "not run",
+    "native_compilation": "passed on c46ec26 (core tests); service binary later step did not run",
+    "native_tests": "failed on c46ec26: Record 18 passed, 1 failed, 4 ignored; journal/partition/index I/O steps passed; fixture corrected, new SHA run pending",
     "system_crash": "not run",
-    "ci_job": "persistence-native/windows-latest prepared locally; not published or dispatched"
+    "ci_job": "persistence-native/windows-latest"
   },
-  "external_state_changes": "none; local branch and commit only",
+  "external_state_changes": "Authorized development-branch push and workflow dispatch only; no PR, merge, deployment or issue edit",
   "remaining": [
-    "iterator and bulk/query/all deletion",
-    "collection deletion lifecycle",
-    "HTTP backup/restore",
-    "comprehensive real HTTP I/O failure injection",
-    "pending UI request permanent-rejection resolution",
-    "CORS/trailing slash compatibility",
-    "Windows native integration and filesystem/system-crash certification",
-    "data-operation ledger reclamation with physical-version resource limits",
-    "safe catalog-level reclamation of abandoned root initialization preparations"
+    "full service/catalog backup portability and backup retirement tools",
+    "initial service-root interrupted-publication recovery",
+    "data-operation ledger reclamation and physical-history limits",
+    "permanently rejected pending-creation UI resolution",
+    "Windows native corrected-SHA acceptance",
+    "Linux and Windows host/system-crash certification"
   ],
-  "review_checkpoint_parent": "40d5ee35b0453e8e4ff58d84706000e9a0bc4eb5",
+  "review_checkpoint_parent": "b51e0cd84f334096e0be009e0430466b833d4611",
   "independent_review": {
     "mode": "read-only",
     "original_findings": [
@@ -110,6 +109,21 @@
     "final_static_review": "no new blocking defect in correction scope",
     "incremental_and_generation_findings": "Corrected with regression coverage; final static persistence review found no new blocker in reviewed scope. Native Windows/system faults remain unvalidated.",
     "catalog_findings": "Fixed: nonfinite config could poison recovery; revoked creator stranded prepared collection; revoke capacity failure left authorization live. Reviewer static followup found no new blocker in reviewed persistence/revision scope. Added panic fencing and regression coverage.",
-    "service_findings": "Fixed and regression tested: internal activation namespace/length, protected error body handoff, bounded control admission, retained response admission, serialization/oversize authorization bypass"
-  }
+    "service_findings": "Fixed and regression tested: internal activation namespace/length, protected error body handoff, bounded control admission, retained response admission, serialization/oversize authorization bypass",
+    "lifecycle_findings": "reviewed iterator/batch/delete-plan/collection deletion; backup review found uncertified root retry dead end, repaired via strict initialization republish; followup found uncertain repair errors flattened to Storage, corrected classification"
+  },
+  "ci_runs": [
+    {
+      "sha": "b51e0cd84f334096e0be009e0430466b833d4611",
+      "url": "https://github.com/TheLudlows/seekpower/actions/runs/39539810586",
+      "result": "workflow validation failed; no jobs ran"
+    },
+    {
+      "sha": "c46ec26b6c12f312783d3223b2fe97b4f2f0125a",
+      "url": "https://github.com/TheLudlows/seekpower/actions/runs/39539953102",
+      "linux_build_browser_full_suite": "passed",
+      "linux_native": "passed",
+      "windows_native": "failed at locked-WAL read test fixture; later steps skipped"
+    }
+  ]
 }

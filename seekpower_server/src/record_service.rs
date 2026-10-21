@@ -15,7 +15,10 @@ use seekpower::{
     },
     index::{AccessType, FrequentwordType, IndexMetaObject, LexicalSimilarity},
     index::{Clustering, DocumentCompression},
-    record::{OperationId, RecordConfig, RecordError, RecordPartition, RecordQuery, RecordWrite},
+    record::{
+        OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
+        RecordWrite,
+    },
     vector::Inference,
 };
 use serde::{Deserialize, Serialize};
@@ -108,6 +111,9 @@ fn master_verifier() -> String {
     verifier(&Sha256::digest(crate::MASTER_KEY_SECRET.as_bytes()))
 }
 fn control_id(id: &OperationId) -> Result<(), Error> {
+    if id.nonce.is_empty() || id.nonce.len() > 256 {
+        return Err(bad("operation nonce length must be 1..256 bytes"));
+    }
     if id.nonce.starts_with("sys:") {
         return Err(bad("reserved operation namespace"));
     }
@@ -252,14 +258,38 @@ impl Service {
         Ok(service)
     }
     async fn finish_collection(&self, entry: CollectionEntry) -> Result<(), Error> {
+        if entry.deleted {
+            return Ok(());
+        }
         if self.records.read().await.contains_key(&entry.collection_id) {
             return Ok(());
         }
         let path = self.root.join(&entry.directory);
+        if !entry.active {
+            RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
+        }
         let partition = if path.exists() {
             RecordPartition::open(&path, entry.config.max_journal_bytes).await?
         } else if !entry.active {
-            RecordPartition::create(&path, entry.config.clone()).await?
+            if let Some(backup_id) = &entry.restore_from {
+                let backup = RecordPartition::open(
+                    &self.root.join(format!("backup-{backup_id}")),
+                    entry.config.max_journal_bytes,
+                )
+                .await?;
+                if serde_json::to_value(backup.configuration().await?).map_err(storage)?
+                    != serde_json::to_value(&entry.config).map_err(storage)?
+                {
+                    return Err(storage(
+                        "backup configuration differs from durable restore intent",
+                    ));
+                }
+                backup.checkpoint(&path).await?;
+                drop(backup);
+                RecordPartition::open(&path, entry.config.max_journal_bytes).await?
+            } else {
+                RecordPartition::create(&path, entry.config.clone()).await?
+            }
         } else {
             return Err(storage(
                 "active collection data missing; refusing empty replacement",
@@ -644,6 +674,139 @@ async fn read(
         });
     protected(value, permit)
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageRequest {
+    #[serde(default)]
+    cursor: Option<RecordCursor>,
+    #[serde(default = "page_length")]
+    length: usize,
+    #[serde(default)]
+    fields: Vec<String>,
+}
+fn page_length() -> usize {
+    10
+}
+async fn iterate(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    let request: PageRequest = parse(&bytes)?;
+    let key = s.authenticate(&headers).await?;
+    let p = s.record(&key, &id).await?;
+    let (result, permit) = s
+        .catalog
+        .authorized(key, id, move |_| async move {
+            let mut page = p.page(request.cursor, request.length).await?;
+            if !request.fields.is_empty() {
+                for record in &mut page.records {
+                    if let Some(doc) = record.document.as_mut() {
+                        doc.retain(|field, _| request.fields.contains(field));
+                    }
+                }
+            }
+            Ok::<_, RecordError>(page)
+        })
+        .await?;
+    protected(result.map_err(Into::into), permit)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchRequest {
+    writes: Vec<RecordWrite>,
+}
+async fn batch(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    // Null is a deliberate deletion. Missing document is never interpreted as one.
+    let value: Value = parse(&bytes)?;
+    if !value
+        .get("writes")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter()
+                .all(|r| r.as_object().is_some_and(|o| o.contains_key("document")))
+        })
+    {
+        return Err(bad("every write must contain explicit document"));
+    }
+    let request: BatchRequest = serde_json::from_value(value).map_err(bad)?;
+    if request.writes.is_empty() || request.writes.len() > 100 {
+        return Err(bad("batch requires 1..100 independent writes"));
+    }
+    let key = s.authenticate(&headers).await?;
+    let p = s.record(&key, &id).await?;
+    let (result, permit) = s.catalog.authorized(key, id, move |_| async move {
+        let mut rows = Vec::new();
+        let mut stopped = false;
+        for write in request.writes {
+            let operation_id = write.operation_id.clone();
+            if stopped { rows.push(json!({"operation_id":operation_id,"code":"not_attempted"})); continue; }
+            match p.write(write).await {
+                Ok(receipt) => rows.push(json!({"operation_id":operation_id,"receipt":receipt,"code":"applied","expires_at":operation_id.expires_at_unix_seconds()})),
+                Err(error) => {
+                    stopped = matches!(error, RecordError::OutcomeUnknown(_) | RecordError::DurablePending(_) | RecordError::RecoveryRequired | RecordError::Storage(_));
+                    let error = Error::from(error);
+                    rows.push(json!({"operation_id":operation_id,"code":error.1,"message":error.2,"status":error.0.as_u16()}));
+                }
+            }
+        }
+        json!({"atomic":false,"results":rows})
+    }).await?;
+    response(result, permit)
+}
+#[derive(Deserialize)]
+#[serde(tag = "select", rename_all = "snake_case", deny_unknown_fields)]
+enum DeleteSelection {
+    All,
+    Ids { record_ids: Vec<String> },
+    Query { query: SearchRequestObject },
+}
+async fn deletion_plan(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    let selection: DeleteSelection = parse(&bytes)?;
+    let default_nprobe = s.default_nprobe;
+    let key = s.authenticate(&headers).await?;
+    let p = s.record(&key, &id).await?;
+    let (result, permit) = s.catalog.authorized(key, id, move |entry| async move {
+        let (seq, records) = match selection {
+            DeleteSelection::Query { query } => {
+                if query.query_vector.is_some() || query.similarity_threshold.is_some() || query.query_string.trim().is_empty() {
+                    return Err(bad("query deletion requires nonempty lexical text; use explicit all selection to clear"));
+                }
+                // Deletion selects every match, never the caller's display page or ANN sample.
+                query.search_mode(default_nprobe).map_err(bad)?;
+                let result = p.query(RecordQuery { text:query.query_string.clone(), vector:None, mode:seekpower::search::SearchMode::Lexical,
+                    query_type:query.query_type(), offset:0, length:entry.config.max_candidates, result_type:seekpower::search::ResultType::TopkCount,
+                    fields:query.field_filter, filters:query.facet_filter, sort:vec![] }).await?;
+                if result.hits.len() != result.count_total { return Err(bad("deletion selection exceeds candidate budget")); }
+                (result.visible_seq, result.hits.into_iter().map(|hit| hit.record).collect::<Vec<_>>())
+            }
+            selection => {
+                let mut page = p.page(None, entry.config.max_candidates).await?;
+                if page.next.is_some() { return Err(bad("deletion selection exceeds candidate budget")); }
+                if let DeleteSelection::Ids { record_ids } = selection {
+                    if record_ids.len() > entry.config.max_candidates { return Err(bad("identity selection exceeds budget")); }
+                    page.records.retain(|record| record_ids.contains(&record.record_id));
+                }
+                (page.visible_seq, page.records)
+            }
+        };
+        let targets: Vec<_> = records.into_iter().map(|r| json!({"record_id":r.record_id,"routing_key":r.routing_key,"expected":{"Match":r.version},"document":null})).collect();
+        Ok::<_,Error>(json!({"visible_seq":seq,"targets":targets,"atomic":false,"instruction":"Persist targets with one original operation_id each before executing /batch; retries must reuse the saved requests, never regenerate the selection."}))
+    }).await?;
+    protected(result, permit)
+}
+
 async fn operation(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -672,6 +835,131 @@ async fn catalog_operation(
         s.permit(&key).await?,
     )
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupRequest {
+    operation_id: OperationId,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreRequest {
+    operation_id: OperationId,
+    collection_id: String,
+    backup_id: String,
+}
+fn validate_backup_id(id: &str) -> Result<(), Error> {
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(bad("invalid backup ID"));
+    }
+    Ok(())
+}
+async fn backup(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    let request: BackupRequest = parse(&bytes)?;
+    control_id(&request.operation_id)?;
+    let admission = s.admit_control(&headers, false).await?;
+    owned(async move {
+        let _admission = admission;
+        let _control = s.control.lock().await;
+        let key = s.authenticate(&headers).await?;
+        let p = s.record(&key, &id).await?;
+        let identity = serde_json::to_vec(&(id.clone(), &request.operation_id)).map_err(bad)?;
+        let backup_id = verifier(&identity);
+        let path = s.root.join(format!("backup-{backup_id}"));
+        let root = s.root.clone();
+        let oid = request.operation_id.clone();
+        let (result, permit) = s.catalog.authorized(key, id, move |entry| async move {
+            // The source epoch watermark is checked even for a replay. Backup IDs
+            // are immutable; retrying an ID never takes a fresher snapshot.
+            p.operation(&oid).await?;
+            RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
+            let seq = if path.exists() {
+                let existing = RecordPartition::open(&path, entry.config.max_journal_bytes).await?;
+                existing.statistics().await?.visible_seq
+            } else {
+                let count = std::fs::read_dir(&root).map_err(storage)?.try_fold(0usize, |count, row| {
+                    let row = row?;
+                    Ok::<_,std::io::Error>(count + usize::from(row.file_name().to_string_lossy().starts_with("backup-")))
+                }).map_err(storage)?;
+                if count >= 32 { return Err(bad("local backup budget exhausted (32); export/retirement tooling is pending")); }
+                p.checkpoint(&path).await?
+            };
+            Ok::<_,Error>(json!({"backup_id":backup_id,"visible_seq":seq,"operation_id":request.operation_id,"expires_at":request.operation_id.expires_at_unix_seconds(),"scope":"collection data/configuration/versions/operation receipts; grants are not restored"}))
+        }).await?;
+        protected(result, permit)
+    }).await
+}
+async fn restore(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    let request: RestoreRequest = parse(&bytes)?;
+    control_id(&request.operation_id)?;
+    validate_backup_id(&request.backup_id)?;
+    let admission = s.admit_control(&headers, true).await?;
+    owned(async move {
+        let _admission = admission;
+        let _control = s.control.lock().await;
+        let key = s.admin(&headers).await?;
+        let backup = RecordPartition::open(&s.root.join(format!("backup-{}",request.backup_id)), 256*1024*1024).await?;
+        let config = backup.configuration().await?;
+        drop(backup);
+        let operation_id = request.operation_id.clone();
+        let id = request.collection_id;
+        s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::PrepareRestore {
+            collection_id:id.clone(), owner_key:key.clone(), config, backup_id:request.backup_id,
+        }}).await?;
+        let entry = s.catalog.collections().await?.into_iter().find(|e|e.collection_id==id).ok_or_else(not_found)?;
+        if entry.deleted { return Err(bad("restored collection has since been deleted")); }
+        s.finish_collection(entry).await?;
+        let (_, permit) = s.catalog.authorized(key, id.clone(), |_|async {}).await?;
+        response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()}), permit)
+    }).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteCollectionRequest {
+    operation_id: OperationId,
+}
+async fn delete_collection(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    let request: DeleteCollectionRequest = parse(&bytes)?;
+    control_id(&request.operation_id)?;
+    let admission = s.admit_control(&headers, true).await?;
+    owned(async move {
+        let _admission = admission;
+        let _control = s.control.lock().await;
+        let key = s.admin(&headers).await?;
+        let receipt = s
+            .catalog
+            .execute(CatalogRequest {
+                operation_id: request.operation_id,
+                command: CatalogCommand::DeleteCollection {
+                    collection_id: id.clone(),
+                },
+            })
+            .await?;
+        // No physical deletion while mmap owners may remain. The durable catalog
+        // tombstone prevents serving or reopening this identity after a restart.
+        s.records.write().await.remove(&id);
+        response(
+            json!({"receipt":receipt,"deleted":true,"physical_reclamation":"deferred"}),
+            s.permit(&key).await?,
+        )
+    })
+    .await
+}
+
 async fn checkpoint(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -785,7 +1073,12 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
             get(list_collections).post(create_key).delete(revoke_key),
         )
         .route("/api/v1/index", post(create_collection))
-        .route("/api/v1/index/{id}", get(info).patch(checkpoint))
+        .route("/api/v1/restore", post(restore))
+        .route("/api/v1/index/{id}/backup", post(backup))
+        .route(
+            "/api/v1/index/{id}",
+            get(info).patch(checkpoint).delete(delete_collection),
+        )
         .route("/api/v1/index/{id}/grants", post(grants))
         .route(
             "/api/v1/index/{id}/doc",
@@ -793,6 +1086,9 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         )
         .route("/api/v1/index/{id}/doc/{record_id}", get(read))
         .route("/api/v1/index/{id}/query", post(query))
+        .route("/api/v1/index/{id}/iterator", post(iterate))
+        .route("/api/v1/index/{id}/batch", post(batch))
+        .route("/api/v1/index/{id}/delete-plan", post(deletion_plan))
         .route(
             "/api/v1/index/{id}/operation/{epoch}/{nonce}",
             get(operation),
@@ -1116,7 +1412,7 @@ pub(crate) fn generate_openapi() {
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
-    doc["info"] = json!({"title":"Seekpower Record service (P1 in progress)","version":crate::VERSION,"description":"Default Record/catalog routes. Writes require stable operation and record identities. Unimplemented legacy bulk/iterator/collection deletion routes are not mounted. See docs/implementation-57.md for acceptance limits."});
+    doc["info"] = json!({"title":"Seekpower Record service (P1 in progress)","version":crate::VERSION,"description":"Default Record/catalog routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Backup/restore is collection-scoped and does not restore old grants. See docs/implementation-57.md for acceptance limits."});
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","routing_key","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"routing_key":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
@@ -1202,6 +1498,54 @@ pub(crate) fn generate_openapi() {
             "get",
             "Master: control-plane operation status",
             None,
+        ),
+        (
+            "/api/v1/index/{id}/iterator",
+            "post",
+            "Stable identity page; cursor conflicts if view changed",
+            Some(
+                json!({"type":"object","properties":{"cursor":{"type":"object"},"length":{"type":"integer","minimum":1},"fields":{"type":"array","items":{"type":"string"}}}}),
+            ),
+        ),
+        (
+            "/api/v1/index/{id}/batch",
+            "post",
+            "1..100 independent writes; per-item outcomes; no batch atomicity",
+            Some(
+                json!({"type":"object","required":["writes"],"properties":{"writes":{"type":"array","minItems":1,"maxItems":100,"items":{"$ref":"#/components/schemas/RecordWrite"}}}}),
+            ),
+        ),
+        (
+            "/api/v1/index/{id}/delete-plan",
+            "post",
+            "Read-only all/ids/query deletion target selection; save plan and assign original operation IDs before batch execution",
+            Some(
+                json!({"type":"object","required":["select"],"properties":{"select":{"enum":["all","ids","query"]},"record_ids":{"type":"array","items":{"type":"string"}},"query":{"$ref":"#/components/schemas/SearchRequestObject"}}}),
+            ),
+        ),
+        (
+            "/api/v1/index/{id}/backup",
+            "post",
+            "Independent local collection checkpoint; retry same operation for same snapshot",
+            Some(
+                json!({"type":"object","required":["operation_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"}}}),
+            ),
+        ),
+        (
+            "/api/v1/restore",
+            "post",
+            "Master: restore local backup into new collection; grants are not restored",
+            Some(
+                json!({"type":"object","required":["operation_id","backup_id","collection_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"backup_id":{"type":"string"},"collection_id":{"type":"string"}}}),
+            ),
+        ),
+        (
+            "/api/v1/index/{id}",
+            "delete",
+            "Master: permanently retire collection identity and revoke all grants; physical reclamation deferred",
+            Some(
+                json!({"type":"object","required":["operation_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"}}}),
+            ),
         ),
     ] {
         let mut operation = json!({"summary":summary,"responses":{"200":{"description":"Success; JSON response"},"default":{"description":"JSON code/message error; 409 conflict, 410 expired, 503 durable_pending/outcome_unknown/recovery_required"}}});

@@ -12,11 +12,11 @@ function resetDocumentEditor() {
     CURRENT_SCHEMA = {};
     $('#documentJson,#documentFile').val('');
     $('#documentSchema,#documentIndex,#documentError,#documentStatus').text('');
-    $('#retryDocumentCommit').prop('hidden', true);
+    $('#retryDocumentCommit,#discardRejectedWrites').prop('hidden', true);
 }
 function documentControls(busy) {
     documentBusy = busy;
-    $('#manageIndexes,#writeDocuments,#backToSearch,#retryDocumentCommit').prop('disabled', busy);
+    $('#manageIndexes,#writeDocuments,#backToSearch,#retryDocumentCommit,#discardRejectedWrites').prop('disabled', busy);
     $('#writeDocuments').prop('disabled', busy || $('#documentPanel').is(':visible'));
     $('#documentJson,#documentFile,#submitDocuments').prop('disabled', busy || pendingDocumentCommit !== null);
 }
@@ -31,21 +31,28 @@ function showDocuments() {
     $('#documentJson,#documentFile').val('');
     $('#documentError,#documentStatus').text('');
     $('#retryDocumentCommit').prop('hidden', !pendingDocumentCommit);
+    $('#discardRejectedWrites').prop('hidden', !pendingDocumentCommit?.rejected);
     if (pendingDocumentCommit) $('#documentStatus').text('Original write requests retained. Retry to resolve their outcomes.');
     documentControls(false);
 }
 async function submitPendingWrites() {
     const pending = pendingDocumentCommit;
     try {
-        for (const request of pending.requests) {
+        for (let i = pending.completed || 0; i < pending.requests.length; i++) {
+            const request = pending.requests[i];
             await setupApi('POST', `api/v1/index/${encodeURIComponent(pending.collection)}/doc`, API_KEY, request);
+            pending.completed = i + 1; pending.rejected = false;
+            sessionStorage.setItem('seekpower.pendingWrites', JSON.stringify(pending));
         }
         sessionStorage.removeItem('seekpower.pendingWrites');
         pendingDocumentCommit = null;
         $('#documentStatus').text(`Wrote ${pending.requests.length} record(s). All confirmed writes are durable and visible.`);
-        $('#retryDocumentCommit').prop('hidden', true);
+        $('#retryDocumentCommit,#discardRejectedWrites').prop('hidden', true);
         $('#documentJson,#documentFile').val('');
     } catch (error) {
+        pending.rejected = error.code === 'rejected' || error.code === 'conflict';
+        try { sessionStorage.setItem('seekpower.pendingWrites', JSON.stringify(pending)); } catch (_) {}
+        $('#discardRejectedWrites').prop('hidden', !pending.rejected);
         $('#documentError').text(`${error.message} Original requests are retained; retry uses the same identities. An absent operation result does not prove failure.`);
         $('#retryDocumentCommit').prop('hidden', false);
         $('#documentStatus').text('Some outcomes may be unresolved. No batch atomicity is implied.');
@@ -73,6 +80,16 @@ $(function () {
             sessionStorage.setItem('seekpower.pendingWrites',JSON.stringify(pendingDocumentCommit));
         } catch(error){pendingDocumentCommit=null;$('#documentError').text(error.message);return;}
         documentControls(true); await submitPendingWrites(); documentControls(false);
+    });
+    $('#discardRejectedWrites').on('click', () => {
+        if (documentBusy || !pendingDocumentCommit?.rejected) return;
+        const completed = pendingDocumentCommit.completed || 0;
+        sessionStorage.removeItem('seekpower.pendingWrites');
+        pendingDocumentCommit = null;
+        $('#retryDocumentCommit,#discardRejectedWrites').prop('hidden', true);
+        $('#documentJson,#documentFile').val(''); $('#documentError').text('');
+        $('#documentStatus').text(`${completed} confirmed writes remain saved. Rejected and unsent requests discarded; enter only the records you still want to write.`);
+        documentControls(false);
     });
     $('#retryDocumentCommit').on('click',async()=>{
         if(!pendingDocumentCommit||documentBusy)return;

@@ -48,6 +48,12 @@ def exercise(base,master,call):
             page.locator('#createIndexForm button[type="submit"]').click();expect(page.locator('#indexName')).to_have_text('browser-'+mode)
             page.locator('#writeDocuments').click();page.locator('#documentJson').fill(json.dumps({'title':mode,'body':'alpha','vector':[2,0]}))
             page.locator('#submitDocuments').click();expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
+            # Known rejection can release only the rejected/unattempted remainder.
+            page.locator('#documentJson').fill(json.dumps({'body':'bad vector','vector':[1]}))
+            page.locator('#submitDocuments').click();expect(page.locator('#discardRejectedWrites')).to_be_visible()
+            page.reload();page.locator('#writeDocuments').click();expect(page.locator('#discardRejectedWrites')).to_be_visible()
+            page.locator('#discardRejectedWrites').click();expect(page.locator('#documentJson')).to_be_enabled()
+            expect(page.locator('#documentStatus')).to_contain_text('Rejected and unsent requests discarded')
             page.locator('#backToSearch').click()
         assert not errors,errors
         context.close();browser.close()

@@ -8,7 +8,7 @@ def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--browser',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
     with tempfile.TemporaryDirectory(prefix='seekpower-service-', dir=os.environ.get('SEEKPOWER_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
@@ -17,9 +17,9 @@ def main():
         master=base64.b64encode(hashlib.sha256(b'issue57-service-test').digest()).decode()
         log=open(pathlib.Path(tmp)/'server.log','w+')
         process=None
-        def start():
+        def start(fault_env=None):
             nonlocal process
-            process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test'},stdout=log,stderr=log)
+            process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**(fault_env or {})},stdout=log,stderr=log)
             for _ in range(300):
                 if process.poll() is not None:
                     log.seek(0);raise AssertionError(log.read())
@@ -95,6 +95,111 @@ def main():
             for query in [{'query_vector':[1,0],'all':True},{'query':'alpha','query_vector':[1,0],'rrf':{}}]:
                 q=call('POST','/api/v1/index/vectors/query',query);assert q['hits'][0]['record']['record_id']=='v',q
             assert call('GET','/api/v1/index/vectors/doc/v')['document']['vector']==[2,0]
+            vector_backup=call('POST','/api/v1/index/vectors/backup',{'operation_id':operation()})
+            call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'restored-vectors','backup_id':vector_backup['backup_id']})
+            assert call('GET','/api/v1/index/restored-vectors/doc/v')['document']['vector']==[2,0]
+            assert call('POST','/api/v1/index/restored-vectors/query',{'query_vector':[1,0],'all':True})['hits'][0]['record']['record_id']=='v'
+            # New Record iterator, planned conditional deletion, independent backup and lifecycle.
+            page=call('POST','/api/v1/index/shared/iterator',{'length':2,'fields':['title']},key=keys['b'])
+            assert len(page['records'])==2 and page['next'] and page['statistics']['active_records']==4
+            assert all(set(r['document'])=={'title'} for r in page['records'])
+            second=call('POST','/api/v1/index/shared/iterator',{'cursor':page['next'],'length':2},key=keys['b'])
+            assert not second['next'] and not ({r['record_id'] for r in page['records']} & {r['record_id'] for r in second['records']})
+            plan=call('POST','/api/v1/index/shared/delete-plan',{'select':'query','query':{'query':'alpha','length':1}},key=keys['b'])
+            assert len(plan['targets'])==3
+            saved=[{**t,'operation_id':operation()} for t in plan['targets']]
+            updated={**recreate,'operation_id':operation(),'expected':{'Match':4},'document':{'body':'replacement survives stale delete'}}
+            call('POST','/api/v1/index/shared/doc',updated,key=keys['b'])
+            call('POST','/api/v1/index/shared/iterator',{'cursor':page['next'],'length':2},key=keys['b'],status=409)
+            results=call('POST','/api/v1/index/shared/batch',{'writes':saved},key=keys['b'])
+            assert not results['atomic'] and [r['code'] for r in results['results']].count('conflict')==1
+            assert call('POST','/api/v1/index/shared/batch',{'writes':saved},key=keys['b'])==results
+            assert call('GET','/api/v1/index/shared/doc/r0',key=keys['b'])['version']==5
+            backup_request={'operation_id':operation()}
+            backup=call('POST','/api/v1/index/shared/backup',backup_request,key=keys['b'])
+            assert call('POST','/api/v1/index/shared/backup',backup_request,key=keys['b'])==backup
+            restore={'operation_id':operation(),'collection_id':'restored','backup_id':backup['backup_id']}
+            call('POST','/api/v1/restore',restore,key=keys['b'],status=403)
+            call('POST','/api/v1/restore',restore)
+            call('POST','/api/v1/restore',restore)
+            call('GET','/api/v1/index/restored',key=keys['b'],status=403)
+            assert call('GET','/api/v1/index/restored/doc/r0')['version']==5
+            oid=saved[-1]['operation_id']
+            assert call('GET',f'/api/v1/index/restored/operation/{oid["epoch"]}/{oid["nonce"]}')['receipt']
+            # Tombstone version + complete operation ledger survive independent restoration.
+            assert call('POST','/api/v1/index/restored/batch',{'writes':saved})==results
+            all_plan=call('POST','/api/v1/index/restored/delete-plan',{'select':'all'})
+            clear=[{**t,'operation_id':operation()} for t in all_plan['targets']]
+            assert all(r['code']=='applied' for r in call('POST','/api/v1/index/restored/batch',{'writes':clear})['results'])
+            assert call('GET','/api/v1/index/restored')['indexed_doc_count']==0
+            # Retrying backup after source changes still returns its original point.
+            assert call('POST','/api/v1/index/shared/backup',backup_request,key=keys['b'])==backup
+            deletion_request={'operation_id':operation()}
+            call('DELETE','/api/v1/index/shared',deletion_request,key=keys['b'],status=403)
+            call('DELETE','/api/v1/index/shared',deletion_request)
+            call('DELETE','/api/v1/index/shared',deletion_request)
+            restart()
+            call('GET','/api/v1/index/shared',key=keys['b'],status=403)
+            call('POST','/api/v1/index',{**create,'operation_id':operation()},key=keys['b'],status=409)
+            call('POST','/api/v1/restore',{**restore,'operation_id':operation(),'collection_id':'after-source-delete'})
+            assert call('GET','/api/v1/index/after-source-delete/doc/r0')['version']==5
+            call('POST','/api/v1/restore',{**restore,'backup_id':'../escape'},status=400)
+            if args.faults:
+                import http.client
+                for stage in ['before_append','after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
+                    w={'operation_id':operation(),'record_id':stage,'routing_key':stage,'expected':'Absent','document':{'body':'fault recovery'}}
+                    later={**w,'operation_id':operation(),'record_id':stage+'-later','routing_key':stage+'-later'}
+                    process.kill();process.wait(timeout=20)
+                    start({'SEEKPOWER_RECORD_FAULT':stage,'SEEKPOWER_RECORD_FAULT_NONCE':w['operation_id']['nonce']})
+                    if stage.startswith('crash_'):
+                        try: call('POST','/api/v1/index/after-source-delete/doc',w)
+                        except (OSError,http.client.HTTPException): pass
+                        else: raise AssertionError('expected transport loss at '+stage)
+                        process.wait(timeout=20);assert process.returncode==86
+                    else:
+                        result=call('POST','/api/v1/index/after-source-delete/batch',{'writes':[w,later]})['results']
+                        expected={'before_append':'rejected','after_append_unknown':'outcome_unknown','after_durable':'durable_pending'}[stage]
+                        assert result[0]['code']==expected,result
+                        if stage=='before_append':
+                            assert result[1]['code']=='applied'
+                        else:
+                            assert result[1]['code']=='not_attempted'
+                            call('POST','/api/v1/index/after-source-delete/query',{},status=503)
+                    restart()
+                    oid=w['operation_id'];status=call('GET',f'/api/v1/index/after-source-delete/operation/{oid["epoch"]}/{oid["nonce"]}')
+                    assert bool(status['receipt']) == (stage!='before_append'),(stage,status)
+                    first=call('POST','/api/v1/index/after-source-delete/doc',w)['receipt']
+                    assert first['version']==1 and call('POST','/api/v1/index/after-source-delete/doc',w)['receipt']==first
+                    if stage!='before_append':call('GET','/api/v1/index/after-source-delete/doc/'+later['record_id'],status=404)
+                # Interrupt initial root publication, then interrupt its repair,
+                # proving durable staging can be resumed on both native platforms.
+                for kind in ['backup','restore']:
+                    body={'operation_id':operation()}
+                    endpoint='/api/v1/index/after-source-delete/backup'
+                    if kind=='restore':
+                        body.update({'collection_id':'interrupted-restore','backup_id':backup['backup_id']});endpoint='/api/v1/restore'
+                    process.kill();process.wait(timeout=20)
+                    start({'SEEKPOWER_INITIAL_ROOT_PREFIX':kind if kind=='backup' else 'collection-','SEEKPOWER_INITIAL_FAULT':'published'})
+                    try: call('POST',endpoint,body)
+                    except (OSError,http.client.HTTPException):pass
+                    else:raise AssertionError('expected initial publication exit')
+                    process.wait(timeout=20);assert process.returncode==87
+                    if kind=='backup':
+                        start({'SEEKPOWER_INITIAL_ROOT_PREFIX':'backup-','SEEKPOWER_INITIAL_FAULT':'retired'})
+                        try: call('POST',endpoint,body)
+                        except (OSError,http.client.HTTPException):pass
+                        else:raise AssertionError('expected interrupted repair')
+                        process.wait(timeout=20);assert process.returncode==87
+                    # Restore recovery runs before HTTP starts, so no readiness loop
+                    # is used for the intentional repair crash.
+                    else:
+                        process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','SEEKPOWER_INITIAL_ROOT_PREFIX':'collection-','SEEKPOWER_INITIAL_FAULT':'retired'},stdout=log,stderr=log)
+                        process.wait(timeout=20);assert process.returncode==87
+                    start();recovered=call('POST',endpoint,body)
+                    if kind=='restore':assert call('GET','/api/v1/index/interrupted-restore/doc/r0')['version']==5
+                    else:assert recovered['backup_id']
+                print('PASS real HTTP faults: rejection/unknown/durable pending, process exits before/after visibility, batch tail stopped, backup/restore publication and repeated repair crashes')
+            print('PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, no revived grants, collection tombstone across restart')
             print('PASS real HTTP: default Record/catalog, shared grants, conditional writes, retry/response loss, checkpoint, crash restart, revoked operation lookup, full query parameters, vectors')
             if args.browser:
                 from record_service_browser import exercise

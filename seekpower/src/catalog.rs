@@ -79,9 +79,25 @@ pub enum CatalogCommand {
         /// Complete immutable data-engine configuration.
         config: RecordConfig,
     },
+    /// Prepare a new identity from an independently recoverable local backup.
+    PrepareRestore {
+        /// New collection identity, never an in-place overwrite.
+        collection_id: String,
+        /// Trusted restoring identity receiving the initial grant.
+        owner_key: String,
+        /// Complete configuration read from the certified backup.
+        config: RecordConfig,
+        /// Generated backup ID, without path components.
+        backup_id: String,
+    },
     /// Called only after the prepared RecordPartition has durably initialized.
     ActivateCollection {
         /// Stable, never reused collection identity.
+        collection_id: String,
+    },
+    /// Permanently retire a collection identity and revoke every grant.
+    DeleteCollection {
+        /// Stable collection identity; never reusable after deletion.
         collection_id: String,
     },
     /// Grant the same read/write capability as every other authorized key.
@@ -133,6 +149,10 @@ pub struct CollectionEntry {
     pub config: RecordConfig,
     /// False until initialization is durably activated.
     pub active: bool,
+    /// Permanent logical deletion; data reclamation is a separate operation.
+    pub deleted: bool,
+    /// Retained restoration intent; never a caller-supplied filesystem path.
+    pub restore_from: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Applied {
@@ -350,7 +370,22 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
             collection_id,
             owner_key,
             config,
+        }
+        | CatalogCommand::PrepareRestore {
+            collection_id,
+            owner_key,
+            config,
+            ..
         } => {
+            let restore_from =
+                if let CatalogCommand::PrepareRestore { backup_id, .. } = &event.request.command {
+                    if backup_id.len() != 64 || !backup_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(CatalogError::Rejected("invalid backup ID".into()));
+                    }
+                    Some(backup_id.clone())
+                } else {
+                    None
+                };
             identity(collection_id)?;
             crate::record::validate_config(config)
                 .map_err(|e| CatalogError::Rejected(e.to_string()))?;
@@ -376,6 +411,8 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                     owner_key: owner_key.clone(),
                     config: config.clone(),
                     active: false,
+                    deleted: false,
+                    restore_from,
                 },
             );
         }
@@ -384,7 +421,7 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                 .collections
                 .get(collection_id)
                 .ok_or_else(|| CatalogError::Conflict("collection not prepared".into()))?;
-            if collection.active {
+            if collection.active || collection.deleted {
                 return Err(CatalogError::Conflict("collection already active".into()));
             }
             // A revoked creator cannot strand independently owned data.
@@ -399,6 +436,15 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                     .or_default()
                     .insert(owner, event.receipt.seq);
             }
+        }
+        CatalogCommand::DeleteCollection { collection_id } => {
+            let collection = state
+                .collections
+                .get_mut(collection_id)
+                .ok_or_else(|| CatalogError::Conflict("collection not found".into()))?;
+            collection.active = false;
+            collection.deleted = true;
+            state.grants.remove(collection_id);
         }
         CatalogCommand::Grant {
             collection_id,
@@ -578,7 +624,9 @@ impl Catalog {
                 }
                 let revoke = matches!(
                     request.command,
-                    CatalogCommand::RevokeKey { .. } | CatalogCommand::RevokeGrant { .. }
+                    CatalogCommand::RevokeKey { .. }
+                        | CatalogCommand::RevokeGrant { .. }
+                        | CatalogCommand::DeleteCollection { .. }
                 );
                 #[cfg(test)]
                 let operation_limit = inner.operation_limit;
@@ -610,8 +658,12 @@ impl Catalog {
                     .seq
                     .checked_add(1)
                     .ok_or_else(|| CatalogError::Rejected("sequence exhausted".into()))?;
-                let directory = matches!(request.command, CatalogCommand::PrepareCollection { .. })
-                    .then(|| format!("collection-{seq:016x}"));
+                let directory = matches!(
+                    request.command,
+                    CatalogCommand::PrepareCollection { .. }
+                        | CatalogCommand::PrepareRestore { .. }
+                )
+                .then(|| format!("collection-{seq:016x}"));
                 let event = Applied {
                     request,
                     receipt: CatalogReceipt { seq, directory },

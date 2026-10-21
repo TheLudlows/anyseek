@@ -22,7 +22,18 @@
 master 可 POST `/api/v1/apikey` 注册 `{operation_id,key_id,apikey_base64}`，
 DELETE 同一路径撤销 `{operation_id,key_id}`；grant 接口与请求见生成参考。
 撤销 key 不删除 collection。操作状态与数据读取同样检查现有授权。
-旧 bulk/iterator/collection 删除路由暂未挂载，不能据此宣称完成服务功能对齐。
+POST `iterator` 接收 `{cursor?,length?,fields?}`，返回同一 visible_seq 的原始记录页；
+写入后旧 cursor 返回409。POST `delete-plan` 接收 `{select:"all"}`、
+`{select:"ids",record_ids:[...]}` 或 `{select:"query",query:{query:"text"}}`。
+保存返回 targets、为每个目标分配并保存 operation_id，再 POST `batch` 的
+`{writes:[...]}` 执行；每批最多100条，非原子，返回逐项结果。不要在重试时重新生成删除计划。
+Master DELETE collection 接收 `{operation_id}`，永久保留ID墓碑并撤销所有grant；
+文件回收后置，撤销key仍不删除collection。
+POST collection `backup` 接收 `{operation_id}`，返回独立本地快照 backup_id；
+相同ID重试返回原快照。Master POST `/api/v1/restore` 接收
+`{operation_id,collection_id,backup_id}`，恢复到新collection，不恢复旧grant。
+保留完整原始数据/配置/版本/操作收据，备份最多32份；尚无备份导出/退役工具，
+不等于完整服务catalog备份或异地容灾。
 Web UI 已接入创建、原请求重试、搜索和向量配置；批量 JSON 输入逐条提交。
 
 ---

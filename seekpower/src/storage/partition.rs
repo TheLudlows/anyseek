@@ -84,6 +84,8 @@ impl PartitionJournal {
             })?,
         );
         publish(&prepared, path)?;
+        #[cfg(feature = "fault-injection")]
+        initialization_fault(path, "published");
         let owner = OpenOptions::new()
             .read(true)
             .write(true)
@@ -120,6 +122,84 @@ impl PartitionJournal {
             _owner: owner,
         })
     }
+    /// Complete only a certified-journal, never-served initial root. The caller
+    /// must own the parent catalog lock, including when the target is absent.
+    /// A stable repair lock serializes repair attempts; it never substitutes for
+    /// that parent lock. Certified or corrupt roots are never retired/rebuilt.
+    pub(crate) fn resume_initial(path: &Path, max_bytes: u64) -> Result<(), CreateError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("missing parent"))?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| io::Error::other("invalid root name"))?;
+        let staging = parent.join(format!(".initial-resume-{name}"));
+        let guard = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(parent.join(format!(".initial-resume-{name}.lock")))?;
+        guard.try_lock().map_err(io::Error::other)?;
+        if !path.exists() && !staging.exists() {
+            return Ok(());
+        }
+        if path.exists() && staging.exists() {
+            return Err(io::Error::other("ambiguous initial root and staging").into());
+        }
+        let candidate = if path.exists() { path } else { &staging };
+        let owner = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(candidate.join("owner"))?;
+        owner.try_lock().map_err(io::Error::other)?;
+        let ids = generations(candidate)?;
+        if ids != vec![0] {
+            // This is not an initial root. Validate through normal recovery later.
+            if candidate == path {
+                return Ok(());
+            }
+            return Err(io::Error::other("staged root is not an initial generation").into());
+        }
+        let (journal, entries) = Journal::open(&generation_path(candidate, 0), max_bytes)?;
+        if entries.get(1).is_some_and(|bytes| bytes == PUBLISHED) {
+            if candidate == path {
+                return Ok(());
+            }
+            return Err(io::Error::other("certified root unexpectedly staged").into());
+        }
+        if entries.len() != 1 {
+            return Err(io::Error::other("invalid initial publication").into());
+        }
+        // Close all child/owner handles before directory moves on Windows.
+        drop(journal);
+        drop(owner);
+        if candidate == path {
+            publish(path, &staging)?;
+            #[cfg(feature = "fault-injection")]
+            initialization_fault(path, "retired");
+        }
+        publish(&staging, path)?;
+        // Both durable directory publications must finish before certification.
+        let owner = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.join("owner"))?;
+        owner.try_lock().map_err(io::Error::other)?;
+        let (mut journal, entries) = Journal::open(&generation_path(path, 0), max_bytes)?;
+        if entries.len() != 1 {
+            return Err(io::Error::other("initial root changed during repair").into());
+        }
+        journal
+            .append(PUBLISHED)
+            .map_err(CreateError::PublicationUnknown)?;
+        drop(journal);
+        drop(owner);
+        drop(guard);
+        Ok(())
+    }
+
     pub(crate) fn open(path: &Path, max_bytes: u64) -> io::Result<(Self, Vec<Vec<u8>>)> {
         let owner = OpenOptions::new()
             .read(true)
@@ -261,6 +341,19 @@ impl PartitionJournal {
         Ok(())
     }
 }
+#[cfg(feature = "fault-injection")]
+fn initialization_fault(path: &Path, stage: &str) {
+    let prefix = std::env::var("SEEKPOWER_INITIAL_ROOT_PREFIX").unwrap_or_default();
+    if !prefix.is_empty()
+        && path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        && std::env::var("SEEKPOWER_INITIAL_FAULT").as_deref() == Ok(stage)
+    {
+        std::process::exit(87);
+    }
+}
+
 #[cfg(test)]
 fn crash_boundary(stage: &str) {
     if std::env::var("SEEKPOWER_PARTITION_CRASH").as_deref() == Ok(stage) {
@@ -281,6 +374,40 @@ mod tests {
             rand::random::<u128>()
         ))
     }
+    #[test]
+    fn partition_resume_initial_preserves_payload_and_rejects_certified_corruption() {
+        let path = root();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("owner"), []).unwrap();
+        drop(
+            Journal::create_initialized(
+                &generation_path(&path, 0),
+                4096,
+                Some(b"complete original snapshot"),
+            )
+            .unwrap(),
+        );
+        assert!(PartitionJournal::open(&path, 4096).is_err());
+        PartitionJournal::resume_initial(&path, 4096).unwrap();
+        let (store, entries) = PartitionJournal::open(&path, 4096).unwrap();
+        assert_eq!(entries, vec![b"complete original snapshot".to_vec()]);
+        drop(store);
+        PartitionJournal::resume_initial(&path, 4096).unwrap();
+        let wal = generation_path(&path, 0).join("wal");
+        let mut bytes = fs::read(&wal).unwrap();
+        bytes[30] ^= 1;
+        fs::write(&wal, &bytes).unwrap();
+        assert!(PartitionJournal::resume_initial(&path, 4096).is_err());
+        assert!(PartitionJournal::open(&path, 4096).is_err());
+        assert_eq!(fs::read(&wal).unwrap(), bytes);
+        fs::remove_dir_all(&path).unwrap();
+        fs::remove_file(path.parent().unwrap().join(format!(
+            ".initial-resume-{}.lock",
+            path.file_name().unwrap().to_str().unwrap()
+        )))
+        .unwrap();
+    }
+
     #[test]
     #[ignore = "invoked by parent owner-lock test"]
     fn partition_creation_owner_worker() {
