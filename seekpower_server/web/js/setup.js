@@ -159,6 +159,35 @@ $(function () {
         if ($('#indexList').val() !== null) openSelectedIndex($('#indexList').val());
     });
     $('#indexMode').on('change', presetSchema);
+    $('#serviceBackupId').val(sessionValue('seekpower.serviceBackupId') || '');
+    for (const [button, action] of [['backupService', 'backup'], ['restoreService', 'restore']]) {
+        $('#' + button).on('click', async () => {
+            const slot = 'seekpower.pendingService' + action;
+            try {
+                let pending = JSON.parse(sessionValue(slot) || 'null');
+                if (!pending) {
+                    pending = {operation_id: newOperationId()};
+                    if (action === 'restore') {
+                        pending.backup_id = $('#serviceBackupId').val().trim();
+                        if (!/^[0-9a-f]{64}$/.test(pending.backup_id)) throw new Error('Enter a lowercase service backup ID.');
+                    }
+                    sessionStorage.setItem(slot, JSON.stringify(pending));
+                }
+                $('#backupService,#restoreService').prop('disabled', true);
+                const result = await setupApi('POST', action === 'backup' ? 'api/v1/service-backups' : 'api/v1/service-restores', API_KEY, pending);
+                sessionStorage.removeItem(slot);
+                if (action === 'backup') {
+                    sessionValue('seekpower.serviceBackupId', result.backup_id);
+                    $('#serviceBackupId').val(result.backup_id);
+                    $('#serviceRecoveryStatus').text('Service backup created: ' + result.backup_id);
+                } else {
+                    $('#serviceRecoveryStatus').text('Restored to new stopped root: ' + result.target_root + '. Current master only; historical keys remain disabled.');
+                }
+            } catch (error) {
+                $('#serviceRecoveryStatus').text((error.message || 'Recovery request failed.') + ' Retry preserves the original request; no running service is replaced.');
+            } finally { $('#backupService,#restoreService').prop('disabled', false); }
+        });
+    }
     $('#discardRejectedCreation').on('click', () => {
         const pending = JSON.parse(sessionValue('seekpower.pendingCreate') || 'null');
         if (!pending?.rejected) return;

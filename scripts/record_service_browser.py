@@ -12,12 +12,12 @@ def exercise(base,master,call):
         expect(page.locator('#indexManager')).to_be_visible()
         # A known pre-prepare rejection is editable after reload; uncertainty is not.
         page.locator('#newIndexName').fill('rejected-config')
-        page.locator('details').first.locator('summary').click()
+        page.locator('#createIndexForm details summary').click()
         schema=[{'field':'body','field_type':'Text','store':True,'boost':0}]
         page.locator('#indexSchema').fill(json.dumps(schema))
         page.locator('#createIndexForm button[type="submit"]').click()
         expect(page.locator('#discardRejectedCreation')).to_be_visible()
-        page.reload();page.locator('#manageIndexes').click()
+        page.reload(wait_until="domcontentloaded");page.locator('#manageIndexes').click()
         expect(page.locator('#discardRejectedCreation')).to_be_visible()
         page.locator('#discardRejectedCreation').click()
         expect(page.locator('#newIndexName')).to_be_enabled()
@@ -33,7 +33,7 @@ def exercise(base,master,call):
         expect(page.locator('#newIndexName')).to_be_disabled()
         assert page.evaluate("JSON.parse(sessionStorage.getItem('seekpower.pendingCreate')).body")==creations[0]
         expect(page.locator('#discardRejectedCreation')).to_be_hidden()
-        page.reload();page.locator('#manageIndexes').click()
+        page.reload(wait_until="domcontentloaded");page.locator('#manageIndexes').click()
         page.locator('#createIndexForm button[type="submit"]').click()
         expect(page.locator('#indexName')).to_have_text('browser-records')
         collection=page.evaluate('INDEX_ID')
@@ -53,7 +53,7 @@ def exercise(base,master,call):
         expect(page.locator('#documentJson')).to_be_disabled()
         saved=page.evaluate("JSON.parse(sessionStorage.getItem('seekpower.pendingWrites'))")
         assert saved['requests']==writes and 'key' not in saved
-        page.reload();expect(page.locator('#indexName')).to_have_text('browser-records')
+        page.reload(wait_until="domcontentloaded");expect(page.locator('#indexName')).to_have_text('browser-records')
         page.locator('#writeDocuments').click();expect(page.locator('#retryDocumentCommit')).to_be_visible()
         page.locator('#retryDocumentCommit').click()
         expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
@@ -62,7 +62,7 @@ def exercise(base,master,call):
         page.locator('#backToSearch').click()
         page.locator('#searchInput').fill('browser alpha')
         expect(page.locator('#contentBox')).to_contain_text('Browser title')
-        page.reload();expect(page.locator('#indexName')).to_have_text('browser-records')
+        page.reload(wait_until="domcontentloaded");expect(page.locator('#indexName')).to_have_text('browser-records')
         # Keep existing Vector/Hybrid setup, with explicit model/space identity.
         for mode in ['Vector','Hybrid']:
             page.locator('#manageIndexes').click();expect(page.locator('#newIndexName')).to_be_enabled()
@@ -74,10 +74,16 @@ def exercise(base,master,call):
             # Known rejection can release only the rejected/unattempted remainder.
             page.locator('#documentJson').fill(json.dumps({'body':'bad vector','vector':[1]}))
             page.locator('#submitDocuments').click();expect(page.locator('#discardRejectedWrites')).to_be_visible()
-            page.reload();page.locator('#writeDocuments').click();expect(page.locator('#discardRejectedWrites')).to_be_visible()
+            page.reload(wait_until="domcontentloaded");page.locator('#writeDocuments').click();expect(page.locator('#discardRejectedWrites')).to_be_visible()
             page.locator('#discardRejectedWrites').click();expect(page.locator('#documentJson')).to_be_enabled()
             expect(page.locator('#documentStatus')).to_contain_text('Rejected and unsent requests discarded')
             page.locator('#backToSearch').click()
+        page.locator('#manageIndexes').click()
+        page.locator('#serviceRecovery summary').click()
+        page.locator('#backupService').click()
+        expect(page.locator('#serviceRecoveryStatus')).to_contain_text('Service backup created',timeout=30000)
+        page.locator('#restoreService').click()
+        expect(page.locator('#serviceRecoveryStatus')).to_contain_text('Restored to new stopped root',timeout=30000)
         assert not errors,errors
         context.close();browser.close()
     print('PASS Chromium: existing setup/editor/search, stable collection IDs, response-loss retry after reload without duplicate write, lexical/vector/hybrid creation')

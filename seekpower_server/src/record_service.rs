@@ -258,6 +258,10 @@ impl Service {
             Catalog::create_with_key(root, "master".into(), master_verifier()).await
         }
         .map_err(|e| e.to_string())?;
+        catalog
+            .require_service_completion(root)
+            .await
+            .map_err(|e| e.to_string())?;
         // Never silently reset a missing/mismatched master or legacy directory.
         if catalog
             .authenticate(&master_verifier())
@@ -919,6 +923,89 @@ fn validate_backup_id(id: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceRestoreRequest {
+    operation_id: OperationId,
+    backup_id: String,
+}
+fn service_budget(parent: &FsPath, prefix: &str, target: &FsPath) -> Result<(), Error> {
+    if target.exists()
+        || target
+            .with_file_name(format!(
+                ".{}.staging",
+                target.file_name().unwrap().to_string_lossy()
+            ))
+            .exists()
+    {
+        return Ok(());
+    }
+    let count = std::fs::read_dir(parent)
+        .map_err(storage)?
+        .try_fold(0usize, |n, e| {
+            let e = e?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            Ok::<_, std::io::Error>(
+                n + usize::from(
+                    name.starts_with(prefix) || name.starts_with(&format!(".{prefix}")),
+                ),
+            )
+        })
+        .map_err(storage)?;
+    if count >= 4 {
+        return Err(bad(
+            "service snapshot/root limit (4) reached; no automatic eviction",
+        ));
+    }
+    Ok(())
+}
+async fn service_backup(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    let request: BackupRequest = parse(&bytes)?;
+    control_id(&request.operation_id)?;
+    let admission = s.admit_control(&headers, true).await?;
+    owned(async move {
+        let _admission=admission;let _control=s.control.lock().await;
+        let key=s.admin(&headers).await?;
+        s.catalog.operation(&request.operation_id).await?; // epoch admission, never infer absence = failure
+        let id=verifier(&serde_json::to_vec(&("service-backup",&request.operation_id)).map_err(bad)?);
+        let target=s.root.join(format!("service-backup-{id}"));
+        service_budget(&s.root,"service-backup-",&target)?;
+        let records=s.records.read().await.clone();
+        let receipt=s.catalog.backup_service(s.root.clone(),target,id.clone(),records).await?;
+        response(json!({"backup_id":id,"snapshot":receipt,"operation_id":request.operation_id,"scope":"catalog, all retained collections and live collection backups; no recursive service archives"}),s.permit(&key).await?)
+    }).await
+}
+async fn service_restore(
+    State(s): State<Arc<Service>>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Response, Error> {
+    let request: ServiceRestoreRequest = parse(&bytes)?;
+    control_id(&request.operation_id)?;
+    validate_backup_id(&request.backup_id)?;
+    let admission = s.admit_control(&headers, true).await?;
+    owned(async move {
+        let _admission=admission;let _control=s.control.lock().await;
+        let key=s.admin(&headers).await?;s.catalog.operation(&request.operation_id).await?;
+        let id=verifier(&serde_json::to_vec(&("service-restore",&request.operation_id)).map_err(bad)?);
+        let parent=s.root.parent().ok_or_else(||bad("missing service parent"))?;
+        let name=format!("restored-service-{id}");let target=parent.join(&name);
+        service_budget(parent,"restored-service-",&target)?;
+        if let Some(receipt)=Catalog::completed_service_restore(&target)? {
+            if receipt.identity!=id || receipt.restored_from.as_ref()!=Some(&request.backup_id){return Err(bad("restore request identity reused"));}
+            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}),s.permit(&key).await?);
+        }
+
+        let guard=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(parent.join(format!(".seekpower-service-{name}.lock"))).map_err(storage)?;
+        guard.try_lock().map_err(storage)?;
+        let receipt=Catalog::restore_service(s.root.join(format!("service-backup-{}",request.backup_id)),target.clone(),id,master_verifier()).await?;
+        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}),s.permit(&key).await?)
+    }).await
+}
 async fn backup(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -1195,6 +1282,8 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index", post(create_collection))
         .route("/api/v1/restore", post(restore))
         .route("/api/v1/backups", get(list_backups))
+        .route("/api/v1/service-backups", post(service_backup))
+        .route("/api/v1/service-restores", post(service_restore))
         .route("/api/v1/backups/{id}", axum::routing::delete(retire_backup))
         .route("/api/v1/index/{id}/backup", post(backup))
         .route(
@@ -1681,6 +1770,22 @@ pub(crate) fn generate_openapi() {
             "Master: permanently retire collection identity and revoke all grants; physical reclamation deferred",
             Some(
                 json!({"type":"object","required":["operation_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"}}}),
+            ),
+        ),
+        (
+            "/api/v1/service-backups",
+            "post",
+            "Master: complete consistent local service snapshot",
+            Some(
+                json!({"type":"object","required":["operation_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"}}}),
+            ),
+        ),
+        (
+            "/api/v1/service-restores",
+            "post",
+            "Master: restore into new stopped root; historical authorization never revived",
+            Some(
+                json!({"type":"object","required":["operation_id","backup_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"backup_id":{"type":"string"}}}),
             ),
         ),
     ] {

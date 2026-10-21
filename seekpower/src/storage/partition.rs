@@ -14,6 +14,22 @@ use std::{
 // Appended only AFTER directory publication completed successfully. The
 // existing three-witness WAL protocol makes this a crash-safe certificate.
 const PUBLISHED: &[u8] = b"SPPARTITION-PUBLISHED-1";
+#[derive(Debug)]
+struct UncertifiedPartition;
+impl std::fmt::Display for UncertifiedPartition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "partition creation has no confirmed publication certificate"
+        )
+    }
+}
+impl std::error::Error for UncertifiedPartition {}
+pub(crate) fn is_uncertified(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|e| e.is::<UncertifiedPartition>())
+}
 pub(crate) struct PartitionJournal {
     journal: Journal,
     path: PathBuf,
@@ -43,6 +59,12 @@ fn generations(root: &Path) -> io::Result<Vec<u64>> {
     result.sort_unstable();
     Ok(result)
 }
+pub(crate) fn publish_bundle(prepared: &Path, target: &Path) -> Result<(), io::Error> {
+    publish(prepared, target).map_err(|error| match error {
+        CreateError::NotPublished(e) | CreateError::PublicationUnknown(e) => e,
+    })
+}
+
 fn publish(prepared: &Path, target: &Path) -> Result<(), CreateError> {
     platform::publish_directory(prepared, target).map_err(|error| match error {
         platform::PublishError::BeforeRename(error) => CreateError::NotPublished(error),
@@ -275,9 +297,8 @@ impl PartitionJournal {
             }
             unpublished.push(generation);
         }
-        let (generation, journal, entries) = selected.ok_or_else(|| {
-            io::Error::other("partition creation has no confirmed publication certificate")
-        })?;
+        let (generation, journal, entries) =
+            selected.ok_or_else(|| io::Error::other(UncertifiedPartition))?;
         let store = Self {
             journal,
             path: path.into(),

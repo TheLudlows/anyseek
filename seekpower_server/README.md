@@ -150,3 +150,27 @@ IDs must be lowercase hexadecimal. Retirement is durable and permanent; a
 prepared restore pins its source. `cleanup_pending: true` means logical retirement
 succeeded but physical cleanup needs retry or restart. This is collection backup
 management, not complete catalog/service backup.
+
+### Complete service snapshots and safe recovery
+
+Master-only `POST /api/v1/service-backups` takes `{ "operation_id": ... }` and
+returns `backup_id` and a catalog/Record cut. It includes the full catalog, retained
+collection data and live collection backups; it excludes recursive service archives
+and rebuildable caches. Each authoritative object is bound by SHA-256 and the
+outer publication has its own completion witness.
+
+Master-only `POST /api/v1/service-restores` takes `{ "operation_id": ..., "backup_id": ... }`.
+The returned `target_root` is a **new stopped root**, never the running root. Start
+it separately with the current `MASTER_KEY_SECRET` after a successful response.
+Historical API keys remain disabled, grants are reset to current master only, and
+pre-restore control operation IDs explicitly conflict. Record versions and retry
+receipts are retained. Recreate shared access using new key identities and explicit
+grants. The Web UI exposes these same operations under master service recovery.
+
+Retry uncertain requests with the original operation ID. No destination overwrite
+or automatic activation occurs. Limits: four service archives per root, four
+generated restored roots per managed parent, 1 GiB preflight authoritative payload
+per archive plus existing engine limits. Archive/root cleanup is an offline operator
+task; this API does not delete running roots. Linux/Windows native process recovery
+and host/power-failure qualification are reported separately in the implementation
+record. No upgrade/migration compatibility is provided.

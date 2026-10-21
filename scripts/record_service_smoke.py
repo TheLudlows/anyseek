@@ -229,6 +229,72 @@ def main():
             call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()})
             print('PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, no revived grants, collection tombstone across restart')
             print('PASS real HTTP: default Record/catalog, shared grants, conditional writes, retry/response loss, checkpoint, crash restart, revoked operation lookup, full query parameters, vectors')
+            # Whole service cut, including revoked authority and independent backups.
+            ckey=base64.b64encode(os.urandom(32)).decode()
+            add_key={'operation_id':operation(),'key_id':'snapshot-user','apikey_base64':ckey}
+            call('POST','/api/v1/apikey',add_key)
+            call('POST','/api/v1/index/after-source-delete/grants',{'operation_id':operation(),'key_id':'snapshot-user','allow':True})
+            whole_request={'operation_id':operation()}
+            call('POST','/api/v1/service-backups',whole_request,key=ckey,status=403)
+            whole=call('POST','/api/v1/service-backups',whole_request)
+            assert whole['snapshot']['collection_backups']
+            call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'snapshot-user'})
+            assert call('POST','/api/v1/service-backups',whole_request)==whole
+            service_restore={'operation_id':operation(),'backup_id':whole['backup_id']}
+            restored=call('POST','/api/v1/service-restores',service_restore)
+            assert call('POST','/api/v1/service-restores',service_restore)==restored
+            assert not restored['started']
+            original_base=base
+            other_port=port+2
+            restored_process=subprocess.Popen([binary,f"index_path={restored['target_root']}",f'local_port={other_port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test'},stdout=log,stderr=log)
+            try:
+                base=f'http://127.0.0.1:{other_port}'
+                for _ in range(300):
+                    if restored_process.poll() is not None:
+                        log.seek(0);raise AssertionError(log.read())
+                    try:urllib.request.urlopen(base+'/api/v1/live',timeout=1).read();break
+                    except (OSError,urllib.error.URLError):time.sleep(.05)
+                call('GET','/api/v1/index/after-source-delete',key=ckey,status=403)
+                call('GET','/api/v1/index/after-source-delete',key=keys['b'],status=403)
+                call('GET','/api/v1/index/after-source-delete')
+                call('GET','/api/v1/index/shared',status=403)
+                call('POST','/api/v1/apikey',add_key,status=409)
+                old=add_key['operation_id'];call('GET',f"/api/v1/catalog/operation/{old['epoch']}/{old['nonce']}",status=409)
+                assert call('POST','/api/v1/index/after-source-delete/doc',writes[0])['receipt']['version']==1
+                # A copied independent collection snapshot is usable after root recovery.
+                copied=next(iter(whole['snapshot']['collection_backups']))
+                call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'from-copied-backup','backup_id':copied})
+                restored_base=base;base=original_base
+                assert call('POST','/api/v1/service-restores',service_restore)==restored
+                base=restored_base
+            finally:
+                restored_process.kill();restored_process.wait(timeout=20);base=original_base
+            assert call('POST','/api/v1/service-restores',service_restore)==restored # Target was legitimately modified.
+            if args.faults:
+                for kind in ['backup','restore']:
+                    body={'operation_id':operation()}
+                    endpoint='/api/v1/service-backups'
+                    if kind=='restore':body['backup_id']=whole['backup_id'];endpoint='/api/v1/service-restores'
+                    for stage in [kind+'_children',kind+'_manifest','bundle_published']:
+                        process.kill();process.wait(timeout=20);start({'SEEKPOWER_SERVICE_SNAPSHOT_FAULT':stage})
+                        try:call('POST',endpoint,body);raise AssertionError('expected process exit')
+                        except (OSError,urllib.error.URLError):pass
+                        assert process.wait(timeout=30)==88,stage
+                    start()
+                    result=call('POST',endpoint,body)
+                    assert call('POST',endpoint,body)==result
+                # The completion witness has its own initial-publication boundary.
+                for kind in ['backup','restore']:
+                    body={'operation_id':operation()};endpoint='/api/v1/service-backups'
+                    if kind=='restore':body['backup_id']=whole['backup_id'];endpoint='/api/v1/service-restores'
+                    process.kill();process.wait(timeout=20)
+                    start({'SEEKPOWER_INITIAL_ROOT_PREFIX':'service-snapshot-complete','SEEKPOWER_INITIAL_FAULT':'published'})
+                    try:call('POST',endpoint,body);raise AssertionError('expected completion-witness exit')
+                    except (OSError,urllib.error.URLError):pass
+                    assert process.wait(timeout=30)==87
+                    start();result=call('POST',endpoint,body)
+                    assert call('POST',endpoint,body)==result
+            print('PASS complete service snapshot: common catalog cut, all retained collections/live backups, new-root recovery, no revived keys, historical control rejection, data retry preserved')
             if args.browser:
                 from record_service_browser import exercise
                 exercise(base,master,call)

@@ -36,6 +36,13 @@
 <p id="indexListStatus" role="status"></p>
 </form>
 <hr>
+<details id="serviceRecovery"><summary>Service backup and recovery (master key)</summary>
+<p>Create a consistent local snapshot of the catalog, retained collections and collection backups. Recovery creates a new stopped service root. Historical keys stay disabled; only the current master can access restored data.</p>
+<button id="backupService" type="button">Create service backup / retry</button>
+<label for="serviceBackupId">Service backup ID</label><input id="serviceBackupId" spellcheck="false">
+<button id="restoreService" type="button">Restore to new stopped root / retry</button>
+<p id="serviceRecoveryStatus" role="status"></p>
+</details>
 <form id="createIndexForm">
 <h2>Create index</h2>
 <label for="newIndexName">Index name</label><input id="newIndexName" required maxlength="200" placeholder="my-index">

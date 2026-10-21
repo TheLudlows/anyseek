@@ -14,6 +14,9 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
+mod service_snapshot;
+pub use service_snapshot::ServiceSnapshot;
+
 const BUDGET: u64 = 16 * 1024 * 1024;
 const MAX_OPERATIONS: usize = 10_000;
 
@@ -154,6 +157,8 @@ pub struct CollectionEntry {
     pub config: RecordConfig,
     /// False until initialization is durably activated.
     pub active: bool,
+    /// Retains activation history even after logical deletion.
+    pub initialized: bool,
     /// Permanent logical deletion; data reclamation is a separate operation.
     pub deleted: bool,
     /// Retained restoration intent; never a caller-supplied filesystem path.
@@ -176,6 +181,9 @@ struct State {
     grants: BTreeMap<String, BTreeMap<String, u64>>,
     operations: Vec<Applied>,
     retired_backups: std::collections::BTreeSet<String>,
+    historical_operations: Vec<OperationId>,
+    service_snapshot: Option<(String, bool)>,
+    authority_history: Vec<serde_json::Value>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
@@ -424,6 +432,7 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                     owner_key: owner_key.clone(),
                     config: config.clone(),
                     active: false,
+                    initialized: false,
                     deleted: false,
                     restore_from,
                 },
@@ -442,6 +451,11 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
             let owner = collection.owner_key.clone();
             let grant_owner = active_key(&owner, state);
             state.collections.get_mut(collection_id).unwrap().active = true;
+            state
+                .collections
+                .get_mut(collection_id)
+                .unwrap()
+                .initialized = true;
             if grant_owner {
                 state
                     .grants
@@ -655,6 +669,15 @@ impl Catalog {
                     return Err(CatalogError::OperationExpired);
                 }
                 identity(&request.operation_id.nonce)?;
+                if inner
+                    .state
+                    .historical_operations
+                    .contains(&request.operation_id)
+                {
+                    return Err(CatalogError::Conflict(
+                        "operation belongs to pre-restore authority".into(),
+                    ));
+                }
                 if let Some(old) = inner
                     .state
                     .operations
@@ -926,6 +949,11 @@ impl Catalog {
         if id.epoch > now || id.epoch.saturating_add(1) < now {
             return Err(CatalogError::OperationExpired);
         }
+        if inner.state.historical_operations.contains(id) {
+            return Err(CatalogError::Conflict(
+                "operation belongs to pre-restore authority".into(),
+            ));
+        }
         Ok(inner
             .state
             .operations
@@ -1006,6 +1034,84 @@ mod tests {
             ))
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn catalog_service_backup_preserves_absent_deleted_intent_and_detects_corruption() {
+        let path = root();
+        let catalog = setup(&path).await;
+        prepare(&catalog).await;
+        catalog
+            .execute(request(
+                "delete-uninitialized",
+                CatalogCommand::DeleteCollection {
+                    collection_id: "shared".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        let archive = path.join("archive");
+        let receipt = catalog
+            .backup_service(
+                path.join("catalog"),
+                archive.clone(),
+                "archive-id".into(),
+                BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+        assert!(receipt.absent_collections.contains("shared"));
+        let restored = path.join("restored");
+        let result = Catalog::restore_service(
+            archive.clone(),
+            restored.clone(),
+            "restore-id".into(),
+            "c".repeat(64),
+        )
+        .await
+        .unwrap();
+        let recovered = Catalog::open(&restored).await.unwrap();
+        assert!(recovered.collections().await.unwrap()[0].deleted);
+        assert!(!recovered.collections().await.unwrap()[0].initialized);
+        recovered
+            .require_service_completion(&restored)
+            .await
+            .unwrap();
+        recovered
+            .execute(request(
+                "new-key",
+                CatalogCommand::AddKey {
+                    key_id: "new".into(),
+                    verifier: "d".repeat(64),
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            Catalog::completed_service_restore(&restored).unwrap(),
+            Some(result)
+        );
+        drop(recovered);
+        // A valid, independently checksummed catalog at the same sequence is
+        // still the wrong object. The manifest binds its complete payload hash.
+        let other = Catalog::open(&archive).await.unwrap();
+        other
+            .execute(request(
+                "unexpected-key",
+                CatalogCommand::AddKey {
+                    key_id: "other".into(),
+                    verifier: "e".repeat(64),
+                },
+            ))
+            .await
+            .unwrap();
+        drop(other);
+        assert!(
+            Catalog::restore_service(archive, path.join("wrong"), "wrong".into(), "c".repeat(64))
+                .await
+                .is_err()
+        );
+        drop(catalog);
+        std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn catalog_retirement_pins_restore_and_rejects_case_aliases() {

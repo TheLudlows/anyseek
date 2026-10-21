@@ -9,7 +9,108 @@ The product contract remains [issue #57](https://github.com/TheLudlows/seekpower
 Current capabilities remain in [FEATURES](../FEATURES.md). Historical validation
 remains in [VALIDATION](../VALIDATION.md).
 
-## Current checkpoint — root recovery, backup retirement and pending creation
+## Current checkpoint — complete service backup and safe new-root recovery
+
+Status: implementation complete for the defined bounded P1-A slice; final-source
+local regression and native CI are being completed. System/power-loss acceptance
+remains **not run**, so this is not an unrestricted reliability release claim.
+Parent checkpoint `9ebd0bd8e47f15fed057624c4bd3e1c937d6b0ee` passed all jobs in
+[run 39543087466](https://github.com/TheLudlows/seekpower/actions/runs/39543087466).
+The following describes the new source, not that previous CI result.
+
+Final-source Linux results: **162 passed, 0 failed, 10 ignored, 35 suites** with
+`SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet`.
+Default workspace and `fault-injection` server builds passed. Real HTTP/Chromium
+passed both default and `--faults` builds. Core boundary passed default and
+`--no-default-features`; OpenAPI generated 19 paths / 25 operations. Logs:
+`/tmp/seekpower-service-backup-final-tests.log`, `...-final-default-e2e.log`,
+`...-faults2.log`, `...-boundary.log`. Native CI for this new code is pending.
+
+### Scope and protocol
+
+Master-only POST `/api/v1/service-backups` freezes the existing catalog barrier
+used by all authorized Record operations. It checkpoints the full catalog,
+all retained collection partitions (including logically deleted collections),
+and all non-retired local collection backups. Existing service archives, derived
+index caches and abandoned preparation/trash are excluded; archives do not
+recursively include themselves. A deleted, never-activated collection with no
+physical data is explicitly represented as absent, with its identity/configuration
+tombstone preserved. Missing data from an activated collection fails closed.
+An unfinished collection intent must first finish recovery; the backup rejects it
+rather than silently omitting its dependencies.
+
+The manifest records protocol version, request-derived identity, source catalog
+sequence, every Record/collection-backup sequence, explicit absent identities,
+and SHA-256 of each object's canonical authoritative journal payload. These
+hashes bind the catalog, configuration, originals, versions, tombstones and
+operation ledgers to their generated relative paths. The catalog cut is shared;
+Record sequences are local watermarks, not a global distributed clock.
+
+All children and the manifest are certified in a private staging tree. Handles
+and mmap owners are closed before the platform's outer durable directory rename.
+Only afterwards is a separately durable completion witness published. Merely
+seeing a directory is not proof of completion. An uncertified initial witness
+is distinguished by a typed storage error, repaired only under target ownership;
+certified corruption fails closed. An incomplete unpublished tree can be rebuilt
+only before a manifest cut exists. Once the manifest exists, retry preserves its
+cut. The tests exercise children, manifest, outer publication, and completion
+witness publication boundaries independently.
+
+Master-only POST `/api/v1/service-restores` validates the complete archive and
+publishes a new sibling `restored-service-<request hash>` root. It does not replace,
+start or switch the running service. Source control ownership and the new root's
+external owner lock protect publication. Ordinary startup rejects archives and
+uncertified restored roots, including a missing manifest indicated by the catalog
+marker. Restoring is recovery into a new location, not historical format migration.
+
+### Authorization and retries
+
+All historical non-master identities stay disabled, historical grants are cleared,
+and access is rebuilt for the **current trusted master only**. The original
+catalog is retained as audit material, including previous authority histories;
+it is never loaded as active authorization. A current-master verifier that
+collides with a historical non-master identity is rejected. Users needing shared
+access create fresh key identities and explicitly grant them after recovery.
+
+Historical control operation IDs return an explicit conflict (also through
+operation lookup), not a misleading successful AddKey/Grant receipt. Data Record
+operation receipts, versions and ABA protection remain intact. The restored
+catalog marker establishes a new authority incarnation. Same-request recovery
+retries read immutable provenance/completion records even while the destination
+is running or has legitimately changed; they never reapply the restore.
+
+The retained Web UI includes master backup/recovery controls, shows the resulting
+new stopped root and retains original request IDs for uncertain retries. It does
+not automatically start/deploy the restored root. Existing setup/editor/search
+and known-rejected creation/write handling remain in place.
+
+### Resource and validation boundaries
+
+Before creating a service archive, authoritative payload is preflighted against
+1 GiB (with per-object overhead allowance). Existing per-partition/catalog limits
+remain enforced. A source has at most four complete/in-progress service archives;
+the managed parent has at most four generated restored roots. Limits reject
+without silent eviction. Reclamation of service archives/restored roots is an
+explicit offline operator task in this slice; no live-root deletion route is
+introduced. Collection-backup retirement remains available. Sustainable data
+history/operation-ledger GC is still P3, not an extra P1-A feature.
+
+Independent static review identified and verified fixes for absent deleted
+intents, original restore retry after destination mutation, and completion-witness
+initialization interruption. Regression includes actual HTTP sharing/revocation,
+new-root startup, old-key denial, historical control conflict, Record replay,
+restoration from copied collection backups, and Chromium backup/restore actions.
+Final test results and exact SHA-native CI are recorded below/on the validation
+ledger when complete. Hosted process exits do not simulate a filesystem crash.
+
+Remaining environment-only acceptance: isolated Linux and Windows VMs/machines
+with disposable filesystem-backed disks, externally forced reset/power cut and
+an external acknowledged-write witness, checking acknowledged data and revocation
+survival across reboot. No user/shared environment has been restarted. P2 typed
+source/evidence semantics, P3 sustainable reclamation and cloud protocol work are
+outside this slice. No PR, merge, deployment or issue change is performed.
+
+## Previous checkpoint — root recovery, backup retirement and pending creation
 
 Status: local final-source checks passed; current native CI rerun pending. This is a bounded
 P1-A checkpoint, not full P1 completion. Previous source `41f5f601ac3c7bbcb049f7a76ed5d6ba7bb552b9`

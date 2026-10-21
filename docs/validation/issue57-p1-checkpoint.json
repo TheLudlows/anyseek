@@ -2,7 +2,7 @@
   "date": "2026-10-21",
   "baseline": "fc4fcfe64fdf86d03c07f82cf1d4889deb896801",
   "branch": "feat/57-reliable-record-engine",
-  "status": "P1-A in progress: root recovery, durable backup retirement and pending-creation UI implemented; full service/catalog backup remaining",
+  "status": "Defined bounded P1-A implementation complete; final native CI and host/system-failure qualification pending",
   "linux": {
     "platform": "Linux 6.18.55 x86_64",
     "rust": "1.99.1",
@@ -11,13 +11,13 @@
     "workspace_command": "SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet",
     "workspace_result": {
       "suites": 35,
-      "passed": 161,
+      "passed": 162,
       "failed": 0,
       "ignored": 10
     },
     "build": "cargo build --workspace --quiet: passed on final source",
-    "http_smoke": "passed: real HTTP lifecycle, catalog-root initial publication and repair exits, retirement/restart/capacity release/canonical IDs",
-    "chromium": "passed: retained editor/search and lost creation/write response retries after reload, explicit rejected creation/write discard",
+    "http_smoke": "passed final production source: complete service snapshots, new-root startup, old-key denial, historical control conflict, immutable restore replay even with running/mutated destination",
+    "chromium": "passed default and fault builds: existing creation/editor/search and original-request retry; master service backup/new-root restore",
     "process_exit_boundaries": {
       "journal_write": 8,
       "journal_repair": 1,
@@ -28,7 +28,7 @@
       "catalog_revoke": 8
     },
     "system_crash": "not run",
-    "workspace_log": "/tmp/seekpower-root-final3-tests.log",
+    "workspace_log": "/tmp/seekpower-service-backup-final-tests.log",
     "controlled_cancellation_tests": {
       "passed": 2,
       "failed": 0,
@@ -75,25 +75,25 @@
       "failed": 0,
       "ignored_subprocess_workers": 1
     },
-    "http_log": "/tmp/seekpower-root-e2e.log",
+    "http_log": "/tmp/seekpower-service-backup-final-default-e2e.log",
     "service_barrier_tests": "4 passed: real TCP revocation vs success/error handoff, reserved internal IDs/recovery, unconsumed-body admission, protected oversize/serialization errors",
-    "openapi": "passed: 17 paths, 23 operations",
-    "fault_http_log": "/tmp/seekpower-root-faults.log",
-    "service_fault_matrix": "explicit fault-injection feature: before_append rejection; after_append_unknown; after_durable pending; crash_after_durable; crash_after_visible; backup and restore initial publication and repeated repair exits",
-    "backup_resource_regression": "32-backup budget: repeated rejected requests leave directory/repair-file set unchanged"
+    "openapi": "passed: 19 paths / 25 operations",
+    "fault_http_log": "/tmp/seekpower-service-backup-faults2.log",
+    "service_fault_matrix": "explicit fault-injection feature: before_append rejection; after_append_unknown; after_durable pending; crash_after_durable; crash_after_visible; backup and restore initial publication and repeated repair exits; full service backup/restore children, manifest, outer publication and COMPLETE initial publication boundaries",
+    "backup_resource_regression": "32-backup budget: repeated rejected requests leave directory/repair-file set unchanged",
+    "core_boundary": "passed default and --no-default-features standalone build and dependency graph"
   },
   "windows": {
     "native_compilation": "passed at 41f5f601ac3c7bbcb049f7a76ed5d6ba7bb552b9",
-    "native_tests": "passed: persistence, catalog, server barriers, actual HTTP/restarts and feature-gated process faults at 41f5f601; current checkpoint rerun pending",
+    "native_tests": "All native jobs passed at 9ebd0bd8; complete service snapshot implementation awaits final SHA CI",
     "platform": "Windows Server 2025 Datacenter 10.0.26100; D: NTFS verified in job log",
     "system_crash": "not run",
     "ci_job": "persistence-native/windows-latest"
   },
   "external_state_changes": "Authorized development-branch push and workflow dispatch only; no PR, merge, deployment or issue edit",
   "remaining": [
-    "complete service/catalog backup and authorization-safe restore protocol",
-    "final checkpoint Linux/Windows native CI",
-    "broader I/O failure and Linux/Windows host/system-crash certification"
+    "final source Linux/Windows native CI to terminal state",
+    "isolated Linux/Windows host reset/power-cut qualification with external acknowledgment witness"
   ],
   "review_checkpoint_parent": "b51e0cd84f334096e0be009e0430466b833d4611",
   "independent_review": {
@@ -110,7 +110,8 @@
     "catalog_findings": "Fixed: nonfinite config could poison recovery; revoked creator stranded prepared collection; revoke capacity failure left authorization live. Reviewer static followup found no new blocker in reviewed persistence/revision scope. Added panic fencing and regression coverage.",
     "service_findings": "Fixed and regression tested: internal activation namespace/length, protected error body handoff, bounded control admission, retained response admission, serialization/oversize authorization bypass",
     "lifecycle_findings": "reviewed iterator/batch/delete-plan/collection deletion; backup review found uncertified root retry dead end, repaired via strict initialization republish; followup found uncertain repair errors flattened to Storage, corrected classification",
-    "root_and_retirement": "Fixed Windows backup case-alias pin bypass, uncertain trash retirement cleanup, missing initial repair staging cleanup. Static follow-up: no remaining blocker in reviewed scope."
+    "root_and_retirement": "Fixed Windows backup case-alias pin bypass, uncertain trash retirement cleanup, missing initial repair staging cleanup. Static follow-up: no remaining blocker in reviewed scope.",
+    "service_snapshot": "Fixed: absent deleted uninitialized intent; immutable completion lookup after legitimate restored-root mutation; typed uncertified COMPLETE recovery. Final static follow-up: no remaining blocker in reviewed scope."
   },
   "ci_runs": [
     {
@@ -138,10 +139,23 @@
       "linux_build_browser_full_suite": "passed",
       "linux_native": "passed",
       "windows_native": "passed"
+    },
+    {
+      "sha": "9ebd0bd8e47f15fed057624c4bd3e1c937d6b0ee",
+      "url": "https://github.com/TheLudlows/seekpower/actions/runs/39543087466",
+      "linux_build_browser_full_suite": "passed",
+      "linux_native": "passed",
+      "windows_native": "passed"
     }
   ],
   "deferred_p3": [
     "sustainable data operation-ledger reclamation",
     "physical-history compaction; current slice uses explicit limits/backpressure"
-  ]
+  ],
+  "service_snapshot_limits": {
+    "max_archives_per_source": 4,
+    "max_restored_roots_per_parent": 4,
+    "authoritative_payload_preflight_bytes": 1073741824,
+    "cleanup": "explicit offline operator task; no automatic eviction or live-root deletion"
+  }
 }
