@@ -1,5 +1,7 @@
 # 当前功能清单
 
+本地 P1 实施进展见 [#57 实施与验证记录](docs/implementation-57.md)。可靠 Record 模块正在开发并已接入检索内核测试，尚未贯通 HTTP/UI；下表不能据此扩展为可靠服务承诺。
+
 核查日期：2026-10-15（Asia/Shanghai）。基于主干 `4e171b5`，本分支收敛 HTTP 参数；Rust 核心配置与索引格式保持不变。
 
 ## 1. 检索与数据能力
@@ -14,7 +16,7 @@
 | 向量校验 | 维度、精度、有限数值/范围、非零余弦范数、base64 格式 | 非法请求显式报错；批次入队前校验输入不等于事务 |
 | 向量检索 | 全簇扫描、Leveled IVF ANN、K-Medoid 聚类 | `AnnMode::All/Nprobe/Similaritythreshold/NprobeSimilaritythreshold`；全簇扫描仍使用配置的存储精度/量化，不等于原始 F32 精确评分 |
 | 向量配置 | F32/I8；Cosine/Dot/Euclidean；不量化、ScalarQuantizationI8、TurboQuantI8 | I8 输入只能配 `quantization: None`；聚类 `None/Auto/Fixed`；可设相似度阈值 |
-| 混合检索 | 全文与向量分别召回，按文档 ID 合并并执行 RRF | 当前融合参数在代码内固定；HTTP 按文本/向量输入推导模式；无模型重排或跨节点协调 |
+| 混合检索 | 全文与向量分别召回，按文档 ID 合并并执行 RRF | 已有 weighted RRF、独立候选预算和权重；HTTP 按文本/向量输入推导模式；无模型重排或跨节点协调 |
 | 字段选择 | `search_fields` 选择检索字段；`fields` 投影存储字段 | 字段选择不等于元数据值过滤 |
 | 元数据过滤 | 字符串/字符串集合、整数、浮点、时间戳范围过滤 | 创建请求使用 `filterable:true`（核心/索引响应仍为 `facet:true`）；三种模式使用共享谓词，向量在评分/Top-K 前过滤；ANN 仍受簇探测范围限制 |
 | 排序 | 相关性、facet 字段升降序、多字段组合、`_score`/`_id` | Vector/Hybrid 也会对已召回候选排序，但向量召回先按相似度截断，不保证全库字段排序 Top-K |
@@ -81,7 +83,7 @@ HTTP 新建索引采用 Snappy、English 高频词、N-gram=9、Auto 聚类；�
 - Ctrl-C/SIGINT 或 SIGTERM 停止接收请求、结束已有连接，再提交并关闭全部索引；无 stdin 交互命令。
 - 启动参数 `generate_openapi=true` 生成 OpenAPI JSON/YAML；启动/索引概况使用普通日志；核心库 `info::collect_index_info` 返回结构化统计，采集不提交或同步文件。核心日志由调用方配置；服务支持 `RUST_LOG`。
 - Rust 核心库可嵌入应用；HTTP 服务内嵌静态 UI；保留 Dockerfile 从源码构建。两个 crate 均 `publish=false`。
-- 核心默认 features 为 `zh`、`vb`。`vb` 提供来源、两路分数及 shard/level/cluster 等诊断字段；这些字段不表示保留自动切块。哈希实现固定使用 AHash。HTTP DTO 与 OpenAPI 全部位于服务，核心不提供 `api-schema` feature。
+- 核心默认 features 为 `zh`、`vb`。`vb` 提供来源、两路分数及 shard/level/cluster 等诊断字段；这些字段不表示保留自动切块。内存集合使用 AHash；持久词项键使用固定 XXH64（格式 8），见 [哈希契约](docs/persistent-term-hash.md)。HTTP DTO 与 OpenAPI 全部位于服务，核心不提供 `api-schema` feature。
 - CI 保留独立核心构建/依赖边界、workspace 构建与测试、HTTP/Chromium、静态资源及 OpenAPI 契约检查与产物生成。
 
 ## 5. 已移除与尚未实现

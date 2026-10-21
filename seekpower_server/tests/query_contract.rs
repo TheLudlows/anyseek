@@ -61,12 +61,12 @@ async fn literal_queries_and_strict_metadata() {
         let doc: Document = serde_json::from_value(json!({"body":body})).unwrap();
         index.index_document(doc).await.unwrap();
     }
-    index.commit().await;
+    index.commit().await.unwrap();
     for (query,count) in [("red",2),("\"red apple\"",1),("+red -green",1),
         ("\"the search engine\"",1),("ERR_CONNECTION_RESET",1),("中文混合检索",1),("applle",0),("FISHING",1),("fish",0),("car",1),("automobile",0)] {
         assert_query(&index, query, count).await;
     }
-    index.close().await; drop(index);
+    index.close().await.unwrap(); drop(index);
     assert!(!path.join("synonyms.json").exists());
     assert!(!path.join("shards/0/synonyms.json").exists());
     assert!(!path.join("dictionary.csv").exists());
@@ -75,7 +75,7 @@ async fn literal_queries_and_strict_metadata() {
     let mut saved: serde_json::Value=serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
     let reopened=open_index(path).await.unwrap(); assert_query(&reopened,"\"red apple\"",1).await;
     for (query,count) in [("fishing",1),("fish",0),("car",1),("automobile",0)] { assert_query(&reopened,query,count).await; }
-    reopened.close().await;drop(reopened);
+    reopened.close().await.unwrap();drop(reopened);
     for field in ["spelling_correction","query_completion", "unknown_option", "stemmer", "synonyms"] {
         for value in [json!(null), json!({}), json!([]), json!("None"), json!("English")] {
             saved[field]=value;

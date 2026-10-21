@@ -51,10 +51,10 @@ async fn boosted_single_term_matches_formula_in_every_state() {
     let expected = 6.0 * 2.0_f64.ln() * 2.2 / (1.0 + 1.2 * (0.25 + 0.75 / 2.0));
     for stage in 0..3 {
         if stage == 1 {
-            index.commit().await;
+            index.commit().await.unwrap();
         }
         if stage == 2 {
-            index.close().await;
+            index.close().await.unwrap();
             drop(index);
             index = open_index(&path).await.unwrap();
         }
@@ -84,7 +84,7 @@ async fn boosted_single_term_matches_formula_in_every_state() {
             x.results[0].score
         );
     }
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }

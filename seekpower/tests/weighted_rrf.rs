@@ -76,7 +76,7 @@ async fn weighted_global_shards() {
             false,0,10,ResultType::Topk,true,vec![],vec![],vec![]).await;
         assert!(realtime.error.is_none());
         assert_eq!(realtime.results.len(),3);
-        index.commit().await;
+        index.commit().await.unwrap();
         let vector = Some(Embedding::F32(vec![1.0,0.0,0.0]));
         let old = query(&index, SearchMode::Hybrid { similarity_threshold:None, ann_mode:AnnMode::All }, vector.clone()).await;
         let new = query(&index, weighted(RrfOptions::default()), vector.clone()).await;
@@ -124,12 +124,12 @@ async fn weighted_global_shards() {
         // Fixed explicit budgets make pagination a slice of the same fused ranking.
         let page = index.search("alpha".into(), vector, QueryType::Union, weighted(options), false,1,1,ResultType::Topk,false,vec![],vec![],vec![]).await;
         assert_eq!(page.results[0].doc_id,result.results[1].doc_id);
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         let reopened = open_index(&path).await.unwrap();
         let again = query(&reopened, weighted(options), Some(Embedding::F32(vec![1.0,0.0,0.0]))).await;
         assert_eq!(serde_json::to_value(&result.results).unwrap(),serde_json::to_value(&again.results).unwrap());
-        reopened.close().await;
+        reopened.close().await.unwrap();
         drop(reopened);
         std::fs::remove_dir_all(path).unwrap();
     }

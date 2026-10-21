@@ -66,9 +66,9 @@ async fn format_gate_and_roundtrip() {
     let path=std::env::temp_dir().join(format!("seekpower-format8-{}",std::process::id()));assert!(!path.exists());
     let index=create(&path,3,TextNormalization::OpenCcT2s1_1_9).await;
     let _=snapshot(&index,true).await;
-    index.commit().await;
-    let expected=snapshot(&index,false).await;index.close().await;drop(index);
-    let reopened=open_index(&path).await.unwrap();assert_eq!(snapshot(&reopened,false).await,expected);reopened.close().await;drop(reopened);
+    index.commit().await.unwrap();
+    let expected=snapshot(&index,false).await;index.close().await.unwrap();drop(index);
+    let reopened=open_index(&path).await.unwrap();assert_eq!(snapshot(&reopened,false).await,expected);reopened.close().await.unwrap();drop(reopened);
     let pristine=files(&path);
     // Root and every shard must reject legacy, future, minor mismatch, empty,
     // truncated and missing headers before any other file is changed/created.
@@ -100,13 +100,13 @@ async fn cross_build_same_index() {
         for (tag,normalization) in [("none",TextNormalization::None),("t2s",TextNormalization::OpenCcT2s1_1_9)] {
             let name=format!("{tag}-{shards}");let path=root.join(&name);let reference=root.join(format!("{name}.json"));
             if mode=="create" {
-                assert!(!path.exists());let index=create(&path,shards,normalization).await;index.commit().await;
-                let expected=snapshot(&index,false).await;index.close().await;drop(index);
+                assert!(!path.exists());let index=create(&path,shards,normalization).await;index.commit().await.unwrap();
+                let expected=snapshot(&index,false).await;index.close().await.unwrap();drop(index);
                 std::fs::write(reference,serde_json::to_vec(&expected).unwrap()).unwrap();
             } else {
                 let before=files(&path);let index=open_index(&path).await.unwrap();
                 let expected:Value=serde_json::from_slice(&std::fs::read(reference).unwrap()).unwrap();
-                assert_eq!(snapshot(&index,false).await,expected,"{name}");index.close().await;drop(index);
+                assert_eq!(snapshot(&index,false).await,expected,"{name}");index.close().await.unwrap();drop(index);
                 assert_eq!(files(&path),before,"reader changed committed index");
             }
         }

@@ -139,17 +139,17 @@ pub async fn exercise(proximity: bool) {
                         .unwrap();
                     if mixed {
                         add(&index, &docs[..1], 1).await;
-                        index.commit().await;
+                        index.commit().await.unwrap();
                         add(&index, &docs[1..], docs.len()).await;
                     } else {
                         add(&index, &docs, docs.len()).await;
                     }
                     for stage in 0..3 {
                         if stage == 1 {
-                            index.commit().await;
+                            index.commit().await.unwrap();
                         }
                         if stage == 2 {
-                            index.close().await;
+                            index.close().await.unwrap();
                             drop(index);
                             index = open_index(&path).await.unwrap();
                         }
@@ -221,7 +221,7 @@ pub async fn exercise(proximity: bool) {
                             }
                         }
                     }
-                    index.close().await;
+                    index.close().await.unwrap();
                     drop(index);
                     std::fs::remove_dir_all(path).unwrap();
                 }
@@ -270,16 +270,16 @@ pub async fn exercise_quantized_df() {
         let mut docs = vec![json!({"a":"of neutral"}); 100];
         docs[0] = json!({"a":"the of"});
         add(&index, &docs, 100).await;
-        index.commit().await;
+        index.commit().await.unwrap();
         for stage in 0..6 {
             if stage == 1 {
                 add(&index, &vec![json!({"a":"of neutral"}); 4], 104).await;
             }
             if stage == 2 || stage == 5 {
-                index.commit().await;
+                index.commit().await.unwrap();
             }
             if stage == 3 {
-                index.close().await;
+                index.close().await.unwrap();
                 drop(index);
                 index = open_index(&path).await.unwrap();
             }
@@ -337,7 +337,7 @@ pub async fn exercise_quantized_df() {
                 }
             }
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }

@@ -1359,7 +1359,7 @@ mod stable_ranking_tests {
                 assert_eq!(ids, (0..7).collect::<Vec<_>>());
             }
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }

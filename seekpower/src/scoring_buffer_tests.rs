@@ -65,9 +65,9 @@ async fn scoring_buffer_field_count_matrix() {
                     }).await.unwrap();
                     assert_eq!(index.read().await.shard_vec[0].read().await.indexed_field_vec.len(),fields);
                     for stage in 0..3 {
-                        if stage == 1 { index.commit().await; }
+                        if stage == 1 { index.commit().await.unwrap(); }
                         if stage == 2 {
-                            index.close().await;
+                            index.close().await.unwrap();
                             drop(index);
                             index = open_index(&path).await.unwrap();
                         }
@@ -106,7 +106,7 @@ async fn scoring_buffer_field_count_matrix() {
                                 "hits":result.results.iter().map(|r|(r.doc_id,r.score.to_bits())).collect::<Vec<_>>() }));
                         }
                     }
-                    index.close().await;
+                    index.close().await.unwrap();
                     drop(index);
                     std::fs::remove_dir_all(path).unwrap();
                 }

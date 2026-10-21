@@ -74,3 +74,25 @@ jobs:
           path: |
             target/debug/openapi.json
             target/debug/openapi.yml
+
+  persistence-native:
+    name: Persistence primitives (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      SEEKPOWER_TEST_ROOT: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native toolchain
+        run: rustc --version --verbose
+      - name: Native journal and child-process crash tests
+        run: cargo test -p seekpower --lib journal_
+      - name: Native existing-index I/O errors and mapping lifecycle
+        run: cargo test -p seekpower --lib commit_io_tests
+      - name: Native record replay, snapshot and response-loss tests
+        run: cargo test -p seekpower --lib record::tests

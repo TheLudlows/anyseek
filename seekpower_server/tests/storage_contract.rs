@@ -35,7 +35,7 @@ async fn retired_disk_metadata_is_not_silently_reinterpreted() {
     let index = create_index(path, meta, &schema, 11, true, Some(1))
         .await
         .unwrap();
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     let metadata = path.join("index.json");
     let valid: serde_json::Value = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
@@ -54,7 +54,7 @@ async fn retired_disk_metadata_is_not_silently_reinterpreted() {
     }
     fs::write(&metadata, serde_json::to_vec(&valid).unwrap()).unwrap();
     let index = open_index(path).await.unwrap();
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     fs::remove_dir_all(path).unwrap();
 }

@@ -125,8 +125,8 @@ pub(crate) async fn delete_index_api(
     }
 }
 
-pub(crate) async fn commit_index_api(index_arc: &IndexArc) -> Result<u64, String> {
-    index_arc.commit().await;
+pub(crate) async fn commit_index_api(index_arc: &IndexArc) -> std::io::Result<u64> {
+    index_arc.commit().await?;
     Ok(index_arc.read().await.indexed_doc_count().await as u64)
 }
 

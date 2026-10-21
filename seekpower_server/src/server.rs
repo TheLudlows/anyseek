@@ -116,10 +116,18 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
     .await;
     log::info!("Committing and closing all indices");
     let keys = apikey_list.write().await;
+    let mut close_failed = false;
     for key in keys.values() {
         for index in key.index_list.values() {
-            index.close().await;
+            if let Err(error) = index.close().await {
+                close_failed = true;
+                log::error!("Index close failed: {error}");
+            }
         }
+    }
+    if close_failed {
+        log::error!("Shutdown incomplete: one or more indices failed to close");
+        std::process::exit(1);
     }
     log::info!("Shutdown complete");
 }

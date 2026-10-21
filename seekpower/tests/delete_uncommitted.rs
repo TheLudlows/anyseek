@@ -81,10 +81,10 @@ async fn delete_uncommitted_survives_commit() {
     index.delete_documents(vec![0]).await;
     // Must not underflow/panic while the async index task is still running.
     let _ = index.read().await.current_doc_count().await;
-    index.commit().await;
+    index.commit().await.unwrap();
     assert_eq!(count(&index, "hello", false).await, 0);
     assert_eq!(index.read().await.current_doc_count().await, 1);
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Control: delete-after-commit keeps working as before.
@@ -94,12 +94,12 @@ async fn delete_committed_control() {
     index
         .index_documents(vec![doc("hello world"), doc("foo bar")])
         .await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
     index.delete_documents(vec![0]).await;
-    index.commit().await;
+    index.commit().await.unwrap();
     assert_eq!(count(&index, "hello", false).await, 0);
     assert_eq!(index.read().await.current_doc_count().await, 1);
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Out-of-range deletes stay silent no-ops: no panic, counts unchanged.
@@ -109,15 +109,15 @@ async fn delete_out_of_range_ignored() {
     index
         .index_documents(vec![doc("hello world"), doc("foo bar")])
         .await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
     index.delete_documents(Vec::new()).await;
     index.delete_documents(vec![u64::MAX]).await;
     index.delete_documents(vec![999_999]).await;
     index.delete_documents(vec![0, 0, 0]).await;
-    index.commit().await;
+    index.commit().await.unwrap();
     assert_eq!(count(&index, "hello", false).await, 0);
     assert_eq!(index.read().await.current_doc_count().await, 1);
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// clear_index reuses the docid namespace: a stale pre-clear docid addresses
@@ -128,14 +128,14 @@ async fn delete_reused_docid_after_clear() {
     index
         .index_documents(vec![doc("hello world"), doc("foo bar")])
         .await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
     index.write().await.clear_index().await;
     index
         .index_documents(vec![doc("alphaone"), doc("betaone")])
         .await.unwrap();
     index.delete_documents(vec![0]).await;
-    index.commit().await;
+    index.commit().await.unwrap();
     assert_eq!(count(&index, "alphaone", false).await, 0);
     assert_eq!(count(&index, "betaone", false).await, 1);
-    index.close().await;
+    index.close().await.unwrap();
 }

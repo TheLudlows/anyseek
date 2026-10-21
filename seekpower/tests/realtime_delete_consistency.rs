@@ -118,7 +118,7 @@ async fn realtime_single_count_excludes_deleted() {
     let index = fresh("tests/index_delete_realtime_single/").await;
     let docs: Vec<_> = (0..5).map(|i| doc(&format!("base doc{i}"))).collect();
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
     let docs: Vec<_> = (0..5).map(|i| doc(&format!("base extra{i}"))).collect();
     index.index_documents(docs).await.unwrap();
     settle_search(&index, "base", QueryType::Union, 10).await;
@@ -135,7 +135,7 @@ async fn realtime_single_count_excludes_deleted() {
     let count = search(&index, "base", QueryType::Union, ResultType::Count, true).await;
     assert_eq!(topk.result_count_total, 8);
     assert_eq!(count.result_count_total, 8);
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// OR realtime totals must drop deleted uncommitted documents (no double count).
@@ -172,5 +172,5 @@ async fn realtime_union_count_excludes_deleted() {
     assert_eq!(topk.result_count_total, 17);
     assert_eq!(topk.results.len(), 17);
     assert_eq!(count.result_count_total, 17);
-    index.close().await;
+    index.close().await.unwrap();
 }

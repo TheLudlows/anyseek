@@ -74,7 +74,7 @@ async fn frequent_terms_topk_returns_results() {
         let doc: Document = serde_json::from_str(&format!(r#"{{"title":"{t}"}}"#)).unwrap();
         index_arc.index_document(doc).await.unwrap();
     }
-    index_arc.commit().await;
+    index_arc.commit().await.unwrap();
 
     // Intersection Topk must not come back empty with 1500 matches.
     let rlo = search(
@@ -121,6 +121,6 @@ async fn frequent_terms_topk_returns_results() {
     .await;
     assert_eq!(c.result_count_total, 1500);
 
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
     let _ = fs::remove_dir_all(index_path);
 }

@@ -1428,8 +1428,8 @@ mod tests {
             )
             .await
             .unwrap();
-        index.commit().await;
-        index.close().await;
+        index.commit().await.unwrap();
+        index.close().await.unwrap();
         drop(index);
         let index = open_index(&path).await.unwrap();
         for query in ["中国 rust", "中国 rust。", "中国 rust "] {
@@ -1473,7 +1473,7 @@ mod tests {
                 "punctuation must not change term frequency or document length"
             );
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         fs::remove_dir_all(path).unwrap();
     }

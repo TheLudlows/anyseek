@@ -261,11 +261,11 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             .collect();
         index.delete_document(map[&23]).await;
         check(&index, true, &[23]).await;
-        index.commit().await;
+        index.commit().await.unwrap();
         check(&index, false, &[23]).await;
         index.delete_document(map[&22]).await;
         index.update_document((map[&21], doc(25))).await.unwrap();
-        index.commit().await;
+        index.commit().await.unwrap();
         // Updated/deleted IDs do not retain old metadata or old vectors.
         for name in ["Lexical", "Vector", "Hybrid"] {
             let r = query(
@@ -289,7 +289,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             .await;
             assert_eq!(labels(&index, &r, false).await, vec![25]);
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         let index = open_index(&path).await.unwrap();
         for name in ["Lexical", "Vector", "Hybrid"] {
@@ -304,7 +304,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             .await;
             assert_eq!(labels(&index, &r, false).await, vec![25]);
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         fs::remove_dir_all(path).unwrap();
     }
@@ -379,7 +379,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                 }
             }
             index.index_documents(docs).await.unwrap();
-            index.commit().await;
+            index.commit().await.unwrap();
             let predicate = json!([{"String16":{"field":"category","filter":["allowed"]}}]);
             for name in ["Vector", "Hybrid"] {
                 for ann in [
@@ -446,7 +446,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                 replacement.insert("vector".into(), json!([24, 1, 0]));
             }
             index.index_documents(vec![replacement]).await.unwrap();
-            index.commit().await;
+            index.commit().await.unwrap();
             // The set dictionary reuses ID 0 after clear; old memberships must not survive.
             let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","filter":[{"StringSet32":{"field":"tags","filter":["even"]}}]})).unwrap();
             let result = index
@@ -466,7 +466,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                 )
                 .await;
             assert!(labels(&index, &result, false).await.is_empty());
-            index.close().await;
+            index.close().await.unwrap();
             drop(index);
             fs::remove_dir_all(path).unwrap();
         }

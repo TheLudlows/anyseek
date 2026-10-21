@@ -82,7 +82,7 @@ async fn union_count_overlap_same_block() {
         doc("beta only item"),
     ];
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     // 6 docs total in the same block; all contain at least one of alpha/beta.
     let count = search(&index, "alpha beta", ResultType::Count).await;
@@ -94,5 +94,5 @@ async fn union_count_overlap_same_block() {
     assert_eq!(count.result_count_total, expected);
     assert_eq!(topk_count.result_count_total, expected);
 
-    index.close().await;
+    index.close().await.unwrap();
 }

@@ -136,14 +136,14 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
     .expect("indexing completes");
     assert_eq!(index.read().await.committed_doc_count().await, 0);
     assert_phrases(&index, true, &format!("mask={mask}, realtime")).await;
-    index.commit().await;
+    index.commit().await.unwrap();
     assert_phrases(&index, false, &format!("mask={mask}, committed")).await;
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     let index = open_index(&path).await.unwrap();
     assert_eq!(index.read().await.meta.ngram_indexing, mask);
     assert_phrases(&index, false, &format!("mask={mask}, reopened")).await;
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     fs::remove_dir_all(path).unwrap();
 }

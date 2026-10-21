@@ -949,7 +949,7 @@ impl Shard {
         }
     }
 
-    pub(crate) async fn commit_vector_shard(&mut self) {
+    pub(crate) async fn commit_vector_shard(&mut self) -> std::io::Result<()> {
         if self.is_last_level_incomplete {
             let vector_dimensions = self.vector_dimensions;
             let vector_type = match self.quantization {
@@ -1017,13 +1017,15 @@ impl Shard {
                 }
             }
 
-            let _ = self
+            self
                 .vector_file
-                .seek(SeekFrom::Start(self.last_level_vector_file_start_pos));
+                .seek(SeekFrom::Start(self.last_level_vector_file_start_pos))?;
         } else {
-            self.last_level_vector_file_start_pos = self.vector_file.stream_position().unwrap();
+            self.last_level_vector_file_start_pos = self.vector_file.stream_position()?;
         }
 
+        // Old mapped values have been copied into block_vector_buffer above.
+        self.vector_file_mmap = memmap2::MmapOptions::new().len(1).map_anon()?.make_read_only()?;
         let enable_clustering = if let Clustering::Fixed(size) = self.meta.clustering {
             size > 1 && self.block_vector_buffer.len() >= 100
         } else if let Clustering::None = self.meta.clustering {
@@ -1044,11 +1046,11 @@ impl Shard {
 
         let mut header = [0u8; 4];
         header[..4].copy_from_slice(&(medoids.len() as u32).to_le_bytes());
-        let _ = self.vector_file.write_all(&header);
+        self.vector_file.write_all(&header)?;
 
         for medoid in medoids.iter() {
             header[..4].copy_from_slice(&(medoid.child_count as u32).to_le_bytes());
-            let _ = self.vector_file.write_all(&header);
+            self.vector_file.write_all(&header)?;
         }
 
         for record in self.block_vector_buffer.iter() {
@@ -1068,14 +1070,16 @@ impl Shard {
             };
 
             let header_bytes = bytes_of(&header);
-            let _ = self.vector_file.write_all(header_bytes);
-            let _ = self.vector_file.write_all(vec_bytes);
+            self.vector_file.write_all(header_bytes)?;
+            self.vector_file.write_all(vec_bytes)?;
         }
         self.block_vector_buffer.clear();
 
-        self.vector_file.flush().expect("Unable to flush Mmap");
+        self.vector_file.flush()?;
+        self.vector_file.sync_all()?;
         self.vector_file_mmap =
-            unsafe { Mmap::map(&self.vector_file).expect("Unable to create Mmap") };
+            unsafe { Mmap::map(&self.vector_file)? };
+        Ok(())
     }
 }
 

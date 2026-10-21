@@ -130,9 +130,9 @@ async fn ordinary_metadata_survives_aggregate_removal() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         check_metadata(&index,true).await;
-        index.commit().await;
+        index.commit().await.unwrap();
         check_metadata(&index,false).await;
-        index.close().await; drop(index);
+        index.close().await.unwrap(); drop(index);
         // The current dictionary contains only names and ordered string/set values.
         for shard in 0..2 {
             let file=path.join(format!("shards/{shard}/facet.json"));
@@ -147,7 +147,7 @@ async fn ordinary_metadata_survives_aggregate_removal() {
         }
         let reopened=open_index(path).await.unwrap();
         check_metadata(&reopened,false).await;
-        reopened.close().await; drop(reopened);
+        reopened.close().await.unwrap(); drop(reopened);
         fs::remove_dir_all(path).unwrap();
     }
 }
@@ -156,7 +156,7 @@ async fn ordinary_metadata_survives_aggregate_removal() {
 async fn unknown_schema_type_is_rejected() {
     let path=Path::new("tests/index_unknown_schema");
     let index=create(path,AccessType::Mmap).await;
-    index.close().await;drop(index);
+    index.close().await.unwrap();drop(index);
     for schema_path in [path.join("schema.json"),path.join("shards/0/schema.json")] {
         let original=fs::read(&schema_path).unwrap();
         let mut schema: Value=serde_json::from_slice(&original).unwrap();
@@ -180,7 +180,7 @@ async fn only_current_index_format_is_opened() {
         let path_buf = format!("tests/index_format_{name}");
         let path = Path::new(&path_buf);
         let index = create(path, access).await;
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         for file in [path.join("index.bin"), path.join("shards/0/index.bin")] {
             let original = fs::read(&file).unwrap();
@@ -200,7 +200,7 @@ async fn only_current_index_format_is_opened() {
             }
         }
         let reopened = open_index(path).await.unwrap();
-        reopened.close().await;
+        reopened.close().await.unwrap();
         drop(reopened);
         fs::remove_dir_all(path).unwrap();
     }

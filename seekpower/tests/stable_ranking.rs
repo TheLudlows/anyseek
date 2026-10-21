@@ -126,7 +126,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
             rt.iter().map(|x| x.0).collect::<Vec<_>>(),
             (0..7).collect::<Vec<_>>(), "realtime shards={shards}, results={rt:?}"
         );
-        index.commit().await;
+        index.commit().await.unwrap();
         for mode in 0..4 {
             let expected = query(&index, mode, vec![], 0, QueryType::Union, false).await;
             assert_eq!(
@@ -233,7 +233,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
             result.results.iter().map(|r| r.doc_id).collect::<Vec<_>>(),
             (83..90).rev().collect::<Vec<_>>()
         );
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap(); // Only this test's newly created fixture.
     }
@@ -276,7 +276,7 @@ async fn stable_equal_score_block_boundary_and_explicit_id_sort() {
             .await
             .unwrap();
     }
-    index.commit().await;
+    index.commit().await.unwrap();
     for text in ["alpha", "alpha beta", "alpha beta gamma", "alpha beta gamma delta epsilon zeta eta theta iota"] {
         for qt in [QueryType::Union, QueryType::Intersection] {
             for rt in [ResultType::Topk, ResultType::TopkCount] {
@@ -318,7 +318,7 @@ async fn stable_equal_score_block_boundary_and_explicit_id_sort() {
             }
         }
     }
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }

@@ -57,9 +57,9 @@ async fn stored_records_and_projection_survive_reopen() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(index.read().await.get_document(0,true,&HashSet::new()).await.unwrap(),expected);
-        index.commit().await;
+        index.commit().await.unwrap();
         assert_eq!(index.read().await.get_document(0,false,&HashSet::new()).await.unwrap(),expected);
-        index.close().await;drop(index);
+        index.close().await.unwrap();drop(index);
         let reopened=open_index(path).await.unwrap();
         let reader=reopened.read().await;
         assert_eq!(reader.get_document(0,false,&HashSet::new()).await.unwrap(),expected);
@@ -68,7 +68,7 @@ async fn stored_records_and_projection_survive_reopen() {
         assert_eq!(projected.len(),1);
         assert_eq!(projected["data"],expected["data"]);
         assert!(reader.get_document(0,false,&HashSet::from(["missing".into()])).await.unwrap().is_empty());
-        drop(reader);reopened.close().await;drop(reopened);
+        drop(reader);reopened.close().await.unwrap();drop(reopened);
         fs::remove_dir_all(path).unwrap();
     }
 }

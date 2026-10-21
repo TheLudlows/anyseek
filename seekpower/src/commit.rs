@@ -22,85 +22,20 @@ use crate::{
     utils::{block_copy, read_u8, read_u16, read_u32, read_u64, write_u16, write_u32, write_u64},
 };
 
-/// Commit moves indexed documents from the intermediate uncompressed data structure (array lists/HashMap, queryable by realtime search) in RAM
-/// to the final compressed data structure (roaring bitmap) on Mmap or disk -
-/// which is persistent, more compact, with lower query latency and allows search with realtime=false.
-/// Commit is invoked automatically each time 64K documents are newly indexed **per shard** as well as on close_index (e.g. server quit).
-/// There is no way to prevent this automatic commit by not manually invoking it.
-/// But commit can also be invoked manually at any time at any number of newly indexed documents.
-/// commit is a **hard commit** for persistence on disk. A **soft commit** for searchability
-/// is invoked implicitly with every index_doc,
-/// i.e. the document can immediately searched and included in the search results
-/// if it matches the query AND the query parameter realtime=true is enabled.
-/// **Use commit with caution, as it is an expensive operation**.
-/// **Usually, there is no need to invoke it manually**, as it is invoked automatically every 64k documents **per shard** and when the index is closed with close_index.
-/// Before terminating the program, always call close_index (commit), otherwise all documents indexed since last (manual or automatic) commit are lost.
-/// There are only 2 reasons that justify a manual commit:
-/// 1. if you want to search newly indexed documents without using realtime=true for search performance reasons or
-/// 2. if after indexing new documents there won't be more documents indexed (for some time),
-///    so there won't be (soon) a commit invoked automatically at the next 64k threshold **per shard** or close_index,
-///    but you still need immediate persistence guarantees on disk to protect against data loss in the event of a crash.
+/// Write pending derived index components and propagate I/O failures.
+///
+/// This legacy mutable-file operation is not an atomic multi-file checkpoint.
+/// On failure discard the affected derived instance; retrying it in place is not
+/// a recovery protocol. The reliable record layer keeps authoritative operations
+/// separately and rebuilds complete views before publication.
 #[allow(async_fn_in_trait)]
 pub trait Commit {
-    /// Commit moves indexed documents from the intermediate uncompressed data structure (array lists/HashMap, queryable by realtime search) in RAM
-    /// to the final compressed data structure (roaring bitmap) on Mmap or disk -
-    /// which is persistent, more compact, with lower query latency and allows search with realtime=false.
-    /// Commit is invoked automatically each time 64K documents are newly indexed **per shard** as well as on close_index (e.g. server quit).
-    /// There is no way to prevent this automatic commit by not manually invoking it.
-    /// But commit can also be invoked manually at any time at any number of newly indexed documents.
-    /// commit is a **hard commit** for persistence on disk. A **soft commit** for searchability
-    /// is invoked implicitly with every index_doc,
-    /// i.e. the document can immediately searched and included in the search results
-    /// if it matches the query AND the query parameter realtime=true is enabled.
-    /// **Use commit with caution, as it is an expensive operation**.
-    /// **Usually, there is no need to invoke it manually**, as it is invoked automatically every 64k documents **per shard** and when the index is closed with close_index.
-    /// Before terminating the program, always call close_index (commit), otherwise all documents indexed since last (manual or automatic) commit are lost.
-    /// There are only 2 reasons that justify a manual commit:
-    /// 1. if you want to search newly indexed documents without using realtime=true for search performance reasons or
-    /// 2. if after indexing new documents there won't be more documents indexed (for some time),
-    ///    so there won't be (soon) a commit invoked automatically at the next 64k threshold **per shard** or close_index,
-    ///    but you still need immediate persistence guarantees on disk to protect against data loss in the event of a crash.
-    async fn commit(&self);
+    /// Wait for every shard and return any write, mapping or synchronization error.
+    async fn commit(&self) -> std::io::Result<()>;
 }
 
-/// Commit moves indexed documents from the intermediate uncompressed data structure (array lists/HashMap, queryable by realtime search) in RAM
-/// to the final compressed data structure (roaring bitmap) on Mmap or disk -
-/// which is persistent, more compact, with lower query latency and allows search with realtime=false.
-/// Commit is invoked automatically each time 64K documents are newly indexed **per shard** as well as on close_index (e.g. server quit).
-/// There is no way to prevent this automatic commit by not manually invoking it.
-/// But commit can also be invoked manually at any time at any number of newly indexed documents.
-/// commit is a **hard commit** for persistence on disk. A **soft commit** for searchability
-/// is invoked implicitly with every index_doc,
-/// i.e. the document can immediately searched and included in the search results
-/// if it matches the query AND the query parameter realtime=true is enabled.
-/// **Use commit with caution, as it is an expensive operation**.
-/// **Usually, there is no need to invoke it manually**, as it is invoked automatically every 64k documents **per shard** and when the index is closed with close_index.
-/// Before terminating the program, always call close_index (commit), otherwise all documents indexed since last (manual or automatic) commit are lost.
-/// There are only 2 reasons that justify a manual commit:
-/// 1. if you want to search newly indexed documents without using realtime=true for search performance reasons or
-/// 2. if after indexing new documents there won't be more documents indexed (for some time),
-///    so there won't be (soon) a commit invoked automatically at the next 64k threshold **per shard** or close_index,
-///    but you still need immediate persistence guarantees on disk to protect against data loss in the event of a crash.
 impl Commit for IndexArc {
-    /// Commit moves indexed documents from the intermediate uncompressed data structure (array lists/HashMap, queryable by realtime search) in RAM
-    /// to the final compressed data structure (roaring bitmap) on Mmap or disk -
-    /// which is persistent, more compact, with lower query latency and allows search with realtime=false.
-    /// Commit is invoked automatically each time 64K documents are newly indexed **per shard** as well as on close_index (e.g. server quit).
-    /// There is no way to prevent this automatic commit by not manually invoking it.
-    /// But commit can also be invoked manually at any time at any number of newly indexed documents.
-    /// commit is a **hard commit** for persistence on disk. A **soft commit** for searchability
-    /// is invoked implicitly with every index_doc,
-    /// i.e. the document can immediately searched and included in the search results
-    /// if it matches the query AND the query parameter realtime=true is enabled.
-    /// **Use commit with caution, as it is an expensive operation**.
-    /// **Usually, there is no need to invoke it manually**, as it is invoked automatically every 64k documents **per shard** and when the index is closed with close_index.
-    /// Before terminating the program, always call close_index (commit), otherwise all documents indexed since last (manual or automatic) commit are lost.
-    /// There are only 2 reasons that justify a manual commit:
-    /// 1. if you want to search newly indexed documents without using realtime=true for search performance reasons or
-    /// 2. if after indexing new documents there won't be more documents indexed (for some time),
-    ///    so there won't be (soon) a commit invoked automatically at the next 64k threshold **per shard** or close_index,
-    ///    but you still need immediate persistence guarantees on disk to protect against data loss in the event of a crash.
-    async fn commit(&self) {
+    async fn commit(&self) -> std::io::Result<()> {
         let index_ref = self.read().await;
 
         let shard_vec = index_ref.shard_vec.clone();
@@ -114,7 +49,7 @@ impl Commit for IndexArc {
         for shard in shard_vec {
             join_set.spawn(async move {
                 let semaphore = { shard.read().await.semaphore.clone() };
-                let _permit = semaphore.acquire_owned().await.unwrap();
+                let _permit = semaphore.acquire_owned().await.map_err(std::io::Error::other)?;
 
                 let shard_stats = {
                     let s = shard.read().await;
@@ -135,29 +70,32 @@ impl Commit for IndexArc {
                     {
                         let mut s = shard.write().await;
                         if is_vector_indexing {
-                            s.commit_vector_shard().await;
+                            s.commit_vector_shard().await?;
                         }
-                        s.commit_lexical_shard(indexed_doc_count).await;
+                        s.commit_lexical_shard(indexed_doc_count).await?;
                     }
                     warmup(&shard).await;
-                    (doc_delta, vec_delta)
+                    Ok::<_, std::io::Error>((doc_delta, vec_delta))
                 } else {
-                    (0usize, 0usize)
+                    Ok((0usize, 0usize))
                 }
             });
         }
 
+        // Drain every task even after a failure: returning early must not detach
+        // other shard mutations or cancel them halfway through file publication.
+        let mut first_error = None;
         while let Some(joined) = join_set.join_next().await {
             match joined {
-                Ok((doc_delta, vec_delta)) => {
+                Ok(Ok((doc_delta, vec_delta))) => {
                     uncommitted_doc_count += doc_delta;
                     uncommitted_vec_count += vec_delta;
                 }
-                Err(e) => {
-                    log::error!("commit shard task failed: {:?}", e);
-                }
+                Ok(Err(error)) => { first_error.get_or_insert(error); }
+                Err(error) => { first_error.get_or_insert_with(|| std::io::Error::other(error)); }
             }
         }
+        if let Some(error) = first_error { return Err(error); }
 
         let index_ref = self.read().await;
 
@@ -181,43 +119,27 @@ impl Commit for IndexArc {
             }
         }
         drop(index_ref);
+        Ok(())
     }
 }
 
 impl Shard {
-    pub(crate) async fn commit_lexical_shard(&mut self, indexed_doc_count: usize) {
+    pub(crate) async fn commit_lexical_shard(&mut self, indexed_doc_count: usize) -> std::io::Result<()> {
         self.invalidate_frequentword_results();
         let is_last_level_incomplete = self.is_last_level_incomplete;
         if is_last_level_incomplete {
             self.merge_incomplete_index_level_to_level0();
 
-            self.index_file_mmap = unsafe {
-                MmapOptions::new()
-                    .len(0)
-                    .map(&self.index_file)
-                    .expect("Unable to create Mmap")
-            };
+            self.index_file_mmap = MmapOptions::new().len(1).map_anon()?.make_read_only()?;
 
-            if let Err(e) = self
-                .index_file
-                .set_len(self.last_level_index_file_start_pos)
-            {
-                log::error!(
-                    "Unable to index_file.set_len in commit_lexical_shard {} {} {:?}",
-                    self.index_path_string,
-                    self.indexed_doc_count,
-                    e
-                )
-            };
-            let _ = self
-                .index_file
-                .seek(SeekFrom::Start(self.last_level_index_file_start_pos));
+            self.index_file.set_len(self.last_level_index_file_start_pos)?;
+            self.index_file.seek(SeekFrom::Start(self.last_level_index_file_start_pos))?;
 
             let idx = self.level_index.len() - 1;
             {
-                self.index_file_mmap =
-                    unsafe { Mmap::map(&self.index_file).expect("Unable to create Mmap") };
-
+                // Keep the anonymous placeholder until the rewritten file is
+                // complete. Remapping here would reopen a Windows mapping while
+                // subsequent writes still need to extend the file.
                 for segment in self.segments_index.iter_mut() {
                     if idx == segment.byte_array_blocks_pointer.len() - 1 {
                         segment.byte_array_blocks_pointer.remove(idx);
@@ -225,8 +147,8 @@ impl Shard {
                 }
             }
         } else {
-            self.last_level_index_file_start_pos = self.index_file.stream_position().unwrap();
-            self.last_level_docstore_file_start_pos = self.docstore_file.stream_position().unwrap();
+            self.last_level_index_file_start_pos = self.index_file.stream_position()?;
+            self.last_level_docstore_file_start_pos = self.docstore_file.stream_position()?;
         };
 
         if self.committed_doc_count / ROARING_BLOCK_SIZE == 0 {
@@ -236,16 +158,16 @@ impl Shard {
                 0,
             );
 
-            let _ = self
+            self
                 .index_file
-                .write(&self.compressed_index_segment_block_buffer[0..2]);
+                .write_all(&self.compressed_index_segment_block_buffer[0..2])?;
         }
 
         let document_length_compressed_array_pointer =
-            self.index_file.stream_position().unwrap() as usize;
+            self.index_file.stream_position()? as usize;
 
         for document_length_compressed_array in self.document_length_compressed_array.iter_mut() {
-            let _ = self.index_file.write(document_length_compressed_array);
+            self.index_file.write_all(document_length_compressed_array)?;
         }
 
         if !self.mute {
@@ -273,23 +195,22 @@ impl Shard {
             8,
         );
 
-        let _ = self
+        self
             .index_file
-            .write(&self.compressed_index_segment_block_buffer[0..16]);
+            .write_all(&self.compressed_index_segment_block_buffer[0..16])?;
 
         // Per-field snapshots belong to this committed level, alongside the
         // existing physical count and decoded-length sum, not a separate sidecar.
         if self.meta.field_length_normalization == crate::index::FieldLengthNormalization::PerField {
             for field in &self.indexed_field_vec {
-                self.index_file.write_all(&(field.field_length_sum as u64).to_le_bytes()).expect("write field length sum");
-                self.index_file.write_all(&field.field_document_count.to_le_bytes()).expect("write field document count");
+                self.index_file.write_all(&(field.field_length_sum as u64).to_le_bytes())?;
+                self.index_file.write_all(&field.field_document_count.to_le_bytes())?;
             }
         }
 
-        let segment_head_position = self.index_file.stream_position().unwrap() as usize;
+        let segment_head_position = self.index_file.stream_position()? as usize;
         self.index_file
-            .seek(SeekFrom::Current((self.segment_number1 * 8) as i64))
-            .unwrap();
+            .seek(SeekFrom::Current((self.segment_number1 * 8) as i64))?;
 
         self.document_length_normalized_average =
             self.positions_sum_normalized as f32 / indexed_doc_count as f32;
@@ -301,7 +222,7 @@ impl Shard {
         }
 
         for k0 in 0..self.segment_number1 {
-            let strip_compressed = self.commit_segment(k0);
+            let strip_compressed = self.commit_segment(k0)?;
             self.strip_compressed_sum += strip_compressed as u64;
             self.key_count_sum += self.segments_level0[k0].segment.len() as u64;
         }
@@ -317,57 +238,57 @@ impl Shard {
             *document_length_compressed_array = [0; ROARING_BLOCK_SIZE];
         }
 
-        let segment_head_position2 = self.index_file.stream_position().unwrap() as usize;
+        let segment_head_position2 = self.index_file.stream_position()? as usize;
         self.index_file
-            .seek(SeekFrom::Start(segment_head_position as u64))
-            .unwrap();
+            .seek(SeekFrom::Start(segment_head_position as u64))?;
         let segment_head_position3 =
             self.compressed_index_segment_block_buffer.len() - (self.segment_number1 * 8);
-        let _ = self
+        self
             .index_file
-            .write(&self.compressed_index_segment_block_buffer[segment_head_position3..]);
+            .write_all(&self.compressed_index_segment_block_buffer[segment_head_position3..])?;
 
-        let _ = self.index_file.flush();
+        self.index_file.flush()?;
 
         self.index_file
-            .seek(SeekFrom::Start(segment_head_position2 as u64))
-            .unwrap();
+            .seek(SeekFrom::Start(segment_head_position2 as u64))?;
 
         if !self.stored_field_names.is_empty() {
-            self.commit_docstore(indexed_doc_count, is_last_level_incomplete);
+            self.commit_docstore(indexed_doc_count, is_last_level_incomplete)?;
         }
 
         {
-            self.index_file.flush().expect("Unable to flush Mmap");
+            self.index_file.flush()?;
 
             self.index_file_mmap =
-                unsafe { Mmap::map(&self.index_file).expect("Unable to create Mmap") };
+                unsafe { Mmap::map(&self.index_file)? };
         }
 
         if !self.facets.is_empty() {
-            self.facets_file_mmap.flush().expect("Unable to flush Mmap");
-            if self.facets_file.metadata().unwrap().len()
+            self.facets_file_mmap.flush()?;
+            if self.facets_file.metadata()?.len()
                 != (self.facets_size_sum * (self.level_index.len() + 1) * ROARING_BLOCK_SIZE) as u64
             {
-                if let Err(e) = self.facets_file.set_len(
-                    (self.facets_size_sum * (self.level_index.len() + 1) * ROARING_BLOCK_SIZE)
-                        as u64,
-                ) {
-                    log::error!("Unable to facets_file.set_len in commit {:?}", e)
-                };
+                // Windows forbids SetEndOfFile while a file mapping is open.
+                self.facets_file_mmap = MmapOptions::new().len(1).map_anon()?;
+                self.facets_file.set_len(
+                    (self.facets_size_sum * (self.level_index.len() + 1) * ROARING_BLOCK_SIZE) as u64,
+                )?;
 
                 self.facets_file_mmap =
-                    unsafe { MmapMut::map_mut(&self.facets_file).expect("Unable to create Mmap") };
+                    unsafe { MmapMut::map_mut(&self.facets_file)? };
             }
 
             let index_path = Path::new(&self.index_path_string);
-            serde_json::to_writer(
-                &File::create(Path::new(index_path).join(FACET_VALUES_FILENAME)).unwrap(),
-                &self.facets,
-            )
-            .unwrap();
+            let dictionary = File::create(Path::new(index_path).join(FACET_VALUES_FILENAME))?;
+            serde_json::to_writer(&dictionary, &self.facets)?;
+            dictionary.sync_all()?;
+            self.facets_file.sync_all()?;
         }
 
+        self.index_file.sync_all()?;
+        if !self.stored_field_names.is_empty() {
+            self.docstore_file.sync_all()?;
+        }
         self.string_set_to_single_term_id();
 
         self.committed_doc_count = indexed_doc_count;
@@ -387,10 +308,11 @@ impl Shard {
         self.modified = true;
 
         self.uncommitted = false;
+        Ok(())
     }
 
     /// Flush a single segment from the key hash range partitioned level to RAM and disk
-    pub(crate) fn commit_segment(&mut self, key0: usize) -> usize {
+    pub(crate) fn commit_segment(&mut self, key0: usize) -> std::io::Result<usize> {
         let mut key_head_pointer_w: usize = 0;
         let segment_head_position = self.compressed_index_segment_block_buffer.len()
             - (self.segment_number1 * 8)
@@ -462,11 +384,11 @@ impl Shard {
             segment_head_position,
         );
 
-        let file_position = self.index_file.stream_position().unwrap() as usize;
+        let file_position = self.index_file.stream_position()? as usize;
 
-        let _ = self
+        self
             .index_file
-            .write(&self.compressed_index_segment_block_buffer[0..compressed_segment_block_size]);
+            .write_all(&self.compressed_index_segment_block_buffer[0..compressed_segment_block_size])?;
 
         {
             self.segments_index[key0].byte_array_blocks_pointer.push((
@@ -476,7 +398,7 @@ impl Shard {
             ));
         }
 
-        compressed_segment_block_size
+        Ok(compressed_segment_block_size)
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -1,3 +1,7 @@
+# Issue #57 implementation
+
+P1-A is in progress, not complete. See the [implementation and platform validation record](docs/implementation-57.md).
+
 # Seekpower 执行状态
 
 更新日期：2026-10-14（Asia/Shanghai）。[当前功能](FEATURES.md) · [后续计划](SEEKPOWER_PLAN.md) · [验证记录](VALIDATION.md) · [迁移说明](MIGRATION.md)

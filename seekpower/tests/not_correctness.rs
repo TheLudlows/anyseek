@@ -124,10 +124,10 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                     add(&index, &[&first, &second]).await;
                     for stage in 0..3 {
                         if stage == 1 {
-                            index.commit().await;
+                            index.commit().await.unwrap();
                         }
                         if stage == 2 {
-                            index.close().await;
+                            index.close().await.unwrap();
                             drop(index);
                             index = open_index(&path).await.unwrap();
                         }
@@ -156,7 +156,7 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                             }
                         }
                     }
-                    index.close().await;
+                    index.close().await.unwrap();
                     drop(index);
                     std::fs::remove_dir_all(path).unwrap();
                 }

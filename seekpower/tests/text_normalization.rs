@@ -129,10 +129,10 @@ async fn t2s_phrases_original_utf8_ngram_and_reopen() {
         add(&index, &docs).await;
         for stage in 0..3 {
             if stage == 1 {
-                index.commit().await;
+                index.commit().await.unwrap();
             }
             if stage == 2 {
-                index.close().await;
+                index.close().await.unwrap();
                 drop(index);
                 index = open_index(&path).await.unwrap();
             }
@@ -181,7 +181,7 @@ async fn t2s_phrases_original_utf8_ngram_and_reopen() {
                 [6, 7].into_iter().collect()
             );
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -190,7 +190,7 @@ async fn t2s_phrases_original_utf8_ngram_and_reopen() {
 async fn none_default_and_persisted_rule_are_explicit() {
     let (index, path) = fresh("default", TextNormalization::None, 0).await;
     add(&index, &["臺灣", "台湾"]).await;
-    index.commit().await;
+    index.commit().await.unwrap();
     assert_ne!(
         ids(&index, "臺灣", false).await,
         ids(&index, "台湾", false).await
@@ -205,7 +205,7 @@ async fn none_default_and_persisted_rule_are_explicit() {
     );
     value["text_normalization"] = json!("OpenCcLatest");
     assert!(serde_json::from_value::<IndexMetaObject>(value).is_err());
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -232,10 +232,10 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                     add(&index, &[&first, &second]).await;
                     for stage in 0..3 {
                         if stage == 1 {
-                            index.commit().await;
+                            index.commit().await.unwrap();
                         }
                         if stage == 2 {
-                            index.close().await;
+                            index.close().await.unwrap();
                             drop(index);
                             index = open_index(&path).await.unwrap();
                         }
@@ -263,7 +263,7 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                             }
                         }
                     }
-                    index.close().await;
+                    index.close().await.unwrap();
                     drop(index);
                     std::fs::remove_dir_all(path).unwrap();
                 }
@@ -290,7 +290,7 @@ async fn nul_suffix_alone_has_independent_hits_in_every_state() {
             add(&index, &docs).await;
             for stage in 0..5 {
                 if stage == 1 || stage == 3 {
-                    index.commit().await;
+                    index.commit().await.unwrap();
                 }
                 if stage == 2 {
                     docs.push("臺灣\0後綴");
@@ -309,7 +309,7 @@ async fn nul_suffix_alone_has_independent_hits_in_every_state() {
                     .unwrap();
                 }
                 if stage == 4 {
-                    index.close().await;
+                    index.close().await.unwrap();
                     drop(index);
                     index = open_index(&path).await.unwrap();
                 }
@@ -350,7 +350,7 @@ async fn nul_suffix_alone_has_independent_hits_in_every_state() {
                     );
                 }
             }
-            index.close().await;
+            index.close().await.unwrap();
             drop(index);
             std::fs::remove_dir_all(path).unwrap();
         }

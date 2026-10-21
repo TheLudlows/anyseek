@@ -58,7 +58,7 @@ async fn fresh(dir: &str, access_type: AccessType) -> seekpower::index::IndexArc
 async fn index_one(index: &seekpower::index::IndexArc, json: &str) {
     let doc: seekpower::index::Document = serde_json::from_str(json).unwrap();
     index.index_documents(vec![doc]).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 }
 
 async fn get0(index: &seekpower::index::IndexArc) -> Result<seekpower::index::Document, String> {
@@ -75,7 +75,7 @@ async fn get_nonstored_only_mmap() {
     let index = fresh("tests/index_get_nonstored_mmap/", AccessType::Mmap).await;
     index_one(&index, r#"{"nostore":"only indexed content"}"#).await;
     assert!(get0(&index).await.is_err());
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Control: a normal stored document still reads back.
@@ -84,5 +84,5 @@ async fn get_stored_control() {
     let index = fresh("tests/index_get_control/", AccessType::Mmap).await;
     index_one(&index, r#"{"title":"hello world"}"#).await;
     assert!(get0(&index).await.is_ok());
-    index.close().await;
+    index.close().await.unwrap();
 }

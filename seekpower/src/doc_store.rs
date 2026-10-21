@@ -151,23 +151,25 @@ impl Shard {
         &mut self,
         indexed_doc_count: usize,
         is_last_level_incomplete: bool,
-    ) {
+    ) -> std::io::Result<()> {
+        // Do not keep a mapping over a file being resized/rewritten (Windows).
+        self.docstore_file_mmap = memmap2::MmapOptions::new().len(1).map_anon()?.make_read_only()?;
         let size_uncommitted = self.compressed_docstore_segment_block_buffer.len();
         let level = self.level_index.len() - 1;
 
         if is_last_level_incomplete {
-            let docstore_file_end = self.docstore_file.metadata().unwrap().len();
+            let docstore_file_end = self.docstore_file.metadata()?.len();
 
             let size_committed =
                 docstore_file_end as usize - self.last_level_docstore_file_start_pos as usize - 4;
             let size_committed_docs = size_committed - (4 * ROARING_BLOCK_SIZE);
             let size_sum = size_uncommitted + size_committed_docs;
 
-            let _ = self
+            self
                 .docstore_file
-                .seek(SeekFrom::Start(self.last_level_docstore_file_start_pos));
+                .seek(SeekFrom::Start(self.last_level_docstore_file_start_pos))?;
 
-            let _ = self.docstore_file.write(&(size_sum as u32).to_le_bytes());
+            self.docstore_file.write_all(&(size_sum as u32).to_le_bytes())?;
 
             let committed_doc_count = ((self.committed_doc_count - 1) % ROARING_BLOCK_SIZE) + 1;
             let indexed_doc_count = ((indexed_doc_count - 1) % ROARING_BLOCK_SIZE) + 1;
@@ -182,41 +184,42 @@ impl Shard {
                 );
             }
 
-            let _ = self.docstore_file.seek(SeekFrom::Start(
+            self.docstore_file.seek(SeekFrom::Start(
                 self.last_level_docstore_file_start_pos + 4 + committed_doc_count as u64 * 4,
-            ));
+            ))?;
 
-            let _ = self.docstore_file.write(
+            self.docstore_file.write_all(
                 &self.compressed_docstore_segment_block_buffer
                     [committed_doc_count * 4..ROARING_BLOCK_SIZE * 4],
-            );
+            )?;
 
-            let _ = self.docstore_file.seek(SeekFrom::Start(docstore_file_end));
+            self.docstore_file.seek(SeekFrom::Start(docstore_file_end))?;
 
-            let _ = self
+            self
                 .docstore_file
-                .write(&self.compressed_docstore_segment_block_buffer[4 * ROARING_BLOCK_SIZE..]);
+                .write_all(&self.compressed_docstore_segment_block_buffer[4 * ROARING_BLOCK_SIZE..])?;
         } else {
-            let _ = self
+            self
                 .docstore_file
-                .write(&(size_uncommitted as u32).to_le_bytes());
+                .write_all(&(size_uncommitted as u32).to_le_bytes())?;
 
             self.level_index[level].docstore_pointer_docs_pointer =
-                self.docstore_file.stream_position().unwrap() as usize;
+                self.docstore_file.stream_position()? as usize;
 
-            let _ = self
+            self
                 .docstore_file
-                .write(&self.compressed_docstore_segment_block_buffer);
+                .write_all(&self.compressed_docstore_segment_block_buffer)?;
         }
 
-        let _ = self.docstore_file.flush();
+        self.docstore_file.flush()?;
 
         self.compressed_docstore_segment_block_buffer = vec![0; ROARING_BLOCK_SIZE * 4];
 
         {
             self.docstore_file_mmap =
-                unsafe { Mmap::map(&self.docstore_file).expect("Unable to create Mmap") };
+                unsafe { Mmap::map(&self.docstore_file)? };
         }
+        Ok(())
     }
 }
 
