@@ -159,8 +159,25 @@ def exercise(base,master,call):
         publish={'record_id':'ui-generation','routing_key':'ui-route','expected':{'Match':2},'generation':{'action':'publish','generation_id':'g1'}}
         page.locator('#documentJson').fill(json.dumps(publish));page.locator('#submitDocuments').click()
         expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
+        upload={'record_id':'ui-upload','routing_key':'ui-route','expected':'Absent','generation':{'action':'begin','generation_id':'g','source':{'record_id':'ui-source','routing_key':'ui-route','version':2},'members':['ui-up-a','ui-up-b']}}
+        page.locator('#documentJson').fill(json.dumps(upload));page.locator('#submitDocuments').click();expect(page.locator('#documentStatus')).to_contain_text('Staging is durable')
+        for version,rid in [(1,'ui-up-b'),(2,'ui-up-a')]:
+            upload={'record_id':'ui-upload','routing_key':'ui-route','expected':{'Match':version},'generation':{'action':'stage_batch','generation_id':'g','chunks':[{'record_id':rid,'document':{'title':rid,'body':'multipartui'}}]}}
+            page.locator('#documentJson').fill(json.dumps(upload));page.locator('#submitDocuments').click();expect(page.locator('#documentStatus')).to_contain_text('Staging is durable')
+            assert call('POST',f'/api/v1/index/{collection}/query',{'query':'multipartui'})['count_total']==0
+        status=call('GET',f'/api/v1/index/{collection}/doc/ui-upload/generation')
+        for action,version,extra in [('seal',3,{'manifest_sha256':status['manifest_sha256']}),('publish',4,{})]:
+            upload={'record_id':'ui-upload','routing_key':'ui-route','expected':{'Match':version},'generation':{'action':action,'generation_id':'g',**extra}}
+            page.locator('#documentJson').fill(json.dumps(upload));page.locator('#submitDocuments').click()
+            expect(page.locator('#documentStatus')).to_contain_text('Staging is durable' if action=='seal' else 'All confirmed writes are durable and visible')
+        assert call('POST',f'/api/v1/index/{collection}/query',{'query':'multipartui'})['count_total']==2
+        print('PASS Chromium: multipart begin/two batches/seal/publish, staged invisibility and complete publication')
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('generationui')
         expect(page.locator('#contentBox')).to_contain_text('Generation A');expect(page.locator('#contentBox')).to_contain_text('Generation B')
+        explanation=page.locator('.hitExplanation').first;explanation.locator('summary').click()
+        displayed=json.loads(explanation.locator('pre').inner_text());assert displayed['channels'][0]['channel']=='lexical' and displayed['channels'][0]['raw_score']==displayed['score']
+        print('PASS Chromium: real per-hit raw-score and channel explanation')
+
         page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
         deletion={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':2},'document':None}
         page.locator('#documentJson').fill(json.dumps(deletion));page.locator('#submitDocuments').click()

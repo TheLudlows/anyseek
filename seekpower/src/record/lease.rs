@@ -3,7 +3,7 @@ use super::*;
 use sha2::{Digest,Sha256};
 const LEASE_MS:u64=30*60*1000;
 pub(super) fn deadline(now:u64)->Result<u64,RecordError>{now.checked_add(LEASE_MS).filter(|t|*t<=253_402_300_799_999).ok_or_else(||RecordError::Rejected("staging lease time overflow".into()))}
-fn digest(request:&RecordWrite)->Result<String,RecordError>{
+pub(super) fn digest<T:Serialize>(request:&T)->Result<String,RecordError>{
     // Value equality ignores object ordering. Canonicalize recursively before
     // replacing an aborted private payload by its collision-resistant identity.
     fn sort(value:&mut serde_json::Value){match value{serde_json::Value::Object(map)=>{for v in map.values_mut(){sort(v);}map.sort_keys();},serde_json::Value::Array(a)=>for v in a{sort(v);},_=>{}}}
@@ -15,9 +15,9 @@ pub(super) fn same_request(old:&Applied,request:&RecordWrite)->Result<bool,Recor
 }
 pub(super) fn redact(state:&mut State,id:&str,generation:&str)->Result<(),RecordError>{
     for op in &mut state.operations {
-        if op.request.record_id!=id || !matches!(&op.request.generation,Some(GenerationCommand::Stage{generation_id,..}) if generation_id==generation){continue;}
+        if op.request.record_id!=id || !matches!(&op.request.generation,Some(GenerationCommand::Stage{generation_id,..}|GenerationCommand::StageBatch{generation_id,..}) if generation_id==generation){continue;}
         if op.request_digest.is_none(){op.request_digest=Some(digest(&op.request)?);}
-        if let Some(GenerationCommand::Stage{chunks,members,..})=&mut op.request.generation{chunks.clear();members.clear();}
+        match &mut op.request.generation{Some(GenerationCommand::Stage{chunks,members,..})=>{chunks.clear();members.clear();},Some(GenerationCommand::StageBatch{chunks,..})=>chunks.clear(),_=>{}}
         state.private_cleanup_pending=true;
     }Ok(())
 }
@@ -45,16 +45,16 @@ pub(super) fn validate_state(state:&State)->Result<(),RecordError>{
         for t in &event.targets {
             let m=state.generations.get(&t.record_id).ok_or_else(||storage("orphan lease history"))?;
             let previous=controls.get(&(t.record_id.as_str(),t.previous_version)).ok_or_else(||storage("missing expiring lease receipt"))?;
-            if previous.receipt.seq>=event.seq || deadline(previous.observed_time_ms)?!=t.deadline_ms || !matches!(&previous.request.generation,Some(GenerationCommand::Stage{generation_id,..}|GenerationCommand::Renew{generation_id}) if generation_id==&t.generation_id){return Err(storage("expired lease provenance mismatch"));}
+            if previous.receipt.seq>=event.seq || deadline(previous.observed_time_ms)?!=t.deadline_ms || !matches!(&previous.request.generation,Some(GenerationCommand::Stage{generation_id,..}|GenerationCommand::Begin{generation_id,..}|GenerationCommand::StageBatch{generation_id,..}|GenerationCommand::Seal{generation_id,..}|GenerationCommand::Renew{generation_id}) if generation_id==&t.generation_id){return Err(storage("expired lease provenance mismatch"));}
             if !m.was_used(&t.generation_id)||!retired.insert((&t.record_id,&t.generation_id))||t.deadline_ms>event.evaluation_time_ms||m.version<=t.previous_version||m.staged.as_ref().is_some_and(|s|s.id==t.generation_id){return Err(storage("lease history mismatch"));}
         }
     }
     for op in &state.operations {
         if let Some(hash)=&op.request_digest {
             if hash.len()!=64||!hash.bytes().all(|b|b.is_ascii_hexdigit()){return Err(storage("invalid retained request digest"));}
-            let Some(GenerationCommand::Stage{generation_id,chunks,members,..})=&op.request.generation else{return Err(storage("only retired private stages can be redacted"));};
+            let (generation_id,empty)=match &op.request.generation{Some(GenerationCommand::Stage{generation_id,chunks,members,..})=>(generation_id,chunks.is_empty()&&members.is_empty()),Some(GenerationCommand::StageBatch{generation_id,chunks})=>(generation_id,chunks.is_empty()),_=>return Err(storage("only retired private stages can be redacted"))};
             let terminal=state.operations.iter().any(|a|a.receipt.seq>op.receipt.seq&&a.request.record_id==op.request.record_id&&matches!(&a.request.generation,Some(GenerationCommand::Abort{generation_id:id}) if id==generation_id)) || state.lease_expirations.iter().any(|e|e.seq>op.receipt.seq&&e.targets.iter().any(|t|t.record_id==op.request.record_id&&t.generation_id==*generation_id));
-            if !terminal||!chunks.is_empty()||!members.is_empty()||state.generations.get(&op.request.record_id).is_none_or(|m|!m.was_used(generation_id)||m.staged.as_ref().is_some_and(|s|&s.id==generation_id))||state.records.values().any(|r|r.generation_member.as_ref().is_some_and(|m|m.document_id==op.request.record_id&&m.generation_id==*generation_id)){return Err(storage("redacted stage still reachable"));}
+            if !terminal||!empty||state.generations.get(&op.request.record_id).is_none_or(|m|!m.was_used(generation_id)||m.staged.as_ref().is_some_and(|s|&s.id==generation_id))||state.records.values().any(|r|r.generation_member.as_ref().is_some_and(|m|m.document_id==op.request.record_id&&m.generation_id==*generation_id)){return Err(storage("redacted stage still reachable"));}
         }
     }Ok(())
 }

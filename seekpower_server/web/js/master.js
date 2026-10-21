@@ -52,6 +52,7 @@ newEntry.find('a.url').text(linkText);
 if(linkUrl)newEntry.find('a').attr('href',linkUrl);
 if(imageUrl)$('<div class="col-xs-2 imgPrev"></div>').css('background-image','url('+JSON.stringify(imageUrl)+')').prependTo(newEntry.find('.row'));
 if(imageData.startsWith('data:image')){const image=new Image();image.src=imageData;image.height=100;newEntry.prepend(image);}
+if(hit.channels?.length){const details=$('<details class="hitExplanation"><summary>Retrieval explanation</summary><pre></pre></details>');details.find('pre').text(JSON.stringify({score:hit.score,channels:hit.channels},null,2));newEntry.find('.record').append(details);}
 contentBox.append(newEntry);
 newEntry.on('mouseenter',()=>{
 moveSplitter(newEntry[0].getBoundingClientRect().y);

@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, Semaphore};
 mod evidence;
 mod enrichment;
 mod generation;
+mod upload;
 mod temporal;
 mod change_feed;
 mod graph;
@@ -297,15 +298,15 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV11")]
+    #[serde(rename = "RecordCheckpointV12")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV11")]
+    #[serde(rename = "RecordAppliedV12")]
     Applied(Applied),
-    #[serde(rename = "RecordExpiredV11")]
+    #[serde(rename = "RecordExpiredV12")]
     Expired(temporal::Expiration),
-    #[serde(rename = "RecordFeedTrimV11")]
+    #[serde(rename = "RecordFeedTrimV12")]
     FeedTrim(change_feed::Trim),
-    #[serde(rename = "RecordLeaseExpiredV11")]
+    #[serde(rename = "RecordLeaseExpiredV12")]
     LeaseExpired(lease::Expiration),
 }
 struct Inner {
@@ -373,6 +374,8 @@ pub struct RecordPage {
 /// A record hit from one complete visible position.
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordHit {
+    /// Per-channel ranking evidence from this same view, with unmodified raw scores.
+    pub channels: Vec<crate::search::ChannelExplanation>,
     /// The exact original record corresponding to the ranked candidate.
     pub record: Record,
     /// Existing engine score (BM25, vector, or RRF according to query mode).
@@ -1422,6 +1425,8 @@ mod tests {
         let mut expected:Vec<_>=oracle.into_iter().collect();expected.sort_by(|a,b|b.1.total_cmp(&a.1).then_with(||a.0.cmp(&b.0)));
         let result=p.query_with_relations(fusion_query(),options.clone()).await.unwrap();
         assert_eq!(result.hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>(),expected);
+        for hit in &result.hits {assert_eq!(hit.channels.iter().map(|c|c.rrf_contribution.unwrap()).sum::<f32>(),hit.score);assert_eq!(hit.channels.iter().filter(|c|c.channel=="relation").count(),usize::from(["b","c"].contains(&hit.record.record_id.as_str())));for c in &hit.channels{assert_eq!(c.raw_score.is_none(),c.channel=="relation");}}
+
         assert_eq!(result.count_total,6);assert!(result.fusion.unwrap().relation_complete);
         p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.query_with_relations(fusion_query(),options.clone()).await.unwrap().hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>(),expected);
@@ -1445,6 +1450,108 @@ mod tests {
         let result=p.query_with_relations(q,fusion_options()).await.unwrap();assert_eq!(result.hits.len(),1);assert_eq!(result.hits[0].record.record_id,"b");
         clock.set(now+100);let result=p.query_with_relations(fusion_query(),fusion_options()).await.unwrap();assert_eq!(result.evaluation_time_ms,now+100);assert!(!result.hits.iter().any(|h|h.record.record_id=="b"||h.record.record_id=="ab"));
         let mut bad=fusion_options();bad.rrf.keyword_candidates=Some(100);assert!(p.query_with_relations(fusion_query(),bad).await.is_err());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn query_explanations_preserve_raw_scores_ranks_and_pagination() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        for id in ["c","a","b"] {p.write(write(id,id,"alpha",ExpectedVersion::Absent)).await.unwrap();}
+        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:AnnMode::All}] {
+            let mut q=fusion_query();q.mode=mode.clone();if mode==SearchMode::Lexical{q.vector=None;}q.offset=1;q.length=1;
+            let r=p.query(q).await.unwrap();assert_eq!(r.hits.len(),1);let hit=&r.hits[0];assert_eq!(hit.channels.len(),1);assert_eq!(hit.channels[0].rank,1);assert_eq!(hit.channels[0].raw_score,Some(hit.score));assert!(hit.channels[0].rrf_contribution.is_none());
+        }
+        let mut q=fusion_query();q.mode=SearchMode::WeightedHybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.5,vector_weight:2.0,keyword_candidates:Some(3),vector_candidates:Some(2)}};
+        let all=p.query(q).await.unwrap();
+        let lexical_raw=query(&p,SearchMode::Lexical).await.hits[0].score;
+        let vector_raw=query(&p,SearchMode::Vector{similarity_threshold:None,ann_mode:AnnMode::All}).await.hits[0].score;
+        assert!(all.hits.iter().flat_map(|h|&h.channels).all(|c|c.raw_score==Some(if c.channel=="lexical"{lexical_raw}else{vector_raw})));
+        for (rank,hit) in all.hits.iter().enumerate(){assert_eq!(hit.record.record_id,["a","b","c"][rank]);assert_eq!(hit.channels.iter().map(|c|c.rrf_contribution.unwrap()).sum::<f32>(),hit.score);let lex=hit.channels.iter().find(|c|c.channel=="lexical").unwrap();assert_eq!(lex.rank,rank);assert_eq!(lex.rrf_contribution,Some(0.5/(3.0+rank as f32)));assert_eq!(hit.channels.iter().any(|c|c.channel=="vector"),rank<2);}
+        let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All};q.offset=1;q.length=1;
+        let page=p.query(q).await.unwrap();assert_eq!(page.hits[0].channels[0].rank,1);assert_eq!(page.hits[0].channels[1].rank,1);
+        let mut q=fusion_query();q.mode=SearchMode::WeightedHybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.0,vector_weight:1.0,keyword_candidates:Some(3),vector_candidates:Some(3)}};
+        let vector_only=p.query(q).await.unwrap();assert!(!vector_only.hits.is_empty());assert!(vector_only.hits.iter().all(|h|h.channels.len()==1&&h.channels[0].channel=="vector"&&h.channels[0].rrf_contribution==Some(h.score)));
+        let mut q=fusion_query();q.mode=SearchMode::Lexical;q.vector=None;q.sort=vec![crate::search::ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}];q.offset=1;q.length=1;
+        let sorted=p.query(q).await.unwrap();assert_eq!(sorted.hits.len(),1);assert_eq!(sorted.hits[0].channels[0].rank_basis,"requested_order");assert_eq!(sorted.hits[0].channels[0].rank,1);
+        let browse=p.search(String::new(),None,SearchMode::Lexical,vec![],10).await.unwrap();assert!(browse.hits.iter().all(|h|h.channels[0].channel=="browse"&&h.channels[0].raw_score.is_none()));
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();let restored=query(&p,SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All}).await;assert!(restored.hits.iter().all(|h|h.channels.len()==2));
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn multipart_generation_exceeds_command_limit_with_small_publish() {
+        let root=path();let mut cfg=config();cfg.max_record_bytes=1024*1024;cfg.max_journal_bytes=64*1024*1024;
+        let p=RecordPartition::create(&root,cfg.clone()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let GenerationCommand::Stage{source,members,mut chunks,..}=stage_generation("g",&["one","two"]) else{unreachable!()};
+        for chunk in &mut chunks {chunk.document.insert("payload".into(),serde_json::json!("x".repeat(600_000)));}
+        let begin=generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members});
+        p.write(begin.clone()).await.unwrap();assert!(p.write(write("reserved","one","alpha",ExpectedVersion::Absent)).await.is_err());
+        let first=generation_write("batch1",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks:vec![chunks[1].clone()]});
+        let r=p.write(first.clone()).await.unwrap();assert!(r.staged_only);assert_eq!(p.write(first.clone()).await.unwrap(),r);
+        assert!(p.get("two").await.unwrap().is_none());
+        let incomplete=p.generation_status("doc").await.unwrap().unwrap();assert_eq!(incomplete.expected_members,2);assert_eq!(incomplete.staged_members,1);
+        assert!(p.write(generation_write("earlyseal",ExpectedVersion::Match(2),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:incomplete.manifest_sha256.unwrap()})).await.is_err());
+        assert!(p.write(generation_write("earlypublish",ExpectedVersion::Match(2),GenerationCommand::Publish{generation_id:"g".into()})).await.is_err());
+        let second=generation_write("batch2",ExpectedVersion::Match(2),GenerationCommand::StageBatch{generation_id:"g".into(),chunks:vec![chunks[0].clone()]});
+        p.write(second.clone()).await.unwrap();
+        assert!(serde_json::to_vec(&first).unwrap().len()<1024*1024);assert!(serde_json::to_vec(&second).unwrap().len()<1024*1024);
+        assert!(serde_json::to_vec(&first).unwrap().len()+serde_json::to_vec(&second).unwrap().len()>1024*1024);
+        let status=p.generation_status("doc").await.unwrap().unwrap();
+        assert!(p.write(generation_write("badseal",ExpectedVersion::Match(3),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:"0".repeat(64)})).await.is_err());
+        let seal=generation_write("seal",ExpectedVersion::Match(3),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:status.manifest_sha256.unwrap()});
+        p.write(seal.clone()).await.unwrap();assert!(serde_json::to_vec(&seal).unwrap().len()<1024);
+        drop(p);let p=RecordPartition::open(&root,cfg.max_journal_bytes).await.unwrap();
+        assert!(p.generation_status("doc").await.unwrap().unwrap().sealed);assert!(p.get("one").await.unwrap().is_none());
+        assert_eq!(p.write(first).await.unwrap(),r);
+        let publish=generation_write("publish",ExpectedVersion::Match(4),GenerationCommand::Publish{generation_id:"g".into()});
+        let receipt=p.write(publish.clone()).await.unwrap();assert!(!receipt.staged_only);
+        let inner=p.inner.lock().await;
+        let applied=inner.state.operations.last().unwrap();assert!(encode_entry(&Entry::Applied(applied.clone())).unwrap().len()<2048);
+        let batches:Vec<_>=inner.state.operations.iter().filter(|a|matches!(a.request.generation,Some(GenerationCommand::StageBatch{..}))).collect();assert_eq!(batches.len(),2);
+        assert!(batches.iter().all(|a|encode_entry(&Entry::Applied((*a).clone())).unwrap().len()<1024*1024));drop(inner);
+        for id in ["one","two"]{assert_eq!(p.get(id).await.unwrap().unwrap().document.unwrap()["payload"].as_str().unwrap().len(),600_000);}
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,cfg.max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(publish).await.unwrap(),receipt);assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,2);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn multipart_checkpoint_cannot_forge_seal_or_order() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let GenerationCommand::Stage{source,members,chunks,..}=stage_generation("g",&["one","two"]) else{unreachable!()};
+        p.write(generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members})).await.unwrap();
+        p.write(generation_write("batch",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks})).await.unwrap();
+        let inner=p.inner.lock().await;let state=inner.state.clone();let cfg=inner.config.clone();drop(inner);
+        let mut bad=state.clone();bad.generations.get_mut("doc").unwrap().staged.as_mut().unwrap().sealed=true;
+        let mut order=state;order.generations.get_mut("doc").unwrap().staged.as_mut().unwrap().chunks.reverse();
+        let hash=p.generation_status("doc").await.unwrap().unwrap().manifest_sha256.unwrap();
+        p.write(generation_write("seal",ExpectedVersion::Match(2),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:hash})).await.unwrap();
+        let mut wrong=p.inner.lock().await.state.clone();if let Some(GenerationCommand::Seal{manifest_sha256,..})=&mut wrong.operations.last_mut().unwrap().request.generation{*manifest_sha256="0".repeat(64);}
+        for state in [bad,order,wrong]{let damaged=path();let bytes=encode_entry(&Entry::Checkpoint{config:cfg.clone(),state}).unwrap();drop(PartitionJournal::create(&damaged,cfg.max_journal_bytes,&bytes).unwrap());assert!(RecordPartition::open(&damaged,cfg.max_journal_bytes).await.is_err());std::fs::remove_dir_all(damaged).unwrap();}
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn multipart_completion_reserves_seal_and_publish() {
+        let root=path();let mut cfg=config();cfg.max_operations=7;
+        let p=RecordPartition::create(&root,cfg).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let GenerationCommand::Stage{source,members,chunks,..}=stage_generation("g",&["one"]) else{unreachable!()};
+        p.write(generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members})).await.unwrap();
+        p.write(generation_write("batch",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks})).await.unwrap();
+        let hash=p.generation_status("doc").await.unwrap().unwrap().manifest_sha256.unwrap();
+        p.write(generation_write("seal",ExpectedVersion::Match(2),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:hash})).await.unwrap();
+        p.write(generation_write("publish",ExpectedVersion::Match(3),GenerationCommand::Publish{generation_id:"g".into()})).await.unwrap();assert!(p.get("one").await.unwrap().is_some());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn multipart_expiry_redacts_each_batch_and_retains_retries() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(source_write("s","s",&[])).await.unwrap();
+        let GenerationCommand::Stage{source,members,chunks,..}=stage_generation("g",&["one","two"]) else{unreachable!()};
+        p.write(generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members})).await.unwrap();
+        clock.set(now+100);let batch=generation_write("batch",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks:vec![chunks[0].clone()]});let receipt=p.write(batch.clone()).await.unwrap();
+        clock.set(now+1_800_100);assert!(p.generation_status("doc").await.unwrap().unwrap().staged_generation.is_none());
+        assert_eq!(p.write(batch.clone()).await.unwrap(),receipt);
+        let state=p.inner.lock().await.state.clone();let op=state.operations.iter().find(|o|o.request.operation_id==batch.operation_id).unwrap();assert!(op.request_digest.is_some());
+        assert!(matches!(&op.request.generation,Some(GenerationCommand::StageBatch{chunks,..}) if chunks.is_empty()));lease::validate_state(&state).unwrap();
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock.clone();assert_eq!(p.write(batch).await.unwrap(),receipt);
+        p.write(write("reuse","two","alpha",ExpectedVersion::Absent)).await.unwrap();
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -2301,7 +2408,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV11", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV12", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
@@ -3798,7 +3905,9 @@ impl Inner {
                     }
                 }
                 if let Some(temporal) = temporal { filters.extend(temporal::filters(temporal)?); }
-                let result = self
+                let channel=match &mode{SearchMode::Lexical=>Some(if text.trim().is_empty(){"browse"}else{"lexical"}),SearchMode::Vector{..}=>Some("vector"),_=>None};
+                let rank_basis=if !sort.is_empty(){"requested_order"}else if channel==Some("browse"){"browse_order"}else{"score"};
+                let mut result = self
                     .index
                     .search(
                         text,
@@ -3819,12 +3928,14 @@ impl Inner {
                     return Err(storage(error));
                 }
                 let mut hits = Vec::new();
-                for hit in result.results {
+                for (rank,hit) in result.results.into_iter().enumerate() {
                     let id = self
                         .ordinals
                         .get(hit.doc_id)
                         .ok_or_else(|| storage("candidate ordinal outside view"))?;
+                    let channels=if let Some(channel)=channel {vec![crate::search::ChannelExplanation{channel:channel.into(),rank:offset+rank,rank_basis:rank_basis.into(),raw_score:if channel=="browse"{None}else{Some(hit.score)},rrf_contribution:None}]}else{result.explanations.remove(&hit.doc_id).ok_or_else(||storage("hybrid candidate explanation missing"))?};
                     hits.push(RecordHit {
+                        channels,
                         record: self.state.records[id].clone(),
                         score: hit.score,
                     });

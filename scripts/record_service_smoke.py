@@ -106,6 +106,12 @@ def main():
             call('POST','/api/v1/index/vectors/doc',vw)
             for query in [{'query_vector':[1,0],'all':True},{'query':'alpha','query_vector':[1,0],'rrf':{}}]:
                 q=call('POST','/api/v1/index/vectors/query',query);assert q['hits'][0]['record']['record_id']=='v',q
+                hit=q['hits'][0];channels=hit['channels'];assert all(c['rank']==0 and c['raw_score'] is not None for c in channels)
+                if query.get('rrf') is not None:
+                    assert {c['channel'] for c in channels}=={'lexical','vector'}
+                    assert abs(sum(c['rrf_contribution'] for c in channels)-hit['score'])<1e-5
+                else:assert channels[0]['channel']=='vector' and channels[0]['raw_score']==hit['score']
+
             assert call('GET','/api/v1/index/vectors/doc/v')['document']['vector']==[2,0]
             pending={**vw,'operation_id':operation(),'record_id':'pending','document':{'body':'pendingword'}}
             call('POST','/api/v1/index/vectors/doc',pending)
@@ -533,6 +539,8 @@ def main():
             from record_graph_smoke import exercise as graph_exercise
             graph_exercise(call,restart_with,args.faults)
             temporal_exercise(call,restart_with,root.parent,args.faults)
+            from record_upload_smoke import exercise as upload_exercise
+            upload_exercise(call,restart_with,args.faults)
             from record_lease_smoke import exercise as lease_exercise
             lease_exercise(call,restart_with,root.parent,False)
             if args.browser:
