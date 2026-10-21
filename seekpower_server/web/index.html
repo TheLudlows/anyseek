@@ -40,7 +40,7 @@
 <h2>Create index</h2>
 <label for="newIndexName">Index name</label><input id="newIndexName" required maxlength="200" placeholder="my-index">
 <label for="indexMode">Search mode</label><select id="indexMode"><option value="Lexical">Lexical — text search</option><option value="Vector">Vector — external embeddings</option><option value="Hybrid">Hybrid — text and embeddings</option></select>
-<div id="dimensionControl" hidden><label for="vectorDimensions">Vector dimensions</label><input id="vectorDimensions" type="number" min="1" max="65535" step="1" value="384"><p class="setup-help">Must match your external embedding model. Vectors are supplied in the “vector” document field; this server does not generate embeddings.</p></div>
+<div id="dimensionControl" hidden><label for="vectorDimensions">Vector dimensions</label><input id="vectorDimensions" type="number" min="1" max="4096" step="1" value="384"><label for="embeddingSpaceId">Embedding space/model identity</label><input id="embeddingSpaceId" type="text" placeholder="model-name-and-version"><p class="setup-help">Must match your external embedding model. Vectors are supplied in the “vector” document field; this server does not generate embeddings.</p></div>
 <p class="setup-help">Default fields: title, body and url. Vector/Hybrid also include vector (F32, cosine similarity).</p>
 <details><summary>Advanced: field schema (JSON)</summary><p class="setup-help">Edit field names, storage, lexical/vector indexing and filter/sort metadata. Changing search mode resets this schema.</p><label for="indexSchema">Schema</label><textarea id="indexSchema" rows="12" spellcheck="false"></textarea></details>
 <button type="submit">Create &amp; open index</button>
@@ -58,11 +58,11 @@
 <input id="documentFile" type="file" accept=".json,application/json">
 <label for="documentJson">JSON records</label>
 <textarea id="documentJson" rows="14" required spellcheck="false" placeholder='[{"title":"Example","body":"Hello search","url":""}]'></textarea>
-<button id="submitDocuments" type="submit">Write &amp; commit</button>
+<button id="submitDocuments" type="submit">Write records</button>
 </form>
 <p id="documentError" role="alert"></p>
 <p id="documentStatus" role="status" aria-live="polite"></p>
-<button id="retryDocumentCommit" type="button" hidden>Retry commit only</button>
+<button id="retryDocumentCommit" type="button" hidden>Retry original writes</button>
 <button id="backToSearch" type="button">Back to search</button>
 </section>
 <div class=h100 id=landingSearch>

@@ -9,7 +9,92 @@ The product contract remains [issue #57](https://github.com/TheLudlows/seekpower
 Current capabilities remain in [FEATURES](../FEATURES.md). Historical validation
 remains in [VALIDATION](../VALIDATION.md).
 
-## Latest checkpoint — durable catalog and authorization barriers (in progress)
+## Latest checkpoint — default Record HTTP/UI integration (in progress)
+
+Parent checkpoint: `40d5ee35b0453e8e4ff58d84706000e9a0bc4eb5`.
+Default startup now opens the durable catalog and recovers its registered Record
+partitions before serving requests. It never mounts the legacy per-key index
+router. Prepared creation intents are completed before activation; missing active
+partitions fail startup. The initial data root must be absent, or already a valid
+catalog; existing empty/legacy directories are not silently imported.
+
+Actual changes and decisions:
+
+- `record_service.rs` authenticates API keys, orchestrates collection creation and
+  recovery, and serves original records, conditional writes, query, operation
+  status and online checkpoint. Only the bootstrap master identity may register
+  or revoke keys, manage grants or inspect catalog operation status. An ordinary
+  key may create a new collection but cannot enlarge access to existing data.
+  Revocation preserves collections and other authorized keys.
+- The catalog output permit now captures an active identity plus all grant
+  revisions represented by a response. HTTP checks it at final application
+  status/header handoff and again when handing the bounded body frame to Hyper.
+  Success, conflict, not-found, serialization and oversized-response errors use
+  the same barrier. Bytes already handed to the network cannot be retracted.
+- Writes and control work survive requester cancellation. Sixteen control tasks
+  and 64 admitted requests bound service concurrency; request admission remains
+  held through body consumption/disconnect. A 30-second deadline reports
+  `outcome_unknown`; clients must retry their original operation identity.
+- Internal activation identities use a reserved `sys:` namespace, rejected for
+  external commands, and generated directory IDs rather than arbitrary-length
+  collection IDs. Master creation is part of the initial durable snapshot.
+- `RecordQuery` carries existing AND/OR, filters, sorting, pagination, count,
+  vector budget and RRF semantics into one Record read view. Query hits carry
+  stable Record envelopes. Direct reads retain complete original documents;
+  search projection follows schema storage and requested fields.
+- The existing Web UI uses string collection IDs, an explicit embedding space
+  for vector collections and per-record conditional writes. Pending creation and
+  write requests are saved before sending and replayed unchanged after response
+  loss/reload. Multi-document input is a sequence of independent writes, not an
+  atomic batch. No raw API key is duplicated in pending request storage.
+- API reference generation describes the new mounted routes. Historical legacy
+  tests remain library regression tests, not proof of default HTTP integration.
+
+Independent review fixes: reserved activation identity collisions/length,
+protected error responses, bounded control admission, response-body admission
+lifetime, and serialization/size-error output barriers. Regression coverage uses
+real TCP revocation interleavings plus bounded-body unit tests. No new graph,
+account platform, migration or performance investigation was added.
+
+Validation: final-source commands and results are recorded below and in
+[the validation ledger](validation/issue57-p1-checkpoint.json). Native CI now runs
+service barrier tests and HTTP/restart tests on Linux and Windows; Linux also
+runs Chromium. These workflow changes have not been published or executed on
+Windows. Process kills are not system-crash or power-loss certification.
+
+Remaining acceptance gates (P1-A is **not complete**): iterator, bulk/ID-list/query
+and all-record deletion, collection deletion lifecycle, independent HTTP backup/
+restore, comprehensive failure injection through actual HTTP, further legacy
+panic/decoder audit, and Windows native/system-fault certification. These routes
+are currently unmounted rather than delegated to an unauthorized legacy path.
+The UI still needs an explicit resolution/discard flow for permanently rejected
+pending requests; automatic identity regeneration would be unsafe. Cross-origin
+CORS/trailing-slash compatibility is not yet restored. Typed source dependencies
+and immediate derived-data hiding remain P2; arbitrary JSON metadata is not an
+implemented dependency graph.
+
+Final-source Linux validation for this checkpoint:
+
+- `cargo test --workspace --all-targets --quiet`: **158 passed, 0 failed,
+  10 ignored, 35 suites**. Log `/tmp/seekpower-service-final-tests.log`.
+- `cargo build --workspace --quiet`: passed. Existing dead-code warnings from
+  unmounted legacy service modules remain.
+- `SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data
+  PLAYWRIGHT_BROWSERS_PATH=/workspace/playwright-browsers python3
+  scripts/record_service_smoke.py --server target/debug/seekpower_server --browser`:
+  passed, real HTTP and Chromium, with data on overlayfs. Log
+  `/tmp/seekpower-service-final-e2e.log`.
+- `python3 scripts/check_core_boundary.py` (with the configured Cargo PATH):
+  passed, including isolated core builds. The initial invocation lacked Cargo
+  on PATH and was rerun with the executor toolchain environment.
+- `target/debug/seekpower_server generate_openapi=true`: passed; 10 mounted API
+  paths, no legacy bulk/iterator routes advertised.
+- Linux native process/restart tests: passed. Linux host/system-crash: **not run**.
+  Windows native tests and Windows system-crash: **not run**. To execute the new
+  Windows CI path requires authorization to publish the branch and invoke the
+  workflow (or a separately provided Windows runner); neither was done here.
+
+## Previous checkpoint — durable catalog and authorization barriers
 
 Parent checkpoint: `837bac35d7c629ab3ca1ff6ed62658038668333b`.
 This is the executable catalog dependency for service integration. **The default

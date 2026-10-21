@@ -60,7 +60,7 @@ jobs:
       - name: HTTP API and embedded UI smoke (no SDK)
         env:
           SEEKPOWER_BROWSER_TEST: "1"
-        run: python3 scripts/http_smoke.py --server target/debug/seekpower_server
+        run: python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
       - name: Existing core and server tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --workspace --all-targets
@@ -100,3 +100,15 @@ jobs:
         run: cargo test -p seekpower --lib record::tests
       - name: Native catalog authorization and revocation recovery tests
         run: cargo test -p seekpower --lib catalog_
+      - name: Native service output and admission barriers
+        run: cargo test -p seekpower_server record_service::tests
+      - name: Build native service
+        run: cargo build -p seekpower_server
+      - name: Native service HTTP and restart acceptance
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/record_service_smoke.py --server target/debug/seekpower_server.exe
+          else
+            python3 scripts/record_service_smoke.py --server target/debug/seekpower_server
+          fi

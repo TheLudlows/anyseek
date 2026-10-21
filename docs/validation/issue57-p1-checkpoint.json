@@ -2,7 +2,7 @@
   "date": "2026-10-21",
   "baseline": "fc4fcfe64fdf86d03c07f82cf1d4889deb896801",
   "branch": "feat/57-reliable-record-engine",
-  "status": "P1-A in progress; durable catalog and authorization barriers implemented at library level; default HTTP/UI remains legacy",
+  "status": "P1-A in progress; default Record/catalog HTTP and UI integrated; service feature parity and Windows native acceptance pending",
   "linux": {
     "platform": "Linux 6.18.55 x86_64",
     "rust": "1.99.1",
@@ -11,13 +11,13 @@
     "workspace_command": "SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet",
     "workspace_result": {
       "suites": 35,
-      "passed": 154,
+      "passed": 158,
       "failed": 0,
       "ignored": 10
     },
     "build": "cargo build --workspace --quiet: passed on final source",
-    "http_smoke": "Not rerun for catalog dependency checkpoint; no new service integration claim. Prior legacy smoke evidence retained.",
-    "chromium": "not run",
+    "http_smoke": "SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data PLAYWRIGHT_BROWSERS_PATH=/workspace/playwright-browsers python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser: passed",
+    "chromium": "passed: real UI collection creation, lexical/vector/hybrid, lost write response and reload/retry without duplicate",
     "process_exit_boundaries": {
       "journal_write": 8,
       "journal_repair": 1,
@@ -28,7 +28,7 @@
       "catalog_revoke": 8
     },
     "system_crash": "not run",
-    "workspace_log": "/tmp/seekpower-catalog-final2.log",
+    "workspace_log": "/tmp/seekpower-service-final-tests.log",
     "controlled_cancellation_tests": {
       "passed": 2,
       "failed": 0,
@@ -69,12 +69,15 @@
       "online checkpoint preserves grant revisions and unexpired retry results",
       "expired receipts reclaimed with persistent epoch watermark"
     ],
-    "build_log": "/tmp/seekpower-catalog-build-final.log",
+    "build_log": "/tmp/seekpower-service-final-build.log",
     "catalog_test_result": {
       "passed": 12,
       "failed": 0,
       "ignored_subprocess_workers": 1
-    }
+    },
+    "http_log": "/tmp/seekpower-service-final-e2e.log",
+    "service_barrier_tests": "4 passed: real TCP revocation vs success/error handoff, reserved internal IDs/recovery, unconsumed-body admission, protected oversize/serialization errors",
+    "openapi": "generation passed; 10 actual mounted API paths"
   },
   "windows": {
     "native_compilation": "not run",
@@ -84,16 +87,17 @@
   },
   "external_state_changes": "none; local branch and commit only",
   "remaining": [
-    "default HTTP/UI routing to Record and catalog",
-    "service orchestration of prepared collection create/recovery/activation",
-    "authenticated shared-key control-plane management and operation status",
-    "HTTP body handoff integration for OutputPermit plus response size/deadline bounds",
-    "real service end-to-end crash/restart/revocation tests",
+    "iterator and bulk/query/all deletion",
+    "collection deletion lifecycle",
+    "HTTP backup/restore",
+    "comprehensive real HTTP I/O failure injection",
+    "pending UI request permanent-rejection resolution",
+    "CORS/trailing slash compatibility",
+    "Windows native integration and filesystem/system-crash certification",
     "data-operation ledger reclamation with physical-version resource limits",
-    "Linux and Windows native reliability acceptance; system-crash tests",
     "safe catalog-level reclamation of abandoned root initialization preparations"
   ],
-  "review_checkpoint_parent": "837bac35d7c629ab3ca1ff6ed62658038668333b",
+  "review_checkpoint_parent": "40d5ee35b0453e8e4ff58d84706000e9a0bc4eb5",
   "independent_review": {
     "mode": "read-only",
     "original_findings": [
@@ -105,6 +109,7 @@
     "all_findings": "corrected and regression tested on Linux",
     "final_static_review": "no new blocking defect in correction scope",
     "incremental_and_generation_findings": "Corrected with regression coverage; final static persistence review found no new blocker in reviewed scope. Native Windows/system faults remain unvalidated.",
-    "catalog_findings": "Fixed: nonfinite config could poison recovery; revoked creator stranded prepared collection; revoke capacity failure left authorization live. Reviewer static followup found no new blocker in reviewed persistence/revision scope. Added panic fencing and regression coverage."
+    "catalog_findings": "Fixed: nonfinite config could poison recovery; revoked creator stranded prepared collection; revoke capacity failure left authorization live. Reviewer static followup found no new blocker in reviewed persistence/revision scope. Added panic fencing and regression coverage.",
+    "service_findings": "Fixed and regression tested: internal activation namespace/length, protected error body handoff, bounded control admission, retained response admission, serialization/oversize authorization bypass"
   }
 }

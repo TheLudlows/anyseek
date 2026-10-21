@@ -4,7 +4,7 @@
 use crate::{
     commit::Commit,
     index::{Document, IndexArc, IndexDocuments, IndexMetaObject, SchemaField, create_index},
-    search::{FacetFilter, QueryType, ResultType, Search, SearchMode},
+    search::{FacetFilter, QueryType, ResultSort, ResultType, Search, SearchMode},
     storage::{journal::CreateError, partition::PartitionJournal},
     vector::Embedding,
 };
@@ -158,6 +158,7 @@ pub enum ExpectedVersion {
 }
 /// Full replacement or ordered deletion.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordWrite {
     /// Retry identity.
     pub operation_id: OperationId,
@@ -244,9 +245,26 @@ pub struct RecordHit {
     /// Existing engine score (BM25, vector, or RRF according to query mode).
     pub score: f32,
 }
+/// Retrieval options evaluated against one authoritative view.
+pub struct RecordQuery {
+    pub text: String,
+    pub vector: Option<Embedding>,
+    pub mode: SearchMode,
+    pub query_type: QueryType,
+    pub offset: usize,
+    pub length: usize,
+    pub result_type: ResultType,
+    pub fields: Vec<String>,
+    pub filters: Vec<FacetFilter>,
+    pub sort: Vec<ResultSort>,
+}
 /// Search response; hybrid/ANN counts are deliberately not called exact totals.
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordSearch {
+    /// Mode-specific reported total, not an unconditional exact corpus count.
+    pub count_total: usize,
+    /// Analyzed query terms from this same search.
+    pub query_terms: Vec<String>,
     /// Common visible position for candidates and records.
     pub visible_seq: u64,
     /// Ranked effective records.
@@ -840,6 +858,34 @@ impl RecordPartition {
         filters: Vec<FacetFilter>,
         limit: usize,
     ) -> Result<RecordSearch, RecordError> {
+        self.query(RecordQuery {
+            text,
+            vector,
+            mode,
+            query_type: QueryType::Union,
+            offset: 0,
+            length: limit,
+            result_type: ResultType::Topk,
+            fields: vec![],
+            filters,
+            sort: vec![],
+        })
+        .await
+    }
+    /// Full retrieval contract for service callers, using one published view.
+    pub async fn query(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
+        let RecordQuery {
+            text,
+            vector,
+            mode,
+            query_type,
+            offset,
+            length: limit,
+            result_type,
+            fields,
+            filters,
+            sort,
+        } = query;
         let permit = self
             .admission
             .clone()
@@ -853,7 +899,10 @@ impl RecordPartition {
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
-                if limit == 0 || limit > inner.config.max_candidates {
+                if offset
+                    .checked_add(limit)
+                    .is_none_or(|n| n > inner.config.max_candidates)
+                {
                     return Err(RecordError::Rejected("candidate budget exceeded".into()));
                 }
                 if let SearchMode::WeightedHybrid { rrf, .. } = &mode {
@@ -874,16 +923,16 @@ impl RecordPartition {
                     .search(
                         text,
                         vector,
-                        QueryType::Union,
+                        query_type,
                         mode,
                         true,
-                        0,
+                        offset,
                         limit,
-                        ResultType::Topk,
+                        result_type,
                         true,
-                        vec![],
+                        fields,
                         filters,
-                        vec![],
+                        sort,
                     )
                     .await;
                 if let Some(error) = result.error {
@@ -901,6 +950,8 @@ impl RecordPartition {
                     });
                 }
                 Ok(RecordSearch {
+                    count_total: result.result_count_total,
+                    query_terms: result.query_terms,
                     visible_seq: inner.state.seq,
                     hits,
                     statistics: inner.statistics(),

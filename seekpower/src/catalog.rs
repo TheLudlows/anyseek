@@ -165,6 +165,7 @@ fn encode(entry: &Entry) -> Result<Vec<u8>, CatalogError> {
 #[derive(Default)]
 struct OutputState {
     healthy: bool,
+    keys: std::collections::BTreeSet<String>,
     grants: BTreeMap<String, BTreeMap<String, u64>>,
 }
 
@@ -176,8 +177,7 @@ struct OutputState {
 pub struct OutputPermit {
     state: Arc<RwLock<OutputState>>,
     key: String,
-    collection: String,
-    revision: u64,
+    grants: Vec<(String, u64)>,
 }
 impl OutputPermit {
     /// Recheck the captured grant and perform one atomic output handoff.
@@ -189,11 +189,10 @@ impl OutputPermit {
         if !state.healthy {
             return Err(CatalogError::RecoveryRequired);
         }
-        if state
-            .grants
-            .get(&self.collection)
-            .and_then(|g| g.get(&self.key))
-            != Some(&self.revision)
+        if !state.keys.contains(&self.key)
+            || self.grants.iter().any(|(collection, revision)| {
+                state.grants.get(collection).and_then(|g| g.get(&self.key)) != Some(revision)
+            })
         {
             return Err(CatalogError::Unauthorized);
         }
@@ -224,6 +223,13 @@ impl Inner {
             .write()
             .map_err(|_| CatalogError::RecoveryRequired)?;
         output.grants = self.state.grants.clone();
+        output.keys = self
+            .state
+            .keys
+            .iter()
+            .filter(|(_, k)| k.active)
+            .map(|(id, _)| id.clone())
+            .collect();
         output.healthy = true;
         self.healthy = true;
         Ok(())
@@ -439,10 +445,35 @@ impl Catalog {
     /// Explicit initialization only. Existing or uncertain roots must be opened,
     /// never replaced with an empty catalog. Parent directory must already exist.
     pub async fn create(path: &Path) -> Result<Self, CatalogError> {
+        Self::create_state(path, State::default()).await
+    }
+    /// Atomically initialize the first trusted identity in the root snapshot.
+    pub async fn create_with_key(
+        path: &Path,
+        key_id: String,
+        verifier: String,
+    ) -> Result<Self, CatalogError> {
+        let mut state = State::default();
+        apply(
+            &mut state,
+            &Applied {
+                request: CatalogRequest {
+                    operation_id: OperationId::new("sys:bootstrap".into()),
+                    command: CatalogCommand::AddKey { key_id, verifier },
+                },
+                receipt: CatalogReceipt {
+                    seq: 1,
+                    directory: None,
+                },
+                observed_epoch: epoch(),
+            },
+        )?;
+        Self::create_state(path, state).await
+    }
+    async fn create_state(path: &Path, state: State) -> Result<Self, CatalogError> {
         let path = path.to_path_buf();
         crate::INDEX_RUNTIME
             .spawn(async move {
-                let state = State::default();
                 let payload = encode(&Entry::Snapshot(state.clone()))?;
                 let journal =
                     PartitionJournal::create(&path, BUDGET, &payload).map_err(|e| match e {
@@ -485,6 +516,12 @@ impl Catalog {
     fn from_parts(state: State, journal: PartitionJournal) -> Self {
         let output = Arc::new(RwLock::new(OutputState {
             healthy: true,
+            keys: state
+                .keys
+                .iter()
+                .filter(|(_, k)| k.active)
+                .map(|(id, _)| id.clone())
+                .collect(),
             grants: state.grants.clone(),
         }));
         Self {
@@ -630,6 +667,13 @@ impl Catalog {
                         .write()
                         .map_err(|_| CatalogError::RecoveryRequired)?;
                     output.grants = inner.state.grants.clone();
+                    output.keys = inner
+                        .state
+                        .keys
+                        .iter()
+                        .filter(|(_, k)| k.active)
+                        .map(|(id, _)| id.clone())
+                        .collect();
                     output.healthy = true;
                 }
                 inner.healthy = true;
@@ -660,6 +704,37 @@ impl Catalog {
             return Err(CatalogError::RecoveryRequired);
         }
         Ok(inner.state.collections.values().cloned().collect())
+    }
+    /// Capture visible collections and their grant revisions for output delivery.
+    pub async fn listing(
+        &self,
+        key: &str,
+    ) -> Result<(Vec<CollectionEntry>, OutputPermit), CatalogError> {
+        let inner = self.inner.lock().await;
+        if !inner.healthy {
+            return Err(CatalogError::RecoveryRequired);
+        }
+        if !inner.state.keys.get(key).is_some_and(|k| k.active) {
+            return Err(CatalogError::Unauthorized);
+        }
+        let grants: Vec<_> = inner
+            .state
+            .grants
+            .iter()
+            .filter_map(|(id, g)| g.get(key).map(|revision| (id.clone(), *revision)))
+            .collect();
+        let entries = grants
+            .iter()
+            .map(|(id, _)| inner.state.collections[id].clone())
+            .collect();
+        Ok((
+            entries,
+            OutputPermit {
+                state: inner.output.clone(),
+                key: key.into(),
+                grants,
+            },
+        ))
     }
     /// Service must keep this owned task around the ENTIRE Record operation,
     /// including nested cancellation-safe publication. Revocation queues behind
@@ -703,8 +778,7 @@ impl Catalog {
                 let permit = OutputPermit {
                     state: inner.output.clone(),
                     key,
-                    collection,
-                    revision,
+                    grants: vec![(collection, revision)],
                 };
                 let mut guard = AuthorizedWork {
                     inner: &mut inner,

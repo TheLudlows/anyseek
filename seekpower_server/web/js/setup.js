@@ -1,3 +1,7 @@
+function newIdentity() {
+    return Array.from(crypto.getRandomValues(new Uint8Array(16)), x => x.toString(16).padStart(2, '0')).join('');
+}
+function newOperationId() { return {epoch: Math.floor(Date.now() / 86400000), nonce: newIdentity()}; }
 // Onboarding uses the same authenticated REST API as external clients.
 let setupOpen = false;
 let setupRequest = 0;
@@ -11,9 +15,9 @@ function sessionValue(name, value) {
 const savedKey = sessionValue('seekpower.apiKey');
 const savedIndex = sessionValue('seekpower.index');
 if (savedKey !== null) API_KEY = savedKey;
-if (savedIndex !== null && /^\d+$/.test(savedIndex)) {
-    INDEX_ID = Number(savedIndex);
-    STATUS_URL = `api/v1/index/${INDEX_ID}`;
+if (savedIndex !== null && savedIndex.length > 0) {
+    INDEX_ID = savedIndex;
+    STATUS_URL = `api/v1/index/${encodeURIComponent(INDEX_ID)}`;
     QUERY_URL = `${STATUS_URL}/query`;
 }
 function resetSearch() {
@@ -44,8 +48,8 @@ async function setupApi(method, path, key, body) {
     });
     const value = await response.json();
     if (!response.ok) {
-        if (response.status === 401) throw Object.assign(new Error('Invalid API key. Check the key copied from the server logs.'), {status: response.status});
-        throw Object.assign(new Error(value.message || `Request failed (${response.status}).`), {status: response.status});
+        if (response.status === 401) throw Object.assign(new Error('Invalid API key. Check the key copied from the server logs.'), {status: response.status, code: value.code});
+        throw Object.assign(new Error(value.message || `Request failed (${response.status}).`), {status: response.status, code: value.code});
     }
     return value;
 }
@@ -54,6 +58,20 @@ function setSetupBusy(busy) {
     if (!busy) {
         $('#openIndex,#indexList').prop('disabled', !$('#indexList option').length);
         $('#vectorDimensions').prop('disabled', $('#indexMode').val() === 'Lexical');
+        const pending = JSON.parse(sessionValue('seekpower.pendingCreate') || 'null');
+        if (pending) {
+            const config = pending.body.config;
+            $('#newIndexName').val(config.index_name);
+            $('#indexSchema').val(JSON.stringify(config.schema, null, 2));
+            $('#indexMode').val(config.vector ? (config.schema.some(f => f.field_type === 'Text' && f.index_lexical !== false) ? 'Hybrid' : 'Vector') : 'Lexical');
+            if (config.vector) $('#vectorDimensions').val(config.vector.dimensions);
+            $('#embeddingSpaceId').val(pending.body.embedding_space_id || '');
+            $('#dimensionControl').prop('hidden', !config.vector);
+            $('#createIndexForm input,#createIndexForm select,#createIndexForm textarea').prop('disabled', true);
+            $('#createIndexForm button[type="submit"]').text('Retry original creation');
+        } else {
+            $('#createIndexForm button[type="submit"]').text('Create & open index');
+        }
     }
 }
 async function connectKey(key) {
@@ -69,7 +87,7 @@ async function connectKey(key) {
         API_KEY = key;
         sessionValue('seekpower.apiKey', key);
         resetSearch();
-        indexes.sort((a, b) => a.id - b.id).forEach(index => {
+        indexes.sort((a, b) => a.id.localeCompare(b.id)).forEach(index => {
             $('<option>').val(String(index.id)).text(`${index.name} (ID ${index.id})`).appendTo('#indexList');
         });
         if (indexes.some(index => index.id === INDEX_ID)) $('#indexList').val(String(INDEX_ID));
@@ -90,8 +108,8 @@ function showSetup(connect = true) {
     if (connect) connectKey(API_KEY);
 }
 function openSelectedIndex(id) {
-    INDEX_ID = Number(id);
-    STATUS_URL = `api/v1/index/${INDEX_ID}`;
+    INDEX_ID = String(id);
+    STATUS_URL = `api/v1/index/${encodeURIComponent(INDEX_ID)}`;
     QUERY_URL = `${STATUS_URL}/query`;
     sessionValue('seekpower.index', String(INDEX_ID));
     resetSearch();
@@ -156,19 +174,30 @@ $(function () {
                 fields.add(field.field);
             }
             const mode = $('#indexMode').val();
-            const body = {index_name: name, schema};
+            const config = {index_name: name, schema};
             if (mode !== 'Lexical') {
                 const dimensions = Number($('#vectorDimensions').val());
-                if (!Number.isInteger(dimensions) || dimensions < 1 || dimensions > 65535) throw new Error('Vector dimensions must be an integer from 1 to 65535.');
+                if (!Number.isInteger(dimensions) || dimensions < 1 || dimensions > 4096) throw new Error('Vector dimensions must be an integer from 1 to 4096.');
                 if (!schema.some(field => field.index_vector)) throw new Error('Vector/Hybrid indexes need at least one index_vector field.');
-                body.vector = {dimensions};
+                config.vector = {dimensions};
             } else if (schema.some(field => field.index_vector)) {
                 throw new Error('Choose Vector or Hybrid to configure vector dimensions.');
             }
-            const id = await setupApi('POST', 'api/v1/index', API_KEY, body);
-            if (request === setupRequest) openSelectedIndex(id);
+            let pending = JSON.parse(sessionValue('seekpower.pendingCreate') || 'null');
+            if (!pending) {
+                const body = {operation_id: newOperationId(), collection_id: newIdentity(), config};
+                if (mode !== 'Lexical') {
+                    body.embedding_space_id = $('#embeddingSpaceId').val().trim();
+                    if (!body.embedding_space_id) throw new Error('Enter the external embedding space/model identity.');
+                }
+                pending = {body};
+                sessionStorage.setItem('seekpower.pendingCreate', JSON.stringify(pending));
+            }
+            const result = await setupApi('POST', 'api/v1/index', API_KEY, pending.body);
+            sessionStorage.removeItem('seekpower.pendingCreate');
+            if (request === setupRequest) openSelectedIndex(result.collection_id);
         } catch (error) {
-            if (request === setupRequest) $('#setupError').text(error.message || 'Index creation failed.');
+            if (request === setupRequest) $('#setupError').text((error.message || 'Index creation failed.') + ' If creation is pending, retry submits its original identity and configuration.');
         } finally {
             if (request === setupRequest) setSetupBusy(false);
         }

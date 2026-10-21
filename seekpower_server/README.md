@@ -1,3 +1,32 @@
+# 当前 P1-A 开发分支接口
+
+默认服务现已切换至 Record/catalog；本文件后续旧接口说明保留作历史参考，
+不得作为当前默认服务契约。实际路由以 `generate_openapi=true` 输出及
+[阶段记录](../docs/implementation-57.md) 为准。P1-A 尚未完成。
+
+首次启动 `index_path` 必须不存在（父目录存在）；重启必须指向完整 catalog。
+不导入旧索引或空目录。`MASTER_KEY_SECRET` 必须在重启时保持一致，
+启动输出的 master API key 是可信管理入口，普通共享 key 不能注册身份或管理授权。
+所有请求仍使用 `apikey` header；不增加账户或读写角色平台。
+
+创建 collection 使用 `{operation_id,collection_id,config,embedding_space_id?}`，
+其中 `config` 是原创建 schema/config，向量 collection 需要 embedding space。
+写入 `/api/v1/index/{id}/doc` 使用
+`{operation_id,record_id,routing_key,expected,document}`；
+`expected` 为 `"Absent"` 或 `{"Match":N}`，`document:null` 是条件删除。
+成功写入已 durable 且 visible，无需随后 PATCH 才可见；PATCH collection
+现在执行在线检查点。读结果/查询命中使用 Record envelope 和稳定字符串 ID。
+操作 ID 为 `{epoch:UTC日编号,nonce:唯一字符串}`；`sys:` nonce 前缀保留。
+丢失响应/`outcome_unknown` 必须复用原 ID、原请求；到期后不能假设未执行。
+
+master 可 POST `/api/v1/apikey` 注册 `{operation_id,key_id,apikey_base64}`，
+DELETE 同一路径撤销 `{operation_id,key_id}`；grant 接口与请求见生成参考。
+撤销 key 不删除 collection。操作状态与数据读取同样检查现有授权。
+旧 bulk/iterator/collection 删除路由暂未挂载，不能据此宣称完成服务功能对齐。
+Web UI 已接入创建、原请求重试、搜索和向量配置；批量 JSON 输入逐条提交。
+
+---
+
 # Seekpower HTTP 服务
 
 本服务托管 JSON API 与内嵌搜索 UI。完整路由及功能边界见 [FEATURES.md](../FEATURES.md)；请求字段见生成的 OpenAPI 文件（`generate_openapi=true`）和 [HTTP 示例](test_api.rest)。
