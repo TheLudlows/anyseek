@@ -1,6 +1,6 @@
 # A 批实施设计：本地不可变 Segment、发布与安全回收
 
-状态：实施中，尚未完成 A 批；实际检查点见 §11–18。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
+状态：实施中，尚未完成 A 批；实际检查点见 §11–19。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
 
 ## 1. 交付和不做的事
 
@@ -191,3 +191,11 @@ active Record 路径的显式 `_id` 排序现在在局部 Top-K 和 root 都使�
 临时数据测试分别用目录占据 docstore、vector、schema 文件路径，验证错误正常返回而非 panic。第一 shard 失败时通过测试专用 gate 阻塞第二 shard，父调用必须等待 gate 释放、第二 shard 完成后才返回；关闭后删除目录验证句柄生命周期。该 gate 不进入生产构建。
 
 本步骤仅修复错误传播，**不是全过程资源预算已完成**。内存分配 abort、tokenizer/term/posting 的增长预留、文件扩展前统一扣账及发布峰值仍需接通。受控分配请求与逻辑文件长度预算也不等于进程 RSS 或文件系统实际占用上限。最终源码 Linux 验证：`cargo test --workspace --features server --all-targets` 为 34 suites、251 passed、0 failed、10 ignored；`cargo test --doc` 为 44 passed；`cargo build --features server,fault-injection --bin anyseek_server` 成功；真实 HTTP/Chromium `--browser --faults` 退出 0、34 PASS。十个忽略项归属与前述一致。独立审查提出的兄弟任务等待验证已用 gate 回归补齐。日志：`a-resource-io-final-full.log`、`a-resource-io-doc.log`、`a-resource-io-build.log`、`a-resource-io-http-browser-faults.log`。Windows 原生及系统崩溃/断电仍未运行。
+
+## 19. 未发布候选失败清理（本地验证完成）
+
+候选构建/加载/新 tail 准备放在独立 future 作用域；错误返回后先释放全部局部索引和映射，再在 `healthy` 仍为真时回收当前认证引用之外的对象。清理失败保留原始错误并记录待清理状态，不谎报已释放容量。提交结果未知时 `healthy=false`，禁止按旧内存引用清理可能已经认证的新对象，必须由恢复判定权威。不会为腾出空间删除当前选中段、payload、tail 或仍需保留的日志。
+
+回归覆盖候选文件已发布但未加载、candidate mmap 与新 tail 已准备两处拒绝，各重复三次：旧认证引用不变、孤儿文件不累计、旧副本可继续写入、再发布/重启与重试仍成功。独立审查未发现新的认证边界问题，并按建议补充了后一处句柄释放测试。最终源码 Linux：`cargo test --workspace --features server --all-targets` 为 34 suites、252 passed、0 failed、10 ignored；`cargo test --doc` 44 passed；故障注入服务构建成功；真实 HTTP/Chromium `--browser --faults` 退出 0、34 PASS。日志为 `a-candidate-cleanup-full.log`、`a-candidate-cleanup-doc.log`、`a-candidate-cleanup-build.log`、`a-candidate-cleanup-http-browser-faults.log`。
+
+A 清单当前状态：默认多段+tail、认证发布及只重放 tail 恢复、多轮冻结与等价 compaction、选中引用安全 GC 已接入真实路径并有 Linux 回归；全过程共享内存/逻辑磁盘限额仍未接通，不用末尾文件大小检查冒充硬限额。Windows 原生及系统断电未验收；此阶段不推送或触发 CI。

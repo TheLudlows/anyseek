@@ -179,11 +179,27 @@ impl Inner {
         self.publish_anchor_state(self.state.clone(),true).await
     }
     pub(super) async fn publish_anchor_state(&mut self,next:State,reuse:bool)->Result<u64,RecordError>{
+        let result=self.prepare_and_publish_anchor(next,reuse).await;
+        // The inner future has dropped every candidate view/handle before GC.
+        // Unknown publication leaves healthy=false: never remove recovery
+        // evidence on the basis of the old in-memory certificate in that case.
+        if result.is_err() && self.healthy {
+            if let Err(error)=self.reclaim_anchor_objects().await {
+                log::warn!("unpublished anchor cleanup pending: {error}");
+            }
+        }
+        result
+    }
+    async fn prepare_and_publish_anchor(&mut self,next:State,reuse:bool)->Result<u64,RecordError>{
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();
         let snapshot_bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:next.clone()})?.len();
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
         let reference=Reference::prepare(&root,&self.config,&next,prior,self.anchor.as_ref(),&self.index,!reuse).await?;
+        #[cfg(test)]
+        if root.join(".test-anchor-reject-prepared").exists() {
+            return Err(storage("injected candidate rejection before certificate"));
+        }
         let loaded=reference.load(&root,self.config.max_journal_bytes).await?;
         let mut index=view::RetrievalView::single(loaded.index);
         let mut ordinals=loaded.ordinals;
@@ -191,6 +207,10 @@ impl Inner {
         let cache=root.join(format!("cache-{:032x}",rand::random::<u128>()));
         let (tail,_)=build_at(&root,&cache,&self.config,&State::default()).await?;
         index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{max_segments:64,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?}).await?;
+        #[cfg(test)]
+        if root.join(".test-anchor-reject-loaded").exists() {
+            return Err(storage("injected loaded candidate rejection before certificate"));
+        }
         let payload=encode_entry(&Entry::Anchor(reference.clone()))?;
         PartitionJournal::validate_initial(payload.len(),self.config.max_journal_bytes).map_err(storage)?;
         let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
@@ -253,6 +273,37 @@ impl Inner {
 mod tests {
     use super::*;
     use super::super::tests::{path,config,write,query};
+    #[tokio::test]
+    async fn rejected_prepared_anchor_reclaims_only_unselected_objects() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(write("one","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let selected=p.inner.lock().await.anchor.clone().unwrap();
+        let selected_bytes=serde_json::to_vec(&selected).unwrap();
+        p.write(write("two","b","alpha beta",ExpectedVersion::Absent)).await.unwrap();
+        for gate in [".test-anchor-reject-prepared",".test-anchor-reject-loaded"] {
+        std::fs::write(root.join(gate),b"reject").unwrap();
+        for _ in 0..3 {
+            assert!(p.compact_journal().await.is_err());
+            let inner=p.inner.lock().await;
+            assert!(inner.healthy);
+            assert_eq!(serde_json::to_vec(inner.anchor.as_ref().unwrap()).unwrap(),selected_bytes);
+            let names=std::fs::read_dir(&root).unwrap().map(|e|e.unwrap().file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
+            assert!(!names.iter().any(|n|n.starts_with(".anchor-prepare-")||n.starts_with(".segment-prepare-")||n.starts_with(".payload-prepare-")));
+            assert_eq!(names.iter().filter(|n|n.starts_with("anchor-")).count(),1);
+            assert_eq!(names.iter().filter(|n|n.starts_with("segment-")).count(),selected.segments.len());
+            assert_eq!(names.iter().filter(|n|n.starts_with("payload-")).count(),inner.payloads.objects.len());
+        }
+        std::fs::remove_file(root.join(gate)).unwrap();
+        }
+        let retry=write("three","c","alpha gamma",ExpectedVersion::Absent);
+        p.write(retry.clone()).await.unwrap();
+        p.compact_journal().await.unwrap();drop(p);
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert!(p.write(retry).await.is_ok());
+        assert_eq!(p.inner.lock().await.state.records.len(),3);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn successive_flush_reuses_segments_compacts_and_replays_tail() {
         async fn counted(p:&RecordPartition,mode:SearchMode)->RecordSearch {
