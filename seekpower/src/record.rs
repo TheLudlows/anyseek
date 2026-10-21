@@ -65,6 +65,55 @@ pub struct RecordConfig {
     /// Candidate/final-result bound for this partition.
     pub max_candidates: usize,
 }
+/// Shared admission check for collection intent and physical initialization.
+pub(crate) fn validate_config(config: &RecordConfig) -> Result<(), RecordError> {
+    if config.schema.is_empty()
+        || config.schema.len() > 64
+        || config
+            .schema
+            .iter()
+            .any(|f| f.field.is_empty() || !f.boost.is_finite() || f.boost <= 0.0)
+    {
+        return Err(RecordError::Rejected("invalid or oversized schema".into()));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    if config.schema.iter().any(|f| !names.insert(&f.field)) {
+        return Err(RecordError::Rejected("duplicate schema field".into()));
+    }
+    if let crate::vector::Inference::External { dimensions, .. } = &config.index.inference {
+        if *dimensions > 4096 {
+            return Err(RecordError::Rejected(
+                "vector dimension budget exceeded".into(),
+            ));
+        }
+    }
+    if config.max_records == 0
+        || config.max_records > 10_000
+        || config.max_operations == 0
+        || config.max_candidates == 0
+        || config.max_record_bytes == 0
+        || config.max_record_bytes > 1024 * 1024
+    {
+        return Err(RecordError::Rejected("invalid record-engine limits".into()));
+    }
+    crate::vector::validate_vector_schema(&config.index.inference, &config.schema)
+        .map_err(RecordError::Rejected)?;
+    if config.schema.iter().any(|f| f.index_vector)
+        && config
+            .embedding_space_id
+            .as_ref()
+            .is_none_or(|s| s.is_empty())
+    {
+        return Err(RecordError::Rejected("embedding_space_id required".into()));
+    }
+    let bytes = encode_entry(&Entry::Checkpoint {
+        config: config.clone(),
+        state: State::default(),
+    })?;
+    PartitionJournal::validate_initial(bytes.len(), config.max_journal_bytes)
+        .map_err(|e| RecordError::Rejected(e.to_string()))?;
+    Ok(())
+}
 /// Client operation identity includes its UTC day epoch. Current and previous
 /// day are accepted, giving at least 24 hours for retries; older epochs explicitly
 /// expire. Reusing a nonce in another epoch is a *different operation*.
@@ -82,6 +131,12 @@ impl OperationId {
             epoch: current_epoch(),
             nonce,
         }
+    }
+    /// Retry admission ends at the start of epoch + 2 (UTC seconds). An
+    /// operation issued in its own UTC day therefore has at least 24 hours.
+    /// A clock rollback never extends a persisted server epoch watermark.
+    pub fn expires_at_unix_seconds(&self) -> u64 {
+        self.epoch.saturating_add(2).saturating_mul(86400)
     }
 }
 fn current_epoch() -> u64 {
@@ -406,47 +461,7 @@ impl RecordPartition {
     }
 
     async fn create_owned(path: &Path, mut config: RecordConfig) -> Result<Self, RecordError> {
-        if config.schema.is_empty()
-            || config.schema.len() > 64
-            || config
-                .schema
-                .iter()
-                .any(|f| f.field.is_empty() || !f.boost.is_finite() || f.boost <= 0.0)
-        {
-            return Err(RecordError::Rejected("invalid or oversized schema".into()));
-        }
-        let mut names = std::collections::BTreeSet::new();
-        if config.schema.iter().any(|f| !names.insert(&f.field)) {
-            return Err(RecordError::Rejected("duplicate schema field".into()));
-        }
-        if let crate::vector::Inference::External { dimensions, .. } = &config.index.inference {
-            if *dimensions > 4096 {
-                return Err(RecordError::Rejected(
-                    "vector dimension budget exceeded".into(),
-                ));
-            }
-        }
-        if config.max_records == 0
-            || config.max_records > 10_000
-            || config.max_operations == 0
-            || config.max_candidates == 0
-            || config.max_record_bytes == 0
-            || config.max_record_bytes > 1024 * 1024
-        {
-            return Err(RecordError::Rejected(
-                "invalid reference-engine limits".into(),
-            ));
-        }
-        crate::vector::validate_vector_schema(&config.index.inference, &config.schema)
-            .map_err(RecordError::Rejected)?;
-        if config.schema.iter().any(|f| f.index_vector)
-            && config
-                .embedding_space_id
-                .as_ref()
-                .is_none_or(|s| s.is_empty())
-        {
-            return Err(RecordError::Rejected("embedding_space_id required".into()));
-        }
+        validate_config(&config)?;
         // Pin an encoding choice in persisted configuration, independent of
         // insertion order or which record survives compaction/recovery.
         if !config
@@ -788,7 +803,7 @@ impl RecordPartition {
             return Err(RecordError::RecoveryRequired);
         }
         let epoch = current_epoch().max(inner.state.epoch_watermark);
-        if id.epoch.saturating_add(1) < epoch {
+        if id.epoch > epoch || id.epoch.saturating_add(1) < epoch {
             return Err(RecordError::OperationExpired);
         }
         Ok(inner
@@ -2276,6 +2291,21 @@ mod tests {
         assert_eq!(query(&partition, SearchMode::Lexical).await.hits.len(), 1);
         let mut expired = write("expired", "a", "alpha", ExpectedVersion::Any);
         expired.operation_id.epoch = current_epoch() - 2;
+        assert_eq!(
+            partition
+                .operation(&expired.operation_id)
+                .await
+                .unwrap_err(),
+            RecordError::OperationExpired
+        );
+        let future = OperationId {
+            epoch: current_epoch() + 1,
+            nonce: "future".into(),
+        };
+        assert_eq!(
+            partition.operation(&future).await.unwrap_err(),
+            RecordError::OperationExpired
+        );
         assert_eq!(
             partition.write(expired).await.unwrap_err(),
             RecordError::OperationExpired

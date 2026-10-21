@@ -9,7 +9,108 @@ The product contract remains [issue #57](https://github.com/TheLudlows/seekpower
 Current capabilities remain in [FEATURES](../FEATURES.md). Historical validation
 remains in [VALIDATION](../VALIDATION.md).
 
-## Latest checkpoint — incremental publication and online WAL generations (validated locally)
+## Latest checkpoint — durable catalog and authorization barriers (in progress)
+
+Parent checkpoint: `837bac35d7c629ab3ca1ff6ed62658038668333b`.
+This is the executable catalog dependency for service integration. **The default
+HTTP/UI path has not been switched. There is no new HTTP end-to-end acceptance
+claim, and P1-A remains incomplete.** Existing HTTP key deletion still follows the
+legacy ownership model until that service replacement is completed; this branch
+must not be represented as a shared-collection service release.
+
+Actual changes:
+
+- `catalog.rs` stores independent keys, collection creation intents, complete
+  collection configuration, grant revisions and idempotent control-plane results.
+  It reuses `PartitionJournal`, including its owner lock, witnesses, publication
+  certificates, online checkpoint and old-WAL retirement. It does not duplicate
+  filesystem synchronization code or store authoritative grants in plain JSON.
+- `PrepareCollection` persists a generated relative directory and complete config
+  before data creation. It is invisible to authorized data operations until
+  `ActivateCollection`. The service must create/recover the actual RecordPartition
+  and verify it before issuing Activate; this orchestration is still pending.
+  Recovery exposes prepared intents, never registers arbitrary directories.
+- Key and collection identities are never reused. Revoking a key removes its
+  grants and leaves collections and other keys intact. A creator revoked during
+  initialization cannot strand data: privileged activation can complete without
+  restoring that key's grant, and a valid key can be granted access separately.
+- `authorized` runs owned work under a catalog publication barrier, including
+  nested Record writes that survive cancellation. Dropping the requester does
+  not release the barrier prematurely. A panicking work task fences authority.
+- `OutputPermit::deliver` checks the captured grant revision under a synchronous
+  read guard held through the actual bounded output handoff. Revoke takes the
+  corresponding write barrier. Revoke/regrant cannot revive a previously captured
+  permit. Dropping the catalog invalidates outstanding permits. Wiring this into
+  the HTTP body handoff remains necessary; checking before returning JSON alone
+  is insufficient. Already handed-off network bytes cannot be retracted.
+- Catalog commands and operation lookup are privileged library interfaces. The
+  service must authenticate control-plane callers; these are not unauthenticated
+  public HTTP routes. No account platform or read/write role split was added.
+- `record.rs` shares configuration validation with Prepare, including finite
+  boosts, vector/schema rules and checkpoint admission. Catalog entries also
+  undergo recovery-decoder roundtrip before durability. Future-epoch Record
+  operation lookups now reject consistently with writes.
+
+Retention and resource policy:
+
+- Both data and catalog operation IDs accept the current and previous UTC day.
+  `expires_at_unix_seconds` exposes the start of epoch + 2; an ID issued in its
+  own day has at least 24 hours. Future and expired IDs reject explicitly.
+- Catalog retains up to 10,000 results and a 16 MiB journal generation. Online
+  checkpoint removes only expired receipts, persists the epoch watermark, and
+  preserves all identity tombstones, collection intents/config and grant revisions.
+  Clock rollback cannot resurrect removed retry identities. WAL admission retries
+  after safe compaction; unexpired ledger exhaustion applies backpressure.
+- If capacity prevents a revoke, no success is returned and authorization is
+  fenced. Recovery preserves the actual durable state; the caller must retry
+  the original revoke ID. Uncertain persistence also fences existing outputs.
+- Record checkpoint still retains its bounded operation ledger rather than
+  reclaiming it. Data-operation retention/reclamation and physical-version bounds
+  must be finalized together; this change does not silently remove retry results
+  or claim unbounded continuous operation.
+- Catalog mutations currently clone bounded control-plane state. Record writes
+  remain incremental. The global catalog barrier serializes authorized work;
+  per-collection concurrency and HTTP response-size/deadline enforcement remain
+  explicit service integration work, not performance tuning claims.
+
+Regression coverage includes real Record writes/get/operation lookup through
+catalog authorization, shared-key revoke and reopen, durable data preservation,
+prepared intent replay, creator revocation during creation, illegal configuration
+rejection with unchanged WAL, cancellation barriers, grant ABA, panic fencing,
+output handoff ordering, capacity-failed revoke, uncertain revoke replay, online
+checkpoint/retry preservation, expired receipt reclamation and clock rollback.
+Eight subprocess exit boundaries cover revoke WAL/witness publication; these
+are process-failure tests, not system/power-loss certification.
+
+Final-code Linux validation (overlayfs, Rust 1.99.1):
+
+- `SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet`:
+  **154 passed, 0 failed, 10 ignored**, across 35 suites. Nine ignored subprocess
+  workers are invoked by parent tests; the existing opt-in AES test remains
+  ignored. Final log: `/tmp/seekpower-catalog-final2.log`.
+- `cargo build --workspace --quiet`: passed on final source;
+  `/tmp/seekpower-catalog-build-final.log`.
+- New catalog tests: 12 passed plus one subprocess worker ignored by default.
+  Initial fixture failures (missing schema `store`) were fixed before full runs.
+- Independent read-only review identified invalid-config recovery, revoked
+  creator activation, and revoke-at-capacity defects; all fixed with regression
+  coverage. Followup static review found no new blocking persistence/revision
+  defect in its scope. This is not a service integration review.
+- HTTP/UI smoke was not rerun for this dependency-only change. The prior legacy
+  smoke cannot establish new service integration; new HTTP end-to-end is pending.
+
+Native Windows compilation/tests and both platforms' system crash verification
+remain **not run**. The native CI matrix includes catalog tests only as a local
+change; it has not been published or dispatched.
+
+Next required work: default server startup and HTTP/UI use of this authority;
+prepared collection creation/recovery orchestration; public key management and
+shared grants; operation-status authorization; body delivery integration; real
+service crash/restart/revocation end-to-end tests; full platform acceptance. No
+permission denial is blocking local work. This checkpoint is a dependency slice,
+not completion of those service tasks.
+
+## Historical checkpoint — incremental publication and online WAL generations (validated locally)
 
 Parent checkpoint: `7fa0fd3f4b60bad336674b54fbbb49013aedc956`. This stage replaces
 the per-write reference rebuild with the actual existing-engine append path.

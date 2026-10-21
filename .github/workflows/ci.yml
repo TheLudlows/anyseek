@@ -98,3 +98,5 @@ jobs:
         run: cargo test -p seekpower --lib commit_io_tests
       - name: Native record replay, snapshot and response-loss tests
         run: cargo test -p seekpower --lib record::tests
+      - name: Native catalog authorization and revocation recovery tests
+        run: cargo test -p seekpower --lib catalog_

@@ -2,7 +2,7 @@
   "date": "2026-10-21",
   "baseline": "fc4fcfe64fdf86d03c07f82cf1d4889deb896801",
   "branch": "feat/57-reliable-record-engine",
-  "status": "P1-A in progress; incremental library and online WAL checkpoint validated locally; HTTP/UI remains legacy",
+  "status": "P1-A in progress; durable catalog and authorization barriers implemented at library level; default HTTP/UI remains legacy",
   "linux": {
     "platform": "Linux 6.18.55 x86_64",
     "rust": "1.99.1",
@@ -11,12 +11,12 @@
     "workspace_command": "SEEKPOWER_TEST_ROOT=/workspace/seekpower/target/p1-native-data cargo test --workspace --all-targets --quiet",
     "workspace_result": {
       "suites": 35,
-      "passed": 142,
+      "passed": 154,
       "failed": 0,
-      "ignored": 9
+      "ignored": 10
     },
-    "build": "cargo build --workspace --quiet: passed after final source change",
-    "http_smoke": "python3 scripts/http_smoke.py --server target/debug/seekpower_server: passed after final build; legacy HTTP/UI path only, Chromium not run",
+    "build": "cargo build --workspace --quiet: passed on final source",
+    "http_smoke": "Not rerun for catalog dependency checkpoint; no new service integration claim. Prior legacy smoke evidence retained.",
     "chromium": "not run",
     "process_exit_boundaries": {
       "journal_write": 8,
@@ -24,10 +24,11 @@
       "record_and_response_loss": 5,
       "initialization": 4,
       "online_checkpoint": 8,
-      "interrupted_uncertified_generation_cleanup": 2
+      "interrupted_uncertified_generation_cleanup": 2,
+      "catalog_revoke": 8
     },
     "system_crash": "not run",
-    "workspace_log": "/tmp/seekpower-incremental-final4.log",
+    "workspace_log": "/tmp/seekpower-catalog-final2.log",
     "controlled_cancellation_tests": {
       "passed": 2,
       "failed": 0,
@@ -50,7 +51,30 @@
       "root creation owner lock spans return",
       "recovery read budget cannot expand persisted write budget"
     ],
-    "http_smoke_log": "/tmp/seekpower-incremental-http-final.log"
+    "http_smoke_log": "/tmp/seekpower-incremental-http-final.log",
+    "workspace_validation_status": "passed on final source",
+    "new_http_end_to_end": "not implemented / not run",
+    "catalog_regressions": [
+      "actual Record write/read/operation retry under shared catalog authorization",
+      "key revoke preserves independent collection and other key after recovery",
+      "prepared config and directory recovery without activation",
+      "revoked creator activation without restoring revoked grant",
+      "nonfinite configuration rejected with unchanged WAL",
+      "cancelled waiter retains publication barrier",
+      "grant revoke/regrant ABA invalidates old output permit",
+      "authorized task panic fences authority and old outputs",
+      "output handoff ordered before revoke acknowledgment",
+      "capacity-failed revoke fences and never claims success",
+      "post-durable injected revoke failure fences; recovery reconciles operation status",
+      "online checkpoint preserves grant revisions and unexpired retry results",
+      "expired receipts reclaimed with persistent epoch watermark"
+    ],
+    "build_log": "/tmp/seekpower-catalog-build-final.log",
+    "catalog_test_result": {
+      "passed": 12,
+      "failed": 0,
+      "ignored_subprocess_workers": 1
+    }
   },
   "windows": {
     "native_compilation": "not run",
@@ -60,13 +84,16 @@
   },
   "external_state_changes": "none; local branch and commit only",
   "remaining": [
-    "HTTP/UI default-path integration",
-    "shared collection catalog, key grants and revocation barriers",
-    "configured retention/deadline policy",
+    "default HTTP/UI routing to Record and catalog",
+    "service orchestration of prepared collection create/recovery/activation",
+    "authenticated shared-key control-plane management and operation status",
+    "HTTP body handoff integration for OutputPermit plus response size/deadline bounds",
+    "real service end-to-end crash/restart/revocation tests",
+    "data-operation ledger reclamation with physical-version resource limits",
     "Linux and Windows native reliability acceptance; system-crash tests",
-    "safe catalog-level reclamation of failed root initialization preparations"
+    "safe catalog-level reclamation of abandoned root initialization preparations"
   ],
-  "review_checkpoint_parent": "7fa0fd3f4b60bad336674b54fbbb49013aedc956",
+  "review_checkpoint_parent": "837bac35d7c629ab3ca1ff6ed62658038668333b",
   "independent_review": {
     "mode": "read-only",
     "original_findings": [
@@ -77,6 +104,7 @@
     "followup_finding": "cancelled hybrid query may retain mmap after journal lock is released",
     "all_findings": "corrected and regression tested on Linux",
     "final_static_review": "no new blocking defect in correction scope",
-    "incremental_and_generation_findings": "Corrected with regression coverage; final static persistence review found no new blocker in reviewed scope. Native Windows/system faults remain unvalidated."
+    "incremental_and_generation_findings": "Corrected with regression coverage; final static persistence review found no new blocker in reviewed scope. Native Windows/system faults remain unvalidated.",
+    "catalog_findings": "Fixed: nonfinite config could poison recovery; revoked creator stranded prepared collection; revoke capacity failure left authorization live. Reviewer static followup found no new blocker in reviewed persistence/revision scope. Added panic fencing and regression coverage."
   }
 }
