@@ -206,6 +206,8 @@ impl Inner {
             self.evaluation_time_ms = evaluation;
             return Ok(());
         }
+        self.expire_staging(evaluation).await?;
+        self.cleanup_private()?;
         self.trim_feed(evaluation)?;
         let targets: Vec<_> = self
             .state
@@ -414,6 +416,7 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
         .operations
         .iter()
         .map(|op| (op.receipt.seq, op.observed_time_ms))
+        .chain(state.lease_expirations.iter().map(|event|(event.seq,event.evaluation_time_ms)))
         .chain(
             state
                 .expirations

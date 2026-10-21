@@ -57,7 +57,7 @@ async function submitPendingWrites() {
         }
         sessionStorage.removeItem('seekpower.pendingWrites');
         pendingDocumentCommit = null;
-        $('#documentStatus').text(pending.requests.some(r => r.generation?.action === 'stage')
+        $('#documentStatus').text(pending.requests.some(r => ['stage','renew'].includes(r.generation?.action))
             ? `Wrote ${pending.requests.length} record(s). Staging is durable, not searchable until an explicit publish succeeds.`
             : `Wrote ${pending.requests.length} record(s). All confirmed writes are durable and visible.`);
         $('#retryDocumentCommit,#discardRejectedWrites').prop('hidden', true);
@@ -194,7 +194,7 @@ $(function(){
 
 let graphState=null;
 let graphBusy=false;
-function resetGraph(){graphState=null;$('#relationResult,#relationStatus,#evidenceResult').text('');$('#nextEntities').prop('disabled',true);}
+function resetGraph(){graphState=null;$('#relationResult,#relationStatus,#evidenceResult,#leaseResult').text('');$('#nextEntities').prop('disabled',true);}
 async function inspectGraph(action){
     if(graphBusy)return;graphBusy=true;
     $('#listEntities,#nextEntities,#expandNeighbors').prop('disabled',true);
@@ -231,6 +231,18 @@ $(function(){
             const result=await setupApi('POST',`api/v1/index/${encodeURIComponent(collection)}/evidence`,key,JSON.parse($('#evidenceRef').val()));
             if(current())$('#evidenceResult').text(JSON.stringify(result,null,2));
         }catch(error){if(current())$('#evidenceResult').text(error.message);}
+        finally{$(this).prop('disabled',false);}
+    });
+});
+
+$(function(){
+    $('#inspectLease').on('click',async function(){
+        const collection=INDEX_ID,key=API_KEY,current=()=>collection===INDEX_ID&&key===API_KEY;
+        $(this).prop('disabled',true);$('#leaseResult').text('');
+        try{
+            const result=await setupApi('GET',`api/v1/index/${encodeURIComponent(collection)}/doc/${encodeURIComponent($('#leaseDocument').val())}/generation`,key);
+            if(current())$('#leaseResult').text(JSON.stringify(result,null,2));
+        }catch(error){if(current())$('#leaseResult').text(error.message);}
         finally{$(this).prop('disabled',false);}
     });
 });

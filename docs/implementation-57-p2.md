@@ -903,3 +903,47 @@ P3 操作/版本历史持续回收、Segment compaction 另属后续阶段，不
 首轮 Chromium 因折叠面板内输入框未展开超时，HTTP 已通过但未将该轮算全通过；现将摘录控件放到独立面板并明确展开，最终默认和 fault 两轮浏览器测试均成功。测试日志 `/tmp/p2-locator-final-{all,build,http,fault-build,fault-http,boundary,openapi}.log` 仅为本地证据。Windows 本批未运行（没有本分支发布/CI授权），系统断电未验收（需隔离环境与外部确认见证），不使用关系或 feed 的结果替代。
 
 后续独立批次：staging 租约及安全清理；关系与全文/向量同视图融合。管理型 Blob 仍依真实大文件需求选择，不能把外部 URL 当已备份文件。通用非 Source 的任意历史修订读取未新增；本批只提供计划所需的精确内联 Source 摘录。
+
+## 21. P2 收尾第二批：staging 租约与私有正文清理
+
+分支 `feat/57-p2-staging-leases` 堆叠于来源定位 `50459fa9c8287eee33e826b58ecd8fe7c9673833`；此前关系/定位检查点保持独立，未获本批推送授权。只处理尚未发布的 staging，不压缩已发布正文、证据修订、墓碑或普通操作历史。
+
+### 21.1 租约、fence 与上传边界
+
+工程参数沿用原设计的 30 分钟：Stage 的持久 observed_time 决定 `deadline=observed_time+1800000`（UTC Unix ms）。`generation:{action:"renew",generation_id}` 与现有 record_id/routing_key/operation_id/expected Match 一起提交；仅未到期 staging 可续租，期限为本次固定可信时间 + 30 分钟，control version 同时递增。control version 就是 fencing token，不再平行引入第二个计数器。Publish/Abort/Renew 都必须 Match 当前版本，到期先于所有新请求处理；旧 fence 拒绝。相同 operation_id 重试返回原回执，不因为到期而重新创建 staging。Renew 回执 `staged_only=true`，从不声称成员可检索。
+
+`generation_status` 增加 lease_expires_at_ms、lease_fence、lease_requires_renewal、private_cleanup_pending。UI 可检查期限/fence，并通过现有持久重试编辑器发送 renew，避免另建一套重试存储。当前上传仍是完整有界 Stage 请求：HTTP 完整解码前没有可回收的服务器 staging 对象；成功 Stage 后在租期内保留私有内容，上层长任务显式续租。不宣称提供分块文件上传或网络连接本身能无限延长租约。
+
+staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保留 scope 和剩余期限；独立快照仍隔离、不推进期限，受控接管换 scope 后必须新授权显式 Renew，再按新版本发布。旧 owner 已持久封存；scope 仅作 fencing 身份，不赋予授权。期限已到的目标不能以续租复活；需新的 generation ID，原 ID 永久 spent。无需在认证接管摘要中忽略 staging 状态。
+
+### 21.2 持久过期与有限清理
+
+`lease.rs` 处理有界到期集合，在同一 PartitionJournal 追加 LeaseExpired，携带 seq、可信 evaluation_time、每个 document/generation 的精确原版本与期限；应用后控制版本递增、释放 manifest 私有成员。记录参与全局连续提交/可信时间校验，但不投影内容 feed（staging/renew/abort/expire 都是私有控制变更），feed 游标允许这些 seq 间隙。沿用 generation 接受时的终止/完整 checkpoint 预留；资源不足先失败关闭，不把未持久过期当已回收。
+
+仅 Abort 或 lease expiration 会将对应、从未发布的 Stage 操作正文/成员清单替换为规范化请求 SHA-256；其 operation_id、原 receipt、命令身份及时间仍在账本。规范化递归排序对象 key，保留数组顺序，以匹配原请求对象等价语义。原请求重试重新计算摘要，相同则返回原回执，改变正文/清单则冲突；不重新 Stage。已发布 Stage 不走此清理，普通操作不走此清理。恢复验证 redaction 具备对应 Abort/LeaseExpired 终态且没有仍活动或已发布成员引用，不能靠一个 hash 字段任意丢正文。
+
+清理先是已持久的逻辑退休，再在后续入口发布完整 checkpoint，释放旧 journal owner 后回收旧 WAL；不删除已有独立备份中的内容，也不承诺安全擦除。备份 pin 对不可变独立 archive 的保护沿用原协议，不在这里跨目录级联。checkpoint 已发布与旧代回收分别确认：回收失败保持可重试 private_cleanup_pending；已知未发布不破坏终态，发布结果未知则 fence。重开必须先成功回收旧代，否则拒绝服务。故障后成功重试不会复活内容。
+
+该 pending 是本地回收状态：checkpoint 已持久发布 false 但旧代回收失败时运行态恢复 true 并重算快照预算；若此时重启，PartitionJournal 必须先成功清理旧代才能打开。seal/备份仍持久化其实际完整切面。没有额外 GC 服务；无请求时不承诺及时清理，下一入口推进到期/回收。累计回执、spent generation ID 仍占既有配额，长期运行依赖 P3。
+
+### 21.3 审查与验证
+
+2026-10-21 本地 Linux 最终验证完成。独立审查发现旧 checkpoint API 在旧 WAL 删除失败时仍返回成功，原实现错误清空 pending；已增加显式 reclaim_obsolete 确认与故障回归，定点及最后复审通过，无未修复阻塞项。private_cleanup_pending 是 partition 级旧 WAL 回收状态，不表示当前活跃 staging 正在被删除。
+
+| 命令/范围 | Linux 最终源码结果 | Windows 本批 |
+| --- | --- | --- |
+| `cargo test --workspace --all-targets --quiet` | **35 suites，219 passed，0 failed，10 ignored** | 未运行 |
+| `cargo build --workspace` | 通过 | 未运行 |
+| `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser` | 通过；真实 renew/fence、租约 UI、接管须续租、abort 清理及原回执 | 未运行 |
+| `cargo build -p seekpower_server --features fault-injection` 后 smoke `--faults --browser` | 通过；可控时钟到期、unknown/durable_pending/持久后退出/可见后退出、旧代删除失败与恢复、全套既有矩阵 | 未运行 |
+| `python3 scripts/check_core_boundary.py` | default/no-default-features 独立构建通过 | 未运行 |
+| OpenAPI 生成与 Renew 协议断言 | 通过 | 未运行 |
+| `git diff --check` | 通过 | 不适用 |
+
+新增五个核心测试覆盖租约延期/到期、canonical 对象键顺序幂等、到期恢复/owner scope、同 fence Renew/Publish 并发单赢家，以及 cleanup 失败保持 pending→重试→仅剩一个 WAL 代且不含私有正文。10 个 ignored 仍为 9 个父测试运行的子进程 worker 和 1 个既有额外参数跨构建 fixture。补完竞争与恢复原因校验后重新执行最终全量，未以之前通过结果替代。
+
+首轮 HTTP 夹具因浏览器先占满 32 个备份槽而失败；将本批备份/接管流程安排在浏览器前，未来时钟到期故障安排在浏览器后，最终两种服务矩阵均通过，没有放宽生产预算。全部删除/封存/故障仅针对 TemporaryDirectory 中的测试服务数据。日志 `/tmp/p2-lease-final-{all,build,http,fault-build,fault-http,boundary,openapi}.log` 为本地证据。
+
+本批未推送、未创建 PR。Windows 本批未运行（未获发布/CI授权）；系统崩溃/断电未验收，需要隔离可丢弃双平台环境和外部确认见证。Linux 进程退出故障不能替代这些验收。
+
+下一独立批次仍为关系与全文/向量同 ReadView 融合。本节不将三项 P2 收尾或总体 P2 标成全部完成。

@@ -30,6 +30,7 @@ pub use generation::{GenerationChunk, GenerationCommand, GenerationMember, Gener
 mod output;
 pub use evidence::{EvidenceKind, EvidenceMetadata, EvidenceRef, EvidenceVisibility};
 pub use output::DataOutputPermit;
+mod lease;
 mod locator;
 pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
@@ -261,6 +262,7 @@ pub struct WriteReceipt {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Applied {
+    request_digest: Option<String>,
     graph_invalidation: bool,
     request: RecordWrite,
     receipt: WriteReceipt,
@@ -278,6 +280,8 @@ struct State {
     epoch_watermark: u64,
     time_watermark_ms: u64,
     expirations: Vec<temporal::Expiration>,
+    lease_expirations: Vec<lease::Expiration>,
+    private_cleanup_pending: bool,
     // Independent snapshots cannot prove the absence of later source deletes.
     // This persistent restore gate is deliberately not cleared by ordinary writes.
     evidence_quarantined: bool,
@@ -291,14 +295,16 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV10")]
+    #[serde(rename = "RecordCheckpointV11")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV10")]
+    #[serde(rename = "RecordAppliedV11")]
     Applied(Applied),
-    #[serde(rename = "RecordExpiredV10")]
+    #[serde(rename = "RecordExpiredV11")]
     Expired(temporal::Expiration),
-    #[serde(rename = "RecordFeedTrimV10")]
+    #[serde(rename = "RecordFeedTrimV11")]
     FeedTrim(change_feed::Trim),
+    #[serde(rename = "RecordLeaseExpiredV11")]
+    LeaseExpired(lease::Expiration),
 }
 struct Inner {
     config: RecordConfig,
@@ -754,6 +760,7 @@ impl RecordPartition {
             match serde_json::from_slice(&bytes).map_err(storage)? {
                 Entry::Applied(applied) => apply(&mut state, &applied)?,
                 Entry::Expired(event) => temporal::apply(&mut state, &event)?,
+                Entry::LeaseExpired(event) => lease::apply(&mut state,&event)?,
                 Entry::FeedTrim(trim) => change_feed::apply_trim(&mut state,&config.change_feed,&trim)?,
                 Entry::Checkpoint { .. } => {
                     return Err(storage("unexpected checkpoint in operation stream"));
@@ -763,6 +770,7 @@ impl RecordPartition {
         evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
         locator::validate_history(&state).map_err(storage)?;
         generation::validate_state(&state, &config)?;
+        lease::validate_state(&state)?;
         temporal::validate_state(&state)?;
         if state.records.len() > config.max_records
             || state.source_revisions.len() + state.records.values().filter(|r| evidence::retained_revision(r)).count() > config.max_records
@@ -1315,6 +1323,86 @@ mod tests {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
         p.inner.lock().await.clock=clock.clone(); (clock,now)
+    }
+    #[tokio::test]
+    async fn staging_lease_renew_expire_redact_and_exact_retry() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(source_write("source","s",&[])).await.unwrap();
+        let stage=generation_write("lease-stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]));
+        let receipt=p.write(stage.clone()).await.unwrap();let status=p.generation_status("doc").await.unwrap().unwrap();assert_eq!(status.lease_expires_at_ms,Some(now+1_800_000));
+        clock.set(now+900_000);let renew=generation_write("renew",ExpectedVersion::Match(1),GenerationCommand::Renew{generation_id:"g".into()});
+        let renewed=p.write(renew.clone()).await.unwrap();assert_eq!(p.write(renew).await.unwrap(),renewed);
+        assert!(p.write(generation_write("old-owner",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()})).await.is_err());
+        clock.set(now+1_800_000);assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,1);
+        clock.set(now+2_700_000);let status=p.generation_status("doc").await.unwrap().unwrap();assert_eq!(status.staged_members,0);assert_eq!(status.version,3);assert!(!status.private_cleanup_pending);
+        assert_eq!(p.write(stage.clone()).await.unwrap(),receipt);
+        let mut changed=stage.clone();if let Some(GenerationCommand::Stage{chunks,..})=&mut changed.generation {chunks[0].document.insert("body".into(),serde_json::json!("different"));}
+        assert!(matches!(p.write(changed).await,Err(RecordError::Conflict(_))));
+        let state=p.inner.lock().await.state.clone();assert!(state.operations[1].request_digest.is_some());assert!(state.lease_expirations.len()==1);
+        if let Some(GenerationCommand::Stage{chunks,members,..})=&state.operations[1].request.generation {assert!(chunks.is_empty()&&members.is_empty());}else{panic!();}
+        assert_eq!(p.changes(None,100).await.unwrap().events.len(),1);
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock;
+        assert_eq!(p.write(stage).await.unwrap(),receipt);assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_renew_publish_race_has_one_fenced_winner() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        p.write(generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]))).await.unwrap();
+        let (renew,publish)=tokio::join!(p.write(generation_write("renew-race",ExpectedVersion::Match(1),GenerationCommand::Renew{generation_id:"g".into()})),p.write(generation_write("publish-race",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()})));
+        assert_ne!(renew.is_ok(),publish.is_ok());
+        if renew.is_ok(){assert!(p.get("chunk").await.unwrap().is_none());p.write(generation_write("publish-current",ExpectedVersion::Match(2),GenerationCommand::Publish{generation_id:"g".into()})).await.unwrap();}
+        assert!(p.get("chunk").await.unwrap().is_some());
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(p.get("chunk").await.unwrap().is_some());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_cleanup_failure_stays_pending_and_retries() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let stage=generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]));let receipt=p.write(stage.clone()).await.unwrap();
+        p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort{generation_id:"g".into()})).await.unwrap();
+        std::fs::write(root.join(".test-cleanup-failure"),b"fail old generation retirement").unwrap();
+        assert!(p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        assert_eq!(p.write(stage.clone()).await.unwrap(),receipt);
+        assert!(p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        std::fs::remove_file(root.join(".test-cleanup-failure")).unwrap();
+        assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        let generations:Vec<_>=std::fs::read_dir(&root).unwrap().filter_map(Result::ok).filter(|e|e.file_name().to_string_lossy().starts_with("generation-")).collect();
+        assert_eq!(generations.len(),1);
+        assert!(!std::fs::read(generations[0].path().join("wal")).unwrap().windows(b"generationword alpha".len()).any(|w|w==b"generationword alpha"));
+        assert_eq!(p.write(stage).await.unwrap(),receipt);
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_abort_releases_private_payload_but_keeps_canonical_retry() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();p.write(source_write("s","s",&[])).await.unwrap();
+        let mut stage=generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]));
+        if let Some(GenerationCommand::Stage{chunks,..})=&mut stage.generation{chunks[0].document.insert("extra".into(),serde_json::json!({"b":2,"a":1}));}
+        let receipt=p.write(stage.clone()).await.unwrap();
+        p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort{generation_id:"g".into()})).await.unwrap();
+        if let Some(GenerationCommand::Stage{chunks,..})=&mut stage.generation{chunks[0].document.insert("extra".into(),serde_json::json!({"a":1,"b":2}));}
+        assert_eq!(p.write(stage.clone()).await.unwrap(),receipt);
+        assert!(p.write(generation_write("spent",ExpectedVersion::Match(2),stage_generation("g",&["chunk"]))).await.is_err());
+        p.write(generation_write("new",ExpectedVersion::Match(2),stage_generation("g2",&["chunk"]))).await.unwrap();
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert_eq!(p.write(stage).await.unwrap(),receipt);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_expiry_durable_pending_and_owner_scope_fence() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
+        p.write(source_write("s","s",&[])).await.unwrap();p.write(generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]))).await.unwrap();
+        // A new certified owner's scope differs; it must explicitly renew.
+        p.inner.lock().await.state.feed.scope="other-owner".into();
+        assert!(p.generation_status("doc").await.unwrap().unwrap().lease_requires_renewal);
+        assert!(p.write(generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()})).await.is_err());
+        p.write(generation_write("renew",ExpectedVersion::Match(1),GenerationCommand::Renew{generation_id:"g".into()})).await.unwrap();
+        assert!(!p.generation_status("doc").await.unwrap().unwrap().lease_requires_renewal);
+        clock.set(now+1_800_000);p.inner.lock().await.fail_after_durable=true;
+        assert!(matches!(p.generation_status("doc").await,Err(RecordError::DurablePending(_))));
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock;
+        assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn locator_utf8_pages_history_and_delete_barrier() {
@@ -2233,7 +2321,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV10", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV11", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();

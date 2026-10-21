@@ -330,6 +330,10 @@ impl PartitionJournal {
         for generation in generations(&self.path)? {
             if generation < self.generation {
                 #[cfg(test)]
+                if self.path.join(".test-cleanup-failure").exists(){return Err(io::Error::other("injected old generation cleanup failure"));}
+                #[cfg(feature="fault-injection")]
+                if std::env::var("SEEKPOWER_CHECKPOINT_CLEANUP_FAULT").as_deref()==Ok("1"){return Err(io::Error::other("injected old generation cleanup failure"));}
+                #[cfg(test)]
                 if std::env::var("SEEKPOWER_PARTITION_CRASH").as_deref() == Ok("old_partial") {
                     fs::remove_file(generation_path(&self.path, generation).join("wal"))?;
                     crash_boundary("old_partial");
@@ -365,6 +369,8 @@ impl PartitionJournal {
         }
         Ok(())
     }
+    /// Retry old-generation retirement independently of durable publication.
+    pub(crate) fn reclaim_obsolete(&self)->io::Result<()> {self.clean_obsolete()}
     pub(crate) fn restrict_budget(&mut self, max_bytes: u64) -> io::Result<()> {
         self.journal.restrict_budget(max_bytes)?;
         self.max_bytes = self.max_bytes.min(max_bytes);

@@ -142,7 +142,15 @@ def exercise(base,master,call):
         expect(page.locator('#documentStatus')).to_contain_text('not searchable')
         assert call('POST',f'/api/v1/index/{collection}/query',{'query':'generationui'})['count_total']==0
         assert call('GET',f'/api/v1/index/{collection}/doc/ui-generation/generation')['staged_members']==2
-        publish={'record_id':'ui-generation','routing_key':'ui-route','expected':{'Match':1},'generation':{'action':'publish','generation_id':'g1'}}
+        page.locator('summary').filter(has_text='Staging lease status').click()
+        page.locator('#leaseDocument').fill('ui-generation');page.locator('#inspectLease').click()
+        expect(page.locator('#leaseResult')).to_contain_text('lease_expires_at_ms')
+        renewal={'record_id':'ui-generation','routing_key':'ui-route','expected':{'Match':1},'generation':{'action':'renew','generation_id':'g1'}}
+        page.locator('#documentJson').fill(json.dumps(renewal));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('not searchable')
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-generation/generation')['lease_fence']==2
+        print('PASS Chromium: staging lease inspection and durable renewal without publication')
+        publish={'record_id':'ui-generation','routing_key':'ui-route','expected':{'Match':2},'generation':{'action':'publish','generation_id':'g1'}}
         page.locator('#documentJson').fill(json.dumps(publish));page.locator('#submitDocuments').click()
         expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('generationui')
