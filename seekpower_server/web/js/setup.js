@@ -34,7 +34,7 @@ function resetSearch() {
     $('#contentBox,#prevTitle,#prevText2,#searchError').empty();
     $('#prevText').attr('src', '').hide();
     $('#prevUrl,#splitter').hide();
-    $('#searchInput,#searchMain,#queryVector,#dateFrom,#dateTo').val('');
+    $('#searchInput,#searchMain,#queryVector,#dateFrom,#dateTo,#eventFrom,#eventTo,#validAt').val('');
     $('#vectorControls,#dateControls').prop('hidden', true);
     $('.switch-label').removeClass('active').filter('[data-index="2"]').addClass('active');
     $('input[name="search-type"][value="Lexical"]').prop('checked', true);

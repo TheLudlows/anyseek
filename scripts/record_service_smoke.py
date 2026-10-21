@@ -520,10 +520,15 @@ def main():
             client_requests=root.parent/'client-requests.json'
             client_exercise(base,master,client_requests)
             client_exercise(base,master,client_requests)
+            call('DELETE','/api/v1/backups/'+early['backup_id'],{'operation_id':operation()})
+            from record_temporal_smoke import exercise as temporal_exercise
+            def restart_with(env):
+                if process.poll() is None:process.kill();process.wait(timeout=20)
+                start(env)
+            temporal_exercise(call,restart_with,root.parent,args.faults)
             if args.browser:
                 # The capacity test intentionally fills all 32 backup slots.
                 # Retire our completed evidence fixture before the UI creates its own.
-                call('DELETE','/api/v1/backups/'+early['backup_id'],{'operation_id':operation()})
                 from record_service_browser import exercise
                 exercise(base,master,call)
         finally:

@@ -27,7 +27,14 @@ if(!Number.isFinite(start)||!Number.isFinite(end)||start>=end){$('#searchError')
 facetFilter=[{Timestamp:{field:DATE_FIELD,filter:{start:start,end:end}}}];
 }
 }
-$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:search_mode==="Vector"?undefined:query,query_vector:queryVector,offset:(page-1)*10,length:10,sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],filter:facetFilter}),traditional:true,cache:false,type:"POST",dataType:'json',success:function(data){if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;contentBox.empty();
+let temporal;
+try {
+const readTime=id=>{const raw=document.getElementById(id).value.trim();if(!raw)return undefined;const value=Number(raw);if(!Number.isSafeInteger(value))throw new Error('Enter whole UTC milliseconds.');return value;};
+const from=readTime('eventFrom'),to=readTime('eventTo'),at=readTime('validAt');
+if(from!==undefined&&to!==undefined&&from>=to)throw new Error('Event until must be after event from.');
+if(from!==undefined||to!==undefined||at!==undefined)temporal={event:from!==undefined||to!==undefined?{from_ms:from,to_ms:to}:undefined,valid_at_ms:at};
+}catch(error){$('#searchError').text(error.message);return;}
+$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:search_mode==="Vector"?undefined:query,query_vector:queryVector,offset:(page-1)*10,length:10,sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],filter:facetFilter,temporal:temporal}),traditional:true,cache:false,type:"POST",dataType:'json',success:function(data){if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;contentBox.empty();$("#evaluationTime").text("Evaluated at "+new Date(data.evaluation_time_ms).toISOString());
 data.hits.forEach(hit=>{const element=hit.record.document||{};
 const linkText=valid(element[URL_FIELD]);
 const linkUrl=httpUrl(linkText);
@@ -84,6 +91,8 @@ if(page-5+i>maxPages){element.hide();}}}else{for(let i=0;i<10;i++){const element
 if(i>=maxPages){element.hide();}}}}
 $(function(){
 $('#dateApply').on('click',()=>loadResults(1,currSort));
+$('#timeApply').on('click',()=>loadResults(1,currSort));
+$('#timeClear').on('click',()=>{$('#eventFrom,#eventTo,#validAt').val('');loadResults(1,currSort);});
 $('#dateClear').on('click',()=>{$('#dateFrom,#dateTo').val('');loadResults(1,currSort);});
 $('#sort button').on('click',function(){const sort=this.id;$('#sort button').removeClass('active');$(this).addClass('active');loadResults(1,sort);});
 $("#vectorSearch").on("click",()=>loadResults(1,"score"));$("#searchInput").on("input",function(e){e.preventDefault();$("#landingSearch").hide();$("#landingMain").show();$("#searchMain").val($("#searchInput").val()).trigger("input");$("#searchMain").focus();$("#searchInput").val("");});$("#footer, #topBar").on("mouseenter",function(){const prevUrl=$("#prevUrl");const prevTitle=$("#prevTitle");const prevText=$("#prevText");const prevText2=$("#prevText2");moveSplitter(-50,true);prevUrl.hide();prevTitle.text("");prevText2.text("");prevText.hide();});$("#topLogo").on("click",function(e){e.preventDefault();$("#landingSearch").show();$("#searchInput").focus();$("#landingMain").hide();updateTitle(true);window.history.pushState("","",window.location.href.split("?")[0]);});const mainSearch=$("#searchMain");mainSearch.on("input",debounce(()=>{query=mainSearch.val();loadResults(1,'score');},50));mainSearch.on("input",debounce(()=>{var newURL=updateURLParameter(window.location.href,"q",query);newURL=updateURLParameter(newURL,"page",1);window.history.pushState("","",newURL);},700));$("#footer div").click(event=>{let target=$(event.target);if(!target.hasClass("action")){loadResults(target.text(),currSort);}else{const cPage=parseInt($("#footer div.active")[0].innerText);if(target.attr("next")){loadResults(cPage+1,currSort);}else{loadResults(cPage-1,currSort);}}});window.addEventListener("popstate",function(e){checkUrl();});checkUrl();$('.switch-label').on('click',function(){const index=$(this).data('index');const value=$(this).find('input').val();$('.switch-label').removeClass('active');$(this).addClass('active');const position=index*33.33;$('.switch-selector').css('left',`calc(${position}% + 4px)`);$(this).find('input').prop('checked',true);switch(value){case"Vector":search_mode="Vector";break;case"Lexical":search_mode="Lexical";break;default:search_mode="Hybrid";}

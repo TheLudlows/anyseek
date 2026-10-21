@@ -96,6 +96,7 @@ impl RecordPartition {
                 return if seal.request == request { Ok(seal.clone()) }
                     else { Err(RecordError::Conflict("partition sealed for a different takeover".into())) };
             }
+            inner.advance_time().await?;
             let certificate = SealCertificate {
                 lineage: inner.state.lineage.clone(), final_seq: inner.state.seq,
                 final_state_digest: content_digest(&inner.config, &inner.state)?, request,

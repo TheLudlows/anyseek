@@ -120,6 +120,22 @@ def exercise(base,master,call):
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
         expect(page.locator('#contentBox')).not_to_contain_text('Derived title')
         print('PASS Chromium: source/derived envelopes, source deletion hides derived search and original reads')
+        # Explicit TTL metadata is preserved by the real editor; temporal filters
+        # go through the visible controls and the actual query endpoint.
+        import time
+        page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
+        temporal={'record_id':'ui-time','routing_key':'ui-route','expected':'Absent','document':{'title':'Temporal title','body':'temporalui'},'temporal':{'event_time_ms':100,'valid_from_ms':100,'valid_to_ms':200,'expire_at_ms':int(time.time()*1000)+86400000}}
+        page.locator('#documentJson').fill(json.dumps(temporal));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
+        page.locator('#backToSearch').click();page.locator('#searchInput').fill('temporalui')
+        expect(page.locator('#contentBox')).to_contain_text('Temporal title')
+        page.locator('#timeControls summary').click();page.locator('#eventFrom').fill('100');page.locator('#eventTo').fill('101');page.locator('#validAt').fill('200');page.locator('#timeApply').click()
+        expect(page.locator('#contentBox')).not_to_contain_text('Temporal title')
+        page.locator('#validAt').fill('100');page.locator('#timeApply').click()
+        expect(page.locator('#contentBox')).to_contain_text('Temporal title');expect(page.locator('#evaluationTime')).to_contain_text('Evaluated at')
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-time')['temporal']==temporal['temporal']
+        page.locator('#timeClear').click()
+        print('PASS Chromium: temporal envelope, half-open event/valid filters and fixed evaluation time')
         # Keep existing Vector/Hybrid setup, with explicit model/space identity.
         for mode in ['Vector','Hybrid']:
             page.locator('#manageIndexes').click();expect(page.locator('#newIndexName')).to_be_enabled()

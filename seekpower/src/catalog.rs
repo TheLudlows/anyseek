@@ -1305,6 +1305,7 @@ mod tests {
         let write = RecordWrite {
             vector_patch: None,
             generation: None,
+            temporal: None,
             system: None,
             operation_id: OperationId::new("write".into()),
             record_id: "r".into(),
