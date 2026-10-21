@@ -5,17 +5,17 @@ use super::*;
 use sha2::{Digest,Sha256};
 use std::io::{Read,Write};
 
-#[derive(Serialize,Deserialize,Clone)]
+#[derive(Debug,Serialize,Deserialize,Clone)]
 #[serde(deny_unknown_fields)]
-struct FileRef { path:String, bytes:u64, sha256:[u8;32] }
-#[derive(Serialize,Deserialize,Clone)]
+pub(super) struct FileRef { path:String, bytes:u64, sha256:[u8;32] }
+#[derive(Debug,Serialize,Deserialize,Clone)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Descriptor { format:u32, seq:u64, files:Vec<FileRef> }
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchState { active:crate::active::ActiveStatistics }
 
-fn files(root:&Path,budget:u64)->Result<Vec<FileRef>,RecordError> {
+pub(super) fn files(root:&Path,budget:u64)->Result<Vec<FileRef>,RecordError> {
     if std::fs::symlink_metadata(root).map_err(storage)?.file_type().is_symlink(){return Err(storage("segment root symlink rejected"));}
     fn walk(root:&Path,path:&Path,total:&mut u64,budget:u64,depth:usize,directories:&mut usize,result:&mut Vec<FileRef>)->Result<(),RecordError>{
         *directories+=1;
@@ -38,11 +38,11 @@ fn files(root:&Path,budget:u64)->Result<Vec<FileRef>,RecordError> {
     }
     let mut result=Vec::new();walk(root,root,&mut 0,budget,0,&mut 0,&mut result)?;result.sort_by(|a,b|a.path.cmp(&b.path));Ok(result)
 }
-fn write_json(path:&Path,value:&impl Serialize)->Result<(),RecordError>{
+pub(super) fn write_json(path:&Path,value:&impl Serialize)->Result<(),RecordError>{
     let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(storage)?;
     serde_json::to_writer(&mut file,value).map_err(storage)?;file.flush().map_err(storage)?;file.sync_all().map_err(storage)
 }
-fn read_bounded(path:&Path,limit:u64)->Result<Vec<u8>,RecordError>{
+pub(super) fn read_bounded(path:&Path,limit:u64)->Result<Vec<u8>,RecordError>{
     let file=std::fs::File::open(path).map_err(storage)?;
     if file.metadata().map_err(storage)?.len()>limit{return Err(storage("segment metadata budget exceeded"));}
     let mut bytes=Vec::new();file.take(limit.saturating_add(1)).read_to_end(&mut bytes).map_err(storage)?;

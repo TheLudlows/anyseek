@@ -78,21 +78,15 @@ impl Inner {
         #[cfg(feature="fault-injection")] if std::env::var("ANYSEEK_LEASE_FAULT").ok().as_deref()==Some("crash_after_visible"){std::process::exit(86);}
         Ok(())
     }
-    pub(super) fn cleanup_private(&mut self)->Result<(),RecordError>{
+    pub(super) async fn cleanup_private(&mut self)->Result<(),RecordError>{
         if !self.state.private_cleanup_pending{return Ok(());}
         let mut candidate=self.state.clone();candidate.private_cleanup_pending=false;
-        let bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:candidate.clone()})?;
-        self.healthy=false;
-        match self.journal.checkpoint(&bytes){
-            Ok(())=>{
-                // checkpoint success only confirms publication. Windows/open
-                // files or I/O failure can still leave the old private WAL.
-                candidate.private_cleanup_pending=self.journal.reclaim_obsolete().is_err();
-                self.snapshot_bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:candidate.clone()})?.len();
-                self.state=candidate;self.healthy=true;Ok(())
-            },
-            Err(CreateError::NotPublished(_))=>{self.healthy=true;Ok(())},
-            Err(e)=>{self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;Err(creation_error(e))}
+        // Rewrite only for irreversible private erasure: a retained object may
+        // contain both live and retired payloads and cannot be truncated in place.
+        match self.publish_anchor_state(candidate,false).await {
+            Ok(_)=>{self.state.private_cleanup_pending=self.reclaim_anchor_objects().await.is_err();Ok(())},
+            Err(_) if self.healthy=>Ok(()),
+            Err(error)=>Err(error),
         }
     }
 }

@@ -72,6 +72,7 @@ fn publish(prepared: &Path, target: &Path) -> Result<(), CreateError> {
     })
 }
 impl PartitionJournal {
+    pub(crate) fn root(&self)->&Path {&self.path}
     pub(crate) fn validate_initial(length: usize, max_bytes: u64) -> io::Result<()> {
         let payload_budget = max_bytes
             .checked_sub(24 + PUBLISHED.len() as u64)

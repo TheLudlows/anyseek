@@ -113,6 +113,7 @@ fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(
 #[serde(deny_unknown_fields)]
 pub(super) struct ReferencedState {config:RecordConfig,state:Value}
 impl ReferencedState {
+    pub(super) fn config(&self)->&RecordConfig {&self.config}
     pub(super) fn decode(bytes:&[u8],max_bytes:u64)->Result<Self,RecordError>{
         if bytes.len() as u64>max_bytes{return Err(storage("referenced state metadata budget exceeded"));}
         serde_json::from_slice(bytes).map_err(storage)

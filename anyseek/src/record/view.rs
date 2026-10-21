@@ -242,6 +242,9 @@ impl RetrievalView {
             })
         })
     }
+    pub(super) async fn storage_paths(&self)->Vec<PathBuf>{
+        vec![PathBuf::from(&self.query.read().await.index_path_string),PathBuf::from(&self.tail.read().await.index_path_string)]
+    }
     #[cfg(test)]
     pub(super) fn test_index(&self) -> &IndexArc {
         &self.query

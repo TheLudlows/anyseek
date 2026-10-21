@@ -26,7 +26,7 @@ pub(super) fn publish_directory(prepared: &Path, target: &Path) -> Result<(), Pu
         fs::File::open(prepared)?.sync_all()?;
         fs::rename(prepared, target).map_err(PublishError::RenameAttempted)?;
         #[cfg(test)]
-        fail_after_rename()?;
+        fail_after_rename(target)?;
         fs::File::open(
             target
                 .parent()
@@ -81,7 +81,7 @@ pub(super) fn publish_directory(prepared: &Path, target: &Path) -> Result<(), Pu
             return Err(PublishError::RenameAttempted(io::Error::last_os_error()));
         }
         #[cfg(test)]
-        fail_after_rename()?;
+        fail_after_rename(target)?;
         Ok(())
     }
     #[cfg(not(any(unix, windows)))]
@@ -95,11 +95,38 @@ pub(super) fn publish_directory(prepared: &Path, target: &Path) -> Result<(), Pu
 }
 
 #[cfg(test)]
-fn fail_after_rename() -> Result<(), PublishError> {
+fn fail_after_rename(target: &Path) -> Result<(), PublishError> {
+    // Authority tests must reach journal publication, not fail earlier while
+    // installing an unselected immutable object. Unscoped hooks keep their
+    // existing behavior for tests of the platform primitive itself.
+    if std::env::var("ANYSEEK_PUBLISH_FAIL_SCOPE").as_deref() == Ok("journal") {
+        let name = target.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if !name.starts_with("generation-") && !name.starts_with(".prepare-") {
+            return Ok(());
+        }
+    }
     if std::env::var("ANYSEEK_PUBLISH_FAIL").as_deref() == Ok("after_rename") {
         return Err(PublishError::RenameAttempted(io::Error::other(
             "injected post-rename synchronization failure",
         )));
     }
     Ok(())
+}
+
+/// Install an immutable, already-synchronized file without replacing any name.
+/// Publication is only preparation: the partition certificate selects authority.
+pub(super) fn publish_file(prepared:&Path,target:&Path)->Result<(),PublishError>{
+    if prepared.parent()!=target.parent(){return Err(io::Error::new(io::ErrorKind::InvalidInput,"object publication must remain in one directory").into());}
+    #[cfg(unix)] {
+        fs::File::open(prepared)?.sync_all()?;
+        // link is an atomic no-replace operation. A failed unlink leaves only
+        // an unselected temporary alias, never a second publication authority.
+        fs::hard_link(prepared,target).map_err(PublishError::RenameAttempted)?;
+        let parent=target.parent().ok_or_else(||PublishError::RenameAttempted(io::Error::other("missing object parent")))?;
+        fs::File::open(parent).and_then(|f|f.sync_all()).map_err(PublishError::RenameAttempted)?;
+        fs::remove_file(prepared).map_err(PublishError::RenameAttempted)?;
+        fs::File::open(parent).and_then(|f|f.sync_all()).map_err(PublishError::RenameAttempted)
+    }
+    #[cfg(windows)] {publish_directory(prepared,target)}
+    #[cfg(not(any(unix,windows)))] {Err(io::Error::new(io::ErrorKind::Unsupported,"uncertified persistence platform").into())}
 }

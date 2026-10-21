@@ -40,6 +40,7 @@ mod mutation;
 mod publication;
 mod segment_state;
 mod segment;
+mod anchor;
 mod view;
 mod recovery;
 pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
@@ -301,6 +302,8 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
+    #[serde(rename = "RecordAnchorV1")]
+    Anchor(anchor::Reference),
     #[serde(rename = "RecordCheckpointV12")]
     Checkpoint { config: RecordConfig, state: State },
     #[serde(rename = "RecordAppliedV12")]
@@ -313,6 +316,8 @@ enum Entry {
     LeaseExpired(lease::Expiration),
 }
 struct Inner {
+    anchor:Option<anchor::Reference>,
+    payloads:crate::storage::payload_pool::Closure,
     config: RecordConfig,
     state: State,
     index: view::RetrievalView,
@@ -590,7 +595,14 @@ async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Res
     // files on Windows. The partition owns the root for the complete query.
     detach(&index).await;
     for shard in &index.read().await.shard_vec {
-        shard.write().await.active = Some(crate::active::ActiveStatistics::default());
+        let mut shard=shard.write().await;
+        shard.active=Some(crate::active::ActiveStatistics::default());
+        // Record segments must not choose a quantizer from the first arriving
+        // vector. Pin the non-affine scalar layout across tail/flush/recovery.
+        if shard.quantization==crate::vector::Quantization::ScalarQuantizationI8
+            && shard.vector_similarity==crate::vector_similarity::VectorSimilarity::Euclidean {
+            shard.min_vector_value=0.0;shard.max_vector_value=f32::MIN;
+        }
     }
     #[cfg(test)]
     if std::env::var_os("ANYSEEK_RECORD_BUILD_GATE").as_deref() == Some(path.as_os_str()) {
@@ -744,6 +756,7 @@ impl RecordPartition {
         Ok(Self {
             output: output.clone(),
             inner: Arc::new(Mutex::new(Inner {
+                anchor:None,payloads:Default::default(),
                 journal,
                 config,
                 state,
@@ -790,22 +803,28 @@ impl RecordPartition {
         let first = entries
             .next()
             .ok_or_else(|| storage("missing initial checkpoint"))?;
-        let Entry::Checkpoint { config, mut state } =
-            serde_json::from_slice(&first).map_err(storage)?
-        else {
-            return Err(storage("missing initial checkpoint"));
+        let mut pending=Vec::new();
+        let (config,mut state,prepared,selected,payloads)=match serde_json::from_slice(&first).map_err(storage)? {
+            Entry::Checkpoint{config,state}=>(config,state,None,None,Default::default()),
+            Entry::Anchor(reference)=>{
+                let loaded=reference.load(path,max_journal_bytes).await?;
+                (loaded.config,loaded.state,Some((loaded.index,loaded.ordinals)),Some(reference),loaded.payloads)
+            },
+            _=>return Err(storage("missing initial checkpoint")),
         };
         journal
             .restrict_budget(config.max_journal_bytes)
             .map_err(storage)?;
         restore_operation_lookup(&mut state)?;
         for bytes in entries {
-            match serde_json::from_slice(&bytes).map_err(storage)? {
+            let entry=serde_json::from_slice(&bytes).map_err(storage)?;
+            if selected.is_some(){pending.push(entry);continue;}
+            match entry {
                 Entry::Applied(applied) => apply(&mut state, &applied)?,
                 Entry::Expired(event) => temporal::apply(&mut state, &event)?,
                 Entry::LeaseExpired(event) => lease::apply(&mut state,&event)?,
                 Entry::FeedTrim(trim) => change_feed::apply_trim(&mut state,&config.change_feed,&trim)?,
-                Entry::Checkpoint { .. } => {
+                Entry::Checkpoint { .. } | Entry::Anchor(_) => {
                     return Err(storage("unexpected checkpoint in operation stream"));
                 }
             }
@@ -818,22 +837,26 @@ impl RecordPartition {
         .len();
         let feed_cache = change_feed::Cache::rebuild(&state,&config.change_feed)?;
         let graph_cache=graph::Cache::rebuild(&state)?;
-        let (index, ordinals) = build(path, &config, &state).await?;
+        let (mut index,mut ordinals)=match prepared {
+            Some((index,ordinals))=>(view::RetrievalView::single(index),ordinals),
+            None=>build(path,&config,&state).await?,
+        };
+        let mut locations:BTreeMap<_,_>=ordinals.iter().enumerate().map(|(id,key)|(key.clone(),id)).collect();
+        if selected.is_some(){
+            let target=path.join(format!("cache-{:032x}",rand::random::<u128>()));
+            let (tail,_)=build_at(path,&target,&config,&State::default()).await?;
+            index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{max_segments:64,max_address_slots:config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?}).await?;
+        }
         let output = Arc::new(std::sync::RwLock::new(output::OutputState {
             revision: 0, fenced: state.sealed_for.is_some(),
         }));
-        Ok(Self {
-            output: output.clone(),
-            inner: Arc::new(Mutex::new(Inner {
+        let mut inner=Inner {
+                anchor:selected,payloads,
                 journal,
                 config,
                 state,
                 index,
-                locations: ordinals
-                    .iter()
-                    .enumerate()
-                    .map(|(id, key)| (key.clone(), id))
-                    .collect(),
+                locations,
                 ordinals,
                 snapshot_bytes,
                 healthy: true,
@@ -841,14 +864,18 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 feed_cache,
                 graph_cache,
-                bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),                output,
+                bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),                output:output.clone(),
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
                 fail_publication_stage: 0,
-            })),
-            admission: Arc::new(Semaphore::new(8)),
-        })
+            };
+        for entry in pending {inner.replay_anchor_tail(entry).await?;}
+        validate_restored_state(&inner.config,&inner.state)?;
+        inner.feed_cache=change_feed::Cache::rebuild(&inner.state,&inner.config.change_feed)?;
+        inner.graph_cache=graph::Cache::rebuild(&inner.state)?;
+        inner.reclaim_anchor_objects().await?;
+        Ok(Self {output,inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(8))})
     }
     /// A cancellation-safe accepted write: dropping this future does not cancel
     /// an already spawned operation. Query its original operation ID afterward.
@@ -1133,35 +1160,16 @@ impl RecordPartition {
         Ok(inner.statistics())
     }
 
-    /// Publish a complete local checkpoint without rebuilding the serving
-    /// index, then retire the old WAL generation. Retry identities, tombstones,
-    /// original input and configuration remain in the complete snapshot.
+    /// Publish an authenticated state/index anchor, retaining canonical payload
+    /// objects and retiring the covered WAL only after its certificate is durable.
     pub async fn compact_journal(&self) -> Result<u64, RecordError> {
-        let _permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
-        let mut inner = self.inner.lock().await;
-        if !inner.healthy {
-            return Err(RecordError::RecoveryRequired);
-        }
-        let payload = encode_entry(&Entry::Checkpoint {
-            config: inner.config.clone(),
-            state: inner.state.clone(),
-        })?;
-        inner.healthy = false;
-        match inner.journal.checkpoint(&payload) {
-            Ok(()) => {
-                inner.healthy = true;
-                Ok(inner.state.seq)
-            }
-            Err(error @ CreateError::NotPublished(_)) => {
-                inner.healthy = true;
-                Err(creation_error(error))
-            }
-            Err(error) => Err(creation_error(error)),
-        }
+        let permit=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
+        let owner=self.inner.clone();
+        crate::INDEX_RUNTIME.spawn(async move {
+            let _permit=permit;let mut inner=owner.lock().await;
+            if !inner.healthy{return Err(RecordError::RecoveryRequired);}
+            inner.publish_anchor().await
+        }).await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?
     }
 
     /// Create an independently recoverable snapshot at a new location. No live
@@ -1365,6 +1373,34 @@ mod tests {
         drop(p);
         assert!(!std::fs::read(generations[0].path().join("wal")).unwrap().windows(b"generationword alpha".len()).any(|w|w==b"generationword alpha"));
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_certified_cleanup_gc_failure_blocks_recovery_until_retired() {
+        let root=path();
+        let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(source_write("s","s",&[])).await.unwrap();
+        let stage=generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]));
+        let receipt=p.write(stage.clone()).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let old_payloads=p.inner.lock().await.payloads.clone();
+        assert!(!old_payloads.objects.is_empty());
+        p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort{generation_id:"g".into()})).await.unwrap();
+        std::fs::write(root.join(".test-anchor-post-certificate-gc"),b"fail after certificate").unwrap();
+        assert!(p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        // The new certificate is authoritative, but the old private bytes still
+        // exist because physical retirement failed after its publication.
+        assert!(old_payloads.objects.keys().all(|id|root.join(format!("payload-{id}")).exists()));
+        drop(p);
+        assert!(RecordPartition::open(&root,config().max_journal_bytes).await.is_err());
+        assert!(old_payloads.objects.keys().all(|id|root.join(format!("payload-{id}")).exists()));
+        std::fs::remove_file(root.join(".test-anchor-gc-failure")).unwrap();
+        std::fs::remove_file(root.join(".test-anchor-post-certificate-gc")).unwrap();
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert!(old_payloads.objects.keys().all(|id|!root.join(format!("payload-{id}")).exists()));
+        assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        assert_eq!(p.write(stage).await.unwrap(),receipt);
+        assert!(p.get("chunk").await.unwrap().is_none());
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -3072,7 +3108,9 @@ mod tests {
             .clone();
         for round in 1..=2 {
             assert_eq!(partition.compact_journal().await.unwrap(), 3);
-            assert_eq!(
+            // The checkpoint now selects an authenticated immutable index;
+            // the original mutable cache is no longer the serving root.
+            assert_ne!(
                 partition
                     .inner
                     .lock()
@@ -3403,7 +3441,8 @@ mod tests {
                     "record::tests::record_checkpoint_crash_worker",
                 ])
                 .env("ANYSEEK_CHECKPOINT_PATH", &location)
-                .env("ANYSEEK_PUBLISH_FAIL", "after_rename");
+                .env("ANYSEEK_PUBLISH_FAIL", "after_rename")
+                .env("ANYSEEK_PUBLISH_FAIL_SCOPE", "journal");
             command
         };
         let output = worker()

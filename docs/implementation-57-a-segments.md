@@ -1,6 +1,6 @@
 # A 批实施设计：本地不可变 Segment、发布与安全回收
 
-状态：实施中，尚未完成 A 批；实际检查点见 §11–15。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
+状态：实施中，尚未完成 A 批；实际检查点见 §11–16。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
 
 ## 1. 交付和不做的事
 
@@ -157,3 +157,17 @@ active Record 路径的显式 `_id` 排序现在在局部 Top-K 和 root 都使�
 **范围限制**：这是 prepared 引用层，尚未替换默认持久化入口。候选闭包预算不等于整个目录预算，不包括尚未回收的孤儿、历史 manifest 和备份固定对象；State 在内存中仍包含完整正文。生产 manifest 必须原子认证 collection/谱系、状态及索引水位、对象闭包，并贯通 catalog 隔离与输出屏障；这些以及备份固定、compaction/GC 尚未完成。本层不自动删除任何旧对象，也未推送或发布。
 
 最终源码 `cargo test --workspace --features server --all-targets`：34 suites、245 passed、0 failed、10 ignored，退出 0；带 `server,fault-injection` 的服务重新构建成功，真实 `record_service_smoke.py --server target/debug/anyseek_server --browser --faults` 重新运行退出 0，34 个 PASS 检查点。日志为工作区 `a-pool-final-full.log`、`a-pool-final-build.log`、`a-pool-http-browser-faults.log`，不是沿用上一提交结果。Windows 与系统断电仍未运行。
+
+## 16. A 默认认证 anchor 与索引恢复（本地验证完成）
+
+默认 `compact_journal` 已接入 `record/anchor.rs`：先持久化不可变正文对象、引用状态、现有检索索引及活动统计，完整校验后再由 `PartitionJournal` 发布唯一证书。候选目录不具备发布权；不扫描目录选取较新版本，不引入第二个 root。恢复核验认证闭包后直接打开索引，只将证书之后的日志决定重放到新的可写 tail。索引正文 JSON 仍关闭，原始正文及操作回执的正文槽位共享 payload 引用。
+
+证书发布前准备新的完整查询视图；已知未发布保留原视图，不确定发布保持 fenced，恢复前不能输出。在线 checkpoint 使用已有 owned actor 保持取消安全。普通写入仅追加 tail，不修改已认证 anchor 的文件。Record 欧氏距离标量量化固定使用非仿射编码，避免首条向量决定不同分段的编码方式；独立 Index 接口未改，量化仍有原有精度限制。
+
+回收在 partition 独占执行边界进行，先清理旧 journal，再删除当前证书和活动查询路径未引用的严格命名对象；恢复返回前也必须成功执行回收。独立备份仍导出完整 inline 权威状态，不借用运行中的对象路径。私有 staging 逻辑删除后强制重写正文闭包，避免旧混合对象保留已取消正文；证书成功但物理回收失败保留 pending，重启即使看到已清除 pending 的证书，也必须先成功回收才能开放。
+
+故障注入明确区分未选中候选对象和日志权威切换；原 checkpoint 同步失败及恢复退休失败测试仍覆盖后者。新增测试覆盖认证索引与 tail 恢复、冻结文件不变、量化分数一致，以及私有清理证书成功后 GC 失败、重启关闭、恢复删除能力后重试回执不变。独立审查未发现新的明确阻塞，提出的 GC 重启交错已补测试。
+
+**尚未完成**：当前 checkpoint 仍全量构建有效检索段，不能视为多轮增量冻结或最终 compaction。对象闭包上限是验收预算，不是全过程硬内存/磁盘预算；内存 State 仍保留完整正文。多段增量发布、等价 compaction 与构建硬限制继续实施。Windows 原生及系统崩溃/断电未运行，Linux 进程故障测试不能替代。
+
+最终源码 Linux 验证：`cargo test --workspace --features server --all-targets` 为 34 suites、247 passed、0 failed、10 ignored；`cargo test --doc` 为 44 passed；`cargo build --features server,fault-injection --bin anyseek_server` 成功；真实 `record_service_smoke.py --server target/debug/anyseek_server --browser --faults` 退出 0、34 PASS。十个忽略项仍是九个父测试调用的进程 worker 和一个异构 AES fixture。日志为工作区 `a-anchor-full.log`、`a-anchor-doc.log`、`a-anchor-build.log`、`a-anchor-http-browser-faults.log`，不是沿用此前提交结果。

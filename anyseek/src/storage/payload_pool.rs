@@ -182,9 +182,14 @@ impl PoolBuilder {
             }
             // Includes prior objects even if some may later become unreferenced:
             // they cannot be reclaimed to make room before manifest publication.
+            match path(&self.root,&self.id)?.try_exists(){
+                Ok(false)=>{},
+                Ok(true)=>{self.poisoned=true;return Err(invalid("payload object name already exists"));},
+                Err(error)=>{self.poisoned=true;return Err(error);}
+            }
             self.writer = Some(
                 match Writer::create(
-                    &path(&self.root, &self.id)?,
+                    &self.root.join(format!(".payload-prepare-{}",self.id)),
                     self.remaining_bytes,
                     self.remaining_payloads,
                 ) {
@@ -219,7 +224,10 @@ impl PoolBuilder {
             .filter(|(id, _)| self.used.contains(id))
             .collect::<BTreeMap<_, _>>();
         if let Some(writer) = self.writer {
-            objects.insert(self.id, writer.finish()?);
+            let descriptor=writer.finish()?;
+            super::platform::publish_file(&self.root.join(format!(".payload-prepare-{}",self.id)),&path(&self.root,&self.id)?)
+                .map_err(|error|match error {super::platform::PublishError::BeforeRename(e)|super::platform::PublishError::RenameAttempted(e)=>e})?;
+            objects.insert(self.id,descriptor);
         }
         Ok(Closure { objects })
     }
