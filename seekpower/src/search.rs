@@ -1645,7 +1645,8 @@ impl SearchLexicalShard for ShardArc {
     ) -> ResultObject {
         let mut result_object: ResultObject = Default::default();
         let shard_ref = self.read().await;
-        if !shard_ref.is_lexical_indexing {
+        let browse = enable_empty_query && query_string.is_empty();
+        if !shard_ref.is_lexical_indexing && !browse {
             return result_object;
         }
 
@@ -1659,7 +1660,7 @@ impl SearchLexicalShard for ShardArc {
             result_type = ResultType::Count;
         }
 
-        if shard_ref.segments_index.is_empty() {
+        if shard_ref.segments_index.is_empty() && !browse {
             return result_object;
         }
         let mut field_filter_set: AHashSet<u16> = AHashSet::new();
@@ -1732,6 +1733,22 @@ impl SearchLexicalShard for ShardArc {
         let result_count_uncommitted_arc = Arc::new(AtomicUsize::new(0));
 
         'search_blocks: {
+            // Browsing needs only live IDs and metadata, including on vector-only
+            // shards. Keep the regular candidate heap so stable Record ordering,
+            // filters, deletion checks and pagination apply before truncation.
+            if browse {
+                search_iterator_shard(
+                    &shard_ref,
+                    result_type,
+                    include_uncommitted,
+                    &result_count_arc,
+                    &mut search_result,
+                    offset + length,
+                    &facet_filter_sparse,
+                )
+                .await;
+                break 'search_blocks;
+            }
             let mut unique_terms: AHashMap<String, TermObject> = AHashMap::new();
             let mut non_unique_terms: Vec<NonUniqueTermObject> = Vec::new();
             let mut nonunique_terms_count = 0u32;
@@ -2051,18 +2068,7 @@ impl SearchLexicalShard for ShardArc {
             let mut matching_blocks: i32 = 0;
             let query_term_count = non_unique_terms.len();
             if query_list_len == 0 {
-                if enable_empty_query && query_string.is_empty() {
-                    search_iterator_shard(
-                        &shard_ref,
-                        result_type,
-                        include_uncommitted,
-                        &result_count_arc,
-                        &mut search_result,
-                        offset + length,
-                        &facet_filter_sparse,
-                    )
-                    .await;
-                }
+                break 'search_blocks;
             } else if query_list_len == 1 {
                 if !(shard_ref.uncommitted && include_uncommitted)
                     && offset + length <= 1000

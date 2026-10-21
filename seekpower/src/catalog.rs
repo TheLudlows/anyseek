@@ -23,6 +23,8 @@ const MAX_OPERATIONS: usize = 10_000;
 /// Admission, authority and persistence outcomes; errors never imply a revoke succeeded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogError {
+    /// Admission refused before operation lookup; prior attempts may have succeeded.
+    Busy,
     /// Request not accepted; resource or validation failure.
     Rejected(String),
     /// Identity, lifecycle or retry semantic conflict.
@@ -653,7 +655,7 @@ impl Catalog {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| CatalogError::Rejected("catalog queue full".into()))?;
+            .map_err(|_| CatalogError::Busy)?;
         let owner = self.inner.clone();
         crate::INDEX_RUNTIME
             .spawn(async move {
@@ -886,7 +888,7 @@ impl Catalog {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| CatalogError::Rejected("catalog queue full".into()))?;
+            .map_err(|_| CatalogError::Busy)?;
         let owner = self.inner.clone();
         crate::INDEX_RUNTIME
             .spawn(async move {

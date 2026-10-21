@@ -1,6 +1,6 @@
 //! Single-partition incremental record engine backed by the existing retrieval
-//! engine. This module is not yet the HTTP service's storage path. See
-//! docs/implementation-57.md for the remaining P1-A integration gates.
+//! engine. The default HTTP service uses this authoritative storage path. See
+//! docs/implementation-57.md for the bounded P1-A scope and validation evidence.
 use crate::{
     commit::Commit,
     index::{Document, IndexArc, IndexDocuments, IndexMetaObject, SchemaField, create_index},
@@ -20,6 +20,8 @@ use tokio::sync::{Mutex, Semaphore};
 /// Failures distinguish rejected requests from operations that require recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordError {
+    /// Admission refused before operation lookup; prior attempts may have succeeded.
+    Busy,
     /// Invalid request or an exhausted resource budget; no write accepted.
     Rejected(String),
     /// Conditional version, routing key, or operation digest conflict.
@@ -630,7 +632,7 @@ impl RecordPartition {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
+            .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.clone();
         crate::INDEX_RUNTIME
             .spawn(async move {
@@ -861,7 +863,7 @@ impl RecordPartition {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
+            .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
@@ -882,7 +884,7 @@ impl RecordPartition {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
+            .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
@@ -936,7 +938,7 @@ impl RecordPartition {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
+            .map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
         crate::INDEX_RUNTIME
             .spawn(async move {
@@ -1017,7 +1019,7 @@ impl RecordPartition {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
+            .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
@@ -1105,7 +1107,7 @@ impl RecordPartition {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
+            .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
@@ -1121,7 +1123,7 @@ impl RecordPartition {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
+            .map_err(|_| RecordError::Busy)?;
         let mut inner = self.inner.lock().await;
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
@@ -1152,7 +1154,7 @@ impl RecordPartition {
             .admission
             .clone()
             .try_acquire_owned()
-            .map_err(|_| RecordError::Rejected("partition queue full".into()))?;
+            .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
@@ -1223,6 +1225,83 @@ mod tests {
             .await
             .unwrap()
     }
+    #[tokio::test]
+    async fn record_vector_only_browse_preserves_live_ids_filters_and_recovery() {
+        let location = path();
+        let mut cfg = config();
+        cfg.schema.iter_mut().for_each(|field| field.index_lexical = false);
+        cfg.schema.push(serde_json::from_value(serde_json::json!({
+            "field":"rank", "field_type":"U64", "facet":true, "store":false,
+            "index_lexical":false
+        })).unwrap());
+        let mut p = RecordPartition::create(&location, cfg.clone()).await.unwrap();
+        for (id, rank) in [("z", 1), ("a", 2), ("m", 1), ("b", 3)] {
+            let mut request = write(id, id, "original", ExpectedVersion::Absent);
+            request.document.as_mut().unwrap().insert("rank".into(), serde_json::json!(rank));
+            p.write(request).await.unwrap();
+        }
+        let mut replace = write("replace", "z", "replacement", ExpectedVersion::Match(1));
+        replace.document.as_mut().unwrap().insert("rank".into(), serde_json::json!(2));
+        p.write(replace).await.unwrap();
+        let mut delete = write("delete", "m", "", ExpectedVersion::Match(1));
+        delete.document = None;
+        p.write(delete).await.unwrap();
+
+        for stage in 0..3 {
+            let options = || RecordQuery {
+                text: String::new(), vector: None, mode: SearchMode::Lexical,
+                query_type: QueryType::Union, offset: 0, length: 10,
+                result_type: ResultType::TopkCount, fields: vec![], filters: vec![], sort: vec![],
+            };
+            let ids = |r: &RecordSearch| r.hits.iter().map(|h| h.record.record_id.clone()).collect::<Vec<_>>();
+            let result = p.query(options()).await.unwrap();
+            assert_eq!(ids(&result), ["a", "b", "z"], "stage {stage}");
+            assert_eq!(result.count_total, 3);
+            assert_eq!(result.visible_seq, 6);
+            assert_eq!(result.hits[2].record.version, 2);
+            let mut q = options(); q.offset = 1; q.length = 1;
+            assert_eq!(ids(&p.query(q).await.unwrap()), ["b"]);
+            let mut q = options(); q.length = 0;
+            let result = p.query(q).await.unwrap();
+            assert_eq!(result.count_total, 3); assert!(result.hits.is_empty());
+            let mut q = options();
+            q.filters = vec![FacetFilter::U64 { field: "rank".into(), filter: 2..3 }];
+            let result = p.query(q).await.unwrap();
+            assert_eq!(ids(&result), ["a", "z"]); assert_eq!(result.count_total, 2);
+            let mut q = options(); q.offset = 1; q.length = 1;
+            q.sort = vec![ResultSort { field: "rank".into(), order: crate::search::SortOrder::Ascending }];
+            assert_eq!(ids(&p.query(q).await.unwrap()), ["z"]);
+            let mut q = options(); q.text = "original".into();
+            assert!(p.query(q).await.unwrap().hits.is_empty());
+            match stage {
+                0 => p.inner.lock().await.index.commit().await.unwrap(),
+                1 => {
+                    p.compact_journal().await.unwrap();
+                    drop(p);
+                    p = RecordPartition::open(&location, cfg.max_journal_bytes).await.unwrap();
+                }
+                _ => {}
+            }
+        }
+        drop(p);
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
+    #[tokio::test]
+    async fn record_busy_retry_does_not_disprove_prior_commit() {
+        let location = path();
+        let p = RecordPartition::create(&location, config()).await.unwrap();
+        let request = write("retry", "r", "alpha", ExpectedVersion::Absent);
+        let receipt = p.write(request.clone()).await.unwrap();
+        let occupied = p.admission.clone().acquire_many_owned(8).await.unwrap();
+        assert_eq!(p.write(request.clone()).await.unwrap_err(), RecordError::Busy);
+        drop(occupied);
+        assert_eq!(p.write(request).await.unwrap(), receipt);
+        assert_eq!(p.statistics().await.unwrap().retained_operations, 1);
+        drop(p);
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
     #[tokio::test]
     async fn record_depth_rejection_preserves_authority_and_accepted_depth_recovers() {
         let location = path();

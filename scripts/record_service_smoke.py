@@ -295,6 +295,10 @@ def main():
                     start();result=call('POST',endpoint,body)
                     assert call('POST',endpoint,body)==result
             print('PASS complete service snapshot: common catalog cut, all retained collections/live backups, new-root recovery, no revived keys, historical control rejection, data retry preserved')
+            from index_write_query_smoke import exercise as client_exercise
+            client_requests=root.parent/'client-requests.json'
+            client_exercise(base,master,client_requests)
+            client_exercise(base,master,client_requests)
             if args.browser:
                 from record_service_browser import exercise
                 exercise(base,master,call)

@@ -1,99 +1,73 @@
 #!/usr/bin/env python3
-"""Create-index, write and query smoke test against a running seekpower_server.
+"""Exercise the Record client against a running server (default port 8080).
 
-Requires only Python 3 and a seekpower_server already listening on the local
-default port (80). Start the server yourself first, e.g.:
-
-    cargo run -p seekpower_server
-
-then run this script. All calls go through SeekpowerClient
-(scripts/seekpower_client.py). The master key is derived from the
-MASTER_KEY_SECRET environment variable (default "1234") exactly as the server
-derives it, so this script authenticates against a server started without
-explicitly setting that variable. Exercises the core create -> write -> commit
--> query loop plus a realtime query over an uncommitted write.
-
-The REST surface is wrapped by SeekpowerClient (scripts/seekpower_client.py).
+Set SEEKPOWER_API_KEY to the startup master API key. --requests selects a JSON
+file to save before sending, or to replay after a lost response. Each new file
+creates a new collection. Full process/browser suite: record_service_smoke.py.
 """
 import argparse
-import sys
-import time
+import json
+import os
 from pathlib import Path
-from urllib.error import URLError
+import uuid
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from seekpower_client import SeekpowerClient, check
-
-# Hardcoded master key = base64(sha256("1234")), matching a server started
-# without setting MASTER_KEY_SECRET (whose default is "1234"). Authenticate
-# against such a server without depending on the environment.
-MASTER_KEY = 'A6xnQhbz4Vx2HuGl4lXwZ5U2I8iziLRFnhP5eNfIRvQ='
+from seekpower_client import SeekpowerClient, check, operation_id
 
 
-def exercise(base, master):
+def exercise(base, key, request_file):
     client = SeekpowerClient(base)
-
-    # The server is started by the caller; wait for it to answer health checks.
-    deadline = time.monotonic() + 30
-    while True:
-        try:
-            client.health()
-            break
-        except (URLError, TimeoutError, ConnectionError):
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f'server not reachable at {base} within 30 seconds; '
-                    'start it first with `cargo run -p seekpower_server`')
-            time.sleep(0.1)
-    print('PASS health')
-
-    # The master key is itself a full scoped key: create/write/query use it
-    # directly, no separate API key needs to be minted first.
-    client.set_default_key(master)
-
-    # Create an index with a stored, lexically indexed schema.
-    schema = [
-        {'field': 'title', 'field_type': 'Text', 'store': True, 'index_lexical': True},
-        {'field': 'body', 'field_type': 'Text', 'store': True, 'index_lexical': True},
-    ]
-    index_id = client.create_index({'index_name': 'write_query_smoke', 'schema': schema, 'tokenizer': 'UnicodeAlphanumeric', 'stop_words': 'None'})
-    check(isinstance(index_id, int),
-          f'index ID is not an integer: {index_id!r}')
-    print(f'PASS index created (id={index_id})')
-
-    # Write a single document, then a batch, and commit both.
-    client.write_documents(index_id, {'title': 'first', 'body': 'the quick brown fox'})
-    client.write_documents(index_id, [
-        {'title': 'second', 'body': 'the lazy brown dog'},
-        {'title': 'third', 'body': 'a quick fox jumps over the dog'},
-    ])
-    check(client.commit(index_id) == 3, 'commit must expose three documents')
-    print('PASS document write and commit')
-
-    # Query the committed index for a shared phrase.
-    result = client.query(index_id, {'query': 'quick fox'})
-    check(result['count_total'] == 2, f'query count mismatch: {result}')
-    titles = sorted(doc['title'] for doc in result['results'])
-    check(titles == ['first', 'third'], f'query result mismatch: {result}')
-    print('PASS lexical query over committed documents')
-
-    # A realtime query sees a write that has not been committed yet.
-    client.write_documents(index_id, {'title': 'fourth', 'body': 'uncommitted realtime record'})
-    realtime = client.query(index_id, {'query': 'realtime'})
-    check(realtime['count_total'] == 1, f'realtime query mismatch: {realtime}')
-    check(realtime['results'][0]['title'] == 'fourth',
-          f'realtime result mismatch: {realtime}')
-    print('PASS realtime query over an uncommitted write')
+    client.set_default_key(key)
+    client.health()
+    request_file = Path(request_file)
+    if request_file.exists():
+        saved = json.loads(request_file.read_text())
+        check(saved['base'] == base, 'saved requests belong to another service URL')
+    else:
+        collection = uuid.uuid4().hex
+        documents = [
+            {'title': 'first', 'body': 'the quick brown fox'},
+            {'title': 'second', 'body': 'the lazy brown dog'},
+            {'title': 'third', 'body': 'a quick fox jumps over the dog'},
+        ]
+        saved = {
+            'base': base,
+            'create': {'operation_id': operation_id(), 'collection_id': collection,
+                       'config': {'index_name': 'write_query_smoke', 'schema': [
+                           {'field': 'title', 'field_type': 'Text'},
+                           {'field': 'body', 'field_type': 'Text'}]}},
+            'writes': [{'operation_id': operation_id(), 'record_id': str(i),
+                        'routing_key': str(i), 'expected': 'Absent', 'document': doc}
+                       for i, doc in enumerate(documents)],
+        }
+        with request_file.open('x') as output:
+            json.dump(saved, output)
+            output.flush()
+            os.fsync(output.fileno())
+    collection = saved['create']['collection_id']
+    check(client.create_collection(saved['create'])['collection_id'] == collection, 'collection ID mismatch')
+    receipt = client.write(collection, saved['writes'][0])
+    check(client.write(collection, saved['writes'][0]) == receipt, 'retry changed receipt')
+    result = client.batch(collection, {'writes': saved['writes'][1:]})
+    check(not result['atomic'] and all(r['code'] == 'applied' for r in result['results']), f'batch failed: {result}')
+    # No explicit checkpoint is needed for durability or visibility.
+    result = client.query(collection, {'query': 'quick fox'})
+    titles = sorted(hit['record']['document']['title'] for hit in result['hits'])
+    check(result['count_total'] == 2 and titles == ['first', 'third'], f'query mismatch: {result}')
+    seq = client.checkpoint(collection)['visible_seq']
+    result = client.query(collection, {})
+    check(seq == result['visible_seq'] == 3 and result['count_total'] == 3, f'checkpoint changed view: {result}')
+    print(f'PASS Record client: stable IDs, retry, batch, immediate query, checkpoint ({collection})')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--port', type=int, default=8080,
-                        help='local port the server is listening on (default: 80)')
+    parser.add_argument('--port', type=int, default=8080)
+    parser.add_argument('--requests', type=Path, required=True, help='save/replay original requests; no API key saved')
     args = parser.parse_args()
-    base = f'http://127.0.0.1:{args.port}'
-    exercise(base, MASTER_KEY)
-    print('PASS create/write/query smoke')
+    key = os.environ.get('SEEKPOWER_API_KEY')
+    if not key:
+        parser.error('set SEEKPOWER_API_KEY to the startup master API key')
+    exercise(f'http://127.0.0.1:{args.port}', key, args.requests)
 
 
 if __name__ == '__main__':

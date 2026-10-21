@@ -1,30 +1,17 @@
 #!/usr/bin/env python3
-"""Reusable HTTP client for the seekpower REST API, used by smoke tests.
+"""Standard-library client for the Record HTTP contract.
 
-Imported by scripts/index_write_query_smoke.py (and available to other test
-scripts) so each scenario reads as a short sequence of method calls instead of
-repeating urllib boilerplate. Requires only the Python standard library and a
-running seekpower_server; no published client SDK is needed.
-
-Usage:
-    client = SeekpowerClient('http://127.0.0.1:54321')
-    client.health()
-    api_key = client.create_api_key(master_key)
-    client.set_default_key(api_key)
-    index_id = client.create_index({...})
-    client.write_documents(index_id, [{'body': '...'}])
-    client.commit(index_id)
-    result = client.query(index_id, {'query': '...'})
-
-Every non-2xx response raises AssertionError via the module-level check() helper,
-matching the assertion style of scripts/http_smoke.py.
+Mutating calls require complete caller-retained requests. Persist them BEFORE
+sending; reuse them after a timeout, busy response or unknown outcome. No method
+allocates new identities or retries implicitly.
 """
 import json
+import time
+import uuid
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
 
-# Sentinel distinguishing "use the client's configured default key" (the common
-# case) from "send no apikey header" (None, unauthenticated, e.g. health checks).
 _DEFAULT = object()
 
 
@@ -33,32 +20,30 @@ def check(condition, message):
         raise AssertionError(message)
 
 
-class SeekpowerClient:
-    """Thin HTTP client for the seekpower REST API surface used by smoke tests."""
+def operation_id():
+    """Allocate once for a NEW request, never inside a retry loop."""
+    return {'epoch': int(time.time() // 86400), 'nonce': uuid.uuid4().hex}
 
+
+class SeekpowerClient:
     def __init__(self, base):
         self.base = base.rstrip('/')
         self._opener = build_opener(ProxyHandler({}))
         self._default_key = None
 
     def set_default_key(self, key):
-        """Authenticate subsequent calls with this key unless one is passed."""
         self._default_key = key
-
-    # -- low-level request helpers --------------------------------------
 
     def request(self, method, path, data=None, key=_DEFAULT, expected=200):
         if key is _DEFAULT:
             key = self._default_key
-        headers = {}
-        if key is not None:
-            headers['apikey'] = key
-        if data is not None and not isinstance(data, bytes):
+        headers = {} if key is None else {'apikey': key}
+        if data is not None:
             data = json.dumps(data, ensure_ascii=False).encode()
             headers['Content-Type'] = 'application/json'
-        req = Request(self.base + path, data=data, headers=headers, method=method)
+        request = Request(self.base + path, data=data, headers=headers, method=method)
         try:
-            response = self._opener.open(req, timeout=10)
+            response = self._opener.open(request, timeout=35)
         except HTTPError as error:
             response = error
         with response:
@@ -70,32 +55,33 @@ class SeekpowerClient:
     def api(self, method, path, data=None, key=_DEFAULT):
         return json.loads(self.request(method, path, data, key))
 
-    # -- public API surface ---------------------------------------------
-
     @staticmethod
-    def index_path(index_id):
-        return f'/api/v1/index/{index_id}'
+    def collection_path(collection_id):
+        return '/api/v1/index/' + quote(collection_id, safe='')
 
     def health(self):
-        """GET /api/v1/live - readiness probe, no authentication required."""
-        self.request('GET', '/api/v1/live', key=None)
+        return self.api('GET', '/api/v1/live', key=None)
 
-    def create_api_key(self, key):
-        """POST /api/v1/apikey - mint a new API key (requires the master key)."""
-        return self.api('POST', '/api/v1/apikey', {}, key)
+    def register_key(self, request, key=_DEFAULT):
+        """Master: {operation_id, key_id, apikey_base64}; client supplies key."""
+        return self.api('POST', '/api/v1/apikey', request, key)
 
-    def create_index(self, config, key=_DEFAULT):
-        """POST /api/v1/index - create an index; returns the new index id."""
-        return self.api('POST', '/api/v1/index', config, key)
+    def create_collection(self, request, key=_DEFAULT):
+        """{operation_id, collection_id, config, embedding_space_id?}."""
+        return self.api('POST', '/api/v1/index', request, key)
 
-    def write_documents(self, index_id, documents, key=_DEFAULT):
-        """POST /api/v1/index/{id}/doc - index one document or a batch (uncommitted)."""
-        self.api('POST', self.index_path(index_id) + '/doc', documents, key)
+    def write(self, collection_id, request, key=_DEFAULT):
+        """{operation_id, record_id, routing_key, expected, document}; null deletes."""
+        return self.api('POST', self.collection_path(collection_id) + '/doc', request, key)
 
-    def commit(self, index_id, key=_DEFAULT):
-        """PATCH /api/v1/index/{id} - commit; returns the indexed document count."""
-        return self.api('PATCH', self.index_path(index_id), None, key)
+    def batch(self, collection_id, request, key=_DEFAULT):
+        """{writes:[RecordWrite,...]}; inspect each result, not an atomic transaction."""
+        return self.api('POST', self.collection_path(collection_id) + '/batch', request, key)
 
-    def query(self, index_id, body, key=_DEFAULT):
-        """POST /api/v1/index/{id}/query - search; returns the parsed result object."""
-        return self.api('POST', self.index_path(index_id) + '/query', body, key)
+    def checkpoint(self, collection_id, key=_DEFAULT):
+        """Confirmed writes are already durable and visible."""
+        return self.api('PATCH', self.collection_path(collection_id), key=key)
+
+    def query(self, collection_id, request, key=_DEFAULT):
+        """Returns hits[].record, visible_seq and optional count_total."""
+        return self.api('POST', self.collection_path(collection_id) + '/query', request, key)

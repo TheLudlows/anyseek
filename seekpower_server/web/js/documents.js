@@ -37,11 +37,19 @@ function showDocuments() {
 }
 async function submitPendingWrites() {
     const pending = pendingDocumentCommit;
+    // Older saved requests without this flag may already have been sent.
+    let previouslyUnresolved = pending.unresolved ?? !pending.rejected;
     try {
         for (let i = pending.completed || 0; i < pending.requests.length; i++) {
             const request = pending.requests[i];
+            previouslyUnresolved = pending.unresolved ?? !pending.rejected;
+            pending.unresolved = true;
+            pending.rejected = false;
+            // A reload or disconnect during fetch must retain uncertainty. If
+            // retaining this state fails, do not send another request.
+            sessionStorage.setItem('seekpower.pendingWrites', JSON.stringify(pending));
             await setupApi('POST', `api/v1/index/${encodeURIComponent(pending.collection)}/doc`, API_KEY, request);
-            pending.completed = i + 1; pending.rejected = false;
+            pending.completed = i + 1; pending.unresolved = false;
             sessionStorage.setItem('seekpower.pendingWrites', JSON.stringify(pending));
         }
         sessionStorage.removeItem('seekpower.pendingWrites');
@@ -50,7 +58,10 @@ async function submitPendingWrites() {
         $('#retryDocumentCommit,#discardRejectedWrites').prop('hidden', true);
         $('#documentJson,#documentFile').val('');
     } catch (error) {
-        pending.rejected = error.code === 'rejected' || error.code === 'conflict';
+        // A rejected retry only describes this attempt; admission may reject
+        // before the server looks up an earlier, already committed operation.
+        pending.rejected = !previouslyUnresolved && (error.code === 'rejected' || error.code === 'conflict');
+        pending.unresolved = !pending.rejected;
         try { sessionStorage.setItem('seekpower.pendingWrites', JSON.stringify(pending)); } catch (_) {}
         $('#discardRejectedWrites').prop('hidden', !pending.rejected);
         $('#documentError').text(`${error.message} Original requests are retained; retry uses the same identities. An absent operation result does not prove failure.`);
@@ -73,7 +84,7 @@ $(function () {
             const documents=Array.isArray(input)?input:[input];
             if(!documents.length||!documents.every(d=>d&&typeof d==='object'&&!Array.isArray(d)))throw new Error('Enter one JSON object or a nonempty array of JSON objects.');
             if(sessionValue('seekpower.pendingWrites'))throw new Error('Resolve the retained writes in their original collection before submitting another batch.');
-            pendingDocumentCommit={collection:INDEX_ID,requests:documents.map(document=>{
+            pendingDocumentCommit={collection:INDEX_ID,unresolved:false,requests:documents.map(document=>{
                 const id=newIdentity(); return {operation_id:newOperationId(),record_id:id,routing_key:id,expected:'Absent',document};
             })};
             // Failure to retain identities must happen before any write is sent.

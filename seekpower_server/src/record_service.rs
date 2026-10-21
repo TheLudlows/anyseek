@@ -45,6 +45,7 @@ impl IntoResponse for Error {
 impl From<CatalogError> for Error {
     fn from(e: CatalogError) -> Self {
         let (status, code) = match &e {
+            CatalogError::Busy => (StatusCode::TOO_MANY_REQUESTS, "busy"),
             CatalogError::Unauthorized => (StatusCode::FORBIDDEN, "unauthorized"),
             CatalogError::Rejected(_) => (StatusCode::BAD_REQUEST, "rejected"),
             CatalogError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
@@ -61,6 +62,7 @@ impl From<CatalogError> for Error {
 impl From<RecordError> for Error {
     fn from(e: RecordError) -> Self {
         let (status, code) = match &e {
+            RecordError::Busy => (StatusCode::TOO_MANY_REQUESTS, "busy"),
             RecordError::Rejected(_) => (StatusCode::BAD_REQUEST, "rejected"),
             RecordError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             RecordError::OperationExpired => (StatusCode::GONE, "operation_expired"),
@@ -1369,6 +1371,13 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[test]
+    fn admission_errors_do_not_claim_a_definitive_write_rejection() {
+        for error in [Error::from(RecordError::Busy), Error::from(CatalogError::Busy)] {
+            assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(error.1, "busy");
+        }
+    }
     fn path() -> PathBuf {
         let base = std::env::var_os("SEEKPOWER_TEST_ROOT")
             .map(PathBuf::from)
@@ -1623,7 +1632,7 @@ pub(crate) fn generate_openapi() {
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
-    doc["info"] = json!({"title":"Seekpower Record service (P1 in progress)","version":crate::VERSION,"description":"Default Record/catalog routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Backup/restore is collection-scoped and does not restore old grants. See docs/implementation-57.md for acceptance limits."});
+    doc["info"] = json!({"title":"Seekpower Record service (bounded P1-A)","version":crate::VERSION,"description":"Default Record/catalog routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root do not restore old grants. See docs/implementation-57.md for acceptance limits."});
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","routing_key","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"routing_key":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
@@ -1789,7 +1798,7 @@ pub(crate) fn generate_openapi() {
             ),
         ),
     ] {
-        let mut operation = json!({"summary":summary,"responses":{"200":{"description":"Success; JSON response"},"default":{"description":"JSON code/message error; 409 conflict, 410 expired, 503 durable_pending/outcome_unknown/recovery_required"}}});
+        let mut operation = json!({"summary":summary,"responses":{"200":{"description":"Success; JSON response"},"default":{"description":"JSON code/message error; 409 conflict, 410 expired, 429 busy (admission before operation lookup; earlier attempts remain unresolved), 503 durable_pending/outcome_unknown/recovery_required"}}});
         let mut params = vec![
             json!({"name":"apikey","in":"header","required":path!="/api/v1/live","schema":{"type":"string"}}),
         ];

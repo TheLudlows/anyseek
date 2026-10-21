@@ -55,6 +55,22 @@ def exercise(base,master,call):
         assert saved['requests']==writes and 'key' not in saved
         page.reload(wait_until="domcontentloaded");expect(page.locator('#indexName')).to_have_text('browser-records')
         page.locator('#writeDocuments').click();expect(page.locator('#retryDocumentCommit')).to_be_visible()
+        # The first request really committed. A later admission rejection or
+        # conflict cannot prove it failed, including after another reload.
+        for status,code in [(400,'rejected'),(409,'conflict'),(429,'busy')]:
+            def reject_retry(route,request,status=status,code=code):
+                route.fulfill(status=status,content_type='application/json',body=json.dumps({'code':code,'message':'retry '+code}))
+            page.route('**/api/v1/index/*/doc',reject_retry,times=1)
+            page.locator('#retryDocumentCommit').click()
+            expect(page.locator('#documentError')).to_contain_text('retry '+code)
+            expect(page.locator('#discardRejectedWrites')).to_be_hidden()
+            expect(page.locator('#documentJson')).to_be_disabled()
+            retained=page.evaluate("JSON.parse(sessionStorage.getItem('seekpower.pendingWrites'))")
+            assert retained['unresolved'] and retained['requests']==writes
+            page.reload(wait_until="domcontentloaded")
+            expect(page.locator('#indexName')).to_have_text('browser-records')
+            page.locator('#writeDocuments').click()
+            expect(page.locator('#discardRejectedWrites')).to_be_hidden()
         page.locator('#retryDocumentCommit').click()
         expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
         assert page.evaluate("sessionStorage.getItem('seekpower.pendingWrites')") is None
@@ -71,6 +87,12 @@ def exercise(base,master,call):
             page.locator('#createIndexForm button[type="submit"]').click();expect(page.locator('#indexName')).to_have_text('browser-'+mode)
             page.locator('#writeDocuments').click();page.locator('#documentJson').fill(json.dumps({'title':mode,'body':'alpha','vector':[2,0]}))
             page.locator('#submitDocuments').click();expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
+            if mode=='Vector':
+                vector_collection=page.evaluate('INDEX_ID')
+                browse=call('POST',f'/api/v1/index/{vector_collection}/query',{})
+                assert browse['count_total']==1 and browse['hits'][0]['record']['document']['title']=='Vector',browse
+                count=call('POST',f'/api/v1/index/{vector_collection}/query',{'length':0})
+                assert count['count_total']==1 and count['hits']==[],count
             # Known rejection can release only the rejected/unattempted remainder.
             page.locator('#documentJson').fill(json.dumps({'body':'bad vector','vector':[1]}))
             page.locator('#submitDocuments').click();expect(page.locator('#discardRejectedWrites')).to_be_visible()
