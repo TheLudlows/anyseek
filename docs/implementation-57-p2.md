@@ -1,6 +1,6 @@
 # Issue #57 P2 实施设计：来源、证据与统一可见性
 
-状态：**P2 设计草案；基础拆分进行中，来源语义未实现，P2 未验收**。本文第 1–10 节保留设计交付时的事实，当前实施进度见第 11 节。D1–D4 尚未答复，建议未转为已批准默认。
+状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施与堆叠基线见第 14 节；已批准不等于已实现。
 
 - 产品依据：[issue #57](https://github.com/TheLudlows/seekpower/issues/57)，包含顶部 2026-10-21 确认。
 - 实施入口：[P1-A 与阶段记录](implementation-57.md)。本设计不替换总体路线。
@@ -193,7 +193,7 @@ Generation 成员补向量是唯一受控的成员增补命令，不等于开放
 
 [确认] 更新不是删除；证据永远引用原版本，不能把旧引用偷偷指向最新来源。上层消费 feed 重算；底座不执行 reflect。
 
-[建议，待 D1 确认] 来源更新保留旧 revision，将依赖旧内容的派生记录标 stale，默认普通 recall 隐藏 stale；可选显式 include_stale 读取仍有效且未删除的历史证据。这里的隐藏策略未获用户批准。独立 source 更新先令旧派生 stale，再发布新 generation；若要零空窗整文替换，建议 `PublishGeneration` 可同时激活其预先 staged SourceRevision，作为一个 MutationPlan，不能连续两个成功 API 冒充原子。
+[确认 D1] 来源更新保留旧 revision，将依赖旧内容的派生记录标 stale，默认普通 recall 隐藏 stale；可选显式 include_stale 读取仍有效且未删除的历史证据。默认隐藏已获批准；显式历史读取是否开放仍是独立接口范围，本批不开放。独立 source 更新先令旧派生 stale，再发布新 generation；若要零空窗整文替换，建议 `PublishGeneration` 可同时激活其预先 staged SourceRevision，作为一个 MutationPlan，不能连续两个成功 API 冒充原子。
 
 重算用新 operation_id + Match 派生 record 版本 + 精确新 evidence 版本，提交时再次验证 source 屏障。证据环在提交前通过有界 DFS 检查，含自引用/跨多个新成员的环；批量命令对最终候选图检查，不能逐条绕过。缺失依赖不按“暂时允许”发布。source 删除和旧重算并发，按串行顺序确定；删除后重算不能恢复旧 incarnation 的内容。
 
@@ -203,7 +203,7 @@ Generation 成员补向量是唯一受控的成员增补命令，不等于开放
 
 [建议] 只允许可信服务时钟设置当前 evaluation_time，客户端业务 as_of 不能复活已删除/TTL 过期内容。获取视图时，基于截止时间有序索引处理到期集合并生成视图的有效位图/统计差量；新视图的 N/df/长度/剪枝也排除过期记录。过期系统命令的事件与不可逆隐藏水位必须在首次向外返回受该 TTL 影响的结果前 durable；查询触发推进也要通过 executor，拿锁前后遵循授权顺序，不在读锁内升级造成死锁。若同步失败，本次读取失败关闭，不能先给出“已过期”再异步落盘。后台仅负责提前推进而不是唯一正确性来源。积压超出预算时等待/背压或显式失败，不以旧统计输出。
 
-[建议，待 D3 确认] TTL 作为不可逆逻辑遗忘：已过期身份保留墓碑；客户端不能通过晚到延长 TTL 恢复，须明确新版本/新生命周期操作。记录持久时间水位以避免重启时钟回退复活；服务发现明显时钟异常进入时间请求失败状态，运行文档声明时钟校准预算。普通未到期记录可 Match 修改 expire_at。
+[确认 D3] TTL 作为不可逆逻辑遗忘：已过期身份保留墓碑；客户端不能通过晚到延长 TTL 恢复，须明确新版本/新生命周期操作。记录持久时间水位以避免重启时钟回退复活；服务发现明显时钟异常进入时间请求失败状态，运行文档声明时钟校准预算。普通未到期记录可 Match 修改 expire_at。
 
 同一已固定查询允许按其 evaluation_time 完成（即使处理期间时间推进），但显式 source 删除/撤权仍立即取消其输出。TTL 的直接/间接派生传播需采用 D3 策略，默认建议同来源删除隐藏；不能在 count/关系上保留另一套 TTL 解释。
 
@@ -225,7 +225,7 @@ source/generation/实体/关系都在一个 partition 日志切面中，service 
 
 [建议] feed 由提交状态保存有界事件窗口，checkpoint 含窗口；不能直接暴露将被 P1 compact_journal 删除的物理 WAL offset。数据提交与事件必须一起 durable，事件不可异步补写，否则崩溃会漏通知。TTLExpired 用持久化过期命令的唯一事件身份，重放不重复逻辑过期。
 
-默认建议配置保留 7 天且设置字节/条数硬上限（D4）；达到容量不能静默突破保证：在过期窗口释放前背压普通新变更，提供告警。source 删除/TTL 隐藏不能被普通 feed 配额堵住：预留覆盖最大有效身份数的紧急墓碑、operation receipt、闭包状态、完整可恢复 checkpoint 和固定大小聚合事件空间，cascade 不强制为每个派生输出独立事件；聚合事件携带 cause 和闭包范围/重建指示，消费者重新读取受保护状态。容量预留在创建身份/依赖时核算；恢复必须保留此预算，授权撤销继续走独立 catalog 权威；P1 当前容量耗尽会 fence 而非保证撤销 durable 成功，P2 不得弱化这个失败关闭行为。若要求满额下撤销仍可提交，须明确新增 catalog 预算预留并测试，不能声称现有保证。消费者离线超过 floor 必须重新 bootstrap；不按最慢消费者无限 pin WAL。长查询/备份/staging与合法 feed 窗口的恢复依赖分别管理，不能用单一“最小 seq”概括所有非连续引用。
+[确认 D4] 至少保留 7 天且设置字节/条数硬上限；达到容量不能静默突破保证：在过期窗口释放前背压普通新变更，提供告警。source 删除/TTL 隐藏不能被普通 feed 配额堵住：预留覆盖最大有效身份数的紧急墓碑、operation receipt、闭包状态、完整可恢复 checkpoint 和固定大小聚合事件空间，cascade 不强制为每个派生输出独立事件；聚合事件携带 cause 和闭包范围/重建指示，消费者重新读取受保护状态。容量预留在创建身份/依赖时核算；恢复必须保留此预算，授权撤销继续走独立 catalog 权威；P1 当前容量耗尽会 fence 而非保证撤销 durable 成功，P2 不得弱化这个失败关闭行为。若要求满额下撤销仍可提交，须明确新增 catalog 预算预留并测试，不能声称现有保证。消费者离线超过 floor 必须重新 bootstrap；不按最慢消费者无限 pin WAL。长查询/备份/staging与合法 feed 窗口的恢复依赖分别管理，不能用单一“最小 seq”概括所有非连续引用。
 
 设计 bootstrap 协议：在同一 barrier 获取数据快照 cut 与 feed continuation；有界 pin 保护分页快照/事件窗口，客户端完成初始枚举后从 cut 后消费，允许重复不得遗漏。P1 iterator 每次写入就失效，不能直接用于不停写的 feed 重建；首版可以在已存在 immutable checkpoint 上有界枚举，租约到期显式重试。备份恢复创建新 feed lineage（防止恢复后新事件与原时间线相同 seq 碰撞），旧 token 明确失效；持久事件仍保留用于审计和重新 bootstrap，数据 operation_id 不因此重用。
 
@@ -297,16 +297,16 @@ P2 新测试文件名以下是拟议名称，尚不存在。复用现有 `cargo 
 
 测试分层：纯状态机/属性测试（重放幂等、循环、ABA）→真实 WAL 故障注入→真实进程退出恢复→共享 key HTTP 并发与流输出→Chromium 创建来源/分批发布/重试/证据预览→Linux 与 Windows 原生矩阵。请求取消和 kill worker 的忽略子程序要列清归属；最终代码修改后重跑适用全套，不能沿用修改前结果。性能只记录预算内资源观察，不重启 benchmark 调参。
 
-## 9. 待用户决定的业务语义
+## 9. 已确认的业务语义与实施状态
 
-以下问题不阻塞通用版本/日志/授权/备份设计，但必须在对应功能编码/验收前确定。其余正确性选择直接采用工程评审，不逐项要求用户确认。
+用户在 Sentinel_d2c624cd956c81919e1aac72655b354c 回复“四项按建议”，批准以下语义。不是批准一次实现所有阶段，也不授权合入或部署。
 
-| 编号 | 实质问题与推荐 | 影响 |
+| 编号 | 已批准语义 | 实施边界 |
 | --- | --- | --- |
-| D1 | **来源更新后，旧证据派生默认还能检索吗？** 推荐标 stale 并默认隐藏，显式历史模式才返回；备选是标 stale 但继续普通 recall，直至上层重算 | 有效语料统计、召回空窗、历史模式、更新事件；删除始终隐藏已确认，不重复询问 |
-| D2 | **整文发布默认是否等待全部向量？** 推荐默认允许 lexical-ready 发布、返回各通道 readiness，并提供显式 require_vectors；备选默认全部向量就绪才发布 | 导入延迟与完整通道要求；无论选择哪种都不可混合 generation |
-| D3 | **TTL 到期是否作为不可逆遗忘，并连带隐藏依赖它的派生内容？** 推荐是；无 TTL 永不过期；备选仅当前查询过滤、允许延长及独立派生保留，需要另行明确语义 | 删除屏障、历史/备份说明、重算与 clock-watermark；不改变明确的 source 删除规则 |
-| D4 | **change feed 的保证离线重放窗口需要多久？** 建议首版 7 天，容量不足背压而不静默提前过期；请按实际消费者最长离线时间确定 | 磁盘/事件预算、消费者重建频率；不承诺无限保留 |
+| D1 | 来源更新使旧派生 stale，默认隐藏，等待上层重算发布；来源删除始终立即隐藏 | 第 14 节先交付条件更新与隐藏；不自动重算，不开放 include_stale 绕过 |
+| D2 | 正文就绪即可发布，先支持全文检索；向量后补，缺向量不参加向量召回，不填零向量 | 下一 generation/可选向量切片；当前带向量 schema 仍要求完整向量 |
+| D3 | TTL 到期为不可逆逻辑删除，并隐藏依赖派生；不能仅延长 TTL 复活，物理回收异步 | 后续 temporal 切片，当前未实现 |
+| D4 | feed 至少保留 7 天；容量不足限制新写，不提前静默丢弃窗口内事件；过期消费者重建同步状态 | 后续 feed 切片，当前未实现 |
 
 管理型大文件 Blob 的必要性按首个实际输入场景决定：如果只需外部引用，不强加上传平台；若要求底座完整保存 PDF/音视频，须将 BlobStore 与备份保护纳入对应切片并确定容量。此为能力选用说明，不把未给定文件规模设成阻塞所有 P2 的问题。
 
@@ -497,3 +497,50 @@ target/debug/seekpower_server generate_openapi=true
 本地日志：`/tmp/p2-takeover-final4-tests.log`、`/tmp/p2-takeover-final2-build.log`、`/tmp/p2-takeover-final3-http.log`、`/tmp/p2-takeover-boundary.log`、`/tmp/p2-takeover-fault-build.log`、`/tmp/p2-takeover-final-fault-http.log`、`/tmp/p2-takeover-openapi.log`。中间验证曾发现 catalog 未规范化配置与已持久配置比较不一致，以及 UI 通用连接状态覆盖接管输入锁，均修复后重跑。测试夹具完成备份容量测试后显式退休其旧备份，未扩大生产上限。
 
 剩余范围：同服务受控接管已形成可运行闭环；独立灾难恢复缺少最新删除历史时仍不可激活，未实现跨服务 fencing；完整 P2-1/P2、D1–D4 及系统故障验收均未完成。不得把当前切片当作整个 P2 已交付。PR 保持草稿供用户检视，不自动合入或部署。
+
+
+## 14. 来源修订与 stale 隐藏（本地实现，等待用户检视）
+
+2026-10-21 核验：master 仍为 `64b1c8f656394a55f5b8a1239754d03d2872efd5`，PR #62 保持 OPEN/draft、未合入，head 为 `20531fa24aaf531faa338451ed55d4d7c2e917b5`。该 head 的 [双平台 CI 39571399133](https://github.com/TheLudlows/seekpower/actions/runs/39571399133) 已全部通过。
+
+本地分支 `feat/57-p2-source-revisions` 堆叠在上述 PR head；不重复合入已有提交，不推送、不创建新 PR、不修改 PR #62。第一批落实 D1 来源更新及直接/间接 stale 默认隐藏，随后另批实现 document generation 与 D2 可选向量。TTL/feed 再按依赖推进，不塞入本批。
+
+### 实际实现与接口边界
+
+- `record/evidence.rs` 负责精确版本规则、依赖可见性和历史完整性检查；`mutation.rs` 负责版本条件及持久容量预留；`publication.rs` 负责增量退役旧 ordinal/派生候选、活动统计及缓存失效。通用 journal 不解释 stale 业务。
+- Source 更新沿用现有写入命令，必须 `expected:{"Match":当前版本}`。省略 system 时继承旧来源类型；不允许换类型/路由。原 operation_id 保持原回执，不重复增加历史；更新冲突不会部分发布。Derived 重算使用新 ID 和最新精确证据版本，不开放原 ID 编辑或删除后重建。
+- 权威 State 保存 `source_revisions`（每个被替换或删除的来源正文、版本、路由及元数据）；与当前记录、回执一起进入 WAL/checkpoint、备份和最终封存水位接管。不把幂等回执保留期当证据保留期；历史没有第二份独立提交状态。恢复拒绝孤立、重复、越界及缺失修订。
+- Source 更新使直接和间接旧证据 stale，默认正文/查询/iterator 隐藏；新 source 仍可见。增量发布同步撤销旧候选并更新活动 BM25 统计和结果计数，所有检索模式共享相同可见集合。旧数据输出许可失效；授权输出屏障保留。删除优先于 stale，隔离恢复仍不可输出 typed 正文。
+- `GET /api/v1/index/{id}/doc/{record_id}/status` 是已实现的受保护元数据接口，返回 `record_id/version/visibility/visible_seq`；状态为 visible/stale/deleted/unavailable/quarantined。它不提供历史正文，也没有 include_stale 绕过。HTTP/UI 只适配核心规则，Web UI envelope 模式可以直接更新来源。
+- 资源上限：历史修订数加 live Source 数不得超过 collection `max_records`，为每个 live Source 留出最终删除位置；实际 checkpoint 字节和既有删除字节预留同时检查。容量不足拒绝新修订，不丢旧历史、不阻止已预留的来源逻辑删除。未实现历史 GC，后续 P3 再处理持续回收。
+- 权威 entry 使用 **V4**，旧 V3/V2/P1 明确拒绝；本批不实现升级迁移。依赖遍历仍采用既有有界、失败关闭约束，同 collection 限制不变。
+
+实际请求结构（operation_id 必须使用调用时有效 epoch，并保存原值重试）：
+
+```json
+{
+  "operation_id": {"epoch": 20747, "nonce": "source-revision-2"},
+  "record_id": "source-1", "routing_key": "document-1",
+  "expected": {"Match": 1}, "document": {"body": "Revised source text"}
+}
+```
+
+### 验证与退出条件
+
+独立代码审查完成，未发现剩余阻塞缺陷；审查建议的完整历史校验已实现并复核。新增核心测试覆盖条件并发冲突、重复提交、直接/间接 stale、新派生、三种检索模式、满历史预算删除、旧输出许可失效、checkpoint/reopen、旧备份接管追平及 durable-pending 恢复。
+
+Linux 最终 Rust 源码全量：**186 passed / 0 failed / 10 ignored，35 suites**；10 个 ignored 为既有辅助程序，本批无新增忽略。默认真实 HTTP/Chromium、核心依赖边界及 OpenAPI 生成通过。HTTP 新用例覆盖共享 key 更新、版本冲突、状态无正文、计数、重启、删除优先级和撤权；Chromium 实际编辑器执行更新、搜索隐藏及删除。故障注入 HTTP/Chromium 全部通过：新增来源更新在 after_append_unknown、after_durable、crash_after_durable、crash_after_visible 四个边界的服务恢复、stale 隐藏与原请求重试；既有删除/接管/备份故障矩阵保持通过。上述命令均退出 0。
+
+```bash
+cargo test --workspace --all-targets --quiet
+cargo build --workspace
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser
+python3 scripts/check_core_boundary.py
+cargo build -p seekpower_server --features fault-injection
+python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --faults --browser
+target/debug/seekpower_server generate_openapi=true
+```
+
+本地证据日志：`/tmp/p2-revisions-full.log`、`/tmp/p2-revisions-build.log`、`/tmp/p2-revisions-http.log`、`/tmp/p2-revisions-boundary.log`、`/tmp/p2-revisions-fault-build.log`、`/tmp/p2-revisions-fault-http.log`、`/tmp/p2-revisions-openapi.log`。
+
+**Windows 本批原生测试未运行**，不能沿用基线 CI 当作本批通过；须另获新分支发布/CI 授权。**Linux/Windows 系统崩溃与断电仍未验收**，需要隔离环境及外部确认见证，进程退出不能替代。范围仅 D1 有界来源修订闭环；generation、可选向量、TTL、feed、历史正文 API 及持续历史回收未实现，四策略批准不代表这些已交付。完成本地检查点后交用户检视，不自动合入或扩展 PR #62。

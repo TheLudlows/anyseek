@@ -97,6 +97,15 @@ pub(super) fn prepare(
         ));
     }
     let previous = state.records.get(&request.record_id);
+    let live_sources = state.records.values().filter(|r| evidence::retained_revision(r)).count();
+    let adding_history = previous.is_some_and(evidence::retained_revision);
+    let new_source = previous.is_none() && request.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Source);
+    let deleting_source = adding_history && request.document.is_none();
+    if state.source_revisions.len() + usize::from(adding_history) + live_sources
+        + usize::from(new_source) - usize::from(deleting_source) > config.max_records {
+        return Err(RecordError::Rejected("source revision budget reserves final deletion slots".into()));
+    }
+
     if previous.is_some_and(|r| r.routing_key != request.routing_key) {
         return Err(RecordError::Conflict("routing key cannot change".into()));
     }
@@ -162,7 +171,10 @@ pub(super) fn prepare(
     } else {
         0
     };
-    let snapshot_bytes = current_snapshot_bytes - old_size
+    let history_bytes = if adding_history {
+        old_size + usize::from(!state.source_revisions.is_empty())
+    } else { 0 };
+    let snapshot_bytes = current_snapshot_bytes + history_bytes - old_size
         + serde_json::to_vec(&next_record).map_err(storage)?.len()
         + map_overhead
         + serde_json::to_vec(&applied).map_err(storage)?.len()

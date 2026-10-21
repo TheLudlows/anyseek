@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 mod evidence;
 mod output;
-pub use evidence::{EvidenceKind, EvidenceMetadata, EvidenceRef};
+pub use evidence::{EvidenceKind, EvidenceMetadata, EvidenceRef, EvidenceVisibility};
 pub use output::DataOutputPermit;
 mod mutation;
 mod publication;
@@ -230,6 +230,7 @@ struct State {
     // This persistent restore gate is deliberately not cleared by ordinary writes.
     evidence_quarantined: bool,
     records: BTreeMap<String, Record>,
+    source_revisions: Vec<Record>,
     // Vec avoids JSON's restriction on structured map keys. Bounded by config.
     operations: Vec<Applied>,
     #[serde(skip)]
@@ -237,9 +238,9 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
-    #[serde(rename = "RecordCheckpointV3")]
+    #[serde(rename = "RecordCheckpointV4")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV3")]
+    #[serde(rename = "RecordAppliedV4")]
     Applied(Applied),
 }
 struct Inner {
@@ -332,6 +333,20 @@ pub struct RecordSearch {
     pub statistics: RecordStatistics,
 }
 
+/// Content-free status from the same view as version and visibility. Hidden
+/// historical bodies are not made available by this inspection API.
+#[derive(Clone, Debug, Serialize)]
+pub struct RecordStatus {
+    /// Stable current identity.
+    pub record_id: String,
+    /// Current authority version, including tombstones.
+    pub version: u64,
+    /// Why ordinary reads include or hide this identity.
+    pub visibility: EvidenceVisibility,
+    /// Common authoritative view waterline.
+    pub visible_seq: u64,
+}
+
 /// Common-view counts; retained physical versions are not live record counts.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct RecordStatistics {
@@ -343,6 +358,8 @@ pub struct RecordStatistics {
     pub retained_identities: usize,
     /// Retry results currently retained by the operation ledger.
     pub retained_operations: usize,
+    /// Immutable prior source bodies retained independently of retry expiry.
+    pub retained_source_revisions: usize,
     /// Physical indexed versions, including candidates filtered as retired.
     pub physical_versions: usize,
     /// Source/evidence data in an independent snapshot is withheld until a
@@ -358,6 +375,7 @@ impl Inner {
             active_records: self.locations.len(),
             retained_identities: self.state.records.len(),
             retained_operations: self.state.operations.len(),
+            retained_source_revisions: self.state.source_revisions.len(),
             physical_versions: self.ordinals.len(),
             evidence_quarantined: self.state.evidence_quarantined,
             checkpoint_bytes: self.snapshot_bytes,
@@ -513,6 +531,9 @@ fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
     {
         return Err(storage("inconsistent committed record operation"));
     }
+    if let Some(record) = previous.filter(|r| evidence::retained_revision(r)) {
+        state.source_revisions.push(record.clone());
+    }
     state.records.insert(
         r.record_id.clone(),
         Record {
@@ -641,7 +662,9 @@ impl RecordPartition {
                 }
             }
         }
+        evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
         if state.records.len() > config.max_records
+            || state.source_revisions.len() + state.records.values().filter(|r| evidence::retained_revision(r)).count() > config.max_records
             || state.operations.len() > config.max_operations
         {
             return Err(storage("recovered state exceeds configured limits"));
@@ -714,8 +737,7 @@ impl RecordPartition {
                 if injected.as_deref() == Some("before_append") {
                     return Err(RecordError::Rejected("injected before append".into()));
                 }
-                let hides_evidence = applied.request.document.is_none()
-                    && inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some());
+                let hides_evidence = inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some());
                 inner.healthy = false;
                 {
                     let mut output = inner.output.write().map_err(|_| RecordError::RecoveryRequired)?;
@@ -796,6 +818,17 @@ impl RecordPartition {
             .get(id)
             .filter(|r| inner.locations.contains_key(&r.record_id))
             .cloned())
+    }
+    /// Inspect visibility without returning stale/deleted original content.
+    pub async fn record_status(&self, id: &str) -> Result<Option<RecordStatus>, RecordError> {
+        let _permit = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
+        let inner = self.inner.lock().await;
+        if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
+        let Some(record) = inner.state.records.get(id) else { return Ok(None); };
+        let visibility = if inner.state.evidence_quarantined && record.system.is_some() {
+            EvidenceVisibility::Quarantined
+        } else { evidence::status(&inner.state.records, id)? };
+        Ok(Some(RecordStatus { record_id: id.into(), version: record.version, visibility, visible_seq: inner.state.seq }))
     }
     /// Search the existing lexical/vector/hybrid engine and read original records
     /// under the same partition guard. Retired candidates are filtered before TopK.
@@ -1132,6 +1165,86 @@ mod tests {
             .await
             .unwrap()
     }
+    #[tokio::test]
+    async fn record_source_revision_stale_recompute_delete_and_recovery() {
+        let root = path(); let archive = path(); let target = path();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(source_write("s1", "s", &[])).await.unwrap();
+        p.write(source_write("d1", "d", &[("s", 1)])).await.unwrap();
+        p.write(source_write("i1", "i", &[("d", 1)])).await.unwrap();
+        p.checkpoint(&archive).await.unwrap();
+        let old_output = p.output_permit().unwrap();
+        let update = write("s2", "s", "alpha current", ExpectedVersion::Match(1));
+        let receipt = p.write(update.clone()).await.unwrap();
+        assert_eq!(receipt.version, 2);
+        assert_eq!(p.write(update.clone()).await.unwrap(), receipt);
+        assert!(old_output.deliver(|| ()).is_err());
+        for id in ["d", "i"] {
+            assert!(p.get(id).await.unwrap().is_none());
+            assert_eq!(p.record_status(id).await.unwrap().unwrap().visibility, EvidenceVisibility::Stale);
+        }
+        assert_eq!(p.get("s").await.unwrap().unwrap().version, 2);
+        assert_eq!(p.statistics().await.unwrap().active_records, 1);
+        assert_eq!(p.statistics().await.unwrap().retained_source_revisions, 1);
+        for mode in [SearchMode::Lexical, SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All },
+            SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All }] {
+            let found = query(&p, mode).await; assert_eq!(found.hits.len(), 1); assert_eq!(found.hits[0].record.record_id, "s");
+        }
+        assert!(p.write(source_write("old-ref", "bad", &[("s", 1)])).await.is_err());
+        p.write(source_write("recomputed", "fresh", &[("s", 2)])).await.unwrap();
+        assert_eq!(p.statistics().await.unwrap().active_records, 2);
+        p.compact_journal().await.unwrap(); drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.record_status("i").await.unwrap().unwrap().visibility, EvidenceVisibility::Stale);
+        assert_eq!(p.write(update).await.unwrap(), receipt);
+        assert_eq!(p.inner.lock().await.state.source_revisions[0].document.as_ref().unwrap()["body"], "evidence original");
+        let backup = RecordPartition::open(&archive, config().max_journal_bytes).await.unwrap();
+        let binding = seal_request(backup.recovery_identity().await.unwrap().digest);
+        let seal = p.seal_for_takeover(binding.clone()).await.unwrap();
+        p.create_takeover_successor(&backup, &target, binding).await.unwrap();
+        let next = RecordPartition::open(&target, config().max_journal_bytes).await.unwrap();
+        next.certify_takeover_successor(&seal).await.unwrap();
+        assert_eq!(next.record_status("d").await.unwrap().unwrap().visibility, EvidenceVisibility::Stale);
+        let mut deletion = write("delete-latest", "s", "unused", ExpectedVersion::Match(2)); deletion.document = None;
+        next.write(deletion).await.unwrap();
+        for id in ["s", "d", "i", "fresh"] {
+            assert_eq!(next.record_status(id).await.unwrap().unwrap().visibility, EvidenceVisibility::Deleted);
+            assert!(next.get(id).await.unwrap().is_none());
+        }
+        assert_eq!(next.statistics().await.unwrap().retained_source_revisions, 2);
+        drop(next); drop(p); drop(backup);
+        for path in [root, archive, target] { std::fs::remove_dir_all(path).unwrap(); }
+    }
+    #[tokio::test]
+    async fn record_source_revision_budget_reserves_delete_and_conflicting_update() {
+        let root = path(); let mut settings = config(); settings.max_records = 2;
+        let p = RecordPartition::create(&root, settings).await.unwrap();
+        p.write(source_write("s", "s", &[])).await.unwrap();
+        let first = write("left", "s", "alpha left", ExpectedVersion::Match(1));
+        let second = write("right", "s", "alpha right", ExpectedVersion::Match(1));
+        let (a,b) = tokio::join!(p.write(first),p.write(second)); assert_ne!(a.is_ok(), b.is_ok());
+        assert!(p.write(write("full", "s", "alpha full", ExpectedVersion::Match(2))).await.is_err());
+        let mut delete = write("delete", "s", "unused", ExpectedVersion::Match(2)); delete.document = None;
+        p.write(delete).await.unwrap();
+        assert_eq!(p.statistics().await.unwrap().retained_source_revisions, 2);
+        drop(p); let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert!(p.get("s").await.unwrap().is_none()); drop(p); std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn record_source_revision_durable_pending_recovers_stale_once() {
+        let root = path(); let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(source_write("s", "s", &[])).await.unwrap();
+        p.write(source_write("d", "d", &[("s", 1)])).await.unwrap();
+        let permit = p.output_permit().unwrap(); p.inner.lock().await.fail_after_durable = true;
+        let update = write("update", "s", "alpha new", ExpectedVersion::Match(1));
+        assert!(matches!(p.write(update.clone()).await, Err(RecordError::DurablePending(3))));
+        assert!(permit.deliver(|| ()).is_err()); drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(update).await.unwrap().version, 2);
+        assert_eq!(p.record_status("d").await.unwrap().unwrap().visibility, EvidenceVisibility::Stale);
+        assert_eq!(p.statistics().await.unwrap().retained_source_revisions, 1);
+        drop(p); std::fs::remove_dir_all(root).unwrap();
+    }
     fn seal_request(digest: String) -> SealRequest {
         SealRequest { intent_id: "a".repeat(64), target_collection_id: "next".into(), backup_digest: digest }
     }
@@ -1354,7 +1467,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV3", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV4", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();

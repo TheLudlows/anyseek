@@ -153,6 +153,32 @@ def main():
             call('POST','/api/v1/restore',{**restore,'operation_id':operation(),'collection_id':'after-source-delete'})
             assert call('GET','/api/v1/index/after-source-delete/doc/r0')['version']==5
             call('POST','/api/v1/restore',{**restore,'backup_id':'../escape'},status=400)
+            # Source revisions preserve bodies while invalidating direct/indirect evidence.
+            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'revisions','config':{'index_name':'Revisions','schema':[{'field':'body','field_type':'Text','store':True}]}})
+            call('POST','/api/v1/index/revisions/grants',{'operation_id':operation(),'key_id':'b','allow':True})
+            src={'operation_id':operation(),'record_id':'s','routing_key':'r','expected':'Absent','document':{'body':'revisionword old'},'system':{'kind':'source'}}
+            call('POST','/api/v1/index/revisions/doc',src)
+            for rid,parent in [('d','s'),('i','d')]:
+                call('POST','/api/v1/index/revisions/doc',{**src,'operation_id':operation(),'record_id':rid,'system':{'kind':'derived','evidence_refs':[{'record_id':parent,'routing_key':'r','version':1}]}})
+            update={**src,'operation_id':operation(),'expected':{'Match':1},'document':{'body':'revisionword new'}}
+            receipt=call('POST','/api/v1/index/revisions/doc',update,key=keys['b'])['receipt']
+            assert receipt['version']==2
+            assert call('POST','/api/v1/index/revisions/doc',update)['receipt']==receipt
+            call('POST','/api/v1/index/revisions/doc',{**update,'operation_id':operation()},status=409)
+            for rid in ['d','i']:
+                status=call('GET','/api/v1/index/revisions/doc/'+rid+'/status',key=keys['b'])
+                assert status['visibility']=='stale' and 'document' not in status
+                call('GET','/api/v1/index/revisions/doc/'+rid,status=404)
+            assert call('POST','/api/v1/index/revisions/query',{'query':'revisionword'})['count_total']==1
+            call('PATCH','/api/v1/index/revisions');restart()
+            assert call('GET','/api/v1/index/revisions/doc/i/status')['visibility']=='stale'
+            assert call('POST','/api/v1/index/revisions/doc',update)['receipt']==receipt
+            call('DELETE','/api/v1/index/revisions/doc',{'operation_id':operation(),'record_id':'s','routing_key':'r','expected':{'Match':2},'document':None})
+            assert call('GET','/api/v1/index/revisions/doc/i/status')['visibility']=='deleted'
+            call('POST','/api/v1/index/revisions/grants',{'operation_id':operation(),'key_id':'b','allow':False})
+            call('GET','/api/v1/index/revisions/doc/i/status',key=keys['b'],status=403)
+            call('DELETE','/api/v1/index/revisions',{'operation_id':operation()})
+            print('PASS source revisions HTTP: conditional update/retry, transitive stale, counts, restart, deletion and status authorization')
             # P2 immutable source/evidence through the same authorized Record API.
             ec={'operation_id':operation(),'collection_id':'evidence','config':{'index_name':'Evidence','schema':[{'field':'body','field_type':'Text','store':True}]}}
             call('POST','/api/v1/index',ec)
@@ -200,6 +226,26 @@ def main():
                     restart();call('GET','/api/v1/index/evidence/doc/'+did,status=404)
                     assert call('DELETE','/api/v1/index/evidence/doc',deletion)['receipt']['version']==2
                 print('PASS source HTTP faults: unknown/durable pending/process loss recover deletion and retry without derived resurrection')
+                for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
+                    sid='revision-'+stage;did='revision-derived-'+stage
+                    call('POST','/api/v1/index/evidence/doc',{**source,'operation_id':operation(),'record_id':sid})
+                    call('POST','/api/v1/index/evidence/doc',{**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'routing_key':'route','version':1}]}})
+                    revision={**source,'operation_id':operation(),'record_id':sid,'expected':{'Match':1},'document':{'body':'revised content'}}
+                    process.kill();process.wait(timeout=20)
+                    start({'SEEKPOWER_RECORD_FAULT':stage,'SEEKPOWER_RECORD_FAULT_NONCE':revision['operation_id']['nonce']})
+                    if stage.startswith('crash_'):
+                        try:call('POST','/api/v1/index/evidence/doc',revision)
+                        except (OSError,http.client.HTTPException):pass
+                        else:raise AssertionError('expected source update transport loss')
+                        process.wait(timeout=20);assert process.returncode==86
+                    else:
+                        assert call('POST','/api/v1/index/evidence/doc',revision,status=503)['code'] in ['outcome_unknown','durable_pending']
+                    restart()
+                    assert call('POST','/api/v1/index/evidence/doc',revision)['receipt']['version']==2
+                    assert call('GET','/api/v1/index/evidence/doc/'+did+'/status')['visibility']=='stale'
+                    call('GET','/api/v1/index/evidence/doc/'+did,status=404)
+                print('PASS source revision HTTP faults: unknown/durable pending/process loss preserve stale and exact retry')
+
             # Same-service takeover catches up to the final authority, never rolls back writes.
             import http.client
             for stage in (['normal','prepared','sealed','target_created','certified','finalized'] if args.faults else ['normal']):

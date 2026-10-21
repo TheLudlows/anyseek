@@ -12,18 +12,19 @@ impl Inner {
         snapshot_bytes: usize,
     ) -> Result<(), RecordError> {
         let receipt = &applied.receipt;
-        let hiding = applied.request.document.is_none()
-            && self
+        let hiding = self
                 .state
                 .records
                 .get(&receipt.record_id)
                 .is_some_and(|r| r.system.is_some());
-        let affected = if hiding {
+        let mut affected = if hiding {
             evidence::descendants(&self.state.records, &receipt.record_id)
                 .map_err(|_| RecordError::DurablePending(receipt.seq))?
         } else {
             std::collections::BTreeSet::new()
         };
+        // Updating the source replaces its own ordinal but keeps the new source visible.
+        if applied.request.document.is_some() { affected.remove(&receipt.record_id); }
         let old_location = self.locations.get(&receipt.record_id).copied();
         if let Some(document) = &applied.request.document {
             let id = self.ordinals.len();

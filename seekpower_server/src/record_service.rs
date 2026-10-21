@@ -736,6 +736,15 @@ async fn write(
         .await?;
     protected(result.map(|receipt|json!({"receipt":receipt,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()})).map_err(Into::into),permit)
 }
+async fn record_status(
+    State(s): State<Arc<Service>>, headers: HeaderMap, Path((id, record_id)): Path<(String, String)>,
+) -> Result<Response, Error> {
+    let key = s.authenticate(&headers).await?;
+    let p = s.record(&key, &id).await?;
+    let data = p.output_permit()?;
+    let (result, permit) = s.catalog.authorized(key, id, move |_| async move { p.record_status(&record_id).await }).await?;
+    protected_data(result.map_err(Error::from).and_then(|status| status.ok_or_else(not_found)), permit, Some(data))
+}
 async fn read(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -1310,6 +1319,7 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index", post(create_collection))
         .route("/api/v1/restore", post(restore))
         .route("/api/v1/takeovers", post(takeover::takeover))
+        .route("/api/v1/index/{id}/doc/{record_id}/status", get(record_status))
         .route("/api/v1/backups", get(list_backups))
         .route("/api/v1/service-backups", post(service_backup))
         .route("/api/v1/service-restores", post(service_restore))
@@ -1775,6 +1785,7 @@ pub(crate) fn generate_openapi() {
     let mut paths = serde_json::Map::new();
     for (path, method, summary, schema) in [
         ("/api/v1/live", "get", "Server version", None),
+        ("/api/v1/index/{id}/doc/{record_id}/status", "get", "Content-free visibility reason and exact current version; stale bodies remain hidden", None),
         ("/api/v1/apikey", "get", "List granted collections", None),
         (
             "/api/v1/apikey",

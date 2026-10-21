@@ -91,7 +91,16 @@ def exercise(base,master,call):
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
         expect(page.locator('#contentBox')).to_contain_text('Derived title')
         page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
-        deletion={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':1},'document':None}
+        revision={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':1},'document':{'title':'Updated source','body':'sourceword revised'}}
+        page.locator('#documentJson').fill(json.dumps(revision));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-derived/status')['visibility']=='stale'
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-derived',status=404)['code']=='not_found'
+        page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
+        expect(page.locator('#contentBox')).to_contain_text('Updated source')
+        expect(page.locator('#contentBox')).not_to_contain_text('Derived title')
+        page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
+        deletion={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':2},'document':None}
         page.locator('#documentJson').fill(json.dumps(deletion));page.locator('#submitDocuments').click()
         expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
         assert call('POST',f'/api/v1/index/{collection}/query',{'query':'sourceword'})['hits']==[]
