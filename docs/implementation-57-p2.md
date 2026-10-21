@@ -1061,3 +1061,7 @@ staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保�
 最终源码 Linux：`cargo test --workspace --all-targets --quiet` **35 suites、226 passed、0 failed、10 ignored**；`cargo build --workspace` 后真实 `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser` 通过；`cargo build -p seekpower_server --features fault-injection` 后同脚本 `--faults --browser` 通过。涵盖实际逐命中 raw score、rank、RRF 求和、关系去重贡献、分页、零权重、字段排序，以及完整多批次上传和既有授权/删除/恢复故障矩阵。核心独立依赖边界 default/no-default、OpenAPI 生成、`git diff --check` 通过。日志 `/tmp/p2-explain-final-{all,build,http,fault-build,fault-http,boundary,openapi}.log`。
 
 10 ignored 是9个由父测试启动的子进程worker，以及1个需相反AES构建的持久哈希辅助fixture；不将忽略项单独算通过。独立审查未留阻塞。Windows 本批原生验证尚未运行；系统崩溃/断电未验收，需隔离可丢弃平台与外部确认见证，进程故障不替代此项。2026-10-21 用户已批准本组收尾按批次发布草稿PR和双平台CI，未授权合入；CI结果以各最终SHA实际run为准，不沿用祖先结果。
+
+## CI 平台修正：staging 清理测试（2026-10-21）
+
+PR #66 run39601083564 与后续 PR #67 run39601191368 的 Windows 原生检查发现：`staging_cleanup_failure_stays_pending_and_retries` 在仍持有 WAL owner 字节范围锁时用独立文件句柄读取 WAL，被 Windows 正确拒绝（错误33）。这是测试观察顺序错误；未放松生产 owner 锁或同步保证。修正为先在 owner 内验证重试，再关闭 owner，检查清理后的持久字节并重开验证 pending 状态。Linux 原结果不替代修正后最终 SHA 的双平台重跑；系统崩溃/断电仍未验收。
