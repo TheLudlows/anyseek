@@ -79,6 +79,26 @@ def exercise(base,master,call):
         page.locator('#searchInput').fill('browser alpha')
         expect(page.locator('#contentBox')).to_contain_text('Browser title')
         page.reload(wait_until="domcontentloaded");expect(page.locator('#indexName')).to_have_text('browser-records')
+        # New source/evidence path through the actual editor, with stable IDs.
+        page.locator('#writeDocuments').click()
+        page.locator('#recordEnvelopeMode').check()
+        envelopes=[
+            {'record_id':'ui-source','routing_key':'ui-route','expected':'Absent','document':{'title':'Source title','body':'sourceword'},'system':{'kind':'source'}},
+            {'record_id':'ui-derived','routing_key':'ui-route','expected':'Absent','document':{'title':'Derived title','body':'sourceword'},'system':{'kind':'derived','evidence_refs':[{'record_id':'ui-source','routing_key':'ui-route','version':1}]}},
+        ]
+        page.locator('#documentJson').fill(json.dumps(envelopes))
+        page.locator('#submitDocuments').click();expect(page.locator('#documentStatus')).to_contain_text('Wrote 2 record(s)')
+        page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
+        expect(page.locator('#contentBox')).to_contain_text('Derived title')
+        page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
+        deletion={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':1},'document':None}
+        page.locator('#documentJson').fill(json.dumps(deletion));page.locator('#submitDocuments').click()
+        expect(page.locator('#documentStatus')).to_contain_text('Wrote 1 record(s)')
+        assert call('POST',f'/api/v1/index/{collection}/query',{'query':'sourceword'})['hits']==[]
+        assert call('GET',f'/api/v1/index/{collection}/doc/ui-derived',status=404)['code']=='not_found'
+        page.locator('#backToSearch').click();page.locator('#searchInput').fill('sourceword')
+        expect(page.locator('#contentBox')).not_to_contain_text('Derived title')
+        print('PASS Chromium: source/derived envelopes, source deletion hides derived search and original reads')
         # Keep existing Vector/Hybrid setup, with explicit model/space identity.
         for mode in ['Vector','Hybrid']:
             page.locator('#manageIndexes').click();expect(page.locator('#newIndexName')).to_be_enabled()
@@ -100,7 +120,33 @@ def exercise(base,master,call):
             page.locator('#discardRejectedWrites').click();expect(page.locator('#documentJson')).to_be_enabled()
             expect(page.locator('#documentStatus')).to_contain_text('Rejected and unsent requests discarded')
             page.locator('#backToSearch').click()
+        # Same-service takeover through real UI; response loss keeps the exact intent.
+        from record_service_smoke import operation
+        archive=call('POST',f'/api/v1/index/{collection}/backup',{'operation_id':operation()})
+        final_write={'operation_id':operation(),'record_id':'after-ui-backup','routing_key':'ui','expected':'Absent','document':{'body':'retained final UI write'}}
+        final_receipt=call('POST',f'/api/v1/index/{collection}/doc',final_write)['receipt']
         page.locator('#manageIndexes').click()
+        page.locator('#takeoverRecovery summary').click()
+        page.locator('#takeoverSource').fill(collection)
+        page.locator('#takeoverBackup').fill(archive['backup_id'])
+        page.locator('#takeoverTarget').fill('browser-takeover')
+        takeover_requests=[]
+        def lose_takeover(route):
+            takeover_requests.append(route.request.post_data_json)
+            reply=route.fetch();assert reply.status==200
+            route.abort('failed')
+        page.route('**/api/v1/takeovers',lose_takeover,times=1)
+        page.locator('#submitTakeover').click()
+        expect(page.locator('#takeoverStatus')).to_contain_text('Retry preserves')
+        page.reload(wait_until='domcontentloaded');page.locator('#manageIndexes').click()
+        page.locator('#takeoverRecovery summary').click()
+        expect(page.locator('#takeoverSource')).to_be_disabled()
+        assert page.evaluate("JSON.parse(sessionStorage.getItem('seekpower.pendingTakeover'))")==takeover_requests[0]
+        page.locator('#submitTakeover').click()
+        expect(page.locator('#takeoverStatus')).to_contain_text('Recovery active: browser-takeover')
+        assert call('POST','/api/v1/index/browser-takeover/doc',final_write)['receipt']==final_receipt
+        call('GET',f'/api/v1/index/{collection}',status=403)
+        print('PASS Chromium: takeover final writes, original closed, exact retry after lost response and reload')
         page.locator('#serviceRecovery summary').click()
         page.locator('#backupService').click()
         expect(page.locator('#serviceRecoveryStatus')).to_contain_text('Service backup created',timeout=30000)

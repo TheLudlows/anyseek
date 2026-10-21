@@ -128,3 +128,33 @@ python3 scripts/record_service_smoke.py --server target/debug/seekpower_server -
 小型调用方示例使用 `scripts/seekpower_client.py`：设置 `SEEKPOWER_API_KEY` 后运行 `python3 scripts/index_write_query_smoke.py --port 8080 --requests requests.json`；重复执行同一命令重试保存的请求，不生成新身份。旧 `http_smoke.py` 已由完整 Record smoke 取代。
 
 `generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。路由清单见 [FEATURES](../FEATURES.md)，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
+
+## P2 本地来源/证据切片
+
+来源删除检查点 aa168ca 已通过 Linux/Windows 原生 CI；新增接管恢复的最新验证见实施记录，系统断电尚未验收。完整设计与限制见 [实施记录](../docs/implementation-57-p2.md#12-来源证据删除切片本地实现等待用户检视)。
+
+沿用 `POST /api/v1/index/{collection_id}/doc`，在完整 Record 请求上增加可选 `system`：
+
+```json
+{
+  "operation_id": {"epoch": 20747, "nonce": "save-source"},
+  "record_id": "source-1", "routing_key": "document-1", "expected": "Absent",
+  "document": {"body": "Original source text"},
+  "system": {"kind": "source"}
+}
+```
+
+示例 epoch 仅作结构说明，实际按当前 UTC 日生成并随原请求保存。派生记录用自己的稳定 ID 和 `system:{"kind":"derived","evidence_refs":[{"record_id":"source-1","routing_key":"document-1","version":1}]}`。来源与派生均要求满足 collection 既有 schema/向量约束；本切片未实现可选向量。
+
+删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；权限撤销与数据输出各自复核。引用只允许当前 collection，未知 collection 字段明确拒绝。source/derived 更新、重建、TTL/generation/feed 暂不支持，不能把 business document 中的同名字段当作已实现语义。
+
+Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。当前仍存活的原服务可以通过下面的受控接管创建已核验的新目标；这不会清除任意独立恢复目录的隔离。
+
+Record 权威格式使用 V3 entry 标签，拒绝 V2/P1 目录；不提供升级迁移或旧格式兼容。
+
+
+### 同服务受控接管
+
+现有 master 使用 `POST /api/v1/takeovers`，请求为 `operation_id`、`source_collection_id`、新的 `collection_id` 和 `backup_id`。只接受当前服务中仍有完整权威历史的源及同谱系备份。此操作会永久关闭原 collection，目标追平最终封存水位，保留全部已确认写入，**不是回退到备份时点**；旧 grants 不复制。返回 `status:"active"`、`recovery:"final_sealed_waterline"` 和最终 certificate。
+
+Web UI 的 “Take over a collection” 输入同样字段，先保存请求，响应丢失/重载后原样重试。相同目标不得换源或备份；中断后服务按持久意图续办，目标认证前不开放。完整服务备份拒绝未完成接管。独立恢复目录（含空或纯普通记录备份）不能冒充当前删除权威；没有强制解除隔离、跨服务自动灾备或双活入口。详见 [接管边界与验证](../docs/implementation-57-p2.md#13-同服务受控接管恢复进行中)。

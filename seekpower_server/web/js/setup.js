@@ -58,6 +58,7 @@ function setSetupBusy(busy) {
     if (!busy) {
         $('#openIndex,#indexList').prop('disabled', !$('#indexList option').length);
         $('#vectorDimensions').prop('disabled', $('#indexMode').val() === 'Lexical');
+        if (sessionValue('seekpower.pendingTakeover')) $('#takeoverSource,#takeoverBackup,#takeoverTarget').prop('disabled', true);
         const pending = JSON.parse(sessionValue('seekpower.pendingCreate') || 'null');
         $('#discardRejectedCreation').prop('hidden', !pending?.rejected);
         if (pending) {
@@ -181,13 +182,41 @@ $(function () {
                     $('#serviceBackupId').val(result.backup_id);
                     $('#serviceRecoveryStatus').text('Service backup created: ' + result.backup_id);
                 } else {
-                    $('#serviceRecoveryStatus').text('Restored to new stopped root: ' + result.target_root + '. Current master only; historical keys remain disabled.');
+                    $('#serviceRecoveryStatus').text('Restored to new stopped root: ' + result.target_root + '. Current master only; historical keys remain disabled. Source/evidence content remains quarantined until deletion-history reconciliation is available.');
                 }
             } catch (error) {
                 $('#serviceRecoveryStatus').text((error.message || 'Recovery request failed.') + ' Retry preserves the original request; no running service is replaced.');
             } finally { $('#backupService,#restoreService').prop('disabled', false); }
         });
     }
+    const takeoverSlot = 'seekpower.pendingTakeover';
+    const savedTakeover = JSON.parse(sessionValue(takeoverSlot) || 'null');
+    if (savedTakeover) {
+        $('#takeoverSource').val(savedTakeover.source_collection_id);
+        $('#takeoverBackup').val(savedTakeover.backup_id);
+        $('#takeoverTarget').val(savedTakeover.collection_id);
+        $('#takeoverSource,#takeoverBackup,#takeoverTarget').prop('disabled', true);
+    }
+    $('#submitTakeover').on('click', async () => {
+        try {
+            let pending = JSON.parse(sessionValue(takeoverSlot) || 'null');
+            if (!pending) {
+                pending = {operation_id: newOperationId(), source_collection_id: $('#takeoverSource').val().trim(),
+                    backup_id: $('#takeoverBackup').val().trim(), collection_id: $('#takeoverTarget').val().trim()};
+                if (!pending.source_collection_id || !pending.collection_id || !/^[0-9a-f]{64}$/.test(pending.backup_id))
+                    throw new Error('Enter source, new target and lowercase collection backup ID.');
+                sessionStorage.setItem(takeoverSlot, JSON.stringify(pending));
+            }
+            $('#submitTakeover').prop('disabled', true);
+            $('#takeoverSource,#takeoverBackup,#takeoverTarget').prop('disabled', true);
+            const result = await setupApi('POST', 'api/v1/takeovers', API_KEY, pending);
+            sessionStorage.removeItem(takeoverSlot);
+            $('#takeoverSource,#takeoverBackup,#takeoverTarget').prop('disabled', false);
+            $('#takeoverStatus').text('Recovery active: ' + result.collection_id + '. Original sealed; all acknowledged writes retained through sequence ' + result.certificate.final_seq + '. Old grants were not restored.');
+        } catch (error) {
+            $('#takeoverStatus').text((error.message || 'Recovery failed.') + ' Retry preserves the saved request; the original may already be sealed.');
+        } finally { $('#submitTakeover').prop('disabled', false); }
+    });
     $('#discardRejectedCreation').on('click', () => {
         const pending = JSON.parse(sessionValue('seekpower.pendingCreate') || 'null');
         if (!pending?.rejected) return;

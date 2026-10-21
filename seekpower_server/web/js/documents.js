@@ -11,6 +11,7 @@ function resetDocumentEditor() {
     pendingDocumentCommit = null;
     CURRENT_SCHEMA = {};
     $('#documentJson,#documentFile').val('');
+    $('#recordEnvelopeMode').prop('checked',false);
     $('#documentSchema,#documentIndex,#documentError,#documentStatus').text('');
     $('#retryDocumentCommit,#discardRejectedWrites').prop('hidden', true);
 }
@@ -18,7 +19,7 @@ function documentControls(busy) {
     documentBusy = busy;
     $('#manageIndexes,#writeDocuments,#backToSearch,#retryDocumentCommit,#discardRejectedWrites').prop('disabled', busy);
     $('#writeDocuments').prop('disabled', busy || $('#documentPanel').is(':visible'));
-    $('#documentJson,#documentFile,#submitDocuments').prop('disabled', busy || pendingDocumentCommit !== null);
+    $('#documentJson,#documentFile,#recordEnvelopeMode,#submitDocuments').prop('disabled', busy || pendingDocumentCommit !== null);
 }
 function showDocuments() {
     if (documentBusy || !status_loaded || setupOpen) return;
@@ -85,6 +86,12 @@ $(function () {
             if(!documents.length||!documents.every(d=>d&&typeof d==='object'&&!Array.isArray(d)))throw new Error('Enter one JSON object or a nonempty array of JSON objects.');
             if(sessionValue('seekpower.pendingWrites'))throw new Error('Resolve the retained writes in their original collection before submitting another batch.');
             pendingDocumentCommit={collection:INDEX_ID,unresolved:false,requests:documents.map(document=>{
+                if ($('#recordEnvelopeMode').prop('checked')) {
+                    if (!Object.hasOwn(document,'document') || !document.record_id || !document.routing_key || !document.expected)
+                        throw new Error('Each envelope requires record_id, routing_key, expected and explicit document (null deletes).');
+                    if (Object.hasOwn(document,'operation_id')) throw new Error('Operation IDs are managed by this editor.');
+                    return {...document, operation_id:newOperationId()};
+                }
                 const id=newIdentity(); return {operation_id:newOperationId(),record_id:id,routing_key:id,expected:'Absent',document};
             })};
             // Failure to retain identities must happen before any write is sent.
