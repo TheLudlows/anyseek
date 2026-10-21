@@ -169,9 +169,27 @@ pub(crate) struct SearchResult<'a> {
     pub topk_candidates: MinHeap<'a>,
 }
 
+/// Explanation of one candidate channel; ranks are zero-based in its bounded window.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChannelExplanation {
+    /// lexical, vector, relation, or browse.
+    pub channel: String,
+    /// Position before final fusion pagination (not a corpus-wide recall guarantee).
+    pub rank: usize,
+    /// score, requested_order, stable_adjacency, or browse_order.
+    pub rank_basis: String,
+    /// Unmodified channel engine score; absent for adjacency/browse.
+    pub raw_score: Option<f32>,
+    /// Weighted reciprocal-rank contribution; absent outside fusion.
+    pub rrf_contribution: Option<f32>,
+}
+
 /// Contains the results returned when searching the index.
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
 pub struct ResultObject {
+    /// Per-returned-ordinal hybrid diagnostics, collected without altering ranking.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub explanations: std::collections::BTreeMap<usize, Vec<ChannelExplanation>>,
     /// Invalid query input. Callers must check this before consuming search results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1181,6 +1199,7 @@ impl Search for IndexArc {
                         })
                         .enumerate()
                     {
+                        result_object.explanations.entry(result.doc_id).or_default().push(ChannelExplanation{channel:"lexical".into(),rank:i,rank_basis:"score".into(),raw_score:Some(result.score),rrf_contribution:Some(rrf_contribution(rrf.keyword_weight,k,i))});
                         rrf_results.insert(
                             result.doc_id,
                             Result {
@@ -1205,6 +1224,7 @@ impl Search for IndexArc {
                         .enumerate()
                     {
                         let rrf_score = rrf_contribution(rrf.vector_weight, k, i);
+                        result_object.explanations.entry(result.doc_id).or_default().push(ChannelExplanation{channel:"vector".into(),rank:i,rank_basis:"score".into(),raw_score:Some(result.score),rrf_contribution:Some(rrf_score)});
 
                         #[cfg(feature = "vb")]
                         rrf_results
@@ -1316,6 +1336,8 @@ impl Search for IndexArc {
             if result_object.results.len() > length {
                 result_object.results.truncate(length);
             }
+            let returned:AHashSet<_>=result_object.results.iter().map(|r|r.doc_id).collect();
+            result_object.explanations.retain(|id,_|returned.contains(id));
             result_object.result_count = result_object.results.len();
         }
 

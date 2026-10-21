@@ -374,6 +374,8 @@ pub struct RecordPage {
 /// A record hit from one complete visible position.
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordHit {
+    /// Per-channel ranking evidence from this same view, with unmodified raw scores.
+    pub channels: Vec<crate::search::ChannelExplanation>,
     /// The exact original record corresponding to the ranked candidate.
     pub record: Record,
     /// Existing engine score (BM25, vector, or RRF according to query mode).
@@ -1420,6 +1422,8 @@ mod tests {
         let mut expected:Vec<_>=oracle.into_iter().collect();expected.sort_by(|a,b|b.1.total_cmp(&a.1).then_with(||a.0.cmp(&b.0)));
         let result=p.query_with_relations(fusion_query(),options.clone()).await.unwrap();
         assert_eq!(result.hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>(),expected);
+        for hit in &result.hits {assert_eq!(hit.channels.iter().map(|c|c.rrf_contribution.unwrap()).sum::<f32>(),hit.score);assert_eq!(hit.channels.iter().filter(|c|c.channel=="relation").count(),usize::from(["b","c"].contains(&hit.record.record_id.as_str())));for c in &hit.channels{assert_eq!(c.raw_score.is_none(),c.channel=="relation");}}
+
         assert_eq!(result.count_total,6);assert!(result.fusion.unwrap().relation_complete);
         p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.query_with_relations(fusion_query(),options.clone()).await.unwrap().hits.iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>(),expected);
@@ -1443,6 +1447,30 @@ mod tests {
         let result=p.query_with_relations(q,fusion_options()).await.unwrap();assert_eq!(result.hits.len(),1);assert_eq!(result.hits[0].record.record_id,"b");
         clock.set(now+100);let result=p.query_with_relations(fusion_query(),fusion_options()).await.unwrap();assert_eq!(result.evaluation_time_ms,now+100);assert!(!result.hits.iter().any(|h|h.record.record_id=="b"||h.record.record_id=="ab"));
         let mut bad=fusion_options();bad.rrf.keyword_candidates=Some(100);assert!(p.query_with_relations(fusion_query(),bad).await.is_err());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn query_explanations_preserve_raw_scores_ranks_and_pagination() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        for id in ["c","a","b"] {p.write(write(id,id,"alpha",ExpectedVersion::Absent)).await.unwrap();}
+        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:AnnMode::All}] {
+            let mut q=fusion_query();q.mode=mode.clone();if mode==SearchMode::Lexical{q.vector=None;}q.offset=1;q.length=1;
+            let r=p.query(q).await.unwrap();assert_eq!(r.hits.len(),1);let hit=&r.hits[0];assert_eq!(hit.channels.len(),1);assert_eq!(hit.channels[0].rank,1);assert_eq!(hit.channels[0].raw_score,Some(hit.score));assert!(hit.channels[0].rrf_contribution.is_none());
+        }
+        let mut q=fusion_query();q.mode=SearchMode::WeightedHybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.5,vector_weight:2.0,keyword_candidates:Some(3),vector_candidates:Some(2)}};
+        let all=p.query(q).await.unwrap();
+        let lexical_raw=query(&p,SearchMode::Lexical).await.hits[0].score;
+        let vector_raw=query(&p,SearchMode::Vector{similarity_threshold:None,ann_mode:AnnMode::All}).await.hits[0].score;
+        assert!(all.hits.iter().flat_map(|h|&h.channels).all(|c|c.raw_score==Some(if c.channel=="lexical"{lexical_raw}else{vector_raw})));
+        for (rank,hit) in all.hits.iter().enumerate(){assert_eq!(hit.record.record_id,["a","b","c"][rank]);assert_eq!(hit.channels.iter().map(|c|c.rrf_contribution.unwrap()).sum::<f32>(),hit.score);let lex=hit.channels.iter().find(|c|c.channel=="lexical").unwrap();assert_eq!(lex.rank,rank);assert_eq!(lex.rrf_contribution,Some(0.5/(3.0+rank as f32)));assert_eq!(hit.channels.iter().any(|c|c.channel=="vector"),rank<2);}
+        let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All};q.offset=1;q.length=1;
+        let page=p.query(q).await.unwrap();assert_eq!(page.hits[0].channels[0].rank,1);assert_eq!(page.hits[0].channels[1].rank,1);
+        let mut q=fusion_query();q.mode=SearchMode::WeightedHybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.0,vector_weight:1.0,keyword_candidates:Some(3),vector_candidates:Some(3)}};
+        let vector_only=p.query(q).await.unwrap();assert!(!vector_only.hits.is_empty());assert!(vector_only.hits.iter().all(|h|h.channels.len()==1&&h.channels[0].channel=="vector"&&h.channels[0].rrf_contribution==Some(h.score)));
+        let mut q=fusion_query();q.mode=SearchMode::Lexical;q.vector=None;q.sort=vec![crate::search::ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}];q.offset=1;q.length=1;
+        let sorted=p.query(q).await.unwrap();assert_eq!(sorted.hits.len(),1);assert_eq!(sorted.hits[0].channels[0].rank_basis,"requested_order");assert_eq!(sorted.hits[0].channels[0].rank,1);
+        let browse=p.search(String::new(),None,SearchMode::Lexical,vec![],10).await.unwrap();assert!(browse.hits.iter().all(|h|h.channels[0].channel=="browse"&&h.channels[0].raw_score.is_none()));
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();let restored=query(&p,SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All}).await;assert!(restored.hits.iter().all(|h|h.channels.len()==2));
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -3874,7 +3902,9 @@ impl Inner {
                     }
                 }
                 if let Some(temporal) = temporal { filters.extend(temporal::filters(temporal)?); }
-                let result = self
+                let channel=match &mode{SearchMode::Lexical=>Some(if text.trim().is_empty(){"browse"}else{"lexical"}),SearchMode::Vector{..}=>Some("vector"),_=>None};
+                let rank_basis=if !sort.is_empty(){"requested_order"}else if channel==Some("browse"){"browse_order"}else{"score"};
+                let mut result = self
                     .index
                     .search(
                         text,
@@ -3895,12 +3925,14 @@ impl Inner {
                     return Err(storage(error));
                 }
                 let mut hits = Vec::new();
-                for hit in result.results {
+                for (rank,hit) in result.results.into_iter().enumerate() {
                     let id = self
                         .ordinals
                         .get(hit.doc_id)
                         .ok_or_else(|| storage("candidate ordinal outside view"))?;
+                    let channels=if let Some(channel)=channel {vec![crate::search::ChannelExplanation{channel:channel.into(),rank:offset+rank,rank_basis:rank_basis.into(),raw_score:if channel=="browse"{None}else{Some(hit.score)},rrf_contribution:None}]}else{result.explanations.remove(&hit.doc_id).ok_or_else(||storage("hybrid candidate explanation missing"))?};
                     hits.push(RecordHit {
+                        channels,
                         record: self.state.records[id].clone(),
                         score: hit.score,
                     });

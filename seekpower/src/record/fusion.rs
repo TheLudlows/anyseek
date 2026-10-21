@@ -135,6 +135,7 @@ impl Inner {
         })?;
         drop(shard);
         let mut scores = BTreeMap::<String, f32>::new();
+        let mut explanations = BTreeMap::<String, Vec<crate::search::ChannelExplanation>>::new();
         let mut terms = Vec::new();
         for (enabled, limit, weight, mode) in [
             (lexical, lex_limit, rrf.keyword_weight, SearchMode::Lexical),
@@ -189,8 +190,18 @@ impl Inner {
                 terms = result.query_terms;
             }
             for (rank, hit) in result.hits.into_iter().enumerate() {
-                *scores.entry(hit.record.record_id).or_default() +=
-                    rrf_contribution(weight, rrf.constant, rank);
+                let contribution = rrf_contribution(weight, rrf.constant, rank);
+                explanations
+                    .entry(hit.record.record_id.clone())
+                    .or_default()
+                    .push(crate::search::ChannelExplanation {
+                        channel: if is_lexical { "lexical" } else { "vector" }.into(),
+                        rank,
+                        rank_basis: "score".into(),
+                        raw_score: Some(hit.score),
+                        rrf_contribution: Some(contribution),
+                    });
+                *scores.entry(hit.record.record_id).or_default() += contribution;
             }
         }
         let mut seen = BTreeSet::new();
@@ -198,8 +209,19 @@ impl Inner {
             for hit in &neighbors.hits {
                 if seen.insert(hit.neighbor.record_id.clone()) {
                     let rank = seen.len() - 1;
-                    *scores.entry(hit.neighbor.record_id.clone()).or_default() +=
+                    let contribution =
                         rrf_contribution(options.relation_weight, rrf.constant, rank);
+                    explanations
+                        .entry(hit.neighbor.record_id.clone())
+                        .or_default()
+                        .push(crate::search::ChannelExplanation {
+                            channel: "relation".into(),
+                            rank,
+                            rank_basis: "stable_adjacency".into(),
+                            raw_score: None,
+                            rrf_contribution: Some(contribution),
+                        });
+                    *scores.entry(hit.neighbor.record_id.clone()).or_default() += contribution;
                 }
             }
         }
@@ -211,6 +233,7 @@ impl Inner {
             .skip(query.offset)
             .take(query.length)
             .map(|(id, score)| RecordHit {
+                channels: explanations.remove(&id).unwrap_or_default(),
                 record: self.state.records[&id].clone(),
                 score,
             })

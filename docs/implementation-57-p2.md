@@ -1,6 +1,6 @@
 # Issue #57 P2 实施设计：来源、证据与统一可见性
 
-状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施及范围审计校正见第 24 节；已批准不等于已实现。
+状态：**P2 分批实施，未整体验收**。D1–D4 已获用户确认（2026-10-21，Sentinel_d2c624cd956c81919e1aac72655b354c：“四项按建议”）。第 10–13 节保留各检查点当时的状态，最新实施及范围审计校正见第 24–25 节；已批准不等于已实现。
 
 - 产品依据：[issue #57](https://github.com/TheLudlows/seekpower/issues/57)，包含顶部 2026-10-21 确认。
 - 实施入口：[P1-A 与阶段记录](implementation-57.md)。本设计不替换总体路线。
@@ -993,7 +993,7 @@ staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保�
 | P2-6 持久 change feed | change_feed + 通用 Applied/Expiration，同权威提交；至少7天、容量背压、scope/floor/bootstrap | feed core + record_feed_smoke；阶段退出/游标过期/恢复/隐藏/私有 staging 不泄露 | UI 是检查器，不是自动同步消费者；消费者自行幂等至少一次处理，过期必须重建 |
 | P2-7 HTTP/UI、恢复、授权与验收 | 默认 record_service/catalog/data 输出；service/collection snapshot 与同服务受控接管 | 完整服务脚本含共享 key/撤权、旧授权不复活、原 owner 封存、恢复故障、实际 Chromium | 新服务缺可信最新删除历史仍隔离；不提供强制绕过/跨服务自动灾备。当前最终本地 SHA 的 Windows 原生测试未运行；系统断电未验收 |
 
-经§24原issue审计校正：通用RecordRevision历史API、独立时间候选是内部工程细化/可选能力，当前未实现，不自动扩大首版硬门槛。逐命中通道与原始分数则是issue首版明确要求，当前只有融合总分/窗口元信息，须在后续独立批次补齐。多批次staging也是明确要求，不能把完整Stage当等价替代；实现见§24。
+经§24原issue审计校正：通用RecordRevision历史API、独立时间候选是内部工程细化/可选能力，当前未实现，不自动扩大首版硬门槛。逐命中通道与原始分数则是issue首版明确要求，在融合检查点只有总分/窗口元信息；后续逐命中实现及验证见§25。多批次staging也是明确要求，不能把完整Stage当等价替代；实现见§24。
 
 真实尚未完成的验收项：本批 Linux 全套/真实服务与复审已通过；本地关系、定位、租约、融合链最终 SHA 的 Windows 原生 CI 待批准发布后运行；双平台系统崩溃/断电需要可丢弃隔离环境和外部已确认写入/撤权/删除见证，不能用进程退出代替。P1-A 可靠性门槛未因此取消。
 
@@ -1043,3 +1043,21 @@ staging 绑定创建/续租时 owner 的 feed scope。正常同 owner 重启保�
 10 ignored为9个由父测试启动的子进程worker和1个既有跨构建辅助fixture，不单独算通过。初轮到期测试在重开后忘记重新绑定测试时钟而报ClockUncertain，已修正夹具，未放松时钟保证。最终全量在恢复/容量修复后执行；默认服务与fault服务依次构建/验证。日志 `/tmp/p2-batches-final-{all,build,http,fault-build,fault-http,boundary,openapi}.log`。全部删除/封存/退出故障只使用临时数据。
 
 本批仅本地提交；Windows原生未运行，系统断电仍需隔离环境和外部确认见证。下一独立批次仍为逐命中通道/原始分数/RRF贡献，不将本检查点称为全部P2验收完成。
+
+## 25. 逐命中检索解释（本地实现与 Linux 验证完成）
+
+分支 `feat/57-p2-hit-explanations`，堆叠基线为多批次上传检查点 `6459193`。只补 issue 原「查询与排名」首版结果中的命中通道、原始分数及融合解释，不增加时间排名/通用历史API/Blob，也不改默认评分参数。
+
+- `search::ResultObject.explanations` 在原 RRF 候选循环记录实际 raw score、零基rank和实际贡献，最终分页后只保留返回ID。未修改候选筛选、排序或权重运算；单通道 fast path 的解释由 Record 视图适配，不强迫它运行额外检索。
+- `RecordHit.channels` 统一输出 channel/rank/rank_basis/raw_score/rrf_contribution。普通全文/向量保留原始引擎分数；browse无raw相关性；融合的零权重或未命中通道无条目。rank不是全库精确召回证明。
+- Hybrid各通道rank来自融合前；普通查询为offset+返回位置，指定字段排序时明确requested_order。关系去重后按稳定邻接顺序赋rank，仅有RRF贡献，不将边weight伪造成相似度。贡献按实际顺序相加与最终score相符。
+- 默认HTTP透传同一结果，仍经过catalog/data双屏障与原投影；解释不携带额外正文。UI普通命中新增可展开解释，关系面板显示完整结果，均用text渲染。无新增持久状态，journal仍V12。
+- 请求/响应契约见 [server README](../seekpower_server/README.md#per-hit-retrieval-explanations)。独立审查无阻塞；根据审查建议补充零权重、分页rank、字段排序basis断言。最终全量、默认与故障注入HTTP/Chromium均通过。
+
+至此代码范围收敛为已审计的两个明确缺口：§24多批次上传、§25逐命中解释。实现不等于整体验收：最终堆叠Windows原生以及双平台系统崩溃/断电仍需验证；可选能力和P3/P4后续范围按§24.1，不继续由新文档扩大需求。
+
+### 25.1 最终验证记录
+
+最终源码 Linux：`cargo test --workspace --all-targets --quiet` **35 suites、226 passed、0 failed、10 ignored**；`cargo build --workspace` 后真实 `python3 scripts/record_service_smoke.py --server target/debug/seekpower_server --browser` 通过；`cargo build -p seekpower_server --features fault-injection` 后同脚本 `--faults --browser` 通过。涵盖实际逐命中 raw score、rank、RRF 求和、关系去重贡献、分页、零权重、字段排序，以及完整多批次上传和既有授权/删除/恢复故障矩阵。核心独立依赖边界 default/no-default、OpenAPI 生成、`git diff --check` 通过。日志 `/tmp/p2-explain-final-{all,build,http,fault-build,fault-http,boundary,openapi}.log`。
+
+10 ignored 是9个由父测试启动的子进程worker，以及1个需相反AES构建的持久哈希辅助fixture；不将忽略项单独算通过。独立审查未留阻塞。Windows 本批原生验证尚未运行；系统崩溃/断电未验收，需隔离可丢弃平台与外部确认见证，进程故障不替代此项。2026-10-21 用户已批准本组收尾按批次发布草稿PR和双平台CI，未授权合入；CI结果以各最终SHA实际run为准，不沿用祖先结果。

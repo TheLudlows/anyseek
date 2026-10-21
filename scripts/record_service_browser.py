@@ -174,6 +174,10 @@ def exercise(base,master,call):
         print('PASS Chromium: multipart begin/two batches/seal/publish, staged invisibility and complete publication')
         page.locator('#backToSearch').click();page.locator('#searchInput').fill('generationui')
         expect(page.locator('#contentBox')).to_contain_text('Generation A');expect(page.locator('#contentBox')).to_contain_text('Generation B')
+        explanation=page.locator('.hitExplanation').first;explanation.locator('summary').click()
+        displayed=json.loads(explanation.locator('pre').inner_text());assert displayed['channels'][0]['channel']=='lexical' and displayed['channels'][0]['raw_score']==displayed['score']
+        print('PASS Chromium: real per-hit raw-score and channel explanation')
+
         page.locator('#writeDocuments').click();page.locator('#recordEnvelopeMode').check()
         deletion={'record_id':'ui-source','routing_key':'ui-route','expected':{'Match':2},'document':None}
         page.locator('#documentJson').fill(json.dumps(deletion));page.locator('#submitDocuments').click()

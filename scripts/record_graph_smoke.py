@@ -38,6 +38,11 @@ def exercise(call,restart_with,faults):
     assert fusion['fusion']['count_relation']=='candidate_window' and fusion['fusion']['relation_complete']
     assert fusion['visible_seq']==fusion['statistics']['visible_seq'] and fusion['evaluation_time_ms']==fusion['statistics']['evaluation_time_ms']
     assert fusion['hits'][0]['record']['record_id']=='b'
+    for hit in fusion['hits']:
+        assert abs(sum(c['rrf_contribution'] for c in hit['channels'])-hit['score'])<1e-5
+        for c in hit['channels']:
+            if c['channel']=='relation':assert c['raw_score'] is None and c['rank_basis']=='stable_adjacency'
+
     bad=fused();bad['relation_fusion']['neighbors']['max_candidates']=1
     call('POST',endpoint+'/query',bad,status=400)
     bad['relation_fusion']['neighbors']['allow_partial']=True
@@ -96,6 +101,7 @@ def exercise(call,restart_with,faults):
             assert ids.count(request['record_id'])==1
             fusion=call('POST',endpoint+'/query',fused())
             assert any(h['record']['record_id']=='a' for h in fusion['hits'])
+            assert all(h['channels'] for h in fusion['hits'])
             assert not any(h['record']['record_id']=='b' for h in fusion['hits'])
     call('DELETE','/api/v1/backups/'+archive['backup_id'],{'operation_id':operation()})
     call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'relation-reader'})

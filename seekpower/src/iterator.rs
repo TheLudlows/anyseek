@@ -361,6 +361,7 @@ pub(crate) async fn search_iterator_index(
     result_sort: Vec<ResultSort>,
 ) -> ResultObject {
     let mut result_object = ResultObject {
+        explanations: Default::default(),
         error: None,
         original_query: "".to_string(),
         query: "".to_string(),
