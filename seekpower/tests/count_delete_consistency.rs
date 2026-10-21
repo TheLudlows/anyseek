@@ -84,9 +84,9 @@ async fn single_count_excludes_deleted() {
     let index = fresh("tests/index_delete_count/").await;
     let docs: Vec<_> = (0..10).map(|i| doc(&format!("common word{i}"))).collect();
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
     index.delete_documents(vec![0, 1, 2]).await;
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let count = search(&index, "common", ResultType::Count).await;
     let topk_count = search(&index, "common", ResultType::TopkCount).await;
@@ -96,7 +96,7 @@ async fn single_count_excludes_deleted() {
     let mut ids: Vec<usize> = topk_count.results.iter().map(|r| r.doc_id).collect();
     ids.sort_unstable();
     assert_eq!(ids, vec![3, 4, 5, 6, 7, 8, 9]);
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Control: without deletes the Count fast path is untouched and exact.
@@ -105,12 +105,12 @@ async fn single_count_no_deletes_control() {
     let index = fresh("tests/index_delete_count_control/").await;
     let docs: Vec<_> = (0..10).map(|i| doc(&format!("common word{i}"))).collect();
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let count = search(&index, "common", ResultType::Count).await;
     let topk_count = search(&index, "common", ResultType::TopkCount).await;
     assert_eq!(count.result_count_total, 10);
     assert_eq!(topk_count.result_count_total, 10);
     assert_eq!(topk_count.results.len(), 10);
-    index.close().await;
+    index.close().await.unwrap();
 }

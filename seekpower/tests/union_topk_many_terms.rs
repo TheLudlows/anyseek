@@ -82,7 +82,7 @@ async fn union_topk_forty_terms() {
         }
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let query = (0..40)
         .map(|t| format!("w{t:02}"))
@@ -96,5 +96,5 @@ async fn union_topk_forty_terms() {
     assert_eq!(topk_count.result_count_total, 1000);
     assert_eq!(topk_count.result_count_total, count.result_count_total);
 
-    index.close().await;
+    index.close().await.unwrap();
 }

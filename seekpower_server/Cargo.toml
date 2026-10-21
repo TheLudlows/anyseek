@@ -17,12 +17,14 @@ publish = false
 default = ["zh","vb"]
 zh = ["seekpower/zh"]
 vb = ["seekpower/vb"]
+fault-injection = ["seekpower/fault-injection"]
 
 [[bin]]
 name = "seekpower_server"
 path = "src/main.rs"
 
 [dependencies]
+http-body = "1"
 log = "0.4"
 env_logger = "0.11"
 seekpower = { version = "3.4.1", path = "../seekpower" , default-features = false}
@@ -48,3 +50,6 @@ workspace = true
 [package.metadata.docs.rs]
 rustc-args = ["-C", "target-cpu=native"]
 rustdoc-args = ["-C", "target-cpu=native"]
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

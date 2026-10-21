@@ -1,15 +1,9 @@
 use base64::{Engine, engine::general_purpose};
-use seekpower::{
-    index::{Close, IS_AVX2, IS_NEON},
-    info::collect_index_info,
-    utils::dir_size,
-};
+use seekpower::index::{IS_AVX2, IS_NEON};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, env::current_exe, fs, path::Path, sync::Arc, time::Instant};
-use tokio::sync::RwLock;
+use std::{collections::HashMap, env::current_exe, path::Path};
 
-use crate::keys::create_apikey_api;
-use crate::{MASTER_KEY_SECRET, VERSION, http_server::http_server, keys::open_all_apikeys};
+use crate::{MASTER_KEY_SECRET, VERSION};
 
 pub(crate) async fn initialize(params: HashMap<String, String>) {
     let force_shard_number = params
@@ -35,10 +29,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
             .unwrap()
             .join(path)
     };
-    if let Err(error) = fs::create_dir_all(&index_path) {
-        log::error!("Cannot create index path {}: {error}", index_path.display());
-        std::process::exit(1);
-    }
     let local_ip = params
         .get("local_ip")
         .cloned()
@@ -65,62 +55,33 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
     log::info!("Web UI and REST API: http://{local_ip}:{local_port}; Ctrl-C to shut down");
     println!("Master API key: {master_apikey}");
 
-    let apikey_list = Arc::new(RwLock::new(HashMap::new()));
-    let start = Instant::now();
+    if force_shard_number.is_some_and(|n: usize| n != 1) {
+        log::error!(
+            "Reliable P1 service supports exactly one partition; force_shard_number must be 1"
+        );
+        std::process::exit(1);
+    }
+    let service = crate::record_service::Service::open(&index_path, default_nprobe)
+        .await
+        .unwrap_or_else(|error| {
+            log::error!("Recovering reliable service failed: {error}");
+            std::process::exit(1)
+        });
+    let address =
+        std::net::SocketAddr::new(local_ip.parse().expect("validated local_ip"), local_port);
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .unwrap_or_else(|error| {
+            log::error!("Starting server failed: {error}");
+            std::process::exit(1)
+        });
+    if let Err(error) = axum::serve(listener, crate::record_service::router(service))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
     {
-        let mut keys = apikey_list.write().await;
-        open_all_apikeys(&index_path, &mut keys).await;
-        // The master key owns a persisted index scope and can also manage other keys.
-        let master_key_bytes = Sha256::digest(MASTER_KEY_SECRET.as_bytes());
-        create_apikey_api(&index_path, master_key_bytes.as_slice(), &mut keys).unwrap_or_else(
-            |error| {
-                log::error!("Persisting master key failed: {error}");
-                std::process::exit(1)
-            },
-        );
-        let index_count: usize = keys.values().map(|key| key.index_list.len()).sum();
-        log::info!(
-            "Loaded {} API key scopes, {index_count} indices, {} bytes on disk in {:?}",
-            keys.len(),
-            dir_size(&index_path).unwrap_or(0),
-            start.elapsed()
-        );
-        for key in keys.values() {
-            for index in key.index_list.values() {
-                let info = collect_index_info(index).await;
-                log::info!(
-                    "Scope {} index {} {:?}: {} documents, {} shards, lexical={}, vector={}, dimensions={}, {} bytes",
-                    key.id,
-                    info.meta.id,
-                    info.meta.name,
-                    info.indexed_documents,
-                    info.shards,
-                    info.lexical,
-                    info.vector,
-                    info.vector_dimensions,
-                    info.index_size_bytes
-                );
-            }
-        }
+        log::error!("HTTP service failed: {error}");
     }
 
-    // The HTTP server stops accepting and drains connections before indexes are closed.
-    http_server(
-        &index_path,
-        apikey_list.clone(),
-        &local_ip,
-        &local_port,
-        &force_shard_number,
-        default_nprobe,
-    )
-    .await;
-    log::info!("Committing and closing all indices");
-    let keys = apikey_list.write().await;
-    for key in keys.values() {
-        for index in key.index_list.values() {
-            index.close().await;
-        }
-    }
     log::info!("Shutdown complete");
 }
 

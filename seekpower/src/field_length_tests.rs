@@ -239,14 +239,14 @@ async fn field_lengths_empty_append_delete_clear_and_reopen() {
     add(&index, &docs, 4).await;
     for stage in 0..6 {
         if stage == 1 || stage == 3 {
-            index.commit().await;
+            index.commit().await.unwrap();
         }
         if stage == 2 {
             docs.push(json!({"title":"alpha","body":"gamma gamma"}));
             add(&index, &docs[4..], 5).await;
         }
         if stage == 4 {
-            index.close().await;
+            index.close().await.unwrap();
             drop(index);
             index = open_index(&path).await.unwrap();
         }
@@ -268,7 +268,7 @@ async fn field_lengths_empty_append_delete_clear_and_reopen() {
             check(&index, &docs, &deleted, q, 1).await;
         }
     }
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     index = open_index(&path).await.unwrap();
     assert_stats(&index, &docs).await;
@@ -277,13 +277,13 @@ async fn field_lengths_empty_append_delete_clear_and_reopen() {
     assert_stats(&index, &[]).await;
     let reset = vec![json!({"title":"alpha","body":"beta"})];
     add(&index, &reset, 1).await;
-    index.commit().await;
-    index.close().await;
+    index.commit().await.unwrap();
+    index.close().await.unwrap();
     drop(index);
     index = open_index(&path).await.unwrap();
     assert_stats(&index, &reset).await;
     check(&index, &reset, &BTreeSet::new(), "alpha beta", 1).await;
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -301,10 +301,10 @@ async fn field_lengths_are_shard_local_and_global_df_is_not_per_field() {
     add(&index, &docs, docs.len()).await;
     for stage in 0..3 {
         if stage == 1 {
-            index.commit().await;
+            index.commit().await.unwrap();
         }
         if stage == 2 {
-            index.close().await;
+            index.close().await.unwrap();
             drop(index);
             index = open_index(&path).await.unwrap();
         }
@@ -313,7 +313,7 @@ async fn field_lengths_are_shard_local_and_global_df_is_not_per_field() {
             check(&index, &docs, &BTreeSet::new(), q, 2).await;
         }
     }
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -328,17 +328,17 @@ async fn field_lengths_hundred_terms_and_decoded_length_literal() {
     add(&index, &docs, 2).await;
     for stage in 0..3 {
         if stage == 1 {
-            index.commit().await;
+            index.commit().await.unwrap();
         }
         if stage == 2 {
-            index.close().await;
+            index.close().await.unwrap();
             drop(index);
             index = open_index(&path).await.unwrap();
         }
         assert_stats(&index, &docs).await;
         check(&index, &docs, &BTreeSet::new(), &terms, 1).await;
     }
-    index.close().await;
+    index.close().await.unwrap();
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -354,17 +354,17 @@ async fn field_lengths_ngram_components_use_same_denominators() {
         add(&index, &docs, 3).await;
         for stage in 0..3 {
             if stage == 1 {
-                index.commit().await;
+                index.commit().await.unwrap();
             }
             if stage == 2 {
-                index.close().await;
+                index.close().await.unwrap();
                 drop(index);
                 index = open_index(&path).await.unwrap();
             }
             assert_stats(&index, &docs).await;
             check(&index, &docs, &BTreeSet::new(), "the of", 1).await;
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -386,7 +386,7 @@ async fn mixed_global_df_uses_all_physical_documents_without_changing_visibility
             2,
         )
         .await;
-        index.commit().await;
+        index.commit().await.unwrap();
         add(&index, &[json!({"title":"alpha","body":"alpha"})], 3).await;
         let avg = if policy == FieldLengthNormalization::Shared {
             2.0
@@ -396,10 +396,10 @@ async fn mixed_global_df_uses_all_physical_documents_without_changing_visibility
         let expected = 2.5 * 1.6_f64.ln() * 2.2 / (1.0 + 1.2 * (0.25 + 0.75 / avg));
         for stage in 0..3 {
             if stage == 1 {
-                index.commit().await;
+                index.commit().await.unwrap();
             }
             if stage == 2 {
-                index.close().await;
+                index.close().await.unwrap();
                 drop(index);
                 index = open_index(&path).await.unwrap();
             }
@@ -439,7 +439,7 @@ async fn mixed_global_df_uses_all_physical_documents_without_changing_visibility
                 }
             }
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -466,10 +466,10 @@ async fn wide_or_boundaries_preserve_membership_scores_not_and_reopen() {
             add(&index, &docs, 3).await;
             for stage in 0..3 {
                 if stage == 1 {
-                    index.commit().await;
+                    index.commit().await.unwrap();
                 }
                 if stage == 2 {
-                    index.close().await;
+                    index.close().await.unwrap();
                     drop(index);
                     index = open_index(&path).await.unwrap();
                 }
@@ -487,7 +487,7 @@ async fn wide_or_boundaries_preserve_membership_scores_not_and_reopen() {
                     .await;
                 }
             }
-            index.close().await;
+            index.close().await.unwrap();
             drop(index);
             std::fs::remove_dir_all(path).unwrap();
         }

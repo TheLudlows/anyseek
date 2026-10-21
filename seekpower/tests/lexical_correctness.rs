@@ -146,10 +146,10 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order() {
             / 8194.0;
         for stage in 0..3 {
             if stage == 1 {
-                index.commit().await;
+                index.commit().await.unwrap();
             }
             if stage == 2 {
-                index.close().await;
+                index.close().await.unwrap();
                 drop(index);
                 index = open_index(&path).await.unwrap();
             }
@@ -190,7 +190,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order() {
                 }
             }
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -209,12 +209,12 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
             _ => json!({"title":"","text":"neutral ".repeat(if i<65536 {1}else{5})}),
         };
         add(&index, 0, 65536, doc).await;
-        index.commit().await;
+        index.commit().await.unwrap();
         add(&index, 65536, 73728, doc).await;
-        index.commit().await;
+        index.commit().await.unwrap();
         for reopened in [false, true] {
             if reopened {
-                index.close().await;
+                index.close().await.unwrap();
                 drop(index);
                 index = open_index(&path).await.unwrap();
             }
@@ -261,7 +261,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                 );
             }
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -277,7 +277,7 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
             "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
         ];
         add(&index,0,65546,|i|json!({"title":"","text":if i==0 {terms.join(" ")}else if i<65536 {"neutral ".repeat(10)}else if i<65545 {terms[i-65536].into()}else{"theta iota".into()}})).await;
-        index.commit().await;
+        index.commit().await.unwrap();
         let q = terms.join(" ");
         let all = search(&index, &q, false, 65547, false, false).await;
         assert_eq!(all.len(), 11);
@@ -314,7 +314,7 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
                 all[..2]
             );
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -347,7 +347,7 @@ async fn five_term_or_subsets_keep_all_pair_contributions() {
         json!({"title":"", "text":if words.is_empty() {"neutral".into()} else {words.join(" ")}})
     })
     .await;
-        index.commit().await;
+        index.commit().await.unwrap();
         let avg = (0..8194)
             .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
             .sum::<usize>() as f64
@@ -373,7 +373,7 @@ async fn five_term_or_subsets_keep_all_pair_contributions() {
                 );
             }
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }

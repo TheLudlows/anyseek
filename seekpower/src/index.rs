@@ -867,6 +867,7 @@ pub struct Shard {
 
     pub(crate) delete_file: File,
     pub(crate) delete_hashset: AHashSet<usize>,
+    pub(crate) active: Option<crate::active::ActiveStatistics>,
 
     pub(crate) index_file: File,
     pub(crate) index_path_string: String,
@@ -1699,6 +1700,7 @@ pub(crate) fn create_shard(
                 docstore_file,
                 delete_file,
                 delete_hashset: AHashSet::new(),
+                active: None,
                 index_file,
                 index_path_string: index_path_string.to_owned(),
                 index_file_mmap,
@@ -1902,8 +1904,11 @@ pub(crate) fn get_max_score(
     // A representative selected under an earlier average length is not a
     // score upper bound after append/reopen. Use BM25's analytic saturation
     // bound, independent of document lengths and stored representatives.
-    let n = index.indexed_doc_count as f32;
-    let idf = |df: u32| (1.0 + (n - df as f32 + 0.5) / (df as f32 + 0.5)).ln().max(0.0);
+    let n = index.scoring_count() as f32;
+    let idf = |df: u32| {
+        let df = if index.active.is_some() { 0 } else { df };
+        (1.0 + (n - df as f32 + 0.5) / (df as f32 + 0.5)).ln().max(0.0)
+    };
     let whole = idf(posting_count) as f64;
     let component_sum = match ngram_type {
         NgramType::SingleTerm => 0.0,
@@ -2795,14 +2800,14 @@ impl Index {
 #[allow(async_fn_in_trait)]
 pub trait Close {
     /// Commit pending changes and flush index files
-    async fn close(&self);
+    async fn close(&self) -> std::io::Result<()>;
 }
 
 /// Commit pending changes and flush index files
 impl Close for IndexArc {
     /// Commit pending changes and flush index files
-    async fn close(&self) {
-        self.commit().await;
+    async fn close(&self) -> std::io::Result<()> {
+        self.commit().await?;
 
         let mut result_object_list = Vec::new();
         for shard in self.read().await.shard_vec.iter() {
@@ -2823,7 +2828,10 @@ impl Close for IndexArc {
                 shard_clone.write().await.index_option = None;
             }));
         }
-        future::join_all(result_object_list).await;
+        for result in future::join_all(result_object_list).await {
+            result.map_err(std::io::Error::other)?;
+        }
+        Ok(())
     }
 }
 
@@ -2980,7 +2988,7 @@ impl UpdateDocument for IndexArc {
     async fn update_document(&self, id_document: (u64, Document)) -> Result<(), String> {
         crate::vector::validate_document_vectors(&*self.read().await, &id_document.1)?;
         self.delete_document(id_document.0).await;
-        enqueue_document(self, id_document.1).await;
+        enqueue_document(self, id_document.1).await?;
         Ok(())
     }
 }
@@ -3010,7 +3018,7 @@ impl UpdateDocuments for IndexArc {
         }
         self.delete_documents(docid_vec).await;
         for document in document_vec {
-            enqueue_document(self, document).await;
+            enqueue_document(self, document).await?;
         }
         Ok(())
     }
@@ -3035,7 +3043,7 @@ impl IndexDocuments for IndexArc {
             }
         }
         for document in document_vec {
-            enqueue_document(self, document).await;
+            enqueue_document(self, document).await?;
         }
         Ok(())
     }
@@ -3054,12 +3062,12 @@ impl IndexDocument for IndexArc {
     /// May block, if the threshold of documents indexed in parallel is exceeded.
     async fn index_document(&self, document: Document) -> Result<(), String> {
         crate::vector::validate_document_vectors(&*self.read().await, &document)?;
-        enqueue_document(self, document).await;
+        enqueue_document(self, document).await?;
         Ok(())
     }
 }
 
-async fn enqueue_document(index_arc: &IndexArc, document: Document) {
+async fn enqueue_document(index_arc: &IndexArc, document: Document) -> Result<(), String> {
     let shard_number = index_arc.read().await.shard_number;
     let docid_global_arc = index_arc.read().await.docid_global.clone();
     let mut docid_global = docid_global_arc.write().await;
@@ -3068,24 +3076,26 @@ async fn enqueue_document(index_arc: &IndexArc, document: Document) {
 
     let shard_arc = index_arc.read().await.shard_vec[shard_id].clone();
     let semaphore = shard_arc.read().await.semaphore.clone();
-    let permit = semaphore.acquire_owned().await.unwrap();
+    let permit = semaphore.acquire_owned().await.map_err(|e| e.to_string())?;
 
     *docid_global += 1;
     drop(docid_global);
 
     INDEX_RUNTIME.handle().spawn(async move {
-        shard_arc
+        let result = shard_arc
             .index_document_shard(document, docid_global_clone)
             .await;
         drop(permit);
-    });
+        result
+    }).await.map_err(|e| format!("index task failed: {e}"))?
+
 }
 /// Indexes a single document
 #[allow(async_fn_in_trait)]
 pub(crate) trait IndexDocumentShard {
     /// Indexes a single document
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_document_shard(&self, document: Document, docid_global: usize);
+    async fn index_document_shard(&self, document: Document, docid_global: usize) -> Result<(), String>;
 }
 
 /// Recursively extract strings from a serde_json::Value and append them to a vector of Strings.
@@ -3110,7 +3120,7 @@ pub(crate) fn object_values_to_string_vec_recursive(value: &Value, out: &mut Vec
 impl IndexDocumentShard for ShardArc {
     /// Index document
     /// May block, if the threshold of documents indexed in parallel is exceeded.
-    async fn index_document_shard(&self, document: Document, docid_global: usize) {
+    async fn index_document_shard(&self, document: Document, docid_global: usize) -> Result<(), String> {
         let shard_arc_clone = self.clone();
         let shard_ref = self.read().await;
         let schema = shard_ref.indexed_schema_vec.clone();
@@ -3264,17 +3274,17 @@ impl IndexDocumentShard for ShardArc {
 
         shard_arc_clone
             .index_document_shard_2(document_item, docid_global)
-            .await;
+            .await
     }
 }
 
 #[allow(async_fn_in_trait)]
 pub(crate) trait IndexDocumentShard2 {
-    async fn index_document_shard_2(&self, document_item: DocumentItem, docid_global: usize);
+    async fn index_document_shard_2(&self, document_item: DocumentItem, docid_global: usize) -> Result<(), String>;
 }
 
 impl IndexDocumentShard2 for ShardArc {
-    async fn index_document_shard_2(&self, document_item: DocumentItem, docid_global: usize) {
+    async fn index_document_shard_2(&self, document_item: DocumentItem, docid_global: usize) -> Result<(), String> {
         let mut shard_mut = self.write().await;
 
         let docid_local = docid_global / shard_mut.shard_number;
@@ -3288,9 +3298,9 @@ impl IndexDocumentShard2 for ShardArc {
             // appended postings. Only flush pending data; always advance the ID.
             if shard_mut.uncommitted {
                 if shard_mut.is_vector_indexing {
-                    shard_mut.commit_vector_shard().await;
+                    shard_mut.commit_vector_shard().await.map_err(|e| e.to_string())?;
                 }
-                shard_mut.commit_lexical_shard(docid_local).await;
+                shard_mut.commit_lexical_shard(docid_local).await.map_err(|e| e.to_string())?;
             }
             shard_mut.block_id = docid_local >> 16;
         }
@@ -3449,6 +3459,11 @@ impl IndexDocumentShard2 for ShardArc {
         shard_mut.invalidate_frequentword_results();
 
 
+        if let Some(active) = &mut shard_mut.active {
+            active.insert(docid_local,
+                document_item.unique_terms.values().map(|term| term.key_hash).collect(),
+                document_item.field_vec.iter().map(|value| (value.0, value.2)).collect());
+        }
         let mut longest_field_id: usize = 0;
         let mut longest_field_length: u32 = 0;
         for value in document_item.field_vec {
@@ -3496,10 +3511,11 @@ impl IndexDocumentShard2 for ShardArc {
             shard_mut.store_document(docid_local, document_item.document);
         }
 
-        if do_commit {
+        if do_commit && shard_mut.active.is_none() {
             drop(shard_mut);
             warmup(self).await;
         }
+        Ok(())
     }
 }
 
@@ -3621,7 +3637,7 @@ mod score_bound_contract_tests {
                 }
                 shard.indexed_doc_count = 0;
             }
-            index.close().await;
+            index.close().await.unwrap();
             drop(index);
             std::fs::remove_dir_all(path).unwrap();
         }

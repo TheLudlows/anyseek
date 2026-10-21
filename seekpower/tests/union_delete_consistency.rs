@@ -91,16 +91,16 @@ async fn union_count_excludes_deleted() {
         docs.push(doc(&format!("beta uniqb{i}")));
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
     index.delete_documents(vec![0, 1, 10]).await;
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let count = search(&index, "alpha beta", ResultType::Count).await;
     let topk_count = search(&index, "alpha beta", ResultType::TopkCount).await;
     assert_eq!(count.result_count_total, 17);
     assert_eq!(topk_count.result_count_total, 17);
     assert_eq!(topk_count.results.len(), 17);
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Control: without deletes the OR fast path is untouched and exact.
@@ -115,11 +115,11 @@ async fn union_count_no_deletes_control() {
         docs.push(doc(&format!("beta uniqb{i}")));
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let count = search(&index, "alpha beta", ResultType::Count).await;
     let topk_count = search(&index, "alpha beta", ResultType::TopkCount).await;
     assert_eq!(count.result_count_total, 20);
     assert_eq!(topk_count.result_count_total, 20);
-    index.close().await;
+    index.close().await.unwrap();
 }

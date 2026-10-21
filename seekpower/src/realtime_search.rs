@@ -918,6 +918,7 @@ impl Shard {
     pub(crate) fn get_ngram_component_df(&self, term: &str) -> u32 {
         let key0 = hash32(term.as_bytes()) & self.segment_number_mask1;
         let key_hash = hash64(term.as_bytes());
+        if self.active.is_some() { return self.scoring_df(key_hash, 0); }
         let committed = decode_posting_list_counts(
             &self.segments_index[key0 as usize], self, key_hash,
         ).map_or(0, |counts| counts.0);
@@ -992,7 +993,8 @@ impl Shard {
                                 value1.posting_count
                             };
 
-                            idf = (((self.indexed_doc_count as f32 - posting_count as f32 + 0.5)
+                            let posting_count = self.scoring_df(key_hash, posting_count as u32);
+                            idf = (((self.scoring_count() as f32 - posting_count as f32 + 0.5)
                                 / (posting_count as f32 + 0.5))
                                 + 1.0)
                                 .ln();
@@ -1004,14 +1006,14 @@ impl Shard {
 
                             let posting_count_ngram_2 = self.get_ngram_component_df(&non_unique_term.term_ngram_0);
 
-                            idf_ngram1 = (((self.indexed_doc_count as f32
+                            idf_ngram1 = (((self.scoring_count() as f32
                                 - posting_count_ngram_1 as f32
                                 + 0.5)
                                 / (posting_count_ngram_1 as f32 + 0.5))
                                 + 1.0)
                                 .ln();
 
-                            idf_ngram2 = (((self.indexed_doc_count as f32
+                            idf_ngram2 = (((self.scoring_count() as f32
                                 - posting_count_ngram_2 as f32
                                 + 0.5)
                                 / (posting_count_ngram_2 as f32 + 0.5))
@@ -1024,21 +1026,21 @@ impl Shard {
 
                             let posting_count_ngram_3 = self.get_ngram_component_df(&non_unique_term.term_ngram_0);
 
-                            idf_ngram1 = (((self.indexed_doc_count as f32
+                            idf_ngram1 = (((self.scoring_count() as f32
                                 - posting_count_ngram_1 as f32
                                 + 0.5)
                                 / (posting_count_ngram_1 as f32 + 0.5))
                                 + 1.0)
                                 .ln();
 
-                            idf_ngram2 = (((self.indexed_doc_count as f32
+                            idf_ngram2 = (((self.scoring_count() as f32
                                 - posting_count_ngram_2 as f32
                                 + 0.5)
                                 / (posting_count_ngram_2 as f32 + 0.5))
                                 + 1.0)
                                 .ln();
 
-                            idf_ngram3 = (((self.indexed_doc_count as f32
+                            idf_ngram3 = (((self.scoring_count() as f32
                                 - posting_count_ngram_3 as f32
                                 + 0.5)
                                 / (posting_count_ngram_3 as f32 + 0.5))

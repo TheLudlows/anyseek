@@ -141,7 +141,7 @@ async fn docid3_disjoint_terms_fill_heap() {
         }
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let total: usize = dfs.iter().sum();
     assert_eq!(total, 181);
@@ -168,7 +168,7 @@ async fn docid3_disjoint_terms_fill_heap() {
     let topk_sel: Vec<(usize, f32)> = topk.results.iter().map(|r| (r.doc_id, r.score)).collect();
     assert_valid_selection(&topk_sel, &score_table, total);
 
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Overlapping terms keep using the fast WAND path and must stay exact.
@@ -190,7 +190,7 @@ async fn docid3_overlap_control() {
         docs.push(doc(&format!("{} uniq{i}", keep.join(" "))));
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     // Overlapping terms never approach the recursion cap, so the fast WAND
     // path must behave exactly as before the fix: heap full, no duplicate
@@ -214,7 +214,7 @@ async fn docid3_overlap_control() {
         }
     }
 
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Mixed corpus with a short strict distinct-score tail to also pin the exact
@@ -236,7 +236,7 @@ async fn docid3_topkcount_total_consistent() {
         }
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let query = words.join(" ");
     let count = search(&index, &query, 1, ResultType::Count).await;
@@ -245,5 +245,5 @@ async fn docid3_topkcount_total_consistent() {
     assert_eq!(topkcount.result_count_total, 130);
     assert_eq!(topkcount.results.len(), 130);
 
-    index.close().await;
+    index.close().await.unwrap();
 }

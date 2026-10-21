@@ -1,6 +1,14 @@
 # Seekpower 执行状态
 
-更新日期：2026-10-14（Asia/Shanghai）。[当前功能](FEATURES.md) · [后续计划](SEEKPOWER_PLAN.md) · [验证记录](VALIDATION.md) · [迁移说明](MIGRATION.md)
+更新日期：2026-10-21（Asia/Shanghai）。[当前功能](FEATURES.md) · [服务契约](seekpower_server/README.md) · [实施与验收](docs/implementation-57.md)
+
+当前 PR #61 在 master 基线 fc4fcfe 上实现 #57 的有界 P1-A：默认 HTTP/UI 已使用 Record/catalog，稳定身份、条件写入、幂等、WAL/checkpoint、活动统计、共享授权和完整备份恢复已贯通。正常写入成功表示 durable + visible。
+
+原生 Linux/Windows 进程验证与系统断电验收分开记录；系统/文件系统崩溃和断电矩阵尚未验收。P2 来源/evidence/generation、Record 账本持续 GC、物理版本压缩、对象存储和分布式尚未完成，不标记整个 P1/P2 或 #57 完成。具体源码版本与测试证据以实施记录顶部为准。
+
+本次审查修复范围：纯向量空查询的活动记录浏览、未知写入在重试/刷新后的状态保留、默认服务文档和工具契约统一。旧服务模块仍未挂载；本次不扩展到拆锁、持续 GC 或底层引擎替换。
+
+## 早期合入记录（历史快照，不代表当前接口）
 
 S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 已合入。PR #11 聚合裁剪已合入 `97bea80`。PR #12 共享过滤已合入 `ea32aa1`。PR #13 已合入 `7bd1602`；PR #14 HTTP/OpenAPI 与结构化信息/日志边界已合入 `74d5012`。PR #15 首次 key 初始化与索引创建界面已合入 `08bf119`。PR #16 按需内存与 JSON 写入界面已合入 `4a459f9`。PR #17 C1～C5 已合入 `ebe7151`。PR #18 N-gram 修复与 D1～D3、PR #19 UI 外链清理已合入；PR #20 D5 已合入 `d1254da`；本分支执行 E1/E2，固定 AHash 并清理旧路由专用提示。
 
@@ -31,11 +39,3 @@ S1.1—S1.5 与 B1/B2 已合入主干 `af56be6`，Issue #1 已关闭，PR #10 �
 ## 最近已合入验证
 
 PR #17 的 [CI 38507685545](https://github.com/TheLudlows/seekpower/actions/runs/38507685545) 全部通过：独立核心边界、workspace 构建、依赖检查、64 项 Rust 测试、HTTP/Chromium、三种模式 JSON 写入、9 个 UI 静态资源及 OpenAPI 精确对比。早期批次记录见 [VALIDATION.md](VALIDATION.md)。
-
-## 下一步与边界
-
-1. HTTP/OpenAPI 下移、结构化 IndexInfo 和调用方日志配置已合入；首次启动与索引创建界面也已合入；JSON 写入与按需内存分配已合入；C1～C5 已合入；N-gram 修复与 D1～D3、UI 外链清理已合入；同义词/词干器删除已合入；本次执行 E1/E2。
-2. 随后推进 S2.1 的稳定业务 ID/版本契约；其他裁剪项需另行确认。
-3. 单机可靠性验收后再推进分布式路由、复制恢复和弹性。
-
-保留 Rust 核心、HTTP 服务与 Web UI。三种模式现已在主干支持元数据过滤；ANN 保留簇探测限制；稳定 ID、WAL/检查点、共同可见视图与生产可靠性验收尚未完成。完整现状统一维护在 [FEATURES.md](FEATURES.md)，不以路线图替代实现清单。

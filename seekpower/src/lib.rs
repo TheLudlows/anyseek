@@ -84,3 +84,13 @@ mod field_length_tests;
 mod warmup_cache_tests;
 
 mod term_hash;
+
+mod storage;
+
+#[cfg(test)]
+mod commit_io_tests;
+
+pub mod record;
+pub mod catalog;
+
+mod active;

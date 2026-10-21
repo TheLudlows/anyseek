@@ -524,6 +524,9 @@ pub(crate) fn result_ordering_root(
         }
     }
 
+    if shard_number == 1 && shard1.active.is_some() {
+        return shard1.rank(result1.score, doc_id1, result2.score, doc_id2);
+    }
     if empty_query && result_sort.is_empty() {
         result1.doc_id.cmp(&result2.doc_id)
     } else {
@@ -996,6 +999,9 @@ impl<'a> MinHeap<'a> {
             }
         }
 
+        if self.index.active.is_some() {
+            return self.index.rank(result1.score, result1.doc_id, result2.score, result2.doc_id);
+        }
         if self.empty_query && self.result_sort.is_empty() {
             result1.doc_id.cmp(&result2.doc_id)
         } else {
@@ -1156,7 +1162,8 @@ impl<'a> MinHeap<'a> {
             return false;
         }
         let worst = self._elements[0];
-        score_upper < worst.score || (score_upper == worst.score && id_lower >= worst.doc_id)
+        score_upper < worst.score || (self.index.active.is_none()
+            && score_upper == worst.score && id_lower >= worst.doc_id)
     }
 
     /// Snapshot the complete worst rank, including ID improvements at equal score.
@@ -1359,7 +1366,7 @@ mod stable_ranking_tests {
                 assert_eq!(ids, (0..7).collect::<Vec<_>>());
             }
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }

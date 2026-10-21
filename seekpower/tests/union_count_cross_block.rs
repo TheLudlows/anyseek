@@ -105,7 +105,7 @@ async fn union_count_cross_block_consistent() {
     }
 
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     // 60k alpha + 5k beta + 5k gamma = 70_000; padding must not match.
     let mut prev_count = 0;
@@ -133,7 +133,7 @@ async fn union_count_cross_block_consistent() {
         );
     }
 
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Control: 2-term union (no cross-block issue) must be stable.
@@ -150,7 +150,7 @@ async fn union_count_two_terms_stable() {
     }
 
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let count = search(&index, "alpha beta", ResultType::Count).await;
     let topk_count = search(&index, "alpha beta", ResultType::TopkCount).await;
@@ -158,5 +158,5 @@ async fn union_count_two_terms_stable() {
     assert_eq!(count.result_count_total, 20);
     assert_eq!(topk_count.result_count_total, 20);
 
-    index.close().await;
+    index.close().await.unwrap();
 }

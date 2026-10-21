@@ -88,7 +88,7 @@ async fn lazy_buffers_grow_commit_restore_and_clear() {
             );
         }
         assert_eq!(count(&index, "alpha").await, 2400);
-        index.commit().await;
+        index.commit().await.unwrap();
         for shard in &index.read().await.shard_vec {
             assert_eq!(shard.read().await.postings_buffer.capacity(), 0);
         }
@@ -99,7 +99,7 @@ async fn lazy_buffers_grow_commit_restore_and_clear() {
             )
             .await
             .unwrap();
-        index.commit().await; // Restores and merges a partially filled committed block.
+        index.commit().await.unwrap(); // Restores and merges a partially filled committed block.
         assert_eq!(count(&index, "alpha").await, 2401);
         assert_eq!(count(&index, "\"alpha and beta\"").await, 2401);
         for shard in &index.read().await.shard_vec {
@@ -115,7 +115,7 @@ async fn lazy_buffers_grow_commit_restore_and_clear() {
                 "partial-block restoration must also allocate scratch lazily"
             );
         }
-        index.close().await;
+        index.close().await.unwrap();
         drop(index);
         let reopened = open_index(&directory).await.unwrap();
         assert_eq!(count(&reopened, "alpha").await, 2401);
@@ -124,7 +124,7 @@ async fn lazy_buffers_grow_commit_restore_and_clear() {
             assert_eq!(shard.read().await.postings_buffer.capacity(), 0);
         }
         assert_eq!(count(&reopened, "alpha").await, 0);
-        reopened.close().await;
+        reopened.close().await.unwrap();
         drop(reopened);
         fs::remove_dir_all(directory).unwrap();
     }

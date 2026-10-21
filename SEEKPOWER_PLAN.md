@@ -1,5 +1,7 @@
 # Seekpower：单机与分布式演进计划
 
+后续路线已由 [issue #57](https://github.com/TheLudlows/seekpower/issues/57) 的 P1—P6 规划及 2026-10-21 确认边界取代；本文件保留早期阶段背景。实际进展与双平台验证统一记录在 [实施入口](docs/implementation-57.md)，不以计划条目代表代码完成。
+
 更新日期：2026-10-14（Asia/Shanghai）。当前实现以 [FEATURES.md](FEATURES.md) 为准，合入与验证见 [STATUS.md](STATUS.md) 和 [VALIDATION.md](VALIDATION.md)，上游来源见 [UPSTREAM.md](UPSTREAM.md)。下文未完成部分均为目标，不是当前能力承诺。
 
 ## 1. 目标与约束

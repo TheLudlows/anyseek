@@ -159,7 +159,7 @@ async fn scan32_topk_matches_global_ranking() {
         }
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let query = words.join(" ");
     let total = search(&index, &query, 0, 1, ResultType::Count).await;
@@ -173,7 +173,7 @@ async fn scan32_topk_matches_global_ranking() {
     assert_eq!(topk.results.len(), 100);
     assert_valid_topk(&topk, &oracle);
 
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Directly reproduces the original B2 puke case: disjoint terms, uniform
@@ -191,7 +191,7 @@ async fn scan32_sparse_uniform_fills_heap() {
     }
     let docs: Vec<seekpower::index::Document> = titles.iter().map(|t| doc(t)).collect();
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let query = (1..=20)
         .map(|i| format!("spar{i:02}"))
@@ -208,7 +208,7 @@ async fn scan32_sparse_uniform_fills_heap() {
     assert_eq!(topk.results.len(), 100, "scan_32 under-filled the heap");
     assert_valid_topk(&topk, &oracle);
 
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Twenty score tiers of twenty docs each: top-100 selects five complete tiers.
@@ -228,7 +228,7 @@ async fn scan32_score_gap_exact_selection() {
         docs.push(doc(&format!("{} {pad}rare{i} finite{i}", words.join(" "))));
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let query = words.join(" ");
     let oracle = search(&index, &query, 0, 400, ResultType::Topk).await;
@@ -256,7 +256,7 @@ async fn scan32_score_gap_exact_selection() {
         "score-gap top-100 must match the global ranking exactly"
     );
 
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// TopkCount and Topk must agree on selection and on the returned count.
@@ -281,7 +281,7 @@ async fn scan32_topkcount_and_topk_agree() {
         docs.push(doc(&title));
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let query = words.join(" ");
     let oracle = search(&index, &query, 0, 160, ResultType::Topk).await;
@@ -305,7 +305,7 @@ async fn scan32_topkcount_and_topk_agree() {
         .collect();
     assert_eq!(strict_key(&a), strict_key(&b));
 
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Pagination sanity on the fixed path: an offset slice of a scan_32 ranking
@@ -321,7 +321,7 @@ async fn scan32_pagination_is_consistent() {
         docs.push(doc(&title));
     }
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let query = words.join(" ");
     let full = search(&index, &query, 0, 250, ResultType::Topk).await;
@@ -338,5 +338,5 @@ async fn scan32_pagination_is_consistent() {
         "pagination scores must match the full ranking slice"
     );
 
-    index.close().await;
+    index.close().await.unwrap();
 }

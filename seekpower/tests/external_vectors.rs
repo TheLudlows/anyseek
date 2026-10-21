@@ -72,13 +72,13 @@ async fn external_write_query_reopen_contract() {
     let missing: Document = serde_json::from_value(json!({"body":"missing"})).unwrap();
     assert!(index.index_document(missing.clone()).await.is_err());
     assert!(index.index_documents(vec![document("partial",json!([1,0,0])), missing.clone()]).await.is_err());
-    index.commit().await;
+    index.commit().await.unwrap();
     assert_eq!(index.read().await.indexed_doc_count().await, 0);
     index.index_documents(vec![document("alpha",json!([1,0,0])),document("beta",json!([0,1,0]))]).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
     assert!(index.update_document((0,missing.clone())).await.is_err());
     assert!(index.update_documents(vec![(0,document("changed",json!([0,0,1]))),(1,missing)]).await.is_err());
-    index.commit().await;
+    index.commit().await.unwrap();
     assert_eq!(query(&index,SearchMode::Lexical,None).await.results.len(),1);
     for mode in [SearchMode::Vector { similarity_threshold:None, ann_mode:AnnMode::All },
                  SearchMode::Hybrid { similarity_threshold:None, ann_mode:AnnMode::All }] {
@@ -88,12 +88,12 @@ async fn external_write_query_reopen_contract() {
         assert!(result.error.is_none(),"{:?}",result.error);
         assert_eq!(result.results[0].doc_id,0);
     }
-    index.close().await; drop(index);
+    index.close().await.unwrap(); drop(index);
     let reopened = open_index(path).await.unwrap();
     let result = query(&reopened,SearchMode::Vector { similarity_threshold:Some(0.7),ann_mode:AnnMode::All },
         Some(Embedding::F32(vec![1.0,0.0,0.0]))).await;
     assert!(result.error.is_none()); assert_eq!(result.results.len(),1); assert_eq!(result.results[0].doc_id,0);
-    reopened.close().await; drop(reopened);
+    reopened.close().await.unwrap(); drop(reopened);
     let meta_path = path.join("index.json");
     let mut old_meta: serde_json::Value = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
     old_meta["inference"] = json!({"Model2Vec":{"model":"PotionBase2M","chunk_size":1000,"quantization":"None"}});
@@ -115,7 +115,7 @@ async fn external_f32_and_quantized_thresholds() {
         let mut beta = vec![0.0; dimensions]; beta[1] = 1.0;
         let index = create_index(&path, config, &schema(), 11, true, Some(1)).await.unwrap();
         index.index_documents(vec![document("alpha",json!(alpha.clone())), document("beta",json!(beta))]).await.unwrap();
-        index.commit().await;
+        index.commit().await.unwrap();
         for ann_mode in [AnnMode::All, AnnMode::Nprobe(1)] {
             let result = query(&index,SearchMode::Vector {similarity_threshold:Some(0.7),ann_mode},
                 Some(Embedding::F32(alpha.clone()))).await;
@@ -123,7 +123,7 @@ async fn external_f32_and_quantized_thresholds() {
             assert_eq!(result.results.len(),1,"{similarity} {quantization} dimensions={dimensions}");
             assert_eq!(result.results[0].doc_id,0,"{similarity} {quantization} dimensions={dimensions}");
         }
-        index.close().await; drop(index); fs::remove_dir_all(path).unwrap();
+        index.close().await.unwrap(); drop(index); fs::remove_dir_all(path).unwrap();
     }
 }
 }

@@ -86,11 +86,11 @@ async fn typed_snapshot_does_not_commit_and_caller_controls_logging() {
         0,
         "observing info must not commit"
     );
-    index.commit().await;
+    index.commit().await.unwrap();
     assert_eq!(collect_index_info(&index).await.indexed_documents, 1);
     log::set_max_level(log::LevelFilter::Off);
     let events = LOGGER.0.load(Ordering::SeqCst);
-    index.close().await;
+    index.close().await.unwrap();
     assert_eq!(
         LOGGER.0.load(Ordering::SeqCst),
         events,

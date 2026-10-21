@@ -115,7 +115,7 @@ async fn setup() -> (seekpower::index::IndexArc, HashSet<u64>, HashSet<u64>) {
         })
         .collect();
     index.index_documents(docs).await.unwrap();
-    index.commit().await;
+    index.commit().await.unwrap();
 
     let vx: Vec<u64> = set_x.iter().copied().collect();
     let overlap: Vec<u64> = set_x.intersection(&set_y).copied().collect();
@@ -128,7 +128,7 @@ async fn setup() -> (seekpower::index::IndexArc, HashSet<u64>, HashSet<u64>) {
         del.insert(overlap[i]);
     }
     index.delete_documents(del.iter().copied().collect()).await;
-    index.commit().await;
+    index.commit().await.unwrap();
     (index, set_x, set_y)
 }
 
@@ -154,7 +154,7 @@ async fn bitmap_and_count_excludes_deleted() {
     .await;
     assert_eq!(count.result_count_total, live_and.len());
     assert_eq!(topk.result_count_total, live_and.len());
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 /// Bitmap OR total must drop deleted documents.
@@ -172,7 +172,7 @@ async fn bitmap_or_count_excludes_deleted() {
     .await;
     assert_eq!(count.result_count_total, live_or.len());
     assert_eq!(topk.result_count_total, live_or.len());
-    index.close().await;
+    index.close().await.unwrap();
 }
 
 fn ground_truth(set_x: &HashSet<u64>, set_y: &HashSet<u64>) -> (HashSet<u64>, HashSet<u64>) {

@@ -94,7 +94,7 @@ async fn stale_warmup_cannot_publish_after_append_commit_or_clear() {
             let neutral = json!({"a":"neutral neutral","b":"neutral neutral"});
             let appended = json!({"a":"the neutral","b":"the neutral"});
             add(&index, &[strong.clone(), neutral.clone()], 2).await;
-            index.commit().await;
+            index.commit().await.unwrap();
             if matches!(mutation, Mutation::Commit) {
                 add(&index, &[appended.clone()], 3).await;
             }
@@ -112,11 +112,11 @@ async fn stale_warmup_cannot_publish_after_append_commit_or_clear() {
                 .unwrap();
             match mutation {
                 Mutation::Append => add(&index, &[appended], 3).await,
-                Mutation::Commit => index.commit().await,
+                Mutation::Commit => index.commit().await.unwrap(),
                 Mutation::Clear => {
                     index.write().await.clear_index().await;
                     add(&index, &[neutral, strong], 2).await;
-                    index.commit().await;
+                    index.commit().await.unwrap();
                 }
             }
             pause.resume.notify_one();
@@ -169,7 +169,7 @@ async fn stale_warmup_cannot_publish_after_append_commit_or_clear() {
                     }
                 }
             }
-            index.close().await;
+            index.close().await.unwrap();
             drop(index);
             drop(shard);
             std::fs::remove_dir_all(path).unwrap();

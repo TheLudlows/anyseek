@@ -1,139 +1,189 @@
-// VS Code REST Client. Copy the master key from the server startup log.
+// VS Code REST Client: set keys, epoch and IDs before sending.
+// UTC day: python3 -c 'import time; print(int(time.time()//86400))'
+// Save this file with the chosen epoch/nonces; retries reuse it unchanged.
+// A new logical run needs new collection/record/operation identities.
 @base_url = http://127.0.0.1:8080
 @master_key = PASTE_MASTER_API_KEY
 @api_key = {{master_key}}
-@index_id = 0
-@vector_index_id = 1
-@key_to_revoke = PASTE_ORDINARY_API_KEY
+@epoch = PASTE_CURRENT_UTC_DAY
+@collection_id = rest-demo
+@vector_collection_id = rest-vectors
+@shared_key_id = rest-reader
+@shared_key = PASTE_CLIENT_GENERATED_32_BYTE_BASE64_KEY
+@backup_id = PASTE_RETURNED_BACKUP_ID
+@service_backup_id = PASTE_RETURNED_SERVICE_BACKUP_ID
 
 ### Health
 GET {{base_url}}/api/v1/live
 
-### Create an optional isolated key
+### Register a caller-generated key (master only); no data belongs to the key
 POST {{base_url}}/api/v1/apikey
 apikey: {{master_key}}
 Content-Type: application/json
 
-{}
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-register"},"key_id":"{{shared_key_id}}","apikey_base64":"{{shared_key}}"}
 
-### List indexes in this key's scope
+### List granted collections
 GET {{base_url}}/api/v1/apikey
 apikey: {{api_key}}
 
-### Create a lexical index; text is stored and indexed by default
+### Create a collection; retain this full request for retries
 POST {{base_url}}/api/v1/index
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"index_name":"documents","schema":[{"field":"body","field_type":"Text"},{"field":"category","field_type":"String16","filterable":true}]}
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-create"},"collection_id":"{{collection_id}}","config":{"index_name":"Documents","schema":[{"field":"body","field_type":"Text"},{"field":"category","field_type":"String16","filterable":true}]}}
 
-### Index information
-GET {{base_url}}/api/v1/index/{{index_id}}
-apikey: {{api_key}}
+### Grant shared access (master only)
+POST {{base_url}}/api/v1/index/{{collection_id}}/grants
+apikey: {{master_key}}
+Content-Type: application/json
 
-### Write one document (an array writes a batch)
-POST {{base_url}}/api/v1/index/{{index_id}}/doc
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-grant"},"key_id":"{{shared_key_id}}","allow":true}
+
+### Conditional creation; success is already durable and visible
+POST {{base_url}}/api/v1/index/{{collection_id}}/doc
 apikey: {{api_key}}
 Content-Type: application/json
 
-[{"body":"hello database","category":"guide"},{"body":"hello world","category":"note"}]
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-write"},"record_id":"r1","routing_key":"r1","expected":"Absent","document":{"body":"hello database","category":"guide"}}
 
-### Search immediately, before committing
-POST {{base_url}}/api/v1/index/{{index_id}}/query
+### Independent batch; inspect every result (not atomic)
+POST {{base_url}}/api/v1/index/{{collection_id}}/batch
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"query":"hello"}
+{"writes":[{"operation_id":{"epoch":{{epoch}},"nonce":"rest-batch-2"},"record_id":"r2","routing_key":"r2","expected":"Absent","document":{"body":"hello world","category":"note"}}]}
 
-### Filter, project and match any term
-POST {{base_url}}/api/v1/index/{{index_id}}/query
+### Filter and project; results are hits[].record
+POST {{base_url}}/api/v1/index/{{collection_id}}/query
 apikey: {{api_key}}
 Content-Type: application/json
 
 {"query":"database world","operator":"or","fields":["body"],"filter":[{"String16":{"field":"category","filter":["guide"]}}]}
 
-### Browse without text; omit total counting
-POST {{base_url}}/api/v1/index/{{index_id}}/query
-apikey: {{api_key}}
-Content-Type: application/json
-
-{"count":false,"length":10,"sort":[{"field":"category","order":"Ascending"}]}
-
-### Persist pending writes
-PATCH {{base_url}}/api/v1/index/{{index_id}}
-apikey: {{api_key}}
-
-### Read selected stored fields; omit fields for the full document
-GET {{base_url}}/api/v1/index/{{index_id}}/doc/0?fields=body
-apikey: {{api_key}}
-
-### Iterate live documents; defaults to 10 with stored fields
-POST {{base_url}}/api/v1/index/{{index_id}}/iterator
+### Browse activity in stable-ID order; also supported by vector-only collections
+POST {{base_url}}/api/v1/index/{{collection_id}}/query
 apikey: {{api_key}}
 Content-Type: application/json
 
 {}
 
-### Fully replace one document (an array of these objects replaces a batch); new ID allocated
-PATCH {{base_url}}/api/v1/index/{{index_id}}/doc
+### Count-only browse
+POST {{base_url}}/api/v1/index/{{collection_id}}/query
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"id":0,"document":{"body":"updated database","category":"guide"}}
+{"length":0}
 
-### Create a hybrid index; vectors default to F32/Cosine, without quantization
+### Read original record by stable identity; optional projection
+GET {{base_url}}/api/v1/index/{{collection_id}}/doc/r1?fields=body
+apikey: {{api_key}}
+
+### Stable iterator page; pass returned next as cursor, unchanged, for the next page
+POST {{base_url}}/api/v1/index/{{collection_id}}/iterator
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"length":10,"fields":["body"]}
+
+### Full conditional replacement, preserving identity and advancing version
+PATCH {{base_url}}/api/v1/index/{{collection_id}}/doc
+apikey: {{api_key}}
+Content-Type: application/json
+
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-replace"},"record_id":"r1","routing_key":"r1","expected":{"Match":1},"document":{"body":"updated database","category":"guide"}}
+
+### Original operation receipt (absence is not proof of failure)
+GET {{base_url}}/api/v1/index/{{collection_id}}/operation/{{epoch}}/rest-write
+apikey: {{api_key}}
+
+### Online complete checkpoint; does not release Record operation ledger capacity
+PATCH {{base_url}}/api/v1/index/{{collection_id}}
+apikey: {{api_key}}
+
+### Create hybrid collection with an explicit external embedding space
 POST {{base_url}}/api/v1/index
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"index_name":"hybrid","schema":[{"field":"body","field_type":"Text"},{"field":"vector","field_type":"Json","index_vector":true}],"vector":{"dimensions":3}}
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-vector-create"},"collection_id":"{{vector_collection_id}}","embedding_space_id":"example-model-f32-cosine-v1","config":{"index_name":"Hybrid","schema":[{"field":"body","field_type":"Text"},{"field":"vector","field_type":"Json","index_vector":true}],"vector":{"dimensions":3}}}
 
-### Supply external embeddings; no model runs in the server
-POST {{base_url}}/api/v1/index/{{vector_index_id}}/doc
+### Supply original external vector with the Record envelope
+POST {{base_url}}/api/v1/index/{{vector_collection_id}}/doc
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"body":"hello database","vector":[1,0,0]}
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-vector-write"},"record_id":"v1","routing_key":"v1","expected":"Absent","document":{"body":"hello database","vector":[1,0,0]}}
 
-### Vector-only search; no query string required
-POST {{base_url}}/api/v1/index/{{vector_index_id}}/query
+### Vector search; all:true explicitly probes all clusters
+POST {{base_url}}/api/v1/index/{{vector_collection_id}}/query
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"query_vector":[1,0,0]}
+{"query_vector":[1,0,0],"all":true}
 
-### Text plus vector selects hybrid search
-POST {{base_url}}/api/v1/index/{{vector_index_id}}/query
+### Hybrid search
+POST {{base_url}}/api/v1/index/{{vector_collection_id}}/query
 apikey: {{api_key}}
 Content-Type: application/json
 
 {"query":"database","query_vector":[1,0,0]}
 
-### Delete by internal document ID
-DELETE {{base_url}}/api/v1/index/{{index_id}}/doc/1
-apikey: {{api_key}}
-
-### Delete all matches of nonempty text; for IDs use {"ids":[0,1]}
-DELETE {{base_url}}/api/v1/index/{{index_id}}/doc
+### Conditional delete; no DELETE /doc/{physical_doc_id} endpoint
+DELETE {{base_url}}/api/v1/index/{{collection_id}}/doc
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"query":"database"}
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-delete"},"record_id":"r1","routing_key":"r1","expected":{"Match":2},"document":null}
 
-### Explicitly remove all documents
-DELETE {{base_url}}/api/v1/index/{{index_id}}/doc
+### Plan deletion of all remaining records (does not write)
+// Save targets, add one original operation_id per item, then submit /batch.
+// Do not regenerate this selection when retrying a partially completed deletion.
+POST {{base_url}}/api/v1/index/{{collection_id}}/delete-plan
 apikey: {{api_key}}
 Content-Type: application/json
 
-{"all":true}
+{"select":"all"}
 
-### Delete the index
-DELETE {{base_url}}/api/v1/index/{{index_id}}
+### Independent collection snapshot
+POST {{base_url}}/api/v1/index/{{collection_id}}/backup
 apikey: {{api_key}}
+Content-Type: application/json
 
-### Revoke a key and delete its indexes
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-backup"}}
+
+### Restore data into a new collection (master only; old grants are not restored)
+POST {{base_url}}/api/v1/restore
+apikey: {{master_key}}
+Content-Type: application/json
+
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-restore"},"collection_id":"rest-restored","backup_id":"{{backup_id}}"}
+
+### Full catalog/service snapshot (master only)
+POST {{base_url}}/api/v1/service-backups
+apikey: {{master_key}}
+Content-Type: application/json
+
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-service-backup"}}
+
+### Restore into a NEW STOPPED root; does not replace the running service
+POST {{base_url}}/api/v1/service-restores
+apikey: {{master_key}}
+Content-Type: application/json
+
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-service-restore"},"backup_id":"{{service_backup_id}}"}
+
+### Revoke key without deleting shared collection data
 DELETE {{base_url}}/api/v1/apikey
 apikey: {{master_key}}
 Content-Type: application/json
 
-{"apikey_base64":"{{key_to_revoke}}"}
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-revoke"},"key_id":"{{shared_key_id}}"}
+
+### Permanently retire collection identity (independent from key revocation)
+DELETE {{base_url}}/api/v1/index/{{collection_id}}
+apikey: {{master_key}}
+Content-Type: application/json
+
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-delete-collection"}}

@@ -19,6 +19,8 @@ publish = false
 default = ["zh","vb"]
 zh = []
 vb = []
+# Explicit test binaries only; no remote activation endpoint.
+fault-injection = []
 
 [lib]
 name = "seekpower"
@@ -45,6 +47,7 @@ regex-syntax = "0.8.11"
 indexmap = { version = "2.14.2", features = ["serde"]}
 unicode-normalization = "0.1.25"
 finl_unicode = "1.4.0"
+sha2 = "0.11.0"
 num_cpus = "1.17.0"
 snap = "1.1.2"
 bytemuck = { version = "1.25.2", features = ["derive","extern_crate_alloc"] }

@@ -60,7 +60,7 @@ async fn test_01_create_index() {
 
     let result = index.meta.id;
     assert_eq!(result, 0);
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -85,12 +85,12 @@ async fn test_02_index_document() {
     index_arc.index_documents(documents_vec).await.unwrap();
 
     // wait until all index threads are finished and commit
-    index_arc.commit().await;
+    index_arc.commit().await.unwrap();
 
     let result = index_arc.read().await.indexed_doc_count().await;
     assert_eq!(result, 4);
 
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -132,7 +132,7 @@ async fn test_03_get_iterator() {
     let result = iterator.results.first().unwrap().doc_id;
     assert_eq!(result, 1);
 
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -203,7 +203,7 @@ async fn test_04_query_index() {
     let result = result_object.result_count_total;
     assert_eq!(result, 2);
 
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -322,7 +322,7 @@ async fn test_05_empty_query() {
     let result = result_object.result_count_total;
     assert_eq!(result, 4);
 
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -348,7 +348,7 @@ async fn test_06_clear_index() {
     index_arc.index_document(document).await.unwrap();
 
     // wait until all index threads are finished and commit
-    index_arc.commit().await;
+    index_arc.commit().await.unwrap();
 
     let result = index_arc.read().await.indexed_doc_count().await;
     assert_eq!(result, 1);
@@ -376,7 +376,7 @@ async fn test_06_clear_index() {
     let result = result_object.result_count_total;
     assert_eq!(result, 1);
 
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -404,7 +404,7 @@ async fn test_07_get_document() {
     let result = serde_json::from_value::<String>(value).unwrap();
 
     assert_eq!(result, "body1");
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -521,7 +521,7 @@ async fn test_09_create_index_vector_supplied() {
 
     let result = index.meta.id;
     assert_eq!(result, 0);
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -540,12 +540,12 @@ async fn test_10_index_document_vector_supplied() {
     index_arc.index_documents(documents_vec).await.unwrap();
 
     // wait until all index threads are finished and commit
-    index_arc.commit().await;
+    index_arc.commit().await.unwrap();
 
     let result = index_arc.read().await.indexed_doc_count().await;
     assert_eq!(result, 3);
 
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -638,7 +638,7 @@ async fn test_12_create_index_vector_external() {
 
     let result = index.meta.id;
     assert_eq!(result, 0);
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -657,12 +657,12 @@ async fn test_13_index_document_vector_external() {
     index_arc.index_documents(documents_vec).await.unwrap();
 
     // wait until all index threads are finished and commit
-    index_arc.commit().await;
+    index_arc.commit().await.unwrap();
 
     let result = index_arc.read().await.indexed_doc_count().await;
     assert_eq!(result, 3);
 
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -759,7 +759,7 @@ async fn test_15_filter_scope() {
     {"id":"c","text":"charlie only","kind":"minutes"}]"#;
     let documents_vec = serde_json::from_str(documents_json).unwrap();
     index_arc.index_documents(documents_vec).await.unwrap();
-    index_arc.commit().await;
+    index_arc.commit().await.unwrap();
 
     let result = index_arc.read().await.indexed_doc_count().await;
     assert_eq!(result, 3);
@@ -828,6 +828,6 @@ async fn test_15_filter_scope() {
     assert_eq!(count, 0);
     assert!(ids.is_empty());
 
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
     let _ = fs::remove_dir_all(index_path);
 }

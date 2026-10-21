@@ -56,7 +56,7 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
         let doc: Document = serde_json::from_str(json).unwrap();
         index_arc.index_document(doc).await.unwrap();
     }
-    index_arc.commit().await;
+    index_arc.commit().await.unwrap();
 
     let index = index_arc.read().await;
     // Empty docs themselves stay not-found (documented behavior, cf. #72).
@@ -86,7 +86,7 @@ async fn run_case(access: AccessType, compression: DocumentCompression, tag: &st
         assert_eq!(title, want, "BUG [{tag}]: wrong content for doc {id}");
     }
     drop(index);
-    index_arc.close().await;
+    index_arc.close().await.unwrap();
     let _ = fs::remove_dir_all(index_path);
     println!("CASE {tag}: ok");
 }
