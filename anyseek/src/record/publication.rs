@@ -29,43 +29,23 @@ impl Inner {
         if document.is_some() { affected.remove(&receipt.record_id); }
         let old_location = self.locations.get(&receipt.record_id).copied();
         if let Some(document) = &document {
-            let id = self.ordinals.len();
-            let shard = self.index.read().await.shard_vec[0].clone();
-            shard
-                .write()
-                .await
-                .active
-                .as_mut()
-                .unwrap()
-                .keys
-                .push(receipt.record_id.clone());
-            self.index
-                .index_documents(vec![temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms })])
-                .await
-                .map_err(|_| RecordError::DurablePending(receipt.seq))?;
+            let id=self.index.append(receipt.record_id.clone(),temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms })).await.map_err(|_|RecordError::DurablePending(receipt.seq))?;
             #[cfg(test)]
             if self.fail_publication_stage == 1 {
                 return Err(RecordError::DurablePending(receipt.seq));
             }
-            self.ordinals.push(receipt.record_id.clone());
+            if self.ordinals.len()<=id {self.ordinals.resize(id+1,String::new());}
+            self.ordinals[id]=receipt.record_id.clone();
             self.locations.insert(receipt.record_id.clone(), id);
         } else {
             self.locations.remove(&receipt.record_id);
         }
         if let Some(old_id) = old_location {
-            let shard = self.index.read().await.shard_vec[0].clone();
-            let mut shard = shard.write().await;
-            shard.delete_hashset.insert(old_id);
-            shard.active.as_mut().unwrap().retire(old_id);
-            shard.invalidate_frequentword_results();
+            self.index.retire(old_id).await.map_err(|_|RecordError::DurablePending(receipt.seq))?;
         }
         for id in affected {
             if let Some(ordinal) = self.locations.remove(&id) {
-                let shard = self.index.read().await.shard_vec[0].clone();
-                let mut shard = shard.write().await;
-                shard.delete_hashset.insert(ordinal);
-                shard.active.as_mut().unwrap().retire(ordinal);
-                shard.invalidate_frequentword_results();
+                self.index.retire(ordinal).await.map_err(|_|RecordError::DurablePending(receipt.seq))?;
             }
         }
         #[cfg(test)]
@@ -98,16 +78,14 @@ impl Inner {
             let retired: Vec<_> = self.locations.keys().filter(|id| visible.get(*id) != Some(&true)).cloned().collect();
             for id in retired {
                 if let Some(ordinal) = self.locations.remove(&id) {
-                    let shard = self.index.read().await.shard_vec[0].clone(); let mut shard = shard.write().await;
-                    shard.delete_hashset.insert(ordinal); shard.active.as_mut().unwrap().retire(ordinal); shard.invalidate_frequentword_results();
+                    self.index.retire(ordinal).await.map_err(|_|RecordError::DurablePending(applied.receipt.seq))?;
                 }
             }
             for (id, record) in next.records.iter().filter(|(id, _)| !self.state.records.contains_key(*id)) {
                 if visible.get(id) != Some(&true) { return Err(RecordError::DurablePending(applied.receipt.seq)); }
-                let ordinal = self.ordinals.len();
-                self.index.read().await.shard_vec[0].write().await.active.as_mut().unwrap().keys.push(id.clone());
-                self.index.index_documents(vec![temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)]).await.map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
-                self.ordinals.push(id.clone()); self.locations.insert(id.clone(), ordinal);
+                let ordinal=self.index.append(id.clone(),temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)).await.map_err(|_|RecordError::DurablePending(applied.receipt.seq))?;
+                if self.ordinals.len()<=ordinal {self.ordinals.resize(ordinal+1,String::new());}
+                self.ordinals[ordinal]=id.clone();self.locations.insert(id.clone(),ordinal);
                 #[cfg(test)]
                 if self.fail_publication_stage == 1 { return Err(RecordError::DurablePending(applied.receipt.seq)); }
             }

@@ -117,7 +117,7 @@ mod tests {
         let descriptor=Descriptor::prepare(&prepared,&inner.config,&inner.state,16*settings.max_journal_bytes).await.unwrap();
         let (_,state,index,ordinals)=descriptor.open(&prepared,16*settings.max_journal_bytes,settings.max_journal_bytes).await.unwrap();
         assert_eq!(serde_json::to_vec(&state).unwrap(),serde_json::to_vec(&inner.state).unwrap());
-        inner.index=index;inner.ordinals=ordinals;inner.state=state;
+        inner.index=view::RetrievalView::single(index);inner.ordinals=ordinals;inner.state=state;
         drop(inner);
         assert_eq!(partition.write(request.clone()).await.unwrap(),receipt);
         request.document.as_mut().unwrap().insert("body".into(),serde_json::json!("conflict"));
@@ -148,7 +148,7 @@ mod tests {
         }
         let corpus=std::sync::Arc::new(std::sync::RwLock::new(crate::active::Corpus::default()));
         for partition in [&a,&b] {
-            partition.inner.lock().await.index.read().await.shard_vec[0].write().await.active.as_mut().unwrap().attach(&corpus).unwrap();
+            partition.inner.lock().await.index.test_index().read().await.shard_vec[0].write().await.active.as_mut().unwrap().attach(&corpus).unwrap();
         }
         async fn matches(a:&RecordPartition,b:&RecordPartition,oracle:&RecordPartition) {
             let mut scores=BTreeMap::new();
@@ -169,8 +169,8 @@ mod tests {
         // Compose the actual root search engine from the two physical shards.
         // This exercises global channel ranking/RRF, rather than merging two
         // already-fused result lists in the test.
-        let root_index=a.inner.lock().await.index.clone();
-        let second=b.inner.lock().await.index.read().await.shard_vec[0].clone();
+        let root_index=a.inner.lock().await.index.test_index().clone();
+        let second=b.inner.lock().await.index.test_index().read().await.shard_vec[0].clone();
         second.write().await.meta.id=1;
         {let mut root=root_index.write().await;root.shard_vec.push(second);root.shard_number=2;}
         for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {

@@ -40,6 +40,7 @@ mod mutation;
 mod publication;
 mod segment_state;
 mod segment;
+mod view;
 mod recovery;
 pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
 
@@ -314,7 +315,7 @@ enum Entry {
 struct Inner {
     config: RecordConfig,
     state: State,
-    index: IndexArc,
+    index: view::RetrievalView,
     ordinals: Vec<String>,
     locations: BTreeMap<String, usize>,
     snapshot_bytes: usize,
@@ -470,7 +471,7 @@ impl Inner {
             staged_records: generation::reserved(&self.state),
             retained_operations: self.state.operations.len(),
             retained_source_revisions: self.state.source_revisions.len(),
-            physical_versions: self.ordinals.len(),
+            physical_versions: self.ordinals.iter().filter(|id|!id.is_empty()).count(),
             evidence_quarantined: self.state.evidence_quarantined,
             checkpoint_bytes: self.snapshot_bytes,
         }
@@ -569,9 +570,10 @@ async fn build(
     path: &Path,
     config: &RecordConfig,
     state: &State,
-) -> Result<(IndexArc, Vec<String>), RecordError> {
+) -> Result<(view::RetrievalView, Vec<String>), RecordError> {
     let cache = path.join(format!("cache-{:032x}", rand::random::<u128>()));
-    build_at(path,&cache,config,state).await
+    let (index,ordinals)=build_at(path,&cache,config,state).await?;
+    Ok((view::RetrievalView::single(index),ordinals))
 }
 async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Result<(IndexArc,Vec<String>),RecordError>{
     let index = create_index(
@@ -1266,7 +1268,7 @@ mod tests {
         for checkpoint in [false, true] {
             if checkpoint { p.compact_journal().await.unwrap(); }
             let inner = p.inner.lock().await;
-            let index = inner.index.read().await;
+            let index = inner.index.test_index().read().await;
             assert!(index.stored_field_names.is_empty());
             for shard in &index.shard_vec {
                 assert!(shard.read().await.stored_field_names.is_empty());
@@ -1283,7 +1285,7 @@ mod tests {
         let p = RecordPartition::open(&location, settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.write(request).await.unwrap(), receipt);
         assert_eq!(p.get("a").await.unwrap().unwrap().document.as_ref(), Some(&original));
-        assert!(p.inner.lock().await.index.read().await.stored_field_names.is_empty());
+        assert!(p.inner.lock().await.index.test_index().read().await.stored_field_names.is_empty());
         let result = query(&p, SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All }).await;
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].record.document.as_ref(), Some(&original));
@@ -2611,7 +2613,7 @@ mod tests {
             let mut q = options(); q.text = "original".into();
             assert!(p.query(q).await.unwrap().hits.is_empty());
             match stage {
-                0 => p.inner.lock().await.index.commit().await.unwrap(),
+                0 => p.inner.lock().await.index.test_index().commit().await.unwrap(),
                 1 => {
                     p.compact_journal().await.unwrap();
                     drop(p);
@@ -3063,7 +3065,7 @@ mod tests {
             .inner
             .lock()
             .await
-            .index
+            .index.test_index()
             .read()
             .await
             .index_path_string
@@ -3075,7 +3077,7 @@ mod tests {
                     .inner
                     .lock()
                     .await
-                    .index
+                    .index.test_index()
                     .read()
                     .await
                     .index_path_string,
@@ -3305,7 +3307,7 @@ mod tests {
         // uses the authoritative Record write path and its publication guard.
         {
             let mut inner = partition.inner.lock().await;
-            let shard = inner.index.read().await.shard_vec[0].clone();
+            let shard = inner.index.test_index().read().await.shard_vec[0].clone();
             for id in 1..65536 {
                 shard
                     .write()
@@ -3316,7 +3318,7 @@ mod tests {
                     .keys
                     .push("a".into());
                 inner
-                    .index
+                    .index.test_index()
                     .index_documents(vec![original.document.clone().unwrap()])
                     .await
                     .unwrap();
@@ -3354,7 +3356,7 @@ mod tests {
             assert_eq!(result.statistics.physical_versions, 65537);
             assert!(result.hits[0].score.is_finite());
         }
-        partition.inner.lock().await.index.commit().await.unwrap();
+        partition.inner.lock().await.index.test_index().commit().await.unwrap();
         partition
             .write(write(
                 "partial-append",
@@ -3557,7 +3559,7 @@ mod tests {
             .inner
             .lock()
             .await
-            .index
+            .index.test_index()
             .read()
             .await
             .index_path_string
@@ -3570,7 +3572,7 @@ mod tests {
         }
         {
             let inner = partition.inner.lock().await;
-            let index = inner.index.read().await;
+            let index = inner.index.test_index().read().await;
             let shard = index.shard_vec[0].read().await;
             let sorts = vec![];
             let mut heap = crate::min_heap::MinHeap::new(1, &shard, false, &sorts);
@@ -3638,7 +3640,7 @@ mod tests {
                         .inner
                         .lock()
                         .await
-                        .index
+                        .index.test_index()
                         .read()
                         .await
                         .index_path_string,
@@ -3649,7 +3651,7 @@ mod tests {
                 assert_eq!(result.visible_seq, result.statistics.visible_seq);
                 assert_eq!(result.statistics.active_records, 4);
                 assert_eq!(result.statistics.physical_versions, 5);
-                partition.inner.lock().await.index.commit().await.unwrap();
+                partition.inner.lock().await.index.test_index().commit().await.unwrap();
             } else if step == 1 {
                 drop(partition);
                 partition = RecordPartition::open(&location, config().max_journal_bytes)
@@ -3715,7 +3717,7 @@ mod tests {
                 .write(make("old-b", "b", "beta old", "alpha beta"))
                 .await
                 .unwrap();
-            partition.inner.lock().await.index.commit().await.unwrap();
+            partition.inner.lock().await.index.test_index().commit().await.unwrap();
             partition
                 .write(make("a", "a", "alpha beta new", ""))
                 .await
@@ -3741,7 +3743,7 @@ mod tests {
                     expected,
                     "before commit: {text}"
                 );
-                partition.inner.lock().await.index.commit().await.unwrap();
+                partition.inner.lock().await.index.test_index().commit().await.unwrap();
                 assert_eq!(
                     ranked(&partition, text, SearchMode::Lexical, 10).await,
                     expected,

@@ -281,11 +281,7 @@ impl Inner {
             .collect();
         for id in retired {
             let ordinal = self.locations.remove(&id).unwrap();
-            let shard = self.index.read().await.shard_vec[0].clone();
-            let mut shard = shard.write().await;
-            shard.delete_hashset.insert(ordinal);
-            shard.active.as_mut().unwrap().retire(ordinal);
-            shard.invalidate_frequentword_results();
+            self.index.retire(ordinal).await.map_err(|_|RecordError::DurablePending(event.seq))?;
         }
         self.state = candidate;
         self.feed_cache.push(Some(feed_point));

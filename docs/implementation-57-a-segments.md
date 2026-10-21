@@ -1,6 +1,6 @@
 # A 批实施设计：本地不可变 Segment、发布与安全回收
 
-状态：设计，未实现。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
+状态：实施中，尚未完成 A 批；实际检查点见 §11–14。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
 
 ## 1. 交付和不做的事
 
@@ -135,3 +135,13 @@ Windows CI 的独立只读诊断：`index.rs` 的 2048 个空词典各预分配 
 active Record 路径的显式 `_id` 排序现在在局部 Top-K 和 root 都使用逻辑 record_id，避免物理 ordinal 因更新或分段变化而改变选中对象；没有 active 的独立 Index API 继续使用物理 DocID。逻辑 ID 平分规则同时用于跨 shard 融合，早于候选截断。prepared 校验的字段编号范围使用 `index_lexical || index_vector`，增加 vector-first schema 覆盖，避免误拒合法向量先行 schema。
 
 独立只读复审通过本轮候选/排序修复；仍明确要求生产接入时处理共享上下文错误的失败关闭、整次查询屏障、段替换与贡献退役原子性。最终源码 `cargo test --workspace --features server --all-targets` 退出 0：34 suites、236 passed、0 failed、10 ignored；日志 `/workspace/anyseek-validation/a2-full.log`。此次没有借用 A1 结果，也未运行 Windows、HTTP/Chromium、系统断电验证。该检查点是实际检索路径的前置正确性实现，尚非默认多段 + tail、manifest 或安全 GC 闭环。
+
+## 14. A2 进行中：默认检索能力隔离与内存轮换
+
+默认 Record 的 `Inner.index` 现由私有 `record/view.rs::RetrievalView` 管理。生产调用者不能取得原始 IndexArc；增量写入仅进入 tail，全文/向量查询和关系 facet 过滤走共同视图，删除/TTL 只更新对应分段的活动覆盖层。低层独立 Index API 不改，HTTP/UI 协议不变。物理地址保留 shard 映射的空槽，但物理版本统计不再把空槽计作记录。
+
+内部轮换先验证独立单 shard tail、schema/向量配置、段数与地址预算，完整构造新映射与独立 Corpus；获取全部锁后一次切换，无异步取消点或可失败转换。独立审查发现并修复了逐项 attach/地址修改导致的失败半切换，以及冻结段旧频词缓存使用过期全局统计的问题。活动 Record 查询绕过该旧缓存，独立 Index 缓存行为保留。
+
+新增真实 Record 写入 oracle 覆盖两次轮换后替换、删除、来源依赖隐藏、全文/精确向量/Hybrid 得分和统计；另覆盖预算拒绝后重试、锁等待期间取消后重试及旧频词缓存绕过。最终源码 `cargo test --workspace --features server --all-targets` 退出 0：34 suites、240 passed、0 failed、10 ignored。`cargo build --features server,fault-injection --bin anyseek_server` 成功，`record_service_smoke.py --server target/debug/anyseek_server --browser --faults` 退出 0，34 个 PASS 检查点。分别记录于工作区 `a-view-final-full.log`、`a-view-final-build.log`、`a-view-http-browser-faults.log`。未减少既有测试覆盖；十个忽略项仍是九个父测试调用的进程 worker 和一个异构 AES fixture。
+
+**明确未完成**：轮换仍只有内部测试调用，默认持久化尚未启用 manifest/多段恢复；当前 checkpoint 仍是原完整状态协议。上述能力隔离及进程内切换不代表文件只读打开、持久发布或安全 GC 已完成。构建全过程硬资源限制、规范正文按需访问、默认 manifest/tail 恢复、compaction/GC 仍需贯通。没有推送、创建 PR、改 master 或运行 Windows/系统断电验证。

@@ -2110,7 +2110,10 @@ impl SearchLexicalShard for ShardArc {
             if query_list_len == 0 {
                 break 'search_blocks;
             } else if query_list_len == 1 {
-                if !(shard_ref.uncommitted && include_uncommitted)
+                // This cache predates the shared active-version corpus. Its scores
+                // cannot be reused after another segment or the tail changes.
+                if shard_ref.active.is_none()
+                    && !(shard_ref.uncommitted && include_uncommitted)
                     && offset + length <= 1000
                     && not_query_list.is_empty()
                     && field_filter_set.is_empty()
