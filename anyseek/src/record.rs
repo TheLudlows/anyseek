@@ -983,7 +983,7 @@ impl RecordPartition {
         backup_id: &str,
         created_at_ms: i64,
         max_snapshot_bytes: usize,
-    ) -> Result<(String, u64), RecordError> {
+    ) -> Result<(String, u64, String), RecordError> {
         let mut inner = self.inner.lock().await;
         if !inner.healthy || inner.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
