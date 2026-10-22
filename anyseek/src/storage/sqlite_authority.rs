@@ -1043,6 +1043,26 @@ mod tests {
     }
 
     #[test]
+    fn pinned_parent_protects_transitive_child_from_gc() {
+        let path=temp_db();
+        let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        db.create_partition("p0",1).unwrap();
+        let parent=object("backup/descriptor",1);
+        let child=object("backup/segment",2);
+        db.register_durable_object(&parent,1).unwrap();
+        db.register_durable_object(&child,1).unwrap();
+        db.register_object_edge(&parent,&child).unwrap();
+        db.pin_object("backup-root-pin","p0",&parent.key,"backup",None).unwrap();
+        assert!(!db.retire_object(&child.key,1,2).unwrap());
+        assert!(db.unpin_object("backup-root-pin").unwrap());
+        assert!(db.retire_object(&child.key,1,3).unwrap());
+        drop(db);
+        let _=fs::remove_file(&path);
+        let _=fs::remove_file(path.with_extension("sqlite-wal"));
+        let _=fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
     fn commit_retry_index_watermark_and_reopen() {
         let path=temp_db();
         let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
