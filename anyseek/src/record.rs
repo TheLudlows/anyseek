@@ -4218,7 +4218,7 @@ mod tests {
         let partition = RecordPartition::create(&path, config()).await.unwrap();
         let mut remote = RemotePersistence {
             store,
-            authority,
+            authority: tokio::sync::Mutex::new(authority),
             partition_id: "record-test".into(),
             owner_epoch: 1,
             max_tail_blocks: 32,
@@ -4247,7 +4247,7 @@ mod tests {
         let store = S3CompatibleStore::from_store(object_store.clone(), 1024 * 1024);
         let mut remote = RemotePersistence {
             store, authority: tokio::sync::Mutex::new(authority), partition_id: "record-test".into(),
-            max_tail_blocks: 32, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
+            owner_epoch: 1, max_tail_blocks: 32, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
         };
         {
             let mut inner = recovered.inner.lock().await;
