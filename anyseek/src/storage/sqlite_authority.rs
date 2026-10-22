@@ -161,6 +161,16 @@ impl SqliteAuthority {
                         "immutable object key reused with different bytes".into()
                     ));
                 }
+                let state: i64 = tx.query_row(
+                    "SELECT state FROM object_uploads WHERE object_key=?1",
+                    [&object.key],
+                    |row| row.get(0),
+                )?;
+                if state == 2 {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "retired immutable object key cannot be reactivated".into()
+                    ));
+                }
                 tx.execute(
                     "UPDATE object_uploads SET state=1 WHERE object_key=?1",
                     [&object.key],
@@ -389,6 +399,11 @@ mod tests {
         assert_eq!(db.read_head("p0").unwrap().unwrap().committed_seq,0);
         db.register_durable_object(&unverified,10).unwrap();
         assert!(db.register_durable_object(&object("wal/unverified",2),11).is_err());
+        db.connection.execute(
+            "UPDATE object_uploads SET state=2 WHERE object_key=?1",
+            ["wal/unverified"],
+        ).unwrap();
+        assert!(db.register_durable_object(&unverified,12).is_err());
         assert!(matches!(
             db.publish_commit("p0",head.head_version,3,"op-x",[1;32],1,unverified,None).unwrap(),
             PublishOutcome::Published(_)
