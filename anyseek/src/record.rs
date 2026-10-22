@@ -4511,11 +4511,16 @@ mod tests {
         ).await.unwrap();
         assert_eq!(recovered.get("a").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote first");
         recovered.write(write("second-remote","b","alpha remote second",ExpectedVersion::Absent)).await.unwrap();
+        let revision=write("update-remote","a","alpha remote updated",ExpectedVersion::Match(1));
+        recovered.write(revision).await.unwrap();
+        let mut tombstone=write("delete-remote","b","",ExpectedVersion::Match(1));
+        tombstone.document=None;
+        recovered.write(tombstone).await.unwrap();
         drop(recovered);
         std::fs::remove_dir_all(&target_path).unwrap();
 
-        // Reopen from a missing local cache. SQLite/S3 bootstrap plus both committed
-        // Applied entries must reconstruct the same queryable Record view.
+        // Reopen from a missing local cache. SQLite/S3 bootstrap plus committed
+        // create/update/delete entries must reconstruct the same queryable Record view.
         let authority=SqliteAuthority::open(&authority_path,Duration::from_secs(1)).unwrap();
         let remote=RemotePersistence{
             store:S3CompatibleStore::from_store(object_store,1024*1024),
