@@ -73,11 +73,12 @@ Overall: **in progress; not ready to merge**.
 - No real S3-compatible endpoint has yet been exercised; in-memory object-store tests do not prove service-specific conditional PUT or visibility semantics.
 
 ### Remaining work
-1. Integrate `publish_bootstrap` and `append_and_commit` into actual RecordPartition/RecordService create/open/write paths. Object-backed recovery must load the bootstrap checkpoint and replay committed log entries; do not dual-commit local WAL and S3 without an explicit recovery protocol.
-2. Apply committed-but-unindexed entries in the same authoritative Record query view, including update/delete/version semantics.
-3. Register complete manifest/segment/WAL dependency edges in all writers/indexers and integrate backup/restore into service lifecycle.
-4. Validate conditional create, ambiguous PUT, read-after-write and delete behavior against a real S3-compatible service.
-5. Complete object-backend process-failure/restart tests and only then remove Draft status.
+1. Run fresh current-head CI after the Record bootstrap/recovery integration.
+2. Audit all state-changing maintenance events and compaction/anchor paths so no authoritative change bypasses the remote commit protocol.
+3. Add Record-level tests for missing local cache recovery from bootstrap + full remote log, interrupted bootstrap retry, response loss, and update/delete semantics.
+4. Register complete manifest/segment/WAL dependency edges in all writers/indexers and verify backup restore lifecycle.
+5. Validate conditional create, ambiguous PUT, read-after-write and delete behavior against a real S3-compatible service.
+6. Complete object-backend process-failure/restart tests and only then remove Draft status.
 
 ## Latest progress — 2026-10-22
 
