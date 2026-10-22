@@ -470,6 +470,7 @@ impl SqliteAuthority {
                 "WITH RECURSIVE reachable(object_key) AS (
                     SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
                     UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
+                    UNION SELECT json_extract(bootstrap_json,'$.key') FROM partition_heads WHERE bootstrap_json IS NOT NULL
                     UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
                     UNION SELECT object_key FROM object_pins
                     UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
