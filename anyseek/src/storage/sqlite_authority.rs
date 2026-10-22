@@ -2,7 +2,7 @@
 //!
 //! This database stores coordination metadata only. Record bodies, vectors, WAL
 //! blocks and immutable index segments remain in external immutable objects.
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::{path::{Path, PathBuf}, time::Duration};
 
@@ -18,7 +18,8 @@ pub(crate) struct ObjectRef {
 }
 
 /// Authoritative partition watermarks and immutable object references.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PartitionHead {
     pub partition_id: String,
     pub head_version: u64,
