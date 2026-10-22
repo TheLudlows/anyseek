@@ -312,6 +312,12 @@ impl SqliteAuthority {
             tx.commit()?;
             return Ok(PublishOutcome::Conflict);
         }
+        if let Some(previous) = current.wal_tip.as_ref() {
+            tx.execute(
+                "INSERT OR IGNORE INTO object_edges(parent_key,child_key) VALUES(?1,?2)",
+                params![wal_tip.key, previous.key],
+            )?;
+        }
         let head = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let result_json = serde_json::to_string(&head).map_err(|_| rusqlite::Error::InvalidQuery)?;
         tx.execute(
@@ -600,6 +606,26 @@ impl SqliteAuthority {
         )?;
         tx.commit()?;
         Ok(changed)
+    }
+
+    /// Register an immutable dependency from a manifest/segment object to its child.
+    /// Both endpoints must already be verified and active in the object registry.
+    pub(crate) fn register_object_edge(
+        &mut self,
+        parent: &ObjectRef,
+        child: &ObjectRef,
+    ) -> rusqlite::Result<()> {
+        if parent.key == child.key {
+            return Err(rusqlite::Error::InvalidParameterName("self-referential object edge".into()));
+        }
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_durable_object(&tx, parent)?;
+        ensure_durable_object(&tx, child)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO object_edges(parent_key,child_key) VALUES(?1,?2)",
+            params![parent.key,child.key],
+        )?;
+        tx.commit()
     }
 
     /// Pin a verified object before opening it or starting a background build.
