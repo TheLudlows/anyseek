@@ -316,6 +316,8 @@ mod tests {
         let out=authority.publish_commit("p0",head.head_version,4,"op-2",[2;32],2,r2,None).unwrap();
         head=match out {super::super::sqlite_authority::PublishOutcome::Published(h)=>h,other=>panic!("{other:?}")};
         assert_eq!(load_committed_tail(&store,&head,4,4096).await.unwrap(),vec![entry(1),entry(2)]);
+        assert_eq!(load_committed_entries_after(&store,&head,1,4,4096).await.unwrap(),vec![entry(2)]);
+        assert_eq!(load_committed_entries_after(&store,&head,2,4,4096).await.unwrap(),Vec::<ObjectLogEntry>::new());
         let reachable=authority.reachable_objects().unwrap();
         assert!(reachable.iter().any(|object| object.key=="p0/log/1"));
         assert!(reachable.iter().any(|object| object.key=="p0/log/2"));
