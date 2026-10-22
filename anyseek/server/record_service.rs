@@ -1379,8 +1379,8 @@ async fn restore(
                 let marker: S3BackupMarker = serde_json::from_slice(
                     &std::fs::read(s.root.join(format!("backup-{}",request.backup_id)).join("s3-backup.json")).map_err(storage)?
                 ).map_err(storage)?;
-                if marker.backup_id != request.backup_id || marker.collection_id != request.collection_id {
-                    return Err(bad("S3 backup can only restore to its original collection identity"));
+                if marker.backup_id != request.backup_id {
+                    return Err(bad("S3 backup marker identity mismatch"));
                 }
                 marker.config
             } else {
