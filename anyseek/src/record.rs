@@ -4376,6 +4376,23 @@ mod tests {
         assert_eq!(record.version, 1);
         assert_eq!(record.document.unwrap()["body"], "alpha remote durable");
 
+        // A normal RecordPartition write must pass through the same remote commit
+        // authority, then publish locally.
+        let receipt = recovered.write(write(
+            "remote-write", "remote-record-2", "second remote durable",
+            ExpectedVersion::Absent,
+        )).await.unwrap();
+        assert_eq!(receipt.seq, 2);
+        let second = recovered.get("remote-record-2").await.unwrap().unwrap();
+        assert_eq!(second.document.unwrap()["body"], "second remote durable");
+        let (bundle_json, visible_seq, partition_id) =
+            recovered.create_s3_backup("record-backup", 200, 1024 * 1024).await.unwrap();
+        assert_eq!(visible_seq, 2);
+        assert_eq!(partition_id, "record-test");
+        let bundle: crate::storage::s3_compatible::BackupBundle =
+            serde_json::from_str(&bundle_json).unwrap();
+        assert_eq!(bundle.descriptor.backup_id, RemotePersistence::safe_backup_id("record-backup"));
+
         drop(recovered);
         let _ = std::fs::remove_dir_all(&path);
         let _ = std::fs::remove_file(&authority_path);
