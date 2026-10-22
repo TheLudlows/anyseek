@@ -9,6 +9,9 @@ Status: **implementation foundation in Draft PR #72; not yet accepted or wired i
 - Immutable S3 writes use conditional create (`PutMode::Create`), then read back and compare exact bytes, length and SHA-256. If a PUT response is ambiguous, the adapter reads the existing key and treats it as success only when the bytes match exactly; conflicting bytes are never overwritten.
 - `put_and_register` completes object upload and verification before recording the object as durable in SQLite; it deliberately does not advance `committed_seq`.
 - `get_verified` checks each read against the SQLite-published object reference.
+- Added bounded object-log blocks and backward chain replay from the SQLite committed tip to the indexed watermark. Partition mismatch, sequence gaps, checksum failures and block/byte budget exhaustion fail closed rather than returning a partial tail.
+- Added a logical metadata backup snapshot containing partition heads, operation receipts, object registry, pins and retired-key tombstones. Backup creation pins the caller-supplied complete object closure in the same SQLite transaction that captures the snapshot.
+- Added a backup descriptor that references both the metadata snapshot and the object closure, plus restore that verifies the descriptor, snapshot and each object before importing metadata into an empty SQLite authority.
 - Added authority-mediated retirement, pin/unpin, and collectible-object enumeration. An object is only retired when it is not referenced by any current partition head and has no live reader/indexer/backup/staging pin. Retirement is monotonic; a retired key cannot be reactivated.
 - `delete_retired` only deletes keys that the authority currently reports collectible. There is intentionally no unconditional object delete API.
 - Opening the metadata database enables SQLite WAL, sets `synchronous=FULL`, verifies the setting, enables foreign keys, and configures a bounded busy timeout.
@@ -21,7 +24,7 @@ Status: **implementation foundation in Draft PR #72; not yet accepted or wired i
 
 ## Explicit limitations
 
-This slice is **not** the end-to-end SQLite + object-storage backend. The S3-compatible adapter and basic pin-aware GC eligibility are implemented as isolated primitives, but they are not yet connected to the current RecordService authoritative write path. The adapter's conditional-create behavior must be tested against each selected S3-compatible service; services that do not honor conditional create and read-after-write visibility must not be certified. Query-time tail replay, indexer execution, coherent backup/restore closure, and integration fault tests remain outstanding.
+This slice is **not** the end-to-end SQLite + object-storage backend. The S3-compatible adapter, object-log tail reader, logical metadata backup/restore bundle and basic pin-aware GC eligibility exist as isolated primitives, but they are not yet connected to the current RecordService authoritative write path or search/index view. Tail replay currently returns validated operation envelopes; applying them to the live Record/search state remains outstanding. The caller must provide a complete object closure including all manifest/segment and WAL-chain dependencies; the metadata authority checks current-head references but cannot infer opaque manifest internals. A failed backup may leave pins; release them only after confirming no valid descriptor was published. S3 conditional-create, visibility, and delete semantics must be tested against a real target service before certification.
 
 The SQLite database is a single local authority. Do not put its WAL database on a network filesystem or allow independent nodes to maintain writable copies. Cross-host failover/HA is out of scope for this first slice.
 
@@ -35,6 +38,8 @@ The SQLite database is a single local authority. Do not put its WAL database on 
 - Verify upload/register does not itself commit a record.
 - Verify S3 adapter create/read-back, exact-content retry resolution, size limit, digest mismatch and conflicting-key rejection using the in-memory ObjectStore test double.
 - Verify active backup pins block retirement, retired objects are deleted only when collectible, repeated delete is safe, and retired keys cannot be registered again.
+- Verify committed log tail replay from the authoritative tip, replay only above the indexed watermark, and fail closed on partition mismatch or exhausted budgets.
+- Verify logical metadata backup/restore preserves committed head and idempotency receipt after validating the object closure.
 
 ## Required next work
 
