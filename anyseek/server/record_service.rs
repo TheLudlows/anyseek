@@ -1354,7 +1354,7 @@ async fn retire_backup(
                 ).map_err(|error| error.to_string())?;
                 if marker.backup_id != id { return Err("backup marker mismatch".into()); }
                 let authorities = std::fs::read_dir(&s.root).map_err(|error| error.to_string())?
-                    .filter_map(Result::ok)
+                    .filter_map(|entry| entry.ok())
                     .map(|entry| entry.path())
                     .filter(|path| path.file_name().and_then(|name| name.to_str())
                         .is_some_and(|name| name.starts_with(".authority-") && name.ends_with(".sqlite")))
