@@ -175,6 +175,67 @@ impl ObjectBackedPartition {
     }
 
     pub(crate) fn sqlite_path(&self) -> &Path { &self.sqlite_path }
+
+    #[cfg(test)]
+    fn from_parts(
+        sqlite_path: &Path,
+        partition_id: &str,
+        owner_epoch: u64,
+        store: Arc<S3CompatibleStore>,
+        authority: SqliteAuthority,
+        max_object_bytes: usize,
+    ) -> Self {
+        Self {
+            partition_id: partition_id.to_owned(),
+            sqlite_path: sqlite_path.to_path_buf(),
+            owner_epoch,
+            store,
+            authority: Mutex::new(authority),
+            max_tail_blocks: 16,
+            max_tail_bytes: max_object_bytes.saturating_mul(16),
+            max_object_bytes,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::s3_compatible::S3CompatibleStore;
+    use object_store::memory::InMemory;
+
+    fn temp_db(label: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("anyseek-object-partition-{label}-{stamp}-{}.sqlite",std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn bootstrap_and_committed_tail_survive_authority_reopen() {
+        let path=temp_db("reopen");
+        let mut authority=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        authority.create_partition("p0",12).unwrap();
+        let store=Arc::new(S3CompatibleStore::from_store(Arc::new(InMemory::new()),1024*1024));
+        let head=store.publish_bootstrap(&mut authority,"p0",12,b"initial-record-checkpoint",1).await.unwrap();
+        assert_eq!(head.committed_seq,0);
+        drop(authority);
+        let authority=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        let partition=ObjectBackedPartition::from_parts(&path,"p0",12,store,authority,1024*1024);
+        let outcome=partition.append("op-1",b"{\"kind\":\"upsert\",\"id\":\"r1\"}".to_vec()).await.unwrap();
+        assert!(matches!(outcome,AppendCommitOutcome::Published{..}));
+        let snapshot=partition.snapshot().await.unwrap();
+        assert_eq!(snapshot.bootstrap,b"initial-record-checkpoint");
+        assert_eq!(snapshot.head.committed_seq,1);
+        assert_eq!(snapshot.tail.len(),1);
+        assert_eq!(snapshot.tail[0].operation_id,"op-1");
+        assert_eq!(snapshot.tail[0].payload,b"{\"kind\":\"upsert\",\"id\":\"r1\"}");
+        let retry=partition.append("op-1",b"{\"kind\":\"upsert\",\"id\":\"r1\"}".to_vec()).await.unwrap();
+        assert!(matches!(retry,AppendCommitOutcome::AlreadyPublished(head) if head.committed_seq==1));
+        assert!(partition.append("op-1",b"different".to_vec()).await.is_err());
+        drop(partition);
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
 }
 
 fn now_ms() -> i64 {
