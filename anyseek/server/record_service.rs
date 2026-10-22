@@ -1092,6 +1092,7 @@ struct BackupRequest {
 struct S3BackupMarker {
     backup_id: String,
     collection_id: String,
+    config: RecordConfig,
     visible_seq: u64,
     bundle_json: String,
 }
@@ -1201,6 +1202,7 @@ async fn create_s3_backup_pointer(
     root: &FsPath,
     backup_id: &str,
     collection_id: &str,
+    config: &RecordConfig,
 ) -> Result<u64, Error> {
     if path.exists() {
         let marker: S3BackupMarker = serde_json::from_slice(
@@ -1225,6 +1227,7 @@ async fn create_s3_backup_pointer(
     let marker = S3BackupMarker {
         backup_id: backup_id.to_owned(),
         collection_id: collection_id.to_owned(),
+        config: config.clone(),
         visible_seq,
         bundle_json,
     };
@@ -1260,7 +1263,7 @@ async fn backup(
         let (result, permit) = s.catalog.authorized(key, id, move |entry| async move {
             p.operation(&oid).await?;
             let seq = if s3_mode {
-                create_s3_backup_pointer(&p, &path, &root, &backup_id, &collection_id).await?
+                create_s3_backup_pointer(&p, &path, &root, &backup_id, &collection_id, &entry.config).await?
             } else {
                 RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
                 if path.exists() {
