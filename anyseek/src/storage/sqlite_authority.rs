@@ -751,19 +751,17 @@ impl SqliteAuthority {
     /// any future publication or pin from making the object live again.
     pub(crate) fn collectible_objects(&self, _now_ms: i64) -> rusqlite::Result<Vec<ObjectRef>> {
         let mut statement = self.connection.prepare(
-            "SELECT u.object_key,u.sha256,u.byte_length
+            "WITH RECURSIVE reachable(object_key) AS (
+                SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
+                UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
+                UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
+                UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
+             )
+             SELECT u.object_key,u.sha256,u.byte_length
              FROM object_uploads u
              WHERE u.state=2
-               AND NOT EXISTS(
-                 SELECT 1 FROM partition_heads h
-                 WHERE json_extract(h.wal_tip_json,'$.key')=u.object_key
-                    OR json_extract(h.manifest_json,'$.key')=u.object_key
-                    OR json_extract(h.log_anchor_json,'$.key')=u.object_key
-               )
-               AND NOT EXISTS(
-                 SELECT 1 FROM object_pins p
-                 WHERE p.object_key=u.object_key
-               )
+               AND NOT EXISTS(SELECT 1 FROM reachable r WHERE r.object_key=u.object_key)
+               AND NOT EXISTS(SELECT 1 FROM object_pins p WHERE p.object_key=u.object_key)
              ORDER BY u.object_key"
         )?;
         let rows = statement.query_map([], |row| {
