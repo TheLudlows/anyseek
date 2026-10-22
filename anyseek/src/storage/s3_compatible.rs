@@ -231,6 +231,8 @@ impl S3CompatibleStore {
         let snapshot_key = format!("backups/{backup_id}/authority.json");
         let metadata_snapshot = self.put_verified(&snapshot_key, &snapshot_bytes).await
             .map_err(BackupError::ObjectStore)?;
+        authority.register_durable_object(&metadata_snapshot, created_at_ms)
+            .map_err(BackupError::Metadata)?;
         let mut closure = object_closure.to_vec();
         closure.sort_by(|a,b| a.key.cmp(&b.key));
         let descriptor = BackupDescriptor {
@@ -244,6 +246,14 @@ impl S3CompatibleStore {
         let descriptor_key = format!("backups/{backup_id}/descriptor.json");
         let descriptor_ref = self.put_verified(&descriptor_key, &descriptor_bytes).await
             .map_err(BackupError::ObjectStore)?;
+        authority.register_durable_object(&descriptor_ref, created_at_ms)
+            .map_err(BackupError::Metadata)?;
+        authority.register_object_edge(&descriptor_ref, &descriptor.metadata_snapshot)
+            .map_err(BackupError::Metadata)?;
+        for reference in &descriptor.object_closure {
+            authority.register_object_edge(&descriptor_ref, reference)
+                .map_err(BackupError::Metadata)?;
+        }
         Ok(BackupBundle { descriptor_ref, descriptor })
     }
 
