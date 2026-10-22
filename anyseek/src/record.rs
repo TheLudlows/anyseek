@@ -949,13 +949,45 @@ impl RecordPartition {
         let mut remote = RemotePersistence::open(&remote_config)?;
         let existing = remote.authority.lock().await.read_head(&remote.partition_id).map_err(storage)?;
         match existing {
-            Some(head) => {
-                if head.owner_epoch != remote.owner_epoch || head.bootstrap.is_none() {
-                    return Err(RecordError::RecoveryRequired);
-                }
+            Some(head) if head.owner_epoch != remote.owner_epoch => {
+                Err(RecordError::RecoveryRequired)
+            }
+            Some(head) if head.bootstrap.is_some() => {
                 drop(remote);
                 Self::open_s3(path, config, remote_config).await
             }
+            Some(head) if head.committed_seq == 0 => {
+                // Recover an interrupted create: the authority row may exist even if
+                // publishing its first bootstrap object previously failed.
+                let partition = if path.exists() {
+                    Self::open(path, config.max_journal_bytes).await?
+                } else {
+                    Self::create(path, config).await?
+                };
+                let (checkpoint, seq) = {
+                    let inner = partition.inner.lock().await;
+                    (encode_entry(&Entry::Checkpoint {
+                        config: inner.config.clone(),
+                        state: inner.state.clone(),
+                    })?, inner.state.seq)
+                };
+                if seq != 0 {
+                    return Err(RecordError::RecoveryRequired);
+                }
+                {
+                    let mut authority = remote.authority.lock().await;
+                    remote.store.publish_bootstrap(
+                        &mut authority, &remote.partition_id, remote.owner_epoch,
+                        &checkpoint, unix_time_ms_i64(),
+                    ).await.map_err(storage)?;
+                }
+                {
+                    let mut inner = partition.inner.lock().await;
+                    inner.remote = Some(remote);
+                }
+                Ok(partition)
+            }
+            Some(_) => Err(RecordError::RecoveryRequired),
             None => {
                 // A new remote authority must be bootstrapped from a fresh local
                 // partition. Never silently promote an existing local-only journal:
@@ -990,7 +1022,6 @@ impl RecordPartition {
             }
         }
     }
-
     /// Open a local partition and reconcile every SQLite-committed S3 log entry
     /// before making its read view available. A missing/corrupt committed object
     /// fails closed and never falls back to the local cache as authoritative.
