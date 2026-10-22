@@ -27,7 +27,7 @@ Status: **implementation foundation in Draft PR #72; not yet accepted or wired i
 
 ## Explicit limitations
 
-This slice is **not** the end-to-end SQLite + object-storage backend. The S3-compatible adapter, object-log tail reader, logical metadata backup/restore bundle and basic pin-aware GC eligibility exist as isolated primitives, but they are not yet connected to the current RecordService authoritative write path or search/index view. Tail replay currently returns validated operation envelopes; applying them to the live Record/search state remains outstanding. The authority-driven backup derives closure through registered object dependency edges. Every writer/indexer must register all manifest/segment and WAL-chain dependencies; opaque manifest internals cannot be inferred automatically if those edges are omitted. Backup root pins are recreated on restore. A failed backup may leave pins; release them only after confirming no valid descriptor was published. S3 conditional-create, visibility, and delete semantics must be tested against a real target service before certification.
+This slice is **not** the end-to-end SQLite + object-storage backend. The S3-compatible adapter, object-log tail reader, logical metadata backup/restore bundle and basic pin-aware GC eligibility exist as isolated primitives, but they are not yet connected to the current RecordService authoritative write path or search/index view. Tail replay currently returns validated operation envelopes; applying them to the live Record/search state remains outstanding. The authority-driven backup derives closure through registered object dependency edges. Every writer/indexer must register all manifest/segment and WAL-chain dependencies; opaque manifest internals cannot be inferred automatically if those edges are omitted. Backup root pins are recreated on restore. GC reachability traverses dependency edges from both partition heads and pinned roots, so a pinned descriptor protects its transitive child objects. A failed backup may leave pins; release them only after confirming no valid descriptor was published. S3 conditional-create, visibility, and delete semantics must be tested against a real target service before certification.
 
 The SQLite database is a single local authority. Do not put its WAL database on a network filesystem or allow independent nodes to maintain writable copies. Cross-host failover/HA is out of scope for this first slice.
 
@@ -43,6 +43,7 @@ The SQLite database is a single local authority. Do not put its WAL database on 
 - Verify active backup pins block retirement, retired objects are deleted only when collectible, repeated delete is safe, and retired keys cannot be registered again.
 - Verify committed log tail replay from the authoritative tip, replay only above the indexed watermark, and fail closed on partition mismatch or exhausted budgets.
 - Verify logical metadata backup/restore preserves committed head and idempotency receipt after validating the object closure.
+- Verify a pinned backup descriptor protects transitive child objects from retirement until the root pin is explicitly released.
 
 ## Required next work
 
@@ -76,4 +77,11 @@ Overall: **in progress; not ready to merge**.
 4. Register complete manifest/segment/WAL dependency edges in all writers/indexers and integrate backup/restore into service lifecycle.
 5. Validate conditional create, ambiguous PUT, read-after-write and delete behavior against a real S3-compatible service.
 6. Complete process-failure/restart tests and only then remove Draft status.
+
+## Latest progress — 2026-10-22
+
+- Added the object-first `append_and_commit` primitive and a focused idempotency/tail test.
+- Fixed GC reachability to treat pinned roots as roots of the transitive object graph, and added a regression test that a pinned backup descriptor protects its child objects.
+- CI Run #264 passed before these latest changes. Run #265 was started on the preceding progress-document commit; its result must not be treated as validation of the later GC reachability changes.
+- Current state remains **not ready to merge** and RecordPartition/RecordService integration remains outstanding.
 
