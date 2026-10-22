@@ -1,6 +1,6 @@
 //! Single-partition incremental record engine backed by the existing retrieval
 //! engine. The default HTTP service uses this authoritative storage path. See
-//! docs/implementation-57.md for the bounded P1-A scope and validation evidence.
+//! docs/record-model.md for the bounded P1-A scope and validation evidence.
 use crate::{
     commit::Commit,
     index::{Document, IndexArc, IndexDocuments, IndexMetaObject, SchemaField, create_index},
@@ -472,30 +472,6 @@ impl RemotePersistence {
         let seq=snapshot.heads.iter().find(|h|h.partition_id==self.partition_id)
             .ok_or_else(||"backup omits partition".to_owned())?.committed_seq;
         Ok((serde_json::to_string(&bundle).map_err(|e|e.to_string())?,seq))
-    }
-
-    async fn restore_backup_bundle(
-        &mut self,
-        bundle_json: &str,
-        max_snapshot_bytes: usize,
-        max_objects: usize,
-        max_total_object_bytes: usize,
-    ) -> Result<(), RecordError> {
-        let bundle: crate::storage::s3_compatible::BackupBundle =
-            serde_json::from_str(bundle_json).map_err(storage)?;
-        let mut authority = self.authority.lock().await;
-        self.store.restore_backup_bundle(
-            &mut authority, &bundle.descriptor_ref, max_snapshot_bytes,
-            max_objects, max_total_object_bytes,
-        ).await.map_err(storage)?;
-        let now_ms = unix_time_ms_i64();
-        authority.register_durable_object(&bundle.descriptor.metadata_snapshot, now_ms).map_err(storage)?;
-        authority.register_durable_object(&bundle.descriptor_ref, now_ms).map_err(storage)?;
-        authority.register_object_edge(&bundle.descriptor_ref, &bundle.descriptor.metadata_snapshot).map_err(storage)?;
-        for reference in &bundle.descriptor.object_closure {
-            authority.register_object_edge(&bundle.descriptor_ref, reference).map_err(storage)?;
-        }
-        Ok(())
     }
 
     fn safe_backup_id(backup_id: &str) -> String {
@@ -1707,6 +1683,12 @@ impl RecordPartition {
     /// files are copied; original data, configuration, versions and dedup results
     /// are serialized under the same view. Use `compact_journal` for live WAL retirement.
     pub async fn checkpoint(&self, destination: &Path) -> Result<u64, RecordError> {
+        self.checkpoint_with_scope(destination, None).await
+    }
+
+    // A retained remote backup has an immutable descriptor identity. Repeated
+    // private materializations must preserve its digest for takeover binding.
+    async fn checkpoint_with_scope(&self, destination: &Path, scope: Option<String>) -> Result<u64, RecordError> {
         // A sealed owner may still be archived without advancing its final cut.
         let advance = { let inner = self.inner.lock().await; inner.state.sealed_for.is_none() && !inner.state.independent_snapshot };
         if advance { self.advance_time().await?; }
@@ -1724,7 +1706,7 @@ impl RecordPartition {
         // Preserve originals, but do not silently revive typed evidence when the
         // snapshot is opened/restored under a different owner/root.
         snapshot_state.independent_snapshot = true;
-        snapshot_state.feed.scope = format!("{:032x}",rand::random::<u128>());
+        snapshot_state.feed.scope = scope.unwrap_or_else(|| format!("{:032x}",rand::random::<u128>()));
         snapshot_state.evidence_quarantined |= snapshot_state.records.values().any(temporal::protected);
         let payload = encode_entry(&Entry::Checkpoint {
             config: inner.config.clone(),

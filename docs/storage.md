@@ -1,15 +1,16 @@
-# B：SQLite + S3 对象持久化实施记录
+# 持久化、对象存储与恢复
 
-状态：**PR #72 为 Draft。用户本批指定的 1–4 项已实现并通过本地验证；不把本批交付等同于 B 全部验收或生产可靠性完成。** 本批基于 `f28e35414c7e90dcec6c2f9d4b578568ff575747`，A/P3 已在主干 `5cd76e3b`。
+本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/server/README.md)。
 
-## 本批范围
+## 本地 Segment 与共同视图
 
-1. 远端检查点、Segment 与 manifest 发布。
-2. 远端日志保留边界与 feed 截断。
-3. 对象依赖、上传登记与安全 GC。
-4. SQLite/对象共同备份、恢复以及服务入口的中断重试。
+`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订、generation 与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。低层独立 Index API 仍可保存自己的投影。
 
-独立 Indexer、块缓存优化、分布式路由、跨主机 HA 及超大 collection 不在本批。
+`record/view.rs` 在同一 partition guard 下检索多个冻结段与可变 tail。更新/墓碑先排除旧版本，再截断 Top-K；各段共享活动 N/df/字段长度上下文，每个通道先形成全局排名再融合。查询、过滤、回表与统计固定同一视图，缺少必要 tail 时失败，不能只搜旧段。
+
+Flush 复用未变冻结段、冻结当前 tail；compaction 重建完整等价闭包。先完成构建、校验及同步，再发布选择证书，最后安装内存共同视图。发布后应用失败保持 fenced，恢复只采用认证选择结果。构建拒绝不得改变当前选择；退休失败可以重试，不回滚已提交状态。
+
+本地读者/构建由 partition guard 保护；仍被 mmap 使用的文件不能删除。备份导出独立权威，不借用将被源端 GC 的可变路径。构建与回收有显式预算，当前仍保留完整内存 State 与保守准入，不承诺全进程 RSS 硬上限。
 
 ## 权威与数据归属
 
@@ -70,51 +71,19 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 
 完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务只启用当前 master，历史 key/grant 不复活；在 S3 模式首次启动时，已认证的独立归档被发布到新的服务 namespace。归档中的 collection backup 仍可再次恢复。
 
-## 验证
+## 维护与受控接管
 
-本批 Linux 本地验证结果如下；不得用旧 Run #305 代替新代码 CI，不得把 HTTP test double 当成真实云后端认证。
+封存复用完整 anchor 发布协议，S3 模式必须先由 SQLite 选择包含 seal 的远端 manifest，不能只更新本地 checkpoint。封存关闭当前输出许可；发布失败保持 fenced，恢复读取唯一权威再以原意图重试，同序号维护不会消耗业务序号。
 
-| 验证 | 结果 |
-| --- | --- |
-| workspace 全 targets 回归 | 34 suites，280 passed，0 failed，11 ignored；随后追加未完成上传库存恢复回归 |
-| 最终核心 lib（含新增库存恢复测试） | 181 passed，0 failed，10 ignored；最终源代码验证 |
-| 上传库存/迟到 PUT 专项 | 2 passed，0 failed |
-| doctest | 44 passed，0 failed |
-| 固定版本 fault-injection binary 的 S3 HTTP 矩阵 | 全部通过：检查点前/后退出、无缓存多通道恢复、feed floor、备份四个边界（含 PUT 前 inventory）、恢复导入中断、独立 GC、完整服务归档/恢复/旧 key 禁用及再次冷启动 |
-| 默认本地后端原生 HTTP 回归 | `record_service_smoke.py` 通过，覆盖共享授权、版本、备份、受控接管、generation、TTL、feed、关系、定位等既有路径 |
-| 文档/品牌/本地链接 | 25 Markdown 文件、105 executable surfaces 检查通过 |
-| 新提交原生 Linux/Windows CI | 提交后独立跟踪，不提前标为通过 |
+同服务接管通过独立临时导入库校验 retained S3 备份；相同 descriptor 的私有物化采用确定 feed scope，使准备与重试绑定相同摘要。备份只证明谱系，后继复制最终封存状态，包含备份之后的已确认写入、删除和回执。后继在独立 namespace 发布并认证完整远端状态后，catalog 才能激活；旧源永久封存，旧 grants 不复制。
 
-十个核心 ignored 为九个父测试调用的进程 worker 与一个真实 S3 endpoint 合同测试；workspace 另有异构 AES fixture。父测试调用的 worker 不等于从未执行，真实 endpoint 合同仍未执行。
+接管中断恢复按 catalog 意图打开远端源，不能把缓存当本地权威。中断留下的私有校验目录可在获得服务根独占锁后清理。完整服务备份同样从远端打开已删除/封存的 retained collection，清空本地缓存不能导致丢失归档输入。
 
-```bash
-cargo test --workspace --features server --all-targets
-cargo test --features server --doc
-cargo build --features server,fault-injection
-python scripts/s3_storage_smoke.py --server target/debug/anyseek_server --faults
-python scripts/record_service_smoke.py --server target/debug/anyseek_server
-python scripts/check_docs_brand.py
-```
+## 验证入口与边界
 
-Windows 使用 `target/debug/anyseek_server.exe`。CI 原生 Linux/Windows 矩阵已加入 S3 专项 HTTP 进程故障检查。
+- `cargo test --workspace --features server --all-targets`：Record/catalog、Segment、SQLite、上传/依赖/GC 和现有检索回归。
+- `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权、恢复与受控接管。
+- `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、无缓存查询、feed floor、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
+- [CI #307](https://github.com/TheLudlows/anyseek/actions/runs/39784279098) 对 PR #72 最终 head 的 Linux、Windows 与构建/冒烟任务全部通过。这是该提交的证据，不替代后续修改验证。
 
-新增验证覆盖：
-
-- checkpoint 之后仍有 tail，更新/删除/原始回执经无缓存恢复，全文/向量/混合结果及计数一致。
-- checkpoint 在 SQLite 发布前/后中断，仅采用权威选择的完整根。
-- feed floor 经缓存清空仍生效，旧游标明确过期，后续写入连续。
-- bootstrap、transitive pin 与所选成员不会误回收；丢失成员失败关闭。
-- 备份在捕获元数据、上传 snapshot、发布 descriptor 后进程退出，重试保留原 cut。
-- 恢复导入后进程退出可重试；源备份退休、两侧 GC 和冷重启不破坏另一侧数据。
-- 迟到 PUT 不可重新发布，可被重试 DELETE。
-- 完整服务归档包含 retained S3 collection backup；独立服务 namespace、禁用历史 key 和再次冷重启。
-
-## 保留的 B 验收缺口
-
-- 本批之外的权威/维护路径全面审计，尤其受控接管/封存等路径，仍须逐项确认，不把四项收尾视为该审计完成。
-- 真实目标 S3 endpoint/bucket 的条件创建、响应丢失、读后可见性、错误与删除合同测试尚未完成。
-- 本批最终原生 Windows CI 结果须单独记录；Linux 本地证据不能替代。
-- 系统/文件系统崩溃及硬断电仍未验收；进程退出测试不替代该门槛。
-- SQLite 单主机、单持久卷协调；没有跨主机 HA 或权威卷丢失零 RPO 承诺。恢复依赖经过验证的共同备份。
-
-PR #72 保持 Draft，#57 保持开放。
+HTTP fixture 不等于真实 S3 服务认证。剩余 B 工作为维护路径审计、更多查询/失效场景及实际 endpoint 合同测试；系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。

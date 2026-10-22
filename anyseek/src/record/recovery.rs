@@ -112,16 +112,17 @@ impl RecordPartition {
             let payload = encode_entry(&Entry::Checkpoint { config: inner.config.clone(), state: next.clone() })?;
             PartitionJournal::validate_initial(payload.len(), inner.config.max_journal_bytes)
                 .map_err(|e| RecordError::Rejected(e.to_string()))?;
-            // No await between closing the output gate and publishing the full
-            // authority. A failed publication remains fenced until recovery.
+            // Close output before any fallible/awaited publication. The same
+            // anchor protocol handles local certificates and SQLite-selected
+            // remote manifests, including this same-sequence terminal state.
             inner.healthy = false;
             inner.output.write().map_err(|_| RecordError::RecoveryRequired)?.fenced = true;
-            inner.journal.checkpoint(&payload).map_err(creation_error)?;
+            inner.publish_anchor_state(next, true).await?;
             #[cfg(test)]
-            if inner.fail_after_durable { return Err(RecordError::DurablePending(next.seq)); }
-            inner.state = next;
-            inner.snapshot_bytes = payload.len();
-            inner.healthy = true;
+            if inner.fail_after_durable {
+                inner.healthy = false;
+                return Err(RecordError::DurablePending(inner.state.seq));
+            }
             // Output stays fenced permanently, including after future compaction.
             Ok(certificate)
         }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?

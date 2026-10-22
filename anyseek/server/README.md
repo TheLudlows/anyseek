@@ -1,6 +1,6 @@
 # anyseek Record HTTP 服务
 
-默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、受控接管、来源修订、generation 多批上传/整代发布、可选向量、TTL、feed、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../STATUS.md) 与 [阶段证据](../../docs/implementation-57.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、受控接管、来源修订、generation 多批上传/整代发布、可选向量、TTL、feed、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../STATUS.md) 与 [阶段证据](../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -23,9 +23,9 @@ target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 
 只接受 `name=value`；未知、重复、非法参数返回非零状态。核心使用 `log`，服务支持 `RUST_LOG`。Ctrl-C/SIGINT/SIGTERM 停止接收请求并等待连接结束；成功写入已持久，不依靠退出时提交派生索引才成立。默认 secret 不适合部署，必须配置自己的值。
 
-## S3 后端（B 分支，显式启用）
+## S3 后端（显式启用）
 
-本分支的 `server` feature 包含 S3 支持；默认仍为 `local`。启用新部署示例：
+`server` feature 包含 S3 支持；默认仍为 `local`。启用新部署示例：
 
 ```sh
 export ANYSEEK_STORAGE_BACKEND=s3
@@ -42,7 +42,7 @@ export ANYSEEK_S3_SECRET_ACCESS_KEY='your-secret-key'
 
 PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到独立对象命名空间，不恢复原 grants，受保护证据保持隔离。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到新的服务 namespace。
 
-该后端仍属 Draft；真实目标服务的条件写/读后可见性认证、其余维护路径审计和最终双平台验收见 [B 实施记录](../../docs/implementation-72-sqlite-authority.md)。SQLite 首版是单主机协调，不提供跨主机 HA。
+该后端已合入；真实目标服务的条件写/读后可见性认证与其余维护路径审计仍待完成，见[存储协议](../../docs/storage.md)。SQLite 首版是单主机协调，不提供跨主机 HA。
 
 ## 稳定身份、写入和重试
 
@@ -101,7 +101,7 @@ curl "$BASE/api/v1/index/demo/doc/welcome" -H "apikey: $API_KEY"
 
 文本选择 Lexical，单向量选择 Vector，文本加向量选择 Hybrid；`rrf` 提供加权融合和独立候选预算。空对象 `{}` 浏览活动记录，包括纯向量 collection；`length:0` 可仅统计词法/浏览结果。`count:false` 返回 `count_total:null`。默认返回 10 条，支持 offset、stored 字段投影、过滤和排序。查询字段投影只输出 schema 中 `store:true` 的字段；按 ID 读取和 iterator 可读取完整权威原始数据，并可显式投影。
 
-Vector/Hybrid 默认每 level 探测最多 `default_nprobe` 个簇，`nprobe` 可覆盖，`all:true` 扫描全部簇。`all:true` 与 `nprobe` 不可同时指定；这些参数必须伴随 query_vector。ANN/Hybrid 的 count_total 不是全库精确并集，候选窗口内按字段重排也不保证全库字段 Top-K。全簇扫描仍使用配置的存储精度/量化。默认值的历史校准见 [记录](../../docs/ann-default-calibration.json)，不是本可靠服务的性能承诺。
+Vector/Hybrid 默认每 level 探测最多 `default_nprobe` 个簇，`nprobe` 可覆盖，`all:true` 扫描全部簇。`all:true` 与 `nprobe` 不可同时指定；这些参数必须伴随 query_vector。ANN/Hybrid 的 count_total 不是全库精确并集，候选窗口内按字段重排也不保证全库字段 Top-K。全簇扫描仍使用配置的存储精度/量化。默认值不是性能或精确召回承诺。
 
 POST `iterator` 接收 `{cursor?,length?,fields?}`，按稳定 ID 正向分页；写入改变 visible_seq 后继续旧 cursor 返回 409。旧 skip/take 双向 HTTP 协议不再支持，低层 Rust iterator 另有自己的 API。
 
@@ -154,7 +154,7 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --b
 
 ## 来源与证据
 
-当前来源、删除隐藏与接管已合入；历史平台结果与系统断电限制见 [实施记录](../../docs/implementation-57-p2.md#12-来源证据删除切片本地实现等待用户检视)。
+当前来源、删除隐藏与接管已合入；历史平台结果与系统断电限制见 [Record 语义](../../docs/record-model.md)。
 
 沿用 `POST /api/v1/index/{collection_id}/doc`，在完整 Record 请求上增加可选 `system`：
 
@@ -180,16 +180,16 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 
 ### 同服务受控接管
 
-使用 `POST /api/v1/takeovers`，请求为 `operation_id`、`source_collection_id`、新的 `collection_id` 和 `backup_id`。只接受当前服务中仍有完整权威历史的源及同谱系备份。此操作会永久关闭原 collection，目标追平最终封存水位，保留全部已确认写入，**不是回退到备份时点**；旧 grants 不复制。返回 `status:"active"`、`recovery:"final_sealed_waterline"` 和最终 certificate。
+使用 `POST /api/v1/takeovers`，请求为 `operation_id`、`source_collection_id`、新的 `collection_id` 和 `backup_id`。只接受当前服务中仍有完整权威历史的源及同谱系备份。此操作会永久关闭原 collection，目标追平最终封存水位，保留全部已确认写入，**不是回退到备份时点**；旧 grants 不复制。返回 `status:"active"`、`recovery:"final_sealed_waterline"` 和最终 certificate。S3 模式同样使用该入口，先持久发布源 seal 和目标独立远端 checkpoint，认证后才激活；本地缓存可重建。
 
-Web UI 的 “Take over a collection” 输入同样字段，先保存请求，响应丢失/重载后原样重试。相同目标不得换源或备份；中断后服务按持久意图续办，目标认证前不开放。完整服务备份拒绝未完成接管。独立恢复目录（含空或纯普通记录备份）不能冒充当前删除权威；没有强制解除隔离、跨服务自动灾备或双活入口。详见 [接管边界与验证](../../docs/implementation-57-p2.md#13-同服务受控接管恢复进行中)。
+Web UI 的 “Take over a collection” 输入同样字段，先保存请求，响应丢失/重载后原样重试。相同目标不得换源或备份；中断后服务按持久意图续办，目标认证前不开放。完整服务备份拒绝未完成接管。独立恢复目录（含空或纯普通记录备份）不能冒充当前删除权威；没有强制解除隔离、跨服务自动灾备或双活入口。详见 [Record 语义](../../docs/record-model.md)。
 
 
 ### 可选向量与后补
 
 正文可先写入，不需零向量占位。沿用写入端点提交 `operation_id,record_id,routing_key,expected:{"Match":当前正文版本},vector_patch:{"vector":[2,0]}`，省略 document/system；仅填充尚未存在的 schema 向量字段。正文版本保持不变，提交序号推进；重复请求必须保留 operation_id。已删除、stale 或隔离 typed 记录不可补写，来源正文版本改变后旧请求冲突。
 
-状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[第 15 节实施记录](../../docs/implementation-57-p2.md)。
+状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[Record 语义](../../docs/record-model.md)。
 
 
 ### 文档 generation
@@ -200,7 +200,7 @@ Web UI 的 “Take over a collection” 输入同样字段，先保存请求，�
 - Publish/Abort：`{action:"publish"或"abort",generation_id}`，必须 Match control version。成功 staging 回执 `staged_only:true`，表示仅持久、不可搜索；首次 stage version 1，publish 后 version 2。替换前重新验证来源及最终依赖可见性。
 - `GET /api/v1/index/{id}/doc/{record_id}/generation` 只返回版本、active/staged 身份和成员数。已发布成员保持精确证据并支持向量后补；换代使旧代及其派生隐藏。Abort 释放未发布成员 ID，generation ID 不可复用。
 
-Web UI envelope 模式可运行上述流程并保存原操作重试。完整示例、预留预算、恢复与验证边界见[第 16 节实施记录](../../docs/implementation-57-p2.md)。
+Web UI envelope 模式可运行上述流程并保存原操作重试。完整示例、预留预算、恢复与验证边界见[Record 语义](../../docs/record-model.md)。
 
 ## 时间条件与不可逆 TTL
 
@@ -210,25 +210,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 {"temporal":{"event_time_ms":1735689600000,"valid_from_ms":1735689600000,"valid_to_ms":1767225600000,"expire_at_ms":1893456000000}}
 ```
 
-`temporal` 是系统元数据，不放入自定义 `document`。业务有效期是半开区间 `[valid_from_ms,valid_to_ms)`，缺失边界无界；它不会自动删除数据。`expire_at_ms` 必须严格晚于可信评估时间。完整替换省略 temporal 时继承旧值；到期前可通过合法的完整条件替换修改/清除 TTL，来源仍要求精确 Match，derived/chunk 仍不允许原地正文重算。向量后补不能改变时间元数据或 `ingested_at_ms`。
-
-到期会持久化新版本墓碑，隐藏直接及间接依赖，更新所有活动检索通道/统计。即便使用 `Any`/`Absent`、延长 TTL 或清空 temporal，也不能复活到期身份；用新身份创建新内容。原 operation_id 重试仍返回原回执，回执不是当前仍可见的保证。`/doc/{record_id}/status` 的 `visibility=expired` 不返回历史正文。源 TTL 可隐藏整文派生；chunk TTL 作用于该身份及其下游，不隐式给同 generation 其他成员添加 TTL。staging 期间到期的 chunk 不可 publish，需要 abort 后重新准备。
-
-查询可附加以下条件，全部在全文/向量/hybrid 候选选择前 AND；不做 TopK 后过滤：
-
-```json
-{"query":"example","temporal":{"event":{"from_ms":1735689600000,"to_ms":1767225600000},"ingested":{"from_ms":1735689600000},"valid_at_ms":1750000000000}}
-```
-
-所有窗口均为 `[from_ms,to_ms)`；缺失 event 的记录不匹配 event 条件。`valid_at_ms` 只决定业务有效期过滤，不改变 TTL 的当前可信时间，不支持查询已过期历史。空/反向范围拒绝，时间值限制公元 1–9999 年（TTL 非负）。不提供隐式按当前业务有效期隐藏；未传条件时仅按权限、来源、generation 和 TTL 决定可见性。
-
-查询、iterator page、status 和 statistics 返回同 guard 取得的 `evaluation_time_ms`。单次查询不混合时间视图；iterator 若过期提交改变 seq 会拒绝旧 cursor。查询 `count_total` 维持模式原有精确/近似边界，`statistics.active_records` 是该视图的全局活动集合，不是时间过滤后的命中数。内部 `__seekpower_time_` 字段仅存在可重建检索缓存中，该前缀不能用于 schema；原始 document 不被内部字段改写。
-
-到期采用请求驱动的 owned 提交，取消请求不会中断已接管提交。持久化结果不确定返回 `outcome_unknown`，已持久未应用返回 `durable_pending`，之后数据读写失败关闭直到重开恢复；保留这两类错误回执不绕过任何授权输出检查。恢复后重试查询或原写操作，不为重试生成新 operation_id。旧固定时间读视图可完成；来源显式删除和撤权仍即时阻断未交付输出。
-
-时钟依赖可信系统 UTC。进程内 wall/monotonic 差异或对持久水位的回拨超过 5 分钟返回 `clock_uncertain`；小幅回拨钳制为进程内已观察时间或恢复后的已持久水位，不能复活墓碑。停机期间错误向前跳时无法由同一机器自身鉴别。旧备份中的 TTL/来源证据保持隔离，不推进归档权威状态；同服务受控接管复制最终完整状态和过期历史，再为新视图处理到期，不能强制解除历史不明的隔离。
-
-Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示实际评估时间。TTL 平台和故障验证证据见 [实施记录第 17 节](../../docs/implementation-57-p2.md)。
+`temporal` 是系统元数据，不放入自定义 `document`。业务有效期是半开区间 `[Record 语义](../../docs/record-model.md)。
 
 
 ## change feed 与快照续传
@@ -239,7 +221,7 @@ Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示�
 
 创建 config 可携带 `change_feed:{retention_ms:604800000,max_events:100000,max_bytes:67108864}`。保留期至少七天；事件与紧急失效预留达到配额时新写入返回 429 `feed_full`，不会提前丢事件。既有 Record/journal 配额也继续有效。逻辑 feed 裁剪不删除原幂等账本，不等于 P3 物理历史回收。
 
-独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[实施记录第 18 节](../../docs/implementation-57-p2.md)。当前主干验证结论见 [STATUS](../../STATUS.md)，历史分支结果不能代替本次源码验证。
+独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[Record 语义](../../docs/record-model.md)。当前主干验证结论见 [STATUS](../../STATUS.md)，历史分支结果不能代替本次源码验证。
 
 ## 实体与显式一跳关系
 
@@ -252,7 +234,7 @@ Web UI 的 Record envelope 编辑支持 temporal，独立时间筛选区显示�
 
 一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据和授权输出屏障与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
 
-关系与全文/向量同视图融合见后文；不提供模型实体消歧或完整图语言。测试状态见[实施记录第 19 节](../../docs/implementation-57-p2.md#19-实体与显式一跳关系)。
+关系与全文/向量同视图融合见后文；不提供模型实体消歧或完整图语言。测试状态见[Record 语义](../../docs/record-model.md)。
 
 ## 精确来源摘录
 

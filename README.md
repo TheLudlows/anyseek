@@ -28,7 +28,7 @@ Web UI 支持连接、collection 创建、JSON/Record 写入与原请求重试�
 - ANN 与有界融合不等于全库精确召回；预算不足、未知写入、过期游标均有明确结果，不能将其当作完整成功。
 - 独立备份不证明后续没有删除；恢复隔离、授权重新建立和受控接管有不同条件，不提供强制绕过。保存 URL 不等于托管或备份外部文件。
 - Linux/Windows 原生与进程故障测试不能替代系统崩溃或断电验收，后者仍未完成。各 SHA 的验证结论见 [当前状态](STATUS.md) 与阶段记录。
-- 不可变 Segment/manifest、持续安全回收、SQLite 元数据协调、对象存储、Indexer/cache 和 collection 扩展均属于[后续核心设计](docs/implementation-57-core-roadmap.md)。**SQLite 后端选择已确认，但尚未编码；当前不宣称云端或多节点高可用。**
+- 不可变 Segment、compaction、SQLite/S3 提交、远端 checkpoint、安全回收和共同备份已合入。维护路径审计与真实 S3 后端验收仍在推进；Indexer/cache 与 collection 扩展见[后续路线](docs/roadmap.md)。
 - 不提供旧磁盘格式升级或迁移，不运行模型，不自动解析或抽取知识。
 
 ## 快速开始
@@ -61,6 +61,6 @@ cargo test --workspace --features server --all-targets
 python3 scripts/check_docs_brand.py
 ```
 
-[开发与验证指南](docs/development.md)包含独立核心、rustdoc、真实 HTTP/Chromium 和故障测试命令。[P1 实施记录](docs/implementation-57.md)、[P2 阶段记录](docs/implementation-57-p2.md)保存已实现机制与实际证据；[核心路线](docs/implementation-57-core-roadmap.md)说明后续设计、依赖及验收门槛。
+[开发与验证指南](docs/development.md)包含独立核心、rustdoc、HTTP/Chromium 和故障测试命令。[Record 语义](docs/record-model.md)与[存储协议](docs/storage.md)说明现行不变量；[后续路线](docs/roadmap.md)列出剩余工作。
 
-项目源自 SeekStorm，独立维护。保留[上游归属](UPSTREAM.md)、第三方许可与历史验证，使用 [Apache-2.0](LICENSE) 许可证。
+项目源自 SeekStorm，独立维护。保留[上游归属](UPSTREAM.md)与第三方许可，使用 [Apache-2.0](LICENSE) 许可证。

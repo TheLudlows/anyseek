@@ -1,5 +1,5 @@
 //! Immutable payload objects shared by successive authenticated state anchors.
-//! This prepares reference closures; only PartitionJournal can publish one.
+//! Authenticated partition publication selects a complete reference closure.
 use super::segment::{Descriptor, Reader, Writer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

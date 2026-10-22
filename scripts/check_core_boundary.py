@@ -17,8 +17,9 @@ for source in (core / 'src').rglob('*.rs'):
     assert not re.search(r'\b(?:crate|anyseek)::server\b|\buse\s+.*\bserver\b', text), f'core depends on server: {source}'
     assert 'utoipa' not in text and 'api-schema' not in text, f'HTTP schema in core: {source}'
     assert not re.search(r'pub struct (?:SearchRequestObject|SearchResultObject|CreateIndexRequest|GetDocumentRequest|GetIteratorRequest|IndexResponseObject|RangeU8)\b', text), f'HTTP DTO in core: {source}'
-for name in ('axum', 'http-body', 'env_logger', 'utoipa', 'utoipa-axum'):
+for name in ('axum', 'http-body', 'env_logger', 'utoipa'):
     assert manifest['dependencies'][name].get('optional') is True, name
+assert 'utoipa-axum' not in manifest['dependencies']
 assert 'server' not in manifest['features']['default']
 assert manifest['bin'][0]['required-features'] == ['server']
 print('PASS core source/manifest have no HTTP DTO, schema or terminal output dependencies', flush=True)

@@ -1,16 +1,7 @@
-//! Private prepared state blocks. Publication is deliberately owned by the
-//! partition journal, never inferred from a block's existence.
+//! Canonical state references for authenticated payload pools. An anchor
+//! selects the complete closure; isolated blocks never publish authority.
 use super::*;
-use crate::storage::segment::{Descriptor, Reader, Writer};
 use serde_json::Value;
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PreparedState {
-    config: RecordConfig,
-    state: Value,
-    payload: Descriptor,
-}
 
 // Enumerate only engine-owned payload positions. Never recurse into user JSON:
 // a user field called document/generation/$payload has no special meaning.
@@ -50,39 +41,6 @@ fn encoded_length(value:&Value,limit:u64)->Result<u64,RecordError> {
     let mut counter=Counter{bytes:0,limit};
     serde_json::to_writer(&mut counter,value).map_err(storage)?;Ok(counter.bytes)
 }
-impl PreparedState {
-    pub(super) fn write(path:&Path,config:&RecordConfig,state:&State)->Result<Self,RecordError>{
-        // Current bounded authority is the source. The next publication step
-        // replaces inline checkpoint bytes with this authenticated closure.
-        validate_config(config)?;
-        let mut wire=serde_json::to_value(state).map_err(storage)?;
-        encoded_length(&wire,config.max_journal_bytes)?;
-        let max_payloads=config.max_records.checked_add(config.max_operations)
-            .and_then(|n|n.checked_mul(102)).ok_or_else(||storage("payload budget overflow"))?;
-        let mut writer=Writer::create(path,config.max_journal_bytes,max_payloads).map_err(storage)?;
-        visit(&mut wire,|value|{
-            let bytes=serde_json::to_vec(value).map_err(storage)?;
-            let position=writer.intern(&bytes).map_err(storage)?;
-            *value=serde_json::json!({"$payload":position});Ok(())
-        })?;
-        Ok(Self {config:config.clone(),state:wire,payload:writer.finish().map_err(storage)?})
-    }
-    pub(super) fn decode(bytes:&[u8],max_bytes:u64)->Result<Self,RecordError>{
-        if bytes.len() as u64>max_bytes {return Err(storage("prepared metadata budget exceeded"));}
-        serde_json::from_slice(bytes).map_err(storage)
-    }
-    pub(super) fn read(self,path:&Path,max_bytes:u64)->Result<(RecordConfig,State),RecordError>{
-        validate_config(&self.config)?;
-        let max_bytes=max_bytes.min(self.config.max_journal_bytes);
-        let max_payloads=payload_limit(&self.config)?;
-        let reader=Reader::open(path,self.payload,max_bytes,max_payloads).map_err(storage)?;
-        let body_limit=self.config.max_record_bytes.min(usize::try_from(max_bytes).map_err(storage)?);
-        hydrate(self.config,self.state,max_bytes,|value|{
-            let position=value.as_u64().and_then(|n|usize::try_from(n).ok()).ok_or_else(||storage("invalid payload reference identity"))?;
-            reader.read(position,body_limit).map_err(storage)
-        })
-    }
-}
 fn payload_limit(config:&RecordConfig)->Result<usize,RecordError>{
     config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(102)).ok_or_else(||storage("payload budget overflow"))
 }
@@ -114,10 +72,6 @@ fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(
 pub(super) struct ReferencedState {config:RecordConfig,state:Value}
 impl ReferencedState {
     pub(super) fn config(&self)->&RecordConfig {&self.config}
-    pub(super) fn decode(bytes:&[u8],max_bytes:u64)->Result<Self,RecordError>{
-        if bytes.len() as u64>max_bytes{return Err(storage("referenced state metadata budget exceeded"));}
-        serde_json::from_slice(bytes).map_err(storage)
-    }
     pub(super) fn write(config:&RecordConfig,state:&State,pool:&mut crate::storage::payload_pool::PoolBuilder)->Result<Self,RecordError>{
         validate_config(config)?;
         let mut wire=serde_json::to_value(state).map_err(storage)?;
@@ -142,6 +96,18 @@ impl ReferencedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::payload_pool::{Budget, Closure, PoolBuilder, PoolReader};
+
+    fn prepare(root: &Path, config: &RecordConfig, state: &State) -> (ReferencedState, PoolReader, Closure, PathBuf) {
+        let directory=root.join("private-payload");std::fs::create_dir(&directory).unwrap();
+        let budget=Budget {bytes:config.max_journal_bytes,objects:4,payloads:payload_limit(config).unwrap(),body_bytes:config.max_record_bytes};
+        let id=format!("{:032x}",rand::random::<u128>());
+        let mut writer=PoolBuilder::begin(&directory,Closure::default(),budget,id.clone()).unwrap();
+        let prepared=ReferencedState::write(config,state,&mut writer).unwrap();
+        let closure=writer.finish().unwrap();
+        let reader=PoolReader::open(&directory,closure.clone(),budget).unwrap();
+        (prepared,reader,closure,directory.join(format!("payload-{id}")))
+    }
     #[tokio::test]
     async fn successive_record_anchors_share_prior_request_and_source_payloads(){
         use crate::storage::payload_pool::{Budget,Closure,PoolBuilder,PoolReader};
@@ -169,8 +135,7 @@ mod tests {
         assert_eq!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>(),2);
         let reader=PoolReader::open(&objects,closure,budget).unwrap();
         let encoded=serde_json::to_vec(&second).unwrap();
-        assert!(ReferencedState::decode(&encoded,1).is_err());
-        let second=ReferencedState::decode(&encoded,config.max_journal_bytes).unwrap();
+        let second:ReferencedState=serde_json::from_slice(&encoded).unwrap();
         let (_,state)=second.read(&reader,config.max_journal_bytes).unwrap();
         assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
         assert_eq!(state.operation_lookup.len(),2);
@@ -178,7 +143,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepared_record_state_preserves_exact_requests_and_raw_payloads() {
+    async fn referenced_record_state_preserves_exact_requests_and_raw_payloads() {
         // Exercise the real write planner and authority, not a parallel record API.
         let root=super::super::tests::path();
         let config=super::super::tests::config();
@@ -188,19 +153,18 @@ mod tests {
         partition.write(request).await.unwrap();
         let inner=partition.inner.lock().await;
         let expected=serde_json::to_vec(&inner.state).unwrap();
-        let file=root.join("private-payload");
-        let prepared=PreparedState::write(&file,&inner.config,&inner.state).unwrap();
+        let (prepared,pool,closure,_)=prepare(&root,&inner.config,&inner.state);
         // The same exact Document in current Record and retry request shares bytes.
-        assert_eq!(prepared.payload.payloads.len(),1);
+        assert_eq!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>(),1);
         let encoded=serde_json::to_vec(&prepared).unwrap();
-        let prepared=PreparedState::decode(&encoded,config.max_journal_bytes).unwrap();
-        let (_,state)=prepared.read(&file,config.max_journal_bytes).unwrap();
+        let prepared=serde_json::from_slice::<ReferencedState>(&encoded).unwrap();
+        let (_,state)=prepared.read(&pool,config.max_journal_bytes).unwrap();
         assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
-        drop(inner);drop(partition);
+        drop(pool);drop(inner);drop(partition);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
-    async fn prepared_state_keeps_history_private_chunks_and_same_version_vector_patch() {
+    async fn referenced_state_keeps_history_private_chunks_and_same_version_vector_patch() {
         use super::super::tests::{path,config,source_write,write,generation_write,stage_generation};
         let root=path(); let settings=config();
         let partition=RecordPartition::create(&root,settings.clone()).await.unwrap();
@@ -219,12 +183,11 @@ mod tests {
         let inner=partition.inner.lock().await;
         assert_eq!(inner.state.source_revisions.len(),1);
         let expected=serde_json::to_vec(&inner.state).unwrap();
-        let file=root.join("private-payload");
-        let prepared=PreparedState::write(&file,&settings,&inner.state).unwrap();
+        let (prepared,pool,closure,_)=prepare(&root,&settings,&inner.state);
         let mut references=0; let mut wire=prepared.state.clone();
         visit(&mut wire,|_|{references+=1;Ok(())}).unwrap();
-        assert!(prepared.payload.payloads.len()<references);
-        let (_,state)=prepared.read(&file,settings.max_journal_bytes).unwrap();
+        assert!(closure.objects.values().map(|d|d.payloads.len()).sum::<usize>()<references);
+        let (_,state)=prepared.read(&pool,settings.max_journal_bytes).unwrap();
         assert_eq!(serde_json::to_vec(&state).unwrap(),expected);
         assert_eq!(state.operations[0].request.document,original);
         assert_eq!(state.source_revisions[0].document.as_ref().unwrap()["vector"],serde_json::json!([7.0,0.0]));
@@ -232,48 +195,45 @@ mod tests {
         // Neither the current source nor its historical revision can expose staged bodies.
         assert!(!state.records.contains_key("a"));
         assert_eq!(state.generations["doc"].staged.as_ref().unwrap().chunks.len(),2);
-        drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
+        drop(pool);drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
-    async fn prepared_state_rejects_invalid_reference_and_truncated_payload() {
+    async fn referenced_state_rejects_invalid_reference_and_truncated_payload() {
         use super::super::tests::{path,config,write};
         let root=path();let settings=config();
         let partition=RecordPartition::create(&root,settings.clone()).await.unwrap();
         partition.write(write("op","a","alpha",ExpectedVersion::Absent)).await.unwrap();
         let inner=partition.inner.lock().await;
-        let file=root.join("private-payload");
-        let prepared=PreparedState::write(&file,&settings,&inner.state).unwrap();
+        let (prepared,pool,_,file)=prepare(&root,&settings,&inner.state);
         let encoded=serde_json::to_vec(&prepared).unwrap();
-        let mut invalid:PreparedState=serde_json::from_slice(&encoded).unwrap();
-        invalid.state["records"]["a"]["document"]=serde_json::json!({"$payload":u64::MAX});
-        assert!(invalid.read(&file,settings.max_journal_bytes).is_err());
-        let mut invalid:PreparedState=serde_json::from_slice(&encoded).unwrap();
+        let mut invalid:ReferencedState=serde_json::from_slice(&encoded).unwrap();
+        invalid.state["records"]["a"]["document"]=serde_json::json!({"$payload":{"object":prepared.state["records"]["a"]["document"]["$payload"]["object"],"position":u64::MAX}});
+        assert!(invalid.read(&pool,settings.max_journal_bytes).is_err());
+        let mut invalid:ReferencedState=serde_json::from_slice(&encoded).unwrap();
         invalid.state["records"]["a"]["document"]=serde_json::json!({"$payload":0,"extra":true});
-        assert!(invalid.read(&file,settings.max_journal_bytes).is_err());
+        assert!(invalid.read(&pool,settings.max_journal_bytes).is_err());
         std::fs::OpenOptions::new().write(true).open(&file).unwrap().set_len(16).unwrap();
-        assert!(prepared.read(&file,settings.max_journal_bytes).is_err());
-        drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
+        assert!(prepared.read(&pool,settings.max_journal_bytes).is_err());
+        drop(pool);drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
-    async fn prepared_state_limits_reference_expansion_before_decoding() {
+    async fn referenced_state_limits_reference_expansion_before_decoding() {
         use super::super::tests::{path,config,write};
         let root=path();let mut settings=config();settings.max_record_bytes=4096;
         let partition=RecordPartition::create(&root,settings.clone()).await.unwrap();
         partition.write(write("op","a",&"x".repeat(3000),ExpectedVersion::Absent)).await.unwrap();
         let inner=partition.inner.lock().await;
-        let file=root.join("private-payload");
-        let mut prepared=PreparedState::write(&file,&settings,&inner.state).unwrap();
+        let (mut prepared,pool,closure,_)=prepare(&root,&settings,&inner.state);
         let record=prepared.state["records"]["a"].clone();
         for n in 0..20 {prepared.state["records"][format!("copy-{n}")]=record.clone();}
         // Physical bytes + metadata fit, but expanded repeated bodies do not.
-        assert!(prepared.payload.bytes<20_000);
+        assert!(closure.objects.values().map(|d|d.bytes).sum::<u64>()<20_000);
         assert!(encoded_length(&prepared.state,20_000).is_ok());
-        let error=prepared.read(&file,20_000).err().unwrap();
+        let error=prepared.read(&pool,20_000).err().unwrap();
         assert!(error.to_string().contains("expanded payload budget"),"{error}");
-        assert!(PreparedState::decode(&[b' ';16],15).is_err());
-        drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
+        drop(pool);drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 
 }

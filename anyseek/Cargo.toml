@@ -5,9 +5,9 @@ authors = ["Wolf Garbe <wolf.garbe@seekstorm.com>"]
 license = "Apache-2.0"
 categories = ["database-implementations", "data-structures"]
 description = """Vector & lexical search engine library & multi-tenancy server"""
-documentation = "https://github.com/TheLudlows/seekpower#readme"
-homepage = "https://github.com/TheLudlows/seekpower"
-repository = "https://github.com/TheLudlows/seekpower"
+documentation = "https://github.com/TheLudlows/anyseek#readme"
+homepage = "https://github.com/TheLudlows/anyseek"
+repository = "https://github.com/TheLudlows/anyseek"
 readme = "../README.md"
 keywords = ["search", "information", "retrieval"]
 edition = "2024"
@@ -23,7 +23,7 @@ vb = []
 fault-injection = []
 # HTTP dependencies are absent from the default core dependency graph.
 s3-object-store = ["dep:object_store"]
-server = ["dep:http-body", "dep:env_logger", "dep:axum", "dep:utoipa-axum", "dep:utoipa", "s3-object-store"]
+server = ["dep:http-body", "dep:env_logger", "dep:axum", "dep:utoipa", "s3-object-store"]
 
 [[bin]]
 name = "anyseek_server"
@@ -38,10 +38,9 @@ path = "src/lib.rs"
 http-body = { version = "1", optional = true }
 env_logger = { version = "0.11", optional = true }
 axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "http2", "json", "query", "tokio"] }
-utoipa-axum = { version = "0.3", optional = true }
 utoipa = { version = "6.0.0", optional = true, features = ["preserve_order", "preserve_path_order", "yaml", "indexmap"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
-object_store = { version = "0.12", optional = true, features = ["aws"] }
+object_store = { version = "0.12", optional = true, default-features = false, features = ["aws"] }
 xxhash-rust = { version = "=0.8.15", default-features = false, features = ["xxh64"] }
 log = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }

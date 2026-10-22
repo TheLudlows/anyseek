@@ -1,6 +1,6 @@
 //! Durable identity, collection lifecycle and grant authority. Data directories
 //! are independent of identities; revoking a key never deletes a collection.
-//! The HTTP service integration is tracked in docs/implementation-57.md.
+//! The HTTP service integration is tracked in docs/record-model.md.
 use crate::{
     record::{OperationId, RecordConfig},
     storage::{journal::CreateError, partition::PartitionJournal},

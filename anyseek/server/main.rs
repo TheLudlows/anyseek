@@ -24,13 +24,7 @@ use crate::server::initialize;
 pub static MASTER_KEY_SECRET: LazyLock<String> =
     LazyLock::new(|| env::var("MASTER_KEY_SECRET").unwrap_or("1234".to_string()));
 
-#[doc(hidden)]
-mod operations;
 use anyseek::server::{api_schema, api_types};
-#[doc(hidden)]
-mod http_server;
-#[doc(hidden)]
-mod keys;
 mod record_service;
 #[doc(hidden)]
 mod server;
