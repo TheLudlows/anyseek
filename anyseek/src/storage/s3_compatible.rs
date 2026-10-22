@@ -162,6 +162,28 @@ impl S3CompatibleStore {
         Ok(bytes.to_vec())
     }
 
+    /// Delete only an object the SQLite authority has monotonically retired and
+    /// currently reports as unreferenced and unpinned. Repeated deletion is allowed.
+    pub(crate) async fn delete_retired(
+        &self,
+        authority: &SqliteAuthority,
+        key: &str,
+        now_ms: i64,
+    ) -> Result<bool, UploadRegisterError> {
+        let collectible = authority.collectible_objects(now_ms)
+            .map_err(UploadRegisterError::Metadata)?;
+        let Some(reference) = collectible.iter().find(|reference| reference.key == key) else {
+            return Ok(false);
+        };
+        let location = Self::object_path(&reference.key)
+            .map_err(UploadRegisterError::ObjectStore)?;
+        self.store.delete(&location).await
+            .map_err(UploadRegisterError::ObjectStore)?;
+        // Keep the SQLite retired-key tombstone permanently so a delayed writer
+        // cannot reuse this key after the remote delete has completed.
+        Ok(true)
+    }
+
     #[cfg(test)]
     fn from_store(store: Arc<dyn ObjectStore>, max_object_bytes: usize) -> Self {
         Self { store, max_object_bytes }
@@ -197,6 +219,30 @@ mod tests {
         let outcome = authority.publish_commit("p0", head.head_version, 1, "op-1", [4;32], 1, reference, None).unwrap();
         assert!(matches!(outcome, super::super::sqlite_authority::PublishOutcome::Published(_)));
         assert_eq!(authority.read_head("p0").unwrap().unwrap().committed_seq, 1);
+        drop(authority);
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn deletion_requires_retirement_and_respects_pins() {
+        use std::time::{Duration, SystemTime};
+        let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("anyseek-s3-gc-{stamp}-{}.sqlite", std::process::id()));
+        let mut authority = SqliteAuthority::open(&path, Duration::from_secs(1)).unwrap();
+        authority.create_partition("p0", 1).unwrap();
+        let store = S3CompatibleStore::from_store(Arc::new(InMemory::new()), 1024);
+        let reference = store.put_and_register(&mut authority, "p0/staging/1", b"staging bytes", 1).await.unwrap();
+        authority.pin_object("backup-pin", "p0", &reference.key, "backup", None).unwrap();
+        assert!(!authority.retire_object(&reference.key, 1, 2).unwrap());
+        assert!(!store.delete_retired(&authority, &reference.key, 2).await.unwrap());
+        assert!(authority.unpin_object("backup-pin").unwrap());
+        assert!(authority.retire_object(&reference.key, 1, 3).unwrap());
+        assert!(store.delete_retired(&authority, &reference.key, 3).await.unwrap());
+        assert!(!store.delete_retired(&authority, &reference.key, 3).await.unwrap());
+        assert!(store.get_verified(&reference).await.is_err());
+        assert!(authority.register_durable_object(&reference, 4).is_err());
         drop(authority);
         let _=std::fs::remove_file(&path);
         let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
