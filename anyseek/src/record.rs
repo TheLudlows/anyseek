@@ -983,17 +983,19 @@ impl RecordPartition {
         backup_id: &str,
         created_at_ms: i64,
         max_snapshot_bytes: usize,
-    ) -> Result<String, RecordError> {
+    ) -> Result<(String, u64), RecordError> {
         let mut inner = self.inner.lock().await;
         if !inner.healthy || inner.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
         }
+        let visible_seq = inner.state.seq;
         let remote = inner.remote.as_mut().ok_or_else(|| RecordError::Rejected(
             "partition is not using S3 storage".into()
         ))?;
-        remote.create_backup_bundle(
+        let bundle = remote.create_backup_bundle(
             &RemotePersistence::safe_backup_id(backup_id), created_at_ms, max_snapshot_bytes,
-        ).await.map_err(storage)
+        ).await.map_err(storage)?;
+        Ok((bundle, visible_seq))
     }
 
     /// Release a retained joint backup's pins only after its descriptor has been retired.
@@ -1006,6 +1008,18 @@ impl RecordPartition {
         remote.authority.lock().await
             .release_backup_pins(&RemotePersistence::safe_backup_id(backup_id))
             .map_err(storage)
+    }
+
+    /// Release backup pins after the catalog has permanently retired the backup.
+    #[cfg(feature = "s3-object-store")]
+    pub async fn retire_s3_backup(
+        authority_path: &Path,
+        backup_id: &str,
+    ) -> Result<usize, RecordError> {
+        let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open(
+            authority_path, std::time::Duration::from_secs(5),
+        ).map_err(storage)?;
+        authority.release_backup_pins(&RemotePersistence::safe_backup_id(backup_id)).map_err(storage)
     }
 
     /// Restore a joint S3/SQLite backup into an empty authority database, verify its
