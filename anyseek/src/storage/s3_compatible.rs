@@ -294,7 +294,7 @@ impl S3CompatibleStore {
     /// currently reports as unreferenced and unpinned. Repeated deletion is allowed.
     pub(crate) async fn delete_retired(
         &self,
-        authority: &SqliteAuthority,
+        authority: &mut SqliteAuthority,
         key: &str,
         now_ms: i64,
     ) -> Result<bool, UploadRegisterError> {
@@ -396,10 +396,10 @@ mod tests {
         let reference = store.put_and_register(&mut authority, "p0/staging/1", b"staging bytes", 1).await.unwrap();
         authority.pin_object("backup-pin", "p0", &reference.key, "backup", Some(1)).unwrap();
         assert!(!authority.retire_object(&reference.key, 1, 2).unwrap());
-        assert!(!store.delete_retired(&authority, &reference.key, 2).await.unwrap());
+        assert!(!store.delete_retired(&mut authority, &reference.key, 2).await.unwrap());
         assert!(authority.unpin_object("backup-pin").unwrap());
         assert!(authority.retire_object(&reference.key, 1, 3).unwrap());
-        assert!(store.delete_retired(&authority, &reference.key, 3).await.unwrap());
+        assert!(store.delete_retired(&mut authority, &reference.key, 3).await.unwrap());
         assert!(!store.delete_retired(&authority, &reference.key, 3).await.unwrap());
         assert!(store.get_verified(&reference).await.is_err());
         assert!(authority.register_durable_object(&reference, 4).is_err());
