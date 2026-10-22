@@ -40,6 +40,7 @@ axum = { version = "0.8", optional = true, default-features = false, features = 
 utoipa-axum = { version = "0.3", optional = true }
 utoipa = { version = "6.0.0", optional = true, features = ["preserve_order", "preserve_path_order", "yaml", "indexmap"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
+object_store = { version = "0.12", features = ["aws"] }
 xxhash-rust = { version = "=0.8.15", default-features = false, features = ["xxh64"] }
 log = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }
