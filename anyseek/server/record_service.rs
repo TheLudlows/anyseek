@@ -367,21 +367,28 @@ impl Service {
             .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(1_000_000);
         let max_tail_bytes = usize::try_from(entry.config.max_journal_bytes)
             .unwrap_or(usize::MAX).min(1024 * 1024 * 1024).max(1);
-        let target_digest = Sha256::digest(entry.collection_id.as_bytes())
+        let directory_digest = Sha256::digest(entry.directory.as_bytes())
             .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-        let (partition_id, authority_suffix) = if let Some(backup_id) = &entry.restore_from {
+        let local_partition_marker = self.root.join(&entry.directory).join(".s3-partition-id");
+        let partition_id = if local_partition_marker.exists() {
+            std::fs::read_to_string(&local_partition_marker).map_err(storage)?
+        } else if let Some(backup_id) = &entry.restore_from {
             let marker: S3BackupMarker = serde_json::from_slice(
                 &std::fs::read(self.root.join(format!("backup-{backup_id}")).join("s3-backup.json")).map_err(storage)?
             ).map_err(storage)?;
             if marker.backup_id != *backup_id {
                 return Err(bad("S3 backup marker identity mismatch"));
             }
-            (marker.partition_id, format!("{target_digest}-restore-{backup_id}"))
+            marker.partition_id
         } else {
-            (target_digest.clone(), target_digest)
+            Sha256::digest(entry.collection_id.as_bytes())
+                .iter().map(|byte| format!("{byte:02x}")).collect::<String>()
         };
+        if partition_id.is_empty() || !partition_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(bad("invalid persisted S3 partition identity"));
+        }
         Ok(Some(S3CompatibleRecordConfig {
-            authority_path: self.root.join(format!(".authority-{authority_suffix}.sqlite")),
+            authority_path: self.root.join(format!(".authority-{directory_digest}.sqlite")),
             partition_id,
             owner_epoch: 1,
             endpoint,
