@@ -4,6 +4,7 @@
 //! blocks and immutable index segments remain in external immutable objects.
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{path::{Path, PathBuf}, time::Duration};
 
 const SCHEMA_VERSION: i64 = 1;
@@ -30,6 +31,57 @@ pub(crate) struct PartitionHead {
     pub indexed_seq: u64,
     pub log_base_seq: u64,
     pub log_anchor: Option<ObjectRef>,
+}
+
+
+/// Logical snapshot of the SQLite authority and the caller-verified object closure.
+/// The payload bytes live in object storage; this snapshot contains metadata only.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthorityBackupSnapshot {
+    pub format_version: u32,
+    pub backup_id: String,
+    pub created_at_ms: i64,
+    pub heads: Vec<PartitionHead>,
+    pub receipts: Vec<ReceiptSnapshot>,
+    pub objects: Vec<ObjectRegistrySnapshot>,
+    pub pins: Vec<PinSnapshot>,
+    pub retired: Vec<RetiredSnapshot>,
+    pub object_closure: Vec<ObjectRef>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReceiptSnapshot {
+    pub partition_id: String,
+    pub operation_id: String,
+    pub request_sha256: [u8;32],
+    pub committed_seq: u64,
+    pub result_json: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObjectRegistrySnapshot {
+    pub reference: ObjectRef,
+    pub state: i64,
+    pub created_at_ms: i64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PinSnapshot {
+    pub pin_id: String,
+    pub partition_id: String,
+    pub object_key: String,
+    pub pin_kind: String,
+    pub expires_at_ms: Option<i64>,
+    pub backup_id: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetiredSnapshot {
+    pub object_key: String,
+    pub retired_generation: u64,
+    pub retired_at_ms: i64,
 }
 
 /// Publication result. Uncertain I/O errors must be resolved with the same operation ID.
@@ -101,7 +153,8 @@ impl SqliteAuthority {
                  partition_id TEXT NOT NULL,
                  object_key TEXT NOT NULL,
                  pin_kind TEXT NOT NULL CHECK(pin_kind IN ('reader','indexer','backup','staging')),
-                 expires_at_ms INTEGER
+                 expires_at_ms INTEGER,
+                 backup_id TEXT
              );
              CREATE TABLE IF NOT EXISTS retired_objects (
                  object_key TEXT PRIMARY KEY,
