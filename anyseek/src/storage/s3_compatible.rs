@@ -183,11 +183,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn object_is_verified_before_sqlite_registration() {
+        use std::time::{Duration, SystemTime};
+        let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("anyseek-s3-register-{stamp}-{}.sqlite", std::process::id()));
+        let mut authority = SqliteAuthority::open(&path, Duration::from_secs(1)).unwrap();
+        authority.create_partition("p0", 1).unwrap();
+        let store = S3CompatibleStore::from_store(Arc::new(InMemory::new()), 1024);
+        let reference = store.put_and_register(&mut authority, "p0/log/1", b"record bytes", 100).await.unwrap();
+        assert_eq!(store.get_verified(&reference).await.unwrap(), b"record bytes");
+        let head = authority.read_head("p0").unwrap().unwrap();
+        assert_eq!(head.committed_seq, 0, "upload/registration must not commit the record");
+        assert!(authority.publish_commit("p0", head.head_version, 1, "op-1", [4;32], 1, reference, None).unwrap()
+            == super::super::sqlite_authority::PublishOutcome::Published(
+                authority.read_head("p0").unwrap().unwrap()
+            ));
+        drop(authority);
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
     async fn immutable_key_and_size_limit_are_enforced() {
         let store = S3CompatibleStore::from_store(Arc::new(InMemory::new()), 8);
         let reference = store.put_verified("segments/s1", b"12345678").await.unwrap();
         assert_eq!(store.get_verified(&reference).await.unwrap(), b"12345678");
-        assert!(store.put_verified("segments/s1", b"different").await.is_err());
+        assert!(store.put_verified("segments/s1", b"abcdefgh").await.is_err());
+        assert_eq!(store.put_verified("segments/s1", b"12345678").await.unwrap(), reference);
         assert!(store.put_verified("segments/too-large", b"123456789").await.is_err());
         let wrong = ObjectRef { sha256: [0; 32], ..reference };
         assert!(store.get_verified(&wrong).await.is_err());
