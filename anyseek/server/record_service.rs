@@ -18,7 +18,7 @@ use anyseek::{
     index::{Clustering, DocumentCompression},
     record::{
         OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
-        RecordWrite, DataOutputPermit,
+        RecordWrite, DataOutputPermit, S3CompatibleRecordConfig,
     },
     vector::Inference,
 };
@@ -342,6 +342,49 @@ impl Service {
         }
         Ok(service)
     }
+    fn s3_record_config(&self, entry: &CollectionEntry) -> Result<Option<S3CompatibleRecordConfig>, Error> {
+        let backend = std::env::var("ANYSEEK_STORAGE_BACKEND").unwrap_or_else(|_| "local".into());
+        if backend == "local" { return Ok(None); }
+        if backend != "s3" {
+            return Err(Error(StatusCode::BAD_REQUEST, "storage_config",
+                "ANYSEEK_STORAGE_BACKEND must be local or s3".into()));
+        }
+        let required = |name: &str| std::env::var(name).map_err(|_| Error(
+            StatusCode::INTERNAL_SERVER_ERROR, "storage_config",
+            format!("missing required environment variable {name}"),
+        ));
+        let endpoint = required("ANYSEEK_S3_ENDPOINT")?;
+        let bucket = required("ANYSEEK_S3_BUCKET")?;
+        let access_key_id = required("ANYSEEK_S3_ACCESS_KEY_ID")?;
+        let secret_access_key = required("ANYSEEK_S3_SECRET_ACCESS_KEY")?;
+        let region = std::env::var("ANYSEEK_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
+        let allow_http = std::env::var("ANYSEEK_S3_ALLOW_HTTP")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let max_object_bytes = std::env::var("ANYSEEK_S3_MAX_OBJECT_BYTES")
+            .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
+        let max_tail_blocks = std::env::var("ANYSEEK_S3_MAX_TAIL_BLOCKS")
+            .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(1_000_000);
+        let max_tail_bytes = usize::try_from(entry.config.max_journal_bytes)
+            .unwrap_or(usize::MAX).min(1024 * 1024 * 1024).max(1);
+        let digest = Sha256::digest(entry.collection_id.as_bytes());
+        let partition_id = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        Ok(Some(S3CompatibleRecordConfig {
+            authority_path: self.root.join(format!(".authority-{partition_id}.sqlite")),
+            partition_id,
+            owner_epoch: 1,
+            endpoint,
+            bucket,
+            region,
+            access_key_id,
+            secret_access_key,
+            allow_http,
+            max_object_bytes,
+            max_tail_blocks,
+            max_tail_bytes,
+        }))
+    }
+
     async fn finish_collection(&self, entry: CollectionEntry) -> Result<(), Error> {
         if entry.deleted || entry.takeover_target.is_some() {
             return Ok(());
@@ -353,35 +396,50 @@ impl Service {
             return Ok(());
         }
         let path = self.root.join(&entry.directory);
-        if !entry.active {
-            RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
-        }
-        let partition = if path.exists() {
-            RecordPartition::open(&path, entry.config.max_journal_bytes).await?
-        } else if !entry.active {
-            if let Some(backup_id) = &entry.restore_from {
-                let backup = RecordPartition::open(
-                    &self.root.join(format!("backup-{backup_id}")),
-                    entry.config.max_journal_bytes,
-                )
-                .await?;
-                if serde_json::to_value(backup.configuration().await?).map_err(storage)?
-                    != serde_json::to_value(&entry.config).map_err(storage)?
-                {
-                    return Err(storage(
-                        "backup configuration differs from durable restore intent",
-                    ));
-                }
-                backup.checkpoint(&path).await?;
-                drop(backup);
-                RecordPartition::open(&path, entry.config.max_journal_bytes).await?
+        let remote_config = self.s3_record_config(&entry)?;
+        let partition = if let Some(remote_config) = remote_config {
+            if entry.restore_from.is_some() {
+                return Err(storage("restoring a local-only backup into S3 mode is not supported; use an S3 joint backup"));
+            }
+            if !entry.active && path.exists() {
+                RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
+            }
+            if entry.active {
+                RecordPartition::open_s3(&path, entry.config.clone(), remote_config).await?
             } else {
-                RecordPartition::create(&path, entry.config.clone()).await?
+                RecordPartition::create_s3(&path, entry.config.clone(), remote_config).await?
             }
         } else {
-            return Err(storage(
-                "active collection data missing; refusing empty replacement",
-            ));
+            if !entry.active {
+                RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
+            }
+            if path.exists() {
+                RecordPartition::open(&path, entry.config.max_journal_bytes).await?
+            } else if !entry.active {
+                if let Some(backup_id) = &entry.restore_from {
+                    let backup = RecordPartition::open(
+                        &self.root.join(format!("backup-{backup_id}")),
+                        entry.config.max_journal_bytes,
+                    )
+                    .await?;
+                    if serde_json::to_value(backup.configuration().await?).map_err(storage)?
+                        != serde_json::to_value(&entry.config).map_err(storage)?
+                    {
+                        return Err(storage(
+                            "backup configuration differs from durable restore intent",
+                        ));
+                    }
+                    backup.checkpoint(&path).await?;
+                    drop(backup);
+                    RecordPartition::open(&path, entry.config.max_journal_bytes).await?
+                } else {
+                    RecordPartition::create(&path, entry.config.clone()).await?
+                }
+            } else {
+                return Err(storage(
+                    "active collection data missing; refusing empty replacement",
+                ));
+            }
         };
         if !entry.active {
             self.catalog
