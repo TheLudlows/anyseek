@@ -1318,8 +1318,22 @@ async fn retire_backup(
         let _control=s.control.lock().await;
         let key=s.admin(&headers).await?;
         let receipt=s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::RetireBackup { backup_id:id.clone() } }).await?;
-        let cleanup=RecordPartition::retire_snapshot(&s.root.join(format!("backup-{id}"))).await;
-        response(json!({"receipt":receipt,"backup_id":id,"retired":true,"cleanup_pending":cleanup.is_err(),"cleanup_error":cleanup.err().map(|e|e.to_string())}),s.permit(&key).await?)
+        let backup_path = s.root.join(format!("backup-{id}"));
+        let cleanup: Result<(),String> = async {
+            let marker_path = backup_path.join("s3-backup.json");
+            if marker_path.exists() {
+                let marker: S3BackupMarker = serde_json::from_slice(
+                    &std::fs::read(&marker_path).map_err(|error| error.to_string())?
+                ).map_err(|error| error.to_string())?;
+                let digest = Sha256::digest(marker.collection_id.as_bytes());
+                let collection_hash = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+                let authority_path = s.root.join(format!(".authority-{collection_hash}.sqlite"));
+                RecordPartition::retire_s3_backup(&authority_path, &id).await
+                    .map_err(|error| error.to_string())?;
+            }
+            RecordPartition::retire_snapshot(&backup_path).await.map_err(|error| error.to_string())
+        }.await;
+        response(json!({"receipt":receipt,"backup_id":id,"retired":true,"cleanup_pending":cleanup.is_err(),"cleanup_error":cleanup.err()}),s.permit(&key).await?)
     }).await
 }
 
