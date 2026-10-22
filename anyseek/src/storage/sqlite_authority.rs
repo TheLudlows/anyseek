@@ -145,7 +145,7 @@ impl SqliteAuthority {
                  object_key TEXT PRIMARY KEY,
                  sha256 BLOB NOT NULL CHECK(length(sha256)=32),
                  byte_length INTEGER NOT NULL CHECK(byte_length>=0),
-                 state INTEGER NOT NULL CHECK(state IN (0,1,2)),
+                 state INTEGER NOT NULL CHECK(state IN (0,1,2,3)),
                  created_at_ms INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS object_pins (
@@ -514,7 +514,7 @@ impl SqliteAuthority {
             return Err(rusqlite::Error::InvalidQuery);
         }
         for object in &snapshot.objects {
-            if object.reference.key.is_empty() || !matches!(object.state, 0 | 1 | 2) {
+            if object.reference.key.is_empty() || !matches!(object.state, 0 | 1 | 2 | 3) {
                 return Err(rusqlite::Error::InvalidQuery);
             }
             tx.execute(
@@ -670,6 +670,35 @@ impl SqliteAuthority {
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Record successful (or already-absent) remote deletion after a fresh authority
+    /// reachability check. State 3 is a durable tombstone and is never reactivated.
+    pub(crate) fn mark_object_deleted(&mut self, reference: &ObjectRef) -> rusqlite::Result<bool> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let collectible: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM object_uploads u
+                WHERE u.object_key=?1 AND u.sha256=?2 AND u.byte_length=?3 AND u.state=2
+                  AND NOT EXISTS(SELECT 1 FROM partition_heads h
+                    WHERE json_extract(h.wal_tip_json,'$.key')=u.object_key
+                       OR json_extract(h.manifest_json,'$.key')=u.object_key
+                       OR json_extract(h.log_anchor_json,'$.key')=u.object_key)
+                  AND NOT EXISTS(SELECT 1 FROM object_pins p WHERE p.object_key=u.object_key)
+            )",
+            params![reference.key, reference.sha256.as_slice(), to_i64(reference.length)?],
+            |row| row.get(0),
+        )?;
+        if !collectible {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let changed = tx.execute(
+            "UPDATE object_uploads SET state=3 WHERE object_key=?1 AND state=2",
+            [&reference.key],
+        )?;
+        tx.commit()?;
+        Ok(changed == 1)
     }
 
     /// Return only monotonically retired objects that are still unreferenced and unpinned.
@@ -829,10 +858,8 @@ mod tests {
             ["wal/unverified"],
         ).unwrap();
         assert!(db.register_durable_object(&unverified,12).is_err());
-        assert!(matches!(
-            db.publish_commit("p0",head.head_version,3,"op-x",[1;32],1,unverified,None).unwrap(),
-            PublishOutcome::Published(_)
-        ));
+        assert!(db.publish_commit("p0",head.head_version,3,"op-x",[1;32],1,unverified,None).is_err());
+        assert_eq!(db.read_head("p0").unwrap().unwrap().committed_seq, 0);
         drop(db);
         let _=fs::remove_file(&path);
         let _=fs::remove_file(path.with_extension("sqlite-wal"));
