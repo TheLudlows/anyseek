@@ -140,6 +140,43 @@ impl SqliteAuthority {
         read_head(&self.connection, partition_id)
     }
 
+    /// Register an object only after the object-store adapter has completed the durable
+    /// upload and independently verified its byte length and SHA-256. A key is immutable:
+    /// registering different bytes under an existing key is rejected.
+    pub(crate) fn register_durable_object(
+        &mut self,
+        object: &ObjectRef,
+        created_at_ms: i64,
+    ) -> rusqlite::Result<()> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(Vec<u8>, i64)> = tx.query_row(
+            "SELECT sha256,byte_length FROM object_uploads WHERE object_key=?1",
+            [&object.key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        match existing {
+            Some((digest, length)) => {
+                if digest.as_slice() != object.sha256 || length < 0 || length as u64 != object.length {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "immutable object key reused with different bytes".into()
+                    ));
+                }
+                tx.execute(
+                    "UPDATE object_uploads SET state=1 WHERE object_key=?1",
+                    [&object.key],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO object_uploads(object_key,sha256,byte_length,state,created_at_ms)
+                     VALUES(?1,?2,?3,1,?4)",
+                    params![object.key, object.sha256.as_slice(), to_i64(object.length)?, created_at_ms],
+                )?;
+            }
+        }
+        tx.commit()
+    }
+
     /// Publish only references to objects already uploaded and verified as durable.
     /// This transaction is the commit point; object upload alone never commits data.
     pub(crate) fn publish_commit(
@@ -157,6 +194,10 @@ impl SqliteAuthority {
             return Err(rusqlite::Error::InvalidParameterName("empty identity".into()));
         }
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_durable_object(&tx, &wal_tip)?;
+        if let Some(reference) = manifest.as_ref() {
+            ensure_durable_object(&tx, reference)?;
+        }
         if let Some((digest, result_json)) = read_receipt(&tx, partition_id, operation_id)? {
             if digest != request_sha256 {
                 return Err(rusqlite::Error::InvalidParameterName(
@@ -213,6 +254,7 @@ impl SqliteAuthority {
             tx.commit()?;
             return Ok(None);
         }
+        ensure_durable_object(&tx, &manifest)?;
         let manifest_json = serde_json::to_string(&manifest).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let changed = tx.execute(
             "UPDATE partition_heads SET head_version=head_version+1,manifest_json=?1,indexed_seq=?2
@@ -250,6 +292,20 @@ fn to_i64(value: u64) -> rusqlite::Result<i64> {
 }
 fn decode_object(value: Option<String>) -> rusqlite::Result<Option<ObjectRef>> {
     value.map(|s| serde_json::from_str(&s).map_err(|_| rusqlite::Error::InvalidQuery)).transpose()
+}
+fn ensure_durable_object(tx: &rusqlite::Transaction<'_>, object: &ObjectRef) -> rusqlite::Result<()> {
+    let row: Option<(Vec<u8>, i64, i64)> = tx.query_row(
+        "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
+        [&object.key],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    match row {
+        Some((digest, length, 1))
+            if digest.as_slice() == object.sha256 && length >= 0 && length as u64 == object.length => Ok(()),
+        _ => Err(rusqlite::Error::InvalidParameterName(
+            "object reference is not registered as verified and durable".into()
+        )),
+    }
 }
 fn read_head(connection: &Connection, partition_id: &str) -> rusqlite::Result<Option<PartitionHead>> {
     connection.query_row(
@@ -305,6 +361,9 @@ mod tests {
         let path=temp_db();
         let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
         let head=db.create_partition("p0",7).unwrap();
+        db.register_durable_object(&object("wal/1",1), 1).unwrap();
+        db.register_durable_object(&object("manifest/1",3), 2).unwrap();
+        db.register_durable_object(&object("manifest/bad",2), 3).unwrap();
         let first=db.publish_commit("p0",head.head_version,7,"op-1",[9;32],1,object("wal/1",1),None).unwrap();
         let head=match first {PublishOutcome::Published(head)=>head,other=>panic!("{other:?}")};
         assert_eq!(head.committed_seq,1);
