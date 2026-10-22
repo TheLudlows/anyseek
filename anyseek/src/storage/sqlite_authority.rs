@@ -28,6 +28,8 @@ pub(crate) struct PartitionHead {
     pub committed_seq: u64,
     pub wal_tip: Option<ObjectRef>,
     pub manifest: Option<ObjectRef>,
+    /// Immutable Record configuration + initial empty checkpoint for object-backed recovery.
+    pub bootstrap: Option<ObjectRef>,
     pub indexed_seq: u64,
     pub log_base_seq: u64,
     pub log_anchor: Option<ObjectRef>,
@@ -137,6 +139,7 @@ impl SqliteAuthority {
                  committed_seq INTEGER NOT NULL CHECK(committed_seq>=0),
                  wal_tip_json TEXT,
                  manifest_json TEXT,
+                 bootstrap_json TEXT,
                  indexed_seq INTEGER NOT NULL CHECK(indexed_seq>=0 AND indexed_seq<=committed_seq),
                  log_base_seq INTEGER NOT NULL CHECK(log_base_seq>=0 AND log_base_seq<=committed_seq),
                  log_anchor_json TEXT
@@ -206,6 +209,38 @@ impl SqliteAuthority {
 
     pub(crate) fn read_head(&self, partition_id: &str) -> rusqlite::Result<Option<PartitionHead>> {
         read_head(&self.connection, partition_id)
+    }
+
+    /// Publish an immutable initial Record checkpoint/configuration before any
+    /// operation sequence exists. This is metadata-root publication, not a data commit.
+    pub(crate) fn set_bootstrap_reference(
+        &mut self,
+        partition_id: &str,
+        expected_head_version: u64,
+        owner_epoch: u64,
+        bootstrap: ObjectRef,
+    ) -> rusqlite::Result<Option<PartitionHead>> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_durable_object(&tx, &bootstrap)?;
+        let current = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if current.head_version != expected_head_version || current.owner_epoch != owner_epoch
+            || current.committed_seq != 0 || current.bootstrap.is_some() {
+            tx.commit()?;
+            return Ok(None);
+        }
+        let json = serde_json::to_string(&bootstrap).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let changed = tx.execute(
+            "UPDATE partition_heads SET bootstrap_json=?1,head_version=head_version+1
+             WHERE partition_id=?2 AND head_version=?3 AND owner_epoch=?4 AND committed_seq=0",
+            params![json,partition_id,to_i64(expected_head_version)?,to_i64(owner_epoch)?],
+        )?;
+        if changed != 1 {
+            tx.commit()?;
+            return Ok(None);
+        }
+        let head = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        tx.commit()?;
+        Ok(Some(head))
     }
 
     /// Return every active object reachable from the current committed heads,
@@ -638,12 +673,13 @@ impl SqliteAuthority {
         for head in &snapshot.heads {
             tx.execute(
                 "INSERT INTO partition_heads(partition_id,head_version,owner_epoch,committed_seq,wal_tip_json,
-                 manifest_json,indexed_seq,log_base_seq,log_anchor_json)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                 manifest_json,bootstrap_json,indexed_seq,log_base_seq,log_anchor_json)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                 params![head.partition_id,to_i64(head.head_version)?,to_i64(head.owner_epoch)?,
                     to_i64(head.committed_seq)?,
                     head.wal_tip.as_ref().map(serde_json::to_string).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?,
                     head.manifest.as_ref().map(serde_json::to_string).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    head.bootstrap.as_ref().map(serde_json::to_string).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?,
                     to_i64(head.indexed_seq)?,to_i64(head.log_base_seq)?,
                     head.log_anchor.as_ref().map(serde_json::to_string).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?],
             )?;
@@ -924,15 +960,15 @@ fn ensure_durable_object(tx: &rusqlite::Transaction<'_>, object: &ObjectRef) -> 
 }
 fn read_head(connection: &Connection, partition_id: &str) -> rusqlite::Result<Option<PartitionHead>> {
     connection.query_row(
-        "SELECT partition_id,head_version,owner_epoch,committed_seq,wal_tip_json,manifest_json,indexed_seq,log_base_seq,log_anchor_json
+        "SELECT partition_id,head_version,owner_epoch,committed_seq,wal_tip_json,manifest_json,bootstrap_json,indexed_seq,log_base_seq,log_anchor_json
          FROM partition_heads WHERE partition_id=?1",
         [partition_id],
         |row| Ok((
             row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?,
             row.get::<_,i64>(3)?, row.get::<_,Option<String>>(4)?, row.get::<_,Option<String>>(5)?,
-            row.get::<_,i64>(6)?, row.get::<_,i64>(7)?, row.get::<_,Option<String>>(8)?,
+            row.get::<_,Option<String>>(6)?, row.get::<_,i64>(7)?, row.get::<_,i64>(8)?, row.get::<_,Option<String>>(9)?,
         )),
-    ).optional()?.map(|(partition_id,hv,epoch,committed,wal,manifest,indexed,base,anchor)| {
+    ).optional()?.map(|(partition_id,hv,epoch,committed,wal,manifest,bootstrap,indexed,base,anchor)| {
         Ok(PartitionHead {
             partition_id,
             head_version: u64::try_from(hv).map_err(|_| rusqlite::Error::InvalidQuery)?,
@@ -940,6 +976,7 @@ fn read_head(connection: &Connection, partition_id: &str) -> rusqlite::Result<Op
             committed_seq: u64::try_from(committed).map_err(|_| rusqlite::Error::InvalidQuery)?,
             wal_tip: decode_object(wal)?,
             manifest: decode_object(manifest)?,
+            bootstrap: decode_object(bootstrap)?,
             indexed_seq: u64::try_from(indexed).map_err(|_| rusqlite::Error::InvalidQuery)?,
             log_base_seq: u64::try_from(base).map_err(|_| rusqlite::Error::InvalidQuery)?,
             log_anchor: decode_object(anchor)?,
