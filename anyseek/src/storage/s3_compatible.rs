@@ -102,8 +102,12 @@ impl S3CompatibleStore {
 
     fn object_path(key: &str) -> object_store::Result<ObjectPath> {
         if key.is_empty() || key.starts_with('/') || key.contains('\\') {
-            return Err(object_store::Error::InvalidPath {
-                source: "object key must be a non-empty relative slash-separated key".into(),
+            return Err(object_store::Error::Generic {
+                store: "s3-compatible",
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "object key must be a non-empty relative slash-separated key",
+                ).into(),
             });
         }
         ObjectPath::parse(key)
