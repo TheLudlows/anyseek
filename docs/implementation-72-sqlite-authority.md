@@ -51,7 +51,7 @@ The SQLite database is a single local authority. Do not put its WAL database on 
 
 1. Complete current-head CI after the Record bootstrap/recovery changes.
 2. Audit all state-changing maintenance events and compaction/anchor paths so none bypasses remote commit.
-3. Add Record-level tests for missing local cache recovery, interrupted bootstrap retry, response loss, and update/delete semantics.
+3. Record-level missing-cache recovery now verifies a create/update/delete sequence and confirms the rebuilt query view contains the updated record while hiding the deleted one. Interrupted bootstrap retry and provider-specific S3 semantics still need dedicated tests.
 4. Register complete manifest/segment/index dependency edges and verify service-level backup/restore closure.
 5. Validate conditional create, ambiguous PUT, read-after-write visibility and delete semantics against a real S3-compatible endpoint.
 6. Complete object-backend fault-injection and restart acceptance before removing Draft status.
@@ -84,6 +84,6 @@ Overall: **Record-level S3 integration is implemented as an opt-in path; not rea
 ## Latest progress — 2026-10-22
 
 - Added the Record-level bootstrap publication/recovery path and validation that the local checkpoint identity matches the authoritative remote bootstrap.
-- Added recovery from a missing local cache: reconstruct the local journal from the remote bootstrap, append all committed log entries, then rebuild through the standard Record recovery/index path.
+- Added recovery from a missing local cache: reconstruct the local journal from the remote bootstrap, append all committed log entries, then rebuild through the standard Record recovery/index path. The regression test now includes update and delete operations and checks the final visible state after a second cache loss.
 - Added predecessor dependency edges for immutable WAL blocks and a test that backup reachability includes the full committed chain.
 - Current CI Run #291 is pending/in progress. PR remains Draft; real S3 endpoint validation and the maintenance-event audit remain outstanding.
