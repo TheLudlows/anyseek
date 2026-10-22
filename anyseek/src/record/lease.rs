@@ -70,6 +70,11 @@ impl Inner {
         let bytes=encode_entry(&Entry::LeaseExpired(event.clone()))?;
         self.journal.validate_append_with_reserve(bytes.len(),reserve).map_err(storage)?;
         self.healthy=false;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+        #[cfg(feature = "s3-object-store")]
+        if let Some(remote) = self.remote.as_mut() {
+            remote.commit_entry(event.seq, format!("system:lease-expired:{}", event.seq), &bytes)
+                .await.map_err(RecordError::OutcomeUnknown)?;
+        }
         self.journal.append(&bytes).map_err(|e|RecordError::OutcomeUnknown(e.to_string()))?;
         #[cfg(feature="fault-injection")]
         match std::env::var("ANYSEEK_LEASE_FAULT").ok().as_deref(){Some("after_append_unknown")=>return Err(RecordError::OutcomeUnknown("injected lease append".into())),Some("after_durable")=>return Err(RecordError::DurablePending(event.seq)),Some("crash_after_durable")=>std::process::exit(86),_=>{}}
