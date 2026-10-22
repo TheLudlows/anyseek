@@ -992,10 +992,11 @@ impl RecordPartition {
         let remote = inner.remote.as_mut().ok_or_else(|| RecordError::Rejected(
             "partition is not using S3 storage".into()
         ))?;
+        let partition_id = remote.partition_id.clone();
         let bundle = remote.create_backup_bundle(
             &RemotePersistence::safe_backup_id(backup_id), created_at_ms, max_snapshot_bytes,
         ).await.map_err(storage)?;
-        Ok((bundle, visible_seq))
+        Ok((bundle, visible_seq, partition_id))
     }
 
     /// Release a retained joint backup's pins only after its descriptor has been retired.
