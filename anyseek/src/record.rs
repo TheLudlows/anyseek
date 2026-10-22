@@ -889,15 +889,18 @@ impl RecordPartition {
         config: RecordConfig,
         remote_config: S3CompatibleRecordConfig,
     ) -> Result<Self, RecordError> {
-        let mut remote = RemotePersistence::open(&remote_config)?;
-        remote.authority.lock().await.create_partition(&remote.partition_id, remote.owner_epoch).map_err(storage)?;
-        let partition = Self::create(path, config).await?;
-        {
-            let mut inner = partition.inner.lock().await;
-            if inner.state.seq != 0 { return Err(RecordError::Rejected("S3 backend requires a fresh local partition".into())); }
-            inner.remote = Some(remote);
+        let remote = RemotePersistence::open(&remote_config)?;
+        let existing = remote.authority.lock().await.read_head(&remote.partition_id).map_err(storage)?;
+        match existing {
+            Some(head) if head.owner_epoch != remote.owner_epoch => return Err(RecordError::RecoveryRequired),
+            Some(_) => {},
+            None => {
+                remote.authority.lock().await
+                    .create_partition(&remote.partition_id, remote.owner_epoch).map_err(storage)?;
+            }
         }
-        Ok(partition)
+        drop(remote);
+        Self::open_s3(path, config, remote_config).await
     }
 
     /// Open a local partition and reconcile every SQLite-committed S3 log entry
