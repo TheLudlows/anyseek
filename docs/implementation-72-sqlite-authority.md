@@ -57,24 +57,23 @@ The SQLite database is a single local authority. Do not put its WAL database on 
 
 Overall: **in progress; not ready to merge**.
 
-### Delivered in this branch
-- SQLite metadata authority with conditional sequential commits, owner-epoch checks and operation receipts.
-- S3-compatible immutable object adapter with conditional create, byte/length/SHA-256 verification and same-key retry resolution.
-- Object-first `append_and_commit` primitive and bounded committed-tail replay.
-- Logical metadata backup/restore bundle, dependency-edge-based closure discovery and backup-root pins.
-- Pin-aware retirement, remote-delete completion tombstones and protection against object-key reactivation.
+### Delivered
+- SQLite metadata authority with sequential conditional commit publication, owner-epoch fencing and operation receipts.
+- S3-compatible immutable object adapter with conditional create, read-back verification and ambiguous-PUT retry handling.
+- `append_and_commit` primitive: resolve the original operation receipt, upload/register the immutable operation log, then publish the committed head in SQLite.
+- Bounded committed-tail replay with chain, sequence, partition, digest and byte-budget validation.
+- Logical metadata backup/restore, object dependency edges, transitive closure discovery, backup root pins and GC deletion tombstones.
 
-### Validation status
-- Latest fully completed CI run observed before the newest changes: default-core boundary and workspace build passed, but the storage unit-test suite failed on a GC test asserting that a physically deleted object key could be re-registered.
-- The re-registration guard was tightened to reject both retired and physically deleted states.
-- A newer retained-workspace workflow was queued, but no jobs/results were available at the last status check. Therefore the newest head is **not yet validated**.
-- Prior Linux/Windows persistence and service fault tests passed on earlier commits; they do not substitute for current-head validation.
+### Validation
+- CI Run #264 passed on commit `78549bef`: core boundary checks, retained workspace build, HTTP/UI smoke, existing core/server tests, and Linux/Windows persistence/service fault tests.
+- **That green run predates the subsequent append-and-commit and backup-root changes.** Those newer changes need a fresh current-head CI run before they are considered validated.
+- No real S3-compatible endpoint has yet been exercised; in-memory object-store tests do not prove service-specific conditional PUT or visibility semantics.
 
-### Remaining work, in order
-1. Obtain green current-head CI on Linux and Windows; fix any remaining compile/test failures.
-2. Integrate `append_and_commit` into the existing RecordPartition/RecordService write path using canonical mutation envelopes and existing idempotency semantics.
-3. Apply committed-but-unindexed tail entries in the same Record read view as the index; correctly reconcile updates, deletes, version filters and ordering.
-4. Ensure every manifest/segment/WAL writer registers complete object dependency edges; integrate backup/restore into the existing service lifecycle.
-5. Exercise conditional create, ambiguous PUT, read-after-write visibility and deletion against a real S3-compatible service.
-6. Run fault-injection and restart acceptance; only then remove Draft status.
+### Remaining work
+1. Run current-head CI for the newest object-log/backup changes and fix all failures.
+2. Integrate `append_and_commit` into the actual RecordPartition/RecordService write path; avoid dual-authority success semantics with the existing local journal.
+3. Apply committed-but-unindexed entries in the same authoritative Record query view, including update/delete/version semantics.
+4. Register complete manifest/segment/WAL dependency edges in all writers/indexers and integrate backup/restore into service lifecycle.
+5. Validate conditional create, ambiguous PUT, read-after-write and delete behavior against a real S3-compatible service.
+6. Complete process-failure/restart tests and only then remove Draft status.
 
