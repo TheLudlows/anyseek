@@ -402,16 +402,22 @@ impl RemotePersistence {
     }
 
     async fn commit(&mut self, applied: &Applied, payload: &[u8]) -> Result<(), String> {
+        let operation_id = format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce);
+        self.commit_entry(applied.receipt.seq, operation_id, payload).await
+    }
+
+    async fn commit_entry(&mut self, seq: u64, operation_id: String, payload: &[u8]) -> Result<(), String> {
         use sha2::{Digest, Sha256};
         let head = self.authority.read_head(&self.partition_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "remote partition authority is missing".to_owned())?;
-        let seq = applied.receipt.seq;
         if seq != head.committed_seq.saturating_add(1) {
             return Err(format!("remote commit sequence conflict: local={seq}, remote={}", head.committed_seq));
         }
+        if head.owner_epoch != self.owner_epoch {
+            return Err("remote owner epoch changed; this writer is fenced".into());
+        }
         let digest: [u8; 32] = Sha256::digest(payload).into();
-        let operation_id = format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce);
         let block = crate::storage::object_log::ObjectLogBlock {
             partition_id: self.partition_id.clone(), first_seq: seq, last_seq: seq,
             previous: head.wal_tip.clone(),
@@ -438,48 +444,47 @@ impl RemotePersistence {
         }
     }
 
-    async fn recover_tail(&mut self, inner: &mut Inner) -> Result<(), RecordError> {
-        use sha2::{Digest, Sha256};
+    /// Copy any remotely committed but locally absent sequential entries into the
+    /// local recovery journal. The caller reopens the partition afterward so the
+    /// ordinary journal recovery path applies every Entry variant consistently.
+    async fn reconcile_journal(&mut self, inner: &mut Inner) -> Result<(), RecordError> {
         let head = self.authority.read_head(&self.partition_id).map_err(storage)?
             .ok_or_else(|| storage("remote partition authority is missing"))?;
-        if inner.state.seq > head.committed_seq || inner.state.seq < head.indexed_seq {
+        if head.owner_epoch != self.owner_epoch
+            || inner.state.seq > head.committed_seq
+            || inner.state.seq < head.indexed_seq {
             return Err(RecordError::RecoveryRequired);
         }
         let tail = crate::storage::object_log::load_committed_tail(
             &self.store, &head, self.max_tail_blocks, self.max_tail_bytes,
-        ).await.map_err(|error| storage(error))?;
-        inner.healthy = false;
-        if let Ok(mut output) = inner.output.write() { output.fenced = true; }
+        ).await.map_err(storage)?;
+        let mut expected = inner.state.seq;
         for entry in tail.into_iter().filter(|entry| entry.seq > inner.state.seq) {
-            if entry.seq != inner.state.seq.saturating_add(1) {
+            if entry.seq != expected.saturating_add(1) {
                 return Err(RecordError::RecoveryRequired);
             }
-            let digest: [u8; 32] = Sha256::digest(&entry.payload).into();
+            let digest: [u8; 32] = sha2::Digest::digest(&sha2::Sha256::new(), &entry.payload).into();
             if digest != entry.request_sha256 { return Err(RecordError::RecoveryRequired); }
-            let applied = match serde_json::from_slice::<Entry>(&entry.payload).map_err(storage)? {
-                Entry::Applied(applied) if applied.receipt.seq == entry.seq => applied,
-                _ => return Err(RecordError::RecoveryRequired),
+            let parsed: Entry = serde_json::from_slice(&entry.payload).map_err(storage)?;
+            let (seq, operation_id) = match &parsed {
+                Entry::Applied(applied) => (
+                    applied.receipt.seq,
+                    format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce),
+                ),
+                Entry::Expired(event) => (event.seq, format!("system:expired:{}", event.seq)),
+                Entry::LeaseExpired(event) => (event.seq, format!("system:lease-expired:{}", event.seq)),
+                Entry::Checkpoint { .. } | Entry::Anchor(_) | Entry::FeedTrim(_) =>
+                    return Err(RecordError::RecoveryRequired),
             };
-            let operation_id = format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce);
-            if operation_id != entry.operation_id { return Err(RecordError::RecoveryRequired); }
+            if seq != entry.seq || operation_id != entry.operation_id {
+                return Err(RecordError::RecoveryRequired);
+            }
             inner.journal.validate_append_with_reserve(entry.payload.len(), 0)
                 .map_err(|_| RecordError::RecoveryRequired)?;
             inner.journal.append(&entry.payload).map_err(storage)?;
-            let feed_point = change_feed::pending(&inner.state, &applied)?;
-            let mut next_state = inner.state.clone();
-            apply(&mut next_state, &applied)?;
-            let snapshot_bytes = encode_entry(&Entry::Checkpoint {
-                config: inner.config.clone(), state: next_state,
-            })?.len();
-            inner.publish(&applied, snapshot_bytes).await?;
-            inner.feed_cache.push(feed_point);
+            expected = seq;
         }
-        if inner.state.seq != head.committed_seq { return Err(RecordError::RecoveryRequired); }
-        validate_restored_state(&inner.config, &inner.state)?;
-        inner.feed_cache = change_feed::Cache::rebuild(&inner.state, &inner.config.change_feed)?;
-        inner.graph_cache = graph::Cache::rebuild(&inner.state)?;
-        inner.healthy = true;
-        if let Ok(mut output) = inner.output.write() { output.fenced = inner.state.sealed_for.is_some(); }
+        if expected != head.committed_seq { return Err(RecordError::RecoveryRequired); }
         Ok(())
     }
 }
