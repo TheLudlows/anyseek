@@ -1,92 +1,120 @@
-# SQLite metadata authority — implementation slice
+# B：SQLite + S3 对象持久化实施记录
 
-Status: **implementation foundation in Draft PR #72; not yet accepted or wired into the record write path**.
+状态：**PR #72 为 Draft。用户本批指定的 1–4 项已实现并通过本地验证；不把本批交付等同于 B 全部验收或生产可靠性完成。** 本批基于 `f28e35414c7e90dcec6c2f9d4b578568ff575747`，A/P3 已在主干 `5cd76e3b`。
 
-## Scope implemented
+## 本批范围
 
-- Added `rusqlite` with bundled SQLite and registered the internal `storage::sqlite_authority` module.
-- Added the `object_store` S3 backend (`S3CompatibleStore`) with configurable endpoint/bucket/region/credentials and HTTP opt-in for explicitly configured development endpoints.
-- Immutable S3 writes use conditional create (`PutMode::Create`), then read back and compare exact bytes, length and SHA-256. If a PUT response is ambiguous, the adapter reads the existing key and treats it as success only when the bytes match exactly; conflicting bytes are never overwritten.
-- `put_and_register` completes object upload and verification before recording the object as durable in SQLite; it deliberately does not advance `committed_seq`.
-- `get_verified` checks each read against the SQLite-published object reference.
-- Added bounded object-log blocks and backward chain replay from the SQLite committed tip to the indexed watermark.
-- Added `append_and_commit`: resolve an existing operation receipt first, upload and verify a deterministic immutable log object, register it as durable, then publish the new sequential committed watermark/reference and idempotency receipt in a single SQLite transaction.
-- Added a separate immutable bootstrap checkpoint reference in the SQLite partition head, plus `publish_bootstrap` to upload/verify/register and publish the initial Record configuration/checkpoint before the first data commit. Bootstrap roots are included in backup and GC reachability.
-- Added the feature-gated `ObjectBackedPartition` storage coordinator. It creates/opens a SQLite authority, publishes/loads the immutable bootstrap, appends canonical operation payloads through the object-first commit protocol, and returns a single-head snapshot with a verified committed-but-unindexed tail. A regression test covers bootstrap, append, tail read, duplicate retry, and same operation ID with different payload. Stale owner epochs return conflict; response-loss retries resolve the same operation ID and digest without allocating a second sequence.
-- Added a focused test for object-first publication, unindexed-tail visibility, duplicate operation retry, and stale owner epoch rejection. Partition mismatch, sequence gaps, checksum failures and block/byte budget exhaustion fail closed rather than returning a partial tail.
-- Added a logical metadata backup snapshot containing partition heads, operation receipts, object registry, pins and retired-key tombstones. Backup creation pins the caller-supplied complete object closure in the same SQLite transaction that captures the snapshot.
-- Added a backup descriptor that references both the metadata snapshot and the object closure, plus restore that verifies the descriptor, snapshot and each object before importing metadata into an empty SQLite authority.
-- Added an authority-driven backup entry point that derives the transitive object closure from registered object dependency edges. Backup descriptor and metadata snapshot roots are pinned by backup ID, and restore recreates those pins so the restore entry point is protected from GC. Closure discovery now includes bootstrap roots and existing pinned roots before recursively following dependency edges.
-- Added authority-mediated retirement, pin/unpin, and collectible-object enumeration. An object is only retired when it is not referenced by any current partition head and has no live reader/indexer/backup/staging pin. Retirement is monotonic; a retired key cannot be reactivated.
-- `delete_retired` only deletes keys that the authority currently reports collectible. There is intentionally no unconditional object delete API.
-- Opening the metadata database enables SQLite WAL, sets `synchronous=FULL`, verifies the setting, enables foreign keys, and configures a bounded busy timeout.
-- Metadata tables represent the schema version, partition heads, operation receipts, durable object registration, reader/indexer/backup/staging pins, and retired-object candidates.
-- `PartitionHead` holds the single mutable authority's head version, owner epoch, committed sequence, WAL tip, manifest, indexed sequence, log base and recovery anchor.
-- Commit publication uses a short `BEGIN IMMEDIATE` transaction with expected-head and owner-epoch checks, requires exactly the next committed sequence, and writes the head and operation receipt atomically.
-- An immutable object reference can only be registered as durable after the external object adapter has uploaded and verified its length and SHA-256. Publication refuses unregistered/unverified references and key reuse with different bytes.
-- Index publication is conditional on the current head/owner and constrains `indexed_seq` to the interval from the existing indexed watermark through `committed_seq`.
-- Same-operation retry checks the request digest and returns the original recorded head, independent of the current head; reusing the ID with a different digest is rejected.
+1. 远端检查点、Segment 与 manifest 发布。
+2. 远端日志保留边界与 feed 截断。
+3. 对象依赖、上传登记与安全 GC。
+4. SQLite/对象共同备份、恢复以及服务入口的中断重试。
 
-## Explicit limitations
+独立 Indexer、块缓存优化、分布式路由、跨主机 HA 及超大 collection 不在本批。
 
-The Record layer now exposes feature-gated `create_s3` and `open_s3` paths. Accepted `Applied` operations are committed to S3 + SQLite before local journal/index publication; recovery validates the immutable bootstrap, appends missing committed tail entries to the local recovery journal, then reopens through the ordinary Record replay/index path. The local journal is a rebuildable cache in this mode. Initial checkpoint publication is retryable while the remote head remains at sequence zero. WAL blocks register predecessor dependency edges so backup closure discovery traverses the full committed log chain. Remaining limitations: real S3-compatible endpoint semantics are not yet tested; index/segment dependencies must be registered by every writer; and service-level backup/restore still needs fault testing. The feed-retention trim is a same-sequence metadata transition that the remote log protocol does not yet represent, so S3 mode deliberately skips feed trimming rather than allowing a local-only floor advance that would be lost on cache rebuild. This trades retention reclamation for correctness/backpressure until a remote metadata transition is designed.
+## 权威与数据归属
 
-The SQLite database is a single local authority. Do not put its WAL database on a network filesystem or allow independent nodes to maintain writable copies. Cross-host failover/HA is out of scope for this first slice.
+SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引水位、不可变引用、有限期幂等协调、对象依赖、pin、退休状态和备份/恢复协调记录。正文、原始向量、索引和 WAL 内容均在对象存储中。本地日志、payload 和索引是可以重建的缓存。
 
-## Tests added
+SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本地 owner 文件锁；同一权威不能由两个 Record 实例同时持有。服务根目录的 `s3-namespace` 是持久协调身份，同 collection ID 在独立服务根/恢复目标中不会共享可写对象命名空间；它应与 catalog、SQLite 权威库一起保留，不能当作缓存删除。
 
-- Commit and operation retry, including original receipt persistence after reopening.
-- Reject an index watermark beyond the committed watermark.
-- Reject publication before an object has been registered as durable.
-- Reject reusing an immutable object key for different digest/length.
-- Reopen the database and verify the indexed watermark persists.
-- Verify upload/register does not itself commit a record.
-- Verify S3 adapter create/read-back, exact-content retry resolution, size limit, digest mismatch and conflicting-key rejection using the in-memory ObjectStore test double.
-- Verify active backup pins block retirement, retired objects are deleted only when collectible, repeated delete is safe, and retired keys cannot be registered again.
-- Verify committed log tail replay from the authoritative tip, replay only above the indexed watermark, and fail closed on partition mismatch or exhausted budgets.
-- Verify logical metadata backup/restore preserves committed head and idempotency receipt after validating the object closure.
-- Verify a pinned backup descriptor protects transitive child objects from retirement until the root pin is explicitly released.
+普通写入先登记上传身份，再完成不可变 PUT、读回长度/字节/SHA-256 校验，最后由 SQLite 事务条件发布 head 与回执，再发布本地完整视图。对象缺失或校验失败不会回退为旧缓存成功。
 
-## Required next work
+## 1. 远端检查点与 Segment 发布
 
-1. Complete current-head CI after the Record bootstrap/recovery changes.
-2. Audit all state-changing maintenance events and compaction/anchor paths so none bypasses remote commit.
-3. Record-level missing-cache recovery now verifies a create/update/delete sequence and confirms the rebuilt query view contains the updated record while hiding the deleted one. Interrupted bootstrap retry and provider-specific S3 semantics still need dedicated tests.
-4. Register complete manifest/segment/index dependency edges and verify service-level backup/restore closure.
-5. Run the ignored S3 contract test against a dedicated real endpoint to validate conditional create, ambiguous/duplicate PUT behavior, read-after-write visibility and delete semantics.
-6. Complete object-backend fault-injection and restart acceptance before removing Draft status.
+复用 A 的 `anchor::Reference`、已有 Segment 编码和规范 payload pool。远端 checkpoint descriptor 映射所选 anchor/Segment/payload 文件到有界对象块，保存原文件长度和 SHA-256，不再制作一套正文/向量镜像。对象块按不可变文件身份和内容摘要命名，未变化的所选文件可以复用。
 
-## Progress status — 2026-10-22
+在 partition 串行屏障下：
 
-Overall: **Record-level S3 integration is implemented as an opt-in path. Build/regression CI is green on the latest validated head, but this feature is not ready to merge until the remaining service-specific and retention/backup checks pass.**
+1. 构建并验证完整本地候选 anchor/index。
+2. 上传并校验全部成员，再上传 descriptor，登记 descriptor → 每个成员块的依赖。
+3. SQLite 以 expected head version、owner epoch 和精确 committed seq 条件发布 manifest、indexed seq、log base，并清空已覆盖的 live WAL tip。
+4. 再发布本地恢复证书与共同检索视图。SQLite 发布后的本地失败保持 fenced，重开时采用远端选择结果。
 
-### Delivered
-- SQLite metadata authority with sequential conditional commit publication, owner-epoch fencing and operation receipts.
-- S3-compatible immutable object adapter with conditional create, read-back verification and ambiguous-PUT retry handling.
-- Record `create_s3/open_s3`: remote bootstrap publication/recovery, object-first commit before local journal/index publication, and committed-tail reconciliation into the ordinary Record replay path.
-- Bounded tail validation and incremental replay after a recovered local sequence; immutable WAL predecessor dependency edges.
-- Logical metadata backup/restore, transitive closure discovery, backup root pins and GC deletion tombstones.
-- Record-level cache-loss regression test covers create/update/delete and confirms final visible state after rebuilding from remote bootstrap + committed log.
-- S3 mode deliberately disables local-only feed trimming until a remote-authoritative feed-floor transition is implemented.
+当前实现只在完整当前 cut 上推进检查点，不支持后台 indexer 与新写入并行发布的优化；这属于 C。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 feed floor 等状态。
 
-### Validation
-- **CI Run #305 completed successfully**: Linux persistence/fault tests passed; workspace build and smoke tests passed; Windows persistence and native HTTP process fault/recovery matrix passed.
-- This is the latest confirmed green run at the time of this update.
-- The ignored real S3 contract test has not been run against a real endpoint. In-memory tests do not prove provider-specific conditional-create, read-after-write, or delete behavior.
+## 2. 日志与 feed 保留
 
-### Remaining work
-1. Implement a remote-authoritative feed-floor/FeedTrim transition so feed retention can safely resume in S3 mode.
-2. Verify all manifest/index/segment writers register complete dependency edges and test service-level backup/restore across interrupted recovery.
-3. Run the ignored contract test against the intended S3-compatible endpoint/bucket.
-4. Run a final CI after any further code changes and keep the PR Draft until all remaining acceptance criteria pass.
-5. Review/document operational constraints: SQLite authority is single-host local metadata; this slice does not provide cross-host HA.
+完整 checkpoint 包含版本、删除、来源/generation、原始数据引用、操作回执、feed 状态和 staging 恢复状态，因此 `log_base_seq` 可推进至该 checkpoint cut。新 WAL 链从新 base 开始；旧链的不可变 predecessor 边不修改，仍被备份或其他 pin 保护时不能删除。
 
-## Latest progress — 2026-10-22
+FeedTrim 不再在 S3 模式跳过。它以**同序号完整 checkpoint**认证 feed floor 和时间水位，而非只向本地缓存追加事件。发布成功后更新内存 feed cache；冷恢复仍得到相同保留边界。七天保留契约、过期游标显式重建和资源背压继续生效，不额外消耗业务操作序号。
 
-- CI Run #305 is green across Linux persistence, Windows persistence/native HTTP fault recovery, workspace build and smoke.
-- The Record S3 path is integrated for bootstrap, Applied writes and cache-loss replay, with create/update/delete recovery coverage.
-- Added incremental tail replay so recovery resumes after the locally recovered sequence rather than rereading the entire history.
-- Added WAL predecessor edges for backup closure discovery.
-- TTL and staging-lease expiration already publish sequenced maintenance entries remotely before local journal append.
-- FeedTrim is intentionally a no-op in S3 mode until its retention-floor update is represented by the remote commit protocol.
-- Still outstanding: remote-authoritative feed retention, real S3 endpoint contract run, and service-level backup/restore/GC acceptance. PR #72 remains Draft.
+物理删除不只看 indexed seq：checkpoint 已保存的 feed/幂等/staging/来源状态、当前根、完整依赖图、读者/构建/备份 pin 必须共同满足。当前单机读者和构建受 partition guard 保护；多节点租约/外部 indexer 尚不在本批。
+
+## 3. 上传、依赖与 GC
+
+- PUT 前持久登记 key、长度和摘要，响应丢失/进程退出也有可回收的对象身份；上传登记本身不提交记录。
+- 所有远端 checkpoint 成员和 WAL predecessor 均登记依赖，当前 bootstrap 也是 GC root。
+- 可达性由当前 SQLite roots 与显式 pin 出发遍历不可变边；不使用 LIST 判定提交，不使用固定等待时间代替引用保护，不新增 JOIN。
+- 退休为单调状态，退休 key 不能重新登记、pin 或发布。先认证退休，再 DELETE，再记录删除完成；NotFound 是幂等删除成功。
+- 已验证完成上传的删除使用完成 tombstone，避免每轮 GC 重删所有历史对象。上传结果未知的库存使用单独 tombstone，后续重试 DELETE，处理迟到 PUT；即便对象迟到，也不能成为已提交数据。
+- GC 在单 owner 的 partition guard 下运行，完整视图已发布后收集，删除失败保留待重试状态。显式 `collect_s3_garbage` 可重试回收。
+- 备份元数据对象也在 PUT 前原子登记并 pin，避免中断后尚未形成 descriptor 的 metadata snapshot 被 GC。
+
+对象库存与 tombstone 是协调元数据，不是 payload 副本。后续需量化长期元数据规模与冷恢复/对象请求成本；当前不承诺无界容量。
+
+## 4. 共同备份与恢复
+
+### 备份
+
+在同一个受控 cut 捕获逻辑 SQLite 快照并 pin 完整对象闭包。`backup_exports` 暂存**协调元数据快照字节**，用于进程中断后用同 backup ID 恢复原 cut，不保存正文、向量或索引内容。这项重复是可恢复导出的必要工作状态，显式退休时清除。
+
+metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition 命名空间派生。重试复用原快照时间、水位和闭包，不把后续写入冒充原备份。服务指针使用私有文件 + sync + rename，未完成指针可重试；指针退休与本地 PartitionJournal 退休分别处理，并在启动时重试 catalog 已认证的退休动作。
+
+### 恢复
+
+先校验 descriptor、SQLite 快照和完整对象闭包。中断后的相同快照导入可继续，不覆盖另一个快照或回退已推进的 head。
+
+恢复到新 collection 时，不复制一份能独立 GC 的原对象引用权威。先用不服务、不运行 GC 的临时导入库重放原 cut，再把验证后的规范文件复制到**新对象命名空间**，发布目标独立 checkpoint。原库和恢复目标因此可以独立压缩、退休备份和回收；重复恢复不能回退恢复目标后续写入。
+
+恢复保留 Record 版本、tombstone、原始向量和操作回执。独立快照不自动获得当前删除历史权威：保留 `independent_snapshot`，隔离受保护证据并更换 feed scope；不恢复原 collection 的 grants。
+
+完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务只启用当前 master，历史 key/grant 不复活；在 S3 模式首次启动时，已认证的独立归档被发布到新的服务 namespace。归档中的 collection backup 仍可再次恢复。
+
+## 验证
+
+本批 Linux 本地验证结果如下；不得用旧 Run #305 代替新代码 CI，不得把 HTTP test double 当成真实云后端认证。
+
+| 验证 | 结果 |
+| --- | --- |
+| workspace 全 targets 回归 | 34 suites，280 passed，0 failed，11 ignored；随后追加未完成上传库存恢复回归 |
+| 最终核心 lib（含新增库存恢复测试） | 181 passed，0 failed，10 ignored；最终源代码验证 |
+| 上传库存/迟到 PUT 专项 | 2 passed，0 failed |
+| doctest | 44 passed，0 failed |
+| 固定版本 fault-injection binary 的 S3 HTTP 矩阵 | 全部通过：检查点前/后退出、无缓存多通道恢复、feed floor、备份四个边界（含 PUT 前 inventory）、恢复导入中断、独立 GC、完整服务归档/恢复/旧 key 禁用及再次冷启动 |
+| 默认本地后端原生 HTTP 回归 | `record_service_smoke.py` 通过，覆盖共享授权、版本、备份、受控接管、generation、TTL、feed、关系、定位等既有路径 |
+| 文档/品牌/本地链接 | 25 Markdown 文件、105 executable surfaces 检查通过 |
+| 新提交原生 Linux/Windows CI | 提交后独立跟踪，不提前标为通过 |
+
+十个核心 ignored 为九个父测试调用的进程 worker 与一个真实 S3 endpoint 合同测试；workspace 另有异构 AES fixture。父测试调用的 worker 不等于从未执行，真实 endpoint 合同仍未执行。
+
+```bash
+cargo test --workspace --features server --all-targets
+cargo test --features server --doc
+cargo build --features server,fault-injection
+python scripts/s3_storage_smoke.py --server target/debug/anyseek_server --faults
+python scripts/record_service_smoke.py --server target/debug/anyseek_server
+python scripts/check_docs_brand.py
+```
+
+Windows 使用 `target/debug/anyseek_server.exe`。CI 原生 Linux/Windows 矩阵已加入 S3 专项 HTTP 进程故障检查。
+
+新增验证覆盖：
+
+- checkpoint 之后仍有 tail，更新/删除/原始回执经无缓存恢复，全文/向量/混合结果及计数一致。
+- checkpoint 在 SQLite 发布前/后中断，仅采用权威选择的完整根。
+- feed floor 经缓存清空仍生效，旧游标明确过期，后续写入连续。
+- bootstrap、transitive pin 与所选成员不会误回收；丢失成员失败关闭。
+- 备份在捕获元数据、上传 snapshot、发布 descriptor 后进程退出，重试保留原 cut。
+- 恢复导入后进程退出可重试；源备份退休、两侧 GC 和冷重启不破坏另一侧数据。
+- 迟到 PUT 不可重新发布，可被重试 DELETE。
+- 完整服务归档包含 retained S3 collection backup；独立服务 namespace、禁用历史 key 和再次冷重启。
+
+## 保留的 B 验收缺口
+
+- 本批之外的权威/维护路径全面审计，尤其受控接管/封存等路径，仍须逐项确认，不把四项收尾视为该审计完成。
+- 真实目标 S3 endpoint/bucket 的条件创建、响应丢失、读后可见性、错误与删除合同测试尚未完成。
+- 本批最终原生 Windows CI 结果须单独记录；Linux 本地证据不能替代。
+- 系统/文件系统崩溃及硬断电仍未验收；进程退出测试不替代该门槛。
+- SQLite 单主机、单持久卷协调；没有跨主机 HA 或权威卷丢失零 RPO 承诺。恢复依赖经过验证的共同备份。
+
+PR #72 保持 Draft，#57 保持开放。

@@ -208,7 +208,7 @@ impl Inner {
         }
         self.expire_staging(evaluation).await?;
         self.cleanup_private().await?;
-        self.trim_feed(evaluation)?;
+        self.trim_feed(evaluation).await?;
         let targets: Vec<_> = self
             .state
             .records

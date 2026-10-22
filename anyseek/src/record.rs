@@ -41,6 +41,8 @@ mod publication;
 mod segment_state;
 mod segment;
 mod anchor;
+#[cfg(feature="s3-object-store")]
+mod remote_checkpoint;
 pub(crate) mod build_budget;
 mod view;
 mod recovery;
@@ -359,6 +361,7 @@ struct RemotePersistence {
     max_tail_blocks: usize,
     max_tail_bytes: usize,
     max_object_bytes: usize,
+    _owner: Option<std::fs::File>,
 }
 
 /// Configuration for the first S3-compatible durable Record backend.
@@ -387,6 +390,9 @@ impl RemotePersistence {
             || config.max_object_bytes == 0 || config.max_tail_blocks == 0 || config.max_tail_bytes == 0 {
             return Err(RecordError::Rejected("invalid S3 persistence configuration".into()));
         }
+        let owner=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+            .open(config.authority_path.with_extension("sqlite.owner")).map_err(storage)?;
+        owner.try_lock().map_err(storage)?;
         let store = crate::storage::s3_compatible::S3CompatibleStore::connect(
             &config.endpoint, &config.bucket, &config.region, &config.access_key_id,
             &config.secret_access_key, config.allow_http, config.max_object_bytes,
@@ -398,6 +404,7 @@ impl RemotePersistence {
             store, authority: tokio::sync::Mutex::new(authority), partition_id: config.partition_id.clone(),
             owner_epoch: config.owner_epoch, max_tail_blocks: config.max_tail_blocks,
             max_tail_bytes: config.max_tail_bytes, max_object_bytes: config.max_object_bytes,
+            _owner:Some(owner),
         })
     }
 
@@ -445,21 +452,26 @@ impl RemotePersistence {
         }
     }
 
-    /// Copy any remotely committed but locally absent sequential entries into the
-    /// local recovery journal. The caller reopens the partition afterward so the
-    /// ordinary journal recovery path applies every Entry variant consistently.
+    /// Capture or resume a metadata/object backup at its original committed cut.
     async fn create_backup_bundle(
         &mut self,
         backup_id: &str,
         created_at_ms: i64,
         max_snapshot_bytes: usize,
-    ) -> Result<String, String> {
+    ) -> Result<(String,u64), String> {
         let mut authority = self.authority.lock().await;
-        let closure = authority.reachable_objects().map_err(|error| error.to_string())?;
+        let closure=match authority.saved_backup_closure(backup_id).map_err(|e|e.to_string())? {
+            Some(closure)=>closure,
+            None=>authority.reachable_objects().map_err(|e|e.to_string())?,
+        };
         let bundle = self.store.create_backup_bundle(
             &mut authority, backup_id, &closure, created_at_ms, max_snapshot_bytes,
         ).await.map_err(|error| error.to_string())?;
-        serde_json::to_string(&bundle).map_err(|error| error.to_string())
+        let bytes=self.store.get_verified(&bundle.descriptor.metadata_snapshot).await.map_err(|e|e.to_string())?;
+        let snapshot:crate::storage::sqlite_authority::AuthorityBackupSnapshot=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+        let seq=snapshot.heads.iter().find(|h|h.partition_id==self.partition_id)
+            .ok_or_else(||"backup omits partition".to_owned())?.committed_seq;
+        Ok((serde_json::to_string(&bundle).map_err(|e|e.to_string())?,seq))
     }
 
     async fn restore_backup_bundle(
@@ -1045,6 +1057,23 @@ impl RecordPartition {
         max_journal_bytes: u64,
         mut remote: RemotePersistence,
     ) -> Result<Self, RecordError> {
+        {
+            // Acquire the stable local owner lock without opening cached indexes.
+            // Same-sequence maintenance may have replaced the remote manifest even
+            // when the cached sequence is unchanged, so reinstall its certificate.
+            let mut journal = if path.exists() {
+                PartitionJournal::open(path,max_journal_bytes).map_err(storage)?.0
+            } else {
+                let head=remote.authority.lock().await.read_head(&remote.partition_id).map_err(storage)?
+                    .ok_or(RecordError::RecoveryRequired)?;
+                if head.owner_epoch!=remote.owner_epoch {return Err(RecordError::RecoveryRequired);}
+                let initial=remote.store.get_verified(head.bootstrap.as_ref().ok_or(RecordError::RecoveryRequired)?).await.map_err(storage)?;
+                PartitionJournal::create(path,max_journal_bytes,&initial).map_err(creation_error)?
+            };
+            if let Some(anchor)=remote.materialize_checkpoint(path,max_journal_bytes).await? {
+                journal.checkpoint(&anchor).map_err(creation_error)?;
+            }
+        }
         let partition = if path.exists() {
             Self::open(path, max_journal_bytes).await?
         } else {
@@ -1096,19 +1125,33 @@ impl RecordPartition {
         created_at_ms: i64,
         max_snapshot_bytes: usize,
     ) -> Result<(String, u64, String), RecordError> {
-        let mut inner = self.inner.lock().await;
+        let owner=self.inner.clone();let backup_id=backup_id.to_owned();
+        crate::INDEX_RUNTIME.spawn(async move {
+        let mut inner = owner.lock().await;
         if !inner.healthy || inner.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
         }
-        let visible_seq = inner.state.seq;
         let remote = inner.remote.as_mut().ok_or_else(|| RecordError::Rejected(
             "partition is not using S3 storage".into()
         ))?;
         let partition_id = remote.partition_id.clone();
-        let bundle = remote.create_backup_bundle(
-            &RemotePersistence::safe_backup_id(backup_id), created_at_ms, max_snapshot_bytes,
+        let (bundle,visible_seq) = remote.create_backup_bundle(
+            &RemotePersistence::safe_backup_id(&format!("{}:{backup_id}",remote.partition_id)), created_at_ms, max_snapshot_bytes,
         ).await.map_err(storage)?;
         Ok((bundle, visible_seq, partition_id))
+        }).await.map_err(|e|RecordError::OutcomeUnknown(e.to_string()))?
+    }
+
+    /// Retry pending remote retirement/deletion under the single owner's guard.
+    #[cfg(feature="s3-object-store")]
+    pub async fn collect_s3_garbage(&self)->Result<usize,RecordError> {
+        let owner=self.inner.clone();
+        crate::INDEX_RUNTIME.spawn(async move {
+            let mut inner=owner.lock().await;
+            if !inner.healthy {return Err(RecordError::RecoveryRequired);}
+            inner.remote.as_mut().ok_or_else(||RecordError::Rejected("not an S3 partition".into()))?
+                .collect_objects().await
+        }).await.map_err(|e|RecordError::OutcomeUnknown(e.to_string()))?
     }
 
     /// Release a retained joint backup's pins only after its descriptor has been retired.
@@ -1118,9 +1161,8 @@ impl RecordPartition {
         let remote = inner.remote.as_mut().ok_or_else(|| RecordError::Rejected(
             "partition is not using S3 storage".into()
         ))?;
-        remote.authority.lock().await
-            .release_backup_pins(&RemotePersistence::safe_backup_id(backup_id))
-            .map_err(storage)
+        let id=RemotePersistence::safe_backup_id(&format!("{}:{backup_id}",remote.partition_id));
+        remote.authority.lock().await.release_backup_pins(&id).map_err(storage)
     }
 
     /// Release backup pins after the catalog has permanently retired the backup.
@@ -1132,7 +1174,9 @@ impl RecordPartition {
         let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open(
             authority_path, std::time::Duration::from_secs(5),
         ).map_err(storage)?;
-        authority.release_backup_pins(&RemotePersistence::safe_backup_id(backup_id)).map_err(storage)
+        let Some(partition_id)=authority.single_partition_id().map_err(storage)? else{return Ok(0)};
+        let id=RemotePersistence::safe_backup_id(&format!("{partition_id}:{backup_id}"));
+        authority.release_backup_pins(&id).map_err(storage)
     }
 
     /// Delete the backup descriptor and metadata snapshot after all authority copies
@@ -1165,11 +1209,12 @@ impl RecordPartition {
             max_tail_blocks: 1,
             max_tail_bytes: 1,
         };
-        let remote = RemotePersistence::open(&config)?;
-        let mut authority = remote.authority.lock().await;
-        remote.store.retire_backup_metadata(
-            &mut authority, &bundle, unix_time_ms_i64(),
-        ).await.map_err(storage)
+        let store=crate::storage::s3_compatible::S3CompatibleStore::connect(
+            &config.endpoint,&config.bucket,&config.region,&config.access_key_id,
+            &config.secret_access_key,config.allow_http,config.max_object_bytes).map_err(storage)?;
+        let mut authority=crate::storage::sqlite_authority::SqliteAuthority::open(
+            authority_path,std::time::Duration::from_secs(5)).map_err(storage)?;
+        store.retire_backup_metadata(&mut authority,&bundle,unix_time_ms_i64()).await.map_err(storage)
     }
 
     /// Restore a joint S3/SQLite backup into an empty authority database, verify its
@@ -1184,12 +1229,9 @@ impl RecordPartition {
         max_objects: usize,
         max_total_object_bytes: usize,
     ) -> Result<Self, RecordError> {
-        let mut remote = RemotePersistence::open(&remote_config)?;
-        remote.restore_backup_bundle(
-            bundle_json, max_snapshot_bytes, max_objects, max_total_object_bytes,
-        ).await?;
-        drop(remote);
-        Self::open_s3(path, config, remote_config).await
+        let remote = RemotePersistence::open(&remote_config)?;
+        Self::restore_s3_with_remote(path,config,remote,bundle_json,
+            max_snapshot_bytes,max_objects,max_total_object_bytes).await
     }
 
     /// Create a new authoritative partition. Parent directory must exist.
@@ -4482,7 +4524,7 @@ mod tests {
         let mut authority=SqliteAuthority::open(&authority_path,Duration::from_secs(1)).unwrap();
         authority.create_partition("record-rebuild",1).unwrap();
         store.publish_bootstrap(&mut authority,"record-rebuild",1,&checkpoint,unix_time_ms_i64()).await.unwrap();
-        let mut remote=RemotePersistence{
+        let mut remote=RemotePersistence{ _owner:None,
             store,
             authority:tokio::sync::Mutex::new(authority),
             partition_id:"record-rebuild".into(),
@@ -4523,7 +4565,7 @@ mod tests {
         // Reopen from a missing local cache. SQLite/S3 bootstrap plus committed
         // create/update/delete entries must reconstruct the same queryable Record view.
         let authority=SqliteAuthority::open(&authority_path,Duration::from_secs(1)).unwrap();
-        let remote=RemotePersistence{
+        let remote=RemotePersistence{ _owner:None,
             store:S3CompatibleStore::from_store(object_store,1024*1024),
             authority:tokio::sync::Mutex::new(authority),
             partition_id:"record-rebuild".into(),
@@ -4571,7 +4613,7 @@ mod tests {
                 &mut authority, "record-test", 1, &checkpoint, unix_time_ms_i64(),
             ).await.unwrap();
         }
-        let mut remote = RemotePersistence {
+        let mut remote = RemotePersistence { _owner:None,
             store,
             authority: tokio::sync::Mutex::new(authority),
             partition_id: "record-test".into(),
@@ -4600,7 +4642,7 @@ mod tests {
         let recovered = RecordPartition::open(&path, config().max_journal_bytes).await.unwrap();
         let authority = SqliteAuthority::open(&authority_path, Duration::from_secs(1)).unwrap();
         let store = S3CompatibleStore::from_store(object_store.clone(), 1024 * 1024);
-        let mut remote = RemotePersistence {
+        let mut remote = RemotePersistence { _owner:None,
             store, authority: tokio::sync::Mutex::new(authority), partition_id: "record-test".into(),
             owner_epoch: 1, max_tail_blocks: 32, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
         };
@@ -4632,10 +4674,10 @@ mod tests {
             let mut inner = recovered.inner.lock().await;
             let future = inner.state.time_watermark_ms
                 .saturating_add(9 * 86_400_000);
-            inner.trim_feed(future).unwrap();
-            // Until a remote-authoritative feed-floor transition exists, retention
-            // trimming must not advance only the rebuildable local cache.
-            assert_eq!(inner.state.feed.floor, 0);
+            inner.trim_feed(future).await.unwrap();
+            // Feed trimming publishes a complete remote checkpoint at this same
+            // sequence; it must survive removal of the rebuildable local cache.
+            assert!(inner.state.feed.floor > 0);
         }
         let (bundle_json, visible_seq, partition_id) =
             recovered.create_s3_backup("record-backup", 200, 1024 * 1024).await.unwrap();
@@ -4643,7 +4685,7 @@ mod tests {
         assert_eq!(partition_id, "record-test");
         let bundle: crate::storage::s3_compatible::BackupBundle =
             serde_json::from_str(&bundle_json).unwrap();
-        assert_eq!(bundle.descriptor.backup_id, RemotePersistence::safe_backup_id("record-backup"));
+        assert_eq!(bundle.descriptor.backup_id, RemotePersistence::safe_backup_id("record-test:record-backup"));
 
         drop(recovered);
         let _ = std::fs::remove_dir_all(&path);

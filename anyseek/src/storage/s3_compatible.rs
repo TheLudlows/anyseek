@@ -72,6 +72,7 @@ impl fmt::Display for BackupError {
 impl std::error::Error for BackupError {}
 
 /// S3-compatible immutable object store with write-after-read verification.
+#[derive(Clone)]
 pub(crate) struct S3CompatibleStore {
     store: Arc<dyn ObjectStore>,
     max_object_bytes: usize,
@@ -180,10 +181,21 @@ impl S3CompatibleStore {
         bytes: &[u8],
         created_at_ms: i64,
     ) -> Result<ObjectRef, UploadRegisterError> {
+        let planned=ObjectRef{key:key.to_owned(),sha256:Sha256::digest(bytes).into(),length:bytes.len() as u64};
+        authority.reserve_upload(&planned,created_at_ms).map_err(UploadRegisterError::Metadata)?;
         let reference = self.put_verified(key, bytes).await.map_err(UploadRegisterError::ObjectStore)?;
         authority.register_durable_object(&reference, created_at_ms)
             .map_err(UploadRegisterError::Metadata)?;
         Ok(reference)
+    }
+
+    async fn put_backup_object(&self,authority:&mut SqliteAuthority,backup_id:&str,key:&str,bytes:&[u8],at:i64)
+        ->Result<ObjectRef,UploadRegisterError> {
+        let planned=ObjectRef{key:key.to_owned(),sha256:Sha256::digest(bytes).into(),length:bytes.len() as u64};
+        authority.reserve_backup_upload(&planned,at,Some(backup_id)).map_err(UploadRegisterError::Metadata)?;
+        #[cfg(feature="fault-injection")]
+        if std::env::var("ANYSEEK_REMOTE_BACKUP_FAULT").as_deref()==Ok("after_inventory") {std::process::exit(92);}
+        self.put_and_register(authority,key,bytes,at).await
     }
 
     /// Fetch and verify an object against an authority-published reference.
@@ -250,26 +262,31 @@ impl S3CompatibleStore {
         let snapshot_bytes = authority.prepare_backup_snapshot(
             backup_id, object_closure, created_at_ms, max_snapshot_bytes
         ).map_err(BackupError::Metadata)?;
+        #[cfg(test)]
+        if authority.database_path().with_extension("fail-backup-after-snapshot").exists() {
+            return Err(BackupError::Invalid("injected after backup snapshot"));
+        }
+        #[cfg(feature="fault-injection")]
+        if std::env::var("ANYSEEK_REMOTE_BACKUP_FAULT").as_deref()==Ok("after_snapshot") {std::process::exit(92);}
         let snapshot_key = format!("backups/{backup_id}/authority.json");
-        let metadata_snapshot = self.put_verified(&snapshot_key, &snapshot_bytes).await
-            .map_err(BackupError::ObjectStore)?;
-        authority.register_durable_object(&metadata_snapshot, created_at_ms)
-            .map_err(BackupError::Metadata)?;
-        let mut closure = object_closure.to_vec();
+        let snapshot:AuthorityBackupSnapshot=serde_json::from_slice(&snapshot_bytes).map_err(BackupError::Decode)?;
+        let metadata_snapshot = self.put_backup_object(authority,backup_id,&snapshot_key,&snapshot_bytes,snapshot.created_at_ms).await
+            .map_err(backup_upload_error)?;
+        #[cfg(feature="fault-injection")]
+        if std::env::var("ANYSEEK_REMOTE_BACKUP_FAULT").as_deref()==Ok("after_upload") {std::process::exit(92);}
+        let mut closure = snapshot.object_closure.clone();
         closure.sort_by(|a,b| a.key.cmp(&b.key));
         let descriptor = BackupDescriptor {
             format_version: 1,
             backup_id: backup_id.to_owned(),
-            created_at_ms,
+            created_at_ms:snapshot.created_at_ms,
             metadata_snapshot,
             object_closure: closure,
         };
         let descriptor_bytes = serde_json::to_vec(&descriptor).map_err(BackupError::Decode)?;
         let descriptor_key = format!("backups/{backup_id}/descriptor.json");
-        let descriptor_ref = self.put_verified(&descriptor_key, &descriptor_bytes).await
-            .map_err(BackupError::ObjectStore)?;
-        authority.register_durable_object(&descriptor_ref, created_at_ms)
-            .map_err(BackupError::Metadata)?;
+        let descriptor_ref = self.put_backup_object(authority,backup_id,&descriptor_key,&descriptor_bytes,snapshot.created_at_ms).await
+            .map_err(backup_upload_error)?;
         authority.register_object_edge(&descriptor_ref, &descriptor.metadata_snapshot)
             .map_err(BackupError::Metadata)?;
         for reference in &descriptor.object_closure {
@@ -282,6 +299,8 @@ impl S3CompatibleStore {
             .map_err(BackupError::Metadata)?;
         authority.pin_backup_object(backup_id, &descriptor_ref.key)
             .map_err(BackupError::Metadata)?;
+        #[cfg(feature="fault-injection")]
+        if std::env::var("ANYSEEK_REMOTE_BACKUP_FAULT").as_deref()==Ok("after_descriptor") {std::process::exit(92);}
         Ok(BackupBundle { descriptor_ref, descriptor })
     }
 
@@ -295,7 +314,9 @@ impl S3CompatibleStore {
         created_at_ms: i64,
         max_snapshot_bytes: usize,
     ) -> Result<BackupBundle, BackupError> {
-        let closure = authority.reachable_objects().map_err(BackupError::Metadata)?;
+        let closure=match authority.saved_backup_closure(backup_id).map_err(BackupError::Metadata)? {
+            Some(closure)=>closure,None=>authority.reachable_objects().map_err(BackupError::Metadata)?,
+        };
         if closure.is_empty() {
             return Err(BackupError::Invalid("authority has no reachable objects to back up"));
         }
@@ -345,6 +366,12 @@ impl S3CompatibleStore {
         }
         authority.restore_backup_snapshot(&snapshot_bytes, max_snapshot_bytes)
             .map_err(BackupError::Metadata)?;
+        #[cfg(test)]
+        if authority.database_path().with_extension("fail-restore-after-import").exists() {
+            return Err(BackupError::Invalid("injected after restore import"));
+        }
+        #[cfg(feature="fault-injection")]
+        if std::env::var("ANYSEEK_REMOTE_RESTORE_FAULT").as_deref()==Ok("after_import") {std::process::exit(93);}
         // The descriptor and metadata snapshot are backup control roots created after
         // the logical snapshot was captured. Re-register and pin them on the restored
         // authority so normal GC cannot remove the backup's own restore entry point.
@@ -404,8 +431,10 @@ impl S3CompatibleStore {
         };
         let location = Self::object_path(&reference.key)
             .map_err(UploadRegisterError::ObjectStore)?;
-        self.store.delete(&location).await
-            .map_err(UploadRegisterError::ObjectStore)?;
+        match self.store.delete(&location).await {
+            Ok(())|Err(object_store::Error::NotFound{..})=>{},
+            Err(error)=>return Err(UploadRegisterError::ObjectStore(error)),
+        }
         // Record completion only after a fresh atomic reachability check. If this
         // loses a race with a pin/reference, leave the tombstone in state=2 and
         // retry conservatively rather than claiming physical deletion is complete.
@@ -576,5 +605,51 @@ mod tests {
         assert!(store.put_verified("segments/too-large", b"123456789").await.is_err());
         let wrong = ObjectRef { sha256: [0; 32], ..reference };
         assert!(store.get_verified(&wrong).await.is_err());
+    }
+}
+
+fn backup_upload_error(error:UploadRegisterError)->BackupError {match error {
+    UploadRegisterError::Metadata(e)=>BackupError::Metadata(e),UploadRegisterError::ObjectStore(e)=>BackupError::ObjectStore(e),
+}}
+
+#[cfg(test)]
+mod upload_retirement_tests {
+    use super::*;
+    #[tokio::test]
+    async fn backup_resumes_with_unverified_control_inventory_pinned(){
+        use object_store::memory::InMemory;
+        let db=std::env::temp_dir().join(format!("anyseek-backup-inventory-{:032x}.sqlite",rand::random::<u128>()));
+        let mut authority=SqliteAuthority::open(&db,std::time::Duration::from_secs(1)).unwrap();
+        authority.create_partition("p",1).unwrap();
+        let store=S3CompatibleStore::from_store(Arc::new(InMemory::new()),1024*1024);
+        store.publish_bootstrap(&mut authority,"p",1,b"initial",1).await.unwrap();
+        let closure=authority.reachable_objects().unwrap();
+        let bytes=authority.prepare_backup_snapshot("interrupted",&closure,10,1024*1024).unwrap();
+        let reference=ObjectRef{key:"backups/interrupted/authority.json".into(),length:bytes.len() as u64,
+            sha256:Sha256::digest(&bytes).into()};
+        authority.reserve_backup_upload(&reference,10,Some("interrupted")).unwrap();
+        assert!(authority.reachable_objects().is_err());
+        let bundle=store.create_authoritative_backup_bundle(&mut authority,"interrupted",999,1024*1024).await.unwrap();
+        assert_eq!(bundle.descriptor.created_at_ms,10);
+        assert_eq!(bundle.descriptor.metadata_snapshot,reference);
+        assert_eq!(bundle.descriptor.object_closure,closure);
+    }
+    #[tokio::test]
+    async fn unknown_put_inventory_prevents_republication_and_deletes_late_arrival(){
+        use object_store::memory::InMemory;
+        let db=std::env::temp_dir().join(format!("anyseek-late-put-{:032x}.sqlite",rand::random::<u128>()));
+        let mut authority=SqliteAuthority::open(&db,std::time::Duration::from_secs(1)).unwrap();
+        authority.create_partition("p",1).unwrap();
+        let raw=Arc::new(InMemory::new());let store=S3CompatibleStore::from_store(raw.clone(),1024);
+        let bytes=b"possibly still uploading";
+        let reference=ObjectRef{key:"p/late".into(),length:bytes.len() as u64,sha256:Sha256::digest(bytes).into()};
+        authority.reserve_upload(&reference,1).unwrap();
+        assert!(authority.retire_object(&reference.key,1,2).unwrap());
+        assert!(store.delete_retired(&mut authority,&reference.key,3).await.unwrap());
+        raw.put(&ObjectPath::from(reference.key.as_str()),bytes.to_vec().into()).await.unwrap();
+        assert!(authority.register_durable_object(&reference,4).is_err());
+        assert!(authority.reserve_upload(&reference,4).is_err());
+        assert!(store.delete_retired(&mut authority,&reference.key,5).await.unwrap());
+        assert!(store.get_verified(&reference).await.is_err());
     }
 }

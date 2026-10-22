@@ -156,7 +156,7 @@ impl SqliteAuthority {
                  object_key TEXT PRIMARY KEY,
                  sha256 BLOB NOT NULL CHECK(length(sha256)=32),
                  byte_length INTEGER NOT NULL CHECK(byte_length>=0),
-                 state INTEGER NOT NULL CHECK(state IN (0,1,2,3)),
+                 state INTEGER NOT NULL CHECK(state IN (0,1,2,3,4,5)),
                  created_at_ms INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS object_edges (
@@ -173,6 +173,12 @@ impl SqliteAuthority {
                  pin_kind TEXT NOT NULL CHECK(pin_kind IN ('reader','indexer','backup','staging')),
                  expires_at_ms INTEGER,
                  backup_id TEXT
+             );
+             CREATE TABLE IF NOT EXISTS backup_exports (
+                 backup_id TEXT PRIMARY KEY, snapshot BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS restore_receipts (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton=1), snapshot_sha256 BLOB NOT NULL
              );
              CREATE TABLE IF NOT EXISTS retired_objects (
                  object_key TEXT PRIMARY KEY,
@@ -211,6 +217,13 @@ impl SqliteAuthority {
         read_head(&self.connection, partition_id)
     }
 
+    pub(crate) fn single_partition_id(&self)->rusqlite::Result<Option<String>> {
+        let mut statement=self.connection.prepare("SELECT partition_id FROM partition_heads ORDER BY partition_id LIMIT 2")?;
+        let ids=statement.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if ids.len()>1 {return Err(rusqlite::Error::InvalidQuery);}
+        Ok(ids.into_iter().next())
+    }
+
     /// Publish an immutable initial Record checkpoint/configuration before any
     /// operation sequence exists. This is metadata-root publication, not a data commit.
     pub(crate) fn set_bootstrap_reference(
@@ -246,21 +259,7 @@ impl SqliteAuthority {
     /// Return every active object reachable from the current committed heads,
     /// following immutable manifest/WAL dependency edges transitively.
     pub(crate) fn reachable_objects(&self) -> rusqlite::Result<Vec<ObjectRef>> {
-        let keys = {
-            let mut statement = self.connection.prepare(
-                "WITH RECURSIVE reachable(object_key) AS (
-                    SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
-                    UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
-                    UNION SELECT json_extract(bootstrap_json,'$.key') FROM partition_heads WHERE bootstrap_json IS NOT NULL
-                    UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
-                    UNION SELECT object_key FROM object_pins
-                    UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
-                 )
-                 SELECT object_key FROM reachable ORDER BY object_key"
-            )?;
-            let rows = statement.query_map([], |row| row.get::<_,String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        let keys = reachable_keys(&self.connection)?;
         let mut objects = Vec::with_capacity(keys.len());
         for key in keys {
             let row: Option<(Vec<u8>,i64,i64)> = self.connection.query_row(
@@ -281,6 +280,8 @@ impl SqliteAuthority {
         Ok(objects)
     }
 
+    // object_uploads states: 0 inventory, 1 verified, 2 retired verified,
+    // 3 deleted verified, 4 retired unknown PUT, 5 deleted unknown PUT (retry DELETE).
     /// Register an object only after the object-store adapter has completed the durable
     /// upload and independently verified its byte length and SHA-256. A key is immutable:
     /// registering different bytes under an existing key is rejected.
@@ -307,9 +308,9 @@ impl SqliteAuthority {
                     [&object.key],
                     |row| row.get(0),
                 )?;
-                if state != 1 {
+                if !matches!(state,0|1) {
                     return Err(rusqlite::Error::InvalidParameterName(
-                        "inactive or retired immutable object key cannot be reactivated".into()
+                        "retired immutable object key cannot be reactivated".into()
                     ));
                 }
                 tx.execute(
@@ -431,6 +432,108 @@ impl SqliteAuthority {
         Ok(Some(head))
     }
 
+    /// A complete checkpoint captures every logical component (including feed,
+    /// receipts, tombstones and staging) at the current commit. Detaching the old
+    /// WAL tip only changes live roots; immutable predecessor edges stay intact
+    /// for existing reader/build/backup pins. No sequence is consumed.
+    pub(crate) fn publish_checkpoint(
+        &mut self, partition_id: &str, expected_head_version: u64,
+        owner_epoch: u64, seq: u64, manifest: ObjectRef,
+    ) -> rusqlite::Result<Option<PartitionHead>> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if current.head_version != expected_head_version || current.owner_epoch != owner_epoch
+            || current.committed_seq != seq {
+            return Ok(None);
+        }
+        ensure_durable_object(&tx, &manifest)?;
+        let json = serde_json::to_string(&manifest).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        tx.execute(
+            "UPDATE partition_heads SET head_version=head_version+1,manifest_json=?1,
+             indexed_seq=?2,log_base_seq=?2,wal_tip_json=NULL,log_anchor_json=NULL
+             WHERE partition_id=?3",
+            params![json,to_i64(seq)?,partition_id],
+        )?;
+        let head = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        tx.commit()?;
+        Ok(Some(head))
+    }
+
+    pub(crate) fn bind_restore(&mut self,digest:[u8;32])->rusqlite::Result<()> {
+        let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let old:Option<Vec<u8>>=tx.query_row("SELECT snapshot_sha256 FROM restore_receipts WHERE singleton=1",[],|r|r.get(0)).optional()?;
+        match old {
+            Some(old) if old.as_slice()!=digest=>return Err(rusqlite::Error::InvalidQuery),
+            None=>{tx.execute("INSERT INTO restore_receipts VALUES(1,?1)",[digest.as_slice()])?;},
+            _=>{},
+        }
+        tx.commit()
+    }
+
+    /// Seed a NEW isolated restore namespace; never rewind an existing live head.
+    pub(crate) fn publish_restored_checkpoint(
+        &mut self,partition_id:&str,expected_head_version:u64,owner_epoch:u64,seq:u64,manifest:ObjectRef,
+    )->rusqlite::Result<Option<PartitionHead>> {
+        let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let h=read_head(&tx,partition_id)?.ok_or(rusqlite::Error::InvalidQuery)?;
+        let bound:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM restore_receipts)",[],|r|r.get(0))?;
+        if !bound || h.head_version!=expected_head_version || h.owner_epoch!=owner_epoch
+            || h.committed_seq!=0 || h.manifest.is_some() || h.bootstrap.is_none() {return Ok(None);}
+        ensure_durable_object(&tx,&manifest)?;
+        let json=serde_json::to_string(&manifest).map_err(|_|rusqlite::Error::InvalidQuery)?;
+        tx.execute("UPDATE partition_heads SET head_version=head_version+1,committed_seq=?1,indexed_seq=?1,
+            log_base_seq=?1,manifest_json=?2,wal_tip_json=NULL,log_anchor_json=NULL WHERE partition_id=?3",
+            params![to_i64(seq)?,json,partition_id])?;
+        let head=read_head(&tx,partition_id)?.ok_or(rusqlite::Error::InvalidQuery)?;
+        tx.commit()?;Ok(Some(head))
+    }
+
+    /// Inventory before PUT: even a response-lost or cancelled upload has a
+    /// durable identity for later collection. Registration never publishes it.
+    pub(crate) fn reserve_upload(&mut self,object:&ObjectRef,at:i64)->rusqlite::Result<()> {
+        self.reserve_backup_upload(object,at,None)
+    }
+    /// Pin inventory before PUT, including backup-control objects which do not
+    /// exist in the snapshot they describe. Reservation and pin are atomic.
+    pub(crate) fn reserve_backup_upload(&mut self, object:&ObjectRef,at:i64,backup_id:Option<&str>)->rusqlite::Result<()> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(Vec<u8>,i64,i64)> = tx.query_row(
+            "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
+            [&object.key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).optional()?;
+        if let Some((digest,length,state)) = row {
+            if digest.as_slice()!=object.sha256 || length!=to_i64(object.length)? || !matches!(state,0|1) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        } else {
+            tx.execute("INSERT INTO object_uploads VALUES(?1,?2,?3,0,?4)",
+                params![object.key,object.sha256.as_slice(),to_i64(object.length)?,at])?;
+        }
+        if let Some(id)=backup_id {
+            tx.execute("INSERT OR IGNORE INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id)
+                VALUES(?1,'*',?2,'backup',NULL,?3)",params![backup_pin_id(id,&object.key),object.key,id])?;
+        }
+        tx.commit()
+    }
+
+    pub(crate) fn unreferenced_objects(&self) -> rusqlite::Result<Vec<ObjectRef>> {
+        let live = reachable_keys(&self.connection)?;
+        let mut statement = self.connection.prepare(
+            "SELECT object_key,sha256,byte_length FROM object_uploads WHERE state IN (0,1) ORDER BY object_key"
+        )?;
+        let objects = statement.query_map([], registry_reference)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(objects.into_iter().filter(|o|!live.contains(&o.key)).collect())
+    }
+
+    /// Resume the original backup without first traversing currently pinned
+    /// inventory: a crashed PUT may have left its control object unverified.
+    pub(crate) fn saved_backup_closure(&self,id:&str)->rusqlite::Result<Option<Vec<ObjectRef>>> {
+        let bytes:Option<Vec<u8>>=self.connection.query_row(
+            "SELECT snapshot FROM backup_exports WHERE backup_id=?1",[id],|r|r.get(0)).optional()?;
+        bytes.map(|bytes|serde_json::from_slice::<AuthorityBackupSnapshot>(&bytes)
+            .map(|s|s.object_closure).map_err(|_|rusqlite::Error::InvalidQuery)).transpose()
+    }
+
     /// Create a point-in-time logical metadata snapshot and pin its complete object
     /// closure in the same SQLite transaction. The caller must enumerate and validate
     /// all objects reachable through the active manifest and WAL chain before calling.
@@ -448,6 +551,13 @@ impl SqliteAuthority {
             ));
         }
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let saved: Option<Vec<u8>> = tx.query_row(
+            "SELECT snapshot FROM backup_exports WHERE backup_id=?1", [backup_id], |row|row.get(0)
+        ).optional()?;
+        if let Some(bytes) = saved {
+            if bytes.len()>max_snapshot_bytes { return Err(rusqlite::Error::InvalidQuery); }
+            return Ok(bytes);
+        }
         let prior_backup: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM object_pins WHERE backup_id=?1)",
             [backup_id], |row| row.get(0),
@@ -465,21 +575,7 @@ impl SqliteAuthority {
         for object in &closure {
             ensure_durable_object(&tx, object)?;
         }
-        let reachable: Vec<String> = {
-            let mut statement = tx.prepare(
-                "WITH RECURSIVE reachable(object_key) AS (
-                    SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
-                    UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
-                    UNION SELECT json_extract(bootstrap_json,'$.key') FROM partition_heads WHERE bootstrap_json IS NOT NULL
-                    UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
-                    UNION SELECT object_key FROM object_pins
-                    UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
-                 )
-                 SELECT object_key FROM reachable ORDER BY object_key"
-            )?;
-            let rows = statement.query_map([], |row| row.get::<_,String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        let reachable = reachable_keys(&tx)?;
         if reachable.iter().any(|key| !closure.iter().any(|object| &object.key == key)) {
             return Err(rusqlite::Error::InvalidParameterName(
                 "backup closure omits a transitively reachable committed object".into()
@@ -602,6 +698,8 @@ impl SqliteAuthority {
         if bytes.len() > max_snapshot_bytes {
             return Err(rusqlite::Error::InvalidParameterName("backup metadata exceeds configured limit".into()));
         }
+        tx.execute("INSERT INTO backup_exports(backup_id,snapshot) VALUES(?1,?2)",
+            params![backup_id,bytes])?;
         tx.commit()?;
         Ok(bytes)
     }
@@ -628,9 +726,17 @@ impl SqliteAuthority {
                  OR EXISTS(SELECT 1 FROM object_uploads)",
             [], |row| row.get(0),
         )?;
+        let digest: [u8;32] = Sha256::digest(bytes).into();
         if nonempty {
+            let prior: Option<Vec<u8>> = tx.query_row(
+                "SELECT snapshot_sha256 FROM restore_receipts WHERE singleton=1", [], |r|r.get(0)
+            ).optional()?;
+            if prior.as_deref()==Some(digest.as_slice()) {
+                // Retry completes post-import root registration, never rewinds a head.
+                return Ok(snapshot);
+            }
             return Err(rusqlite::Error::InvalidParameterName(
-                "restore target must be an empty authority database".into()
+                "restore target must be empty or a retry of the identical snapshot".into()
             ));
         }
         let mut closure = snapshot.object_closure.clone();
@@ -639,7 +745,7 @@ impl SqliteAuthority {
             return Err(rusqlite::Error::InvalidQuery);
         }
         for object in &snapshot.objects {
-            if object.reference.key.is_empty() || !matches!(object.state, 0 | 1 | 2 | 3) {
+            if object.reference.key.is_empty() || !matches!(object.state, 0 | 1 | 2 | 3 | 4 | 5) {
                 return Err(rusqlite::Error::InvalidQuery);
             }
             tx.execute(
@@ -706,6 +812,11 @@ impl SqliteAuthority {
         for reference in &closure {
             ensure_durable_object(&tx, reference)?;
         }
+        let required = reachable_keys(&tx)?;
+        if required.iter().any(|key|!closure.iter().any(|r|&r.key==key)) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.execute("INSERT INTO restore_receipts VALUES(1,?1)",[digest.as_slice()])?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -718,6 +829,7 @@ impl SqliteAuthority {
             "DELETE FROM object_pins WHERE backup_id=?1 AND pin_kind='backup'",
             [backup_id],
         )?;
+        tx.execute("DELETE FROM backup_exports WHERE backup_id=?1",[backup_id])?;
         tx.commit()?;
         Ok(changed)
     }
@@ -796,7 +908,7 @@ impl SqliteAuthority {
             ));
         }
         tx.execute(
-            "INSERT INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id)
+            "INSERT OR IGNORE INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id)
              VALUES(?1,'*',?2,'backup',NULL,?3)",
             params![backup_pin_id(backup_id, object_key), object_key, backup_id],
         )?;
@@ -824,30 +936,17 @@ impl SqliteAuthority {
             "SELECT state FROM object_uploads WHERE object_key=?1",
             [object_key], |row| row.get(0),
         ).optional()?;
-        if state != Some(1) {
+        if !matches!(state,Some(0|1)) {
             tx.commit()?;
             return Ok(false);
         }
-        let referenced: bool = tx.query_row(
-            "WITH RECURSIVE reachable(object_key) AS (
-                SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
-                UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
-                UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
-                UNION SELECT object_key FROM object_pins
-                UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
-             )
-             SELECT EXISTS(SELECT 1 FROM reachable WHERE object_key=?1)",
-            [object_key], |row| row.get(0),
-        )?;
-        let pinned: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM object_pins WHERE object_key=?1)",
-            [object_key], |row| row.get(0),
-        )?;
-        if referenced || pinned {
+        let referenced = reachable_keys(&tx)?.contains(object_key);
+        // Pins are roots of the same transitive closure.
+        if referenced {
             tx.commit()?;
             return Ok(false);
         }
-        tx.execute("UPDATE object_uploads SET state=2 WHERE object_key=?1", [object_key])?;
+        tx.execute("UPDATE object_uploads SET state=CASE WHEN state=0 THEN 4 ELSE 2 END WHERE object_key=?1", [object_key])?;
         tx.execute(
             "INSERT INTO retired_objects(object_key,retired_generation,retired_at_ms)
              VALUES(?1,?2,?3)",
@@ -861,29 +960,17 @@ impl SqliteAuthority {
     /// reachability check. State 3 is a durable tombstone and is never reactivated.
     pub(crate) fn mark_object_deleted(&mut self, reference: &ObjectRef) -> rusqlite::Result<bool> {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let collectible: bool = tx.query_row(
-            "WITH RECURSIVE reachable(object_key) AS (
-                SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
-                UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
-                UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
-                UNION SELECT object_key FROM object_pins
-                UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
-             )
-             SELECT EXISTS(
-                SELECT 1 FROM object_uploads u
-                WHERE u.object_key=?1 AND u.sha256=?2 AND u.byte_length=?3 AND u.state=2
-                  AND NOT EXISTS(SELECT 1 FROM reachable r WHERE r.object_key=u.object_key)
-                  AND NOT EXISTS(SELECT 1 FROM object_pins p WHERE p.object_key=u.object_key)
-             )",
-            params![reference.key, reference.sha256.as_slice(), to_i64(reference.length)?],
-            |row| row.get(0),
+        let matches: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM object_uploads WHERE object_key=?1 AND sha256=?2 AND byte_length=?3 AND state IN (2,4,5))",
+            params![reference.key,reference.sha256.as_slice(),to_i64(reference.length)?], |r|r.get(0),
         )?;
+        let collectible = matches && !reachable_keys(&tx)?.contains(&reference.key);
         if !collectible {
             tx.commit()?;
             return Ok(false);
         }
         let changed = tx.execute(
-            "UPDATE object_uploads SET state=3 WHERE object_key=?1 AND state=2",
+            "UPDATE object_uploads SET state=CASE WHEN state=2 THEN 3 ELSE 5 END WHERE object_key=?1 AND state IN (2,4,5)",
             [&reference.key],
         )?;
         tx.commit()?;
@@ -894,30 +981,12 @@ impl SqliteAuthority {
     /// The returned list is safe for idempotent remote deletion: state=retired prevents
     /// any future publication or pin from making the object live again.
     pub(crate) fn collectible_objects(&self, _now_ms: i64) -> rusqlite::Result<Vec<ObjectRef>> {
+        let live = reachable_keys(&self.connection)?;
         let mut statement = self.connection.prepare(
-            "WITH RECURSIVE reachable(object_key) AS (
-                SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
-                UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
-                UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
-                UNION SELECT object_key FROM object_pins
-                UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
-             )
-             SELECT u.object_key,u.sha256,u.byte_length
-             FROM object_uploads u
-             WHERE u.state=2
-               AND NOT EXISTS(SELECT 1 FROM reachable r WHERE r.object_key=u.object_key)
-               AND NOT EXISTS(SELECT 1 FROM object_pins p WHERE p.object_key=u.object_key)
-             ORDER BY u.object_key"
+            "SELECT object_key,sha256,byte_length FROM object_uploads WHERE state IN (2,4,5) ORDER BY object_key"
         )?;
-        let rows = statement.query_map([], |row| {
-            let key: String = row.get(0)?;
-            let digest: Vec<u8> = row.get(1)?;
-            let sha256: [u8;32] = digest.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
-            let length: i64 = row.get(2)?;
-            let length = u64::try_from(length).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            Ok(ObjectRef { key, sha256, length })
-        })?;
-        rows.collect()
+        let objects = statement.query_map([],registry_reference)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(objects.into_iter().filter(|o|!live.contains(&o.key)).collect())
     }
 
     /// Resolve a response-lost retry using the original operation ID and request digest.
@@ -934,6 +1003,37 @@ impl SqliteAuthority {
             None => Ok(None),
         }
     }
+}
+
+fn registry_reference(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRef> {
+    let digest: Vec<u8> = row.get(1)?;
+    let length: i64 = row.get(2)?;
+    Ok(ObjectRef {key:row.get(0)?,sha256:digest.try_into().map_err(|_|rusqlite::Error::InvalidQuery)?,
+        length:u64::try_from(length).map_err(|_|rusqlite::Error::InvalidQuery)?})
+}
+
+/// Walk immutable dependency metadata. All callers making lifecycle decisions
+/// execute this under their publication transaction; pins are roots, not clocks.
+fn reachable_keys(connection: &Connection) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    let mut result = std::collections::BTreeSet::new();
+    let mut heads = connection.prepare("SELECT partition_id FROM partition_heads")?;
+    let ids = heads.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in ids {
+        let h=read_head(connection,&id)?.ok_or(rusqlite::Error::InvalidQuery)?;
+        for r in [&h.wal_tip,&h.manifest,&h.bootstrap,&h.log_anchor].into_iter().flatten() {
+            result.insert(r.key.clone());
+        }
+    }
+    let mut pins=connection.prepare("SELECT object_key FROM object_pins")?;
+    for key in pins.query_map([],|r|r.get::<_,String>(0))? {result.insert(key?);}
+    let mut queue=result.iter().cloned().collect::<Vec<_>>();
+    let mut children=connection.prepare("SELECT child_key FROM object_edges WHERE parent_key=?1")?;
+    while let Some(key)=queue.pop() {
+        for child in children.query_map([key],|r|r.get::<_,String>(0))? {
+            let child=child?;if result.insert(child.clone()) {queue.push(child);}
+        }
+    }
+    Ok(result)
 }
 
 fn backup_pin_id(backup_id: &str, object_key: &str) -> String {

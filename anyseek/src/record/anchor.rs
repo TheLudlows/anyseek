@@ -79,6 +79,19 @@ impl Frozen {
     }
 }
 impl Reference {
+    #[cfg(feature="s3-object-store")]
+    pub(super) fn identity(&self)->&str {&self.id}
+    #[cfg(feature="s3-object-store")]
+    pub(super) fn remote_files(&self,payloads:&Closure)->Result<Vec<(String,u64,[u8;32])>,RecordError>{
+        let mut result=Vec::new();
+        for file in &self.files {result.push((format!("anchor-{}/{}",self.id,file.path),file.bytes,file.sha256));}
+        for segment in &self.segments {for file in &segment.files {
+            result.push((format!("segment-{}/{}",segment.id,file.path),file.bytes,file.sha256));
+        }}
+        for (id,descriptor) in &payloads.objects {result.push((format!("payload-{id}"),descriptor.bytes,descriptor.sha256));}
+        if result.len()>10_000 {return Err(storage("checkpoint file count exceeded"));}
+        Ok(result)
+    }
     pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:&view::RetrievalView,compact:bool)->Result<Self,RecordError>{
         let id=format!("{:032x}",rand::random::<u128>());
         let prepared=root.join(format!(".anchor-prepare-{id}"));
@@ -221,9 +234,15 @@ impl Inner {
         PartitionJournal::validate_initial(payload.len(),self.config.max_journal_bytes).map_err(storage)?;
         let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
         self.healthy=false;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+        #[cfg(feature="s3-object-store")]
+        if let Some(remote)=self.remote.as_mut() {
+            remote.publish_anchor(&root,&reference,&loaded.payloads,next.seq,self.config.max_journal_bytes,false).await?;
+        }
         match self.journal.checkpoint(&payload){
             Ok(())=>{},
             Err(error@CreateError::NotPublished(_))=>{
+                #[cfg(feature="s3-object-store")]
+                if self.remote.is_some() {return Err(RecordError::DurablePending(next.seq));}
                 self.healthy=true;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
                 return Err(creation_error(error));
             },
@@ -239,6 +258,10 @@ impl Inner {
             std::fs::write(root.join(".test-anchor-gc-failure"), b"injected retirement failure").map_err(storage)?;
         }
         if let Err(error)=self.reclaim_anchor_objects().await {log::warn!("anchor certified; object retirement pending: {error}");}
+        #[cfg(feature="s3-object-store")]
+        if let Some(remote)=self.remote.as_mut() {
+            if let Err(error)=remote.collect_objects().await {log::warn!("remote object collection pending: {error}");}
+        }
         Ok(self.state.seq)
     }
     /// The owned partition guard is the local reader/build pin. Backups export

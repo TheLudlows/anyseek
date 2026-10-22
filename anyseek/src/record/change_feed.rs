@@ -312,18 +312,7 @@ pub(super) fn apply_trim(
     Ok(())
 }
 impl Inner {
-    pub(super) fn trim_feed(&mut self, at: u64) -> Result<(), RecordError> {
-        // The current remote WAL protocol assigns one monotonically increasing
-        // sequence to each committed entry. FeedTrim is a same-sequence metadata
-        // transition and has no remote authority publication protocol yet. In S3
-        // mode, retain the feed prefix rather than publishing a local-only trim
-        // that would disappear after local-cache loss. Resource limits still apply
-        // and backpressure is preferable to silently losing retention metadata.
-        #[cfg(feature = "s3-object-store")]
-        if self.remote.is_some() {
-            let _ = at;
-            return Ok(());
-        }
+    pub(super) async fn trim_feed(&mut self, at: u64) -> Result<(), RecordError> {
         let Some(floor) = self
             .feed_cache
             .floor(at, self.config.change_feed.retention_ms)
@@ -335,6 +324,16 @@ impl Inner {
             floor,
             at,
         };
+        #[cfg(feature="s3-object-store")]
+        if self.remote.is_some() {
+            let mut next=self.state.clone();
+            apply_trim(&mut next,&self.config.change_feed,&trim)?;
+            // A complete same-sequence checkpoint atomically publishes the feed
+            // floor and its replay state. It also advances the recovery log base.
+            self.publish_anchor_state(next,true).await?;
+            self.feed_cache.trim(floor);
+            return Ok(());
+        }
         let bytes = encode_entry(&Entry::FeedTrim(trim.clone()))?;
         // Maintenance never consumes deletion/TTL emergency capacity. A full
         // physical WAL can be compacted through the existing checkpoint route.

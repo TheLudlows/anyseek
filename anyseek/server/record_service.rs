@@ -305,6 +305,18 @@ impl Service {
             default_nprobe,
             _root_owner: root_owner,
         });
+        if std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref()==Ok("s3") {
+            let path=root.join("s3-namespace");
+            if !path.exists() {
+                use std::io::Write;
+                let temporary=root.join(format!(".s3-namespace-{:032x}",rand::random::<u128>()));
+                let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|e|e.to_string())?;
+                file.write_all(format!("{:032x}",rand::random::<u128>()).as_bytes()).map_err(|e|e.to_string())?;
+                file.sync_all().map_err(|e|e.to_string())?;drop(file);
+                std::fs::rename(temporary,path).map_err(|e|e.to_string())?;
+                #[cfg(unix)]std::fs::File::open(root).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;
+            }
+        }
         // Only unaddressable preparation names inside this exclusively owned
         // service root are reclaimable. Never scan sibling service roots.
         for row in std::fs::read_dir(root).map_err(|e| e.to_string())? {
@@ -327,7 +339,7 @@ impl Service {
             .map_err(|e| e.to_string())?
         {
             if let Err(error) =
-                RecordPartition::retire_snapshot(&service.root.join(format!("backup-{id}"))).await
+                cleanup_retired_backup(&service.root,&id).await
             {
                 log::warn!("retired backup cleanup pending: {error}");
             }
@@ -369,21 +381,12 @@ impl Service {
             .unwrap_or(usize::MAX).min(1024 * 1024 * 1024).max(1);
         let directory_digest = Sha256::digest(entry.directory.as_bytes())
             .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-        let local_partition_marker = self.root.join(&entry.directory).join(".s3-partition-id");
-        let partition_id = if local_partition_marker.exists() {
-            std::fs::read_to_string(&local_partition_marker).map_err(storage)?
-        } else if let Some(backup_id) = &entry.restore_from {
-            let marker: S3BackupMarker = serde_json::from_slice(
-                &std::fs::read(self.root.join(format!("backup-{backup_id}")).join("s3-backup.json")).map_err(storage)?
-            ).map_err(storage)?;
-            if marker.backup_id != *backup_id {
-                return Err(bad("S3 backup marker identity mismatch"));
-            }
-            marker.partition_id
-        } else {
-            Sha256::digest(entry.collection_id.as_bytes())
-                .iter().map(|byte| format!("{byte:02x}")).collect::<String>()
-        };
+        // A restored collection owns a distinct namespace and GC domain.
+        // Backup source identity is read from its authenticated descriptor.
+        let namespace=std::fs::read_to_string(self.root.join("s3-namespace")).map_err(storage)?;
+        if namespace.len()!=32 || !namespace.bytes().all(|b|b.is_ascii_hexdigit()) {return Err(storage("invalid S3 service namespace"));}
+        let partition_id = Sha256::digest(format!("{namespace}:{}",entry.collection_id).as_bytes())
+            .iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         if partition_id.is_empty() || !partition_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(bad("invalid persisted S3 partition identity"));
         }
@@ -419,7 +422,23 @@ impl Service {
             if !entry.active && path.exists() && entry.restore_from.is_none() {
                 RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
             }
-            if let Some(backup_id) = &entry.restore_from {
+            let service_restore=Catalog::completed_service_restore(&self.root)?;
+            let local_backup=entry.restore_from.as_ref().filter(|id| {
+                let root=self.root.join(format!("backup-{id}"));root.join("owner").exists() && !root.join("s3-backup.json").exists()
+            });
+            let adopt=service_restore.as_ref().is_some_and(|r|r.record_seqs.contains_key(&entry.collection_id)) || local_backup.is_some();
+            if adopt {
+                if !path.exists() && !entry.active {
+                    let id=local_backup.ok_or_else(||storage("certified service restore collection missing"))?;
+                    let snapshot=RecordPartition::open(&self.root.join(format!("backup-{id}")),entry.config.max_journal_bytes).await?;
+                    snapshot.checkpoint(&path).await?;
+                }
+                let identity=service_restore.as_ref().map(|r|r.identity.as_str()).or(entry.restore_from.as_deref())
+                    .ok_or_else(||storage("missing archive restore identity"))?;
+                RecordPartition::adopt_s3_snapshot(&path,entry.config.clone(),remote_config,identity).await?
+            } else if entry.active {
+                RecordPartition::open_s3(&path,entry.config.clone(),remote_config).await?
+            } else if let Some(backup_id)=&entry.restore_from {
                 let marker: S3BackupMarker = serde_json::from_slice(
                     &std::fs::read(self.root.join(format!("backup-{backup_id}")).join("s3-backup.json")).map_err(storage)?
                 ).map_err(storage)?;
@@ -434,8 +453,6 @@ impl Service {
                     &path, entry.config.clone(), remote_config, &marker.bundle_json,
                     256 * 1024 * 1024, 1_000_000, 10 * 1024 * 1024 * 1024usize,
                 ).await?
-            } else if entry.active {
-                RecordPartition::open_s3(&path, entry.config.clone(), remote_config).await?
             } else {
                 RecordPartition::create_s3(&path, entry.config.clone(), remote_config).await?
             }
@@ -1188,7 +1205,31 @@ async fn service_backup(
         let target=s.root.join(format!("service-backup-{id}"));
         service_budget(&s.root,"service-backup-",&target)?;
         let records=s.records.read().await.clone();
-        let receipt=s.catalog.backup_service(s.root.clone(),target,id.clone(),records).await?;
+        let temporary=s.root.join(format!(".s3-service-export-{:032x}",rand::random::<u128>()));
+        let mut archives=BTreeMap::new();
+        if std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref()==Ok("s3") {
+            std::fs::create_dir(&temporary).map_err(storage)?;
+            let retired=s.catalog.retired_backups().await?;
+            let entries=s.catalog.collections().await?;
+            for row in std::fs::read_dir(&s.root).map_err(storage)? {
+                let row=row.map_err(storage)?;
+                let name=row.file_name().to_string_lossy().into_owned();
+                let Some(backup_id)=name.strip_prefix("backup-") else{continue};
+                if validate_backup_id(backup_id).is_err() || retired.iter().any(|id|id==backup_id) {continue;}
+                let marker_path=row.path().join("s3-backup.json");
+                if !marker_path.exists(){continue;}
+                let marker:S3BackupMarker=serde_json::from_slice(&std::fs::read(marker_path).map_err(storage)?).map_err(storage)?;
+                let entry=entries.iter().find(|e|e.collection_id==marker.collection_id).ok_or_else(||storage("backup collection missing"))?;
+                let mut config=s.s3_record_config(entry)?.ok_or_else(||storage("S3 configuration missing"))?;
+                config.authority_path=temporary.join(format!("{backup_id}.sqlite"));
+                let destination=temporary.join(backup_id);
+                RecordPartition::materialize_s3_backup_archive(&destination,marker.config,config,&marker.bundle_json).await?;
+                archives.insert(backup_id.to_owned(),RecordPartition::open(&destination,256*1024*1024).await?);
+            }
+        }
+        let result=s.catalog.backup_service_with_archives(s.root.clone(),target,id.clone(),records,archives).await;
+        if temporary.exists(){let _=std::fs::remove_dir_all(&temporary);}
+        let receipt=result?;
         response(json!({"backup_id":id,"snapshot":receipt,"operation_id":request.operation_id,"scope":"catalog, all retained collections and live collection backups; no recursive service archives"}),s.permit(&key).await?)
     }).await
 }
@@ -1227,7 +1268,7 @@ async fn create_s3_backup_pointer(
     collection_id: &str,
     config: &RecordConfig,
 ) -> Result<u64, Error> {
-    if path.exists() {
+    if path.join("s3-backup.json").exists() {
         let marker: S3BackupMarker = serde_json::from_slice(
             &std::fs::read(path.join("s3-backup.json")).map_err(storage)?
         ).map_err(storage)?;
@@ -1255,8 +1296,18 @@ async fn create_s3_backup_pointer(
         visible_seq,
         bundle_json,
     };
-    std::fs::write(path.join("s3-backup.json"), serde_json::to_vec(&marker).map_err(bad)?)
-        .map_err(storage)?;
+    let temporary=path.join(format!(".marker-{:032x}",rand::random::<u128>()));
+    {
+        use std::io::Write;
+        let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(storage)?;
+        file.write_all(&serde_json::to_vec(&marker).map_err(bad)?).map_err(storage)?;
+        file.sync_all().map_err(storage)?;
+    }
+    std::fs::rename(&temporary,path.join("s3-backup.json")).map_err(storage)?;
+    #[cfg(unix)] {
+        std::fs::File::open(path).and_then(|f|f.sync_all()).map_err(storage)?;
+        std::fs::File::open(root).and_then(|f|f.sync_all()).map_err(storage)?;
+    }
     Ok(visible_seq)
 }
 
@@ -1330,6 +1381,39 @@ async fn list_backups(
     }
     response(ids.into_iter().map(|id|json!({"backup_id":id,"retired":retired.contains(&id),"on_disk":s.root.join(format!("backup-{id}")).exists()})).collect::<Vec<_>>(),s.permit(&key).await?)
 }
+// Catalog retirement has already fenced restores/readers before this helper.
+// A pointer is metadata, not a PartitionJournal; absent/partial pointer directories
+// must also be resumable after an interrupted backup or retirement.
+async fn cleanup_retired_backup(root:&FsPath,id:&str)->Result<(),String> {
+    let path=root.join(format!("backup-{id}"));
+    if !path.exists() {return Ok(());}
+    let marker_path=path.join("s3-backup.json");
+    let pointer=marker_path.exists() || (!path.join("owner").exists()
+        && std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref()==Ok("s3"));
+    if !pointer {return RecordPartition::retire_snapshot(&path).await.map_err(|e|e.to_string());}
+    let marker=if marker_path.exists(){
+        let marker:S3BackupMarker=serde_json::from_slice(&std::fs::read(marker_path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        if marker.backup_id!=id {return Err("backup marker mismatch".into());}
+        Some(marker)
+    }else{None};
+    let mut authorities=Vec::new();
+    for row in std::fs::read_dir(root).map_err(|e|e.to_string())? {
+        let path=row.map_err(|e|e.to_string())?.path();
+        if path.file_name().and_then(|n|n.to_str()).is_some_and(|n|n.starts_with(".authority-") && n.ends_with(".sqlite")) {
+            authorities.push(path);
+        }
+    }
+    for authority in &authorities {
+        RecordPartition::retire_s3_backup(authority,id).await.map_err(|e|e.to_string())?;
+    }
+    if let Some(marker)=marker {for authority in &authorities {
+        RecordPartition::delete_s3_backup_metadata(authority,&marker.bundle_json).await.map_err(|e|e.to_string())?;
+    }}
+    std::fs::remove_dir_all(path).map_err(|e|e.to_string())?;
+    #[cfg(unix)]std::fs::File::open(root).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
 async fn retire_backup(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -1345,31 +1429,7 @@ async fn retire_backup(
         let _control=s.control.lock().await;
         let key=s.admin(&headers).await?;
         let receipt=s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::RetireBackup { backup_id:id.clone() } }).await?;
-        let backup_path = s.root.join(format!("backup-{id}"));
-        let cleanup: Result<(),String> = async {
-            let marker_path = backup_path.join("s3-backup.json");
-            if marker_path.exists() {
-                let marker: S3BackupMarker = serde_json::from_slice(
-                    &std::fs::read(&marker_path).map_err(|error| error.to_string())?
-                ).map_err(|error| error.to_string())?;
-                if marker.backup_id != id { return Err("backup marker mismatch".into()); }
-                let authorities = std::fs::read_dir(&s.root).map_err(|error| error.to_string())?
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| entry.path())
-                    .filter(|path| path.file_name().and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with(".authority-") && name.ends_with(".sqlite")))
-                    .collect::<Vec<_>>();
-                for authority_path in &authorities {
-                    RecordPartition::retire_s3_backup(authority_path, &id).await
-                        .map_err(|error| error.to_string())?;
-                }
-                for authority_path in &authorities {
-                    RecordPartition::delete_s3_backup_metadata(authority_path, &marker.bundle_json).await
-                        .map_err(|error| error.to_string())?;
-                }
-            }
-            RecordPartition::retire_snapshot(&backup_path).await.map_err(|error| error.to_string())
-        }.await;
+        let cleanup=cleanup_retired_backup(&s.root,&id).await;
         response(json!({"receipt":receipt,"backup_id":id,"retired":true,"cleanup_pending":cleanup.is_err(),"cleanup_error":cleanup.err()}),s.permit(&key).await?)
     }).await
 }
@@ -1394,7 +1454,7 @@ async fn restore(
             entry.config
         } else {
             if s.catalog.retired_backups().await?.contains(&request.backup_id) { return Err(Error(StatusCode::GONE,"backup_retired","backup identity was retired".into())); }
-            if s3_mode {
+            if s3_mode && s.root.join(format!("backup-{}",request.backup_id)).join("s3-backup.json").exists() {
                 let marker: S3BackupMarker = serde_json::from_slice(
                     &std::fs::read(s.root.join(format!("backup-{}",request.backup_id)).join("s3-backup.json")).map_err(storage)?
                 ).map_err(storage)?;
