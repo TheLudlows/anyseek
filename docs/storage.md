@@ -61,6 +61,8 @@ FeedTrim 不再在 S3 模式跳过。它以**同序号完整 checkpoint**认证 
 
 metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition 命名空间派生。重试复用原快照时间、水位和闭包，不把后续写入冒充原备份。服务指针使用私有文件 + sync + rename，未完成指针可重试；指针退休与本地 PartitionJournal 退休分别处理，并在启动时重试 catalog 已认证的退休动作。
 
+本地最多保留 32 个 collection 备份指针。中断留下的同 ID 目录已经占用一个槽位，达到上限时仍允许修复该指针；新 ID 在分配前拒绝。重试只清理该目录内本实现拥有的 `.marker-<32hex>` 普通临时文件，继续使用原远端备份 cut。
+
 ### 恢复
 
 先校验 descriptor、SQLite 快照和完整对象闭包。中断后的相同快照导入可继续，不覆盖另一个快照或回退已推进的 head。
@@ -71,6 +73,10 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 
 完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务只启用当前 master，历史 key/grant 不复活；在 S3 模式首次启动时，已认证的独立归档被发布到新的服务 namespace。归档中的 collection backup 仍可再次恢复。
 
+私有输入逐个物化为认证 journal 路径，随后由 catalog 逐个打开、预检和导出，每次释放其索引与预算租约；不同时持有所有 retained collection/备份的检索视图。私有工作目录在成功或失败后清理，现有共享内存与归档大小预算继续生效。
+
+完整服务备份完成后，同一操作重试先核验 manifest 与完成见证，直接返回原回执，避免每次重新物化全部输入而再次超过 HTTP 期限。这是已完成操作的结果查询；恢复仍须重新验证完整归档闭包。未完成的归档继续既有发布/修复协议。
+
 ## 维护与受控接管
 
 封存复用完整 anchor 发布协议，S3 模式必须先由 SQLite 选择包含 seal 的远端 manifest，不能只更新本地 checkpoint。封存关闭当前输出许可；发布失败保持 fenced，恢复读取唯一权威再以原意图重试，同序号维护不会消耗业务序号。
@@ -79,11 +85,23 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 
 接管中断恢复按 catalog 意图打开远端源，不能把缓存当本地权威。中断留下的私有校验目录可在获得服务根独占锁后清理。完整服务备份同样从远端打开已删除/封存的 retained collection，清空本地缓存不能导致丢失归档输入。
 
+维护审计的发布点与失败边界如下。普通写入、TTL 和 staging 租约过期共用缓存追加入口；SQLite 已明确提交成功时，缓存追加失败返回 `durable_pending` 并保持输出封锁，重开恢复原回执。SQLite 提交结果未知仍为 `outcome_unknown`，不能据此另发新操作。
+
+| 路径 | 持久发布与恢复依据 | 失败/重试边界 |
+| --- | --- | --- |
+| 普通写入、TTL、租约过期 | 不可变 WAL + SQLite head/回执 | 提交后缓存失败不回滚、不开放旧输出；无缓存重放 |
+| flush、compaction、feed trim、私有 staging 清理、seal | 完整对象闭包 + SQLite 所选 manifest | 同序号维护也必须远端认证；失败保持 fenced |
+| 冷启动 | 独占权威 owner 锁，认证 bootstrap/manifest/tail | 新建缓存前校验 bootstrap 预算、配置与初始序号；错误不发布缓存目录 |
+| 备份与指针 | SQLite 中原 ID 的 snapshot/pin + 不可变 descriptor | 中断重试维持原 cut；指针第 32 槽仍可修复 |
+| 恢复、受控接管、服务归档 | 校验源闭包，目标独立 namespace；接管另认证最终 seal | catalog 激活前完成目标远端发布；归档包含 retained 源 |
+| GC、备份退休 | SQLite 可达性、pin、单调退休/删除记录及 catalog 退休意图 | 删除失败留待重试；不回滚 head，不复活已退休身份 |
+
 ## 验证入口与边界
 
 - `cargo test --workspace --features server --all-targets`：Record/catalog、Segment、SQLite、上传/依赖/GC 和现有检索回归。
-- `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权、恢复与受控接管。
-- `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、无缓存查询、feed floor、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
+- `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权、恢复与受控接管；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 缓存。
+- `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、十种接管路径、feed floor、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
+- `scripts/s3_acceptance.py`：统一执行上述存储矩阵、七组共享语义与不可变对象/共同备份合同；`--backend real` 只接受专用测试配置。命令及报告边界见[开发指南](development.md)。
 - [CI #307](https://github.com/TheLudlows/anyseek/actions/runs/39784279098) 对 PR #72 最终 head 的 Linux、Windows 与构建/冒烟任务全部通过。这是该提交的证据，不替代后续修改验证。
 
-HTTP fixture 不等于真实 S3 服务认证。剩余 B 工作为维护路径审计、更多查询/失效场景及实际 endpoint 合同测试；系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
+HTTP fixture 不等于真实 S3 服务认证。本轮先交付合同工具与用例，实际 endpoint 尚未运行；最终修改的原生 Linux/Windows CI 与实际目标后端验收仍须核对。系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。

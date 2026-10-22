@@ -222,14 +222,24 @@ fn fault(stage: &str) {
     }
 }
 impl Catalog {
+    /// Return the original completed backup receipt without reopening every
+    /// child index. Restore still validates the entire immutable archive closure.
+    pub fn completed_service_backup(root: &Path) -> Result<Option<ServiceSnapshot>, CatalogError> {
+        Self::completed_service_snapshot(root,false)
+    }
+
     /// Immutable completion lookup. A used restored root need not retain its
     /// original data cut; this never opens or overwrites live data/catalog.
     pub fn completed_service_restore(root: &Path) -> Result<Option<ServiceSnapshot>, CatalogError> {
+        Self::completed_service_snapshot(root,true)
+    }
+
+    fn completed_service_snapshot(root: &Path, restored: bool) -> Result<Option<ServiceSnapshot>, CatalogError> {
         if !root.join(COMPLETE).exists() {
             return Ok(None);
         }
         let receipt = read_manifest(root)?;
-        if receipt.restored_from.is_none() {
+        if receipt.restored_from.is_some()!=restored {
             return Ok(None);
         }
         let (journal, entries) = match PartitionJournal::open(&root.join(COMPLETE), BUDGET) {
@@ -239,7 +249,7 @@ impl Catalog {
         };
         drop(journal);
         if entries != vec![serde_json::to_vec(&receipt).map_err(storage)?] {
-            return Err(storage("restore completion mismatch"));
+            return Err(storage("service completion mismatch"));
         }
         Ok(Some(receipt))
     }
@@ -289,11 +299,13 @@ impl Catalog {
         self.backup_service_with_archives(source_root,target,identity,records,BTreeMap::new()).await
     }
 
-    /// Complete-service snapshot with privately materialized object-backed archives.
-    /// The server holds the catalog/control barrier and backup retention pins.
+    /// Complete-service snapshot with privately materialized journal paths keyed
+    /// by generated collection/backup directory. Open one archive at a time so
+    /// retained backups do not all consume live index reservations. The server
+    /// holds the control barrier, private paths and backup retention pins.
     pub async fn backup_service_with_archives(
         &self,source_root:PathBuf,target:PathBuf,identity:String,
-        records:BTreeMap<String,RecordPartition>,archives:BTreeMap<String,RecordPartition>,
+        records:BTreeMap<String,RecordPartition>,archives:BTreeMap<String,PathBuf>,
     )->Result<ServiceSnapshot,CatalogError> {
         let owner = self.inner.clone();
         crate::INDEX_RUNTIME
@@ -331,7 +343,7 @@ impl Catalog {
                     let p = match records.get(&entry.collection_id) {
                         Some(p) => p.clone(),
                         None => RecordPartition::open(
-                            &source_root.join(&entry.directory),
+                            &archives.get(&entry.directory).cloned().unwrap_or_else(||source_root.join(&entry.directory)),
                             entry.config.max_journal_bytes,
                         )
                         .await
@@ -348,7 +360,9 @@ impl Catalog {
                         if inner.state.retired_backups.contains(id) {
                             continue;
                         }
-                        let p=if let Some(p)=archives.get(id) {p.clone()}else {
+                        let p=if let Some(path)=archives.get(&name) {
+                            RecordPartition::open(path,256*1024*1024).await.map_err(storage)?
+                        }else {
                             RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(storage)?;
                             RecordPartition::open(&row.path(),256*1024*1024).await.map_err(storage)?
                         };
@@ -380,7 +394,7 @@ impl Catalog {
                     let partition = match records.get(&entry.collection_id) {
                         Some(p) => p.clone(),
                         None => RecordPartition::open(
-                            &source_root.join(&entry.directory),
+                            &archives.get(&entry.directory).cloned().unwrap_or_else(||source_root.join(&entry.directory)),
                             entry.config.max_journal_bytes,
                         )
                         .await
@@ -404,7 +418,9 @@ impl Catalog {
                         if inner.state.retired_backups.contains(id) {
                             continue;
                         }
-                        let p=if let Some(p)=archives.get(id) {p.clone()}else {
+                        let p=if let Some(path)=archives.get(&name) {
+                            RecordPartition::open(path,256*1024*1024).await.map_err(storage)?
+                        }else {
                             RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(storage)?;
                             RecordPartition::open(&row.path(),256*1024*1024).await.map_err(storage)?
                         };

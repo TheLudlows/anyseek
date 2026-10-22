@@ -2,13 +2,13 @@
 """Native process + real HTTP acceptance for the default Record/catalog service.
 Uses a fresh data root, never accesses a running user server. No SDK required.
 """
-import argparse, base64, hashlib, json, os, pathlib, socket, subprocess, tempfile, time, urllib.request, urllib.error, uuid
+import argparse, base64, hashlib, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error, uuid
 
 def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','feed']);args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
     with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
@@ -19,23 +19,53 @@ def main():
         process=None
         def start(fault_env=None):
             nonlocal process
+            if args.cold_restarts:
+                assert os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3','cold-restarts requires the S3 backend'
+                if root.exists():
+                    for cache in root.glob('collection-*'):
+                        if cache.is_dir():shutil.rmtree(cache)
             process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**(fault_env or {})},stdout=log,stderr=log)
-            for _ in range(300):
+            for _ in range(2400 if args.cold_restarts else 300):
                 if process.poll() is not None:
                     log.seek(0);raise AssertionError(log.read())
                 try:
                     urllib.request.urlopen(base+'/api/v1/live',timeout=1).read();return
                 except (OSError,urllib.error.URLError):time.sleep(.05)
-            raise AssertionError('server startup timeout')
+            log.seek(0);raise AssertionError('server startup timeout: '+log.read()[-8192:])
         def call(method,path,body=None,key=master,status=200):
             req=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),headers={'apikey':key,'Content-Type':'application/json'},method=method)
             try:
-                with urllib.request.urlopen(req,timeout=30) as r: code=r.status;raw=r.read()
+                with urllib.request.urlopen(req,timeout=40) as r: code=r.status;raw=r.read()
             except urllib.error.HTTPError as e:code=e.code;raw=e.read()
+            if code==503 and status==200 and path in ['/api/v1/service-backups','/api/v1/service-restores']:
+                result=json.loads(raw)
+                if result.get('code')=='outcome_unknown':
+                    # The body retains the exact operation identity. The service
+                    # continues accepted work after its HTTP deadline.
+                    for _ in range(10):
+                        try:
+                            with urllib.request.urlopen(req,timeout=40) as response:
+                                return json.loads(response.read())
+                        except urllib.error.HTTPError as error:
+                            result=json.loads(error.read())
+                            if error.code!=503 or result.get('code')!='outcome_unknown':raise
+                    raise AssertionError(('control retry deadline',path))
             assert code==status,(method,path,code,status,raw)
             return json.loads(raw)
         def restart():
             process.kill();process.wait(timeout=20);start()
+        def restart_with(fault_env):
+            if process.poll() is None:process.kill();process.wait(timeout=20)
+            start(fault_env)
+        def section(name):
+            import importlib
+            exercise=importlib.import_module('record_'+name+'_smoke').exercise
+            if name in ['temporal','feed']:
+                exercise(call,restart_with,root.parent,args.faults)
+            elif name=='lease':
+                exercise(call,restart_with,root.parent,False)
+                if args.faults:exercise(call,restart_with,root.parent,True,only_faults=True)
+            else:exercise(call,restart_with,args.faults)
         try:
             if args.faults:
                 for stage in ['published','retired']:
@@ -45,6 +75,9 @@ def main():
                     finally:
                         if child.poll() is None:child.kill();child.wait(timeout=20)
             start()
+            if args.section and args.section!='base':
+                section(args.section)
+                return
             # A second owner and a changed bootstrap secret must never rebuild this root.
             for secret in ['issue57-service-test','wrong-master']:
                 child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port+1}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':secret},stdout=log,stderr=log)
@@ -408,7 +441,7 @@ def main():
                     if stage!='before_append':call('GET','/api/v1/index/after-source-delete/doc/'+later['record_id'],status=404)
                 # Interrupt initial root publication, then interrupt its repair,
                 # proving durable staging can be resumed on both native platforms.
-                for kind in ['backup','restore']:
+                for kind in ([] if args.cold_restarts else ['backup','restore']):
                     body={'operation_id':operation()}
                     endpoint='/api/v1/index/after-source-delete/backup'
                     if kind=='restore':
@@ -433,7 +466,25 @@ def main():
                     start();recovered=call('POST',endpoint,body)
                     if kind=='restore':assert call('GET','/api/v1/index/interrupted-restore/doc/r0')['version']==5
                     else:assert recovered['backup_id']
-                print('PASS real HTTP faults: rejection/unknown/durable pending, process exits before/after visibility, batch tail stopped, backup/restore publication and repeated repair crashes')
+                print('PASS real HTTP faults: rejection/unknown/durable pending, process exits before/after visibility and stopped batch tail'+('; local backup/restore publication and repair crashes' if not args.cold_restarts else '; remote backup faults run in the storage suite'))
+            if args.cold_restarts and args.faults:
+                while sum(p.name.startswith('backup-') for p in root.iterdir())<31:
+                    call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()})
+                pointer_request={'operation_id':operation()}
+                pointer_cut=call('GET','/api/v1/index/after-source-delete')['statistics']['visible_seq']
+                for stage in ['after_directory','after_marker_sync']:
+                    restart_with({'ANYSEEK_BACKUP_POINTER_FAULT':stage})
+                    try:call('POST','/api/v1/index/after-source-delete/backup',pointer_request)
+                    except (OSError,http.client.HTTPException):pass
+                    else:raise AssertionError('expected pointer process exit')
+                    assert process.wait(timeout=30)==94
+                start()
+                repaired=call('POST','/api/v1/index/after-source-delete/backup',pointer_request)
+                assert repaired['visible_seq']==pointer_cut
+                assert call('POST','/api/v1/index/after-source-delete/backup',pointer_request)==repaired
+                assert sum(p.name.startswith('backup-') for p in root.iterdir())==32
+                assert not list(root.glob('backup-*/.marker-*'))
+                print('PASS S3 pointer slot 32: directory/marker-sync exits resume original backup and clean private metadata')
             # Rejecting excess backup requests must not allocate unbounded repair files.
             while sum(p.name.startswith('backup-') for p in root.iterdir()) < 32:
                 call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()})
@@ -501,7 +552,7 @@ def main():
                 restored_process.kill();restored_process.wait(timeout=20);base=original_base
             assert call('POST','/api/v1/service-restores',service_restore)==restored # Target was legitimately modified.
             if args.faults:
-                for kind in ['backup','restore']:
+                for kind in ([] if args.cold_restarts else ['backup','restore']):
                     body={'operation_id':operation()}
                     endpoint='/api/v1/service-backups'
                     if kind=='restore':body['backup_id']=whole['backup_id'];endpoint='/api/v1/service-restores'
@@ -514,7 +565,7 @@ def main():
                     result=call('POST',endpoint,body)
                     assert call('POST',endpoint,body)==result
                 # The completion witness has its own initial-publication boundary.
-                for kind in ['backup','restore']:
+                for kind in ([] if args.cold_restarts else ['backup','restore']):
                     body={'operation_id':operation()};endpoint='/api/v1/service-backups'
                     if kind=='restore':body['backup_id']=whole['backup_id'];endpoint='/api/v1/service-restores'
                     process.kill();process.wait(timeout=20)
@@ -530,10 +581,8 @@ def main():
             client_exercise(base,master,client_requests)
             client_exercise(base,master,client_requests)
             call('DELETE','/api/v1/backups/'+early['backup_id'],{'operation_id':operation()})
+            if args.section=='base':return
             from record_temporal_smoke import exercise as temporal_exercise
-            def restart_with(env):
-                if process.poll() is None:process.kill();process.wait(timeout=20)
-                start(env)
             from record_locator_smoke import exercise as locator_exercise
             locator_exercise(call,restart_with,args.faults)
             from record_graph_smoke import exercise as graph_exercise

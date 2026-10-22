@@ -1174,6 +1174,8 @@ mod tests {
             .await
             .unwrap();
         assert!(receipt.absent_collections.contains("shared"));
+        assert_eq!(Catalog::completed_service_backup(&archive).unwrap(),Some(receipt.clone()));
+        assert_eq!(Catalog::completed_service_restore(&archive).unwrap(),None);
         let restored = path.join("restored");
         let result = Catalog::restore_service(
             archive.clone(),
@@ -1183,6 +1185,8 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(Catalog::completed_service_backup(&restored).unwrap(),None);
+        assert_eq!(Catalog::completed_service_restore(&restored).unwrap(),Some(result.clone()));
         let recovered = Catalog::open(&restored).await.unwrap();
         assert!(recovered.collections().await.unwrap()[0].deleted);
         assert!(!recovered.collections().await.unwrap()[0].initialized);

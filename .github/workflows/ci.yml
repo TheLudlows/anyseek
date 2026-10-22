@@ -145,3 +145,51 @@ jobs:
           else
             python3 scripts/s3_storage_smoke.py --server target/debug/anyseek_server --faults
           fi
+
+  s3-native-acceptance:
+    name: S3 semantics and contracts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/s3-native-data
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: s3-source-only
+          cache-targets: false
+      - name: Prepare isolated test roots
+        shell: bash
+        run: mkdir -p target/s3-native-data
+      - name: Build explicit fault-injection service
+        run: cargo build -p anyseek --features server,fault-injection
+      - name: Authority, cache-failure, checkpoint and restore regressions
+        run: cargo test -p anyseek --lib --features server,fault-injection record::remote_checkpoint::tests
+      - name: Immutable object and joint-backup contract (HTTP fixture)
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/s3_acceptance.py --backend fixture --suite contract --report target/s3-contract.json
+          else
+            python3 scripts/s3_acceptance.py --backend fixture --suite contract --report target/s3-contract.json
+          fi
+      - name: Shared Record semantics after S3 cache loss
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/s3_acceptance.py --backend fixture --suite semantic --server target/debug/anyseek_server.exe --faults --report target/s3-semantics.json
+          else
+            python3 scripts/s3_acceptance.py --backend fixture --suite semantic --server target/debug/anyseek_server --faults --report target/s3-semantics.json
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s3-acceptance-${{ matrix.os }}
+          path: |
+            target/s3-contract.json
+            target/s3-semantics.json

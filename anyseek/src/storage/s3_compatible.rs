@@ -454,38 +454,115 @@ mod tests {
     use super::*;
     use object_store::memory::InMemory;
 
-    /// Run explicitly against a dedicated disposable S3-compatible test bucket:
-    /// cargo test --features s3-object-store real_s3_compatible_contract -- --ignored
+    /// Explicit test-bucket contract; the same test runs against the disposable
+    /// HTTP fixture in CI. Only a real endpoint run is provider evidence.
     #[tokio::test]
     #[ignore = "requires a dedicated S3-compatible test endpoint and bucket"]
     async fn real_s3_compatible_contract() {
-        use std::{env, time::{Duration, SystemTime}};
+        use std::{env, panic::AssertUnwindSafe, time::{Duration, SystemTime}};
+        use futures::FutureExt;
+        use super::super::{object_log, sqlite_authority::PublishOutcome};
         let required = |name: &str| env::var(name).unwrap_or_else(|_| panic!("set {name} for this ignored integration test"));
         let endpoint=required("ANYSEEK_S3_TEST_ENDPOINT");
         let bucket=required("ANYSEEK_S3_TEST_BUCKET");
-        let region=env::var("ANYSEEK_S3_TEST_REGION").unwrap_or_else(|_|"us-east-1".into());
+        let region=required("ANYSEEK_S3_TEST_REGION");
         let access=required("ANYSEEK_S3_TEST_ACCESS_KEY_ID");
         let secret=required("ANYSEEK_S3_TEST_SECRET_ACCESS_KEY");
         let allow_http=env::var("ANYSEEK_S3_TEST_ALLOW_HTTP").map(|v|v=="1").unwrap_or(false);
         let stamp=SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let prefix=format!("anyseek-contract-tests/{}/{}",std::process::id(),stamp);
+        let id=format!("contract-{}-{stamp}",std::process::id());
+        let prefix=format!("anyseek-contract-tests/{id}/");
+        let partition_prefix=format!("partitions/{id}/");
+        let backup_prefix=format!("backups/{id}/");
         let store=S3CompatibleStore::connect(&endpoint,&bucket,&region,&access,&secret,allow_http,1024*1024).unwrap();
-        let body=b"anyseek s3 compatibility contract";
-        let reference=store.put_verified(&format!("{prefix}/immutable-object"),body).await.unwrap();
-        assert_eq!(store.get_verified(&reference).await.unwrap(),body);
-        assert_eq!(store.put_verified(&reference.key,body).await.unwrap(),reference);
-        assert!(store.put_verified(&reference.key,b"different bytes").await.is_err());
+        let source_path=env::temp_dir().join(format!("anyseek-{id}-source.sqlite"));
+        let target_path=env::temp_dir().join(format!("anyseek-{id}-target.sqlite"));
+        let mut keys=std::collections::BTreeSet::new();
+        // Clean only this run's explicit keys, including uncertain uploads. No
+        // bucket LIST, prefix-wide deletion, production SQLite or foreign roots.
+        let outcome=AssertUnwindSafe(async {
+            let key=format!("{prefix}immutable");keys.insert(key.clone());
+            let reference=store.put_verified(&key,b"canonical bytes").await.unwrap();
+            assert_eq!(store.get_verified(&reference).await.unwrap(),b"canonical bytes");
+            assert_eq!(store.store.head(&ObjectPath::from(key.clone())).await.unwrap().size,reference.length);
+            assert_eq!(store.put_verified(&key,b"canonical bytes").await.unwrap(),reference);
+            assert!(store.put_verified(&key,b"different bytes").await.is_err());
+            assert_eq!(store.get_verified(&reference).await.unwrap(),b"canonical bytes");
+            let mut bad=reference.clone();bad.sha256[0]^=0xff;
+            assert!(store.get_verified(&bad).await.is_err());
+            bad=reference.clone();bad.length+=1;
+            assert!(store.get_verified(&bad).await.is_err());
+            let missing=ObjectPath::from(format!("{prefix}missing"));
+            assert!(store.store.get(&missing).await.is_err());
 
-        let db_path=env::temp_dir().join(format!("anyseek-s3-contract-{stamp}.sqlite"));
-        let mut authority=SqliteAuthority::open(&db_path,Duration::from_secs(2)).unwrap();
-        authority.register_durable_object(&reference,stamp.min(i64::MAX as u128) as i64).unwrap();
-        assert!(authority.retire_object(&reference.key,1,stamp.min(i64::MAX as u128) as i64).unwrap());
-        assert!(store.delete_retired(&mut authority,&reference.key,stamp.min(i64::MAX as u128) as i64).await.unwrap());
-        assert!(store.get_verified(&reference).await.is_err());
-        drop(authority);
-        let _=std::fs::remove_file(&db_path);
-        let _=std::fs::remove_file(db_path.with_extension("sqlite-wal"));
-        let _=std::fs::remove_file(db_path.with_extension("sqlite-shm"));
+            let race=format!("{prefix}create-race");keys.insert(race.clone());
+            let (left,right)=tokio::join!(store.put_verified(&race,b"left"),store.put_verified(&race,b"right"));
+            assert_eq!(usize::from(left.is_ok())+usize::from(right.is_ok()),1,"conditional create must have one winner");
+            let winner=left.or(right).unwrap();
+            let winner_bytes=store.get_verified(&winner).await.unwrap();
+            assert!(winner_bytes==b"left"||winner_bytes==b"right");
+            let identical=format!("{prefix}identical-race");keys.insert(identical.clone());
+            let (a,b)=tokio::join!(store.put_verified(&identical,b"same"),store.put_verified(&identical,b"same"));
+            assert_eq!(a.unwrap(),b.unwrap(),"response-lost retries resolve exact immutable bytes");
+            let oversize=format!("{prefix}oversize");keys.insert(oversize.clone());
+            assert!(store.put_verified(&oversize,&vec![0;1024*1024+1]).await.is_err());
+            assert!(store.store.head(&ObjectPath::from(oversize)).await.is_err());
+
+            let mut source=SqliteAuthority::open(&source_path,Duration::from_secs(2)).unwrap();
+            source.create_partition(&id,7).unwrap();
+            keys.insert(format!("{partition_prefix}bootstrap/initial.json"));
+            let initial=store.publish_bootstrap(&mut source,&id,7,b"initial authority",10).await.unwrap();
+            let bootstrap=initial.bootstrap.unwrap();
+            let body=b"operation one";let digest:[u8;32]=Sha256::digest(body).into();
+            keys.insert(format!("{partition_prefix}wal/{:020}-{}.json",1,digest.iter().map(|b|format!("{b:02x}")).collect::<String>()));
+            assert!(matches!(object_log::append_and_commit(&store,&mut source,&id,7,"op-1",digest,body.to_vec(),20,1024*1024).await.unwrap(),object_log::AppendCommitOutcome::Published{..}));
+            let first=source.read_head(&id).unwrap().unwrap();
+            let closure=source.reachable_objects().unwrap();
+            keys.insert(format!("{backup_prefix}authority.json"));keys.insert(format!("{backup_prefix}descriptor.json"));
+            let backup=store.create_backup_bundle(&mut source,&id,&closure,30,1024*1024).await.unwrap();
+            let body=b"operation two";let digest:[u8;32]=Sha256::digest(body).into();
+            keys.insert(format!("{partition_prefix}wal/{:020}-{}.json",2,digest.iter().map(|b|format!("{b:02x}")).collect::<String>()));
+            assert!(matches!(object_log::append_and_commit(&store,&mut source,&id,7,"op-2",digest,body.to_vec(),40,1024*1024).await.unwrap(),object_log::AppendCommitOutcome::Published{..}));
+            let current=source.read_head(&id).unwrap().unwrap();
+            let orphan=format!("{prefix}unpublished");keys.insert(orphan.clone());
+            let orphan=store.put_and_register(&mut source,&orphan,b"never committed",50).await.unwrap();
+            assert!(matches!(source.publish_commit(&id,current.head_version,6,"stale-owner",[9;32],3,orphan.clone(),None).unwrap(),PublishOutcome::Conflict));
+            assert_eq!(source.read_head(&id).unwrap().unwrap(),current);
+            let current_closure=source.reachable_objects().unwrap();
+            let retry=store.create_backup_bundle(&mut source,&id,&current_closure,60,1024*1024).await.unwrap();
+            assert_eq!(retry,backup,"backup retry preserves the original metadata cut and descriptor");
+            let mut target=SqliteAuthority::open(&target_path,Duration::from_secs(2)).unwrap();
+            let snapshot=store.restore_backup_bundle(&mut target,&backup.descriptor_ref,1024*1024,100,16*1024*1024).await.unwrap();
+            assert_eq!(snapshot.heads[0],first);
+            let restored=target.read_head(&id).unwrap().unwrap();
+            let tail=object_log::load_committed_entries_after(&store,&restored,0,100,16*1024*1024).await.unwrap();
+            assert_eq!(tail.len(),1);assert_eq!(tail[0].payload,b"operation one");
+            assert!(!source.retire_object(&bootstrap.key,100,100).unwrap(),"live roots cannot be retired");
+            assert!(!store.delete_retired(&mut source,&bootstrap.key,100).await.unwrap());
+            assert!(source.retire_object(&orphan.key,100,100).unwrap());
+            assert!(store.delete_retired(&mut source,&orphan.key,100).await.unwrap());
+            assert!(!store.delete_retired(&mut source,&orphan.key,101).await.unwrap());
+            assert!(store.store.get(&ObjectPath::from(orphan.key)).await.is_err());
+            source.release_backup_pins(&id).unwrap();
+            store.retire_backup_metadata(&mut source,&backup,110).await.unwrap();
+            assert!(store.get_verified(&backup.descriptor_ref).await.is_err());
+            assert_eq!(store.get_verified(&bootstrap).await.unwrap(),b"initial authority");
+        }).catch_unwind().await;
+        let mut cleanup_errors=Vec::new();
+        for key in keys {
+            assert!(key.starts_with(&prefix)||key.starts_with(&partition_prefix)||key.starts_with(&backup_prefix));
+            match store.store.delete(&ObjectPath::from(key.clone())).await {
+                Ok(())|Err(object_store::Error::NotFound{..})=>{},
+                Err(error)=>cleanup_errors.push(format!("{key}: {error}")),
+            }
+        }
+        for path in [&source_path,&target_path] {
+            let _=std::fs::remove_file(path);
+            let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
+            let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+        }
+        if let Err(panic)=outcome {std::panic::resume_unwind(panic);}
+        assert!(cleanup_errors.is_empty(),"test-owned object cleanup failed: {cleanup_errors:?}");
     }
 
     #[tokio::test]

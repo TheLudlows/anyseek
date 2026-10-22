@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Real service HTTP acceptance against a disposable S3 HTTP test double.
+"""Real service HTTP acceptance against a fixture or dedicated S3 test bucket.
 
-No credentials or production endpoint are used. This validates the engine/service
-protocol, not the compatibility of any cloud provider. All objects live in memory.
+The default fixture keeps objects in memory and needs no service credentials.
+Real mode requires explicit ANYSEEK_S3_TEST_* configuration and a disposable bucket.
 """
 import argparse, hashlib, http.server, os, subprocess, sys, threading, urllib.parse
 
 class S3(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
+    disable_nagle_algorithm = True
     objects = {}
     lock = threading.Lock()
     def log_message(self, *args):
@@ -48,16 +49,25 @@ class S3(http.server.BaseHTTPRequestHandler):
 
 def main():
     import base64, http.client, json, pathlib, shutil, socket, tempfile, time, urllib.error, urllib.request, uuid
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--faults',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--faults',action='store_true');parser.add_argument('--backend',choices=['fixture','real'],default='fixture');args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
-    fixture=http.server.ThreadingHTTPServer(('127.0.0.1',0),S3)
-    threading.Thread(target=fixture.serve_forever,daemon=True).start()
-    env={**os.environ,'ANYSEEK_STORAGE_BACKEND':'s3','ANYSEEK_S3_ENDPOINT':f'http://127.0.0.1:{fixture.server_port}',
-         'ANYSEEK_S3_BUCKET':'disposable','ANYSEEK_S3_REGION':'us-east-1','ANYSEEK_S3_ACCESS_KEY_ID':'fixture',
-         'ANYSEEK_S3_SECRET_ACCESS_KEY':'fixture-secret','ANYSEEK_S3_ALLOW_HTTP':'1','MASTER_KEY_SECRET':'s3-test'}
+    fixture=None
+    if args.backend=='fixture':
+        fixture=http.server.ThreadingHTTPServer(('127.0.0.1',0),S3)
+        threading.Thread(target=fixture.serve_forever,daemon=True).start()
+        env={**os.environ,'ANYSEEK_STORAGE_BACKEND':'s3','ANYSEEK_S3_ENDPOINT':f'http://127.0.0.1:{fixture.server_port}',
+             'ANYSEEK_S3_BUCKET':'disposable','ANYSEEK_S3_REGION':'us-east-1','ANYSEEK_S3_ACCESS_KEY_ID':'fixture',
+             'ANYSEEK_S3_SECRET_ACCESS_KEY':'fixture-secret','ANYSEEK_S3_ALLOW_HTTP':'1','MASTER_KEY_SECRET':'s3-test'}
+    else:
+        required=['ENDPOINT','BUCKET','REGION','ACCESS_KEY_ID','SECRET_ACCESS_KEY']
+        missing=[f'ANYSEEK_S3_TEST_{key}' for key in required if not os.environ.get(f'ANYSEEK_S3_TEST_{key}')]
+        if missing:parser.error('missing dedicated test configuration: '+', '.join(missing))
+        env={**os.environ,'ANYSEEK_STORAGE_BACKEND':'s3','MASTER_KEY_SECRET':'s3-test'}
+        for key in required+['ALLOW_HTTP']:
+            env[f'ANYSEEK_S3_{key}']=os.environ.get(f'ANYSEEK_S3_TEST_{key}','0')
     master=base64.b64encode(hashlib.sha256(b's3-test').digest()).decode()
     def operation():return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
-    with tempfile.TemporaryDirectory(prefix='anyseek-s3-') as directory:
+    with tempfile.TemporaryDirectory(prefix='anyseek-s3-',dir=os.environ.get('ANYSEEK_TEST_ROOT')) as directory:
         directory=pathlib.Path(directory);root=directory/'data';log=open(directory/'service.log','w+')
         clock=directory/'clock';clock.write_text(str(int(time.time()*1000)));env['ANYSEEK_TEST_CLOCK_FILE']=str(clock)
         process=None;children=[]
@@ -68,12 +78,12 @@ def main():
             process=subprocess.Popen([binary,f'index_path={target or root}',f'local_port={listen or port}',
                 'local_ip=127.0.0.1','force_shard_number=1'],env={**env,**(extra or {})},stdout=log,stderr=log)
             children.append(process)
-            for _ in range(600):
+            for _ in range(2400):
                 if process.poll() is not None:
                     log.seek(0);raise AssertionError(log.read())
                 try:urllib.request.urlopen(base+'/api/v1/live',timeout=1).read();return
                 except (OSError,urllib.error.URLError):time.sleep(.05)
-            raise AssertionError('S3 service startup timed out')
+            log.seek(0);raise AssertionError('S3 service startup timed out: '+log.read()[-8192:])
         def stop():
             if process and process.poll() is None:process.kill();process.wait(timeout=30)
         def call(method,path,body=None,status=200,key=master):
@@ -82,8 +92,17 @@ def main():
             try:
                 with urllib.request.urlopen(req,timeout=60) as response:code=response.status;raw=response.read()
             except urllib.error.HTTPError as error:code=error.code;raw=error.read()
-            assert code==status,(method,path,code,status,raw)
+            assert code in (status if isinstance(status,tuple) else (status,)),(method,path,code,status,raw)
             return json.loads(raw)
+        def control(method,path,body):
+            deadline=time.monotonic()+300
+            while True:
+                result=call(method,path,body,status=(200,503))
+                if result.get('code')!='outcome_unknown':
+                    assert 'code' not in result,(path,result)
+                    return result
+                assert time.monotonic()<deadline,('control retry deadline',path)
+                print('RETRY original control identity: '+path,flush=True)
         def cold_restart():
             stop()
             for path in root.glob('collection-*'):
@@ -125,6 +144,16 @@ def main():
                     assert process.wait(timeout=30)==91
                     cold_restart();assert query()==expected
                 print('PASS S3 checkpoint real process exits before/after SQLite publication',flush=True)
+                stop();start({'ANYSEEK_CACHE_APPEND_FAULT':'1'})
+                cache_write=write('cache-failure','cache-failure','alpha remotely committed')
+                pending=call('POST','/api/v1/index/main/doc',cache_write,status=503)
+                assert pending['code']=='durable_pending',pending
+                call('POST','/api/v1/index/main/query',{},status=503)
+                cold_restart()
+                assert call('POST','/api/v1/index/main/doc',cache_write)['receipt']['version']==1
+                assert call('GET','/api/v1/index/main/doc/cache-failure')['document']['body']=='alpha remotely committed'
+                expected=query()
+                print('PASS confirmed SQLite commit + failed local cache append: durable_pending, fenced output, cold recovery and original receipt',flush=True)
             # A backup proves provenance; the successor must include newer writes
             # and deletions from the permanent, SQLite-certified final source.
             modes=['normal','prepared','sealed','target_created','certified','finalized','remote_before','remote_after','target_remote_before','target_remote_after'] if args.faults else ['normal']
@@ -216,10 +245,10 @@ def main():
             call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'reader','apikey_base64':user})
             call('POST','/api/v1/index/main/grants',{'operation_id':operation(),'key_id':'reader','allow':True})
             whole_request={'operation_id':operation()}
-            whole=call('POST','/api/v1/service-backups',whole_request)
+            whole=control('POST','/api/v1/service-backups',whole_request)
             assert whole['snapshot']['collection_backups']
-            assert call('POST','/api/v1/service-backups',whole_request)==whole
-            restored=call('POST','/api/v1/service-restores',{'operation_id':operation(),'backup_id':whole['backup_id']})
+            assert control('POST','/api/v1/service-backups',whole_request)==whole
+            restored=control('POST','/api/v1/service-restores',{'operation_id':operation(),'backup_id':whole['backup_id']})
             target_root=pathlib.Path(restored['target_root']);stop();start(target=target_root)
             call('GET','/api/v1/index/main',key=user,status=403)
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
@@ -240,5 +269,6 @@ def main():
         finally:
             for child in children:
                 if child.poll() is None:child.kill();child.wait(timeout=30)
-            log.close();fixture.shutdown();fixture.server_close()
+            log.close()
+            if fixture:fixture.shutdown();fixture.server_close()
 if __name__=='__main__':main()

@@ -663,6 +663,29 @@ pub struct RecordStatistics {
     pub checkpoint_bytes: usize,
 }
 impl Inner {
+    // In S3 mode the caller has already received SQLite commit confirmation.
+    // A cache append error cannot turn that known durable operation into an
+    // unknown remote commit. The caller keeps health/output fenced until reopen.
+    fn append_operation(&mut self, bytes: &[u8], seq: u64) -> Result<(), RecordError> {
+        let result = (|| {
+            #[cfg(test)]
+            if self.journal.root().join(".test-cache-append-failure").exists() {
+                return Err(std::io::Error::other("injected cache append failure"));
+            }
+            #[cfg(feature="fault-injection")]
+            if std::env::var("ANYSEEK_CACHE_APPEND_FAULT").as_deref()==Ok("1") {
+                return Err(std::io::Error::other("injected cache append failure"));
+            }
+            self.journal.append(bytes)
+        })();
+        if let Err(error) = result {
+            #[cfg(feature="s3-object-store")]
+            if self.remote.is_some() { return Err(RecordError::DurablePending(seq)); }
+            let _ = seq;
+            return Err(RecordError::OutcomeUnknown(error.to_string()));
+        }
+        Ok(())
+    }
     fn statistics(&self) -> RecordStatistics {
         RecordStatistics {
             evaluation_time_ms: self.evaluation_time_ms,            visible_seq: self.state.seq,
@@ -935,7 +958,7 @@ impl RecordPartition {
         config: RecordConfig,
         remote_config: S3CompatibleRecordConfig,
     ) -> Result<Self, RecordError> {
-        let mut remote = RemotePersistence::open(&remote_config)?;
+        let remote = RemotePersistence::open(&remote_config)?;
         let existing = remote.authority.lock().await.read_head(&remote.partition_id).map_err(storage)?;
         match existing {
             Some(head) if head.owner_epoch != remote.owner_epoch => {
@@ -1044,36 +1067,19 @@ impl RecordPartition {
                     .ok_or(RecordError::RecoveryRequired)?;
                 if head.owner_epoch!=remote.owner_epoch {return Err(RecordError::RecoveryRequired);}
                 let initial=remote.store.get_verified(head.bootstrap.as_ref().ok_or(RecordError::RecoveryRequired)?).await.map_err(storage)?;
+                PartitionJournal::validate_initial(initial.len(),max_journal_bytes)
+                    .map_err(|e|RecordError::Rejected(e.to_string()))?;
+                match serde_json::from_slice::<Entry>(&initial).map_err(storage)? {
+                    Entry::Checkpoint {config,state} if config.max_journal_bytes==max_journal_bytes && state.seq==0 => validate_config(&config)?,
+                    _=>return Err(RecordError::Rejected("remote bootstrap configuration or initial sequence is invalid".into())),
+                }
                 PartitionJournal::create(path,max_journal_bytes,&initial).map_err(creation_error)?
             };
             if let Some(anchor)=remote.materialize_checkpoint(path,max_journal_bytes).await? {
                 journal.checkpoint(&anchor).map_err(creation_error)?;
             }
         }
-        let partition = if path.exists() {
-            Self::open(path, max_journal_bytes).await?
-        } else {
-            let head = remote.authority.lock().await.read_head(&remote.partition_id).map_err(storage)?
-                .ok_or_else(|| storage("remote partition authority is missing"))?;
-            if head.owner_epoch != remote.owner_epoch {
-                return Err(RecordError::RecoveryRequired);
-            }
-            let bootstrap_ref = head.bootstrap.as_ref()
-                .ok_or_else(|| storage("remote partition has no committed bootstrap checkpoint"))?;
-            let bootstrap = remote.store.get_verified(bootstrap_ref).await.map_err(storage)?;
-            let (stored_config, stored_state) = match serde_json::from_slice::<Entry>(&bootstrap).map_err(storage)? {
-                Entry::Checkpoint { config, state } => (config, state),
-                _ => return Err(storage("remote bootstrap is not a Record checkpoint")),
-            };
-            if stored_config.max_journal_bytes != max_journal_bytes || stored_state.seq != 0 {
-                return Err(RecordError::Rejected(
-                    "remote bootstrap configuration or initial sequence is invalid".into()
-                ));
-            }
-            PartitionJournal::validate_initial(bootstrap.len(), max_journal_bytes).map_err(storage)?;
-            drop(PartitionJournal::create(path, max_journal_bytes, &bootstrap).map_err(creation_error)?);
-            Self::open(path, max_journal_bytes).await?
-        };
+        let partition = Self::open(path,max_journal_bytes).await?;
         {
             let mut inner = partition.inner.lock().await;
             remote.reconcile_journal(&mut inner).await?;
@@ -1430,10 +1436,7 @@ impl RecordPartition {
                     remote.commit(&applied, &bytes).await
                         .map_err(|error| RecordError::OutcomeUnknown(error))?;
                 }
-                inner
-                    .journal
-                    .append(&bytes)
-                    .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+                inner.append_operation(&bytes,receipt.seq)?;
                 #[cfg(feature = "fault-injection")]
                 match injected.as_deref() {
                     Some("after_append_unknown") => {
