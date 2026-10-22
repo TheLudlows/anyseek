@@ -4206,7 +4206,7 @@ mod tests {
             let mut inner = partition.inner.lock().await;
             let prepared = mutation::prepare_at(
                 &inner.state, &inner.config, inner.snapshot_bytes,
-                write("remote-tail", "remote-record", "alpha remote durable", ExpectedVersion::Missing),
+                write("remote-tail", "remote-record", "alpha remote durable", ExpectedVersion::Absent),
                 current_epoch(), inner.evaluation_time_ms,
             ).unwrap();
             let (applied, bytes) = match prepared {
