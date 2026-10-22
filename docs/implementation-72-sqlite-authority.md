@@ -58,33 +58,35 @@ The SQLite database is a single local authority. Do not put its WAL database on 
 
 ## Progress status — 2026-10-22
 
-Overall: **Record-level S3 integration is implemented as an opt-in path; not ready to merge until current-head CI and service-specific validation pass.**
+Overall: **Record-level S3 integration is implemented as an opt-in path. Build/regression CI is green on the latest validated head, but this feature is not ready to merge until the remaining service-specific and retention/backup checks pass.**
 
 ### Delivered
 - SQLite metadata authority with sequential conditional commit publication, owner-epoch fencing and operation receipts.
 - S3-compatible immutable object adapter with conditional create, read-back verification and ambiguous-PUT retry handling.
 - Record `create_s3/open_s3`: remote bootstrap publication/recovery, object-first commit before local journal/index publication, and committed-tail reconciliation into the ordinary Record replay path.
-- Bounded tail validation; immutable WAL predecessor dependency edges; logical metadata backup/restore, transitive closure discovery, backup root pins and GC deletion tombstones.
-- Record-level regression test for recovering a missing local cache from the remote bootstrap plus committed operation log.
+- Bounded tail validation and incremental replay after a recovered local sequence; immutable WAL predecessor dependency edges.
+- Logical metadata backup/restore, transitive closure discovery, backup root pins and GC deletion tombstones.
+- Record-level cache-loss regression test covers create/update/delete and confirms final visible state after rebuilding from remote bootstrap + committed log.
+- S3 mode deliberately disables local-only feed trimming until a remote-authoritative feed-floor transition is implemented.
 
 ### Validation
-- CI Run #276 passed on an earlier storage-only head.
-- Run #281 exposed a missing `max_object_bytes` initializer and was fixed.
-- Runs #285 and #289 were cancelled by subsequent pushes before completing.
-- Run #291 is the current validation run for Record cache-rebuild tests; final result is pending at the time of this update.
-- No real S3-compatible endpoint has yet been exercised. An ignored integration contract test now covers conditional create, read-after-write, duplicate/conflicting key behavior, and authority-gated deletion when a dedicated endpoint/bucket and test credentials are supplied via `ANYSEEK_S3_TEST_*` environment variables. In-memory tests do not prove provider-specific behavior.
+- **CI Run #305 completed successfully**: Linux persistence/fault tests passed; workspace build and smoke tests passed; Windows persistence and native HTTP process fault/recovery matrix passed.
+- This is the latest confirmed green run at the time of this update.
+- The ignored real S3 contract test has not been run against a real endpoint. In-memory tests do not prove provider-specific conditional-create, read-after-write, or delete behavior.
 
 ### Remaining work
-1. Finish current-head Linux/Windows/workspace CI and fix all failures.
-2. Audit non-`Applied` maintenance events and compaction/anchor paths to ensure they cannot mutate authoritative state without remote publication. Feed trimming now explicitly no-ops in S3 mode until its metadata transition can be committed remotely; add a remote-authoritative feed-floor protocol before claiming retention reclamation.
-3. Test response loss, update/delete semantics, bootstrap retry and local-cache-loss recovery.
-4. Verify complete index/segment dependency registration and service-level backup/restore.
-5. Run integration/fault tests against a real S3-compatible service before removing Draft status.
+1. Implement a remote-authoritative feed-floor/FeedTrim transition so feed retention can safely resume in S3 mode.
+2. Verify all manifest/index/segment writers register complete dependency edges and test service-level backup/restore across interrupted recovery.
+3. Run the ignored contract test against the intended S3-compatible endpoint/bucket.
+4. Run a final CI after any further code changes and keep the PR Draft until all remaining acceptance criteria pass.
+5. Review/document operational constraints: SQLite authority is single-host local metadata; this slice does not provide cross-host HA.
 
 ## Latest progress — 2026-10-22
 
-- Added the Record-level bootstrap publication/recovery path and validation that the local checkpoint identity matches the authoritative remote bootstrap.
-- Added recovery from a missing local cache: reconstruct the local journal from the remote bootstrap, append all committed log entries, then rebuild through the standard Record recovery/index path. The regression test now includes update and delete operations and checks the final visible state after a second cache loss.
-- Added predecessor dependency edges for immutable WAL blocks and a test that backup reachability includes the full committed chain. Added an incremental tail-read test for resuming after a locally recovered sequence.
-- Audited TTL and staging-lease expiration: both already publish their sequenced maintenance events through the remote authority before local journal append. Found feed trim was local-only; S3 mode now skips that trim rather than risking a lost retention floor after cache rebuild, with a regression assertion in the Record-level remote integration test.
-- Current CI Run #291 is pending/in progress. PR remains Draft; real S3 endpoint validation and the maintenance-event audit remain outstanding.
+- CI Run #305 is green across Linux persistence, Windows persistence/native HTTP fault recovery, workspace build and smoke.
+- The Record S3 path is integrated for bootstrap, Applied writes and cache-loss replay, with create/update/delete recovery coverage.
+- Added incremental tail replay so recovery resumes after the locally recovered sequence rather than rereading the entire history.
+- Added WAL predecessor edges for backup closure discovery.
+- TTL and staging-lease expiration already publish sequenced maintenance entries remotely before local journal append.
+- FeedTrim is intentionally a no-op in S3 mode until its retention-floor update is represented by the remote commit protocol.
+- Still outstanding: remote-authoritative feed retention, real S3 endpoint contract run, and service-level backup/restore/GC acceptance. PR #72 remains Draft.
