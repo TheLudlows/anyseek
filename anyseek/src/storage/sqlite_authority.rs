@@ -219,9 +219,9 @@ impl SqliteAuthority {
                     [&object.key],
                     |row| row.get(0),
                 )?;
-                if state == 2 {
+                if state != 1 {
                     return Err(rusqlite::Error::InvalidParameterName(
-                        "retired immutable object key cannot be reactivated".into()
+                        "inactive or retired immutable object key cannot be reactivated".into()
                     ));
                 }
                 tx.execute(
