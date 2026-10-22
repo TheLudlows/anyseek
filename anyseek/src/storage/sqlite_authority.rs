@@ -208,6 +208,42 @@ impl SqliteAuthority {
         read_head(&self.connection, partition_id)
     }
 
+    /// Return every active object reachable from the current committed heads,
+    /// following immutable manifest/WAL dependency edges transitively.
+    pub(crate) fn reachable_objects(&self) -> rusqlite::Result<Vec<ObjectRef>> {
+        let keys = {
+            let mut statement = self.connection.prepare(
+                "WITH RECURSIVE reachable(object_key) AS (
+                    SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
+                    UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
+                    UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
+                    UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
+                 )
+                 SELECT object_key FROM reachable ORDER BY object_key"
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_,String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut objects = Vec::with_capacity(keys.len());
+        for key in keys {
+            let row: Option<(Vec<u8>,i64,i64)> = self.connection.query_row(
+                "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
+                [&key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            ).optional()?;
+            let (digest,length,state) = row.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            if state != 1 || length < 0 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let sha256: [u8;32] = digest.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            objects.push(ObjectRef {
+                key,
+                sha256,
+                length: u64::try_from(length).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            });
+        }
+        Ok(objects)
+    }
+
     /// Register an object only after the object-store adapter has completed the durable
     /// upload and independently verified its byte length and SHA-256. A key is immutable:
     /// registering different bytes under an existing key is rejected.
