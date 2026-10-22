@@ -448,6 +448,43 @@ impl RemotePersistence {
     /// Copy any remotely committed but locally absent sequential entries into the
     /// local recovery journal. The caller reopens the partition afterward so the
     /// ordinary journal recovery path applies every Entry variant consistently.
+    async fn create_backup_bundle(
+        &mut self,
+        backup_id: &str,
+        created_at_ms: i64,
+        max_snapshot_bytes: usize,
+    ) -> Result<String, String> {
+        let mut authority = self.authority.lock().await;
+        let closure = authority.reachable_objects().map_err(|error| error.to_string())?;
+        let bundle = self.store.create_backup_bundle(
+            &mut authority, backup_id, &closure, created_at_ms, max_snapshot_bytes,
+        ).await.map_err(|error| error.to_string())?;
+        serde_json::to_string(&bundle).map_err(|error| error.to_string())
+    }
+
+    async fn restore_backup_bundle(
+        &mut self,
+        bundle_json: &str,
+        max_snapshot_bytes: usize,
+        max_objects: usize,
+        max_total_object_bytes: usize,
+    ) -> Result<(), RecordError> {
+        let bundle: crate::storage::s3_compatible::BackupBundle =
+            serde_json::from_str(bundle_json).map_err(storage)?;
+        let mut authority = self.authority.lock().await;
+        self.store.restore_backup_bundle(
+            &mut authority, &bundle.descriptor_ref, max_snapshot_bytes,
+            max_objects, max_total_object_bytes,
+        ).await.map_err(storage)?;
+        Ok(())
+    }
+
+    fn safe_backup_id(backup_id: &str) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(backup_id.as_bytes()).iter()
+            .map(|byte| format!("{byte:02x}")).collect()
+    }
+
     async fn reconcile_journal(&mut self, inner: &mut Inner) -> Result<(), RecordError> {
         let head = self.authority.lock().await.read_head(&self.partition_id).map_err(storage)?
             .ok_or_else(|| storage("remote partition authority is missing"))?;
@@ -935,6 +972,60 @@ impl RecordPartition {
             inner.remote = Some(remote);
         }
         Ok(partition)
+    }
+
+    /// Create an immutable joint S3/SQLite backup. The returned JSON descriptor
+    /// is a small local pointer; the metadata snapshot and all payload objects remain
+    /// in object storage. The source authority pins the complete reachable closure.
+    #[cfg(feature = "s3-object-store")]
+    pub async fn create_s3_backup(
+        &self,
+        backup_id: &str,
+        created_at_ms: i64,
+        max_snapshot_bytes: usize,
+    ) -> Result<String, RecordError> {
+        let mut inner = self.inner.lock().await;
+        if !inner.healthy || inner.state.sealed_for.is_some() {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let remote = inner.remote.as_mut().ok_or_else(|| RecordError::Rejected(
+            "partition is not using S3 storage".into()
+        ))?;
+        remote.create_backup_bundle(
+            &RemotePersistence::safe_backup_id(backup_id), created_at_ms, max_snapshot_bytes,
+        ).await.map_err(storage)
+    }
+
+    /// Release a retained joint backup's pins only after its descriptor has been retired.
+    #[cfg(feature = "s3-object-store")]
+    pub async fn release_s3_backup_pins(&self, backup_id: &str) -> Result<usize, RecordError> {
+        let mut inner = self.inner.lock().await;
+        let remote = inner.remote.as_mut().ok_or_else(|| RecordError::Rejected(
+            "partition is not using S3 storage".into()
+        ))?;
+        remote.authority.lock().await
+            .release_backup_pins(&RemotePersistence::safe_backup_id(backup_id))
+            .map_err(storage)
+    }
+
+    /// Restore a joint S3/SQLite backup into an empty authority database, verify its
+    /// complete object closure, then reconstruct the local journal/index cache.
+    #[cfg(feature = "s3-object-store")]
+    pub async fn restore_s3_backup(
+        path: &Path,
+        config: RecordConfig,
+        remote_config: S3CompatibleRecordConfig,
+        bundle_json: &str,
+        max_snapshot_bytes: usize,
+        max_objects: usize,
+        max_total_object_bytes: usize,
+    ) -> Result<Self, RecordError> {
+        let mut remote = RemotePersistence::open(&remote_config)?;
+        remote.restore_backup_bundle(
+            bundle_json, max_snapshot_bytes, max_objects, max_total_object_bytes,
+        ).await?;
+        drop(remote);
+        Self::open_s3(path, config, remote_config).await
     }
 
     /// Create a new authoritative partition. Parent directory must exist.
