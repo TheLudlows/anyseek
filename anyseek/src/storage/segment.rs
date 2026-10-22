@@ -1,8 +1,9 @@
 //! Immutable, bounded payload blocks. A descriptor is prepared data, not a
 //! publication witness: only an authenticated partition manifest may select it.
+use super::build_budget::{File,OpenOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fs::{File, OpenOptions}, io::{self, Read, Seek, SeekFrom, Write}, path::Path, sync::Mutex};
+use std::{io::{self, Read, Seek, SeekFrom, Write}, path::Path, sync::Mutex};
 
 const MAGIC: &[u8; 16] = b"ANYSEEK-PAYLOAD1";
 const HEADER: u64 = 16;

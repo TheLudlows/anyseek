@@ -41,6 +41,7 @@ mod publication;
 mod segment_state;
 mod segment;
 mod anchor;
+pub(crate) mod build_budget;
 mod view;
 mod recovery;
 pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
@@ -584,6 +585,14 @@ async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Res
     build_at_selected(path,cache,config,state,None).await
 }
 async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(IndexArc,Vec<String>),RecordError>{
+    let disk_limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("build disk limit overflow"))?;
+    let _disk=crate::storage::build_budget::ensure_scope(path,disk_limit).map_err(storage)?;
+    let visible = evidence::visibility(&state.records)?;
+    let records: Vec<_> = state.records.values().filter(|record|
+        visible.get(&record.record_id) == Some(&true)
+        && selected.is_none_or(|keys|keys.contains(&record.record_id))
+        && !(state.evidence_quarantined && temporal::protected(record))).collect();
+    let reservation=build_budget::admit(config,records.iter().copied())?;
     let index = create_index(
         &cache,
         config.index.clone(),
@@ -597,6 +606,8 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
     // Break legacy ownership cycles so a rejected candidate can release mapped
     // files on Windows. The partition owns the root for the complete query.
     detach(&index).await;
+    index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
+    index.read().await.shard_vec[0].write().await.build_input_covered=true;
     for shard in &index.read().await.shard_vec {
         let mut shard=shard.write().await;
         shard.active=Some(crate::active::ActiveStatistics::default());
@@ -616,11 +627,7 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     }
-    let visible = evidence::visibility(&state.records)?;
-    let records: Vec<_> = state.records.values().filter(|record|
-        visible.get(&record.record_id) == Some(&true)
-        && selected.is_none_or(|keys|keys.contains(&record.record_id))
-        && !(state.evidence_quarantined && temporal::protected(record))).collect();
+
     for record in &records {
         index.read().await.shard_vec[0]
             .write()
@@ -636,6 +643,7 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
             .map_err(storage)?;
     }
     index.commit().await.map_err(storage)?;
+    index.read().await.shard_vec[0].write().await.build_input_covered=false;
     Ok((
         index,
         records.into_iter().map(|r| r.record_id.clone()).collect(),
@@ -906,6 +914,13 @@ impl RecordPartition {
                     mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve } =>
                         (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve),
                 };
+                let growth=build_budget::write_estimate(&inner.state,&inner.config,&applied)?;
+                if growth>0 && !inner.index.can_admit(growth).await {
+                    // One bounded flush attempt before rejecting, never discard
+                    // selected history to manufacture admission space.
+                    inner.publish_anchor().await?;
+                    if !inner.index.can_admit(growth).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
+                }
                 let feed_point = change_feed::pending(&inner.state,&applied)?;
                 inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;
                 inner.journal.validate_append_with_reserve(bytes.len(), reserve_bytes)
@@ -3345,12 +3360,15 @@ mod tests {
             .unwrap()
             .insert("region".into(), "eu".into());
         partition.write(original.clone()).await.unwrap();
-        // Seed a realistic retired physical history through the actual engine,
-        // without 65K unrelated WAL fsyncs. The final boundary crossing itself
-        // uses the authoritative Record write path and its publication guard.
+        // Seed synthetic retired physical history through the actual engine,
+        // bypassing WAL/admission to preserve the low-level 64K boundary oracle.
+        // Production admission now flushes such a tail earlier; this fixture is
+        // not evidence that 65K retained mutations fit the resource budget.
+        // The final boundary crossing still uses authoritative publication.
         {
             let mut inner = partition.inner.lock().await;
             let shard = inner.index.test_index().read().await.shard_vec[0].clone();
+            shard.write().await.build_input_covered=true;
             for id in 1..65536 {
                 shard
                     .write()
@@ -3370,6 +3388,7 @@ mod tests {
                 shard.active.as_mut().unwrap().retire(id - 1);
                 inner.ordinals.push("a".into());
             }
+            shard.write().await.build_input_covered=false;
             inner.locations.insert("a".into(), 65535);
         }
         partition

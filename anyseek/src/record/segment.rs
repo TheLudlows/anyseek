@@ -7,7 +7,7 @@ use std::io::{Read,Write};
 
 #[derive(Debug,Serialize,Deserialize,Clone)]
 #[serde(deny_unknown_fields)]
-pub(super) struct FileRef { path:String, bytes:u64, sha256:[u8;32] }
+pub(super) struct FileRef { path:String, pub(super) bytes:u64, sha256:[u8;32] }
 #[derive(Debug,Serialize,Deserialize,Clone)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Descriptor { format:u32, seq:u64, files:Vec<FileRef> }
@@ -39,7 +39,7 @@ pub(super) fn files(root:&Path,budget:u64)->Result<Vec<FileRef>,RecordError> {
     let mut result=Vec::new();walk(root,root,&mut 0,budget,0,&mut 0,&mut result)?;result.sort_by(|a,b|a.path.cmp(&b.path));Ok(result)
 }
 pub(super) fn write_json(path:&Path,value:&impl Serialize)->Result<(),RecordError>{
-    let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(storage)?;
+    let mut file=crate::storage::build_budget::OpenOptions::new().write(true).create_new(true).open(path).map_err(storage)?;
     serde_json::to_writer(&mut file,value).map_err(storage)?;file.flush().map_err(storage)?;file.sync_all().map_err(storage)
 }
 pub(super) fn read_bounded(path:&Path,limit:u64)->Result<Vec<u8>,RecordError>{

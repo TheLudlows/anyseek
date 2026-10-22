@@ -1,3 +1,4 @@
+use crate::storage::build_budget::File;
 use ahash::{AHashMap, AHashSet};
 use futures::future;
 use indexmap::IndexMap;
@@ -12,7 +13,7 @@ use std::{
     cmp,
     collections::HashMap,
     fmt::{self},
-    fs::{self, File},
+    fs::{self},
     io::{BufRead, BufReader, Read, Seek, Write},
     path::Path,
     sync::{Arc, LazyLock},
@@ -868,6 +869,8 @@ pub struct Shard {
     pub(crate) delete_file: File,
     pub(crate) delete_hashset: AHashSet<usize>,
     pub(crate) active: Option<crate::active::ActiveStatistics>,
+    pub(crate) build_reservation: Option<crate::storage::build_budget::MemoryLease>,
+    pub(crate) build_input_covered: bool,
 
     pub(crate) index_file: File,
     pub(crate) index_path_string: String,
@@ -1710,6 +1713,8 @@ pub(crate) fn create_shard(
                 delete_file,
                 delete_hashset: AHashSet::new(),
                 active: None,
+                build_reservation: None,
+                build_input_covered: false,
                 index_file,
                 index_path_string: index_path_string.to_owned(),
                 index_file_mmap,
@@ -3131,8 +3136,15 @@ impl IndexDocumentShard for ShardArc {
     /// May block, if the threshold of documents indexed in parallel is exceeded.
     async fn index_document_shard(&self, document: Document, docid_global: usize) -> Result<(), String> {
         let shard_arc_clone = self.clone();
-        let shard_ref = self.read().await;
+        let mut shard_ref = self.write().await;
         let schema = shard_ref.indexed_schema_vec.clone();
+        let _analysis_reservation=if shard_ref.active.is_some(){
+            let bytes=crate::record::build_budget::document_estimate(&document,&schema).map_err(|e|e.to_string())?;
+            if !shard_ref.build_input_covered {
+                if let Some(lease)=&mut shard_ref.build_reservation {lease.grow(bytes).map_err(|e|e.to_string())?;}
+            }
+            Some(crate::storage::build_budget::reserve_memory(bytes).map_err(|e|e.to_string())?)
+        }else{None};
         let ngram_indexing = shard_ref.meta.ngram_indexing;
         let indexed_field_vec_len = shard_ref.indexed_field_vec.len();
         let tokenizer_type = shard_ref.meta.tokenizer;
@@ -3511,6 +3523,7 @@ impl IndexDocumentShard2 for ShardArc {
         }
 
         let unique_terms = document_item.unique_terms;
+        if shard_mut.active.is_some() { shard_mut.prepare_record_postings(&unique_terms)?; }
 
         for term in unique_terms {
             shard_mut.index_posting(term.1, docid_local, false, 0, 0, 0);

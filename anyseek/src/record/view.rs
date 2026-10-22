@@ -13,6 +13,11 @@ pub(super) struct RetrievalView {
     common: Option<Arc<std::sync::RwLock<crate::active::Corpus>>>,
 }
 impl RetrievalView {
+    pub(super) async fn can_admit(&self,bytes:u64)->bool {
+        let root=self.tail.read().await;let shard=root.shard_vec[0].read().await;
+        shard.build_reservation.as_ref().is_some_and(|r|r.can_grow(bytes))
+    }
+
     pub(super) fn single(index: IndexArc) -> Self {
         Self {
             query: index.clone(),

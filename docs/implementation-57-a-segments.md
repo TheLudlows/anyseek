@@ -1,6 +1,6 @@
 # A 批实施设计：本地不可变 Segment、发布与安全回收
 
-状态：实施中，尚未完成 A 批；实际检查点见 §11–19。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
+状态：A 核心本地实现及 Linux 回归完成；Windows 原生与系统崩溃/断电仍未验收。实际检查点见 §11–20。基线为已合入 PR #70 的 `f73d3eb27ff4bf97149031069f49cac3e01966ab`。承接[核心路线 §3–5](implementation-57-core-roadmap.md#5-a本地-segmentmanifest-与回收)，本文件细化 A，不代替既有 P1/P2 契约。用户已确认优先核心能力、避免关系库和 Segment 冗余；以下物理布局与接口是工程方案，不能表述为已完成能力。
 
 ## 1. 交付和不做的事
 
@@ -66,7 +66,7 @@ PayloadRef 必须区分 body version 与物理提交修订：vector_patch 可不
 
 ## 6. 资源与防冗余验收
 
-预算分别覆盖 tail 字节/操作、段数、构建输入输出、内存引用缓存、查询候选、未退休对象和备份保留；不让“分批”最终再聚合成无限大单 WAL/单内存对象。达到阈值先触发有限 flush/compaction，无法腾出正确性允许的空间才背压。
+资源验收采用用户已确认的方案 1（详见 §20）：保守输入准入、显式缓冲限制和写入前共享逻辑磁盘扣账，不承诺全部分配或 RSS 硬上限。预算分别覆盖 tail 字节/操作、段数、构建输入输出、内存引用缓存、查询候选、未退休对象和备份保留；不让“分批”最终再聚合成无限大单 WAL/单内存对象。达到阈值先触发有限 flush/compaction，无法腾出正确性允许的空间才背压。
 
 测试报告拆分：唯一 payload、检索派生、业务历史/回执/feed、备份 pin、临时构建、retired 未清理。不存在第二套持久全量 JSON docstore；规范原始向量只保存在 payload 中，索引表示差异单独计量。重复同一物理内容只引用，不做无依据跨版本去重。固定活跃数据循环更新后，无引用的索引和过期私有数据应收敛；有效 Source 历史/精确重试/备份本身可增长，必须解释并背压，不宣称恒定空间。
 
@@ -199,3 +199,39 @@ active Record 路径的显式 `_id` 排序现在在局部 Top-K 和 root 都使�
 回归覆盖候选文件已发布但未加载、candidate mmap 与新 tail 已准备两处拒绝，各重复三次：旧认证引用不变、孤儿文件不累计、旧副本可继续写入、再发布/重启与重试仍成功。独立审查未发现新的认证边界问题，并按建议补充了后一处句柄释放测试。最终源码 Linux：`cargo test --workspace --features server --all-targets` 为 34 suites、252 passed、0 failed、10 ignored；`cargo test --doc` 44 passed；故障注入服务构建成功；真实 HTTP/Chromium `--browser --faults` 退出 0、34 PASS。日志为 `a-candidate-cleanup-full.log`、`a-candidate-cleanup-doc.log`、`a-candidate-cleanup-build.log`、`a-candidate-cleanup-http-browser-faults.log`。
 
 A 清单当前状态：默认多段+tail、认证发布及只重放 tail 恢复、多轮冻结与等价 compaction、选中引用安全 GC 已接入真实路径并有 Linux 回归；全过程共享内存/逻辑磁盘限额仍未接通，不用末尾文件大小检查冒充硬限额。Windows 原生及系统断电未验收；此阶段不推送或触发 CI。
+
+## 20. 方案 1 资源准入与显式缓冲（本地验证完成）
+
+用户于 2026-10-22 确认采用“保守准入 + 显式缓冲预算”。本节替代此前把 A 资源门槛笼统称作“全过程硬内存限制”的表述；历史检查点的测试结果不改写。**预算不是全部分配请求或进程 RSS 上限**，不精确计量 HashMap 桶、容器扩容临时内存、分配器开销、系统文件缓存及已有业务 State/查询缓存。
+
+### 准入与内存生命周期
+
+当前采用内部固定限额，不增加账户、调度或通用资源平台：单租约估算上限 256 MiB，共享估算额度 4 GiB，Record shard 的 posting/position scratch/压缩缓冲及 root 压缩工作区合计显式长度上限 64 MiB。4 GiB 是逻辑估算额度，不表示机器需要或必然只使用 4 GiB RAM。
+
+构建在创建索引之前遍历选中的输入、统计序列化字节和候选词数量；估算包含 `32 × 正文字节` 的复制/规范化/向量工作量余量，以及 unigram/bigram/trigram、字段位置与词项描述符余量。每字段另预留数组/facet 工作量；ZH 另有 64 MiB 字典余量。非 ASCII 字符按逐字符候选计数，同时覆盖空白分词。它们是保守工程估算与背压规则，不是标准库 malloc 布局证明。恢复已认证段在打开索引之前预留字段/ZH 基础余量和两倍索引文件字节估算。
+
+租约附着 Shard，旧视图及其映射仍存活时不提前释放。新 tail 的后续输入累积计入该租约；分词前另有暂态分析租约。已预审整个输入的冻结构建不重复累加相同输入。生产写入在 WAL 前检查单 tail 准入；空间不足先尝试一次已认证 flush，再检查并拒绝，不静默丢弃内容。全局额度可能被其他 collection 并发占用，因此不能声称所有资源失败都发生在 WAL 前：持久化后应用失败仍返回 DurablePending 并保持输出封锁，按原协议恢复。
+
+posting 的全部增长在编码前计算并用 `try_reserve_exact` 预留；每位置最多三字节的 scratch 与 round-up posting capacity 一并检查。压缩前按已编码位置字节、posting 指针/docid 和 key 头部推导工作区上界；增长前检查合计额度，完成后复用缓冲，不再无条件重新分配固定工作区。构建拒绝不改变已认证视图；不是通过截断字段、词项或向量来满足预算。
+
+### 磁盘、发布与回收
+
+每个 partition 的逻辑目录预算沿用 `64 × max_journal_bytes + 32 MiB`，现在限制共享总量，而非只验收单段最终文件。构建在 partition 串行屏障下扫描真实目录：当前选中对象、缓存/tail、候选、WAL/见证及未删孤儿都计入；不按“计划删除”扣减。索引、payload、manifest/schema/statistics、WAL 与见证文件使用同一检查入口，在 write 或 set_len 扩展之前扣账；mmap 的文件长度先由该入口预留。
+
+跨轮 flush 复用仍存活句柄持有的同根账本，下一次安全扫描才用实际文件重新核对。失败写入、truncate、unlink、rename 都不会立即退款；删除失败仍占额。打开文件随后 rename 可能产生保守重复计费，允许提前背压，但绝不能少计。registry 锁异常明确返回错误，不能退回未受限写入。目录扫描遵循持有 partition 屏障的前置条件，不支持外部进程任意修改存储目录。
+
+只有明确未发布的候选在句柄释放后清理；未知发布继续保留恢复证据。文件系统实际占用、日志以外的服务备份目录不属于这个 partition 逻辑长度指标；独立备份仍按已有完整性与保留契约管理。该限制不能保证底层磁盘永远不满，真实 I/O 失败仍走既有错误/恢复协议。
+
+### 验收映射与限制
+
+| A 项目 | 当前实际落点 | 验收证据/边界 |
+|---|---|---|
+| A1 数据唯一归属 | payload pool + 引用闭包；Record 检索关闭 JSON docstore | 原正文/原始向量/版本与回执恢复已有回归；运行态 State 仍驻内存，不宣称全量按需加载 |
+| A2 多段与 tail | 默认 RetrievalView、共同 Corpus、活动映射 | 多轮 oracle、旧版本过滤、稳定排序；本轮重跑全套 |
+| A3 原子发布/恢复 | PartitionJournal 唯一证书，认证索引 + tail 重放 | 发布故障/损坏关闭、HTTP 进程故障；系统断电未验收 |
+| A4 compaction/GC | 八段上限后等价合并、当前引用保护、失败重试 | 保持串行屏障，不宣称后台无停顿；预算失败不删除有效历史 |
+| 方案 1 资源 | 构建准入、显式缓冲、共享逻辑文件检查 | 超限前检查、兄弟任务竞争、旧句柄跨轮/rename、保留文件占额、失败重试；不是完整 allocator 限额 |
+
+低层 64K 物理块回归继续保留：夹具原本就直接灌入历史、跳过 WAL；现在明确将这部分作为预构造输入，避免生产准入提前 flush 使其失去跨块覆盖。最终写入和查询仍经过真实发布路径。该夹具不是生产可保留 65K tail 变更的容量证明；资源拒绝另有正常 Record 路径测试。
+
+最终源码 Linux 验证：`cargo test --workspace --features server --all-targets` 退出 0，34 suites、257 passed、0 failed、10 ignored（九个由父测试调用的进程 worker、一个异构 AES fixture）；`cargo test --doc` 44 passed；`cargo check --no-default-features` 成功；`python3 scripts/check_core_boundary.py` 的独立外部消费者默认及无默认特性构建和依赖检查均通过；`cargo build --features server,fault-injection --bin anyseek_server` 成功；`PLAYWRIGHT_BROWSERS_PATH=/workspace/playwright-browsers /workspace/seekpower-tools/bin/python scripts/record_service_smoke.py --server target/debug/anyseek_server --browser --faults` 退出 0、34 PASS。日志位于工作区 `/workspace/anyseek-validation/`：`a-budget-verified-full.log`、`a-budget-verified-doc.log`、`a-budget-core-check.log`、`a-budget-core-boundary.log`、`a-budget-verified-build.log`、`a-budget-verified-http-browser-faults.log`。独立审查指出的 WAL 计费遗漏、旧句柄账本跨轮复用、registry 锁异常失败关闭和测试共享计数器干扰均已修复并回归；最终复审无新的实质阻塞。A 核心实现按本节限定范围完成，不代表全部平台可靠性验收完成。Windows 原生与隔离系统崩溃/断电仍未运行；旧 Windows CI 分配失败的候选原因不能因本轮改动或 Linux 通过而宣布已修复。无推送、PR 或主干变更。

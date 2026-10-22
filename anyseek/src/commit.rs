@@ -1,7 +1,7 @@
+use crate::storage::build_budget::File;
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use num::FromPrimitive;
 use std::{
-    fs::File,
     io::{Seek, SeekFrom, Write},
     path::Path,
 };
@@ -126,6 +126,18 @@ impl Commit for IndexArc {
 impl Shard {
     pub(crate) async fn commit_lexical_shard(&mut self, indexed_doc_count: usize) -> std::io::Result<()> {
         self.invalidate_frequentword_results();
+        if self.active.is_some() {
+            let overflow=||std::io::Error::other("record compression budget exceeded");
+            let mut largest=0;
+            for segment in &self.segments_level0 {
+                let size=segment.segment.values().try_fold(0usize,|sum,p|p.posting_count.checked_mul(8).and_then(|n|n.checked_add(p.size_compressed_positions_key)).and_then(|n|n.checked_add(64+self.key_head_size)).and_then(|n|sum.checked_add(n))).ok_or_else(overflow)?;
+                largest=largest.max(size);
+            }
+            let needed=largest.checked_add(self.segment_number1*8).ok_or_else(overflow)?.max(self.compressed_index_segment_block_buffer.len());
+            let total=self.segments_level0.iter().try_fold(needed.checked_add(self.postings_buffer.len()).and_then(|n|n.checked_add(10_000_000)).ok_or_else(overflow)?,|sum,s|sum.checked_add(s.positions_compressed.len()).ok_or_else(overflow))?;
+            if total as u64>crate::storage::build_budget::EXPLICIT_BUFFERS{return Err(overflow());}
+            if needed>self.compressed_index_segment_block_buffer.len(){self.compressed_index_segment_block_buffer.try_reserve_exact(needed-self.compressed_index_segment_block_buffer.len()).map_err(std::io::Error::other)?;self.compressed_index_segment_block_buffer.resize(needed,0);}
+        }
         let is_last_level_incomplete = self.is_last_level_incomplete;
         if is_last_level_incomplete {
             self.merge_incomplete_index_level_to_level0();
@@ -298,7 +310,7 @@ impl Shard {
         self.is_last_level_incomplete =
             !(self.committed_doc_count).is_multiple_of(ROARING_BLOCK_SIZE);
 
-        self.compressed_index_segment_block_buffer = vec![0; 10_000_000];
+        self.compressed_index_segment_block_buffer.fill(0);
         self.postings_buffer = Vec::new();
 
         self.postings_buffer_pointer = 0;
@@ -316,6 +328,14 @@ impl Shard {
 
     /// Flush a single segment from the key hash range partitioned level to RAM and disk
     pub(crate) fn commit_segment(&mut self, key0: usize) -> std::io::Result<usize> {
+        if self.active.is_some() {
+            // Positions are already encoded. Allow eight bytes per posting
+            // for pointers/docids plus headers for each key.
+            // Reject before the fixed compression workspace can be overrun.
+            let bound=self.segments_level0[key0].segment.values().try_fold(0usize,|sum,p|p.posting_count.checked_mul(8).and_then(|n|n.checked_add(p.size_compressed_positions_key)).and_then(|n|n.checked_add(64+self.key_head_size)).and_then(|n|sum.checked_add(n))).ok_or_else(||std::io::Error::other("compression budget overflow"))?;
+            let available=self.compressed_index_segment_block_buffer.len().checked_sub(self.segment_number1*8).ok_or_else(||std::io::Error::other("compression header budget"))?;
+            if bound>available{return Err(std::io::Error::other("record compression buffer budget exceeded"));}
+        }
         let mut key_head_pointer_w: usize = 0;
         let segment_head_position = self.compressed_index_segment_block_buffer.len()
             - (self.segment_number1 * 8)

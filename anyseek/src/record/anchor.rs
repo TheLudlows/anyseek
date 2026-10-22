@@ -61,7 +61,12 @@ impl Frozen {
         active.validate_sparse(retrieval_schema(config).iter().filter(|f|f.index_lexical||f.index_vector).count()).map_err(storage)?;
         let schema:Vec<SchemaField>=serde_json::from_slice(&read_bounded(&path.join("schema.json"),config.max_journal_bytes)?).map_err(storage)?;
         if serde_json::to_vec(&schema).map_err(storage)?!=serde_json::to_vec(&retrieval_schema(config)).map_err(storage)?{return Err(storage("frozen segment schema mismatch"));}
+        let mapped=self.files.iter().try_fold(0u64,|n,f|n.checked_add(f.bytes)).ok_or_else(||storage("loaded segment estimate overflow"))?;
+        let estimate=mapped.checked_mul(2).ok_or_else(||storage("loaded segment estimate overflow"))?;
+        let mut reservation=build_budget::admit(config,std::iter::empty())?;
+        reservation.grow(estimate).map_err(storage)?;
         let index=crate::index::open_index(&path).await.map_err(storage)?;detach(&index).await;
+        index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
         {
             let index=index.read().await;
             if index.shard_number!=1||index.shard_vec.len()!=1||!index.stored_field_names.is_empty(){return Err(storage("invalid frozen topology"));}
@@ -193,6 +198,7 @@ impl Inner {
     async fn prepare_and_publish_anchor(&mut self,next:State,reuse:bool)->Result<u64,RecordError>{
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();
+        let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
         let snapshot_bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:next.clone()})?.len();
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
         let reference=Reference::prepare(&root,&self.config,&next,prior,self.anchor.as_ref(),&self.index,!reuse).await?;
@@ -273,6 +279,29 @@ impl Inner {
 mod tests {
     use super::*;
     use super::super::tests::{path,config,write,query};
+    #[tokio::test]
+    async fn resource_admission_rejects_before_wal_and_retries_after_space_returns() {
+        let root=path();let mut settings=config();settings.max_record_bytes=1024*1024;settings.max_journal_bytes=8*1024*1024;
+        let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
+        let request=write("oversized-analysis","a",&"a ".repeat(300_000),ExpectedVersion::Absent);
+        assert!(matches!(p.write(request).await,Err(RecordError::Rejected(message)) if message.contains("build admission")));
+        assert_eq!(p.inner.lock().await.state.seq,0);
+        let accepted=write("oversized-analysis","a","alpha",ExpectedVersion::Absent);
+        p.write(accepted.clone()).await.unwrap();p.compact_journal().await.unwrap();
+        let selected=serde_json::to_vec(p.inner.lock().await.anchor.as_ref().unwrap()).unwrap();
+        // Retained evidence outside the orphan-name namespace must be counted,
+        // not silently deleted to make the next publication fit.
+        let retained=root.join("retained-budget-evidence");
+        std::fs::File::create(&retained).unwrap().set_len(closure_limit(settings.max_journal_bytes).unwrap()+1).unwrap();
+        assert!(p.compact_journal().await.is_err());
+        assert_eq!(serde_json::to_vec(p.inner.lock().await.anchor.as_ref().unwrap()).unwrap(),selected);
+        assert!(retained.exists());assert!(p.inner.lock().await.healthy);
+        std::fs::remove_file(retained).unwrap();p.compact_journal().await.unwrap();
+        drop(p);let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(accepted).await.unwrap().seq,1);
+        assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),1);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn rejected_prepared_anchor_reclaims_only_unselected_objects() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
