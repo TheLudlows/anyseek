@@ -11,7 +11,25 @@ use object_store::{
     ObjectStore, PutMode, PutOptions, PutPayload,
 };
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
+use super::sqlite_authority::SqliteAuthority;
+
+/// Error from the object-first persistence stage.
+#[derive(Debug)]
+pub(crate) enum UploadRegisterError {
+    ObjectStore(object_store::Error),
+    Metadata(rusqlite::Error),
+}
+impl fmt::Display for UploadRegisterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ObjectStore(error) => write!(f, "object-store operation failed: {error}"),
+            Self::Metadata(error) => write!(f, "SQLite object registration failed: {error}"),
+        }
+    }
+}
+impl std::error::Error for UploadRegisterError {}
+
 
 /// S3-compatible immutable object store with write-after-read verification.
 pub(crate) struct S3CompatibleStore {
@@ -67,11 +85,30 @@ impl S3CompatibleStore {
         }
         let location = Self::object_path(key)?;
         let digest: [u8; 32] = Sha256::digest(bytes).into();
-        self.store.put_opts(
+        let put_result = self.store.put_opts(
             &location,
             PutPayload::from(bytes.to_vec()),
             PutOptions { mode: PutMode::Create, ..Default::default() },
-        ).await?;
+        ).await;
+
+        // If the response was lost after the service committed the PUT, a retry
+        // may observe an existing key. Resolve that ambiguity only by reading
+        // the existing bytes and proving they are byte-identical.
+        if let Err(put_error) = put_result {
+            match self.store.get(&location).await {
+                Ok(result) => {
+                    let existing = result.bytes().await?;
+                    let existing_digest: [u8; 32] = Sha256::digest(&existing).into();
+                    if existing.len() == bytes.len()
+                        && existing_digest == digest
+                        && existing.as_ref() == bytes {
+                        return Ok(ObjectRef { key: key.to_owned(), sha256: digest, length: bytes.len() as u64 });
+                    }
+                    return Err(put_error);
+                }
+                Err(_) => return Err(put_error),
+            }
+        }
 
         // Successful PUT alone is not enough: verify visibility and exact content
         // through the read path used by later readers before publishing metadata.
@@ -84,6 +121,22 @@ impl S3CompatibleStore {
             });
         }
         Ok(ObjectRef { key: key.to_owned(), sha256: digest, length: bytes.len() as u64 })
+    }
+
+    /// Execute the object-first stage and register the verified reference in SQLite.
+    /// This intentionally does not publish a committed sequence; the caller must
+    /// publish the reference and operation receipt in a separate SQLite transaction.
+    pub(crate) async fn put_and_register(
+        &self,
+        authority: &mut SqliteAuthority,
+        key: &str,
+        bytes: &[u8],
+        created_at_ms: i64,
+    ) -> Result<ObjectRef, UploadRegisterError> {
+        let reference = self.put_verified(key, bytes).await.map_err(UploadRegisterError::ObjectStore)?;
+        authority.register_durable_object(&reference, created_at_ms)
+            .map_err(UploadRegisterError::Metadata)?;
+        Ok(reference)
     }
 
     /// Fetch and verify an object against an authority-published reference.
