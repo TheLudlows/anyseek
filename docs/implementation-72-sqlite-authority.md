@@ -53,7 +53,7 @@ The SQLite database is a single local authority. Do not put its WAL database on 
 2. Audit all state-changing maintenance events and compaction/anchor paths so none bypasses remote commit.
 3. Record-level missing-cache recovery now verifies a create/update/delete sequence and confirms the rebuilt query view contains the updated record while hiding the deleted one. Interrupted bootstrap retry and provider-specific S3 semantics still need dedicated tests.
 4. Register complete manifest/segment/index dependency edges and verify service-level backup/restore closure.
-5. Validate conditional create, ambiguous PUT, read-after-write visibility and delete semantics against a real S3-compatible endpoint.
+5. Run the ignored S3 contract test against a dedicated real endpoint to validate conditional create, ambiguous/duplicate PUT behavior, read-after-write visibility and delete semantics.
 6. Complete object-backend fault-injection and restart acceptance before removing Draft status.
 
 ## Progress status — 2026-10-22
@@ -72,7 +72,7 @@ Overall: **Record-level S3 integration is implemented as an opt-in path; not rea
 - Run #281 exposed a missing `max_object_bytes` initializer and was fixed.
 - Runs #285 and #289 were cancelled by subsequent pushes before completing.
 - Run #291 is the current validation run for Record cache-rebuild tests; final result is pending at the time of this update.
-- No real S3-compatible endpoint has yet been exercised; in-memory tests do not prove provider-specific conditional PUT, read-after-write, or delete semantics.
+- No real S3-compatible endpoint has yet been exercised. An ignored integration contract test now covers conditional create, read-after-write, duplicate/conflicting key behavior, and authority-gated deletion when a dedicated endpoint/bucket and test credentials are supplied via `ANYSEEK_S3_TEST_*` environment variables. In-memory tests do not prove provider-specific behavior.
 
 ### Remaining work
 1. Finish current-head Linux/Windows/workspace CI and fix all failures.
