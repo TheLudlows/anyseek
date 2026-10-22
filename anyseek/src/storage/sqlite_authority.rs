@@ -179,6 +179,8 @@ impl SqliteAuthority {
 
     /// Publish only references to objects already uploaded and verified as durable.
     /// This transaction is the commit point; object upload alone never commits data.
+    /// If a manifest is supplied, the caller asserts it completely indexes through
+    /// this commit's sequence; otherwise the committed tail remains unindexed.
     pub(crate) fn publish_commit(
         &mut self,
         partition_id: &str,
@@ -222,7 +224,8 @@ impl SqliteAuthority {
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
         let changed = tx.execute(
             "UPDATE partition_heads SET head_version=?1,committed_seq=?2,wal_tip_json=?3,
-             manifest_json=COALESCE(?4,manifest_json)
+             manifest_json=COALESCE(?4,manifest_json),
+             indexed_seq=CASE WHEN ?4 IS NOT NULL THEN ?2 ELSE indexed_seq END
              WHERE partition_id=?5 AND head_version=?6 AND owner_epoch=?7 AND committed_seq=?8",
             params![to_i64(next_version)?,to_i64(committed_seq)?,wal_json,manifest_json,
                 partition_id,to_i64(expected_head_version)?,to_i64(owner_epoch)?,to_i64(current.committed_seq)?],
