@@ -254,6 +254,12 @@ impl S3CompatibleStore {
             authority.register_object_edge(&descriptor_ref, reference)
                 .map_err(BackupError::Metadata)?;
         }
+        // Keep both control objects alive for the full retention period, not merely
+        // the payload closure captured before the descriptor itself existed.
+        authority.pin_backup_object(backup_id, &descriptor.metadata_snapshot.key)
+            .map_err(BackupError::Metadata)?;
+        authority.pin_backup_object(backup_id, &descriptor_ref.key)
+            .map_err(BackupError::Metadata)?;
         Ok(BackupBundle { descriptor_ref, descriptor })
     }
 
@@ -297,7 +303,25 @@ impl S3CompatibleStore {
             }
         }
         authority.restore_backup_snapshot(&snapshot_bytes, max_snapshot_bytes)
-            .map_err(BackupError::Metadata)
+            .map_err(BackupError::Metadata)?;
+        // The descriptor and metadata snapshot are backup control roots created after
+        // the logical snapshot was captured. Re-register and pin them on the restored
+        // authority so normal GC cannot remove the backup's own restore entry point.
+        authority.register_durable_object(&descriptor.metadata_snapshot, descriptor.created_at_ms)
+            .map_err(BackupError::Metadata)?;
+        authority.register_durable_object(descriptor_ref, descriptor.created_at_ms)
+            .map_err(BackupError::Metadata)?;
+        authority.register_object_edge(descriptor_ref, &descriptor.metadata_snapshot)
+            .map_err(BackupError::Metadata)?;
+        for reference in &descriptor.object_closure {
+            authority.register_object_edge(descriptor_ref, reference)
+                .map_err(BackupError::Metadata)?;
+        }
+        authority.pin_backup_object(&descriptor.backup_id, &descriptor.metadata_snapshot.key)
+            .map_err(BackupError::Metadata)?;
+        authority.pin_backup_object(&descriptor.backup_id, &descriptor_ref.key)
+            .map_err(BackupError::Metadata)?;
+        Ok(snapshot)
     }
 
     /// Retire and delete only the two backup-control objects after backup pins
