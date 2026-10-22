@@ -1341,13 +1341,20 @@ async fn retire_backup(
                 let marker: S3BackupMarker = serde_json::from_slice(
                     &std::fs::read(&marker_path).map_err(|error| error.to_string())?
                 ).map_err(|error| error.to_string())?;
-                for entry in std::fs::read_dir(&s.root).map_err(|error| error.to_string())? {
-                    let entry = entry.map_err(|error| error.to_string())?;
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.starts_with(".authority-") && name.ends_with(".sqlite") {
-                        RecordPartition::retire_s3_backup(&entry.path(), &id).await
-                            .map_err(|error| error.to_string())?;
-                    }
+                if marker.backup_id != id { return Err("backup marker mismatch".into()); }
+                let authorities = std::fs::read_dir(&s.root).map_err(|error| error.to_string())?
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| path.file_name().and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(".authority-") && name.ends_with(".sqlite")))
+                    .collect::<Vec<_>>();
+                for authority_path in &authorities {
+                    RecordPartition::retire_s3_backup(authority_path, &id).await
+                        .map_err(|error| error.to_string())?;
+                }
+                for authority_path in &authorities {
+                    RecordPartition::delete_s3_backup_metadata(authority_path, &marker.bundle_json).await
+                        .map_err(|error| error.to_string())?;
                 }
             }
             RecordPartition::retire_snapshot(&backup_path).await.map_err(|error| error.to_string())
