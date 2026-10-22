@@ -1031,8 +1031,19 @@ impl RecordPartition {
         config: RecordConfig,
         remote_config: S3CompatibleRecordConfig,
     ) -> Result<Self, RecordError> {
-        let max_journal_bytes = config.max_journal_bytes;
-        let mut remote = RemotePersistence::open(&remote_config)?;
+        let remote = RemotePersistence::open(&remote_config)?;
+        Self::open_s3_with_remote(path, config.max_journal_bytes, remote).await
+    }
+
+    /// Rebuild the local journal/index cache from the remote bootstrap and committed
+    /// log when the local directory is missing, or reconcile its missing remote tail.
+    /// Kept separate so crash recovery can be tested with an in-memory object store.
+    #[cfg(feature = "s3-object-store")]
+    async fn open_s3_with_remote(
+        path: &Path,
+        max_journal_bytes: u64,
+        mut remote: RemotePersistence,
+    ) -> Result<Self, RecordError> {
         let partition = if path.exists() {
             Self::open(path, max_journal_bytes).await?
         } else {
@@ -1044,17 +1055,16 @@ impl RecordPartition {
             let bootstrap_ref = head.bootstrap.as_ref()
                 .ok_or_else(|| storage("remote partition has no committed bootstrap checkpoint"))?;
             let bootstrap = remote.store.get_verified(bootstrap_ref).await.map_err(storage)?;
-            let (stored_config, _) = match serde_json::from_slice::<Entry>(&bootstrap).map_err(storage)? {
+            let (stored_config, stored_state) = match serde_json::from_slice::<Entry>(&bootstrap).map_err(storage)? {
                 Entry::Checkpoint { config, state } => (config, state),
                 _ => return Err(storage("remote bootstrap is not a Record checkpoint")),
             };
-            if stored_config.max_journal_bytes != max_journal_bytes {
+            if stored_config.max_journal_bytes != max_journal_bytes || stored_state.seq != 0 {
                 return Err(RecordError::Rejected(
-                    "max_journal_bytes differs from the remote bootstrap configuration".into()
+                    "remote bootstrap configuration or initial sequence is invalid".into()
                 ));
             }
-            PartitionJournal::validate_initial(bootstrap.len(), max_journal_bytes)
-                .map_err(storage)?;
+            PartitionJournal::validate_initial(bootstrap.len(), max_journal_bytes).map_err(storage)?;
             drop(PartitionJournal::create(path, max_journal_bytes, &bootstrap).map_err(creation_error)?);
             Self::open(path, max_journal_bytes).await?
         };
@@ -1075,7 +1085,6 @@ impl RecordPartition {
         }
         Ok(partition)
     }
-
     /// Create an immutable joint S3/SQLite backup. The returned JSON descriptor
     /// is a small local pointer; the metadata snapshot and all payload objects remain
     /// in object storage. The source authority pins the complete reachable closure.
