@@ -7,6 +7,8 @@ pub(crate) mod sqlite_authority;
 pub(crate) mod s3_compatible;
 #[cfg(feature = "s3-object-store")]
 pub(crate) mod object_log;
+#[cfg(feature = "s3-object-store")]
+pub(crate) mod object_backed_partition;
 mod platform;
 
 pub(crate) mod partition;
