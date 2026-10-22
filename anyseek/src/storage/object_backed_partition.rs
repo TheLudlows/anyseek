@@ -132,6 +132,7 @@ impl ObjectBackedPartition {
             authority: Mutex::new(authority),
             max_tail_blocks: config.max_tail_blocks,
             max_tail_bytes: config.max_tail_bytes,
+            max_object_bytes: config.max_object_bytes,
         })
     }
 
