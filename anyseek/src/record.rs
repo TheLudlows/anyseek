@@ -4627,6 +4627,15 @@ mod tests {
         assert_eq!(receipt.seq, 2);
         let second = recovered.get("remote-record-2").await.unwrap().unwrap();
         assert_eq!(second.document.unwrap()["body"], "second remote durable");
+        {
+            let mut inner = recovered.inner.lock().await;
+            let future = inner.state.time_watermark_ms
+                .saturating_add(9 * 86_400_000);
+            inner.trim_feed(future).unwrap();
+            // Until a remote-authoritative feed-floor transition exists, retention
+            // trimming must not advance only the rebuildable local cache.
+            assert_eq!(inner.state.feed.floor, 0);
+        }
         let (bundle_json, visible_seq, partition_id) =
             recovered.create_s3_backup("record-backup", 200, 1024 * 1024).await.unwrap();
         assert_eq!(visible_seq, 2);
