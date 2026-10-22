@@ -410,6 +410,10 @@ mod tests {
         let restored_head = target.read_head("p0").unwrap().unwrap();
         assert_eq!(restored_head.committed_seq, 1);
         assert_eq!(target.resolve_operation("p0", "op-1", [7;32]).unwrap().unwrap().committed_seq, 1);
+        source.release_backup_pins(&bundle.descriptor.backup_id).unwrap();
+        store.retire_backup_metadata(&mut source, &bundle, 30).await.unwrap();
+        assert!(store.get_verified(&bundle.descriptor_ref).await.is_err());
+        assert!(store.get_verified(&bundle.descriptor.metadata_snapshot).await.is_err());
         drop(source);
         drop(target);
         for path in [&source_path, &target_path] {
