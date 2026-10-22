@@ -481,6 +481,100 @@ impl SqliteAuthority {
         Ok(bytes)
     }
 
+    /// Restore a logical authority snapshot into a fresh, empty SQLite database.
+    /// The caller must verify every object in the snapshot's closure before serving reads.
+    pub(crate) fn restore_backup_snapshot(
+        &mut self,
+        bytes: &[u8],
+        max_snapshot_bytes: usize,
+    ) -> rusqlite::Result<AuthorityBackupSnapshot> {
+        if bytes.len() > max_snapshot_bytes {
+            return Err(rusqlite::Error::InvalidParameterName("backup metadata exceeds configured limit".into()));
+        }
+        let snapshot: AuthorityBackupSnapshot =
+            serde_json::from_slice(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if snapshot.format_version != 1 || snapshot.backup_id.is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let nonempty: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM partition_heads)
+                 OR EXISTS(SELECT 1 FROM operation_receipts)
+                 OR EXISTS(SELECT 1 FROM object_uploads)",
+            [], |row| row.get(0),
+        )?;
+        if nonempty {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "restore target must be an empty authority database".into()
+            ));
+        }
+        let mut closure = snapshot.object_closure.clone();
+        closure.sort_by(|a,b| a.key.cmp(&b.key));
+        if closure.windows(2).any(|pair| pair[0].key == pair[1].key) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        for object in &snapshot.objects {
+            if object.reference.key.is_empty() || !matches!(object.state, 0 | 1 | 2) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            tx.execute(
+                "INSERT INTO object_uploads(object_key,sha256,byte_length,state,created_at_ms)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![object.reference.key,object.reference.sha256.as_slice(),
+                    to_i64(object.reference.length)?,object.state,object.created_at_ms],
+            )?;
+        }
+        for retired in &snapshot.retired {
+            tx.execute(
+                "INSERT INTO retired_objects(object_key,retired_generation,retired_at_ms) VALUES(?1,?2,?3)",
+                params![retired.object_key,to_i64(retired.retired_generation)?,retired.retired_at_ms],
+            )?;
+        }
+        for pin in &snapshot.pins {
+            if !matches!(pin.pin_kind.as_str(),"reader"|"indexer"|"backup"|"staging") {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            tx.execute(
+                "INSERT INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id)
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![pin.pin_id,pin.partition_id,pin.object_key,pin.pin_kind,pin.expires_at_ms,pin.backup_id],
+            )?;
+        }
+        for head in &snapshot.heads {
+            tx.execute(
+                "INSERT INTO partition_heads(partition_id,head_version,owner_epoch,committed_seq,wal_tip_json,
+                 manifest_json,indexed_seq,log_base_seq,log_anchor_json)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![head.partition_id,to_i64(head.head_version)?,to_i64(head.owner_epoch)?,
+                    to_i64(head.committed_seq)?,
+                    head.wal_tip.as_ref().map(serde_json::to_string).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    head.manifest.as_ref().map(serde_json::to_string).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    to_i64(head.indexed_seq)?,to_i64(head.log_base_seq)?,
+                    head.log_anchor.as_ref().map(serde_json::to_string).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?],
+            )?;
+        }
+        for receipt in &snapshot.receipts {
+            let _: PartitionHead = serde_json::from_str(&receipt.result_json)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            tx.execute(
+                "INSERT INTO operation_receipts(partition_id,operation_id,request_sha256,committed_seq,result_json)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![receipt.partition_id,receipt.operation_id,receipt.request_sha256.as_slice(),
+                    to_i64(receipt.committed_seq)?,receipt.result_json],
+            )?;
+        }
+        for head in &snapshot.heads {
+            for reference in [&head.wal_tip,&head.manifest,&head.log_anchor].into_iter().flatten() {
+                ensure_durable_object(&tx, reference)?;
+            }
+        }
+        for reference in &closure {
+            ensure_durable_object(&tx, reference)?;
+        }
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
     /// Release pins after a failed backup attempt, or after an explicit backup-retention
     /// deletion has itself been completed. Never call this while the backup is retained.
     pub(crate) fn release_backup_pins(&mut self, backup_id: &str) -> rusqlite::Result<usize> {
