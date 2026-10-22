@@ -31,6 +31,7 @@ python3 -m playwright install chromium
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
 cargo build -p anyseek --features server,fault-injection
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser --faults
+python3 scripts/s3_storage_smoke.py --server target/debug/anyseek_server --faults
 ```
 
 Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测试；测试后重新 `cargo build --workspace --features server` 得到默认二进制。测试环境变量前缀为 `ANYSEEK_`（例如 `ANYSEEK_TEST_ROOT`、`ANYSEEK_BROWSER_TEST`）；正常服务主密钥仍为 `MASTER_KEY_SECRET`。
@@ -47,4 +48,4 @@ target/debug/anyseek_server generate_openapi=true
 
 Linux 与 Windows 都是原生可靠性验收平台；交叉编译不代替 Windows 原生运行。CI 包含真实服务 HTTP、子进程故障、恢复和浏览器流程，但不能代替系统崩溃/断电。后者需要可中断的隔离环境、持久设备和外部已确认写入见证，不自行重启共享环境。
 
-记录每个最终源码版本的命令、结果、失败/忽略项和未运行项。目录或包名调整前的历史计数不可冒充改名后的验证。品牌变更记录见 [本次验证](validation/anyseek-brand.md)。
+记录每个最终源码版本的命令、结果、失败/忽略项和未运行项。目录或包名调整前的历史计数不可冒充改名后的验证。历史阶段结果通过 Git 历史及对应 PR/CI 查阅，当前测试命令与剩余验收须保持可复现。

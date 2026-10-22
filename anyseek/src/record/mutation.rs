@@ -17,6 +17,7 @@ pub(super) enum PreparedWrite {
     },
 }
 
+#[cfg(test)]
 pub(super) fn prepare(
     state: &State,
     config: &RecordConfig,

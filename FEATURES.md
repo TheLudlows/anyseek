@@ -15,7 +15,7 @@
 | 身份和写入 | 稳定 Record ID、不可变 routing key、版本条件、墓碑、防 ABA、原 operation_id 重试 |
 | 原始数据 | 权威状态保留完整 Document 和原始向量；schema.store 控制查询投影，不控制原始数据持久保存 |
 | 浏览 | 空查询浏览活动记录，包括纯向量 collection；iterator 按稳定 ID 分页，visible_seq 改变使 cursor 失效 |
-| 持久化 | WAL、冗余见证、完整 checkpoint、进程恢复；成功写入 durable + visible；系统断电矩阵未验收 |
+| 持久化 | 本地 Segment + tail，或 SQLite/S3 对象提交、远端 checkpoint 与 GC；成功写入 durable + visible；真实 S3/系统断电尚待验收 |
 | 授权 | key、collection、grant 独立；多个 key 共享数据，撤销不删除 collection；输出复核 revision |
 | 备份 | collection 独立快照、备份退役、完整 service/catalog 备份、新未启动根恢复 |
 
@@ -56,6 +56,7 @@
 | GET | `/api/v1/catalog/operation/{epoch}/{nonce}` | master 控制操作查询 |
 | POST | `/api/v1/index/{id}/backup` | 独立 collection 快照；同操作 ID 保留原快照 |
 | POST | `/api/v1/restore` | master 恢复到新 collection，不恢复历史 grants |
+| POST | `/api/v1/takeovers` | master 同服务封存源并激活最终水位的后继 collection；不是回退旧备份 |
 | GET | `/api/v1/backups` | master 查看 collection 备份及退役状态 |
 | DELETE | `/api/v1/backups/{id}` | master 退役备份；未完成 restore pin 来源 |
 | POST | `/api/v1/service-backups` | master 完整 catalog/数据/collection backups 快照 |
@@ -75,6 +76,6 @@ Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 
-尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、物理版本压缩、通用任意历史读取、独立时间候选排名、管理型 Blob、SQLite 云端协调、分布式与对象存储。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
+尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、通用任意历史读取、独立时间候选排名、管理型 Blob、B 维护路径及真实 S3 服务验收、分布式。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
 
-早期移除能力的实际记录见 [历史验证](VALIDATION.md) 与 [Changelog](CHANGELOG.md)；当前接入以服务指南为准，不提供旧格式迁移。
+当前接入以服务指南为准，不提供旧格式迁移。历史裁剪与验证通过 Git 历史和对应 PR/CI 查阅。

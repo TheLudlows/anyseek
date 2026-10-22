@@ -104,7 +104,7 @@ def main():
             config={'index_name':'S3','schema':[{'field':'body','field_type':'Text'},
                 {'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config})
-            origin=call('POST','/api/v1/index/main/changes',{})['next']
+            feed_origin=call('POST','/api/v1/index/main/changes',{})['next']
             original=write('first','a','alpha old');receipt=call('POST','/api/v1/index/main/doc',original)['receipt']
             call('POST','/api/v1/index/main/doc',write('b','b','alpha beta'))
             call('PATCH','/api/v1/index/main')
@@ -125,9 +125,58 @@ def main():
                     assert process.wait(timeout=30)==91
                     cold_restart();assert query()==expected
                 print('PASS S3 checkpoint real process exits before/after SQLite publication',flush=True)
+            # A backup proves provenance; the successor must include newer writes
+            # and deletions from the permanent, SQLite-certified final source.
+            modes=['normal','prepared','sealed','target_created','certified','finalized','remote_before','remote_after','target_remote_before','target_remote_after'] if args.faults else ['normal']
+            for mode in modes:
+                origin='take-'+mode;target=origin+'-next'
+                call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':origin,'embedding_space_id':'fixture','config':config})
+                source=write('source','source','alpha evidence');source['system']={'kind':'source'}
+                derived=write('derived','derived','alpha derived');derived['system']={'kind':'derived','evidence_refs':[{'record_id':'source','routing_key':'r','version':1}]}
+                for request in [source,derived]:call('POST',f'/api/v1/index/{origin}/doc',request)
+                backup=call('POST',f'/api/v1/index/{origin}/backup',{'operation_id':operation()})
+                fresh=write('fresh','fresh','alpha acknowledged after backup')
+                final_receipt=call('POST',f'/api/v1/index/{origin}/doc',fresh)['receipt']
+                deletion={'operation_id':operation(),'record_id':'source','routing_key':'r','expected':{'Match':1},'document':None}
+                deleted_receipt=call('DELETE',f'/api/v1/index/{origin}/doc',deletion)['receipt']
+                expected_takeover=query(origin)
+                takeover={'operation_id':operation(),'source_collection_id':origin,'collection_id':target,'backup_id':backup['backup_id']}
+                if mode!='normal':
+                    stop()
+                    remote_fault='remote_' in mode
+                    fault_env={'ANYSEEK_REMOTE_CHECKPOINT_FAULT':'before_publish' if mode.endswith('_before') else 'after_publish'} if remote_fault else {'ANYSEEK_TAKEOVER_FAULT':mode}
+                    if mode.startswith('target_remote_'):
+                        namespace=root.joinpath('s3-namespace').read_text()
+                        fault_env['ANYSEEK_REMOTE_CHECKPOINT_PARTITION']=hashlib.sha256(f'{namespace}:{target}'.encode()).hexdigest()
+                    start(fault_env)
+                    try:call('POST','/api/v1/takeovers',takeover)
+                    except (OSError,http.client.HTTPException):pass
+                    else:raise AssertionError('expected takeover process exit')
+                    assert process.wait(timeout=30)==(91 if remote_fault else 89)
+                    # Lose both source and target caches, including pre-adoption
+                    # local successors. Startup must resume from durable intent.
+                    cold_restart()
+                done=call('POST','/api/v1/takeovers',takeover)
+                assert done['status']=='active'
+                assert call('POST','/api/v1/takeovers',takeover)==done
+                call('GET',f'/api/v1/index/{origin}',status=403)
+                assert query(target)==expected_takeover
+                call('GET',f'/api/v1/index/{target}/doc/source',status=404)
+                call('GET',f'/api/v1/index/{target}/doc/derived',status=404)
+                assert call('POST',f'/api/v1/index/{target}/doc',fresh)['receipt']==final_receipt
+                assert call('DELETE',f'/api/v1/index/{target}/doc',deletion)['receipt']==deleted_receipt
+                retired=call('DELETE','/api/v1/backups/'+backup['backup_id'],{'operation_id':operation()})
+                assert not retired['cleanup_pending']
+                call('PATCH',f'/api/v1/index/{target}');cold_restart()
+                assert query(target)==expected_takeover
+                assert not list(root.glob('.takeover-input-*'))
+                print('PASS S3 takeover '+mode+': final writes/deletes/receipts, cold recovery, retry and backup retirement',flush=True)
+                if mode!=modes[-1]:
+                    call('DELETE',f'/api/v1/index/{target}',{'operation_id':operation()})
+                else:takeover_target=target
             clock.write_text(str(int(clock.read_text())+8*86400000))
-            call('POST','/api/v1/index/main/changes',{'after':origin},status=410)
-            cold_restart();call('POST','/api/v1/index/main/changes',{'after':origin},status=410)
+            call('POST','/api/v1/index/main/changes',{'after':feed_origin},status=410)
+            cold_restart();call('POST','/api/v1/index/main/changes',{'after':feed_origin},status=410)
             assert query()==expected
             print('PASS remote feed floor, old cursor expiry and query views survive cache loss',flush=True)
             stages=['after_snapshot','after_inventory','after_upload','after_descriptor'] if args.faults else ['normal']
@@ -174,6 +223,7 @@ def main():
             target_root=pathlib.Path(restored['target_root']);stop();start(target=target_root)
             call('GET','/api/v1/index/main',key=user,status=403)
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
+            assert query(takeover_target)==expected_takeover
             # Old collection archives in a service snapshot remain usable.
             copied=next(iter(whole['snapshot']['collection_backups']))
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'copied-archive','backup_id':copied})
@@ -184,6 +234,7 @@ def main():
             start(target=target_root)
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
             assert call('GET','/api/v1/index/copied-archive/doc/a')['version']==2
+            assert query(takeover_target)==expected_takeover
             assert target_root.joinpath('s3-namespace').read_text()!=root.joinpath('s3-namespace').read_text()
             print('PASS complete service archive: retained S3 backups, isolated restore, disabled old keys and cold restart',flush=True)
         finally:

@@ -27,11 +27,6 @@ Cargo.lock
 /miracl-corpus-v1.0-zh/*.part
 /miracl-corpus-v1.0-zh/*.jsonl
 
-# Local OpenSearch distribution, indexes, and logs (keep the release archive)
-/tools/opensearch/*
-!/tools/opensearch/opensearch-3.9.0-linux-x64.tar.gz
-!/tools/opensearch/opensearch-3.9.0-linux-x64.tar.gz.sha512
-
 # Python smoke-test bytecode
 __pycache__/
 *.py[cod]

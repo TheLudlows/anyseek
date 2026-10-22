@@ -1,5 +1,5 @@
-//! Local persistence primitives. The journal owns authoritative bytes; mmap
-//! indexes are consumers, never the commit witness.
+//! Local journal and SQLite/object persistence primitives. Authenticated heads
+//! select committed bytes; mmap indexes never act as independent commit witnesses.
 
 pub(crate) mod journal;
 pub(crate) mod sqlite_authority;
@@ -7,8 +7,6 @@ pub(crate) mod sqlite_authority;
 pub(crate) mod s3_compatible;
 #[cfg(feature = "s3-object-store")]
 pub(crate) mod object_log;
-#[cfg(feature = "s3-object-store")]
-pub(crate) mod object_backed_partition;
 mod platform;
 
 pub(crate) mod partition;

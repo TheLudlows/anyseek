@@ -2,8 +2,8 @@
 //!
 //! The SQLite head decides which tip and sequence range is committed. Objects not
 //! reachable from that head are never replayed. This module provides the tail
-//! primitive; RecordService must apply returned entries inside the same read view
-//! as its manifest before advertising end-to-end search consistency.
+//! primitive; RecordPartition applies returned entries in the same read view
+//! as its selected manifest before serving search results.
 use super::{
     s3_compatible::{S3CompatibleStore, UploadRegisterError},
     sqlite_authority::{ObjectRef, PartitionHead, PublishOutcome, SqliteAuthority},
@@ -100,9 +100,8 @@ pub(crate) enum AppendCommitOutcome {
 /// reference and committed watermark in SQLite. A retry first resolves the original
 /// operation receipt; it never allocates a new sequence or rewrites a committed key.
 ///
-/// This is the storage protocol primitive. The existing RecordPartition API must still
-/// translate its canonical mutation envelope and apply the resulting tail in its read
-/// view before this can be considered end-to-end RecordService integration.
+/// This storage primitive does not apply Record state. RecordPartition owns
+/// canonical mutation validation and publication of its complete retrieval view.
 pub(crate) async fn append_and_commit(
     store: &S3CompatibleStore,
     authority: &mut SqliteAuthority,

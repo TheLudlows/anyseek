@@ -324,6 +324,7 @@ impl Service {
             let name = row.file_name().to_string_lossy().into_owned();
             if name
                 .strip_prefix(".partition-prepare-")
+                .or_else(|| name.strip_prefix(".takeover-input-"))
                 .is_some_and(|suffix| {
                     suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
                 })
@@ -1204,13 +1205,26 @@ async fn service_backup(
         let id=verifier(&serde_json::to_vec(&("service-backup",&request.operation_id)).map_err(bad)?);
         let target=s.root.join(format!("service-backup-{id}"));
         service_budget(&s.root,"service-backup-",&target)?;
-        let records=s.records.read().await.clone();
+        let mut records=s.records.read().await.clone();
         let temporary=s.root.join(format!(".s3-service-export-{:032x}",rand::random::<u128>()));
         let mut archives=BTreeMap::new();
         if std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref()==Ok("s3") {
             std::fs::create_dir(&temporary).map_err(storage)?;
             let retired=s.catalog.retired_backups().await?;
             let entries=s.catalog.collections().await?;
+            let restored=Catalog::completed_service_restore(&s.root)?;
+            // Deleted/sealed collections are retained archive inputs too. Their
+            // local directories may have been evicted; never open an S3 cache as
+            // a standalone journal or silently omit its authoritative state.
+            for entry in &entries {
+                let path=s.root.join(&entry.directory);
+                if records.contains_key(&entry.collection_id) || (!entry.initialized && !path.exists()) {continue;}
+                let config=s.s3_record_config(entry)?.ok_or_else(||storage("S3 configuration missing"))?;
+                let p=if let Some(proof)=restored.as_ref().filter(|r|r.record_seqs.contains_key(&entry.collection_id)) {
+                    RecordPartition::adopt_s3_snapshot(&path,entry.config.clone(),config,&proof.identity).await?
+                } else {RecordPartition::open_s3(&path,entry.config.clone(),config).await?};
+                records.insert(entry.collection_id.clone(),p);
+            }
             for row in std::fs::read_dir(&s.root).map_err(storage)? {
                 let row=row.map_err(storage)?;
                 let name=row.file_name().to_string_lossy().into_owned();
@@ -2123,7 +2137,7 @@ pub(crate) fn generate_openapi() {
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
-    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, generation, temporal, feed and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root do not restore old grants. See docs/implementation-57.md for acceptance limits."});
+    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, generation, temporal, feed and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root do not restore old grants. See docs/record-model.md for acceptance limits."});
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","routing_key","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"routing_key":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
