@@ -29,7 +29,7 @@ Status: **implementation foundation in Draft PR #72; not yet accepted or wired i
 
 ## Explicit limitations
 
-The Record layer now exposes feature-gated `create_s3` and `open_s3` paths. Accepted `Applied` operations are committed to S3 + SQLite before local journal/index publication; recovery validates the immutable bootstrap, appends missing committed tail entries to the local recovery journal, then reopens through the ordinary Record replay/index path. The local journal is a rebuildable cache in this mode. Initial checkpoint publication is retryable while the remote head remains at sequence zero. WAL blocks register predecessor dependency edges so backup closure discovery traverses the full committed log chain. Remaining limitations: real S3-compatible endpoint semantics are not yet tested; maintenance events/compaction must be audited to ensure no state-changing operation bypasses remote commit; index/segment dependencies must be registered by every writer; and service-level backup/restore still needs fault testing.
+The Record layer now exposes feature-gated `create_s3` and `open_s3` paths. Accepted `Applied` operations are committed to S3 + SQLite before local journal/index publication; recovery validates the immutable bootstrap, appends missing committed tail entries to the local recovery journal, then reopens through the ordinary Record replay/index path. The local journal is a rebuildable cache in this mode. Initial checkpoint publication is retryable while the remote head remains at sequence zero. WAL blocks register predecessor dependency edges so backup closure discovery traverses the full committed log chain. Remaining limitations: real S3-compatible endpoint semantics are not yet tested; index/segment dependencies must be registered by every writer; and service-level backup/restore still needs fault testing. The feed-retention trim is a same-sequence metadata transition that the remote log protocol does not yet represent, so S3 mode deliberately skips feed trimming rather than allowing a local-only floor advance that would be lost on cache rebuild. This trades retention reclamation for correctness/backpressure until a remote metadata transition is designed.
 
 The SQLite database is a single local authority. Do not put its WAL database on a network filesystem or allow independent nodes to maintain writable copies. Cross-host failover/HA is out of scope for this first slice.
 
@@ -76,7 +76,7 @@ Overall: **Record-level S3 integration is implemented as an opt-in path; not rea
 
 ### Remaining work
 1. Finish current-head Linux/Windows/workspace CI and fix all failures.
-2. Audit non-`Applied` maintenance events and compaction/anchor paths to ensure they cannot mutate authoritative state without remote publication.
+2. Audit non-`Applied` maintenance events and compaction/anchor paths to ensure they cannot mutate authoritative state without remote publication. Feed trimming now explicitly no-ops in S3 mode until its metadata transition can be committed remotely; add a remote-authoritative feed-floor protocol before claiming retention reclamation.
 3. Test response loss, update/delete semantics, bootstrap retry and local-cache-loss recovery.
 4. Verify complete index/segment dependency registration and service-level backup/restore.
 5. Run integration/fault tests against a real S3-compatible service before removing Draft status.
@@ -86,4 +86,5 @@ Overall: **Record-level S3 integration is implemented as an opt-in path; not rea
 - Added the Record-level bootstrap publication/recovery path and validation that the local checkpoint identity matches the authoritative remote bootstrap.
 - Added recovery from a missing local cache: reconstruct the local journal from the remote bootstrap, append all committed log entries, then rebuild through the standard Record recovery/index path. The regression test now includes update and delete operations and checks the final visible state after a second cache loss.
 - Added predecessor dependency edges for immutable WAL blocks and a test that backup reachability includes the full committed chain.
+- Audited TTL and staging-lease expiration: both already publish their sequenced maintenance events through the remote authority before local journal append. Found feed trim was local-only; S3 mode now skips that trim rather than risking a lost retention floor after cache rebuild.
 - Current CI Run #291 is pending/in progress. PR remains Draft; real S3 endpoint validation and the maintenance-event audit remain outstanding.
