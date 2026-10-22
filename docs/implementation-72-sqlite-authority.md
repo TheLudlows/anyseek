@@ -75,7 +75,7 @@ Overall: **in progress; not ready to merge**.
 ### Remaining work
 1. Run fresh current-head CI after the Record bootstrap/recovery integration.
 2. Audit all state-changing maintenance events and compaction/anchor paths so no authoritative change bypasses the remote commit protocol.
-3. Add Record-level tests for missing local cache recovery from bootstrap + full remote log, interrupted bootstrap retry, response loss, and update/delete semantics.
+3. Add Record-level tests for missing local cache recovery from bootstrap + full remote log, interrupted bootstrap retry, response loss, and update/delete semantics. A storage-level test now asserts that a committed tail's predecessor chain is included in reachability.
 4. Register complete manifest/segment/WAL dependency edges in all writers/indexers and verify backup restore lifecycle.
 5. Validate conditional create, ambiguous PUT, read-after-write and delete behavior against a real S3-compatible service.
 6. Complete object-backend process-failure/restart tests and only then remove Draft status.
