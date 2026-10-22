@@ -253,6 +253,11 @@ impl Inner {
             .write()
             .map_err(|_| RecordError::RecoveryRequired)?
             .fenced = true;
+        #[cfg(feature = "s3-object-store")]
+        if let Some(remote) = self.remote.as_mut() {
+            remote.commit_entry(event.seq, format!("system:expired:{}", event.seq), &bytes)
+                .await.map_err(RecordError::OutcomeUnknown)?;
+        }
         self.journal
             .append(&bytes)
             .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
