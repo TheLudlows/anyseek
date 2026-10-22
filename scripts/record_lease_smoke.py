@@ -12,9 +12,12 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
     clock(now);env={'ANYSEEK_TEST_CLOCK_FILE':str(clock_file)} if faults else {}
     restart_with(env)
     config={'index_name':'Leases','schema':[{'field':'body','field_type':'Text','store':True}]}
+    directories={}
     def create(cid):
         endpoint='/api/v1/index/'+cid
-        call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':cid,'config':config})
+        oid=operation()
+        call('POST','/api/v1/index',{'operation_id':oid,'collection_id':cid,'config':config})
+        directories[endpoint]=call('GET',f"/api/v1/catalog/operation/{oid['epoch']}/{oid['nonce']}")['receipt']['directory']
         call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','routing_key':'r','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
         return endpoint
     def stage(g='g',expected='Absent'):
@@ -41,10 +44,17 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
         restart_with(env);assert call('POST',endpoint+'/doc',original)['receipt']==receipt
     if faults:
         endpoint=create('lease-cleanup');request=stage();receipt=call('POST',endpoint+'/doc',request)['receipt']
-        restart_with({**env,'ANYSEEK_CHECKPOINT_CLEANUP_FAULT':'1'})
+        restart_with(env)
+        # Arm only this collection after recovery. A global cleanup fault would
+        # correctly fence S3 cold startup while it materializes old checkpoints,
+        # before the private-abort path under test can run.
+        cache=directory/'data'/directories[endpoint]
+        cleanup_fault=cache/'.test-cleanup-failure'
+        cleanup_fault.write_text('fail this collection old-generation retirement')
         call('POST',endpoint+'/doc',command('abort',1))
         assert call('GET',endpoint+'/doc/doc/generation')['private_cleanup_pending']
         assert call('POST',endpoint+'/doc',request)['receipt']==receipt
+        cleanup_fault.unlink()
         restart_with(env)
         assert not call('GET',endpoint+'/doc/doc/generation')['private_cleanup_pending']
         assert call('POST',endpoint+'/doc',request)['receipt']==receipt

@@ -330,7 +330,7 @@ impl PartitionJournal {
     fn clean_obsolete(&self) -> io::Result<()> {
         for generation in generations(&self.path)? {
             if generation < self.generation {
-                #[cfg(test)]
+                #[cfg(any(test,feature="fault-injection"))]
                 if self.path.join(".test-cleanup-failure").exists(){return Err(io::Error::other("injected old generation cleanup failure"));}
                 #[cfg(feature="fault-injection")]
                 if std::env::var("ANYSEEK_CHECKPOINT_CLEANUP_FAULT").as_deref()==Ok("1"){return Err(io::Error::other("injected old generation cleanup failure"));}
