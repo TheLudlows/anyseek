@@ -5,6 +5,12 @@ Status: **implementation foundation in Draft PR #72; not yet accepted or wired i
 ## Scope implemented
 
 - Added `rusqlite` with bundled SQLite and registered the internal `storage::sqlite_authority` module.
+- Added the `object_store` S3 backend (`S3CompatibleStore`) with configurable endpoint/bucket/region/credentials and HTTP opt-in for explicitly configured development endpoints.
+- Immutable S3 writes use conditional create (`PutMode::Create`), then read back and compare exact bytes, length and SHA-256. If a PUT response is ambiguous, the adapter reads the existing key and treats it as success only when the bytes match exactly; conflicting bytes are never overwritten.
+- `put_and_register` completes object upload and verification before recording the object as durable in SQLite; it deliberately does not advance `committed_seq`.
+- `get_verified` checks each read against the SQLite-published object reference.
+- Added authority-mediated retirement, pin/unpin, and collectible-object enumeration. An object is only retired when it is not referenced by any current partition head and has no live reader/indexer/backup/staging pin. Retirement is monotonic; a retired key cannot be reactivated.
+- `delete_retired` only deletes keys that the authority currently reports collectible. There is intentionally no unconditional object delete API.
 - Opening the metadata database enables SQLite WAL, sets `synchronous=FULL`, verifies the setting, enables foreign keys, and configures a bounded busy timeout.
 - Metadata tables represent the schema version, partition heads, operation receipts, durable object registration, reader/indexer/backup/staging pins, and retired-object candidates.
 - `PartitionHead` holds the single mutable authority's head version, owner epoch, committed sequence, WAL tip, manifest, indexed sequence, log base and recovery anchor.
@@ -15,7 +21,7 @@ Status: **implementation foundation in Draft PR #72; not yet accepted or wired i
 
 ## Explicit limitations
 
-This slice is **not** the end-to-end SQLite + object-storage backend. It does not yet implement an object-store adapter, an upload protocol, query-time tail replay, indexer execution, backup/restore closure, or safe GC. It is not yet connected to the current RecordService authoritative write path. The durable-object registration method trusts its caller; the future object adapter must actually perform remote read-back/checksum validation before calling it.
+This slice is **not** the end-to-end SQLite + object-storage backend. The S3-compatible adapter and basic pin-aware GC eligibility are implemented as isolated primitives, but they are not yet connected to the current RecordService authoritative write path. The adapter's conditional-create behavior must be tested against each selected S3-compatible service; services that do not honor conditional create and read-after-write visibility must not be certified. Query-time tail replay, indexer execution, coherent backup/restore closure, and integration fault tests remain outstanding.
 
 The SQLite database is a single local authority. Do not put its WAL database on a network filesystem or allow independent nodes to maintain writable copies. Cross-host failover/HA is out of scope for this first slice.
 
@@ -26,6 +32,9 @@ The SQLite database is a single local authority. Do not put its WAL database on 
 - Reject publication before an object has been registered as durable.
 - Reject reusing an immutable object key for different digest/length.
 - Reopen the database and verify the indexed watermark persists.
+- Verify upload/register does not itself commit a record.
+- Verify S3 adapter create/read-back, exact-content retry resolution, size limit, digest mismatch and conflicting-key rejection using the in-memory ObjectStore test double.
+- Verify active backup pins block retirement, retired objects are deleted only when collectible, repeated delete is safe, and retired keys cannot be registered again.
 
 ## Required next work
 
