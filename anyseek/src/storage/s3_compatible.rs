@@ -400,7 +400,7 @@ mod tests {
         assert!(authority.unpin_object("backup-pin").unwrap());
         assert!(authority.retire_object(&reference.key, 1, 3).unwrap());
         assert!(store.delete_retired(&mut authority, &reference.key, 3).await.unwrap());
-        assert!(!store.delete_retired(&authority, &reference.key, 3).await.unwrap());
+        assert!(!store.delete_retired(&mut authority, &reference.key, 3).await.unwrap());
         assert!(store.get_verified(&reference).await.is_err());
         assert!(authority.register_durable_object(&reference, 4).is_err());
         drop(authority);
