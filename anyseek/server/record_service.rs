@@ -1079,6 +1079,14 @@ async fn catalog_operation(
 struct BackupRequest {
     operation_id: OperationId,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct S3BackupMarker {
+    backup_id: String,
+    collection_id: String,
+    visible_seq: u64,
+    bundle_json: String,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestoreRequest {
