@@ -38,6 +38,7 @@ pub(crate) struct ObjectBackedPartition {
     authority: Mutex<SqliteAuthority>,
     max_tail_blocks: usize,
     max_tail_bytes: usize,
+    max_object_bytes: usize,
 }
 
 /// Snapshot captured from a single SQLite head. The caller applies the tail entries
@@ -102,6 +103,7 @@ impl ObjectBackedPartition {
             authority: Mutex::new(authority),
             max_tail_blocks: config.max_tail_blocks,
             max_tail_bytes: config.max_tail_bytes,
+            max_object_bytes: config.max_object_bytes,
         })
     }
 
@@ -149,7 +151,7 @@ impl ObjectBackedPartition {
         append_and_commit(
             &self.store, &mut authority, &self.partition_id, self.owner_epoch,
             operation_id, digest, canonical_operation, now_ms(),
-            self.store.max_object_bytes,
+            self.max_object_bytes,
         ).await.map_err(ObjectPartitionError::Tail)
     }
 
