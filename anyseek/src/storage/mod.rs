@@ -2,6 +2,7 @@
 //! indexes are consumers, never the commit witness.
 
 pub(crate) mod journal;
+pub(crate) mod sqlite_authority;
 mod platform;
 
 pub(crate) mod partition;
