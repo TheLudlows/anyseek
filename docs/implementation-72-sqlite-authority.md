@@ -85,6 +85,6 @@ Overall: **Record-level S3 integration is implemented as an opt-in path; not rea
 
 - Added the Record-level bootstrap publication/recovery path and validation that the local checkpoint identity matches the authoritative remote bootstrap.
 - Added recovery from a missing local cache: reconstruct the local journal from the remote bootstrap, append all committed log entries, then rebuild through the standard Record recovery/index path. The regression test now includes update and delete operations and checks the final visible state after a second cache loss.
-- Added predecessor dependency edges for immutable WAL blocks and a test that backup reachability includes the full committed chain.
+- Added predecessor dependency edges for immutable WAL blocks and a test that backup reachability includes the full committed chain. Added an incremental tail-read test for resuming after a locally recovered sequence.
 - Audited TTL and staging-lease expiration: both already publish their sequenced maintenance events through the remote authority before local journal append. Found feed trim was local-only; S3 mode now skips that trim rather than risking a lost retention floor after cache rebuild, with a regression assertion in the Record-level remote integration test.
 - Current CI Run #291 is pending/in progress. PR remains Draft; real S3 endpoint validation and the maintenance-event audit remain outstanding.
