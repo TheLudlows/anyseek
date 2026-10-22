@@ -157,15 +157,16 @@ impl SqliteAuthority {
             return Err(rusqlite::Error::InvalidParameterName("empty identity".into()));
         }
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some((digest, _)) = read_receipt(&tx, partition_id, operation_id)? {
+        if let Some((digest, result_json)) = read_receipt(&tx, partition_id, operation_id)? {
             if digest != request_sha256 {
                 return Err(rusqlite::Error::InvalidParameterName(
                     "operation ID reused with a different request digest".into()
                 ));
             }
-            let head = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            let original_head: PartitionHead = serde_json::from_str(&result_json)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
             tx.commit()?;
-            return Ok(PublishOutcome::AlreadyPublished(head));
+            return Ok(PublishOutcome::AlreadyPublished(original_head));
         }
         let current = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         if current.head_version != expected_head_version || current.owner_epoch != owner_epoch
