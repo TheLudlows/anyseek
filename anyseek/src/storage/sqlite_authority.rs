@@ -588,7 +588,8 @@ impl SqliteAuthority {
     }
 
     /// Pin a verified object before opening it or starting a background build.
-    /// Pins are metadata leases; callers must cancel work before allowing its lease to expire.
+    /// Expiry is advisory only: GC treats a pin as protective until an explicit unpin
+    /// after the consumer has been fenced/cancelled. A clock deadline alone is not proof.
     pub(crate) fn pin_object(
         &mut self,
         pin_id: &str,
@@ -654,9 +655,8 @@ impl SqliteAuthority {
             [object_key], |row| row.get(0),
         )?;
         let pinned: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM object_pins
-             WHERE object_key=?1 AND (expires_at_ms IS NULL OR expires_at_ms>?2))",
-            params![object_key,now_ms], |row| row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM object_pins WHERE object_key=?1)",
+            [object_key], |row| row.get(0),
         )?;
         if referenced || pinned {
             tx.commit()?;
@@ -675,7 +675,7 @@ impl SqliteAuthority {
     /// Return only monotonically retired objects that are still unreferenced and unpinned.
     /// The returned list is safe for idempotent remote deletion: state=retired prevents
     /// any future publication or pin from making the object live again.
-    pub(crate) fn collectible_objects(&self, now_ms: i64) -> rusqlite::Result<Vec<ObjectRef>> {
+    pub(crate) fn collectible_objects(&self, _now_ms: i64) -> rusqlite::Result<Vec<ObjectRef>> {
         let mut statement = self.connection.prepare(
             "SELECT u.object_key,u.sha256,u.byte_length
              FROM object_uploads u
@@ -689,11 +689,10 @@ impl SqliteAuthority {
                AND NOT EXISTS(
                  SELECT 1 FROM object_pins p
                  WHERE p.object_key=u.object_key
-                   AND (p.expires_at_ms IS NULL OR p.expires_at_ms>?1)
                )
              ORDER BY u.object_key"
         )?;
-        let rows = statement.query_map([now_ms], |row| {
+        let rows = statement.query_map([], |row| {
             let key: String = row.get(0)?;
             let digest: Vec<u8> = row.get(1)?;
             let sha256: [u8;32] = digest.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
