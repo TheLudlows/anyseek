@@ -367,23 +367,19 @@ impl Service {
             .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(1_000_000);
         let max_tail_bytes = usize::try_from(entry.config.max_journal_bytes)
             .unwrap_or(usize::MAX).min(1024 * 1024 * 1024).max(1);
-        let mut partition_identity = entry.collection_id.clone();
         let target_digest = Sha256::digest(entry.collection_id.as_bytes())
             .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-        let authority_suffix = if let Some(backup_id) = &entry.restore_from {
+        let (partition_id, authority_suffix) = if let Some(backup_id) = &entry.restore_from {
             let marker: S3BackupMarker = serde_json::from_slice(
                 &std::fs::read(self.root.join(format!("backup-{backup_id}")).join("s3-backup.json")).map_err(storage)?
             ).map_err(storage)?;
             if marker.backup_id != *backup_id {
                 return Err(bad("S3 backup marker identity mismatch"));
             }
-            partition_identity = marker.collection_id;
-            format!("{target_digest}-restore-{backup_id}")
+            (marker.partition_id, format!("{target_digest}-restore-{backup_id}"))
         } else {
-            target_digest
+            (target_digest.clone(), target_digest)
         };
-        let digest = Sha256::digest(partition_identity.as_bytes());
-        let partition_id = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         Ok(Some(S3CompatibleRecordConfig {
             authority_path: self.root.join(format!(".authority-{authority_suffix}.sqlite")),
             partition_id,
@@ -1107,6 +1103,7 @@ struct BackupRequest {
 struct S3BackupMarker {
     backup_id: String,
     collection_id: String,
+    partition_id: String,
     config: RecordConfig,
     visible_seq: u64,
     bundle_json: String,
@@ -1235,13 +1232,14 @@ async fn create_s3_backup_pointer(
     if count >= 32 { return Err(bad("local backup pointer budget exhausted (32)")); }
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0);
-    let (bundle_json, visible_seq) = partition.create_s3_backup(
+    let (bundle_json, visible_seq, partition_id) = partition.create_s3_backup(
         backup_id, now_ms, 256 * 1024 * 1024,
     ).await?;
     std::fs::create_dir_all(path).map_err(storage)?;
     let marker = S3BackupMarker {
         backup_id: backup_id.to_owned(),
         collection_id: collection_id.to_owned(),
+        partition_id,
         config: config.clone(),
         visible_seq,
         bundle_json,
