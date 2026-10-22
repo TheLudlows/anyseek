@@ -1343,11 +1343,14 @@ async fn retire_backup(
                 let marker: S3BackupMarker = serde_json::from_slice(
                     &std::fs::read(&marker_path).map_err(|error| error.to_string())?
                 ).map_err(|error| error.to_string())?;
-                let digest = Sha256::digest(marker.collection_id.as_bytes());
-                let collection_hash = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-                let authority_path = s.root.join(format!(".authority-{collection_hash}.sqlite"));
-                RecordPartition::retire_s3_backup(&authority_path, &id).await
-                    .map_err(|error| error.to_string())?;
+                for entry in std::fs::read_dir(&s.root).map_err(|error| error.to_string())? {
+                    let entry = entry.map_err(|error| error.to_string())?;
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with(".authority-") && name.ends_with(".sqlite") {
+                        RecordPartition::retire_s3_backup(&entry.path(), &id).await
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
             }
             RecordPartition::retire_snapshot(&backup_path).await.map_err(|error| error.to_string())
         }.await;
