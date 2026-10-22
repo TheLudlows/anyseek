@@ -52,3 +52,29 @@ The SQLite database is a single local authority. Do not put its WAL database on 
 4. Add tail replay/query integration so committed-but-unindexed records remain searchable.
 5. Integrate backup snapshot roots, restore validation and reference/pin-based GC.
 6. Exercise fault injection and native Linux/Windows recovery before removing Draft status.
+
+## Progress status — 2026-10-22
+
+Overall: **in progress; not ready to merge**.
+
+### Delivered in this branch
+- SQLite metadata authority with conditional sequential commits, owner-epoch checks and operation receipts.
+- S3-compatible immutable object adapter with conditional create, byte/length/SHA-256 verification and same-key retry resolution.
+- Object-first `append_and_commit` primitive and bounded committed-tail replay.
+- Logical metadata backup/restore bundle, dependency-edge-based closure discovery and backup-root pins.
+- Pin-aware retirement, remote-delete completion tombstones and protection against object-key reactivation.
+
+### Validation status
+- Latest fully completed CI run observed before the newest changes: default-core boundary and workspace build passed, but the storage unit-test suite failed on a GC test asserting that a physically deleted object key could be re-registered.
+- The re-registration guard was tightened to reject both retired and physically deleted states.
+- A newer retained-workspace workflow was queued, but no jobs/results were available at the last status check. Therefore the newest head is **not yet validated**.
+- Prior Linux/Windows persistence and service fault tests passed on earlier commits; they do not substitute for current-head validation.
+
+### Remaining work, in order
+1. Obtain green current-head CI on Linux and Windows; fix any remaining compile/test failures.
+2. Integrate `append_and_commit` into the existing RecordPartition/RecordService write path using canonical mutation envelopes and existing idempotency semantics.
+3. Apply committed-but-unindexed tail entries in the same Record read view as the index; correctly reconcile updates, deletes, version filters and ordering.
+4. Ensure every manifest/segment/WAL writer registers complete object dependency edges; integrate backup/restore into the existing service lifecycle.
+5. Exercise conditional create, ambiguous PUT, read-after-write visibility and deletion against a real S3-compatible service.
+6. Run fault-injection and restart acceptance; only then remove Draft status.
+
