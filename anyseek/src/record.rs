@@ -500,6 +500,19 @@ impl RemotePersistence {
             || inner.state.seq < head.indexed_seq {
             return Err(RecordError::RecoveryRequired);
         }
+        let bootstrap_ref = head.bootstrap.as_ref().ok_or(RecordError::RecoveryRequired)?;
+        let bootstrap_bytes = self.store.get_verified(bootstrap_ref).await.map_err(storage)?;
+        let (bootstrap_config, bootstrap_state) = match serde_json::from_slice::<Entry>(&bootstrap_bytes).map_err(storage)? {
+            Entry::Checkpoint { config, state } => (config, state),
+            _ => return Err(storage("remote bootstrap is not a Record checkpoint")),
+        };
+        if serde_json::to_vec(&bootstrap_config).map_err(storage)?
+                != serde_json::to_vec(&inner.config).map_err(storage)?
+            || bootstrap_state.lineage != inner.state.lineage
+            || bootstrap_state.feed.scope != inner.state.feed.scope
+            || bootstrap_state.seq != 0 {
+            return Err(storage("local partition does not match the authoritative remote bootstrap"));
+        }
         let tail = crate::storage::object_log::load_committed_tail(
             &self.store, &head, self.max_tail_blocks, self.max_tail_bytes,
         ).await.map_err(storage)?;
@@ -4423,6 +4436,17 @@ mod tests {
         authority.create_partition("record-test", 1).unwrap();
 
         let partition = RecordPartition::create(&path, config()).await.unwrap();
+        {
+            let inner = partition.inner.lock().await;
+            let checkpoint = encode_entry(&Entry::Checkpoint {
+                config: inner.config.clone(),
+                state: inner.state.clone(),
+            }).unwrap();
+            drop(inner);
+            store.publish_bootstrap(
+                &mut authority, "record-test", 1, &checkpoint, unix_time_ms_i64(),
+            ).await.unwrap();
+        }
         let mut remote = RemotePersistence {
             store,
             authority: tokio::sync::Mutex::new(authority),
