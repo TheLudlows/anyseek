@@ -392,6 +392,24 @@ impl SqliteAuthority {
         for object in &closure {
             ensure_durable_object(&tx, object)?;
         }
+        let reachable: Vec<String> = {
+            let mut statement = tx.prepare(
+                "WITH RECURSIVE reachable(object_key) AS (
+                    SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
+                    UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
+                    UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
+                    UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
+                 )
+                 SELECT object_key FROM reachable ORDER BY object_key"
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_,String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if reachable.iter().any(|key| !closure.iter().any(|object| &object.key == key)) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "backup closure omits a transitively reachable committed object".into()
+            ));
+        }
         let head_ids: Vec<String> = {
             let mut statement = tx.prepare("SELECT partition_id FROM partition_heads ORDER BY partition_id")?;
             let rows = statement.query_map([], |row| row.get(0))?;
@@ -469,6 +487,16 @@ impl SqliteAuthority {
             }))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let edges = {
+            let mut statement = tx.prepare(
+                "SELECT parent_key,child_key FROM object_edges ORDER BY parent_key,child_key"
+            )?;
+            let rows = statement.query_map([], |row| Ok(ObjectEdgeSnapshot {
+                parent_key: row.get(0)?,
+                child_key: row.get(1)?,
+            }))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         let retired = {
             let mut statement = tx.prepare(
                 "SELECT object_key,retired_generation,retired_at_ms FROM retired_objects ORDER BY object_key"
@@ -492,6 +520,7 @@ impl SqliteAuthority {
             objects,
             pins,
             retired,
+            edges,
             object_closure: closure,
         };
         let bytes = serde_json::to_vec(&snapshot).map_err(|_| rusqlite::Error::InvalidQuery)?;
