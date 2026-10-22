@@ -4178,6 +4178,69 @@ mod tests {
         drop(partition);
         std::fs::remove_dir_all(path).unwrap();
     }
+    #[cfg(feature = "s3-object-store")]
+    #[tokio::test]
+    async fn sqlite_committed_remote_tail_recovers_before_local_journal_append() {
+        use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
+        use object_store::memory::InMemory;
+        use std::{sync::Arc, time::Duration};
+
+        let path = path();
+        let authority_path = path.with_extension("authority.sqlite");
+        let object_store = Arc::new(InMemory::new());
+        let store = S3CompatibleStore::from_store(object_store.clone(), 1024 * 1024);
+        let mut authority = SqliteAuthority::open(&authority_path, Duration::from_secs(1)).unwrap();
+        authority.create_partition("record-test", 1).unwrap();
+
+        let partition = RecordPartition::create(&path, config()).await.unwrap();
+        let mut remote = RemotePersistence {
+            store,
+            authority,
+            partition_id: "record-test".into(),
+            owner_epoch: 1,
+            max_tail_blocks: 32,
+            max_tail_bytes: 1024 * 1024,
+            max_object_bytes: 1024 * 1024,
+        };
+        {
+            let mut inner = partition.inner.lock().await;
+            let prepared = mutation::prepare_at(
+                &inner.state, &inner.config, inner.snapshot_bytes,
+                write("remote-tail", "remote-record", "alpha remote durable", ExpectedVersion::Missing),
+                current_epoch(), inner.evaluation_time_ms,
+            ).unwrap();
+            let (applied, bytes) = match prepared {
+                mutation::PreparedWrite::Append { applied, bytes, .. } => (applied, bytes),
+                mutation::PreparedWrite::Replay(_) => panic!("unexpected replay"),
+            };
+            // Simulate a crash after the SQLite commit point but before the local
+            // journal append/index publication. Recovery must reconstruct the tail.
+            remote.commit(&applied, &bytes).await.unwrap();
+        }
+        drop(partition);
+
+        let recovered = RecordPartition::open(&path, config().max_journal_bytes).await.unwrap();
+        let authority = SqliteAuthority::open(&authority_path, Duration::from_secs(1)).unwrap();
+        let store = S3CompatibleStore::from_store(object_store, 1024 * 1024);
+        let mut remote = RemotePersistence {
+            store, authority, partition_id: "record-test".into(), owner_epoch: 1,
+            max_tail_blocks: 32, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
+        };
+        {
+            let mut inner = recovered.inner.lock().await;
+            remote.recover_tail(&mut inner).await.unwrap();
+            inner.remote = Some(remote);
+        }
+        let record = recovered.get("remote-record").await.unwrap().unwrap();
+        assert_eq!(record.version, 1);
+        assert_eq!(record.document.unwrap()["body"], "alpha remote durable");
+
+        drop(recovered);
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_file(&authority_path);
+        let _ = std::fs::remove_file(authority_path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(authority_path.with_extension("sqlite-shm"));
+    }
 }
 
 impl Inner {
