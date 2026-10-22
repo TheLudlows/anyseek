@@ -313,6 +313,17 @@ pub(super) fn apply_trim(
 }
 impl Inner {
     pub(super) fn trim_feed(&mut self, at: u64) -> Result<(), RecordError> {
+        // The current remote WAL protocol assigns one monotonically increasing
+        // sequence to each committed entry. FeedTrim is a same-sequence metadata
+        // transition and has no remote authority publication protocol yet. In S3
+        // mode, retain the feed prefix rather than publishing a local-only trim
+        // that would disappear after local-cache loss. Resource limits still apply
+        // and backpressure is preferable to silently losing retention metadata.
+        #[cfg(feature = "s3-object-store")]
+        if self.remote.is_some() {
+            let _ = at;
+            return Ok(());
+        }
         let Some(floor) = self
             .feed_cache
             .floor(at, self.config.change_feed.retention_ms)
