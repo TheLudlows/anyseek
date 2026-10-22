@@ -347,6 +347,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backup_bundle_restores_authority_only_after_closure_verification() {
+        use std::time::{Duration, SystemTime};
+        let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let source_path = std::env::temp_dir().join(format!("anyseek-backup-source-{stamp}-{}.sqlite", std::process::id()));
+        let target_path = std::env::temp_dir().join(format!("anyseek-backup-target-{stamp}-{}.sqlite", std::process::id()));
+        let mut source = SqliteAuthority::open(&source_path, Duration::from_secs(1)).unwrap();
+        let head = source.create_partition("p0", 5).unwrap();
+        let store = S3CompatibleStore::from_store(Arc::new(InMemory::new()), 1024 * 1024);
+        let reference = store.put_and_register(&mut source, "p0/log/1", b"committed operation", 10).await.unwrap();
+        let result = source.publish_commit("p0", head.head_version, 5, "op-1", [7;32], 1, reference.clone(), None).unwrap();
+        assert!(matches!(result, super::super::sqlite_authority::PublishOutcome::Published(_)));
+        let bundle = store.create_backup_bundle(&mut source, "backup-001", &[reference], 20, 1024 * 1024).await.unwrap();
+
+        let mut target = SqliteAuthority::open(&target_path, Duration::from_secs(1)).unwrap();
+        let restored = store.restore_backup_bundle(&mut target, &bundle.descriptor_ref, 1024 * 1024, 10, 1024 * 1024).await.unwrap();
+        assert_eq!(restored.backup_id, "backup-001");
+        let restored_head = target.read_head("p0").unwrap().unwrap();
+        assert_eq!(restored_head.committed_seq, 1);
+        assert_eq!(target.resolve_operation("p0", "op-1", [7;32]).unwrap().unwrap().committed_seq, 1);
+        drop(source);
+        drop(target);
+        for path in [&source_path, &target_path] {
+            let _=std::fs::remove_file(path);
+            let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
+            let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+        }
+    }
+
+    #[tokio::test]
     async fn deletion_requires_retirement_and_respects_pins() {
         use std::time::{Duration, SystemTime};
         let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
