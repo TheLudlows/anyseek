@@ -4534,9 +4534,9 @@ mod tests {
         let recovered=RecordPartition::open_s3_with_remote(
             &target_path,config().max_journal_bytes,remote,
         ).await.unwrap();
-        assert_eq!(recovered.get("a").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote first");
-        assert_eq!(recovered.get("b").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote second");
-        assert_eq!(recovered.statistics().await.unwrap().visible_seq,2);
+        assert_eq!(recovered.get("a").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote updated");
+        assert!(recovered.get("b").await.unwrap().is_none());
+        assert_eq!(recovered.statistics().await.unwrap().visible_seq,4);
         drop(recovered);
         std::fs::remove_dir_all(&target_path).unwrap();
         let _=std::fs::remove_file(&authority_path);
