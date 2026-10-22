@@ -933,18 +933,49 @@ impl RecordPartition {
         config: RecordConfig,
         remote_config: S3CompatibleRecordConfig,
     ) -> Result<Self, RecordError> {
-        let remote = RemotePersistence::open(&remote_config)?;
+        let mut remote = RemotePersistence::open(&remote_config)?;
         let existing = remote.authority.lock().await.read_head(&remote.partition_id).map_err(storage)?;
         match existing {
-            Some(head) if head.owner_epoch != remote.owner_epoch => return Err(RecordError::RecoveryRequired),
-            Some(_) => {},
+            Some(head) => {
+                if head.owner_epoch != remote.owner_epoch || head.bootstrap.is_none() {
+                    return Err(RecordError::RecoveryRequired);
+                }
+                drop(remote);
+                Self::open_s3(path, config, remote_config).await
+            }
             None => {
+                // A new remote authority must be bootstrapped from a fresh local
+                // partition. Never silently promote an existing local-only journal:
+                // it may contain acknowledged data absent from the remote commit log.
+                if path.exists() {
+                    return Err(RecordError::Rejected(
+                        "cannot attach an empty S3 authority to an existing local partition".into()
+                    ));
+                }
                 remote.authority.lock().await
                     .create_partition(&remote.partition_id, remote.owner_epoch).map_err(storage)?;
+                let partition = Self::create(path, config).await?;
+                let checkpoint = {
+                    let inner = partition.inner.lock().await;
+                    encode_entry(&Entry::Checkpoint {
+                        config: inner.config.clone(),
+                        state: inner.state.clone(),
+                    })?
+                };
+                {
+                    let mut authority = remote.authority.lock().await;
+                    remote.store.publish_bootstrap(
+                        &mut authority, &remote.partition_id, remote.owner_epoch,
+                        &checkpoint, unix_time_ms_i64(),
+                    ).await.map_err(storage)?;
+                }
+                {
+                    let mut inner = partition.inner.lock().await;
+                    inner.remote = Some(remote);
+                }
+                Ok(partition)
             }
         }
-        drop(remote);
-        Self::open_s3(path, config, remote_config).await
     }
 
     /// Open a local partition and reconcile every SQLite-committed S3 log entry
@@ -961,7 +992,27 @@ impl RecordPartition {
         let partition = if path.exists() {
             Self::open(path, max_journal_bytes).await?
         } else {
-            Self::create(path, config).await?
+            let head = remote.authority.lock().await.read_head(&remote.partition_id).map_err(storage)?
+                .ok_or_else(|| storage("remote partition authority is missing"))?;
+            if head.owner_epoch != remote.owner_epoch {
+                return Err(RecordError::RecoveryRequired);
+            }
+            let bootstrap_ref = head.bootstrap.as_ref()
+                .ok_or_else(|| storage("remote partition has no committed bootstrap checkpoint"))?;
+            let bootstrap = remote.store.get_verified(bootstrap_ref).await.map_err(storage)?;
+            let (stored_config, _) = match serde_json::from_slice::<Entry>(&bootstrap).map_err(storage)? {
+                Entry::Checkpoint { config, state } => (config, state),
+                _ => return Err(storage("remote bootstrap is not a Record checkpoint")),
+            };
+            if stored_config.max_journal_bytes != max_journal_bytes {
+                return Err(RecordError::Rejected(
+                    "max_journal_bytes differs from the remote bootstrap configuration".into()
+                ));
+            }
+            PartitionJournal::validate_initial(bootstrap.len(), max_journal_bytes)
+                .map_err(storage)?;
+            drop(PartitionJournal::create(path, max_journal_bytes, &bootstrap).map_err(creation_error)?);
+            Self::open(path, max_journal_bytes).await?
         };
         {
             let mut inner = partition.inner.lock().await;
