@@ -388,7 +388,7 @@ mod tests {
         authority.create_partition("p0", 1).unwrap();
         let store = S3CompatibleStore::from_store(Arc::new(InMemory::new()), 1024);
         let reference = store.put_and_register(&mut authority, "p0/staging/1", b"staging bytes", 1).await.unwrap();
-        authority.pin_object("backup-pin", "p0", &reference.key, "backup", None).unwrap();
+        authority.pin_object("backup-pin", "p0", &reference.key, "backup", Some(1)).unwrap();
         assert!(!authority.retire_object(&reference.key, 1, 2).unwrap());
         assert!(!store.delete_retired(&authority, &reference.key, 2).await.unwrap());
         assert!(authority.unpin_object("backup-pin").unwrap());
