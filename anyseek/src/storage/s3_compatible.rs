@@ -263,6 +263,25 @@ impl S3CompatibleStore {
         Ok(BackupBundle { descriptor_ref, descriptor })
     }
 
+    /// Create a backup from the authority's current transitive object graph. Every
+    /// manifest/WAL/segment object must have its child dependencies registered via
+    /// register_object_edge before this call; missing registry entries fail closed.
+    pub(crate) async fn create_authoritative_backup_bundle(
+        &self,
+        authority: &mut SqliteAuthority,
+        backup_id: &str,
+        created_at_ms: i64,
+        max_snapshot_bytes: usize,
+    ) -> Result<BackupBundle, BackupError> {
+        let closure = authority.reachable_objects().map_err(BackupError::Metadata)?;
+        if closure.is_empty() {
+            return Err(BackupError::Invalid("authority has no reachable objects to back up"));
+        }
+        self.create_backup_bundle(
+            authority, backup_id, &closure, created_at_ms, max_snapshot_bytes
+        ).await
+    }
+
     /// Restore into an empty SQLite authority only after validating the descriptor,
     /// metadata snapshot and every referenced payload object. Any missing/corrupt
     /// object aborts before the target database is modified.
