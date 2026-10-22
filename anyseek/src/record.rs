@@ -333,6 +333,8 @@ struct Inner {
     bootstrap: Option<change_feed::Bootstrap>,
     bootstrap_epoch: String,
     output: Arc<std::sync::RwLock<output::OutputState>>,
+    #[cfg(feature = "s3-object-store")]
+    remote: Option<RemotePersistence>,
     #[cfg(test)]
     fail_after_durable: bool,
     #[cfg(test)]
@@ -348,6 +350,144 @@ impl Drop for Inner {
         if let Ok(mut state) = self.output.write() { state.fenced = true; }
     }
 }
+#[cfg(feature = "s3-object-store")]
+struct RemotePersistence {
+    store: crate::storage::s3_compatible::S3CompatibleStore,
+    authority: crate::storage::sqlite_authority::SqliteAuthority,
+    partition_id: String,
+    owner_epoch: u64,
+    max_tail_blocks: usize,
+    max_tail_bytes: usize,
+}
+
+/// Configuration for the first S3-compatible durable Record backend.
+/// Credentials are runtime-only and are never written into SQLite or backup metadata.
+#[cfg(feature = "s3-object-store")]
+pub struct S3CompatibleRecordConfig {
+    pub authority_path: PathBuf,
+    pub partition_id: String,
+    pub owner_epoch: u64,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub allow_http: bool,
+    pub max_object_bytes: usize,
+    pub max_tail_blocks: usize,
+    pub max_tail_bytes: usize,
+}
+
+#[cfg(feature = "s3-object-store")]
+impl RemotePersistence {
+    fn open(config: &S3CompatibleRecordConfig) -> Result<Self, RecordError> {
+        if config.partition_id.is_empty()
+            || !config.partition_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || config.max_object_bytes == 0 || config.max_tail_blocks == 0 || config.max_tail_bytes == 0 {
+            return Err(RecordError::Rejected("invalid S3 persistence configuration".into()));
+        }
+        let store = crate::storage::s3_compatible::S3CompatibleStore::connect(
+            &config.endpoint, &config.bucket, &config.region, &config.access_key_id,
+            &config.secret_access_key, config.allow_http, config.max_object_bytes,
+        ).map_err(|error| storage(error))?;
+        let authority = crate::storage::sqlite_authority::SqliteAuthority::open(
+            &config.authority_path, std::time::Duration::from_secs(5),
+        ).map_err(storage)?;
+        Ok(Self {
+            store, authority, partition_id: config.partition_id.clone(),
+            owner_epoch: config.owner_epoch, max_tail_blocks: config.max_tail_blocks,
+            max_tail_bytes: config.max_tail_bytes,
+        })
+    }
+
+    async fn commit(&mut self, applied: &Applied, payload: &[u8]) -> Result<(), String> {
+        use sha2::{Digest, Sha256};
+        let head = self.authority.read_head(&self.partition_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "remote partition authority is missing".to_owned())?;
+        let seq = applied.receipt.seq;
+        if seq != head.committed_seq.saturating_add(1) {
+            return Err(format!("remote commit sequence conflict: local={seq}, remote={}", head.committed_seq));
+        }
+        let digest: [u8; 32] = Sha256::digest(payload).into();
+        let operation_id = format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce);
+        let block = crate::storage::object_log::ObjectLogBlock {
+            partition_id: self.partition_id.clone(), first_seq: seq, last_seq: seq,
+            previous: head.wal_tip.clone(),
+            entries: vec![crate::storage::object_log::ObjectLogEntry {
+                seq, operation_id: operation_id.clone(), request_sha256: digest, payload: payload.to_vec(),
+            }],
+        };
+        let key = format!("partitions/{}/wal/{seq:020}-{}", self.partition_id,
+            digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        let reference = crate::storage::object_log::upload_log_block(
+            &self.store, &mut self.authority, &key, &block,
+            unix_time_ms_i64(), self.max_tail_bytes.min(usize::MAX),
+        ).await.map_err(|error| error.to_string())?;
+        match self.authority.publish_commit(
+            &self.partition_id, head.head_version, self.owner_epoch, &operation_id,
+            digest, seq, reference, None,
+        ).map_err(|error| error.to_string())? {
+            crate::storage::sqlite_authority::PublishOutcome::Published(published)
+            | crate::storage::sqlite_authority::PublishOutcome::AlreadyPublished(published)
+                if published.committed_seq == seq => Ok(()),
+            crate::storage::sqlite_authority::PublishOutcome::Conflict =>
+                Err("remote SQLite commit conflicted; partition requires recovery".into()),
+            _ => Err("remote operation receipt does not match committed sequence".into()),
+        }
+    }
+
+    async fn recover_tail(&mut self, inner: &mut Inner) -> Result<(), RecordError> {
+        use sha2::{Digest, Sha256};
+        let head = self.authority.read_head(&self.partition_id).map_err(storage)?
+            .ok_or_else(|| storage("remote partition authority is missing"))?;
+        if inner.state.seq > head.committed_seq || inner.state.seq < head.indexed_seq {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let tail = crate::storage::object_log::load_committed_tail(
+            &self.store, &head, self.max_tail_blocks, self.max_tail_bytes,
+        ).await.map_err(|error| storage(error))?;
+        inner.healthy = false;
+        if let Ok(mut output) = inner.output.write() { output.fenced = true; }
+        for entry in tail.into_iter().filter(|entry| entry.seq > inner.state.seq) {
+            if entry.seq != inner.state.seq.saturating_add(1) {
+                return Err(RecordError::RecoveryRequired);
+            }
+            let digest: [u8; 32] = Sha256::digest(&entry.payload).into();
+            if digest != entry.request_sha256 { return Err(RecordError::RecoveryRequired); }
+            let applied = match serde_json::from_slice::<Entry>(&entry.payload).map_err(storage)? {
+                Entry::Applied(applied) if applied.receipt.seq == entry.seq => applied,
+                _ => return Err(RecordError::RecoveryRequired),
+            };
+            let operation_id = format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce);
+            if operation_id != entry.operation_id { return Err(RecordError::RecoveryRequired); }
+            inner.journal.validate_append_with_reserve(entry.payload.len(), 0)
+                .map_err(|_| RecordError::RecoveryRequired)?;
+            inner.journal.append(&entry.payload).map_err(storage)?;
+            let feed_point = change_feed::pending(&inner.state, &applied)?;
+            let mut next_state = inner.state.clone();
+            apply(&mut next_state, &applied)?;
+            let snapshot_bytes = encode_entry(&Entry::Checkpoint {
+                config: inner.config.clone(), state: next_state,
+            })?.len();
+            inner.publish(&applied, snapshot_bytes).await?;
+            inner.feed_cache.push(feed_point);
+        }
+        if inner.state.seq != head.committed_seq { return Err(RecordError::RecoveryRequired); }
+        validate_restored_state(&inner.config, &inner.state)?;
+        inner.feed_cache = change_feed::Cache::rebuild(&inner.state, &inner.config.change_feed)?;
+        inner.graph_cache = graph::Cache::rebuild(&inner.state)?;
+        inner.healthy = true;
+        if let Ok(mut output) = inner.output.write() { output.fenced = inner.state.sealed_for.is_some(); }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "s3-object-store")]
+fn unix_time_ms_i64() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0)
+}
+
 /// Serial single-partition implementation. Queries and writes share
 /// one guard through candidate retrieval and authoritative record lookup.
 #[derive(Clone)]
@@ -732,6 +872,41 @@ impl RecordPartition {
         if state.fenced { return Err(RecordError::RecoveryRequired); }
         Ok(DataOutputPermit::new(self.output.clone(), state.revision))
     }
+    /// Create a Record partition whose accepted writes are committed to S3 + SQLite
+    /// before local journal/index publication. The local journal remains a rebuildable
+    /// cache; use open_s3 after restart to reconcile any remotely committed tail.
+    #[cfg(feature = "s3-object-store")]
+    pub async fn create_s3(
+        path: &Path,
+        config: RecordConfig,
+        remote_config: S3CompatibleRecordConfig,
+    ) -> Result<Self, RecordError> {
+        let mut remote = RemotePersistence::open(&remote_config)?;
+        remote.authority.create_partition(&remote.partition_id, remote.owner_epoch).map_err(storage)?;
+        let partition = Self::create(path, config).await?;
+        let mut inner = partition.inner.lock().await;
+        if inner.state.seq != 0 { return Err(RecordError::Rejected("S3 backend requires a fresh local partition".into())); }
+        inner.remote = Some(remote);
+        Ok(partition)
+    }
+
+    /// Open a local partition and reconcile every SQLite-committed S3 log entry
+    /// before making its read view available. A missing/corrupt committed object
+    /// fails closed and never falls back to the local cache as authoritative.
+    #[cfg(feature = "s3-object-store")]
+    pub async fn open_s3(
+        path: &Path,
+        max_journal_bytes: u64,
+        remote_config: S3CompatibleRecordConfig,
+    ) -> Result<Self, RecordError> {
+        let mut remote = RemotePersistence::open(&remote_config)?;
+        let partition = Self::open(path, max_journal_bytes).await?;
+        let mut inner = partition.inner.lock().await;
+        remote.recover_tail(&mut inner).await?;
+        inner.remote = Some(remote);
+        Ok(partition)
+    }
+
     /// Create a new authoritative partition. Parent directory must exist.
     pub async fn create(path: &Path, config: RecordConfig) -> Result<Self, RecordError> {
         let path = path.to_owned();
@@ -787,6 +962,8 @@ impl RecordPartition {
                 graph_cache: graph::Cache::default(),
                 bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),
                 output,
+                #[cfg(feature = "s3-object-store")]
+                remote: None,
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
@@ -878,6 +1055,8 @@ impl RecordPartition {
                 feed_cache,
                 graph_cache,
                 bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),                output:output.clone(),
+                #[cfg(feature = "s3-object-store")]
+                remote: None,
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
@@ -942,6 +1121,11 @@ impl RecordPartition {
                     output.fenced = true;
                     if hides_evidence { output.revision = output.revision.checked_add(1)
                         .ok_or_else(|| storage("data barrier revision exhausted"))?; }
+                }
+                #[cfg(feature = "s3-object-store")]
+                if let Some(remote) = inner.remote.as_mut() {
+                    remote.commit(&applied, &bytes).await
+                        .map_err(|error| RecordError::OutcomeUnknown(error))?;
                 }
                 inner
                     .journal
