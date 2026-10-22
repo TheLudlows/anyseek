@@ -10,7 +10,8 @@ Status: **implementation foundation in Draft PR #72; not yet accepted or wired i
 - `put_and_register` completes object upload and verification before recording the object as durable in SQLite; it deliberately does not advance `committed_seq`.
 - `get_verified` checks each read against the SQLite-published object reference.
 - Added bounded object-log blocks and backward chain replay from the SQLite committed tip to the indexed watermark.
-- Added `append_and_commit`: resolve an existing operation receipt first, upload and verify a deterministic immutable log object, register it as durable, then publish the new sequential committed watermark/reference and idempotency receipt in a single SQLite transaction. Stale owner epochs return conflict; response-loss retries resolve the same operation ID and digest without allocating a second sequence.
+- Added `append_and_commit`: resolve an existing operation receipt first, upload and verify a deterministic immutable log object, register it as durable, then publish the new sequential committed watermark/reference and idempotency receipt in a single SQLite transaction.
+- Added a separate immutable bootstrap checkpoint reference in the SQLite partition head, plus `publish_bootstrap` to upload/verify/register and publish the initial Record configuration/checkpoint before the first data commit. Bootstrap roots are included in backup and GC reachability. Stale owner epochs return conflict; response-loss retries resolve the same operation ID and digest without allocating a second sequence.
 - Added a focused test for object-first publication, unindexed-tail visibility, duplicate operation retry, and stale owner epoch rejection. Partition mismatch, sequence gaps, checksum failures and block/byte budget exhaustion fail closed rather than returning a partial tail.
 - Added a logical metadata backup snapshot containing partition heads, operation receipts, object registry, pins and retired-key tombstones. Backup creation pins the caller-supplied complete object closure in the same SQLite transaction that captures the snapshot.
 - Added a backup descriptor that references both the metadata snapshot and the object closure, plus restore that verifies the descriptor, snapshot and each object before importing metadata into an empty SQLite authority.
@@ -72,7 +73,7 @@ Overall: **in progress; not ready to merge**.
 
 ### Remaining work
 1. Run current-head CI for the newest object-log/backup changes and fix all failures.
-2. Integrate `append_and_commit` into the actual RecordPartition/RecordService write path; avoid dual-authority success semantics with the existing local journal.
+2. Integrate `publish_bootstrap` and `append_and_commit` into actual RecordPartition/RecordService create/open/write paths. Object-backed recovery must load the bootstrap checkpoint and replay committed log entries; do not dual-commit local WAL and S3 without an explicit recovery protocol.
 3. Apply committed-but-unindexed entries in the same authoritative Record query view, including update/delete/version semantics.
 4. Register complete manifest/segment/WAL dependency edges in all writers/indexers and integrate backup/restore into service lifecycle.
 5. Validate conditional create, ambiguous PUT, read-after-write and delete behavior against a real S3-compatible service.
