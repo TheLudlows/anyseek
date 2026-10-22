@@ -160,14 +160,33 @@ pub(crate) async fn load_committed_tail(
     max_blocks: usize,
     max_total_bytes: usize,
 ) -> Result<Vec<ObjectLogEntry>, TailError> {
-    if head.indexed_seq > head.committed_seq || head.log_base_seq > head.committed_seq {
-        return Err(TailError::Invalid("invalid head watermarks"));
+    if head.indexed_seq > head.committed_seq {
+        return Err(TailError::Invalid("invalid index watermark"));
     }
-    if head.indexed_seq < head.log_base_seq {
-        return Err(TailError::Invalid("index is behind the retained log anchor"));
+    load_committed_entries_after(store, head, head.indexed_seq, max_blocks, max_total_bytes).await
+}
+
+/// Read the committed log suffix strictly after a caller-verified local state
+/// sequence. This avoids rereading old entries when the remote search-index
+/// watermark intentionally remains unchanged for a rebuildable local index.
+pub(crate) async fn load_committed_entries_after(
+    store: &S3CompatibleStore,
+    head: &PartitionHead,
+    after_seq: u64,
+    max_blocks: usize,
+    max_total_bytes: usize,
+) -> Result<Vec<ObjectLogEntry>, TailError> {
+    if head.log_base_seq > head.committed_seq || after_seq > head.committed_seq {
+        return Err(TailError::Invalid("invalid log watermarks"));
     }
-    if head.indexed_seq == head.committed_seq {
+    if after_seq < head.log_base_seq {
+        return Err(TailError::Invalid("requested sequence is behind retained log anchor"));
+    }
+    if after_seq == head.committed_seq {
         return Ok(Vec::new());
+    }
+    if max_blocks == 0 || max_total_bytes == 0 {
+        return Err(TailError::Invalid("empty committed-tail budget"));
     }
     let mut expected_last = head.committed_seq;
     let mut current = head.wal_tip.clone().ok_or(TailError::Invalid("committed tail has no WAL tip"))?;
@@ -190,13 +209,13 @@ pub(crate) async fn load_committed_tail(
             return Err(TailError::Invalid("partition or log chain sequence mismatch"));
         }
         let filtered: Vec<_> = block.entries.iter()
-            .filter(|entry| entry.seq > head.indexed_seq)
+            .filter(|entry| entry.seq > after_seq)
             .cloned()
             .collect();
         reverse_blocks.push(filtered);
         blocks_read += 1;
 
-        if block.first_seq <= head.indexed_seq.checked_add(1).ok_or(TailError::Invalid("sequence overflow"))? {
+        if block.first_seq <= after_seq.checked_add(1).ok_or(TailError::Invalid("sequence overflow"))? {
             break;
         }
         expected_last = block.first_seq.checked_sub(1).ok_or(TailError::Invalid("invalid block start"))?;
@@ -205,12 +224,12 @@ pub(crate) async fn load_committed_tail(
 
     reverse_blocks.reverse();
     let entries: Vec<_> = reverse_blocks.into_iter().flatten().collect();
-    let expected_count = head.committed_seq - head.indexed_seq;
+    let expected_count = head.committed_seq - after_seq;
     if entries.len() as u64 != expected_count {
         return Err(TailError::Invalid("tail does not cover every committed sequence"));
     }
     for (offset, entry) in entries.iter().enumerate() {
-        let expected = head.indexed_seq + 1 + offset as u64;
+        let expected = after_seq + 1 + offset as u64;
         if entry.seq != expected {
             return Err(TailError::Invalid("non-contiguous operation sequence"));
         }
