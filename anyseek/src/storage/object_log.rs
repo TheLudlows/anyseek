@@ -297,6 +297,9 @@ mod tests {
         let out=authority.publish_commit("p0",head.head_version,4,"op-2",[2;32],2,r2,None).unwrap();
         head=match out {super::super::sqlite_authority::PublishOutcome::Published(h)=>h,other=>panic!("{other:?}")};
         assert_eq!(load_committed_tail(&store,&head,4,4096).await.unwrap(),vec![entry(1),entry(2)]);
+        let reachable=authority.reachable_objects().unwrap();
+        assert!(reachable.iter().any(|object| object.key=="p0/log/1"));
+        assert!(reachable.iter().any(|object| object.key=="p0/log/2"));
         let manifest=ObjectLogBlock{partition_id:"p0".into(),first_seq:1,last_seq:1,previous:None,entries:vec![entry(1)]};
         let manifest_ref=upload_log_block(&store,&mut authority,"p0/manifest/1",&manifest,3,2048).await.unwrap();
         head=authority.publish_index("p0",head.head_version,4,1,manifest_ref).unwrap().unwrap();
