@@ -357,6 +357,26 @@ mod tests {
         ObjectRef { key:key.to_owned(),sha256:[byte;32],length:128 }
     }
     #[test]
+    fn commit_rejects_unverified_objects_and_immutable_key_reuse() {
+        let path=temp_db();
+        let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        let head=db.create_partition("p0",3).unwrap();
+        let unverified=object("wal/unverified",1);
+        assert!(db.publish_commit("p0",head.head_version,3,"op-x",[1;32],1,unverified.clone(),None).is_err());
+        assert_eq!(db.read_head("p0").unwrap().unwrap().committed_seq,0);
+        db.register_durable_object(&unverified,10).unwrap();
+        assert!(db.register_durable_object(&object("wal/unverified",2),11).is_err());
+        assert!(matches!(
+            db.publish_commit("p0",head.head_version,3,"op-x",[1;32],1,unverified,None).unwrap(),
+            PublishOutcome::Published(_)
+        ));
+        drop(db);
+        let _=fs::remove_file(&path);
+        let _=fs::remove_file(path.with_extension("sqlite-wal"));
+        let _=fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
     fn commit_retry_index_watermark_and_reopen() {
         let path=temp_db();
         let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
