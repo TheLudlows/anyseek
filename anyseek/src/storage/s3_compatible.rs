@@ -300,6 +300,30 @@ impl S3CompatibleStore {
             .map_err(BackupError::Metadata)
     }
 
+    /// Retire and delete only the two backup-control objects after backup pins
+    /// have been released. Payload closure objects remain subject to normal head reachability.
+    pub(crate) async fn retire_backup_metadata(
+        &self,
+        authority: &mut SqliteAuthority,
+        bundle: &BackupBundle,
+        now_ms: i64,
+    ) -> Result<(), BackupError> {
+        let refs = [&bundle.descriptor_ref, &bundle.descriptor.metadata_snapshot];
+        for reference in refs {
+            let _ = authority.retire_object(
+                &reference.key, now_ms.max(0) as u64, now_ms,
+            ).map_err(BackupError::Metadata)?;
+        }
+        for reference in refs {
+            let _ = self.delete_retired(authority, &reference.key, now_ms).await
+                .map_err(|error| match error {
+                    UploadRegisterError::ObjectStore(e) => BackupError::ObjectStore(e),
+                    UploadRegisterError::Metadata(e) => BackupError::Metadata(e),
+                })?;
+        }
+        Ok(())
+    }
+
     /// Delete only an object the SQLite authority has monotonically retired and
     /// currently reports as unreferenced and unpinned. Repeated deletion is allowed.
     pub(crate) async fn delete_retired(
