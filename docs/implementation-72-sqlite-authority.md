@@ -15,7 +15,7 @@ Status: **implementation foundation in Draft PR #72; not yet accepted or wired i
 - Added a focused test for object-first publication, unindexed-tail visibility, duplicate operation retry, and stale owner epoch rejection. Partition mismatch, sequence gaps, checksum failures and block/byte budget exhaustion fail closed rather than returning a partial tail.
 - Added a logical metadata backup snapshot containing partition heads, operation receipts, object registry, pins and retired-key tombstones. Backup creation pins the caller-supplied complete object closure in the same SQLite transaction that captures the snapshot.
 - Added a backup descriptor that references both the metadata snapshot and the object closure, plus restore that verifies the descriptor, snapshot and each object before importing metadata into an empty SQLite authority.
-- Added an authority-driven backup entry point that derives the transitive object closure from registered object dependency edges. Backup descriptor and metadata snapshot roots are pinned by backup ID, and restore recreates those pins so the restore entry point is protected from GC.
+- Added an authority-driven backup entry point that derives the transitive object closure from registered object dependency edges. Backup descriptor and metadata snapshot roots are pinned by backup ID, and restore recreates those pins so the restore entry point is protected from GC. Closure discovery now includes bootstrap roots and existing pinned roots before recursively following dependency edges.
 - Added authority-mediated retirement, pin/unpin, and collectible-object enumeration. An object is only retired when it is not referenced by any current partition head and has no live reader/indexer/backup/staging pin. Retirement is monotonic; a retired key cannot be reactivated.
 - `delete_retired` only deletes keys that the authority currently reports collectible. There is intentionally no unconditional object delete API.
 - Opening the metadata database enables SQLite WAL, sets `synchronous=FULL`, verifies the setting, enables foreign keys, and configures a bounded busy timeout.
@@ -72,7 +72,7 @@ Overall: **in progress; not ready to merge**.
 - No real S3-compatible endpoint has yet been exercised; in-memory object-store tests do not prove service-specific conditional PUT or visibility semantics.
 
 ### Remaining work
-1. Run current-head CI for the newest object-log/backup changes and fix all failures.
+1. Run current-head CI for the newest object-log/bootstrap/backup/GC changes and fix all failures.
 2. Integrate `publish_bootstrap` and `append_and_commit` into actual RecordPartition/RecordService create/open/write paths. Object-backed recovery must load the bootstrap checkpoint and replay committed log entries; do not dual-commit local WAL and S3 without an explicit recovery protocol.
 3. Apply committed-but-unindexed entries in the same authoritative Record query view, including update/delete/version semantics.
 4. Register complete manifest/segment/WAL dependency edges in all writers/indexers and integrate backup/restore into service lifecycle.
