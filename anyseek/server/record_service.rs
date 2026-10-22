@@ -1247,21 +1247,25 @@ async fn backup(
         let path = s.root.join(format!("backup-{backup_id}"));
         let root = s.root.clone();
         let oid = request.operation_id.clone();
+        let collection_id = id.clone();
+        let s3_mode = std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref() == Ok("s3");
         let (result, permit) = s.catalog.authorized(key, id, move |entry| async move {
-            // The source epoch watermark is checked even for a replay. Backup IDs
-            // are immutable; retrying an ID never takes a fresher snapshot.
             p.operation(&oid).await?;
-            RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
-            let seq = if path.exists() {
-                let existing = RecordPartition::open(&path, entry.config.max_journal_bytes).await?;
-                existing.statistics().await?.visible_seq
+            let seq = if s3_mode {
+                create_s3_backup_pointer(&p, &path, &root, &backup_id, &collection_id).await?
             } else {
-                let count = std::fs::read_dir(&root).map_err(storage)?.try_fold(0usize, |count, row| {
-                    let row = row?;
-                    Ok::<_,std::io::Error>(count + usize::from(row.file_name().to_string_lossy().starts_with("backup-")))
-                }).map_err(storage)?;
-                if count >= 32 { return Err(bad("local backup budget exhausted (32); export/retirement tooling is pending")); }
-                p.checkpoint(&path).await?
+                RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
+                if path.exists() {
+                    let existing = RecordPartition::open(&path, entry.config.max_journal_bytes).await?;
+                    existing.statistics().await?.visible_seq
+                } else {
+                    let count = std::fs::read_dir(&root).map_err(storage)?.try_fold(0usize, |count, row| {
+                        let row = row?;
+                        Ok::<_,std::io::Error>(count + usize::from(row.file_name().to_string_lossy().starts_with("backup-")))
+                    }).map_err(storage)?;
+                    if count >= 32 { return Err(bad("local backup budget exhausted (32); export/retirement tooling is pending")); }
+                    p.checkpoint(&path).await?
+                }
             };
             Ok::<_,Error>(json!({"backup_id":backup_id,"visible_seq":seq,"operation_id":request.operation_id,"expires_at":request.operation_id.expires_at_unix_seconds(),"scope":"collection data/configuration/versions/operation receipts; grants are not restored"}))
         }).await?;
