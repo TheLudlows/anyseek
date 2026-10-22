@@ -110,7 +110,10 @@ impl S3CompatibleStore {
                 ).into(),
             });
         }
-        ObjectPath::parse(key)
+        Ok(ObjectPath::parse(key).map_err(|error| object_store::Error::Generic {
+            store: "s3-compatible",
+            source: error.into(),
+        })?)
     }
 
     /// Conditionally create a new object, then read it back and verify exact bytes.
@@ -310,7 +313,7 @@ impl S3CompatibleStore {
     }
 
     #[cfg(test)]
-    fn from_store(store: Arc<dyn ObjectStore>, max_object_bytes: usize) -> Self {
+    pub(crate) fn from_store(store: Arc<dyn ObjectStore>, max_object_bytes: usize) -> Self {
         Self { store, max_object_bytes }
     }
 }
