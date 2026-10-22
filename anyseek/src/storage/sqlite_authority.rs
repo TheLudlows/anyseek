@@ -47,6 +47,7 @@ pub(crate) struct AuthorityBackupSnapshot {
     pub objects: Vec<ObjectRegistrySnapshot>,
     pub pins: Vec<PinSnapshot>,
     pub retired: Vec<RetiredSnapshot>,
+    pub edges: Vec<ObjectEdgeSnapshot>,
     pub object_closure: Vec<ObjectRef>,
 }
 
@@ -76,6 +77,13 @@ pub(crate) struct PinSnapshot {
     pub expires_at_ms: Option<i64>,
     pub backup_id: Option<String>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObjectEdgeSnapshot {
+    pub parent_key: String,
+    pub child_key: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RetiredSnapshot {
@@ -148,6 +156,13 @@ impl SqliteAuthority {
                  state INTEGER NOT NULL CHECK(state IN (0,1,2,3)),
                  created_at_ms INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS object_edges (
+                 parent_key TEXT NOT NULL,
+                 child_key TEXT NOT NULL,
+                 PRIMARY KEY(parent_key,child_key),
+                 CHECK(parent_key <> child_key)
+             );
+             CREATE INDEX IF NOT EXISTS object_edges_child_idx ON object_edges(child_key);
              CREATE TABLE IF NOT EXISTS object_pins (
                  pin_id TEXT PRIMARY KEY,
                  partition_id TEXT NOT NULL,
