@@ -419,6 +419,10 @@ impl Service {
                 if marker.backup_id != *backup_id {
                     return Err(storage("S3 backup marker does not match the durable restore intent"));
                 }
+                if serde_json::to_value(&marker.config).map_err(storage)?
+                    != serde_json::to_value(&entry.config).map_err(storage)? {
+                    return Err(storage("S3 backup configuration differs from durable restore intent"));
+                }
                 RecordPartition::restore_s3_backup(
                     &path, entry.config.clone(), remote_config, &marker.bundle_json,
                     256 * 1024 * 1024, 1_000_000, 10 * 1024 * 1024 * 1024usize,
