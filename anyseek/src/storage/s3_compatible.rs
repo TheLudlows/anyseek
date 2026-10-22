@@ -403,6 +403,7 @@ mod tests {
         assert!(!store.delete_retired(&mut authority, &reference.key, 3).await.unwrap());
         assert!(store.get_verified(&reference).await.is_err());
         assert!(authority.register_durable_object(&reference, 4).is_err());
+        assert!(!authority.collectible_objects(4).unwrap().iter().any(|item| item.key == reference.key));
         drop(authority);
         let _=std::fs::remove_file(&path);
         let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
