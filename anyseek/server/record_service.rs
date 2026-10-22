@@ -420,7 +420,7 @@ impl Service {
                 let marker: S3BackupMarker = serde_json::from_slice(
                     &std::fs::read(self.root.join(format!("backup-{backup_id}")).join("s3-backup.json")).map_err(storage)?
                 ).map_err(storage)?;
-                if marker.collection_id != entry.collection_id || marker.backup_id != *backup_id {
+                if marker.backup_id != *backup_id {
                     return Err(storage("S3 backup marker does not match the durable restore intent"));
                 }
                 RecordPartition::restore_s3_backup(
