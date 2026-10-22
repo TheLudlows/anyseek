@@ -425,6 +425,40 @@ mod tests {
     use super::*;
     use object_store::memory::InMemory;
 
+    /// Run explicitly against a dedicated disposable S3-compatible test bucket:
+    /// cargo test --features s3-object-store real_s3_compatible_contract -- --ignored
+    #[tokio::test]
+    #[ignore = "requires a dedicated S3-compatible test endpoint and bucket"]
+    async fn real_s3_compatible_contract() {
+        use std::{env, time::{Duration, SystemTime}};
+        let required = |name: &str| env::var(name).unwrap_or_else(|_| panic!("set {name} for this ignored integration test"));
+        let endpoint=required("ANYSEEK_S3_TEST_ENDPOINT");
+        let bucket=required("ANYSEEK_S3_TEST_BUCKET");
+        let region=env::var("ANYSEEK_S3_TEST_REGION").unwrap_or_else(|_|"us-east-1".into());
+        let access=required("ANYSEEK_S3_TEST_ACCESS_KEY_ID");
+        let secret=required("ANYSEEK_S3_TEST_SECRET_ACCESS_KEY");
+        let allow_http=env::var("ANYSEEK_S3_TEST_ALLOW_HTTP").map(|v|v=="1").unwrap_or(false);
+        let stamp=SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let prefix=format!("anyseek-contract-tests/{}/{}",std::process::id(),stamp);
+        let store=S3CompatibleStore::connect(&endpoint,&bucket,&region,&access,&secret,allow_http,1024*1024).unwrap();
+        let body=b"anyseek s3 compatibility contract";
+        let reference=store.put_verified(&format!("{prefix}/immutable-object"),body).await.unwrap();
+        assert_eq!(store.get_verified(&reference).await.unwrap(),body);
+        assert_eq!(store.put_verified(&reference.key,body).await.unwrap(),reference);
+        assert!(store.put_verified(&reference.key,b"different bytes").await.is_err());
+
+        let db_path=env::temp_dir().join(format!("anyseek-s3-contract-{stamp}.sqlite"));
+        let mut authority=SqliteAuthority::open(&db_path,Duration::from_secs(2)).unwrap();
+        authority.register_durable_object(&reference,stamp.min(i64::MAX as u128) as i64).unwrap();
+        assert!(authority.retire_object(&reference.key,1,stamp.min(i64::MAX as u128) as i64).unwrap());
+        assert!(store.delete_retired(&mut authority,&reference.key,stamp.min(i64::MAX as u128) as i64).await.unwrap());
+        assert!(store.get_verified(&reference).await.is_err());
+        drop(authority);
+        let _=std::fs::remove_file(&db_path);
+        let _=std::fs::remove_file(db_path.with_extension("sqlite-wal"));
+        let _=std::fs::remove_file(db_path.with_extension("sqlite-shm"));
+    }
+
     #[tokio::test]
     async fn create_then_read_back_and_verify() {
         let store = S3CompatibleStore::from_store(Arc::new(InMemory::new()), 1024);
