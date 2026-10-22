@@ -735,6 +735,34 @@ impl SqliteAuthority {
         tx.commit()
     }
 
+    /// Pin a backup root under its stable backup ID so retention and GC can
+    /// release all objects belonging to that backup as one explicit lifecycle action.
+    pub(crate) fn pin_backup_object(
+        &mut self,
+        backup_id: &str,
+        object_key: &str,
+    ) -> rusqlite::Result<()> {
+        if backup_id.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName("empty backup ID".into()));
+        }
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state: Option<i64> = tx.query_row(
+            "SELECT state FROM object_uploads WHERE object_key=?1",
+            [object_key], |row| row.get(0),
+        ).optional()?;
+        if state != Some(1) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "backup root must be registered and active".into()
+            ));
+        }
+        tx.execute(
+            "INSERT INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id)
+             VALUES(?1,'*',?2,'backup',NULL,?3)",
+            params![backup_pin_id(backup_id, object_key), object_key, backup_id],
+        )?;
+        tx.commit()
+    }
+
     /// Release a reader/build/backup/staging pin after its consumer is finished.
     pub(crate) fn unpin_object(&mut self, pin_id: &str) -> rusqlite::Result<bool> {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
