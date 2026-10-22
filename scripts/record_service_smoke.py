@@ -526,11 +526,13 @@ def main():
             restored_process=subprocess.Popen([binary,f"index_path={restored['target_root']}",f'local_port={other_port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test'},stdout=log,stderr=log)
             try:
                 base=f'http://127.0.0.1:{other_port}'
-                for _ in range(300):
+                for _ in range(2400 if args.cold_restarts else 300):
                     if restored_process.poll() is not None:
                         log.seek(0);raise AssertionError(log.read())
                     try:urllib.request.urlopen(base+'/api/v1/live',timeout=1).read();break
                     except (OSError,urllib.error.URLError):time.sleep(.05)
+                else:
+                    log.seek(0);raise AssertionError('restored service startup timeout: '+log.read()[-8192:])
                 call('GET','/api/v1/index/after-source-delete',key=ckey,status=403)
                 call('GET','/api/v1/index/after-source-delete',key=keys['b'],status=403)
                 call('GET','/api/v1/index/after-source-delete')
