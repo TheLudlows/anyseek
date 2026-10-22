@@ -78,7 +78,14 @@ pub(crate) async fn upload_log_block(
     if bytes.len() > max_block_bytes {
         return Err(TailError::Invalid("log block exceeds configured byte budget"));
     }
-    store.put_and_register(authority, key, &bytes, created_at_ms).await.map_err(Into::into)
+    let reference = store.put_and_register(authority, key, &bytes, created_at_ms).await
+        .map_err(TailError::from)?;
+    if let Some(previous) = block.previous.as_ref() {
+        // The immutable block embeds a previous-object reference; record the same
+        // edge in SQLite so backup closure discovery and GC traverse the full chain.
+        authority.register_object_edge(&reference, previous).map_err(TailError::Metadata)?;
+    }
+    Ok(reference)
 }
 
 /// Result of the object-first append and SQLite publication protocol.
