@@ -513,11 +513,12 @@ impl RemotePersistence {
             || bootstrap_state.seq != 0 {
             return Err(storage("local partition does not match the authoritative remote bootstrap"));
         }
-        let tail = crate::storage::object_log::load_committed_tail(
-            &self.store, &head, self.max_tail_blocks, self.max_tail_bytes,
+        let local_seq = inner.state.seq;
+        let tail = crate::storage::object_log::load_committed_entries_after(
+            &self.store, &head, local_seq, self.max_tail_blocks, self.max_tail_bytes,
         ).await.map_err(storage)?;
-        let mut expected = inner.state.seq;
-        for entry in tail.into_iter().filter(|entry| entry.seq > inner.state.seq) {
+        let mut expected = local_seq;
+        for entry in tail {
             if entry.seq != expected.saturating_add(1) {
                 return Err(RecordError::RecoveryRequired);
             }
