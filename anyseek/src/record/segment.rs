@@ -7,7 +7,7 @@ use std::io::{Read,Write};
 
 #[derive(Debug,Serialize,Deserialize,Clone)]
 #[serde(deny_unknown_fields)]
-pub(super) struct FileRef { path:String, pub(super) bytes:u64, sha256:[u8;32] }
+pub(super) struct FileRef { pub(super) path:String, pub(super) bytes:u64, pub(super) sha256:[u8;32] }
 #[derive(Debug,Serialize,Deserialize,Clone)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Descriptor { format:u32, seq:u64, files:Vec<FileRef> }

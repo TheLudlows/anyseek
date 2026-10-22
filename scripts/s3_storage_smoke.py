@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Real service HTTP acceptance against a disposable S3 HTTP test double.
+
+No credentials or production endpoint are used. This validates the engine/service
+protocol, not the compatibility of any cloud provider. All objects live in memory.
+"""
+import argparse, hashlib, http.server, os, subprocess, sys, threading, urllib.parse
+
+class S3(http.server.BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+    objects = {}
+    lock = threading.Lock()
+    def log_message(self, *args):
+        pass
+    def reply(self, status, body=b'', headers=None):
+        self.send_response(status)
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+    def key(self):
+        return urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+    def do_PUT(self):
+        data = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        key = self.key()
+        with self.lock:
+            if self.headers.get('If-None-Match') == '*' and key in self.objects:
+                return self.reply(412, b'<Error><Code>PreconditionFailed</Code></Error>')
+            self.objects[key] = data
+        self.reply(200, headers={'ETag': '"'+hashlib.md5(data).hexdigest()+'"'})
+    def do_GET(self):
+        self.read_object()
+    def do_HEAD(self):
+        self.read_object()
+    def read_object(self):
+        with self.lock:
+            data = self.objects.get(self.key())
+        if data is None:
+            return self.reply(404, b'<Error><Code>NoSuchKey</Code></Error>')
+        self.reply(200, data, {'ETag': '"'+hashlib.md5(data).hexdigest()+'"',
+                             'Last-Modified': 'Thu, 22 Oct 2026 00:00:00 GMT'})
+    def do_DELETE(self):
+        with self.lock:
+            self.objects.pop(self.key(), None)
+        self.reply(204)
+
+def main():
+    import base64, http.client, json, pathlib, shutil, socket, tempfile, time, urllib.error, urllib.request, uuid
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--faults',action='store_true');args=parser.parse_args()
+    binary=str(pathlib.Path(args.server).resolve())
+    fixture=http.server.ThreadingHTTPServer(('127.0.0.1',0),S3)
+    threading.Thread(target=fixture.serve_forever,daemon=True).start()
+    env={**os.environ,'ANYSEEK_STORAGE_BACKEND':'s3','ANYSEEK_S3_ENDPOINT':f'http://127.0.0.1:{fixture.server_port}',
+         'ANYSEEK_S3_BUCKET':'disposable','ANYSEEK_S3_REGION':'us-east-1','ANYSEEK_S3_ACCESS_KEY_ID':'fixture',
+         'ANYSEEK_S3_SECRET_ACCESS_KEY':'fixture-secret','ANYSEEK_S3_ALLOW_HTTP':'1','MASTER_KEY_SECRET':'s3-test'}
+    master=base64.b64encode(hashlib.sha256(b's3-test').digest()).decode()
+    def operation():return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
+    with tempfile.TemporaryDirectory(prefix='anyseek-s3-') as directory:
+        directory=pathlib.Path(directory);root=directory/'data';log=open(directory/'service.log','w+')
+        clock=directory/'clock';clock.write_text(str(int(time.time()*1000)));env['ANYSEEK_TEST_CLOCK_FILE']=str(clock)
+        process=None;children=[]
+        sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close();base=f'http://127.0.0.1:{port}'
+        def start(extra=None,target=None,listen=None):
+            nonlocal process,base
+            base=f'http://127.0.0.1:{listen or port}'
+            process=subprocess.Popen([binary,f'index_path={target or root}',f'local_port={listen or port}',
+                'local_ip=127.0.0.1','force_shard_number=1'],env={**env,**(extra or {})},stdout=log,stderr=log)
+            children.append(process)
+            for _ in range(600):
+                if process.poll() is not None:
+                    log.seek(0);raise AssertionError(log.read())
+                try:urllib.request.urlopen(base+'/api/v1/live',timeout=1).read();return
+                except (OSError,urllib.error.URLError):time.sleep(.05)
+            raise AssertionError('S3 service startup timed out')
+        def stop():
+            if process and process.poll() is None:process.kill();process.wait(timeout=30)
+        def call(method,path,body=None,status=200,key=master):
+            req=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),
+                headers={'apikey':key,'Content-Type':'application/json'},method=method)
+            try:
+                with urllib.request.urlopen(req,timeout=60) as response:code=response.status;raw=response.read()
+            except urllib.error.HTTPError as error:code=error.code;raw=error.read()
+            assert code==status,(method,path,code,status,raw)
+            return json.loads(raw)
+        def cold_restart():
+            stop()
+            for path in root.glob('collection-*'):
+                if path.is_dir():shutil.rmtree(path)
+            start()
+        def query(collection='main'):
+            result=[]
+            for request in [{'query':'alpha','operator':'or'},{'query_vector':[1,0],'all':True},
+                            {'query':'alpha','query_vector':[1,0],'rrf':{}}]:
+                page=call('POST',f'/api/v1/index/{collection}/query',request)
+                result.append((page['count_total'],[(h['record']['record_id'],h['record']['version'],h['record']['document'],h['score']) for h in page['hits']]))
+            return result
+        def write(nonce,record,body,expected='Absent'):
+            return {'operation_id':operation(),'record_id':record,'routing_key':'r','expected':expected,
+                'document':{'body':body,'vector':[2,0]}}
+        try:
+            start()
+            config={'index_name':'S3','schema':[{'field':'body','field_type':'Text'},
+                {'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}
+            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config})
+            origin=call('POST','/api/v1/index/main/changes',{})['next']
+            original=write('first','a','alpha old');receipt=call('POST','/api/v1/index/main/doc',original)['receipt']
+            call('POST','/api/v1/index/main/doc',write('b','b','alpha beta'))
+            call('PATCH','/api/v1/index/main')
+            call('POST','/api/v1/index/main/doc',write('update','a','alpha updated',{'Match':1}))
+            deletion=write('delete','b','',{'Match':1});deletion['document']=None
+            call('DELETE','/api/v1/index/main/doc',deletion)
+            call('POST','/api/v1/index/main/doc',write('tail','c','alpha tail'))
+            expected=query();cold_restart();assert query()==expected
+            assert call('POST','/api/v1/index/main/doc',original)['receipt']==receipt
+            call('GET','/api/v1/index/main/doc/b',status=404)
+            print('PASS S3 checkpoint + unindexed tail: cold cache, update/delete, lexical/vector/hybrid and original receipt',flush=True)
+            if args.faults:
+                for stage in ['before_publish','after_publish']:
+                    stop();start({'ANYSEEK_REMOTE_CHECKPOINT_FAULT':stage})
+                    try:call('PATCH','/api/v1/index/main')
+                    except (OSError,http.client.HTTPException):pass
+                    else:raise AssertionError('expected checkpoint process exit')
+                    assert process.wait(timeout=30)==91
+                    cold_restart();assert query()==expected
+                print('PASS S3 checkpoint real process exits before/after SQLite publication',flush=True)
+            clock.write_text(str(int(clock.read_text())+8*86400000))
+            call('POST','/api/v1/index/main/changes',{'after':origin},status=410)
+            cold_restart();call('POST','/api/v1/index/main/changes',{'after':origin},status=410)
+            assert query()==expected
+            print('PASS remote feed floor, old cursor expiry and query views survive cache loss',flush=True)
+            stages=['after_snapshot','after_inventory','after_upload','after_descriptor'] if args.faults else ['normal']
+            for stage in stages:
+                print('S3 joint backup boundary: '+stage,flush=True)
+                request={'operation_id':operation()}
+                before=call('GET','/api/v1/index/main')['statistics']['visible_seq']
+                if stage!='normal':
+                    stop();start({'ANYSEEK_REMOTE_BACKUP_FAULT':stage})
+                    try:call('POST','/api/v1/index/main/backup',request)
+                    except (OSError,http.client.HTTPException):pass
+                    else:raise AssertionError('expected backup process exit')
+                    assert process.wait(timeout=30)==92;start()
+                    call('POST','/api/v1/index/main/doc',write(stage,'later-'+stage,'alpha later'))
+                    call('PATCH','/api/v1/index/main')
+                archive=call('POST','/api/v1/index/main/backup',request)
+                assert archive['visible_seq']==before
+                assert call('POST','/api/v1/index/main/backup',request)==archive
+                target='restored-'+stage;restore={'operation_id':operation(),'collection_id':target,'backup_id':archive['backup_id']}
+                if args.faults:
+                    stop();start({'ANYSEEK_REMOTE_RESTORE_FAULT':'after_import'})
+                    try:call('POST','/api/v1/restore',restore)
+                    except (OSError,http.client.HTTPException):pass
+                    else:raise AssertionError('expected restore process exit')
+                    assert process.wait(timeout=30)==93;start()
+                call('POST','/api/v1/restore',restore)
+                assert call('GET',f'/api/v1/index/{target}/doc/a')['version']==2
+                assert call('POST',f'/api/v1/index/{target}/doc',original)['receipt']==receipt
+                retired=call('DELETE','/api/v1/backups/'+archive['backup_id'],{'operation_id':operation()})
+                assert not retired['cleanup_pending'],retired
+                call('PATCH','/api/v1/index/main');cold_restart()
+                assert call('GET',f'/api/v1/index/{target}/doc/a')['version']==2
+            print('PASS joint backup retry, interrupted restore, namespace isolation, retirement and cold restart',flush=True)
+            # Keep a collection backup in the complete-service archive.
+            archive=call('POST','/api/v1/index/main/backup',{'operation_id':operation()})
+            user=base64.b64encode(os.urandom(32)).decode()
+            call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'reader','apikey_base64':user})
+            call('POST','/api/v1/index/main/grants',{'operation_id':operation(),'key_id':'reader','allow':True})
+            whole_request={'operation_id':operation()}
+            whole=call('POST','/api/v1/service-backups',whole_request)
+            assert whole['snapshot']['collection_backups']
+            assert call('POST','/api/v1/service-backups',whole_request)==whole
+            restored=call('POST','/api/v1/service-restores',{'operation_id':operation(),'backup_id':whole['backup_id']})
+            target_root=pathlib.Path(restored['target_root']);stop();start(target=target_root)
+            call('GET','/api/v1/index/main',key=user,status=403)
+            assert call('GET','/api/v1/index/main/doc/a')['version']==2
+            # Old collection archives in a service snapshot remain usable.
+            copied=next(iter(whole['snapshot']['collection_backups']))
+            call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'copied-archive','backup_id':copied})
+            assert call('GET','/api/v1/index/copied-archive/doc/a')['version']==2
+            stop()
+            for path in target_root.glob('collection-*'):
+                if path.is_dir():shutil.rmtree(path)
+            start(target=target_root)
+            assert call('GET','/api/v1/index/main/doc/a')['version']==2
+            assert call('GET','/api/v1/index/copied-archive/doc/a')['version']==2
+            assert target_root.joinpath('s3-namespace').read_text()!=root.joinpath('s3-namespace').read_text()
+            print('PASS complete service archive: retained S3 backups, isolated restore, disabled old keys and cold restart',flush=True)
+        finally:
+            for child in children:
+                if child.poll() is None:child.kill();child.wait(timeout=30)
+            log.close();fixture.shutdown();fixture.server_close()
+if __name__=='__main__':main()

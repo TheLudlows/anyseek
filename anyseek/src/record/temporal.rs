@@ -208,7 +208,7 @@ impl Inner {
         }
         self.expire_staging(evaluation).await?;
         self.cleanup_private().await?;
-        self.trim_feed(evaluation)?;
+        self.trim_feed(evaluation).await?;
         let targets: Vec<_> = self
             .state
             .records
@@ -253,6 +253,11 @@ impl Inner {
             .write()
             .map_err(|_| RecordError::RecoveryRequired)?
             .fenced = true;
+        #[cfg(feature = "s3-object-store")]
+        if let Some(remote) = self.remote.as_mut() {
+            remote.commit_entry(event.seq, format!("system:expired:{}", event.seq), &bytes)
+                .await.map_err(RecordError::OutcomeUnknown)?;
+        }
         self.journal
             .append(&bytes)
             .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;

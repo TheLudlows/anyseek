@@ -286,6 +286,15 @@ impl Catalog {
         identity: String,
         records: BTreeMap<String, RecordPartition>,
     ) -> Result<ServiceSnapshot, CatalogError> {
+        self.backup_service_with_archives(source_root,target,identity,records,BTreeMap::new()).await
+    }
+
+    /// Complete-service snapshot with privately materialized object-backed archives.
+    /// The server holds the catalog/control barrier and backup retention pins.
+    pub async fn backup_service_with_archives(
+        &self,source_root:PathBuf,target:PathBuf,identity:String,
+        records:BTreeMap<String,RecordPartition>,archives:BTreeMap<String,RecordPartition>,
+    )->Result<ServiceSnapshot,CatalogError> {
         let owner = self.inner.clone();
         crate::INDEX_RUNTIME
             .spawn(async move {
@@ -339,12 +348,10 @@ impl Catalog {
                         if inner.state.retired_backups.contains(id) {
                             continue;
                         }
-                        RecordPartition::resume_initialization(&row.path(), 256 * 1024 * 1024)
-                            .await
-                            .map_err(storage)?;
-                        let p = RecordPartition::open(&row.path(), 256 * 1024 * 1024)
-                            .await
-                            .map_err(storage)?;
+                        let p=if let Some(p)=archives.get(id) {p.clone()}else {
+                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(storage)?;
+                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(storage)?
+                        };
                         total = total.saturating_add(
                             p.recovery_identity().await.map_err(storage)?.checkpoint_bytes as u64 + 4096,
                         );
@@ -397,12 +404,10 @@ impl Catalog {
                         if inner.state.retired_backups.contains(id) {
                             continue;
                         }
-                        RecordPartition::resume_initialization(&row.path(), 256 * 1024 * 1024)
-                            .await
-                            .map_err(storage)?;
-                        let p = RecordPartition::open(&row.path(), 256 * 1024 * 1024)
-                            .await
-                            .map_err(storage)?;
+                        let p=if let Some(p)=archives.get(id) {p.clone()}else {
+                            RecordPartition::resume_initialization(&row.path(),256*1024*1024).await.map_err(storage)?;
+                            RecordPartition::open(&row.path(),256*1024*1024).await.map_err(storage)?
+                        };
                         let seq = p.checkpoint(&stage.join(&name)).await.map_err(storage)?;
                         collection_backups.insert(id.into(), seq);
                         objects.insert(name.clone(), object_hash(&stage.join(&name))?);

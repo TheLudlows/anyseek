@@ -1,0 +1,1024 @@
+//! Object-first export of an existing authenticated anchor. The descriptor maps
+//! immutable local files to bounded object chunks; it contains no payload copies.
+//! SQLite alone selects the descriptor. Old graphs remain immutable for backups.
+use super::*;
+use crate::storage::sqlite_authority::ObjectRef;
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Checkpoint {
+    format: u32,
+    partition_id: String,
+    seq: u64,
+    anchor: anchor::Reference,
+    files: Vec<File>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct File {
+    path: String,
+    length: u64,
+    sha256: [u8; 32],
+    chunks: Vec<ObjectRef>,
+}
+fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, RecordError> {
+    let parts = relative.split('/').collect::<Vec<_>>();
+    let first = parts
+        .first()
+        .ok_or_else(|| storage("empty checkpoint path"))?;
+    let identity = first
+        .strip_prefix("anchor-")
+        .or_else(|| first.strip_prefix("segment-"))
+        .or_else(|| first.strip_prefix("payload-"));
+    if !identity.is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        || parts
+            .iter()
+            .any(|s| s.is_empty() || *s == "." || *s == ".." || s.contains('\\') || s.contains(':'))
+        || parts.len() > 6
+    {
+        return Err(storage("invalid checkpoint path"));
+    }
+    let mut path = root.to_path_buf();
+    for component in parts {
+        path.push(component);
+        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            if meta.file_type().is_symlink() {
+                return Err(storage("checkpoint symlink rejected"));
+            }
+        }
+    }
+    Ok(path)
+}
+impl RemotePersistence {
+    pub(super) async fn publish_anchor(
+        &mut self,
+        root: &Path,
+        reference: &anchor::Reference,
+        payloads: &crate::storage::payload_pool::Closure,
+        seq: u64,
+        authority_budget: u64,
+        restoring: bool,
+    ) -> Result<(), RecordError> {
+        let mut authority = self.authority.lock().await;
+        let head = authority
+            .read_head(&self.partition_id)
+            .map_err(storage)?
+            .ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch != self.owner_epoch || (!restoring && head.committed_seq != seq) {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let mut files = Vec::new();
+        let mut total = 0u64;
+        for (path, length, sha256) in reference.remote_files(payloads)? {
+            total = total
+                .checked_add(length)
+                .filter(|n| {
+                    *n <= authority_budget
+                        .saturating_mul(64)
+                        .saturating_add(32 * 1024 * 1024)
+                })
+                .ok_or_else(|| storage("checkpoint upload budget exceeded"))?;
+            let target = safe_path(root, &path)?;
+            let mut input = std::fs::File::open(target).map_err(storage)?;
+            let mut chunks = Vec::new();
+            let mut hash = Sha256::new();
+            let mut actual = 0u64;
+            loop {
+                let mut bytes = Vec::new();
+                (&mut input)
+                    .take(self.max_object_bytes as u64)
+                    .read_to_end(&mut bytes)
+                    .map_err(storage)?;
+                if bytes.is_empty() {
+                    break;
+                }
+                hash.update(&bytes);
+                actual = actual
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| storage("checkpoint length overflow"))?;
+                if actual > length {
+                    return Err(storage("checkpoint file grew during export"));
+                }
+                let digest = Sha256::digest(&bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>();
+                let key = format!(
+                    "partitions/{}/files/{}/{:08}-{digest}",
+                    self.partition_id,
+                    path,
+                    chunks.len()
+                );
+                chunks.push(
+                    self.store
+                        .put_and_register(&mut authority, &key, &bytes, unix_time_ms_i64())
+                        .await
+                        .map_err(storage)?,
+                );
+                if chunks.len() > self.max_tail_blocks {
+                    return Err(storage("checkpoint chunk budget exceeded"));
+                }
+            }
+            let actual_hash: [u8; 32] = hash.finalize().into();
+            if actual != length || actual_hash != sha256 {
+                return Err(storage("checkpoint export checksum mismatch"));
+            }
+            files.push(File {
+                path,
+                length,
+                sha256,
+                chunks,
+            });
+        }
+        let checkpoint = Checkpoint {
+            format: 1,
+            partition_id: self.partition_id.clone(),
+            seq,
+            anchor: reference.clone(),
+            files,
+        };
+        let bytes = serde_json::to_vec(&checkpoint).map_err(storage)?;
+        let key = format!(
+            "partitions/{}/checkpoints/{}",
+            self.partition_id,
+            reference.identity()
+        );
+        let manifest = self
+            .store
+            .put_and_register(&mut authority, &key, &bytes, unix_time_ms_i64())
+            .await
+            .map_err(storage)?;
+        for file in &checkpoint.files {
+            for child in &file.chunks {
+                authority
+                    .register_object_edge(&manifest, child)
+                    .map_err(storage)?;
+            }
+        }
+        #[cfg(test)]
+        if root.join(".test-remote-before-checkpoint").exists() {
+            return Err(storage("injected before remote checkpoint publication"));
+        }
+        #[cfg(feature = "fault-injection")]
+        if std::env::var("ANYSEEK_REMOTE_CHECKPOINT_FAULT").as_deref() == Ok("before_publish") {
+            std::process::exit(91);
+        }
+        // This CAS also certifies same-sequence maintenance such as feed trimming.
+        // Never discard predecessor edges: retained backups still traverse them.
+        let published = if restoring {
+            authority.publish_restored_checkpoint(
+                &self.partition_id,
+                head.head_version,
+                self.owner_epoch,
+                seq,
+                manifest,
+            )
+        } else {
+            authority.publish_checkpoint(
+                &self.partition_id,
+                head.head_version,
+                self.owner_epoch,
+                seq,
+                manifest,
+            )
+        };
+        published
+            .map_err(storage)?
+            .ok_or(RecordError::RecoveryRequired)?;
+        #[cfg(feature = "fault-injection")]
+        if std::env::var("ANYSEEK_REMOTE_CHECKPOINT_FAULT").as_deref() == Ok("after_publish") {
+            std::process::exit(91);
+        }
+        #[cfg(test)]
+        if root.join(".test-remote-after-checkpoint").exists() {
+            return Err(RecordError::DurablePending(seq));
+        }
+        Ok(())
+    }
+
+    /// Materialize only the authority-selected checkpoint. Called with the local
+    /// journal owner lock held and without mapped index handles. An interrupted
+    /// download leaves private temp files, never a selected partial anchor.
+    pub(super) async fn materialize_checkpoint(
+        &mut self,
+        root: &Path,
+        budget: u64,
+    ) -> Result<Option<Vec<u8>>, RecordError> {
+        let authority = self.authority.lock().await;
+        let head = authority
+            .read_head(&self.partition_id)
+            .map_err(storage)?
+            .ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch != self.owner_epoch {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let Some(manifest) = &head.manifest else {
+            return Ok(None);
+        };
+        let bytes = self.store.get_verified(manifest).await.map_err(storage)?;
+        let checkpoint: Checkpoint = serde_json::from_slice(&bytes).map_err(storage)?;
+        if checkpoint.format != 1
+            || checkpoint.partition_id != self.partition_id
+            || checkpoint.seq != head.indexed_seq
+            || checkpoint.seq != head.log_base_seq
+            || checkpoint.files.len() > 10_000
+        {
+            return Err(storage("invalid remote checkpoint identity or watermarks"));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        let mut total = 0u64;
+        let mut chunks = 0usize;
+        // Validate budgets and paths before downloading any file.
+        for file in &checkpoint.files {
+            safe_path(root, &file.path)?;
+            if !names.insert(file.path.clone()) {
+                return Err(storage("duplicate checkpoint file"));
+            }
+            total = total
+                .checked_add(file.length)
+                .filter(|n| *n <= budget.saturating_mul(64).saturating_add(32 * 1024 * 1024))
+                .ok_or_else(|| storage("checkpoint download budget exceeded"))?;
+            chunks = chunks
+                .checked_add(file.chunks.len())
+                .filter(|n| *n <= self.max_tail_blocks)
+                .ok_or_else(|| storage("checkpoint chunk count exceeded"))?;
+            if file
+                .chunks
+                .iter()
+                .try_fold(0u64, |n, r| n.checked_add(r.length))
+                != Some(file.length)
+            {
+                return Err(storage("checkpoint file/chunk length mismatch"));
+            }
+        }
+        for file in &checkpoint.files {
+            let target = safe_path(root, &file.path)?;
+            std::fs::create_dir_all(
+                target
+                    .parent()
+                    .ok_or_else(|| storage("checkpoint parent missing"))?,
+            )
+            .map_err(storage)?;
+            let temporary = root.join(format!(".remote-download-{:032x}", rand::random::<u128>()));
+            let result = async {
+                let mut output = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&temporary)
+                    .map_err(storage)?;
+                let mut hash = Sha256::new();
+                for chunk in &file.chunks {
+                    let bytes = self.store.get_verified(chunk).await.map_err(storage)?;
+                    hash.update(&bytes);
+                    output.write_all(&bytes).map_err(storage)?;
+                }
+                let actual: [u8; 32] = hash.finalize().into();
+                if actual != file.sha256 {
+                    return Err(storage("checkpoint download checksum mismatch"));
+                }
+                output.sync_all().map_err(storage)?;
+                drop(output);
+                // Local files are discardable cache. The owner lock excludes readers.
+                if target.exists() {
+                    std::fs::remove_file(&target).map_err(storage)?;
+                }
+                std::fs::rename(&temporary, &target).map_err(storage)
+            }
+            .await;
+            if result.is_err() {
+                let _ = std::fs::remove_file(&temporary);
+            }
+            result?;
+        }
+        // Verify the complete existing anchor/index closure before publishing even
+        // the rebuildable local certificate. This uses the normal Segment readers.
+        let loaded = checkpoint.anchor.load(root, budget).await?;
+        if loaded.state.seq != checkpoint.seq {
+            return Err(storage("checkpoint state sequence mismatch"));
+        }
+        drop(loaded);
+        Ok(Some(encode_entry(&Entry::Anchor(checkpoint.anchor))?))
+    }
+
+    /// Only this single owner invokes GC under the partition guard, after all
+    /// uploads/builds have completed. Persistent pins protect external consumers.
+    pub(super) async fn collect_objects(&mut self) -> Result<usize, RecordError> {
+        let mut authority = self.authority.lock().await;
+        let head = authority
+            .read_head(&self.partition_id)
+            .map_err(storage)?
+            .ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch != self.owner_epoch {
+            return Err(RecordError::RecoveryRequired);
+        }
+        for object in authority.unreferenced_objects().map_err(storage)? {
+            authority
+                .retire_object(&object.key, head.head_version, unix_time_ms_i64())
+                .map_err(storage)?;
+        }
+        let objects = authority
+            .collectible_objects(unix_time_ms_i64())
+            .map_err(storage)?;
+        for object in &objects {
+            self.store
+                .delete_retired(&mut authority, &object.key, unix_time_ms_i64())
+                .await
+                .map_err(storage)?;
+        }
+        // Tombstones are retried too: an ambiguous old PUT may arrive after a
+        // prior DELETE. It can never be registered or published again.
+        Ok(objects.len())
+    }
+}
+
+impl RecordPartition {
+    /// Restore into a new object namespace. Borrowing another authority's object
+    /// graph would let either GC delete the other owner's live data; instead copy
+    /// verified canonical files and publish a new complete checkpoint before use.
+    pub(super) async fn restore_s3_with_remote(
+        path: &Path,
+        config: RecordConfig,
+        mut target: RemotePersistence,
+        bundle_json: &str,
+        max_snapshot_bytes: usize,
+        max_objects: usize,
+        max_total_object_bytes: usize,
+    ) -> Result<Self, RecordError> {
+        use crate::storage::{s3_compatible::BackupBundle, sqlite_authority::SqliteAuthority};
+        let bundle: BackupBundle = serde_json::from_str(bundle_json).map_err(storage)?;
+        target
+            .authority
+            .lock()
+            .await
+            .bind_restore(bundle.descriptor_ref.sha256)
+            .map_err(storage)?;
+        let existing = target
+            .authority
+            .lock()
+            .await
+            .read_head(&target.partition_id)
+            .map_err(storage)?;
+        if existing.as_ref().is_some_and(|h| h.manifest.is_some()) {
+            return Self::open_s3_with_remote(path, config.max_journal_bytes, target).await;
+        }
+        // Use a disposable import authority for closure validation/replay only.
+        // It never runs GC, advances the source head, or serves requests.
+        let source_path = target
+            .authority
+            .lock()
+            .await
+            .database_path()
+            .with_extension("restore-source.sqlite");
+        let mut source_db = SqliteAuthority::open(&source_path, std::time::Duration::from_secs(5))
+            .map_err(storage)?;
+        let snapshot = target
+            .store
+            .restore_backup_bundle(
+                &mut source_db,
+                &bundle.descriptor_ref,
+                max_snapshot_bytes,
+                max_objects,
+                max_total_object_bytes,
+            )
+            .await
+            .map_err(storage)?;
+        if snapshot.heads.len() != 1 {
+            return Err(storage("collection restore requires one partition"));
+        }
+        let source_id = snapshot.heads[0].partition_id.clone();
+        if source_id == target.partition_id {
+            return Err(RecordError::Rejected(
+                "restore requires a new partition/object namespace".into(),
+            ));
+        }
+        let source = RemotePersistence {
+            store: target.store.clone(),
+            authority: Mutex::new(source_db),
+            partition_id: source_id,
+            owner_epoch: snapshot.heads[0].owner_epoch,
+            max_tail_blocks: target.max_tail_blocks,
+            max_tail_bytes: target.max_tail_bytes,
+            max_object_bytes: target.max_object_bytes,
+            _owner: None,
+        };
+        if path.exists() {
+            let mut cache = PartitionJournal::open(path, config.max_journal_bytes)
+                .map_err(storage)?
+                .0;
+            let bootstrap = source
+                .store
+                .get_verified(
+                    snapshot.heads[0]
+                        .bootstrap
+                        .as_ref()
+                        .ok_or(RecordError::RecoveryRequired)?,
+                )
+                .await
+                .map_err(storage)?;
+            cache.checkpoint(&bootstrap).map_err(creation_error)?;
+        }
+        let recovered = Self::open_s3_with_remote(path, config.max_journal_bytes, source).await?;
+        {
+            let mut inner = recovered.inner.lock().await;
+            // Drop the disposable source adapter BEFORE producing any maintenance.
+            // All data/receipt identities survive; old deletion history is untrusted.
+            inner.remote = None;
+            let mut next = inner.state.clone();
+            next.independent_snapshot = true;
+            next.evidence_quarantined |= next.records.values().any(temporal::protected);
+            next.feed.scope = Sha256::digest(format!("restore:{}", target.partition_id))
+                .iter()
+                .take(16)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            inner.publish_anchor_state(next, false).await?;
+            let mut initial = State::default();
+            initial.lineage = inner.state.lineage.clone();
+            initial.feed = change_feed::FeedState {
+                scope: inner.state.feed.scope.clone(),
+                floor: 0,
+            };
+            let bootstrap = encode_entry(&Entry::Checkpoint {
+                config: inner.config.clone(),
+                state: initial,
+            })?;
+            {
+                let mut db = target.authority.lock().await;
+                if db
+                    .read_head(&target.partition_id)
+                    .map_err(storage)?
+                    .is_none()
+                {
+                    db.create_partition(&target.partition_id, target.owner_epoch)
+                        .map_err(storage)?;
+                }
+                let h = db
+                    .read_head(&target.partition_id)
+                    .map_err(storage)?
+                    .ok_or(RecordError::RecoveryRequired)?;
+                if h.bootstrap.is_none() {
+                    target
+                        .store
+                        .publish_bootstrap(
+                            &mut db,
+                            &target.partition_id,
+                            target.owner_epoch,
+                            &bootstrap,
+                            unix_time_ms_i64(),
+                        )
+                        .await
+                        .map_err(storage)?;
+                }
+            }
+            target
+                .publish_anchor(
+                    inner.journal.root(),
+                    inner.anchor.as_ref().ok_or(RecordError::RecoveryRequired)?,
+                    &inner.payloads,
+                    inner.state.seq,
+                    inner.config.max_journal_bytes,
+                    true,
+                )
+                .await?;
+            inner.remote = Some(target);
+            inner.feed_cache =
+                change_feed::Cache::rebuild(&inner.state, &inner.config.change_feed)?;
+        }
+        for file in [
+            &source_path,
+            &source_path.with_extension("sqlite-wal"),
+            &source_path.with_extension("sqlite-shm"),
+        ] {
+            let _ = std::fs::remove_file(file);
+        }
+        // A process can restart at every earlier boundary. The target head is the
+        // durable completion receipt; retries never import/rewind it again.
+        Ok(recovered)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{config, path, query, write};
+    use super::*;
+    use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
+    use object_store::memory::InMemory;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Clock(AtomicU64);
+    impl temporal::Clock for Clock {
+        fn now_ms(&self) -> Result<u64, RecordError> {
+            Ok(self.0.load(Ordering::SeqCst))
+        }
+    }
+    fn remote(store: Arc<InMemory>, db: &Path, id: &str) -> RemotePersistence {
+        RemotePersistence {
+            store: S3CompatibleStore::from_store(store, 1024 * 1024),
+            authority: Mutex::new(
+                SqliteAuthority::open(db, std::time::Duration::from_secs(1)).unwrap(),
+            ),
+            partition_id: id.into(),
+            owner_epoch: 1,
+            max_tail_blocks: 10000,
+            max_tail_bytes: 16 * 1024 * 1024,
+            max_object_bytes: 1024 * 1024,
+            _owner: None,
+        }
+    }
+    async fn source() -> (RecordPartition, Arc<InMemory>, PathBuf, PathBuf, Arc<Clock>) {
+        let root = path();
+        let db = path();
+        let store = Arc::new(InMemory::new());
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let remote = remote(store.clone(), &db, "source");
+        let mut inner = p.inner.lock().await;
+        let initial = encode_entry(&Entry::Checkpoint {
+            config: inner.config.clone(),
+            state: inner.state.clone(),
+        })
+        .unwrap();
+        let mut authority = remote.authority.lock().await;
+        authority.create_partition("source", 1).unwrap();
+        remote
+            .store
+            .publish_bootstrap(&mut authority, "source", 1, &initial, unix_time_ms_i64())
+            .await
+            .unwrap();
+        drop(authority);
+        let clock = Arc::new(Clock(AtomicU64::new(unix_time_ms_i64() as u64)));
+        inner.clock = clock.clone();
+        inner.remote = Some(remote);
+        drop(inner);
+        (p, store, root, db, clock)
+    }
+    async fn cold(p: RecordPartition, root: &Path, clock: Arc<Clock>) -> RecordPartition {
+        let remote = p.inner.lock().await.remote.take().unwrap();
+        drop(p);
+        std::fs::remove_dir_all(root).unwrap();
+        let p = RecordPartition::open_s3_with_remote(root, config().max_journal_bytes, remote)
+            .await
+            .unwrap();
+        p.inner.lock().await.clock = clock;
+        p
+    }
+    async fn scores(p: &RecordPartition) -> Vec<serde_json::Value> {
+        let mut results = Vec::new();
+        for mode in [
+            SearchMode::Lexical,
+            SearchMode::Vector {
+                similarity_threshold: None,
+                ann_mode: crate::vector_similarity::AnnMode::All,
+            },
+            SearchMode::Hybrid {
+                similarity_threshold: None,
+                ann_mode: crate::vector_similarity::AnnMode::All,
+            },
+        ] {
+            let vector = if mode == SearchMode::Lexical {
+                None
+            } else {
+                Some(Embedding::F32(vec![1.0, 0.0]))
+            };
+            let result = p
+                .query(RecordQuery {
+                    temporal: None,
+                    text: "alpha".into(),
+                    vector,
+                    mode,
+                    query_type: QueryType::Union,
+                    offset: 0,
+                    length: 10,
+                    result_type: ResultType::TopkCount,
+                    fields: vec![],
+                    filters: vec![],
+                    sort: vec![],
+                })
+                .await
+                .unwrap();
+            results.push(serde_json::json!({"count":result.count_total,"hits":result.hits.into_iter()
+                .map(|h|serde_json::json!([h.record.record_id,h.record.version,h.record.document,h.score])).collect::<Vec<_>>() }));
+        }
+        results
+    }
+    #[tokio::test]
+    async fn remote_checkpoint_gc_and_cold_tail_keep_all_query_views() {
+        let (p, _, root, _, clock) = source().await;
+        let original = write("a", "a", "alpha old", ExpectedVersion::Absent);
+        let receipt = p.write(original.clone()).await.unwrap();
+        p.write(write("b", "b", "alpha beta", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        let old = {
+            let inner = p.inner.lock().await;
+            let r = inner.remote.as_ref().unwrap();
+            r.authority
+                .lock()
+                .await
+                .read_head("source")
+                .unwrap()
+                .unwrap()
+                .wal_tip
+                .unwrap()
+        };
+        p.compact_journal().await.unwrap();
+        {
+            let inner = p.inner.lock().await;
+            let r = inner.remote.as_ref().unwrap();
+            let h = r
+                .authority
+                .lock()
+                .await
+                .read_head("source")
+                .unwrap()
+                .unwrap();
+            assert_eq!(h.indexed_seq, 2);
+            assert_eq!(h.log_base_seq, 2);
+            assert!(h.wal_tip.is_none());
+            assert!(r.store.get_verified(&old).await.is_err());
+        }
+        p.write(write(
+            "update",
+            "a",
+            "alpha latest",
+            ExpectedVersion::Match(1),
+        ))
+        .await
+        .unwrap();
+        let mut deletion = write("delete", "b", "", ExpectedVersion::Match(1));
+        deletion.document = None;
+        p.write(deletion).await.unwrap();
+        p.write(write("c", "c", "alpha tail", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        let expected = scores(&p).await;
+        let p = cold(p, &root, clock).await;
+        assert_eq!(scores(&p).await, expected);
+        assert!(p.get("b").await.unwrap().is_none());
+        assert_eq!(p.write(original).await.unwrap(), receipt);
+        p.compact_journal().await.unwrap();
+        assert_eq!(scores(&p).await, expected);
+    }
+    #[tokio::test]
+    async fn remote_feed_floor_survives_cache_loss_and_reclaims_covered_wal() {
+        let (p, _, root, _, clock) = source().await;
+        p.write(write("first", "a", "alpha", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        let page = p.changes(None, 10).await.unwrap();
+        let cursor = page.next;
+        let (seq, floor) = {
+            let mut inner = p.inner.lock().await;
+            let future = clock.0.load(Ordering::SeqCst) + inner.config.change_feed.retention_ms + 1;
+            clock.0.store(future, Ordering::SeqCst);
+            inner.trim_feed(future).await.unwrap();
+            assert!(inner.state.feed.floor > 0);
+            let r = inner.remote.as_ref().unwrap();
+            let h = r
+                .authority
+                .lock()
+                .await
+                .read_head("source")
+                .unwrap()
+                .unwrap();
+            assert_eq!(h.log_base_seq, inner.state.seq);
+            assert!(h.wal_tip.is_none());
+            (inner.state.seq, inner.state.feed.floor)
+        };
+        let p = cold(p, &root, clock).await;
+        assert_eq!(p.inner.lock().await.state.feed.floor, floor);
+        assert_eq!(p.statistics().await.unwrap().visible_seq, seq);
+        // A cursor at the retained floor remains valid; an earlier one is explicit expiry.
+        let _ = p.changes(Some(cursor), 10).await;
+        p.write(write("next", "b", "alpha new", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        assert_eq!(p.statistics().await.unwrap().visible_seq, seq + 1);
+    }
+    #[tokio::test]
+    async fn remote_checkpoint_publication_interruptions_recover_only_selected_roots() {
+        for boundary in [
+            ".test-remote-before-checkpoint",
+            ".test-remote-after-checkpoint",
+        ] {
+            let (p, _, root, _, clock) = source().await;
+            p.write(write("a", "a", "alpha durable", ExpectedVersion::Absent))
+                .await
+                .unwrap();
+            std::fs::write(root.join(boundary), b"fail").unwrap();
+            assert!(p.compact_journal().await.is_err());
+            let r = p.inner.lock().await.remote.take().unwrap();
+            let h = r
+                .authority
+                .lock()
+                .await
+                .read_head("source")
+                .unwrap()
+                .unwrap();
+            assert_eq!(h.manifest.is_some(), boundary.ends_with("after-checkpoint"));
+            drop(p);
+            std::fs::remove_dir_all(&root).unwrap();
+            let p = RecordPartition::open_s3_with_remote(&root, config().max_journal_bytes, r)
+                .await
+                .unwrap();
+            p.inner.lock().await.clock = clock;
+            assert_eq!(
+                p.get("a").await.unwrap().unwrap().document.unwrap()["body"],
+                "alpha durable"
+            );
+            p.compact_journal().await.unwrap();
+            assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 1);
+        }
+    }
+    #[tokio::test]
+    async fn remote_backup_retry_restore_isolation_and_gc_are_complete() {
+        let (p, store, root, db, clock) = source().await;
+        let request = write("first", "a", "alpha saved", ExpectedVersion::Absent);
+        let receipt = p.write(request.clone()).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let fail = db.with_extension("fail-backup-after-snapshot");
+        std::fs::write(&fail, b"fail").unwrap();
+        assert!(p.create_s3_backup("cut", 100, 1024 * 1024).await.is_err());
+        p.write(write(
+            "update",
+            "a",
+            "alpha changed",
+            ExpectedVersion::Match(1),
+        ))
+        .await
+        .unwrap();
+        p.compact_journal().await.unwrap();
+        std::fs::remove_file(fail).unwrap();
+        let (bundle, seq, _) = p.create_s3_backup("cut", 999, 1024 * 1024).await.unwrap();
+        assert_eq!(seq, receipt.seq);
+        assert_eq!(
+            p.create_s3_backup("cut", 1000, 1024 * 1024)
+                .await
+                .unwrap()
+                .0,
+            bundle
+        );
+        let restored_root = path();
+        let restored_db = path();
+        let restored = RecordPartition::restore_s3_with_remote(
+            &restored_root,
+            config(),
+            remote(store.clone(), &restored_db, "restored"),
+            &bundle,
+            1024 * 1024,
+            10000,
+            16 * 1024 * 1024,
+        )
+        .await
+        .unwrap();
+        restored.inner.lock().await.clock = clock.clone();
+        assert_eq!(
+            restored.get("a").await.unwrap().unwrap().document.unwrap()["body"],
+            "alpha saved"
+        );
+        assert_eq!(restored.write(request).await.unwrap(), receipt);
+        assert!(
+            restored
+                .recovery_identity()
+                .await
+                .unwrap()
+                .independent_snapshot
+        );
+        let expected = scores(&restored).await;
+        p.release_s3_backup_pins("cut").await.unwrap();
+        p.collect_s3_garbage().await.unwrap();
+        let restored = cold(restored, &restored_root, clock.clone()).await;
+        assert_eq!(scores(&restored).await, expected);
+        restored.compact_journal().await.unwrap();
+        let p = cold(p, &root, clock).await;
+        assert_eq!(
+            p.get("a").await.unwrap().unwrap().document.unwrap()["body"],
+            "alpha changed"
+        );
+        // Retrying restore after activation does not rewind subsequent target writes.
+        restored
+            .write(write("new", "b", "alpha target", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        drop(restored);
+        let restored = RecordPartition::restore_s3_with_remote(
+            &restored_root,
+            config(),
+            remote(store, &restored_db, "restored"),
+            &bundle,
+            1024 * 1024,
+            10000,
+            16 * 1024 * 1024,
+        )
+        .await
+        .unwrap();
+        assert!(restored.get("b").await.unwrap().is_some());
+    }
+    #[tokio::test]
+    async fn missing_checkpoint_member_fails_closed_and_bootstrap_is_not_collectible() {
+        use object_store::{ObjectStore, path::Path as ObjectPath};
+        let (p, store, root, _, _) = source().await;
+        p.write(write("a", "a", "alpha", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        p.compact_journal().await.unwrap();
+        let r = p.inner.lock().await.remote.take().unwrap();
+        let h = r
+            .authority
+            .lock()
+            .await
+            .read_head("source")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !r.authority
+                .lock()
+                .await
+                .retire_object(&h.bootstrap.unwrap().key, 100, 100)
+                .unwrap()
+        );
+        let bytes = r.store.get_verified(&h.manifest.unwrap()).await.unwrap();
+        let c: Checkpoint = serde_json::from_slice(&bytes).unwrap();
+        store
+            .delete(&ObjectPath::from(
+                c.files
+                    .iter()
+                    .flat_map(|f| &f.chunks)
+                    .next()
+                    .unwrap()
+                    .key
+                    .as_str(),
+            ))
+            .await
+            .unwrap();
+        drop(p);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(
+            RecordPartition::open_s3_with_remote(&root, config().max_journal_bytes, r)
+                .await
+                .is_err()
+        );
+    }
+}
+
+impl RecordPartition {
+    /// Export a retained joint backup into a standalone local archive for the
+    /// complete-service snapshot workflow. The caller retains the original backup
+    /// pin until completion and owns the private replay directory.
+    pub async fn materialize_s3_backup_archive(
+        destination: &Path,
+        config: RecordConfig,
+        remote_config: S3CompatibleRecordConfig,
+        bundle_json: &str,
+    ) -> Result<(), RecordError> {
+        use crate::storage::s3_compatible::BackupBundle;
+        let bundle: BackupBundle = serde_json::from_str(bundle_json).map_err(storage)?;
+        let mut remote = RemotePersistence::open(&remote_config)?;
+        let snapshot = {
+            let mut db = remote.authority.lock().await;
+            remote
+                .store
+                .restore_backup_bundle(
+                    &mut db,
+                    &bundle.descriptor_ref,
+                    256 * 1024 * 1024,
+                    1_000_000,
+                    10 * 1024 * 1024 * 1024usize,
+                )
+                .await
+                .map_err(storage)?
+        };
+        if snapshot.heads.len() != 1 {
+            return Err(storage("backup must contain one collection"));
+        }
+        remote.partition_id = snapshot.heads[0].partition_id.clone();
+        remote.owner_epoch = snapshot.heads[0].owner_epoch;
+        let replay = destination.with_extension("replay");
+        let p = Self::open_s3_with_remote(&replay, config.max_journal_bytes, remote).await?;
+        // Snapshot must not run wall-clock maintenance on historical authority.
+        p.inner.lock().await.remote = None;
+        {
+            let mut inner = p.inner.lock().await;
+            inner.state.independent_snapshot = true;
+        }
+        p.checkpoint(destination).await?;
+        drop(p);
+        let _ = std::fs::remove_dir_all(replay);
+        Ok(())
+    }
+
+    /// Activate a verified complete-service restore in a fresh S3 namespace.
+    /// The service's completion certificate is the restore identity; arbitrary
+    /// local caches must never be adopted through this management-only entry point.
+    pub async fn adopt_s3_snapshot(
+        path: &Path,
+        config: RecordConfig,
+        remote_config: S3CompatibleRecordConfig,
+        restore_identity: &str,
+    ) -> Result<Self, RecordError> {
+        let mut remote = RemotePersistence::open(&remote_config)?;
+        let binding: [u8; 32] = Sha256::digest(format!(
+            "service:{restore_identity}:{}",
+            remote.partition_id
+        ))
+        .into();
+        remote
+            .authority
+            .lock()
+            .await
+            .bind_restore(binding)
+            .map_err(storage)?;
+        let head = remote
+            .authority
+            .lock()
+            .await
+            .read_head(&remote.partition_id)
+            .map_err(storage)?;
+        if head.is_some_and(|h| h.manifest.is_some()) {
+            return Self::open_s3_with_remote(path, config.max_journal_bytes, remote).await;
+        }
+        let p = Self::open(path, config.max_journal_bytes).await?;
+        {
+            let mut inner = p.inner.lock().await;
+            if !inner.state.independent_snapshot {
+                return Err(RecordError::Rejected(
+                    "only certified independent snapshots may be adopted".into(),
+                ));
+            }
+            let bootstrap = remote
+                .authority
+                .lock()
+                .await
+                .read_head(&remote.partition_id)
+                .map_err(storage)?
+                .and_then(|h| h.bootstrap);
+            if let Some(reference) = bootstrap {
+                let bytes = remote
+                    .store
+                    .get_verified(&reference)
+                    .await
+                    .map_err(storage)?;
+                match serde_json::from_slice::<Entry>(&bytes).map_err(storage)? {
+                    Entry::Checkpoint { state, .. }
+                        if state.seq == 0 && state.lineage == inner.state.lineage =>
+                    {
+                        inner.state.feed.scope = state.feed.scope;
+                    }
+                    _ => return Err(RecordError::RecoveryRequired),
+                }
+            }
+            inner.publish_anchor().await?;
+            let mut initial = State::default();
+            initial.lineage = inner.state.lineage.clone();
+            initial.feed = change_feed::FeedState {
+                scope: inner.state.feed.scope.clone(),
+                floor: 0,
+            };
+            let bytes = encode_entry(&Entry::Checkpoint {
+                config: inner.config.clone(),
+                state: initial,
+            })?;
+            {
+                let mut db = remote.authority.lock().await;
+                if db
+                    .read_head(&remote.partition_id)
+                    .map_err(storage)?
+                    .is_none()
+                {
+                    db.create_partition(&remote.partition_id, remote.owner_epoch)
+                        .map_err(storage)?;
+                }
+                let h = db
+                    .read_head(&remote.partition_id)
+                    .map_err(storage)?
+                    .ok_or(RecordError::RecoveryRequired)?;
+                if h.bootstrap.is_none() {
+                    remote
+                        .store
+                        .publish_bootstrap(
+                            &mut db,
+                            &remote.partition_id,
+                            remote.owner_epoch,
+                            &bytes,
+                            unix_time_ms_i64(),
+                        )
+                        .await
+                        .map_err(storage)?;
+                }
+            }
+            remote
+                .publish_anchor(
+                    inner.journal.root(),
+                    inner.anchor.as_ref().ok_or(RecordError::RecoveryRequired)?,
+                    &inner.payloads,
+                    inner.state.seq,
+                    inner.config.max_journal_bytes,
+                    true,
+                )
+                .await?;
+            inner.remote = Some(remote);
+        }
+        Ok(p)
+    }
+}
