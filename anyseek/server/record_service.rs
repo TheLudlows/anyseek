@@ -1187,6 +1187,44 @@ async fn service_restore(
         response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}),s.permit(&key).await?)
     }).await
 }
+async fn create_s3_backup_pointer(
+    partition: &RecordPartition,
+    path: &FsPath,
+    root: &FsPath,
+    backup_id: &str,
+    collection_id: &str,
+) -> Result<u64, Error> {
+    if path.exists() {
+        let marker: S3BackupMarker = serde_json::from_slice(
+            &std::fs::read(path.join("s3-backup.json")).map_err(storage)?
+        ).map_err(storage)?;
+        if marker.backup_id != backup_id || marker.collection_id != collection_id {
+            return Err(bad("S3 backup marker identity mismatch"));
+        }
+        return Ok(marker.visible_seq);
+    }
+    let count = std::fs::read_dir(root).map_err(storage)?.try_fold(0usize, |count, row| {
+        let row = row?;
+        Ok::<_,std::io::Error>(count + usize::from(row.file_name().to_string_lossy().starts_with("backup-")))
+    }).map_err(storage)?;
+    if count >= 32 { return Err(bad("local backup pointer budget exhausted (32)")); }
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0);
+    let (bundle_json, visible_seq) = partition.create_s3_backup(
+        backup_id, now_ms, 256 * 1024 * 1024,
+    ).await?;
+    std::fs::create_dir_all(path).map_err(storage)?;
+    let marker = S3BackupMarker {
+        backup_id: backup_id.to_owned(),
+        collection_id: collection_id.to_owned(),
+        visible_seq,
+        bundle_json,
+    };
+    std::fs::write(path.join("s3-backup.json"), serde_json::to_vec(&marker).map_err(bad)?)
+        .map_err(storage)?;
+    Ok(visible_seq)
+}
+
 async fn backup(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
