@@ -4,6 +4,7 @@
 pub(crate) mod journal;
 pub(crate) mod sqlite_authority;
 pub(crate) mod s3_compatible;
+pub(crate) mod object_log;
 mod platform;
 
 pub(crate) mod partition;
