@@ -435,6 +435,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bootstrap_checkpoint_is_published_before_any_data_commit() {
+        use std::time::{Duration, SystemTime};
+        let stamp=SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!("anyseek-bootstrap-{stamp}-{}.sqlite",std::process::id()));
+        let mut authority=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        authority.create_partition("p0",9).unwrap();
+        let store=S3CompatibleStore::from_store(Arc::new(InMemory::new()),4096);
+        let head=store.publish_bootstrap(&mut authority,"p0",9,b"initial checkpoint bytes",1).await.unwrap();
+        assert_eq!(head.committed_seq,0);
+        assert_eq!(head.indexed_seq,0);
+        let bootstrap=head.bootstrap.unwrap();
+        assert_eq!(store.get_verified(&bootstrap).await.unwrap(),b"initial checkpoint bytes");
+        drop(authority);
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
     async fn object_is_verified_before_sqlite_registration() {
         use std::time::{Duration, SystemTime};
         let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
