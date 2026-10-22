@@ -194,10 +194,9 @@ mod tests {
         assert_eq!(store.get_verified(&reference).await.unwrap(), b"record bytes");
         let head = authority.read_head("p0").unwrap().unwrap();
         assert_eq!(head.committed_seq, 0, "upload/registration must not commit the record");
-        assert!(authority.publish_commit("p0", head.head_version, 1, "op-1", [4;32], 1, reference, None).unwrap()
-            == super::super::sqlite_authority::PublishOutcome::Published(
-                authority.read_head("p0").unwrap().unwrap()
-            ));
+        let outcome = authority.publish_commit("p0", head.head_version, 1, "op-1", [4;32], 1, reference, None).unwrap();
+        assert!(matches!(outcome, super::super::sqlite_authority::PublishOutcome::Published(_)));
+        assert_eq!(authority.read_head("p0").unwrap().unwrap().committed_seq, 1);
         drop(authority);
         let _=std::fs::remove_file(&path);
         let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
