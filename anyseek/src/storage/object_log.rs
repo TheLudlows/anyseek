@@ -241,6 +241,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_protocol_uploads_before_commit_and_resolves_same_operation_retry() {
+        let path=temp_db();
+        let mut authority=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        authority.create_partition("p0",8).unwrap();
+        let store=S3CompatibleStore::from_store(Arc::new(InMemory::new()),4096);
+        let outcome=append_and_commit(
+            &store,&mut authority,"p0",8,"op-1",[11;32],b"canonical mutation".to_vec(),1,2048
+        ).await.unwrap();
+        let head=match outcome {
+            AppendCommitOutcome::Published{head,object}=>{
+                assert_eq!(head.committed_seq,1);
+                assert_eq!(head.indexed_seq,0);
+                assert_eq!(store.get_verified(&object).await.unwrap().len()>0,true);
+                head
+            },
+            other=>panic!("{other:?}"),
+        };
+        let retry=append_and_commit(
+            &store,&mut authority,"p0",8,"op-1",[11;32],b"canonical mutation".to_vec(),2,2048
+        ).await.unwrap();
+        assert!(matches!(retry,AppendCommitOutcome::AlreadyPublished(original) if original.committed_seq==1));
+        let tail=load_committed_tail(&store,&head,4,4096).await.unwrap();
+        assert_eq!(tail.len(),1);
+        assert_eq!(tail[0].payload,b"canonical mutation");
+        assert!(matches!(
+            append_and_commit(&store,&mut authority,"p0",7,"op-2",[12;32],b"next".to_vec(),3,2048).await.unwrap(),
+            AppendCommitOutcome::Conflict
+        ));
+        drop(authority);
+        let _=std::fs::remove_file(&path);
+        let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
     async fn committed_tail_replays_only_entries_after_index_watermark() {
         let path=temp_db();
         let mut authority=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
