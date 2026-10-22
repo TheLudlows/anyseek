@@ -906,18 +906,21 @@ impl RecordPartition {
     #[cfg(feature = "s3-object-store")]
     pub async fn open_s3(
         path: &Path,
-        max_journal_bytes: u64,
+        config: RecordConfig,
         remote_config: S3CompatibleRecordConfig,
     ) -> Result<Self, RecordError> {
+        let max_journal_bytes = config.max_journal_bytes;
         let mut remote = RemotePersistence::open(&remote_config)?;
-        let partition = Self::open(path, max_journal_bytes).await?;
-        let mut inner = partition.inner.lock().await;
-        remote.reconcile_journal(&mut inner).await?;
-        drop(inner);
+        let partition = if path.exists() {
+            Self::open(path, max_journal_bytes).await?
+        } else {
+            Self::create(path, config).await?
+        };
+        {
+            let mut inner = partition.inner.lock().await;
+            remote.reconcile_journal(&mut inner).await?;
+        }
         drop(partition);
-
-        // Reopen from the now-complete journal so existing recovery logic rebuilds
-        // every derived cache and applies record, expiration and lease events.
         let partition = Self::open(path, max_journal_bytes).await?;
         {
             let mut inner = partition.inner.lock().await;
