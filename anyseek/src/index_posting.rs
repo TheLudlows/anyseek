@@ -14,6 +14,26 @@ use crate::{
 };
 
 impl Shard {
+    /// Reserve every explicit posting/scratch growth before encoding a Record
+    /// document. Immutable segments are built in one shard; no silent truncation.
+    pub(crate) fn prepare_record_postings(&mut self,terms:&ahash::AHashMap<String,TermObject>)->Result<(),String>{
+        let error=||"record posting buffer budget exceeded".to_string();
+        let mut required=self.postings_buffer_pointer;
+        let mut scratch=self.segments_level0.iter().map(|s|s.positions_compressed.len()).collect::<Vec<_>>();
+        for term in terms.values() {
+            let positions=term.field_positions_vec.iter().map(Vec::len).sum::<usize>();
+            let fields=term.field_positions_vec.len()+term.field_vec_ngram1.len()+term.field_vec_ngram2.len()+term.field_vec_ngram3.len();
+            required=positions.checked_add(fields).and_then(|n|n.checked_mul(3)).and_then(|n|n.checked_add(11)).and_then(|n|required.checked_add(n)).ok_or_else(error)?;
+            let slot=scratch.get_mut(term.key0 as usize).ok_or_else(error)?;
+            *slot=(*slot).max(positions.checked_mul(3).ok_or_else(error)?);
+        }
+        let capacity=required.max(self.postings_buffer.len()).checked_next_power_of_two().ok_or_else(error)?.max(64*1024);
+        let total=scratch.iter().try_fold(capacity.checked_add(self.compressed_index_segment_block_buffer.len()+10_000_000).ok_or_else(error)?,|sum,n|sum.checked_add(*n).ok_or_else(error))?;
+        if total as u64>crate::storage::build_budget::EXPLICIT_BUFFERS{return Err(error());}
+        if capacity>self.postings_buffer.len(){self.postings_buffer.try_reserve_exact(capacity-self.postings_buffer.len()).map_err(|e|e.to_string())?;self.postings_buffer.resize(capacity,0);}
+        for (segment,size) in self.segments_level0.iter_mut().zip(scratch) {if size>segment.positions_compressed.len(){segment.positions_compressed.try_reserve_exact(size-segment.positions_compressed.len()).map_err(|e|e.to_string())?;segment.positions_compressed.resize(size,0);}}
+        Ok(())
+    }
     pub(crate) fn index_posting(
         &mut self,
         term: TermObject,

@@ -122,18 +122,8 @@ impl Inner {
         if let Some(t) = query.temporal.clone() {
             filters.extend(temporal::filters(t)?);
         }
-        // The partition uses one shard. Compile against its actual facet buffers,
-        // including internal temporal fields; do not reinterpret JSON predicates.
-        let shard = self.index.read().await.shard_vec[0].clone();
-        let shard = shard.read().await;
-        let compiled = crate::metadata_filter::compile_filters(&shard, &filters)
-            .map_err(RecordError::Rejected)?;
-        let neighbors = graph::neighbors_view(self, options.neighbors, |id| {
-            self.locations.get(id).is_some_and(|ordinal| {
-                !crate::metadata_filter::is_facet_filter(&shard, &compiled, *ordinal)
-            })
-        })?;
-        drop(shard);
+        let neighbors=self.index.with_filter(&self.locations,&filters,|allowed|
+            graph::neighbors_view(self,options.neighbors,allowed)).await?;
         let mut scores = BTreeMap::<String, f32>::new();
         let mut explanations = BTreeMap::<String, Vec<crate::search::ChannelExplanation>>::new();
         let mut terms = Vec::new();

@@ -1163,9 +1163,34 @@ impl Search for IndexArc {
             };
         }
         let rank_shards = futures::future::join_all(index_ref.shard_vec.iter().map(|s| s.read())).await;
-        let rank = |a, a_id, b, b_id| if rank_shards.len() == 1 {
-            rank_shards[0].rank(a, a_id, b, b_id)
-        } else { rank_ordering(a, a_id, b, b_id) };
+        let rank = |a, a_id, b, b_id| crate::min_heap::rank_with_shards(&rank_shards,a,a_id,b,b_id);
+        let mut result_sort_index: Vec<ResultSortIndex> = Vec::new();
+                for rs in result_sort.iter() {
+                    if rs.field == "_id" {
+                        result_sort_index.push(ResultSortIndex {
+                            idx: usize::MAX,
+                            order: rs.order.clone(),
+                        });
+                        continue;
+                    }
+                    if rs.field == "_score" {
+                        result_sort_index.push(ResultSortIndex {
+                            idx: usize::MAX - 1,
+                            order: rs.order.clone(),
+                        });
+                        continue;
+                    }
+
+                    if let Some(idx) = rank_shards[0]
+                        .facets_map
+                        .get(&rs.field)
+                    {
+                        result_sort_index.push(ResultSortIndex {
+                            idx: *idx,
+                            order: rs.order.clone(),
+                        });
+                    }
+                }
         if aggregate_results {
             match search_mode {
                 SearchMode::Lexical => {
@@ -1184,9 +1209,24 @@ impl Search for IndexArc {
                     similarity_threshold: _,
                     ann_mode: _,
                 } => {
+                    // A Record view first selects the global vector candidate
+                    // window, then applies requested presentation ordering.
+                    // Sorting all per-segment prefixes by a facet first would
+                    // change the candidate set when the layout changes.
+                    if rank_shards.iter().all(|shard|shard.active.is_some()) {
+                        result_object_results_vector.sort_by(|a,b|rank(b.score,b.doc_id,a.score,a.doc_id));
+                        result_object_results_vector.truncate(offset+length);
+                    }
                     result_object.results = result_object_results_vector;
                 }
                 SearchMode::Hybrid { .. } | SearchMode::WeightedHybrid { .. } => {
+                    // Lexical candidate admission follows the same requested
+                    // order as the single-shard heap. Select that global prefix
+                    // before ranking its admitted members for RRF.
+                    if rank_shards.iter().all(|shard|shard.active.is_some()) && !result_sort.is_empty() {
+                        result_object_results_lexical.sort_by(|a,b|result_ordering_root(&rank_shards,shard_number,false,&result_sort_index,*b,*a));
+                        result_object_results_lexical.truncate(rrf.keyword_candidates.unwrap_or(offset+length));
+                    }
                     let k = rrf.constant;
                     let mut rrf_results: AHashMap<usize, Result> = AHashMap::new();
                     for (i, result) in result_object_results_lexical
@@ -1195,7 +1235,7 @@ impl Search for IndexArc {
                         .take(if rrf.keyword_weight == 0.0 {
                             0
                         } else {
-                            rrf.keyword_candidates.unwrap_or(usize::MAX)
+                            rrf.keyword_candidates.unwrap_or(if rank_shards.iter().all(|shard|shard.active.is_some()){offset+length}else{usize::MAX})
                         })
                         .enumerate()
                     {
@@ -1219,7 +1259,7 @@ impl Search for IndexArc {
                         .take(if rrf.vector_weight == 0.0 {
                             0
                         } else {
-                            rrf.vector_candidates.unwrap_or(usize::MAX)
+                            rrf.vector_candidates.unwrap_or(if rank_shards.iter().all(|shard|shard.active.is_some()){offset+length}else{usize::MAX})
                         })
                         .enumerate()
                     {
@@ -1273,34 +1313,7 @@ impl Search for IndexArc {
         }
 
         if aggregate_results {
-            let mut result_sort_index: Vec<ResultSortIndex> = Vec::new();
             if !result_sort.is_empty() {
-                for rs in result_sort.iter() {
-                    if rs.field == "_id" {
-                        result_sort_index.push(ResultSortIndex {
-                            idx: usize::MAX,
-                            order: rs.order.clone(),
-                        });
-                        continue;
-                    }
-                    if rs.field == "_score" {
-                        result_sort_index.push(ResultSortIndex {
-                            idx: usize::MAX - 1,
-                            order: rs.order.clone(),
-                        });
-                        continue;
-                    }
-
-                    if let Some(idx) = rank_shards[0]
-                        .facets_map
-                        .get(&rs.field)
-                    {
-                        result_sort_index.push(ResultSortIndex {
-                            idx: *idx,
-                            order: rs.order.clone(),
-                        });
-                    }
-                }
                 result_object.results.sort_by(|a, b| {
                     result_ordering_root(
                         &rank_shards,
@@ -1312,7 +1325,7 @@ impl Search for IndexArc {
                     )
                 });
             } else {
-                if rank_shards.len() == 1 && rank_shards[0].active.is_some() {
+                if rank_shards.iter().all(|shard|shard.active.is_some()) {
                     result_object.results.sort_by(|a, b| rank(b.score, b.doc_id, a.score, a.doc_id));
                 } else if query_string.is_empty() && query_vector.is_none() {
                     result_object
@@ -2097,7 +2110,10 @@ impl SearchLexicalShard for ShardArc {
             if query_list_len == 0 {
                 break 'search_blocks;
             } else if query_list_len == 1 {
-                if !(shard_ref.uncommitted && include_uncommitted)
+                // This cache predates the shared active-version corpus. Its scores
+                // cannot be reused after another segment or the tail changes.
+                if shard_ref.active.is_none()
+                    && !(shard_ref.uncommitted && include_uncommitted)
                     && offset + length <= 1000
                     && not_query_list.is_empty()
                     && field_filter_set.is_empty()

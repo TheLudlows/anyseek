@@ -38,6 +38,11 @@ mod locator;
 pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
 mod publication;
+mod segment_state;
+mod segment;
+mod anchor;
+pub(crate) mod build_budget;
+mod view;
 mod recovery;
 pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
 
@@ -298,6 +303,8 @@ struct State {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Entry {
+    #[serde(rename = "RecordAnchorV1")]
+    Anchor(anchor::Reference),
     #[serde(rename = "RecordCheckpointV12")]
     Checkpoint { config: RecordConfig, state: State },
     #[serde(rename = "RecordAppliedV12")]
@@ -310,9 +317,11 @@ enum Entry {
     LeaseExpired(lease::Expiration),
 }
 struct Inner {
+    anchor:Option<anchor::Reference>,
+    payloads:crate::storage::payload_pool::Closure,
     config: RecordConfig,
     state: State,
-    index: IndexArc,
+    index: view::RetrievalView,
     ordinals: Vec<String>,
     locations: BTreeMap<String, usize>,
     snapshot_bytes: usize,
@@ -468,7 +477,7 @@ impl Inner {
             staged_records: generation::reserved(&self.state),
             retained_operations: self.state.operations.len(),
             retained_source_revisions: self.state.source_revisions.len(),
-            physical_versions: self.ordinals.len(),
+            physical_versions: self.ordinals.iter().filter(|id|!id.is_empty()).count(),
             evidence_quarantined: self.state.evidence_quarantined,
             checkpoint_bytes: self.snapshot_bytes,
         }
@@ -555,16 +564,39 @@ async fn detach(index: &IndexArc) {
         shard.write().await.index_option = None;
     }
 }
+// Search files contain candidates and scoring data, never a second copy of
+// authoritative Record JSON. Public schema.store still controls HTTP projection.
+fn retrieval_schema(config: &RecordConfig) -> Vec<SchemaField> {
+    let mut schema = temporal::schema(config);
+    for field in &mut schema { field.store = false; }
+    schema
+}
+
 async fn build(
     path: &Path,
     config: &RecordConfig,
     state: &State,
-) -> Result<(IndexArc, Vec<String>), RecordError> {
+) -> Result<(view::RetrievalView, Vec<String>), RecordError> {
     let cache = path.join(format!("cache-{:032x}", rand::random::<u128>()));
+    let (index,ordinals)=build_at(path,&cache,config,state).await?;
+    Ok((view::RetrievalView::single(index),ordinals))
+}
+async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Result<(IndexArc,Vec<String>),RecordError>{
+    build_at_selected(path,cache,config,state,None).await
+}
+async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(IndexArc,Vec<String>),RecordError>{
+    let disk_limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("build disk limit overflow"))?;
+    let _disk=crate::storage::build_budget::ensure_scope(path,disk_limit).map_err(storage)?;
+    let visible = evidence::visibility(&state.records)?;
+    let records: Vec<_> = state.records.values().filter(|record|
+        visible.get(&record.record_id) == Some(&true)
+        && selected.is_none_or(|keys|keys.contains(&record.record_id))
+        && !(state.evidence_quarantined && temporal::protected(record))).collect();
+    let reservation=build_budget::admit(config,records.iter().copied())?;
     let index = create_index(
         &cache,
         config.index.clone(),
-        &temporal::schema(config),
+        &retrieval_schema(config),
         11,
         true,
         Some(1),
@@ -574,8 +606,17 @@ async fn build(
     // Break legacy ownership cycles so a rejected candidate can release mapped
     // files on Windows. The partition owns the root for the complete query.
     detach(&index).await;
+    index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
+    index.read().await.shard_vec[0].write().await.build_input_covered=true;
     for shard in &index.read().await.shard_vec {
-        shard.write().await.active = Some(crate::active::ActiveStatistics::default());
+        let mut shard=shard.write().await;
+        shard.active=Some(crate::active::ActiveStatistics::default());
+        // Record segments must not choose a quantizer from the first arriving
+        // vector. Pin the non-affine scalar layout across tail/flush/recovery.
+        if shard.quantization==crate::vector::Quantization::ScalarQuantizationI8
+            && shard.vector_similarity==crate::vector_similarity::VectorSimilarity::Euclidean {
+            shard.min_vector_value=0.0;shard.max_vector_value=f32::MIN;
+        }
     }
     #[cfg(test)]
     if std::env::var_os("ANYSEEK_RECORD_BUILD_GATE").as_deref() == Some(path.as_os_str()) {
@@ -586,10 +627,7 @@ async fn build(
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     }
-    let visible = evidence::visibility(&state.records)?;
-    let records: Vec<_> = state.records.values().filter(|record|
-        visible.get(&record.record_id) == Some(&true)
-        && !(state.evidence_quarantined && temporal::protected(record))).collect();
+
     for record in &records {
         index.read().await.shard_vec[0]
             .write()
@@ -605,10 +643,39 @@ async fn build(
             .map_err(storage)?;
     }
     index.commit().await.map_err(storage)?;
+    index.read().await.shard_vec[0].write().await.build_input_covered=false;
     Ok((
         index,
         records.into_iter().map(|r| r.record_id.clone()).collect(),
     ))
+}
+fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordError>{
+    validate_config(config)?;
+        evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
+        locator::validate_history(&state).map_err(storage)?;
+        generation::validate_state(&state, &config)?;
+        lease::validate_state(&state)?;
+        temporal::validate_state(&state)?;
+        if state.records.len() > config.max_records
+            || state.source_revisions.len() + state.records.values().filter(|r| evidence::retained_revision(r)).count() > config.max_records
+            || state.operations.len() > config.max_operations
+        {
+            return Err(storage("recovered state exceeds configured limits"));
+        }
+    Ok(())
+}
+fn restore_operation_lookup(state:&mut State)->Result<(),RecordError>{
+    state.operation_lookup.clear();
+        for (position, operation) in state.operations.iter().enumerate() {
+            if state
+                .operation_lookup
+                .insert(operation.request.operation_id.clone(), position)
+                .is_some()
+            {
+                return Err(storage("duplicate checkpoint operation identity"));
+            }
+        }
+    Ok(())
 }
 fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
     if applied.receipt.seq != state.seq + 1 || applied.observed_time_ms < state.time_watermark_ms {
@@ -701,6 +768,7 @@ impl RecordPartition {
         Ok(Self {
             output: output.clone(),
             inner: Arc::new(Mutex::new(Inner {
+                anchor:None,payloads:Default::default(),
                 journal,
                 config,
                 state,
@@ -747,45 +815,33 @@ impl RecordPartition {
         let first = entries
             .next()
             .ok_or_else(|| storage("missing initial checkpoint"))?;
-        let Entry::Checkpoint { config, mut state } =
-            serde_json::from_slice(&first).map_err(storage)?
-        else {
-            return Err(storage("missing initial checkpoint"));
+        let mut pending=Vec::new();
+        let (config,mut state,prepared,selected,payloads)=match serde_json::from_slice(&first).map_err(storage)? {
+            Entry::Checkpoint{config,state}=>(config,state,None,None,Default::default()),
+            Entry::Anchor(reference)=>{
+                let loaded=reference.load(path,max_journal_bytes).await?;
+                (loaded.config,loaded.state,Some((loaded.index,loaded.ordinals,loaded.locations)),Some(reference),loaded.payloads)
+            },
+            _=>return Err(storage("missing initial checkpoint")),
         };
         journal
             .restrict_budget(config.max_journal_bytes)
             .map_err(storage)?;
-        for (position, operation) in state.operations.iter().enumerate() {
-            if state
-                .operation_lookup
-                .insert(operation.request.operation_id.clone(), position)
-                .is_some()
-            {
-                return Err(storage("duplicate checkpoint operation identity"));
-            }
-        }
+        restore_operation_lookup(&mut state)?;
         for bytes in entries {
-            match serde_json::from_slice(&bytes).map_err(storage)? {
+            let entry=serde_json::from_slice(&bytes).map_err(storage)?;
+            if selected.is_some(){pending.push(entry);continue;}
+            match entry {
                 Entry::Applied(applied) => apply(&mut state, &applied)?,
                 Entry::Expired(event) => temporal::apply(&mut state, &event)?,
                 Entry::LeaseExpired(event) => lease::apply(&mut state,&event)?,
                 Entry::FeedTrim(trim) => change_feed::apply_trim(&mut state,&config.change_feed,&trim)?,
-                Entry::Checkpoint { .. } => {
+                Entry::Checkpoint { .. } | Entry::Anchor(_) => {
                     return Err(storage("unexpected checkpoint in operation stream"));
                 }
             }
         }
-        evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
-        locator::validate_history(&state).map_err(storage)?;
-        generation::validate_state(&state, &config)?;
-        lease::validate_state(&state)?;
-        temporal::validate_state(&state)?;
-        if state.records.len() > config.max_records
-            || state.source_revisions.len() + state.records.values().filter(|r| evidence::retained_revision(r)).count() > config.max_records
-            || state.operations.len() > config.max_operations
-        {
-            return Err(storage("recovered state exceeds configured limits"));
-        }
+        validate_restored_state(&config,&state)?;
         let snapshot_bytes = encode_entry(&Entry::Checkpoint {
             config: config.clone(),
             state: state.clone(),
@@ -793,22 +849,27 @@ impl RecordPartition {
         .len();
         let feed_cache = change_feed::Cache::rebuild(&state,&config.change_feed)?;
         let graph_cache=graph::Cache::rebuild(&state)?;
-        let (index, ordinals) = build(path, &config, &state).await?;
+        let (mut index,mut ordinals,mut locations)=match prepared {
+            Some((index,ordinals,locations))=>(view::RetrievalView::single(index),ordinals,locations),
+            None=>{let (index,ordinals)=build(path,&config,&state).await?;
+                let locations=ordinals.iter().enumerate().map(|(i,key)|(key.clone(),i)).collect();
+                (index,ordinals,locations)},
+        };
+        if selected.is_some(){
+            let target=path.join(format!("cache-{:032x}",rand::random::<u128>()));
+            let (tail,_)=build_at(path,&target,&config,&State::default()).await?;
+            index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{max_segments:64,max_address_slots:config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?}).await?;
+        }
         let output = Arc::new(std::sync::RwLock::new(output::OutputState {
             revision: 0, fenced: state.sealed_for.is_some(),
         }));
-        Ok(Self {
-            output: output.clone(),
-            inner: Arc::new(Mutex::new(Inner {
+        let mut inner=Inner {
+                anchor:selected,payloads,
                 journal,
                 config,
                 state,
                 index,
-                locations: ordinals
-                    .iter()
-                    .enumerate()
-                    .map(|(id, key)| (key.clone(), id))
-                    .collect(),
+                locations,
                 ordinals,
                 snapshot_bytes,
                 healthy: true,
@@ -816,14 +877,18 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 feed_cache,
                 graph_cache,
-                bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),                output,
+                bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),                output:output.clone(),
                 #[cfg(test)]
                 fail_after_durable: false,
                 #[cfg(test)]
                 fail_publication_stage: 0,
-            })),
-            admission: Arc::new(Semaphore::new(8)),
-        })
+            };
+        for entry in pending {inner.replay_anchor_tail(entry).await?;}
+        validate_restored_state(&inner.config,&inner.state)?;
+        inner.feed_cache=change_feed::Cache::rebuild(&inner.state,&inner.config.change_feed)?;
+        inner.graph_cache=graph::Cache::rebuild(&inner.state)?;
+        inner.reclaim_anchor_objects().await?;
+        Ok(Self {output,inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(8))})
     }
     /// A cancellation-safe accepted write: dropping this future does not cancel
     /// an already spawned operation. Query its original operation ID afterward.
@@ -849,6 +914,13 @@ impl RecordPartition {
                     mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve } =>
                         (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve),
                 };
+                let growth=build_budget::write_estimate(&inner.state,&inner.config,&applied)?;
+                if growth>0 && !inner.index.can_admit(growth).await {
+                    // One bounded flush attempt before rejecting, never discard
+                    // selected history to manufacture admission space.
+                    inner.publish_anchor().await?;
+                    if !inner.index.can_admit(growth).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
+                }
                 let feed_point = change_feed::pending(&inner.state,&applied)?;
                 inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;
                 inner.journal.validate_append_with_reserve(bytes.len(), reserve_bytes)
@@ -1108,35 +1180,16 @@ impl RecordPartition {
         Ok(inner.statistics())
     }
 
-    /// Publish a complete local checkpoint without rebuilding the serving
-    /// index, then retire the old WAL generation. Retry identities, tombstones,
-    /// original input and configuration remain in the complete snapshot.
+    /// Publish an authenticated state/index anchor, retaining canonical payload
+    /// objects and retiring the covered WAL only after its certificate is durable.
     pub async fn compact_journal(&self) -> Result<u64, RecordError> {
-        let _permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
-        let mut inner = self.inner.lock().await;
-        if !inner.healthy {
-            return Err(RecordError::RecoveryRequired);
-        }
-        let payload = encode_entry(&Entry::Checkpoint {
-            config: inner.config.clone(),
-            state: inner.state.clone(),
-        })?;
-        inner.healthy = false;
-        match inner.journal.checkpoint(&payload) {
-            Ok(()) => {
-                inner.healthy = true;
-                Ok(inner.state.seq)
-            }
-            Err(error @ CreateError::NotPublished(_)) => {
-                inner.healthy = true;
-                Err(creation_error(error))
-            }
-            Err(error) => Err(creation_error(error)),
-        }
+        let permit=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
+        let owner=self.inner.clone();
+        crate::INDEX_RUNTIME.spawn(async move {
+            let _permit=permit;let mut inner=owner.lock().await;
+            if !inner.healthy{return Err(RecordError::RecoveryRequired);}
+            inner.publish_anchor().await
+        }).await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?
     }
 
     /// Create an independently recoverable snapshot at a new location. No live
@@ -1184,14 +1237,14 @@ mod tests {
     };
     use crate::vector::Inference;
     use crate::vector_similarity::AnnMode;
-    fn path() -> PathBuf {
+    pub(super) fn path() -> PathBuf {
         let base = std::env::var_os("ANYSEEK_TEST_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         std::fs::create_dir_all(&base).unwrap();
         base.join(format!("anyseek-record-{:032x}", rand::random::<u128>()))
     }
-    fn config() -> RecordConfig {
+    pub(super) fn config() -> RecordConfig {
         RecordConfig {change_feed:FeedConfig::default(),index:IndexMetaObject{id:0,name:"records".into(),lexical_similarity:LexicalSimilarity::Bm25f,
             tokenizer:TokenizerType::UnicodeAlphanumeric,text_normalization:TextNormalization::None,
             field_length_normalization:FieldLengthNormalization::Shared,stop_words:StopwordType::None,
@@ -1204,7 +1257,7 @@ mod tests {
             ])).unwrap(),embedding_space_id:Some("test-model-f32-cosine-v1".into()),max_records:32,max_record_bytes:4096,
             max_operations:100,max_journal_bytes:1024*1024,max_candidates:100}
     }
-    fn write(nonce: &str, id: &str, body: &str, expected: ExpectedVersion) -> RecordWrite {
+    pub(super) fn write(nonce: &str, id: &str, body: &str, expected: ExpectedVersion) -> RecordWrite {
         RecordWrite {
             vector_patch: None,
             generation: None,
@@ -1221,7 +1274,7 @@ mod tests {
             ),
         }
     }
-    async fn query(p: &RecordPartition, mode: SearchMode) -> RecordSearch {
+    pub(super) async fn query(p: &RecordPartition, mode: SearchMode) -> RecordSearch {
         let vector = if mode == SearchMode::Lexical {
             None
         } else {
@@ -1231,11 +1284,48 @@ mod tests {
             .await
             .unwrap()
     }
-    fn generation_write(nonce: &str, expected: ExpectedVersion, generation: GenerationCommand) -> RecordWrite {
+    #[tokio::test]
+    async fn record_retrieval_files_do_not_duplicate_authoritative_json() {
+        let location = path();
+        let mut settings = config();
+        for field in &mut settings.schema { field.store = true; }
+        let p = RecordPartition::create(&location, settings.clone()).await.unwrap();
+        let request = write("unique-payload", "a", "alpha", ExpectedVersion::Absent);
+        let original = request.document.clone().unwrap();
+        let receipt = p.write(request.clone()).await.unwrap();
+        for checkpoint in [false, true] {
+            if checkpoint { p.compact_journal().await.unwrap(); }
+            let inner = p.inner.lock().await;
+            let index = inner.index.test_index().read().await;
+            assert!(index.stored_field_names.is_empty());
+            for shard in &index.shard_vec {
+                assert!(shard.read().await.stored_field_names.is_empty());
+            }
+            drop(index);
+            drop(inner);
+            assert_eq!(p.get("a").await.unwrap().unwrap().document.as_ref(), Some(&original));
+            let result = query(&p, SearchMode::Lexical).await;
+            assert_eq!(result.hits.len(), 1);
+            assert_eq!(result.hits[0].record.document.as_ref(), Some(&original));
+            assert_eq!(p.configuration().await.unwrap().schema[0].store, true);
+        }
+        drop(p);
+        let p = RecordPartition::open(&location, settings.max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(request).await.unwrap(), receipt);
+        assert_eq!(p.get("a").await.unwrap().unwrap().document.as_ref(), Some(&original));
+        assert!(p.inner.lock().await.index.test_index().read().await.stored_field_names.is_empty());
+        let result = query(&p, SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All }).await;
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].record.document.as_ref(), Some(&original));
+        drop(p);
+        std::fs::remove_dir_all(location).unwrap();
+    }
+
+    pub(super) fn generation_write(nonce: &str, expected: ExpectedVersion, generation: GenerationCommand) -> RecordWrite {
         RecordWrite { operation_id:OperationId::new(nonce.into()), record_id:"doc".into(), routing_key:"document-1".into(),
             expected, document:None, vector_patch:None, system:None, temporal:None, generation:Some(generation) }
     }
-    fn stage_generation(id: &str, members: &[&str]) -> GenerationCommand {
+    pub(super) fn stage_generation(id: &str, members: &[&str]) -> GenerationCommand {
         GenerationCommand::Stage { generation_id:id.into(), source:EvidenceRef { locator:None, record_id:"s".into(), routing_key:"document-1".into(), version:1 },
             members:members.iter().map(|s| (*s).into()).collect(), chunks:members.iter().map(|id| GenerationChunk { record_id:(*id).into(),
                 document:serde_json::from_value(serde_json::json!({"body":"generationword alpha"})).unwrap(), temporal:None, evidence_refs:vec![] }).collect() }
@@ -1303,6 +1393,34 @@ mod tests {
         drop(p);
         assert!(!std::fs::read(generations[0].path().join("wal")).unwrap().windows(b"generationword alpha".len()).any(|w|w==b"generationword alpha"));
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn staging_certified_cleanup_gc_failure_blocks_recovery_until_retired() {
+        let root=path();
+        let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(source_write("s","s",&[])).await.unwrap();
+        let stage=generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]));
+        let receipt=p.write(stage.clone()).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let old_payloads=p.inner.lock().await.payloads.clone();
+        assert!(!old_payloads.objects.is_empty());
+        p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort{generation_id:"g".into()})).await.unwrap();
+        std::fs::write(root.join(".test-anchor-post-certificate-gc"),b"fail after certificate").unwrap();
+        assert!(p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        // The new certificate is authoritative, but the old private bytes still
+        // exist because physical retirement failed after its publication.
+        assert!(old_payloads.objects.keys().all(|id|root.join(format!("payload-{id}")).exists()));
+        drop(p);
+        assert!(RecordPartition::open(&root,config().max_journal_bytes).await.is_err());
+        assert!(old_payloads.objects.keys().all(|id|root.join(format!("payload-{id}")).exists()));
+        std::fs::remove_file(root.join(".test-anchor-gc-failure")).unwrap();
+        std::fs::remove_file(root.join(".test-anchor-post-certificate-gc")).unwrap();
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert!(old_payloads.objects.keys().all(|id|!root.join(format!("payload-{id}")).exists()));
+        assert!(!p.generation_status("doc").await.unwrap().unwrap().private_cleanup_pending);
+        assert_eq!(p.write(stage).await.unwrap(),receipt);
+        assert!(p.get("chunk").await.unwrap().is_none());
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -2288,7 +2406,7 @@ mod tests {
         assert!(p.recovery_identity().await.unwrap().seal.is_none());
         drop(p); std::fs::remove_dir_all(root).unwrap();
     }
-    fn source_write(nonce: &str, id: &str, dependencies: &[(&str, u64)]) -> RecordWrite {
+    pub(super) fn source_write(nonce: &str, id: &str, dependencies: &[(&str, u64)]) -> RecordWrite {
         let mut request = write(nonce, id, "evidence original", ExpectedVersion::Absent);
         request.system = Some(EvidenceMetadata {
             kind: if dependencies.is_empty() { EvidenceKind::Source } else { EvidenceKind::Derived }, relation:None,
@@ -2551,7 +2669,7 @@ mod tests {
             let mut q = options(); q.text = "original".into();
             assert!(p.query(q).await.unwrap().hits.is_empty());
             match stage {
-                0 => p.inner.lock().await.index.commit().await.unwrap(),
+                0 => p.inner.lock().await.index.test_index().commit().await.unwrap(),
                 1 => {
                     p.compact_journal().await.unwrap();
                     drop(p);
@@ -3003,19 +3121,21 @@ mod tests {
             .inner
             .lock()
             .await
-            .index
+            .index.test_index()
             .read()
             .await
             .index_path_string
             .clone();
         for round in 1..=2 {
             assert_eq!(partition.compact_journal().await.unwrap(), 3);
-            assert_eq!(
+            // The checkpoint now selects an authenticated immutable index;
+            // the original mutable cache is no longer the serving root.
+            assert_ne!(
                 partition
                     .inner
                     .lock()
                     .await
-                    .index
+                    .index.test_index()
                     .read()
                     .await
                     .index_path_string,
@@ -3240,12 +3360,15 @@ mod tests {
             .unwrap()
             .insert("region".into(), "eu".into());
         partition.write(original.clone()).await.unwrap();
-        // Seed a realistic retired physical history through the actual engine,
-        // without 65K unrelated WAL fsyncs. The final boundary crossing itself
-        // uses the authoritative Record write path and its publication guard.
+        // Seed synthetic retired physical history through the actual engine,
+        // bypassing WAL/admission to preserve the low-level 64K boundary oracle.
+        // Production admission now flushes such a tail earlier; this fixture is
+        // not evidence that 65K retained mutations fit the resource budget.
+        // The final boundary crossing still uses authoritative publication.
         {
             let mut inner = partition.inner.lock().await;
-            let shard = inner.index.read().await.shard_vec[0].clone();
+            let shard = inner.index.test_index().read().await.shard_vec[0].clone();
+            shard.write().await.build_input_covered=true;
             for id in 1..65536 {
                 shard
                     .write()
@@ -3256,7 +3379,7 @@ mod tests {
                     .keys
                     .push("a".into());
                 inner
-                    .index
+                    .index.test_index()
                     .index_documents(vec![original.document.clone().unwrap()])
                     .await
                     .unwrap();
@@ -3265,6 +3388,7 @@ mod tests {
                 shard.active.as_mut().unwrap().retire(id - 1);
                 inner.ordinals.push("a".into());
             }
+            shard.write().await.build_input_covered=false;
             inner.locations.insert("a".into(), 65535);
         }
         partition
@@ -3294,7 +3418,7 @@ mod tests {
             assert_eq!(result.statistics.physical_versions, 65537);
             assert!(result.hits[0].score.is_finite());
         }
-        partition.inner.lock().await.index.commit().await.unwrap();
+        partition.inner.lock().await.index.test_index().commit().await.unwrap();
         partition
             .write(write(
                 "partial-append",
@@ -3341,7 +3465,8 @@ mod tests {
                     "record::tests::record_checkpoint_crash_worker",
                 ])
                 .env("ANYSEEK_CHECKPOINT_PATH", &location)
-                .env("ANYSEEK_PUBLISH_FAIL", "after_rename");
+                .env("ANYSEEK_PUBLISH_FAIL", "after_rename")
+                .env("ANYSEEK_PUBLISH_FAIL_SCOPE", "journal");
             command
         };
         let output = worker()
@@ -3497,7 +3622,7 @@ mod tests {
             .inner
             .lock()
             .await
-            .index
+            .index.test_index()
             .read()
             .await
             .index_path_string
@@ -3510,7 +3635,7 @@ mod tests {
         }
         {
             let inner = partition.inner.lock().await;
-            let index = inner.index.read().await;
+            let index = inner.index.test_index().read().await;
             let shard = index.shard_vec[0].read().await;
             let sorts = vec![];
             let mut heap = crate::min_heap::MinHeap::new(1, &shard, false, &sorts);
@@ -3578,7 +3703,7 @@ mod tests {
                         .inner
                         .lock()
                         .await
-                        .index
+                        .index.test_index()
                         .read()
                         .await
                         .index_path_string,
@@ -3589,7 +3714,7 @@ mod tests {
                 assert_eq!(result.visible_seq, result.statistics.visible_seq);
                 assert_eq!(result.statistics.active_records, 4);
                 assert_eq!(result.statistics.physical_versions, 5);
-                partition.inner.lock().await.index.commit().await.unwrap();
+                partition.inner.lock().await.index.test_index().commit().await.unwrap();
             } else if step == 1 {
                 drop(partition);
                 partition = RecordPartition::open(&location, config().max_journal_bytes)
@@ -3655,7 +3780,7 @@ mod tests {
                 .write(make("old-b", "b", "beta old", "alpha beta"))
                 .await
                 .unwrap();
-            partition.inner.lock().await.index.commit().await.unwrap();
+            partition.inner.lock().await.index.test_index().commit().await.unwrap();
             partition
                 .write(make("a", "a", "alpha beta new", ""))
                 .await
@@ -3681,7 +3806,7 @@ mod tests {
                     expected,
                     "before commit: {text}"
                 );
-                partition.inner.lock().await.index.commit().await.unwrap();
+                partition.inner.lock().await.index.test_index().commit().await.unwrap();
                 assert_eq!(
                     ranked(&partition, text, SearchMode::Lexical, 10).await,
                     expected,

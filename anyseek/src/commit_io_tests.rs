@@ -83,7 +83,7 @@ async fn commit_io_errors_reach_public_caller() {
         {
             let shard = index.read().await.shard_vec[0].clone();
             let mut shard = shard.write().await;
-            let readonly = fs::File::open(path.join("shards/0").join(component)).unwrap();
+            let readonly = crate::storage::build_budget::File::open(path.join("shards/0").join(component)).unwrap();
             match component {
                 "index.bin" => shard.index_file = readonly,
                 "docstore.bin" => shard.docstore_file = readonly,

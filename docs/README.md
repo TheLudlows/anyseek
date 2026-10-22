@@ -23,3 +23,5 @@
 已删除被现行指南取代的旧迁移说明和早期规划，删除范围与保留依据见 [历史验证中的 README 收敛记录](../VALIDATION.md#2026-10-21readme-清理检查点-3af29ab)。
 
 - [单 package 整合验证](validation/single-package.md)：模块边界、feature 矩阵及平台限制。
+
+- [A 批本地 Segment 实施设计](implementation-57-a-segments.md)：唯一数据归属、tail 查询、manifest 发布及安全回收；尚未实现。
