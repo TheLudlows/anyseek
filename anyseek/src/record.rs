@@ -463,7 +463,8 @@ impl RemotePersistence {
             if entry.seq != expected.saturating_add(1) {
                 return Err(RecordError::RecoveryRequired);
             }
-            let digest: [u8; 32] = sha2::Digest::digest(&sha2::Sha256::new(), &entry.payload).into();
+            use sha2::{Digest, Sha256};
+            let digest: [u8; 32] = Sha256::digest(&entry.payload).into();
             if digest != entry.request_sha256 { return Err(RecordError::RecoveryRequired); }
             let parsed: Entry = serde_json::from_slice(&entry.payload).map_err(storage)?;
             let (seq, operation_id) = match &parsed {
@@ -908,7 +909,19 @@ impl RecordPartition {
         let mut remote = RemotePersistence::open(&remote_config)?;
         let partition = Self::open(path, max_journal_bytes).await?;
         let mut inner = partition.inner.lock().await;
-        remote.recover_tail(&mut inner).await?;
+        remote.reconcile_journal(&mut inner).await?;
+        drop(inner);
+        drop(partition);
+
+        // Reopen from the now-complete journal so existing recovery logic rebuilds
+        // every derived cache and applies record, expiration and lease events.
+        let partition = Self::open(path, max_journal_bytes).await?;
+        let mut inner = partition.inner.lock().await;
+        let head = remote.authority.read_head(&remote.partition_id).map_err(storage)?
+            .ok_or_else(|| storage("remote partition authority is missing"))?;
+        if inner.state.seq != head.committed_seq || head.owner_epoch != remote.owner_epoch {
+            return Err(RecordError::RecoveryRequired);
+        }
         inner.remote = Some(remote);
         Ok(partition)
     }
