@@ -337,6 +337,162 @@ impl SqliteAuthority {
         Ok(Some(head))
     }
 
+    /// Create a point-in-time logical metadata snapshot and pin its complete object
+    /// closure in the same SQLite transaction. The caller must enumerate and validate
+    /// all objects reachable through the active manifest and WAL chain before calling.
+    /// Snapshot bytes contain metadata only, never record/vector/index payload bytes.
+    pub(crate) fn prepare_backup_snapshot(
+        &mut self,
+        backup_id: &str,
+        object_closure: &[ObjectRef],
+        created_at_ms: i64,
+        max_snapshot_bytes: usize,
+    ) -> rusqlite::Result<Vec<u8>> {
+        if backup_id.is_empty() || object_closure.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "backup ID and complete object closure are required".into()
+            ));
+        }
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prior_backup: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM object_pins WHERE backup_id=?1)",
+            [backup_id], |row| row.get(0),
+        )?;
+        if prior_backup {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "backup ID already has pins; use a new ID or explicitly release the failed backup".into()
+            ));
+        }
+        let mut closure = object_closure.to_vec();
+        closure.sort_by(|a,b| a.key.cmp(&b.key));
+        if closure.windows(2).any(|pair| pair[0].key == pair[1].key) {
+            return Err(rusqlite::Error::InvalidParameterName("duplicate object key in backup closure".into()));
+        }
+        for object in &closure {
+            ensure_durable_object(&tx, object)?;
+        }
+        let head_ids: Vec<String> = {
+            let mut statement = tx.prepare("SELECT partition_id FROM partition_heads ORDER BY partition_id")?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut heads = Vec::with_capacity(head_ids.len());
+        for id in head_ids {
+            let head = read_head(&tx, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            for required in [&head.wal_tip, &head.manifest, &head.log_anchor].into_iter().flatten() {
+                if !closure.iter().any(|candidate| candidate == required) {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "backup closure omits an object referenced by the current partition head".into()
+                    ));
+                }
+            }
+            heads.push(head);
+        }
+        for object in &closure {
+            let pin_id = backup_pin_id(backup_id, &object.key);
+            tx.execute(
+                "INSERT INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id)
+                 VALUES(?1,'*',?2,'backup',NULL,?3)",
+                params![pin_id,object.key,backup_id],
+            )?;
+        }
+
+        let receipts = {
+            let mut statement = tx.prepare(
+                "SELECT partition_id,operation_id,request_sha256,committed_seq,result_json
+                 FROM operation_receipts ORDER BY partition_id,operation_id"
+            )?;
+            let rows = statement.query_map([], |row| {
+                let digest: Vec<u8> = row.get(2)?;
+                let request_sha256: [u8;32] = digest.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let committed_seq: i64 = row.get(3)?;
+                Ok(ReceiptSnapshot {
+                    partition_id: row.get(0)?,
+                    operation_id: row.get(1)?,
+                    request_sha256,
+                    committed_seq: u64::try_from(committed_seq).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    result_json: row.get(4)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let objects = {
+            let mut statement = tx.prepare(
+                "SELECT object_key,sha256,byte_length,state,created_at_ms FROM object_uploads ORDER BY object_key"
+            )?;
+            let rows = statement.query_map([], |row| {
+                let key: String = row.get(0)?;
+                let digest: Vec<u8> = row.get(1)?;
+                let sha256: [u8;32] = digest.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let length: i64 = row.get(2)?;
+                let state: i64 = row.get(3)?;
+                Ok(ObjectRegistrySnapshot {
+                    reference: ObjectRef {
+                        key, sha256,
+                        length: u64::try_from(length).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    },
+                    state,
+                    created_at_ms: row.get(4)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let pins = {
+            let mut statement = tx.prepare(
+                "SELECT pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id
+                 FROM object_pins ORDER BY pin_id"
+            )?;
+            let rows = statement.query_map([], |row| Ok(PinSnapshot {
+                pin_id: row.get(0)?, partition_id: row.get(1)?, object_key: row.get(2)?,
+                pin_kind: row.get(3)?, expires_at_ms: row.get(4)?, backup_id: row.get(5)?,
+            }))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let retired = {
+            let mut statement = tx.prepare(
+                "SELECT object_key,retired_generation,retired_at_ms FROM retired_objects ORDER BY object_key"
+            )?;
+            let rows = statement.query_map([], |row| {
+                let generation: i64 = row.get(1)?;
+                Ok(RetiredSnapshot {
+                    object_key: row.get(0)?,
+                    retired_generation: u64::try_from(generation).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    retired_at_ms: row.get(2)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let snapshot = AuthorityBackupSnapshot {
+            format_version: 1,
+            backup_id: backup_id.to_owned(),
+            created_at_ms,
+            heads,
+            receipts,
+            objects,
+            pins,
+            retired,
+            object_closure: closure,
+        };
+        let bytes = serde_json::to_vec(&snapshot).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if bytes.len() > max_snapshot_bytes {
+            return Err(rusqlite::Error::InvalidParameterName("backup metadata exceeds configured limit".into()));
+        }
+        tx.commit()?;
+        Ok(bytes)
+    }
+
+    /// Release pins after a failed backup attempt, or after an explicit backup-retention
+    /// deletion has itself been completed. Never call this while the backup is retained.
+    pub(crate) fn release_backup_pins(&mut self, backup_id: &str) -> rusqlite::Result<usize> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "DELETE FROM object_pins WHERE backup_id=?1 AND pin_kind='backup'",
+            [backup_id],
+        )?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
     /// Pin a verified object before opening it or starting a background build.
     /// Pins are metadata leases; callers must cancel work before allowing its lease to expire.
     pub(crate) fn pin_object(
@@ -468,6 +624,12 @@ impl SqliteAuthority {
             None => Ok(None),
         }
     }
+}
+
+fn backup_pin_id(backup_id: &str, object_key: &str) -> String {
+    let digest = Sha256::digest([backup_id.as_bytes(), b"\\0", object_key.as_bytes()].concat());
+    let suffix: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("backup:{suffix}")
 }
 
 fn to_i64(value: u64) -> rusqlite::Result<i64> {
