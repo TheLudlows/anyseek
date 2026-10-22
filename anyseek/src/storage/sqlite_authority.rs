@@ -284,6 +284,123 @@ impl SqliteAuthority {
         Ok(Some(head))
     }
 
+    /// Pin a verified object before opening it or starting a background build.
+    /// Pins are metadata leases; callers must cancel work before allowing its lease to expire.
+    pub(crate) fn pin_object(
+        &mut self,
+        pin_id: &str,
+        partition_id: &str,
+        object_key: &str,
+        pin_kind: &str,
+        expires_at_ms: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        if pin_id.is_empty() || partition_id.is_empty()
+            || !matches!(pin_kind, "reader" | "indexer" | "backup" | "staging") {
+            return Err(rusqlite::Error::InvalidParameterName("invalid object pin".into()));
+        }
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state: Option<i64> = tx.query_row(
+            "SELECT state FROM object_uploads WHERE object_key=?1",
+            [object_key], |row| row.get(0),
+        ).optional()?;
+        if state != Some(1) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "cannot pin an object that is not active and verified".into()
+            ));
+        }
+        tx.execute(
+            "INSERT INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![pin_id,partition_id,object_key,pin_kind,expires_at_ms],
+        )?;
+        tx.commit()
+    }
+
+    /// Release a reader/build/backup/staging pin after its consumer is finished.
+    pub(crate) fn unpin_object(&mut self, pin_id: &str) -> rusqlite::Result<bool> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute("DELETE FROM object_pins WHERE pin_id=?1", [pin_id])?;
+        tx.commit()?;
+        Ok(changed == 1)
+    }
+
+    /// Retire an object only if no current head references it and no live pin protects it.
+    /// Retirement is monotonic: a retired key can never be registered or pinned again.
+    pub(crate) fn retire_object(
+        &mut self,
+        object_key: &str,
+        retired_generation: u64,
+        now_ms: i64,
+    ) -> rusqlite::Result<bool> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state: Option<i64> = tx.query_row(
+            "SELECT state FROM object_uploads WHERE object_key=?1",
+            [object_key], |row| row.get(0),
+        ).optional()?;
+        if state != Some(1) {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let referenced: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM partition_heads
+                WHERE json_extract(wal_tip_json,'$.key')=?1
+                   OR json_extract(manifest_json,'$.key')=?1
+                   OR json_extract(log_anchor_json,'$.key')=?1
+             )",
+            [object_key], |row| row.get(0),
+        )?;
+        let pinned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM object_pins
+             WHERE object_key=?1 AND (expires_at_ms IS NULL OR expires_at_ms>?2))",
+            params![object_key,now_ms], |row| row.get(0),
+        )?;
+        if referenced || pinned {
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute("UPDATE object_uploads SET state=2 WHERE object_key=?1", [object_key])?;
+        tx.execute(
+            "INSERT INTO retired_objects(object_key,retired_generation,retired_at_ms)
+             VALUES(?1,?2,?3)",
+            params![object_key,to_i64(retired_generation)?,now_ms],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Return only monotonically retired objects that are still unreferenced and unpinned.
+    /// The returned list is safe for idempotent remote deletion: state=retired prevents
+    /// any future publication or pin from making the object live again.
+    pub(crate) fn collectible_objects(&self, now_ms: i64) -> rusqlite::Result<Vec<ObjectRef>> {
+        let mut statement = self.connection.prepare(
+            "SELECT u.object_key,u.sha256,u.byte_length
+             FROM object_uploads u
+             WHERE u.state=2
+               AND NOT EXISTS(
+                 SELECT 1 FROM partition_heads h
+                 WHERE json_extract(h.wal_tip_json,'$.key')=u.object_key
+                    OR json_extract(h.manifest_json,'$.key')=u.object_key
+                    OR json_extract(h.log_anchor_json,'$.key')=u.object_key
+               )
+               AND NOT EXISTS(
+                 SELECT 1 FROM object_pins p
+                 WHERE p.object_key=u.object_key
+                   AND (p.expires_at_ms IS NULL OR p.expires_at_ms>?1)
+               )
+             ORDER BY u.object_key"
+        )?;
+        let rows = statement.query_map([now_ms], |row| {
+            let key: String = row.get(0)?;
+            let digest: Vec<u8> = row.get(1)?;
+            let sha256: [u8;32] = digest.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let length: i64 = row.get(2)?;
+            let length = u64::try_from(length).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(ObjectRef { key, sha256, length })
+        })?;
+        rows.collect()
+    }
+
     /// Resolve a response-lost retry using the original operation ID and request digest.
     pub(crate) fn resolve_operation(
         &self, partition_id: &str, operation_id: &str, request_sha256: [u8; 32],
