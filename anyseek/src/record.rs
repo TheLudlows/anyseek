@@ -1030,6 +1030,43 @@ impl RecordPartition {
         authority.release_backup_pins(&RemotePersistence::safe_backup_id(backup_id)).map_err(storage)
     }
 
+    /// Delete the backup descriptor and metadata snapshot after all authority copies
+    /// have released this backup's payload pins.
+    #[cfg(feature = "s3-object-store")]
+    pub async fn delete_s3_backup_metadata(
+        authority_path: &Path,
+        bundle_json: &str,
+    ) -> Result<(), RecordError> {
+        let bundle: crate::storage::s3_compatible::BackupBundle =
+            serde_json::from_str(bundle_json).map_err(storage)?;
+        let endpoint = std::env::var("ANYSEEK_S3_ENDPOINT").map_err(storage)?;
+        let bucket = std::env::var("ANYSEEK_S3_BUCKET").map_err(storage)?;
+        let access_key_id = std::env::var("ANYSEEK_S3_ACCESS_KEY_ID").map_err(storage)?;
+        let secret_access_key = std::env::var("ANYSEEK_S3_SECRET_ACCESS_KEY").map_err(storage)?;
+        let region = std::env::var("ANYSEEK_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
+        let allow_http = std::env::var("ANYSEEK_S3_ALLOW_HTTP")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true")).unwrap_or(false);
+        let config = S3CompatibleRecordConfig {
+            authority_path: authority_path.to_path_buf(),
+            partition_id: "backup-retirement".into(),
+            owner_epoch: 1,
+            endpoint,
+            bucket,
+            region,
+            access_key_id,
+            secret_access_key,
+            allow_http,
+            max_object_bytes: 1024 * 1024 * 1024,
+            max_tail_blocks: 1,
+            max_tail_bytes: 1,
+        };
+        let remote = RemotePersistence::open(&config)?;
+        let mut authority = remote.authority.lock().await;
+        remote.store.retire_backup_metadata(
+            &mut authority, &bundle, unix_time_ms_i64(),
+        ).await.map_err(storage)
+    }
+
     /// Restore a joint S3/SQLite backup into an empty authority database, verify its
     /// complete object closure, then reconstruct the local journal/index cache.
     #[cfg(feature = "s3-object-store")]
