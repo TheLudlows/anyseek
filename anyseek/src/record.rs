@@ -890,7 +890,7 @@ impl RecordPartition {
         remote_config: S3CompatibleRecordConfig,
     ) -> Result<Self, RecordError> {
         let mut remote = RemotePersistence::open(&remote_config)?;
-        remote.authority.create_partition(&remote.partition_id, remote.owner_epoch).map_err(storage)?;
+        remote.authority.lock().await.create_partition(&remote.partition_id, remote.owner_epoch).map_err(storage)?;
         let partition = Self::create(path, config).await?;
         {
             let mut inner = partition.inner.lock().await;
