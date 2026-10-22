@@ -948,6 +948,34 @@ mod tests {
     }
 
     #[test]
+    fn wal_dependency_edges_are_preserved_in_backup() {
+        let path=temp_db();
+        let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        let head=db.create_partition("p0",9).unwrap();
+        let first=object("wal/1",1);
+        let second=object("wal/2",2);
+        db.register_durable_object(&first,1).unwrap();
+        db.register_durable_object(&second,2).unwrap();
+        let head=match db.publish_commit("p0",head.head_version,9,"op-1",[1;32],1,first.clone(),None).unwrap() {
+            PublishOutcome::Published(head)=>head, other=>panic!("{other:?}")
+        };
+        let head=match db.publish_commit("p0",head.head_version,9,"op-2",[2;32],2,second.clone(),None).unwrap() {
+            PublishOutcome::Published(head)=>head, other=>panic!("{other:?}")
+        };
+        assert!(!db.retire_object(&first.key,1,3).unwrap());
+        assert!(db.prepare_backup_snapshot("backup-missing",&[second.clone()],4,1024*1024).is_err());
+        let snapshot=db.prepare_backup_snapshot("backup-full",&[first,second],5,1024*1024).unwrap();
+        let parsed: AuthorityBackupSnapshot=serde_json::from_slice(&snapshot).unwrap();
+        assert_eq!(parsed.edges.len(),1);
+        assert_eq!(parsed.edges[0].parent_key,"wal/2");
+        assert_eq!(parsed.edges[0].child_key,"wal/1");
+        drop(db);
+        let _=fs::remove_file(&path);
+        let _=fs::remove_file(path.with_extension("sqlite-wal"));
+        let _=fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
     fn commit_retry_index_watermark_and_reopen() {
         let path=temp_db();
         let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
