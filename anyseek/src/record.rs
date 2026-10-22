@@ -353,7 +353,7 @@ impl Drop for Inner {
 #[cfg(feature = "s3-object-store")]
 struct RemotePersistence {
     store: crate::storage::s3_compatible::S3CompatibleStore,
-    authority: crate::storage::sqlite_authority::SqliteAuthority,
+    authority: tokio::sync::Mutex<crate::storage::sqlite_authority::SqliteAuthority>,
     partition_id: String,
     owner_epoch: u64,
     max_tail_blocks: usize,
@@ -395,7 +395,7 @@ impl RemotePersistence {
             &config.authority_path, std::time::Duration::from_secs(5),
         ).map_err(storage)?;
         Ok(Self {
-            store, authority, partition_id: config.partition_id.clone(),
+            store, authority: tokio::sync::Mutex::new(authority), partition_id: config.partition_id.clone(),
             owner_epoch: config.owner_epoch, max_tail_blocks: config.max_tail_blocks,
             max_tail_bytes: config.max_tail_bytes, max_object_bytes: config.max_object_bytes,
         })
@@ -408,7 +408,8 @@ impl RemotePersistence {
 
     async fn commit_entry(&mut self, seq: u64, operation_id: String, payload: &[u8]) -> Result<(), String> {
         use sha2::{Digest, Sha256};
-        let head = self.authority.read_head(&self.partition_id)
+        let mut authority = self.authority.lock().await;
+        let head = authority.read_head(&self.partition_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "remote partition authority is missing".to_owned())?;
         if seq != head.committed_seq.saturating_add(1) {
@@ -428,10 +429,10 @@ impl RemotePersistence {
         let key = format!("partitions/{}/wal/{seq:020}-{}", self.partition_id,
             digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
         let reference = crate::storage::object_log::upload_log_block(
-            &self.store, &mut self.authority, &key, &block,
+            &self.store, &mut authority, &key, &block,
             unix_time_ms_i64(), self.max_object_bytes,
         ).await.map_err(|error| error.to_string())?;
-        match self.authority.publish_commit(
+        match authority.publish_commit(
             &self.partition_id, head.head_version, self.owner_epoch, &operation_id,
             digest, seq, reference, None,
         ).map_err(|error| error.to_string())? {
@@ -448,7 +449,7 @@ impl RemotePersistence {
     /// local recovery journal. The caller reopens the partition afterward so the
     /// ordinary journal recovery path applies every Entry variant consistently.
     async fn reconcile_journal(&mut self, inner: &mut Inner) -> Result<(), RecordError> {
-        let head = self.authority.read_head(&self.partition_id).map_err(storage)?
+        let head = self.authority.lock().await.read_head(&self.partition_id).map_err(storage)?
             .ok_or_else(|| storage("remote partition authority is missing"))?;
         if head.owner_epoch != self.owner_epoch
             || inner.state.seq > head.committed_seq
@@ -891,9 +892,11 @@ impl RecordPartition {
         let mut remote = RemotePersistence::open(&remote_config)?;
         remote.authority.create_partition(&remote.partition_id, remote.owner_epoch).map_err(storage)?;
         let partition = Self::create(path, config).await?;
-        let mut inner = partition.inner.lock().await;
-        if inner.state.seq != 0 { return Err(RecordError::Rejected("S3 backend requires a fresh local partition".into())); }
-        inner.remote = Some(remote);
+        {
+            let mut inner = partition.inner.lock().await;
+            if inner.state.seq != 0 { return Err(RecordError::Rejected("S3 backend requires a fresh local partition".into())); }
+            inner.remote = Some(remote);
+        }
         Ok(partition)
     }
 
@@ -916,13 +919,15 @@ impl RecordPartition {
         // Reopen from the now-complete journal so existing recovery logic rebuilds
         // every derived cache and applies record, expiration and lease events.
         let partition = Self::open(path, max_journal_bytes).await?;
-        let mut inner = partition.inner.lock().await;
-        let head = remote.authority.read_head(&remote.partition_id).map_err(storage)?
-            .ok_or_else(|| storage("remote partition authority is missing"))?;
-        if inner.state.seq != head.committed_seq || head.owner_epoch != remote.owner_epoch {
-            return Err(RecordError::RecoveryRequired);
+        {
+            let mut inner = partition.inner.lock().await;
+            let head = remote.authority.lock().await.read_head(&remote.partition_id).map_err(storage)?
+                .ok_or_else(|| storage("remote partition authority is missing"))?;
+            if inner.state.seq != head.committed_seq || head.owner_epoch != remote.owner_epoch {
+                return Err(RecordError::RecoveryRequired);
+            }
+            inner.remote = Some(remote);
         }
-        inner.remote = Some(remote);
         Ok(partition)
     }
 
@@ -4241,7 +4246,7 @@ mod tests {
         let authority = SqliteAuthority::open(&authority_path, Duration::from_secs(1)).unwrap();
         let store = S3CompatibleStore::from_store(object_store.clone(), 1024 * 1024);
         let mut remote = RemotePersistence {
-            store, authority, partition_id: "record-test".into(), owner_epoch: 1,
+            store, authority: tokio::sync::Mutex::new(authority), partition_id: "record-test".into(),
             max_tail_blocks: 32, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
         };
         {
