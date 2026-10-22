@@ -398,13 +398,21 @@ impl Service {
         let path = self.root.join(&entry.directory);
         let remote_config = self.s3_record_config(&entry)?;
         let partition = if let Some(remote_config) = remote_config {
-            if entry.restore_from.is_some() {
-                return Err(storage("restoring a local-only backup into S3 mode is not supported; use an S3 joint backup"));
-            }
-            if !entry.active && path.exists() {
+            if !entry.active && path.exists() && entry.restore_from.is_none() {
                 RecordPartition::resume_initialization(&path, entry.config.max_journal_bytes).await?;
             }
-            if entry.active {
+            if let Some(backup_id) = &entry.restore_from {
+                let marker: S3BackupMarker = serde_json::from_slice(
+                    &std::fs::read(self.root.join(format!("backup-{backup_id}")).join("s3-backup.json")).map_err(storage)?
+                ).map_err(storage)?;
+                if marker.collection_id != entry.collection_id || marker.backup_id != *backup_id {
+                    return Err(storage("S3 backup marker does not match the durable restore intent"));
+                }
+                RecordPartition::restore_s3_backup(
+                    &path, entry.config.clone(), remote_config, &marker.bundle_json,
+                    256 * 1024 * 1024, 1_000_000, 10 * 1024 * 1024 * 1024usize,
+                ).await?
+            } else if entry.active {
                 RecordPartition::open_s3(&path, entry.config.clone(), remote_config).await?
             } else {
                 RecordPartition::create_s3(&path, entry.config.clone(), remote_config).await?
