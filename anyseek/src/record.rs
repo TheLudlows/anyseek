@@ -4463,6 +4463,84 @@ mod tests {
     }
     #[cfg(feature = "s3-object-store")]
     #[tokio::test]
+    async fn s3_partition_rebuilds_missing_local_cache_from_bootstrap_and_log() {
+        use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
+        use object_store::memory::InMemory;
+        use std::{sync::Arc, time::Duration};
+
+        let source_path=path();
+        let target_path=path();
+        let authority_path=target_path.with_extension("authority.sqlite");
+        let object_store=Arc::new(InMemory::new());
+        let store=S3CompatibleStore::from_store(object_store.clone(),1024*1024);
+        let source=RecordPartition::create(&source_path,config()).await.unwrap();
+        let checkpoint={
+            let inner=source.inner.lock().await;
+            encode_entry(&Entry::Checkpoint{config:inner.config.clone(),state:inner.state.clone()}).unwrap()
+        };
+        let mut authority=SqliteAuthority::open(&authority_path,Duration::from_secs(1)).unwrap();
+        authority.create_partition("record-rebuild",1).unwrap();
+        store.publish_bootstrap(&mut authority,"record-rebuild",1,&checkpoint,unix_time_ms_i64()).await.unwrap();
+        let mut remote=RemotePersistence{
+            store,
+            authority:tokio::sync::Mutex::new(authority),
+            partition_id:"record-rebuild".into(),
+            owner_epoch:1,
+            max_tail_blocks:32,
+            max_tail_bytes:1024*1024,
+            max_object_bytes:1024*1024,
+        };
+        let prepared={
+            let inner=source.inner.lock().await;
+            mutation::prepare_at(
+                &inner.state,&inner.config,inner.snapshot_bytes,
+                write("first-remote","a","alpha remote first",ExpectedVersion::Absent),
+                current_epoch(),inner.evaluation_time_ms,
+            ).unwrap()
+        };
+        let (applied,bytes)=match prepared {
+            mutation::PreparedWrite::Append{applied,bytes,..}=>(applied,bytes),
+            mutation::PreparedWrite::Replay(_)=>panic!("unexpected replay"),
+        };
+        remote.commit(&applied,&bytes).await.unwrap();
+        drop(source);
+        std::fs::remove_dir_all(&source_path).unwrap();
+
+        let recovered=RecordPartition::open_s3_with_remote(
+            &target_path,config().max_journal_bytes,remote,
+        ).await.unwrap();
+        assert_eq!(recovered.get("a").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote first");
+        recovered.write(write("second-remote","b","alpha remote second",ExpectedVersion::Absent)).await.unwrap();
+        drop(recovered);
+        std::fs::remove_dir_all(&target_path).unwrap();
+
+        // Reopen from a missing local cache. SQLite/S3 bootstrap plus both committed
+        // Applied entries must reconstruct the same queryable Record view.
+        let authority=SqliteAuthority::open(&authority_path,Duration::from_secs(1)).unwrap();
+        let remote=RemotePersistence{
+            store:S3CompatibleStore::from_store(object_store,1024*1024),
+            authority:tokio::sync::Mutex::new(authority),
+            partition_id:"record-rebuild".into(),
+            owner_epoch:1,
+            max_tail_blocks:32,
+            max_tail_bytes:1024*1024,
+            max_object_bytes:1024*1024,
+        };
+        let recovered=RecordPartition::open_s3_with_remote(
+            &target_path,config().max_journal_bytes,remote,
+        ).await.unwrap();
+        assert_eq!(recovered.get("a").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote first");
+        assert_eq!(recovered.get("b").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote second");
+        assert_eq!(recovered.statistics().await.unwrap().visible_seq,2);
+        drop(recovered);
+        std::fs::remove_dir_all(&target_path).unwrap();
+        let _=std::fs::remove_file(&authority_path);
+        let _=std::fs::remove_file(authority_path.with_extension("sqlite-wal"));
+        let _=std::fs::remove_file(authority_path.with_extension("sqlite-shm"));
+    }
+
+    #[cfg(feature = "s3-object-store")]
+    #[tokio::test]
     async fn sqlite_committed_remote_tail_recovers_before_local_journal_append() {
         use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
         use object_store::memory::InMemory;
