@@ -29,7 +29,7 @@ Status: **implementation foundation in Draft PR #72; not yet accepted or wired i
 
 ## Explicit limitations
 
-This slice is **not** the end-to-end SQLite + object-storage backend. The S3-compatible adapter, object-log tail reader, logical metadata backup/restore bundle and basic pin-aware GC eligibility exist as isolated primitives, but they are not yet connected to the current RecordService authoritative write path or search/index view. Tail replay currently returns validated operation envelopes; applying them to the live Record/search state remains outstanding. The authority-driven backup derives closure through registered object dependency edges. Every writer/indexer must register all manifest/segment and WAL-chain dependencies; opaque manifest internals cannot be inferred automatically if those edges are omitted. Backup root pins are recreated on restore. GC reachability traverses dependency edges from both partition heads and pinned roots, so a pinned descriptor protects its transitive child objects. A failed backup may leave pins; release them only after confirming no valid descriptor was published. S3 conditional-create, visibility, and delete semantics must be tested against a real target service before certification.
+The Record layer now exposes feature-gated `create_s3` and `open_s3` paths. Accepted `Applied` operations are committed to S3 + SQLite before local journal/index publication; recovery validates the immutable bootstrap, appends missing committed tail entries to the local recovery journal, then reopens through the ordinary Record replay/index path. The local journal is a rebuildable cache in this mode. Initial checkpoint publication is retryable while the remote head remains at sequence zero. WAL blocks register predecessor dependency edges so backup closure discovery traverses the full committed log chain. Remaining limitations: real S3-compatible endpoint semantics are not yet tested; maintenance events/compaction must be audited to ensure no state-changing operation bypasses remote commit; index/segment dependencies must be registered by every writer; and service-level backup/restore still needs fault testing.
 
 The SQLite database is a single local authority. Do not put its WAL database on a network filesystem or allow independent nodes to maintain writable copies. Cross-host failover/HA is out of scope for this first slice.
 
@@ -49,41 +49,41 @@ The SQLite database is a single local authority. Do not put its WAL database on 
 
 ## Required next work
 
-1. Run CI on the exact latest PR head and fix compile/test failures.
-2. Add a real immutable object-store adapter and unique object naming/content verification.
-3. Implement the object-first, SQLite-transaction-second commit flow and response-loss resolution.
-4. Add tail replay/query integration so committed-but-unindexed records remain searchable.
-5. Integrate backup snapshot roots, restore validation and reference/pin-based GC.
-6. Exercise fault injection and native Linux/Windows recovery before removing Draft status.
+1. Complete current-head CI after the Record bootstrap/recovery changes.
+2. Audit all state-changing maintenance events and compaction/anchor paths so none bypasses remote commit.
+3. Add Record-level tests for missing local cache recovery, interrupted bootstrap retry, response loss, and update/delete semantics.
+4. Register complete manifest/segment/index dependency edges and verify service-level backup/restore closure.
+5. Validate conditional create, ambiguous PUT, read-after-write visibility and delete semantics against a real S3-compatible endpoint.
+6. Complete object-backend fault-injection and restart acceptance before removing Draft status.
 
 ## Progress status — 2026-10-22
 
-Overall: **in progress; not ready to merge**.
+Overall: **Record-level S3 integration is implemented as an opt-in path; not ready to merge until current-head CI and service-specific validation pass.**
 
 ### Delivered
 - SQLite metadata authority with sequential conditional commit publication, owner-epoch fencing and operation receipts.
 - S3-compatible immutable object adapter with conditional create, read-back verification and ambiguous-PUT retry handling.
-- `append_and_commit` primitive: resolve the original operation receipt, upload/register the immutable operation log, then publish the committed head in SQLite.
-- Bounded committed-tail replay with chain, sequence, partition, digest and byte-budget validation.
-- Logical metadata backup/restore, object dependency edges, transitive closure discovery, backup root pins and GC deletion tombstones.
+- Record `create_s3/open_s3`: remote bootstrap publication/recovery, object-first commit before local journal/index publication, and committed-tail reconciliation into the ordinary Record replay path.
+- Bounded tail validation; immutable WAL predecessor dependency edges; logical metadata backup/restore, transitive closure discovery, backup root pins and GC deletion tombstones.
+- Record-level regression test for recovering a missing local cache from the remote bootstrap plus committed operation log.
 
 ### Validation
-- CI Run #264 passed on commit `78549bef`: core boundary checks, retained workspace build, HTTP/UI smoke, existing core/server tests, and Linux/Windows persistence/service fault tests.
-- **That green run predates the subsequent append-and-commit and backup-root changes.** Those newer changes need a fresh current-head CI run before they are considered validated.
-- No real S3-compatible endpoint has yet been exercised; in-memory object-store tests do not prove service-specific conditional PUT or visibility semantics.
+- CI Run #276 passed on an earlier storage-only head.
+- Run #281 exposed a missing `max_object_bytes` initializer and was fixed.
+- Runs #285 and #289 were cancelled by subsequent pushes before completing.
+- Run #291 is the current validation run for Record cache-rebuild tests; final result is pending at the time of this update.
+- No real S3-compatible endpoint has yet been exercised; in-memory tests do not prove provider-specific conditional PUT, read-after-write, or delete semantics.
 
 ### Remaining work
-1. Run fresh current-head CI after the Record bootstrap/recovery integration.
-2. Audit all state-changing maintenance events and compaction/anchor paths so no authoritative change bypasses the remote commit protocol.
-3. Add Record-level tests for missing local cache recovery from bootstrap + full remote log, interrupted bootstrap retry, response loss, and update/delete semantics. A storage-level test now asserts that a committed tail's predecessor chain is included in reachability.
-4. Register complete manifest/segment/WAL dependency edges in all writers/indexers and verify backup restore lifecycle.
-5. Validate conditional create, ambiguous PUT, read-after-write and delete behavior against a real S3-compatible service.
-6. Complete object-backend process-failure/restart tests and only then remove Draft status.
+1. Finish current-head Linux/Windows/workspace CI and fix all failures.
+2. Audit non-`Applied` maintenance events and compaction/anchor paths to ensure they cannot mutate authoritative state without remote publication.
+3. Test response loss, update/delete semantics, bootstrap retry and local-cache-loss recovery.
+4. Verify complete index/segment dependency registration and service-level backup/restore.
+5. Run integration/fault tests against a real S3-compatible service before removing Draft status.
 
 ## Latest progress — 2026-10-22
 
-- Added the object-first `append_and_commit` primitive and a focused idempotency/tail test.
-- Fixed GC reachability to treat pinned roots as roots of the transitive object graph, and added a regression test that a pinned backup descriptor protects its child objects.
-- CI Run #264 passed before these latest changes. Run #265 was started on the preceding progress-document commit; its result must not be treated as validation of the later GC reachability changes.
-- Current state remains **not ready to merge** and RecordPartition/RecordService integration remains outstanding.
-
+- Added the Record-level bootstrap publication/recovery path and validation that the local checkpoint identity matches the authoritative remote bootstrap.
+- Added recovery from a missing local cache: reconstruct the local journal from the remote bootstrap, append all committed log entries, then rebuild through the standard Record recovery/index path.
+- Added predecessor dependency edges for immutable WAL blocks and a test that backup reachability includes the full committed chain.
+- Current CI Run #291 is pending/in progress. PR remains Draft; real S3 endpoint validation and the maintenance-event audit remain outstanding.
