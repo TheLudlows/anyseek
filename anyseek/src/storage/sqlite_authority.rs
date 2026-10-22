@@ -251,6 +251,7 @@ impl SqliteAuthority {
                 "WITH RECURSIVE reachable(object_key) AS (
                     SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
                     UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
+                    UNION SELECT json_extract(bootstrap_json,'$.key') FROM partition_heads WHERE bootstrap_json IS NOT NULL
                     UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
                     UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
                  )
@@ -489,7 +490,7 @@ impl SqliteAuthority {
         let mut heads = Vec::with_capacity(head_ids.len());
         for id in head_ids {
             let head = read_head(&tx, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-            for required in [&head.wal_tip, &head.manifest, &head.log_anchor].into_iter().flatten() {
+            for required in [&head.wal_tip, &head.manifest, &head.bootstrap, &head.log_anchor].into_iter().flatten() {
                 if !closure.iter().any(|candidate| candidate == required) {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "backup closure omits an object referenced by the current partition head".into()
@@ -695,7 +696,7 @@ impl SqliteAuthority {
             )?;
         }
         for head in &snapshot.heads {
-            for reference in [&head.wal_tip,&head.manifest,&head.log_anchor].into_iter().flatten() {
+            for reference in [&head.wal_tip,&head.manifest,&head.bootstrap,&head.log_anchor].into_iter().flatten() {
                 ensure_durable_object(&tx, reference)?;
             }
         }
