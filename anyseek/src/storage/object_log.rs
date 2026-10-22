@@ -6,7 +6,7 @@
 //! as its manifest before advertising end-to-end search consistency.
 use super::{
     s3_compatible::{S3CompatibleStore, UploadRegisterError},
-    sqlite_authority::{ObjectRef, PartitionHead, SqliteAuthority},
+    sqlite_authority::{ObjectRef, PartitionHead, PublishOutcome, SqliteAuthority},
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -79,6 +79,69 @@ pub(crate) async fn upload_log_block(
         return Err(TailError::Invalid("log block exceeds configured byte budget"));
     }
     store.put_and_register(authority, key, &bytes, created_at_ms).await.map_err(Into::into)
+}
+
+/// Result of the object-first append and SQLite publication protocol.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AppendCommitOutcome {
+    Published { head: PartitionHead, object: ObjectRef },
+    AlreadyPublished(PartitionHead),
+    Conflict,
+}
+
+/// Persist one operation as an immutable log object, then atomically publish its
+/// reference and committed watermark in SQLite. A retry first resolves the original
+/// operation receipt; it never allocates a new sequence or rewrites a committed key.
+///
+/// This is the storage protocol primitive. The existing RecordPartition API must still
+/// translate its canonical mutation envelope and apply the resulting tail in its read
+/// view before this can be considered end-to-end RecordService integration.
+pub(crate) async fn append_and_commit(
+    store: &S3CompatibleStore,
+    authority: &mut SqliteAuthority,
+    partition_id: &str,
+    owner_epoch: u64,
+    operation_id: &str,
+    request_sha256: [u8;32],
+    payload: Vec<u8>,
+    created_at_ms: i64,
+    max_block_bytes: usize,
+) -> Result<AppendCommitOutcome, TailError> {
+    if let Some(receipt) = authority.resolve_operation(partition_id, operation_id, request_sha256)
+        .map_err(TailError::Metadata)? {
+        return Ok(AppendCommitOutcome::AlreadyPublished(receipt));
+    }
+    let head = authority.read_head(partition_id).map_err(TailError::Metadata)?
+        .ok_or(TailError::Invalid("partition authority does not exist"))?;
+    if head.owner_epoch != owner_epoch {
+        return Ok(AppendCommitOutcome::Conflict);
+    }
+    let seq = head.committed_seq.checked_add(1)
+        .ok_or(TailError::Invalid("committed sequence exhausted"))?;
+    let entry = ObjectLogEntry {
+        seq,
+        operation_id: operation_id.to_owned(),
+        request_sha256,
+        payload,
+    };
+    let block = ObjectLogBlock {
+        partition_id: partition_id.to_owned(),
+        first_seq: seq,
+        last_seq: seq,
+        previous: head.wal_tip.clone(),
+        entries: vec![entry],
+    };
+    let digest_hex: String = request_sha256.iter().map(|byte| format!("{byte:02x}")).collect();
+    let key = format!("partitions/{partition_id}/wal/{seq:020}-{digest_hex}.json");
+    let object = upload_log_block(store, authority, &key, &block, created_at_ms, max_block_bytes).await?;
+    match authority.publish_commit(
+        partition_id, head.head_version, owner_epoch, operation_id, request_sha256,
+        seq, object.clone(), None,
+    ).map_err(TailError::Metadata)? {
+        PublishOutcome::Published(head) => Ok(AppendCommitOutcome::Published { head, object }),
+        PublishOutcome::AlreadyPublished(head) => Ok(AppendCommitOutcome::AlreadyPublished(head)),
+        PublishOutcome::Conflict => Ok(AppendCommitOutcome::Conflict),
+    }
 }
 
 /// Read exactly the committed, not-yet-indexed tail. Blocks are fetched backward
