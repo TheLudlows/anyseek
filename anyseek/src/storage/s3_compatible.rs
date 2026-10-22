@@ -307,8 +307,11 @@ impl S3CompatibleStore {
             .map_err(UploadRegisterError::ObjectStore)?;
         self.store.delete(&location).await
             .map_err(UploadRegisterError::ObjectStore)?;
-        // Keep the SQLite retired-key tombstone permanently so a delayed writer
-        // cannot reuse this key after the remote delete has completed.
+        // Record completion only after a fresh atomic reachability check. If this
+        // loses a race with a pin/reference, leave the tombstone in state=2 and
+        // retry conservatively rather than claiming physical deletion is complete.
+        authority.mark_object_deleted(reference)
+            .map_err(UploadRegisterError::Metadata)?;
         Ok(true)
     }
 
