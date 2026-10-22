@@ -156,7 +156,7 @@ impl SqliteAuthority {
         ).optional()?;
         match existing {
             Some((digest, length)) => {
-                if digest.as_slice() != object.sha256 || length < 0 || length as u64 != object.length {
+                if digest.as_slice() != &object.sha256[..] || length < 0 || length as u64 != object.length {
                     return Err(rusqlite::Error::InvalidParameterName(
                         "immutable object key reused with different bytes".into()
                     ));
@@ -301,7 +301,7 @@ fn ensure_durable_object(tx: &rusqlite::Transaction<'_>, object: &ObjectRef) -> 
     ).optional()?;
     match row {
         Some((digest, length, 1))
-            if digest.as_slice() == object.sha256 && length >= 0 && length as u64 == object.length => Ok(()),
+            if digest.as_slice() == &object.sha256[..] && length >= 0 && length as u64 == object.length => Ok(()),
         _ => Err(rusqlite::Error::InvalidParameterName(
             "object reference is not registered as verified and durable".into()
         )),
