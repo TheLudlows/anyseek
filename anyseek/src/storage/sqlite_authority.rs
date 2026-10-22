@@ -360,6 +360,26 @@ mod tests {
         ObjectRef { key:key.to_owned(),sha256:[byte;32],length:128 }
     }
     #[test]
+    fn complete_manifest_commit_advances_indexed_watermark_atomically() {
+        let path=temp_db();
+        let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        let head=db.create_partition("p0",2).unwrap();
+        let wal=object("wal/1",1);
+        let manifest=object("manifest/1",2);
+        db.register_durable_object(&wal,1).unwrap();
+        db.register_durable_object(&manifest,2).unwrap();
+        let published=db.publish_commit("p0",head.head_version,2,"op-1",[3;32],1,wal,Some(manifest)).unwrap();
+        let head=match published {PublishOutcome::Published(head)=>head,other=>panic!("{other:?}")};
+        assert_eq!(head.committed_seq,1);
+        assert_eq!(head.indexed_seq,1);
+        assert!(head.manifest.is_some());
+        drop(db);
+        let _=fs::remove_file(&path);
+        let _=fs::remove_file(path.with_extension("sqlite-wal"));
+        let _=fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
     fn commit_rejects_unverified_objects_and_immutable_key_reuse() {
         let path=temp_db();
         let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
