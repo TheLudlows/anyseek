@@ -4239,14 +4239,20 @@ mod tests {
 
         let recovered = RecordPartition::open(&path, config().max_journal_bytes).await.unwrap();
         let authority = SqliteAuthority::open(&authority_path, Duration::from_secs(1)).unwrap();
-        let store = S3CompatibleStore::from_store(object_store, 1024 * 1024);
+        let store = S3CompatibleStore::from_store(object_store.clone(), 1024 * 1024);
         let mut remote = RemotePersistence {
             store, authority, partition_id: "record-test".into(), owner_epoch: 1,
             max_tail_blocks: 32, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
         };
         {
             let mut inner = recovered.inner.lock().await;
-            remote.recover_tail(&mut inner).await.unwrap();
+            remote.reconcile_journal(&mut inner).await.unwrap();
+        }
+        drop(recovered);
+        let recovered = RecordPartition::open(&path, config().max_journal_bytes).await.unwrap();
+        {
+            let mut inner = recovered.inner.lock().await;
+            assert_eq!(inner.state.seq, 1);
             inner.remote = Some(remote);
         }
         let record = recovered.get("remote-record").await.unwrap().unwrap();
