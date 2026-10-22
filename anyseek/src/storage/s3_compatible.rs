@@ -209,6 +209,28 @@ impl S3CompatibleStore {
         Ok(bytes.to_vec())
     }
 
+    /// Persist and publish the immutable initial checkpoint/configuration for an
+    /// object-backed Record partition. This establishes the recovery root before the
+    /// first data operation; it does not advance the data commit watermark.
+    pub(crate) async fn publish_bootstrap(
+        &self,
+        authority: &mut SqliteAuthority,
+        partition_id: &str,
+        owner_epoch: u64,
+        checkpoint_bytes: &[u8],
+        created_at_ms: i64,
+    ) -> Result<super::sqlite_authority::PartitionHead, UploadRegisterError> {
+        let head = authority.read_head(partition_id)
+            .map_err(UploadRegisterError::Metadata)?
+            .ok_or_else(|| UploadRegisterError::Metadata(rusqlite::Error::QueryReturnedNoRows))?;
+        let key = format!("partitions/{partition_id}/bootstrap/initial.json");
+        let reference = self.put_and_register(authority, &key, checkpoint_bytes, created_at_ms).await?;
+        authority.set_bootstrap_reference(
+            partition_id, head.head_version, owner_epoch, reference,
+        ).map_err(UploadRegisterError::Metadata)?
+            .ok_or_else(|| UploadRegisterError::Metadata(rusqlite::Error::InvalidQuery))
+    }
+
     /// Create a joint backup: atomically pin the complete live object closure and
     /// export a logical SQLite authority snapshot, upload that metadata snapshot,
     /// then publish an immutable descriptor referencing both. The caller must retain
