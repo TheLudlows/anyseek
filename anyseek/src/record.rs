@@ -358,6 +358,7 @@ struct RemotePersistence {
     owner_epoch: u64,
     max_tail_blocks: usize,
     max_tail_bytes: usize,
+    max_object_bytes: usize,
 }
 
 /// Configuration for the first S3-compatible durable Record backend.
@@ -396,7 +397,7 @@ impl RemotePersistence {
         Ok(Self {
             store, authority, partition_id: config.partition_id.clone(),
             owner_epoch: config.owner_epoch, max_tail_blocks: config.max_tail_blocks,
-            max_tail_bytes: config.max_tail_bytes,
+            max_tail_bytes: config.max_tail_bytes, max_object_bytes: config.max_object_bytes,
         })
     }
 
@@ -422,7 +423,7 @@ impl RemotePersistence {
             digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
         let reference = crate::storage::object_log::upload_log_block(
             &self.store, &mut self.authority, &key, &block,
-            unix_time_ms_i64(), self.max_tail_bytes.min(usize::MAX),
+            unix_time_ms_i64(), self.max_object_bytes,
         ).await.map_err(|error| error.to_string())?;
         match self.authority.publish_commit(
             &self.partition_id, head.head_version, self.owner_epoch, &operation_id,
