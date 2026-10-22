@@ -580,6 +580,15 @@ impl SqliteAuthority {
                 params![retired.object_key,to_i64(retired.retired_generation)?,retired.retired_at_ms],
             )?;
         }
+        for edge in &snapshot.edges {
+            if edge.parent_key.is_empty() || edge.child_key.is_empty() || edge.parent_key == edge.child_key {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            tx.execute(
+                "INSERT INTO object_edges(parent_key,child_key) VALUES(?1,?2)",
+                params![edge.parent_key,edge.child_key],
+            )?;
+        }
         for pin in &snapshot.pins {
             if !matches!(pin.pin_kind.as_str(),"reader"|"indexer"|"backup"|"staging") {
                 return Err(rusqlite::Error::InvalidQuery);
