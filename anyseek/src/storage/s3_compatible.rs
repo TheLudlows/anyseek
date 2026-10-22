@@ -11,8 +11,9 @@ use object_store::{
     ObjectStore, PutMode, PutOptions, PutPayload,
 };
 use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
-use super::sqlite_authority::SqliteAuthority;
+use super::sqlite_authority::{AuthorityBackupSnapshot, SqliteAuthority};
 
 /// Error from the object-first persistence stage.
 #[derive(Debug)]
@@ -30,6 +31,45 @@ impl fmt::Display for UploadRegisterError {
 }
 impl std::error::Error for UploadRegisterError {}
 
+
+
+/// Immutable descriptor for a joint metadata/object backup.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BackupDescriptor {
+    pub format_version: u32,
+    pub backup_id: String,
+    pub created_at_ms: i64,
+    pub metadata_snapshot: ObjectRef,
+    pub object_closure: Vec<ObjectRef>,
+}
+
+/// A created backup and the immutable reference that must be retained by the caller.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct BackupBundle {
+    pub descriptor_ref: ObjectRef,
+    pub descriptor: BackupDescriptor,
+}
+
+/// Backup/restore errors are explicit; a failed restore must not serve a partial database.
+#[derive(Debug)]
+pub(crate) enum BackupError {
+    ObjectStore(object_store::Error),
+    Metadata(rusqlite::Error),
+    Decode(serde_json::Error),
+    Invalid(&'static str),
+}
+impl fmt::Display for BackupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ObjectStore(e) => write!(f, "backup object-store operation failed: {e}"),
+            Self::Metadata(e) => write!(f, "backup SQLite operation failed: {e}"),
+            Self::Decode(e) => write!(f, "invalid backup descriptor or metadata: {e}"),
+            Self::Invalid(e) => write!(f, "invalid backup bundle: {e}"),
+        }
+    }
+}
+impl std::error::Error for BackupError {}
 
 /// S3-compatible immutable object store with write-after-read verification.
 pub(crate) struct S3CompatibleStore {
@@ -160,6 +200,87 @@ impl S3CompatibleStore {
             });
         }
         Ok(bytes.to_vec())
+    }
+
+    /// Create a joint backup: atomically pin the complete live object closure and
+    /// export a logical SQLite authority snapshot, upload that metadata snapshot,
+    /// then publish an immutable descriptor referencing both. The caller must retain
+    /// descriptor_ref; it is the restore entry point. Pins intentionally remain until
+    /// the backup is explicitly retired. An ambiguous failure must not release pins.
+    pub(crate) async fn create_backup_bundle(
+        &self,
+        authority: &mut SqliteAuthority,
+        backup_id: &str,
+        object_closure: &[ObjectRef],
+        created_at_ms: i64,
+        max_snapshot_bytes: usize,
+    ) -> Result<BackupBundle, BackupError> {
+        if backup_id.is_empty() || !backup_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err(BackupError::Invalid("backup ID must contain only ASCII letters, digits, '-' or '_'"));
+        }
+        let snapshot_bytes = authority.prepare_backup_snapshot(
+            backup_id, object_closure, created_at_ms, max_snapshot_bytes
+        ).map_err(BackupError::Metadata)?;
+        let snapshot_key = format!("backups/{backup_id}/authority.json");
+        let metadata_snapshot = self.put_verified(&snapshot_key, &snapshot_bytes).await
+            .map_err(BackupError::ObjectStore)?;
+        let mut closure = object_closure.to_vec();
+        closure.sort_by(|a,b| a.key.cmp(&b.key));
+        let descriptor = BackupDescriptor {
+            format_version: 1,
+            backup_id: backup_id.to_owned(),
+            created_at_ms,
+            metadata_snapshot,
+            object_closure: closure,
+        };
+        let descriptor_bytes = serde_json::to_vec(&descriptor).map_err(BackupError::Decode)?;
+        let descriptor_key = format!("backups/{backup_id}/descriptor.json");
+        let descriptor_ref = self.put_verified(&descriptor_key, &descriptor_bytes).await
+            .map_err(BackupError::ObjectStore)?;
+        Ok(BackupBundle { descriptor_ref, descriptor })
+    }
+
+    /// Restore into an empty SQLite authority only after validating the descriptor,
+    /// metadata snapshot and every referenced payload object. Any missing/corrupt
+    /// object aborts before the target database is modified.
+    pub(crate) async fn restore_backup_bundle(
+        &self,
+        authority: &mut SqliteAuthority,
+        descriptor_ref: &ObjectRef,
+        max_snapshot_bytes: usize,
+        max_objects: usize,
+        max_total_object_bytes: usize,
+    ) -> Result<AuthorityBackupSnapshot, BackupError> {
+        let descriptor_bytes = self.get_verified(descriptor_ref).await
+            .map_err(BackupError::ObjectStore)?;
+        let descriptor: BackupDescriptor = serde_json::from_slice(&descriptor_bytes)
+            .map_err(BackupError::Decode)?;
+        if descriptor.format_version != 1 || descriptor.backup_id.is_empty()
+            || descriptor.object_closure.len() > max_objects {
+            return Err(BackupError::Invalid("unsupported descriptor or object-count budget exceeded"));
+        }
+        let snapshot_bytes = self.get_verified(&descriptor.metadata_snapshot).await
+            .map_err(BackupError::ObjectStore)?;
+        if snapshot_bytes.len() > max_snapshot_bytes {
+            return Err(BackupError::Invalid("metadata snapshot exceeds configured limit"));
+        }
+        let snapshot: AuthorityBackupSnapshot = serde_json::from_slice(&snapshot_bytes)
+            .map_err(BackupError::Decode)?;
+        if snapshot.format_version != 1 || snapshot.backup_id != descriptor.backup_id
+            || snapshot.object_closure != descriptor.object_closure {
+            return Err(BackupError::Invalid("descriptor and metadata snapshot disagree"));
+        }
+        let mut total_bytes = 0usize;
+        for reference in &descriptor.object_closure {
+            let bytes = self.get_verified(reference).await.map_err(BackupError::ObjectStore)?;
+            total_bytes = total_bytes.checked_add(bytes.len())
+                .ok_or(BackupError::Invalid("object closure byte count overflow"))?;
+            if total_bytes > max_total_object_bytes {
+                return Err(BackupError::Invalid("object closure exceeds configured byte budget"));
+            }
+        }
+        authority.restore_backup_snapshot(&snapshot_bytes, max_snapshot_bytes)
+            .map_err(BackupError::Metadata)
     }
 
     /// Delete only an object the SQLite authority has monotonically retired and
