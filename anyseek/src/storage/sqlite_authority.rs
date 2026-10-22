@@ -687,12 +687,13 @@ impl SqliteAuthority {
             return Ok(false);
         }
         let referenced: bool = tx.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM partition_heads
-                WHERE json_extract(wal_tip_json,'$.key')=?1
-                   OR json_extract(manifest_json,'$.key')=?1
-                   OR json_extract(log_anchor_json,'$.key')=?1
-             )",
+            "WITH RECURSIVE reachable(object_key) AS (
+                SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
+                UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
+                UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
+                UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
+             )
+             SELECT EXISTS(SELECT 1 FROM reachable WHERE object_key=?1)",
             [object_key], |row| row.get(0),
         )?;
         let pinned: bool = tx.query_row(
@@ -718,15 +719,18 @@ impl SqliteAuthority {
     pub(crate) fn mark_object_deleted(&mut self, reference: &ObjectRef) -> rusqlite::Result<bool> {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let collectible: bool = tx.query_row(
-            "SELECT EXISTS(
+            "WITH RECURSIVE reachable(object_key) AS (
+                SELECT json_extract(wal_tip_json,'$.key') FROM partition_heads WHERE wal_tip_json IS NOT NULL
+                UNION SELECT json_extract(manifest_json,'$.key') FROM partition_heads WHERE manifest_json IS NOT NULL
+                UNION SELECT json_extract(log_anchor_json,'$.key') FROM partition_heads WHERE log_anchor_json IS NOT NULL
+                UNION SELECT e.child_key FROM object_edges e JOIN reachable r ON e.parent_key=r.object_key
+             )
+             SELECT EXISTS(
                 SELECT 1 FROM object_uploads u
                 WHERE u.object_key=?1 AND u.sha256=?2 AND u.byte_length=?3 AND u.state=2
-                  AND NOT EXISTS(SELECT 1 FROM partition_heads h
-                    WHERE json_extract(h.wal_tip_json,'$.key')=u.object_key
-                       OR json_extract(h.manifest_json,'$.key')=u.object_key
-                       OR json_extract(h.log_anchor_json,'$.key')=u.object_key)
+                  AND NOT EXISTS(SELECT 1 FROM reachable r WHERE r.object_key=u.object_key)
                   AND NOT EXISTS(SELECT 1 FROM object_pins p WHERE p.object_key=u.object_key)
-            )",
+             )",
             params![reference.key, reference.sha256.as_slice(), to_i64(reference.length)?],
             |row| row.get(0),
         )?;
