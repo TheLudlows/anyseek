@@ -1354,15 +1354,26 @@ async fn restore(
         let _control = s.control.lock().await;
         let key = s.admin(&headers).await?;
         let existing = s.catalog.collections().await?.into_iter().find(|e| e.collection_id==request.collection_id);
+        let s3_mode = std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref() == Ok("s3");
         let config = if let Some(entry) = existing {
             if entry.owner_key!=key || entry.restore_from.as_ref()!=Some(&request.backup_id) { return Err(bad("collection identity belongs to another creation intent")); }
             entry.config
         } else {
             if s.catalog.retired_backups().await?.contains(&request.backup_id) { return Err(Error(StatusCode::GONE,"backup_retired","backup identity was retired".into())); }
-            let backup = RecordPartition::open(&s.root.join(format!("backup-{}",request.backup_id)),256*1024*1024).await?;
-            let config = backup.configuration().await?;
-            drop(backup);
-            config
+            if s3_mode {
+                let marker: S3BackupMarker = serde_json::from_slice(
+                    &std::fs::read(s.root.join(format!("backup-{}",request.backup_id)).join("s3-backup.json")).map_err(storage)?
+                ).map_err(storage)?;
+                if marker.backup_id != request.backup_id || marker.collection_id != request.collection_id {
+                    return Err(bad("S3 backup can only restore to its original collection identity"));
+                }
+                marker.config
+            } else {
+                let backup = RecordPartition::open(&s.root.join(format!("backup-{}",request.backup_id)),256*1024*1024).await?;
+                let config = backup.configuration().await?;
+                drop(backup);
+                config
+            }
         };
         let operation_id = request.operation_id.clone();
         let id = request.collection_id;
