@@ -476,6 +476,13 @@ impl RemotePersistence {
             &mut authority, &bundle.descriptor_ref, max_snapshot_bytes,
             max_objects, max_total_object_bytes,
         ).await.map_err(storage)?;
+        let now_ms = unix_time_ms_i64();
+        authority.register_durable_object(&bundle.descriptor.metadata_snapshot, now_ms).map_err(storage)?;
+        authority.register_durable_object(&bundle.descriptor_ref, now_ms).map_err(storage)?;
+        authority.register_object_edge(&bundle.descriptor_ref, &bundle.descriptor.metadata_snapshot).map_err(storage)?;
+        for reference in &bundle.descriptor.object_closure {
+            authority.register_object_edge(&bundle.descriptor_ref, reference).map_err(storage)?;
+        }
         Ok(())
     }
 
