@@ -1637,8 +1637,9 @@ pub(crate) fn create_shard(
 
             let facets_len = facets_vec.len();
 
+            let has_lexical_fields = schema_map.values().any(|field: &SchemaField| field.index_lexical);
             #[cfg(feature = "zh")]
-            let word_segmentation_option = if meta.tokenizer == TokenizerType::UnicodeAlphanumericZH
+            let word_segmentation_option = if has_lexical_fields && meta.tokenizer == TokenizerType::UnicodeAlphanumericZH
             {
                 let mut word_segmentation = WordSegmentationTM::new();
                 word_segmentation.load_dictionary(0, 1, true);
@@ -1649,7 +1650,11 @@ pub(crate) fn create_shard(
 
             let shard_number = 1;
 
-            let (stop_words, frequent_words, frequent_hashset) = analysis_dictionaries(&meta);
+            let (stop_words, frequent_words, frequent_hashset) = if has_lexical_fields {
+                analysis_dictionaries(&meta)
+            } else {
+                (Default::default(), Default::default(), Default::default())
+            };
 
             let mut index = Shard {
                 semaphore: Arc::new(Semaphore::new(1)),
@@ -2314,6 +2319,10 @@ pub(crate) async fn warmup_inner(
     shard_object_arc: &ShardArc,
     #[cfg(test)] pause: Option<&WarmupPause>,
 ) {
+    // The Record companion is vector/metadata only; no lexical cache to warm.
+    if !shard_object_arc.read().await.schema_map.values().any(|field| field.index_lexical) {
+        return;
+    }
     shard_object_arc
         .write()
         .await

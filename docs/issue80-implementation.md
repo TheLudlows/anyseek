@@ -219,3 +219,23 @@ Runtime 身份 manifest 写入改走同一个计费 Directory 的原子写入与
 旧公开低层 create_index/open_index/IndexArc、Commit/Search trait、iterator 的去留已提出具体 API 选择，待答复：推荐 RecordPartition 为唯一公开存储检索入口，保留查询/评分/schema/向量配置类型，删除旧低层全文执行器；这将要求直接使用旧 Rust 接口的调用方改用 Record API，默认 HTTP 不变。未收到答复前未静默删除公开接口。Windows CI、真实S3和系统断电均未运行；没有推送、发布PR、合入或关闭issue。
 
 本阶段最终 native 专项25 passed / 0 failed（20.03秒），已覆盖manifest计费改动。最终 gate 的 HTTP 重跑通过此前失败的generation四类故障、source及revision故障，随后在接管恢复的本地15秒就绪期限超时，未出现新的明确组件错误。没有据此宣称HTTP通过：脚本新增可选 `--startup-timeout`（默认仍15秒），当前使用60秒诊断重跑，超过5秒时打印实际READY耗时；完整all-targets同时运行。检查点若在运行中，须收取日志而不是重复启动。
+
+## 第八阶段：计数契约、原生预算与最终代码回归队列
+
+已收取第七阶段两个进程。HTTP基础故障套件（`--section base --faults --startup-timeout 60`）退出0，包括接管、完整服务快照恢复和客户端重试。该轮没有输出任何超过5秒的READY记录，因此60秒诊断轮并未实际消耗放宽后的就绪窗口；但这不能证明此前15秒超时的唯一原因。该轮曾与编译/测试并发，后续最终二进制必须在没有并发编译/测试的条件下按默认15秒重跑，不能修改默认期限掩盖问题。
+
+第七阶段all-targets核心结果240 passed / 1 failed / 12 ignored，失败在 `sqlite_committed_remote_tail_recovers_before_local_journal_append` 的feed trim远端checkpoint：该夹具把完整checkpoint文件和WAL块共享上限设为32，新增Tantivy文件超出预算。该测试并非容量拒绝测试，现将其明确有限上限设为128；生产配置没有放宽。新增完整文件闭包的chunk数预计算，在任何上传之前拒绝不足额度，错误包含required/limit，并新增空文件、整块和尾部不足一块的边界测试。修正后的远端恢复专项1 passed / 0 failed（3.47秒）。
+
+混合计数契约已核对 `docs/weighted-rrf.md`，明确保留各组件 `max(lexical_count, vector_count)` 后求和，而非全局max或精确并集。向量执行器通过内部函数返回每组件计数，不改变公开配置/返回类型；原生评分同一遍候选过滤记录各组件词法命中数。最小回归：冻结包包含仅正文alpha的记录a，实时尾部包含正文beta和向量的记录b，查询alpha并给向量，结果两条、总数2，重开仍为2。这个总数仍是既有布局相关启发式，不承诺精确并集；没有借本次替换更改评分公式。零权重仍执行/计数对应通道。vb内部诊断保留向量来源字段与词法原始分数，分页后裁掉未返回候选的解释。
+
+生产Runtime现在在分词词典构造前预留额度，持有并复用Analyzer，避免每个写入/查询重新构造中文词典。长期身份表按增长持有全局和服务字节额度，释放时归还；新增额度增长失败不改变原额度、成功增长随owner释放的回归。manifest读取/反序列化前按文件大小预留，flush身份克隆/序列化预留独立临时空间，查询活动身份映射和term/field scorer缓冲也在构造前预留。
+
+Tantivy自主merge改为关闭：其内部合并分配不能由当前owned build额度可靠约束。Record compaction仍通过既有owned、受预算的重建任务产生新原生包并统一认证发布，未引入新业务head。代价是tail在compaction前持有更多原生小段；固定Searcher映射仍在每次可见写入commit后重新捕获，不承诺写延迟/吞吐改善。原生I/O继续经串行gate和服务额度执行，不能将逻辑额度描述成进程RSS硬限制。download、输出与所有取消边界的完整审计仍待收尾。
+
+向量/metadata组件没有词法字段时，现不构造旧词法词典/中文词典、不运行旧高频词warmup。原始Record配置仍交给原生Analyzer；新增English频繁词+mask9的写入/checkpoint/重开回归，断言伴随组件的frequent词典为空且原生查询正常。这是删除无效旧初始化工作的直接证据，尚不能单独断言它解释了之前那一次15秒超时。
+
+隔离Candidate/NativePackage及原生BM25探针现在只在测试编译；生产使用Runtime与正式BM25F/Proximity，不构建这些未被调用的辅助路径。已批准删除旧公开低层Rust API，以RecordPartition统一入口；新版library-examples改为Record写入/重试/查询/checkpoint/重开，facet文档同步RecordError。旧低层执行器、公开API及旧集成测试的实际删除/迁移尚未完成，不能把cfg(test)探针隔离或文档替换当作整体清理完成。
+
+本阶段中间all-targets完整退出0：34组汇总345 passed / 0 failed / 13 ignored；它早于末尾关闭自主merge、跳过metadata词典/warmup及查询缓冲预留。末尾原生专项27 passed / 0 failed（22.21秒），包含这些改动。为避免冒用较早结果，已启动串行最终验证队列 `target/issue80-phase8/validate.sh`：all-targets → doctests → no-default core → build服务 → 默认15秒完整HTTP → 新二进制S3 storage fixture。每阶段退出码单独写入 `target/issue80-phase8/*.exit`，`current-stage`记录当前阶段，服务SHA单独保存；任一失败即停，必须诊断后续跑。运行期间禁止重编译正在测试的同一可执行文件。
+
+仍未运行Windows、真实S3、系统断电。旧API清理已授权，无需再次询问。尚未达到发布候选状态，没有推送/发布/合入/关闭issue。

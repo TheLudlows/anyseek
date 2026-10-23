@@ -1,7 +1,7 @@
-//! Tantivy package and fixed-view semantic gate for issue #80.
+//! Native Tantivy postings and fixed-searcher execution for Record.
 //!
-//! Package construction is available to production persistence. Record view
-//! routing is being integrated separately. A native commit is a private
+//! Runtime owns production build/recovery; isolated Candidate fixtures exercise
+//! the scoring contract without the service. A native commit is a private
 //! candidate, never a Record commit. No original body or vector is stored here.
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,12 +11,14 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tantivy::{
-    DocAddress, DocSet, Index, ReloadPolicy, Searcher, TERMINATED, TantivyDocument, Term,
-    merge_policy::NoMergePolicy,
-    query::{Bm25StatisticsProvider, EnableScoring, Query},
+    DocSet, Index, ReloadPolicy, Searcher, TERMINATED, TantivyDocument, Term,
+    query::{EnableScoring, Query},
     schema::{FAST, Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions},
     tokenizer::{PreTokenizedString, Token},
 };
+
+#[cfg(test)]
+use tantivy::{DocAddress, merge_policy::NoMergePolicy, query::Bm25StatisticsProvider};
 
 use super::{RecordError, segment, storage};
 
@@ -28,6 +30,7 @@ const MAX_FIELDS: usize = 64;
 const MAX_TOKENS: usize = 65_536;
 
 mod directory;
+#[cfg(test)]
 pub(super) mod package;
 pub(crate) mod runtime;
 pub(crate) mod runtime_query;
@@ -80,6 +83,7 @@ struct Manifest {
 
 /// The outer authority must authenticate this entire closure before selecting
 /// it. In particular, discovering a newer meta.json does not select a view.
+#[cfg(test)]
 pub(super) struct Candidate {
     pub files: Vec<segment::FileRef>,
 }
@@ -110,6 +114,7 @@ fn schema(names: &[String]) -> Result<(Schema, Vec<Field>), RecordError> {
     Ok((builder.build(), fields))
 }
 
+#[cfg(test)]
 fn sync_tree(path: &Path) -> Result<(), RecordError> {
     for entry in std::fs::read_dir(path).map_err(storage)? {
         let entry = entry.map_err(storage)?;
@@ -131,6 +136,7 @@ fn sync_tree(path: &Path) -> Result<(), RecordError> {
     Ok(())
 }
 
+#[cfg(test)]
 impl Candidate {
     /// Build only inside a new private directory. The caller owns removal of a
     /// failed candidate. Writer and merge workers finish before leases release.
@@ -430,6 +436,7 @@ pub(super) struct Snapshot {
 pub(super) struct ActiveView<'a> {
     snapshot: &'a Snapshot,
     live: BTreeSet<usize>,
+    #[cfg(test)]
     field_tokens: BTreeMap<Field, u64>,
 }
 
@@ -457,6 +464,8 @@ impl Snapshot {
         if live.len() != identities.len() {
             return Err(storage("active identity absent from lexical package"));
         }
+        #[cfg(test)]
+        let field_tokens = {
         let mut field_tokens = BTreeMap::new();
         for (segment, addresses) in self.addresses.iter().enumerate() {
             for (doc, ordinal) in addresses.iter().enumerate() {
@@ -467,14 +476,18 @@ impl Snapshot {
                 }
             }
         }
+            field_tokens
+        };
         Ok(ActiveView {
             snapshot: self,
             live,
+            #[cfg(test)]
             field_tokens,
         })
     }
 }
 
+#[cfg(test)]
 impl Bm25StatisticsProvider for ActiveView<'_> {
     fn total_num_tokens(&self, field: Field) -> tantivy::Result<u64> {
         Ok(self.field_tokens.get(&field).copied().unwrap_or(0).max(1))
@@ -512,6 +525,7 @@ impl ActiveView<'_> {
     /// Explicitly a BM25 *probe*, not an implementation of the legacy BM25F
     /// contract. Exhaustive scoring avoids unproven physical-statistics pruning
     /// bounds. Memory remains bounded by K, independently of invalid matches.
+    #[cfg(test)]
     pub(super) fn bm25_probe(
         &self,
         query: &dyn Query,

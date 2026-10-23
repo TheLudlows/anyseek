@@ -755,6 +755,29 @@ impl Search for IndexArc {
         facet_filter: Vec<FacetFilter>,
         result_sort: Vec<ResultSort>,
     ) -> ResultObject {
+        search_with_counts(self, query_string, query_vector, query_type_default, search_mode,
+            enable_empty_query, offset, length, result_type, include_uncommitted,
+            field_filter, facet_filter, result_sort, &mut Vec::new()).await
+    }
+}
+
+/// Internal channel counts preserve the documented per-component hybrid heuristic.
+pub(crate) async fn search_with_counts(
+    index: &IndexArc,
+    query_string: String,
+    query_vector: Option<Embedding>,
+    query_type_default: QueryType,
+    search_mode: SearchMode,
+    enable_empty_query: bool,
+    offset: usize,
+    length: usize,
+    result_type: ResultType,
+    include_uncommitted: bool,
+    field_filter: Vec<String>,
+    facet_filter: Vec<FacetFilter>,
+    result_sort: Vec<ResultSort>,
+    component_counts: &mut Vec<usize>,
+) -> ResultObject {
         let rrf = match &search_mode {
             SearchMode::WeightedHybrid { rrf, .. } => *rrf,
             _ => RrfOptions::default(),
@@ -765,7 +788,7 @@ impl Search for IndexArc {
                 ..Default::default()
             };
         }
-        let index_ref = self.read().await;
+        let index_ref = index.read().await;
         if let Err(error) =
             crate::metadata_filter::validate_filters(&index_ref.schema_map, &facet_filter)
         {
@@ -805,7 +828,7 @@ impl Search for IndexArc {
                         || result_sort.first().unwrap().field == "_score")))
         {
             return search_iterator_index(
-                self,
+                index,
                 offset,
                 length,
                 result_type,
@@ -1113,6 +1136,7 @@ impl Search for IndexArc {
         for result_object_shard in result_object_list {
             let mut rlo_shard_hybrid_options = result_object_shard.await.unwrap();
 
+            component_counts.push(rlo_shard_hybrid_options.1.as_ref().map_or(0, |r| r.result_count_total));
             match search_mode {
                 SearchMode::Lexical => {
                     let rlo_shard_lexical = rlo_shard_hybrid_options.0.as_mut().unwrap();
@@ -1359,8 +1383,6 @@ impl Search for IndexArc {
 
         result_object
     }
-}
-
 /// Non-recursive binary search of non-consecutive u64 values in a slice of bytes
 #[inline(never)]
 pub(crate) fn binary_search(

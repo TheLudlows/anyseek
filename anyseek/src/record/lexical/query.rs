@@ -11,6 +11,8 @@ use tantivy::query::{AllQuery, BooleanQuery, EmptyQuery, Occur, PhraseQuery, Ter
 
 pub(super) struct Analyzer {
     meta: IndexMetaObject,
+    _memory: Option<crate::storage::build_budget::MemoryLease>,
+    _buffer: Option<crate::resources::Lease>,
     stop_words: AHashSet<String>,
     frequent: AHashSet<u64>,
     #[cfg(feature = "zh")]
@@ -63,11 +65,28 @@ impl Analyzer {
         };
         Self {
             meta,
+            _memory: None,
+            _buffer: None,
             stop_words,
             frequent,
             #[cfg(feature = "zh")]
             chinese,
         }
+    }
+    /// Reserve dictionary storage before construction and retain it with its owner.
+    pub(super) fn admitted(meta: IndexMetaObject) -> Result<Self, RecordError> {
+        let estimate = 64 * 1024u64;
+        #[cfg(feature = "zh")]
+        let estimate = estimate + if meta.tokenizer == TokenizerType::UnicodeAlphanumericZH {
+            64 * 1024 * 1024
+        } else { 0 };
+        let memory = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
+        let buffer = crate::resources::Scope::current().map(|scope| scope.retained_io().bytes(estimate))
+            .transpose().map_err(storage)?;
+        let mut analyzer = Self::new(meta);
+        analyzer._memory = Some(memory);
+        analyzer._buffer = buffer;
+        Ok(analyzer)
     }
     fn context(&self) -> AnalysisContext<'_> {
         AnalysisContext {

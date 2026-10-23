@@ -5,8 +5,27 @@ use crate::record::{Document, RecordConfig};
 use tantivy::{IndexReader, IndexWriter};
 use tokio::sync::Mutex;
 
+struct Charge {
+    memory: crate::storage::build_budget::MemoryLease,
+    buffer: Option<crate::resources::Lease>,
+}
+impl Charge {
+    fn new(bytes: u64) -> Result<Self, RecordError> {
+        let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
+        let buffer = crate::resources::Scope::current().map(|s| s.retained_io().bytes(bytes))
+            .transpose().map_err(storage)?;
+        Ok(Self { memory, buffer })
+    }
+    fn grow(&mut self, bytes: u64) -> Result<(), RecordError> {
+        self.memory.grow(bytes).map_err(storage)?;
+        if let Some(buffer) = &mut self.buffer { buffer.grow_bytes(bytes).map_err(storage)?; }
+        Ok(())
+    }
+}
+
 pub(crate) struct Runtime {
     pub(crate) config: RecordConfig,
+    pub(super) analyzer: super::query::Analyzer,
     data: Mutex<Data>,
     directory: Option<super::directory::BudgetDirectory>,
     pin: Arc<crate::record::package_pins::Pin>,
@@ -16,6 +35,7 @@ struct Data {
     reader: IndexReader,
     writer: Option<IndexWriter<TantivyDocument>>,
     identities: Vec<Identity>,
+    identity_charge: Charge,
     snapshot: Option<Arc<Snapshot>>,
     cut: Cut,
 }
@@ -28,6 +48,7 @@ impl Drop for Runtime {
 }
 impl Runtime {
     pub(crate) fn create(path: &Path, config: &RecordConfig) -> Result<Arc<Self>, RecordError> {
+        let analyzer = super::query::Analyzer::admitted(config.index.clone())?;
         let pin = crate::record::package_pins::Pin::acquire(&[path
             .parent()
             .ok_or_else(|| storage("native package parent missing"))?
@@ -57,6 +78,10 @@ impl Runtime {
                     .build(),
             )
             .map_err(storage)?;
+        // Record compaction owns the bounded rebuild. Disable autonomous native
+        // merges: their private allocations cannot be admitted through our owned
+        // build budget. Tail segments are retired with their authenticated package.
+        writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -64,12 +89,14 @@ impl Runtime {
             .map_err(storage)?;
         Ok(Arc::new(Self {
             config: config.clone(),
+            analyzer,
             directory: Some(directory),
             data: Mutex::new(Data {
                 index,
                 reader,
                 writer: Some(writer),
                 identities: Vec::new(),
+                identity_charge: Charge::new(0)?,
                 snapshot: None,
                 cut: Cut {
                     sequence: 0,
@@ -80,12 +107,18 @@ impl Runtime {
         }))
     }
     pub(crate) fn open(path: &Path, config: &RecordConfig) -> Result<Arc<Self>, RecordError> {
+        let analyzer = super::query::Analyzer::admitted(config.index.clone())?;
         let pin = crate::record::package_pins::Pin::acquire(&[path
             .parent()
             .ok_or_else(|| storage("native package parent missing"))?
             .to_owned()])?;
-        let bytes =
-            segment::read_bounded(&path.join("record-native.json"), config.max_journal_bytes)?;
+        let manifest_path = path.join("record-native.json");
+        let length = std::fs::metadata(&manifest_path).map_err(storage)?.len();
+        if length > config.max_journal_bytes { return Err(storage("native manifest budget exceeded")); }
+        // Retain conservative JSON/identity storage admission before reading/parsing.
+        let identity_charge = Charge::new(length.checked_mul(8).and_then(|n| n.checked_add(65536))
+            .ok_or_else(|| storage("native manifest memory overflow"))?)?;
+        let bytes = segment::read_bounded(&manifest_path, config.max_journal_bytes)?;
         let (manifest, stored): (Manifest, serde_json::Value) =
             serde_json::from_slice(&bytes).map_err(storage)?;
         if manifest.format != FORMAT
@@ -104,12 +137,14 @@ impl Runtime {
         snapshot._pin = Some(pin.clone());
         Ok(Arc::new(Self {
             config: config.clone(),
+            analyzer,
             directory: None,
             data: Mutex::new(Data {
                 index,
                 reader,
                 writer: None,
                 identities: manifest.identities,
+                identity_charge,
                 snapshot: Some(Arc::new(snapshot)),
                 cut: manifest.cut,
             }),
@@ -129,7 +164,7 @@ impl Runtime {
             .map(|s| s.bytes(estimate))
             .transpose()
             .map_err(storage)?;
-        let analyzer = super::query::Analyzer::new(self.config.index.clone());
+        let analyzer = &self.analyzer;
         let mut fields = Vec::new();
         for field in self.config.schema.iter().filter(|f| f.index_lexical) {
             let text = match document.get(&field.field) {
@@ -149,6 +184,7 @@ impl Runtime {
             fields.push(analyzer.field(&text).await);
         }
         let mut data = self.data.lock().await;
+        data.identity_charge.grow(256 + identity.id.len() as u64)?;
         let mut doc = TantivyDocument::new();
         let native_schema = data.index.schema();
         doc.add_u64(
@@ -191,6 +227,11 @@ impl Runtime {
             .commit()
             .map_err(storage)?;
         data.reader.reload().map_err(storage)?;
+        // Manifest cloning and serialization coexist with the retained identities.
+        let temporary_bytes = data.identities.iter().try_fold(65536u64, |n, id| {
+            n.checked_add(256 + id.id.len() as u64 * 8)
+        }).ok_or_else(|| storage("native manifest memory overflow"))?;
+        let _temporary = Charge::new(temporary_bytes)?;
         let manifest = Manifest {
             format: FORMAT,
             engine: ENGINE.into(),
@@ -354,6 +395,46 @@ mod tests {
             .unwrap();
         assert_eq!(query(&reopened, SearchMode::Lexical).await.count_total, 2);
     }
+    #[tokio::test]
+    async fn metadata_component_does_not_build_or_warm_lexical_dictionaries() {
+        let root = super::super::tests::Temp::new();
+        let mut cfg = config();
+        cfg.index.frequent_words = crate::index::FrequentwordType::English;
+        cfg.index.ngram_indexing = 9;
+        let p = RecordPartition::create(&root.0, cfg.clone()).await.unwrap();
+        p.write(write("a", "a", "alpha in the world", ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        drop(p);
+        let p = RecordPartition::open(&root.0, cfg.max_journal_bytes).await.unwrap();
+        assert_eq!(query(&p, SearchMode::Lexical).await.count_total, 1);
+        let inner = p.inner.lock().await;
+        let index = inner.index.test_index().read().await;
+        for shard in &index.shard_vec {
+            let shard = shard.read().await;
+            assert!(shard.frequent_words.is_empty());
+            assert!(shard.frequent_hashset.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn hybrid_total_preserves_per_component_maximum() {
+        let root = super::super::tests::Temp::new();
+        let cfg = config();
+        let p = RecordPartition::create(&root.0, cfg.clone()).await.unwrap();
+        let mut lexical_only = write("a", "a", "alpha", ExpectedVersion::Absent);
+        lexical_only.document.as_mut().unwrap().remove("vector");
+        p.write(lexical_only).await.unwrap();
+        p.compact_journal().await.unwrap();
+        p.write(write("b", "b", "beta", ExpectedVersion::Absent)).await.unwrap();
+        let mode = SearchMode::Hybrid { similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All };
+        let result = query(&p, mode.clone()).await;
+        assert_eq!(result.count_total, 2, "lexical-only frozen row plus vector-only tail row");
+        assert_eq!(result.hits.len(), 2);
+        drop(p);
+        let p = RecordPartition::open(&root.0, cfg.max_journal_bytes).await.unwrap();
+        assert_eq!(query(&p, mode).await.count_total, 2);
+    }
+
     #[tokio::test]
     async fn zero_weight_vector_preserves_count_before_and_after_checkpoint() {
         let root = super::super::tests::Temp::new();

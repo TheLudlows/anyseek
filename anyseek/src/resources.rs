@@ -131,6 +131,16 @@ impl Governor {
 }
 /// A reservation released only when its actual owner is dropped.
 pub struct Lease { governor: Arc<Governor>, subject: String, lane: Lane, amount: Usage }
+impl Lease {
+    /// Extend a retained byte reservation before its owner allocates more storage.
+    pub(crate) fn grow_bytes(&mut self, bytes: u64) -> Result<(), Busy> {
+        let next = self.amount.bytes.checked_add(bytes).ok_or(Busy)?;
+        let mut added = self.governor.reserve(&self.subject, self.lane, Usage { bytes, ..Usage::default() })?;
+        self.amount.bytes = next;
+        added.amount.bytes = 0;
+        Ok(())
+    }
+}
 impl Drop for Lease {
     fn drop(&mut self) {
         let mut ledger = self.governor.ledger.lock().unwrap_or_else(|e| e.into_inner());
@@ -207,6 +217,20 @@ mod tests {
         assert!(governor.admit("other".into(), Lane::Foreground, 1).is_err());
         assert!(governor.admit("a".into(), Lane::Control, 1).is_ok());
         drop(cold); drop(hot);
+        assert!(governor.ledger.lock().unwrap().subjects.is_empty());
+    }
+    #[test]
+    fn retained_bytes_grow_atomically_and_release_the_full_reservation() {
+        let governor = Arc::new(Governor::default());
+        let scope = governor.admit("native-identities".into(), Lane::Background, 0).unwrap();
+        let cap = governor.limits[Lane::Background.index()].subject_bytes;
+        let mut bytes = scope.bytes(cap - 1).unwrap();
+        assert!(bytes.grow_bytes(2).is_err());
+        bytes.grow_bytes(1).unwrap();
+        assert!(scope.bytes(1).is_err());
+        drop(bytes);
+        assert!(scope.bytes(cap).is_ok());
+        drop(scope);
         assert!(governor.ledger.lock().unwrap().subjects.is_empty());
     }
     #[tokio::test]

@@ -50,6 +50,7 @@ pub(crate) async fn search(
     rrf.validate().map_err(RecordError::Rejected)?;
     let hybrid = !matches!(mode, SearchMode::Lexical);
     let mut vector_result = ResultObject::default();
+    let mut vector_counts = Vec::new();
     // Weights control rank contribution, not channel counts or validation.
     if hybrid {
         let vector_mode = match &mode {
@@ -67,8 +68,8 @@ pub(crate) async fn search(
             },
             _ => unreachable!(),
         };
-        vector_result = index
-            .search(
+        vector_result = crate::search::search_with_counts(
+                index,
                 String::new(),
                 vector,
                 QueryType::Union,
@@ -81,6 +82,7 @@ pub(crate) async fn search(
                 fields.clone(),
                 filters.clone(),
                 vec![],
+                &mut vector_counts,
             )
             .await;
         if let Some(error) = &vector_result.error {
@@ -93,6 +95,22 @@ pub(crate) async fn search(
         return Err(storage("native/vector view topology mismatch"));
     }
     let config = &root.record_lexical[0].config;
+    // Admission precedes active identity maps, term/field scorers and Top-K buffers.
+    // The input bound is the selected live population, not retired physical history.
+    let mut query_bytes = 65536u64;
+    for shard in &shards {
+        let active = shard.active.as_ref().ok_or_else(|| storage("native metadata statistics absent"))?;
+        for (_, id) in active.keys.iter().enumerate().filter(|(ordinal, _)| active.is_live(*ordinal)) {
+            query_bytes = query_bytes.checked_add(1024 + id.len() as u64 * 8)
+                .ok_or_else(|| storage("native query memory overflow"))?;
+        }
+    }
+    query_bytes = query_bytes.checked_add(config.schema.len() as u64 * 100 * 512)
+        .ok_or_else(|| storage("native query memory overflow"))?;
+    let _memory = crate::storage::build_budget::reserve_memory(query_bytes).map_err(storage)?;
+    let _buffer = crate::resources::Scope::current().map(|scope| scope.bytes(query_bytes))
+        .transpose().map_err(storage)?;
+
     let mut snapshots = Vec::new();
     for runtime in &root.record_lexical {
         snapshots.push(runtime.snapshot().await?);
@@ -143,7 +161,7 @@ pub(crate) async fn search(
                 .map(|i| snapshots[0].fields[i])
         })
         .collect::<Vec<_>>();
-    let analyzer = super::query::Analyzer::new(config.index.clone());
+    let analyzer = &root.record_lexical[0].analyzer;
     let plan = analyzer
         .query_fields(
             &text,
@@ -162,19 +180,28 @@ pub(crate) async fn search(
         .iter()
         .map(|f| if indexed_fields == 1 { 1.0 } else { f.boost })
         .collect::<Vec<_>>();
+    let lexical_counts = std::cell::RefCell::new(vec![0usize; n]);
     let (lex_count, hits) = corpus.score_groups(
         plan.predicate.as_ref(),
         &plan.scores,
         &boosts,
         config.index.field_length_normalization.clone(),
         MAX_DOCUMENTS,
-        |id| allowed.contains(id),
+        |id| {
+            if !allowed.contains(id) { return false; }
+            lexical_counts.borrow_mut()[locations[id] % n] += 1;
+            true
+        },
     )?;
     let mut lexical = hits
         .into_iter()
         .map(|hit| crate::min_heap::Result {
             doc_id: locations[&hit.identity],
             score: hit.score,
+            #[cfg(feature = "vb")]
+            lexical_score: hit.score,
+            #[cfg(feature = "vb")]
+            source: crate::vector::ResultSource::Lexical,
             ..Default::default()
         })
         .collect::<Vec<_>>();
@@ -220,12 +247,19 @@ pub(crate) async fn search(
                 let contribution = rrf_contribution(weight, rrf.constant, rank);
                 fused
                     .entry(hit.doc_id)
-                    .and_modify(|h| h.score += contribution)
-                    .or_insert(crate::min_heap::Result {
-                        doc_id: hit.doc_id,
-                        score: contribution,
-                        ..Default::default()
-                    });
+                    .and_modify(|h| {
+                        let score = h.score + contribution;
+                        #[cfg(feature = "vb")]
+                        if channel == "vector" {
+                            *h = crate::min_heap::Result {
+                                lexical_score: h.lexical_score,
+                                source: crate::vector::ResultSource::Hybrid,
+                                ..hit
+                            };
+                        }
+                        h.score = score;
+                    })
+                    .or_insert(crate::min_heap::Result { score: contribution, ..hit });
                 result
                     .explanations
                     .entry(hit.doc_id)
@@ -239,7 +273,9 @@ pub(crate) async fn search(
                     });
             }
         }
-        result.result_count_total = lex_count.max(vector_result.result_count_total);
+        if vector_counts.len() != n { return Err(storage("vector count topology mismatch")); }
+        result.result_count_total = lexical_counts.into_inner().into_iter()
+            .zip(vector_counts).map(|(lexical, vector)| lexical.max(vector)).sum();
         result.observed_vector_count = vector_result.observed_vector_count;
         result.observed_cluster_count = vector_result.observed_cluster_count;
         result.results = fused.into_values().collect();
@@ -257,6 +293,8 @@ pub(crate) async fn search(
             .take(length)
             .collect()
     };
+    let returned = result.results.iter().map(|hit| hit.doc_id).collect::<BTreeSet<_>>();
+    result.explanations.retain(|id, _| returned.contains(id));
     result.result_count = result.results.len();
     Ok(result)
 }

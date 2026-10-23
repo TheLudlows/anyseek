@@ -1,5 +1,4 @@
-//! Existing unigram BM25F arithmetic over native Tantivy postings. This proves
-//! the statistics provider alone is insufficient, without changing public APIs.
+//! BM25F/Proximity arithmetic over native postings and the selected active corpus.
 use super::*;
 use crate::index::{DOCUMENT_LENGTH_COMPRESSION, FieldLengthNormalization, int_to_byte4};
 use tantivy::postings::Postings;
@@ -9,6 +8,7 @@ fn decoded(length: u64) -> f32 {
 }
 
 impl ActiveView<'_> {
+    #[cfg(test)]
     pub(super) fn bm25f_unigram_probe(
         &self,
         query: &dyn Query,
@@ -31,6 +31,7 @@ impl ActiveView<'_> {
         self.score_groups(query, &groups, boosts, normalization, limit, accepts)
     }
 
+    #[cfg(test)]
     pub(super) fn score_groups(
         &self,
         query: &dyn Query,

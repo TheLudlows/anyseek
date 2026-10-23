@@ -4656,12 +4656,14 @@ mod tests {
                 &mut authority, "record-test", 1, &checkpoint, unix_time_ms_i64(),
             ).await.unwrap();
         }
+        // Native packages add postings/positions/fast-field files; this test covers
+        // remote reconciliation, not a 32-object capacity limit. Keep the limit finite.
         let mut remote = RemotePersistence { _owner:None,
             store,
             authority: tokio::sync::Mutex::new(authority),
             partition_id: "record-test".into(),
             owner_epoch: 1,
-            max_tail_blocks: 32,
+            max_tail_blocks: 128,
             max_tail_bytes: 1024 * 1024,
             max_object_bytes: 1024 * 1024,
         };
@@ -4687,7 +4689,7 @@ mod tests {
         let store = S3CompatibleStore::from_store(object_store.clone(), 1024 * 1024);
         let mut remote = RemotePersistence { _owner:None,
             store, authority: tokio::sync::Mutex::new(authority), partition_id: "record-test".into(),
-            owner_epoch: 1, max_tail_blocks: 32, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
+            owner_epoch: 1, max_tail_blocks: 128, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
         };
         {
             let mut inner = recovered.inner.lock().await;
