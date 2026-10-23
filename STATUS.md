@@ -12,13 +12,13 @@ anyseek 是 AI 记忆与知识的存储、检索底座。PR #71 本地 Segment�
 | B：维护路径 | 已合入远端 seal、S3 受控接管及 retained collection 归档；PR #74 已合入，修复缓存失败分类、bootstrap 校验、备份指针容量边界及多备份归档同时持有索引导致的预算耗尽 |
 | B：无缓存语义 | base、locator、graph、temporal、upload、lease、feed 七组已通过本地及 PR 原生 Linux/Windows 验收；每次重启删除 collection 缓存，保留 SQLite/catalog/namespace |
 | B：后端合同 | `scripts/s3_acceptance.py` 统一 fixture/专用真实 bucket 入口；真实目标 endpoint 尚未运行，不能标为已认证 |
-| B：剩余工作 | 跟踪最新主干 CI；实际目标 S3 合同与故障矩阵、系统故障/断电验收仍待完成 |
-| PR #74 验证 | 最终 head `eb9431a3` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39814329888)，包含构建/浏览器与 Linux/Windows 原生持久化、S3 语义及合同；本地 281 tests、44 doctests 通过；[最新主干 CI](https://github.com/TheLudlows/anyseek/actions?query=branch%3Amaster) 本次核验时尚未完成 |
-| C1：下一批 | 尚未开始：有界后台 Indexer、构建 pin/epoch/期限、SQLite 条件发布与并行写入 tail 保留；见[路线](docs/roadmap.md) |
+| B：剩余工作 | 主干 a36e71e0 的 CI 五项已通过；实际目标 S3 合同与故障矩阵、系统故障/断电验收仍待完成 |
+| PR #74 验证 | 最终 head `eb9431a3` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39814329888)，包含构建/浏览器与 Linux/Windows 原生持久化、S3 语义及合同；本地 281 tests、44 doctests 通过；[主干 a36e71e0 CI 五项通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455) |
+| C1：开发分支 | [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 开发分支已实现、未合入；当前提交验证见 PR Checks：有界后台 Indexer、构建 pin/epoch/期限、SQLite 条件发布与并行写入 tail 保留；见[路线](docs/roadmap.md) |
 | C 后续 / D | 校验缓存与 collection 资源公平后续推进；超大 collection 按容量需求后置，均未实现 |
 | 系统故障 | 系统/文件系统崩溃和硬断电尚未验收；进程退出测试不能替代 |
 
-当前运行态 State 仍驻内存，compaction 持有 partition 串行屏障；资源方案为保守准入与显式缓冲检查，不是全进程 RSS 硬上限。Record 操作账本尚无持续 GC，不承诺无界规模或稳定磁盘占用。
+开发分支新增有界后台构建及并发 tail 发布，Rust/HTTP/原生平台回归结果以 [PR #75 Checks](https://github.com/TheLudlows/anyseek/pull/75/checks) 的精确提交为准，不能按主干已交付能力使用。当前运行态 State 仍驻内存，原同步 compaction 保留串行屏障；资源方案为保守准入与显式缓冲检查，不是全进程 RSS 硬上限。Record 操作账本尚无持续 GC，不承诺无界规模或稳定磁盘占用。
 
 S3 服务根中的 catalog、SQLite 权威库及 `s3-namespace` 是持久协调状态；collection 内日志、payload 和索引是可重建缓存。独立恢复使用不同对象命名空间。SQLite 单主机、单持久卷，不提供跨主机 HA 或权威卷丢失零 RPO。
 

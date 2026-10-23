@@ -92,7 +92,7 @@ impl Reference {
         if result.len()>10_000 {return Err(storage("checkpoint file count exceeded"));}
         Ok(result)
     }
-    pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:&view::RetrievalView,compact:bool)->Result<Self,RecordError>{
+    pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool)->Result<Self,RecordError>{
         let id=format!("{:032x}",rand::random::<u128>());
         let prepared=root.join(format!(".anchor-prepare-{id}"));
         std::fs::create_dir(&prepared).map_err(storage)?;
@@ -103,7 +103,7 @@ impl Reference {
         let mut segments=Vec::new();let mut statistics=Vec::new();
         if !compact && previous.is_some_and(|p|p.segments.len()<8) {
             let previous=previous.unwrap();
-            let local=view.local_statistics().await?;
+            let local=view.ok_or_else(||storage("missing incremental input view"))?.local_statistics().await?;
             if local.len()!=previous.segments.len()+1{return Err(storage("selected segment/view mismatch"));}
             let mut local=local.into_iter();let tail=local.next().unwrap();
             for (segment,active) in previous.segments.iter().zip(local) {
@@ -197,6 +197,7 @@ impl Inner {
         self.publish_anchor_state(self.state.clone(),true).await
     }
     pub(super) async fn publish_anchor_state(&mut self,next:State,reuse:bool)->Result<u64,RecordError>{
+        if self.background.is_some() { return Err(RecordError::Busy); }
         let result=self.prepare_and_publish_anchor(next,reuse).await;
         // The inner future has dropped every candidate view/handle before GC.
         // Unknown publication leaves healthy=false: never remove recovery
@@ -214,7 +215,7 @@ impl Inner {
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
         let snapshot_bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:next.clone()})?.len();
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
-        let reference=Reference::prepare(&root,&self.config,&next,prior,self.anchor.as_ref(),&self.index,!reuse).await?;
+        let reference=Reference::prepare(&root,&self.config,&next,prior,self.anchor.as_ref(),Some(&self.index),!reuse).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));
@@ -267,6 +268,9 @@ impl Inner {
     /// The owned partition guard is the local reader/build pin. Backups export
     /// independent inline authority under that same guard, never borrowed paths.
     pub(super) async fn reclaim_anchor_objects(&self)->Result<(),RecordError>{
+        // The owned worker is a local build pin. Its candidate and mmap files
+        // cannot be retired until it completes or is explicitly cancelled.
+        if self.background.is_some() { return Ok(()); }
         self.journal.reclaim_obsolete().map_err(storage)?;
         let root=self.journal.root();
         #[cfg(test)]

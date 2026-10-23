@@ -83,9 +83,14 @@ impl Journal {
         max_bytes: u64,
         initial: Option<&[u8]>,
     ) -> Result<Self, CreateError> {
-        if let Some(payload) = initial {
-            Self::validate_initial(payload.len(), max_bytes)?;
-        }
+        Self::create_initialized_frames(path, max_bytes, &initial.into_iter().collect::<Vec<_>>())
+    }
+
+    /// All frames are synced in private staging before directory publication.
+    pub(crate) fn create_initialized_frames(
+        path: &Path, max_bytes: u64, frames: &[&[u8]],
+    ) -> Result<Self, CreateError> {
+        for payload in frames { Self::validate_initial(payload.len(), max_bytes)?; }
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::other("journal needs a parent"))?;
@@ -117,9 +122,9 @@ impl Journal {
                 witness.sync_all()?;
             }
         }
-        if let Some(payload) = initial {
+        if !frames.is_empty() {
             let (mut journal, _) = Self::open(&prepared, max_bytes)?;
-            journal.append(payload)?;
+            for payload in frames { journal.append(payload)?; }
             // Close every file before directory rename (Windows).
             drop(journal);
         }
@@ -135,7 +140,7 @@ impl Journal {
         crash_boundary("initial_published");
         let (journal, entries) =
             Self::open(path, max_bytes).map_err(CreateError::PublicationUnknown)?;
-        debug_assert_eq!(entries.len(), usize::from(initial.is_some()));
+        debug_assert_eq!(entries.len(), frames.len());
         Ok(journal)
     }
 

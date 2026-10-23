@@ -71,6 +71,7 @@ impl RemotePersistence {
         }
         let mut files = Vec::new();
         let mut total = 0u64;
+        let mut chunk_count = 0usize;
         for (path, length, sha256) in reference.remote_files(payloads)? {
             total = total
                 .checked_add(length)
@@ -117,7 +118,8 @@ impl RemotePersistence {
                         .await
                         .map_err(storage)?,
                 );
-                if chunks.len() > self.max_tail_blocks {
+                chunk_count=chunk_count.checked_add(1).ok_or_else(||storage("checkpoint chunk count overflow"))?;
+                if chunk_count > self.max_tail_blocks {
                     return Err(storage("checkpoint chunk budget exceeded"));
                 }
             }
@@ -504,7 +506,7 @@ impl RecordPartition {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{config, path, query, write};
+    use super::super::tests::{config, path, query, write, source_write};
     use super::*;
     use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
     use object_store::memory::InMemory;
@@ -605,6 +607,86 @@ mod tests {
         }
         results
     }
+    #[tokio::test]
+    async fn background_index_keeps_new_commits_and_hidden_evidence_after_cache_loss() {
+        let (p,_,root,_,clock)=source().await;
+        p.write(source_write("source","s",&[])).await.unwrap();
+        p.write(source_write("derived","d",&[("s",1)])).await.unwrap();
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        let job=p.start_index_committed(std::time::Duration::from_secs(30)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !root.join(".test-indexer-started").exists() { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        let request=write("concurrent","a","alpha revised",ExpectedVersion::Absent);
+        let receipt=p.write(request.clone()).await.unwrap();
+        let mut deletion=write("delete-source","s","",ExpectedVersion::Match(1));deletion.document=None;
+        p.write(deletion).await.unwrap();
+        let expected=scores(&p).await;
+        assert!(matches!(p.collect_s3_garbage().await,Err(RecordError::Busy)));
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+        assert_eq!(job.finish().await.unwrap(),2);
+        {
+            let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
+            let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
+            assert_eq!((head.indexed_seq,head.committed_seq,head.log_base_seq),(2,4,2));
+            assert!(head.wal_tip.is_some());
+        }
+        p.collect_s3_garbage().await.unwrap();
+        let p=cold(p,&root,clock).await;
+        assert_eq!(scores(&p).await,expected);
+        assert!(p.get("d").await.unwrap().is_none());
+        assert_eq!(p.write(request).await.unwrap(),receipt);
+        p.compact_journal().await.unwrap();
+    }
+    #[tokio::test]
+    async fn background_index_owner_rejection_during_admission_also_closes_output() {
+        let (p,_,_,db,_)=source().await;
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let output=p.output_permit().unwrap();
+        let connection=rusqlite::Connection::open(db).unwrap();
+        connection.execute("UPDATE partition_heads SET owner_epoch=2 WHERE partition_id='source'",[]).unwrap();
+        drop(connection);
+        assert!(matches!(p.index_committed(std::time::Duration::from_secs(30)).await,Err(RecordError::RecoveryRequired)));
+        assert!(p.get("a").await.is_err());assert!(output.deliver(||()).is_err());
+    }
+
+    #[tokio::test]
+    async fn background_index_old_owner_cannot_reopen_output_after_rejected_publication() {
+        let (p,_,root,db,_)=source().await;
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let output=p.output_permit().unwrap();
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        let job=p.start_index_committed(std::time::Duration::from_secs(30)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !root.join(".test-indexer-started").exists() { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        // Exercise the authority fence even if an obsolete worker is still alive.
+        let connection=rusqlite::Connection::open(db).unwrap();
+        connection.execute("UPDATE partition_heads SET owner_epoch=2 WHERE partition_id='source'",[]).unwrap();
+        drop(connection);
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+        assert!(matches!(job.finish().await,Err(RecordError::RecoveryRequired)));
+        assert!(p.get("a").await.is_err());assert!(output.deliver(||()).is_err());
+    }
+
+    #[tokio::test]
+    async fn expired_remote_index_build_cleans_pins_without_advancing_manifest() {
+        let (p,_,root,_,clock)=source().await;
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        let job=p.start_index_committed(std::time::Duration::from_millis(10)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !root.join(".test-indexer-started").exists() { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        p.write(write("second","b","alpha",ExpectedVersion::Absent)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+        assert!(matches!(job.finish().await,Err(RecordError::Busy)));
+        let p=cold(p,&root,clock).await;
+        assert!(p.get("a").await.unwrap().is_some());assert!(p.get("b").await.unwrap().is_some());
+        assert_eq!(p.index_committed(std::time::Duration::from_secs(30)).await.unwrap(),2);
+    }
+
     #[tokio::test]
     async fn remote_checkpoint_gc_and_cold_tail_keep_all_query_views() {
         let (p, _, root, _, clock) = source().await;
@@ -1159,5 +1241,153 @@ impl RecordPartition {
             inner.remote = Some(remote);
         }
         Ok(p)
+    }
+}
+
+/// Independent SQLite connection keeps long object I/O outside both the Record
+/// guard and its foreground authority mutex. All connections use the same DB.
+pub(super) struct RemoteBuild {
+    pub build: crate::storage::sqlite_authority::IndexBuild,
+    store: crate::storage::s3_compatible::S3CompatibleStore,
+    authority_path: PathBuf,
+    partition_id: String,
+    max_object_bytes: usize,
+    max_tail_blocks: usize,
+}
+impl RemotePersistence {
+    pub(super) async fn begin_background_build(&mut self, timeout: std::time::Duration) -> Result<RemoteBuild,RecordError> {
+        let mut authority = self.authority.lock().await;
+        let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch!=self.owner_epoch { return Err(RecordError::RecoveryRequired); }
+        let now = unix_time_ms_i64();
+        let deadline = now.checked_add(timeout.as_millis().max(1).try_into().map_err(storage)?)
+            .ok_or_else(||storage("build deadline overflow"))?;
+        let build = authority.begin_index_build(&self.partition_id,self.owner_epoch,now,deadline).map_err(storage)?
+            .ok_or(RecordError::Busy)?;
+        Ok(RemoteBuild{build,store:self.store.clone(),authority_path:authority.database_path().to_path_buf(),
+            partition_id:self.partition_id.clone(),max_object_bytes:self.max_object_bytes,max_tail_blocks:self.max_tail_blocks})
+    }
+}
+impl RemoteBuild {
+    pub(super) async fn publish(&self,active:&mut RemotePersistence,manifest:ObjectRef,root:&Path,expected_seq:u64) -> Result<bool,RecordError> {
+        #[cfg(test)]
+        if root.join(".test-remote-before-checkpoint").exists() { return Err(storage("injected before remote checkpoint publication")); }
+        #[cfg(feature="fault-injection")]
+        let fault_partition=std::env::var("ANYSEEK_REMOTE_CHECKPOINT_PARTITION").map(|id|id==self.partition_id).unwrap_or(true);
+        #[cfg(feature="fault-injection")]
+        if fault_partition && std::env::var("ANYSEEK_REMOTE_CHECKPOINT_FAULT").as_deref()==Ok("before_publish") { std::process::exit(91); }
+        let published=active.authority.lock().await.publish_index_build(&self.build,manifest,unix_time_ms_i64()).map_err(storage)?;
+        let Some(head)=published else {
+            let head=active.authority.lock().await.read_head(&self.partition_id).map_err(storage)?
+                .ok_or(RecordError::RecoveryRequired)?;
+            if head.owner_epoch!=self.build.owner_epoch || head.committed_seq!=expected_seq
+                || head.manifest!=self.build.base_manifest || head.indexed_seq!=self.build.base_indexed_seq {
+                return Err(RecordError::RecoveryRequired);
+            }
+            return Ok(false);
+        };
+        if head.committed_seq!=expected_seq { return Err(RecordError::RecoveryRequired); }
+        #[cfg(feature="fault-injection")]
+        if fault_partition && std::env::var("ANYSEEK_REMOTE_CHECKPOINT_FAULT").as_deref()==Ok("after_publish") { std::process::exit(91); }
+        #[cfg(test)]
+        if root.join(".test-remote-after-checkpoint").exists() { return Err(RecordError::DurablePending(head.committed_seq)); }
+        let _=(root,head);
+        Ok(true)
+    }
+    pub(super) async fn upload(&self, root:&Path, reference:&anchor::Reference,
+        payloads:&crate::storage::payload_pool::Closure, authority_budget:u64) -> Result<ObjectRef,RecordError> {
+        let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open(&self.authority_path,std::time::Duration::from_secs(5)).map_err(storage)?;
+        let mut files = Vec::new();
+        let mut total = 0u64;
+        let mut chunk_count = 0usize;
+        for (path, length, sha256) in reference.remote_files(payloads)? {
+            total = total
+                .checked_add(length)
+                .filter(|n| {
+                    *n <= authority_budget
+                        .saturating_mul(64)
+                        .saturating_add(32 * 1024 * 1024)
+                })
+                .ok_or_else(|| storage("checkpoint upload budget exceeded"))?;
+            let target = safe_path(root, &path)?;
+            let mut input = std::fs::File::open(target).map_err(storage)?;
+            let mut chunks = Vec::new();
+            let mut hash = Sha256::new();
+            let mut actual = 0u64;
+            loop {
+                let mut bytes = Vec::new();
+                (&mut input)
+                    .take(self.max_object_bytes as u64)
+                    .read_to_end(&mut bytes)
+                    .map_err(storage)?;
+                if bytes.is_empty() {
+                    break;
+                }
+                hash.update(&bytes);
+                actual = actual
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| storage("checkpoint length overflow"))?;
+                if actual > length {
+                    return Err(storage("checkpoint file grew during export"));
+                }
+                let digest = Sha256::digest(&bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>();
+                let key = format!(
+                    "partitions/{}/files/{}/{:08}-{digest}",
+                    self.partition_id,
+                    path,
+                    chunks.len()
+                );
+                let planned=ObjectRef{key:key.clone(),sha256:Sha256::digest(&bytes).into(),length:bytes.len() as u64};
+                authority.reserve_index_build_output(&self.build,&planned,unix_time_ms_i64()).map_err(storage)?;
+                let object = self.store.put_and_register(&mut authority,&key,&bytes,unix_time_ms_i64()).await.map_err(storage)?;
+                chunks.push(object);
+                chunk_count=chunk_count.checked_add(1).ok_or_else(||storage("checkpoint chunk count overflow"))?;
+                if chunk_count > self.max_tail_blocks {
+                    return Err(storage("checkpoint chunk budget exceeded"));
+                }
+            }
+            let actual_hash: [u8; 32] = hash.finalize().into();
+            if actual != length || actual_hash != sha256 {
+                return Err(storage("checkpoint export checksum mismatch"));
+            }
+            files.push(File {
+                path,
+                length,
+                sha256,
+                chunks,
+            });
+        }
+        let checkpoint = Checkpoint {
+            format: 1,
+            partition_id: self.partition_id.clone(),
+            seq: self.build.cut_seq,
+            anchor: reference.clone(),
+            files,
+        };
+        let bytes = serde_json::to_vec(&checkpoint).map_err(storage)?;
+        let key = format!(
+            "partitions/{}/checkpoints/{}",
+            self.partition_id,
+            reference.identity()
+        );
+        let planned=ObjectRef{key:key.clone(),sha256:Sha256::digest(&bytes).into(),length:bytes.len() as u64};
+        authority.reserve_index_build_output(&self.build,&planned,unix_time_ms_i64()).map_err(storage)?;
+        let manifest = self
+            .store
+            .put_and_register(&mut authority, &key, &bytes, unix_time_ms_i64())
+            .await
+            .map_err(storage)?;
+        for file in &checkpoint.files {
+            for child in &file.chunks {
+                authority
+                    .register_object_edge(&manifest, child)
+                    .map_err(storage)?;
+            }
+        }
+
+        Ok(manifest)
     }
 }
