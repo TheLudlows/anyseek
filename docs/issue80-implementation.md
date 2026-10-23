@@ -450,3 +450,39 @@ Retained `DocumentCompression::{None,Snappy}` values are serialized configuratio
 labels, not encoding selectors for the new Payload/native packages. Public docs
 now say this explicitly rather than advertising a removed Snappy docstore. No
 additional compatibility engine or old-format reader was introduced.
+
+
+## Phase 14 — final collection and operational cost
+
+S3 cold-cache semantics completed successfully for all seven groups against the
+phase-13 fixed binary: base 462.839 s, locator 7.456 s, graph 12.474 s, temporal
+8.605 s, upload 80.285 s, lease 30.490 s, feed 10.482 s. Report:
+`/tmp/anyseek80-phase13-s3-semantic-report.json`, backend fixture,
+real_endpoint_exercised=false, all_requested_checks_passed=true. Storage, contract
+and semantics therefore all have successful fixture results for this implementation.
+
+All-targets remains active in the independent 8194-record lexical score fixtures;
+there is no final suite exit status yet. Tail sequence samples increase and CPU
+continues to advance, so this is a long computation, not an observed deadlock.
+The fixture/oracles have not been reduced to shorten this run.
+
+One observation from the five-term OR fixture (PID 474557, 2026-10-23 17:05:15 UTC)
+shows RSS 223688 KiB, peak RSS 235324 KiB, 11 threads and 34 file descriptors;
+the current fixture directory had 553 files, 13835226 logical bytes, four selected
+segment directories and one mutable cache directory. These are one process/sample,
+not isolated throughput/latency/RSS measurements or limits. The native writer's
+20,000,000-byte reservation, global/per-subject byte budgets and native file/traffic
+limits are logical accounting bounds, not process-RSS caps. Full Record state and
+operation receipts remain in memory. Immediate writes commit/reload a fixed native
+Searcher; tail maintenance certifies rotation after at most 128 native insertions,
+and the existing bounded segment policy periodically rebuilds a compact package.
+These incur synchronous commit, metadata, hashing and snapshot work. Active scoring
+statistics still scan native postings. No new performance improvement is promised.
+
+`git diff <base> --check` and Markdown/branding checks pass. Whole-repository
+`cargo fmt --all -- --check` exits 1 on this branch and on an isolated archive of
+master baseline `3893cd54f0d8d47b6b9e35fa3cce34e579117764`; the existing repository
+uses many compact declarations that rustfmt would expand. Logs are
+`/tmp/anyseek80-phase14-format.log` and `format-baseline.log`. This is reported as a
+non-passing format check, not hidden as success; no unrelated repository-wide
+format rewrite was made. CI does not currently gate on rustfmt.
