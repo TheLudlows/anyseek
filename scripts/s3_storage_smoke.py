@@ -97,7 +97,14 @@ def main():
         def control(method,path,body):
             deadline=time.monotonic()+300
             while True:
-                result=call(method,path,body,status=(200,429,503))
+                try:
+                    result=call(method,path,body,status=(200,429,503))
+                except (OSError,urllib.error.URLError):
+                    if process.poll() is not None:
+                        log.seek(0);raise AssertionError('control transport lost; service exited '+str(process.returncode)+': '+log.read()[-8192:])
+                    assert time.monotonic()<deadline,('control transport retry deadline',path)
+                    time.sleep(.1)
+                    continue
                 if result.get('code') not in ['outcome_unknown','busy']:
                     assert 'code' not in result,(path,result)
                     return result
