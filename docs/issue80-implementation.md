@@ -434,3 +434,19 @@ Phase-13 full HTTP session 82612 subsequently completed with exit 0, unchanged
 Generated OpenAPI parses successfully and contains 28 paths. The remaining active
 acceptance runs are external all-targets integration tests and the seven-group
 S3 cold-cache semantic fixture; no Windows/real-endpoint/power-loss claim is made.
+
+The final writer/pin/generation-admission implementation has now passed the original
+3000-record frequent-term integration fixture in all-targets (141.44 s), including
+unchanged membership/count/Top-K assertions. Bitmap deletion/count (2 tests,
+281.68 s), stable deletion identity/version (4), external vectors (3), core info,
+count/delete and stored/nonstored payload regressions also passed. All-targets is
+currently in `lexical_correctness`; the complete suite result remains pending.
+S3 cold-cache semantic base and locator groups have passed; remaining groups run
+under the same fixed binary. The only edits after these binaries were built are
+Markdown/Rustdoc clarification and added-test trailing-whitespace cleanup; no
+runtime behavior, fixture data or assertions were changed by those edits.
+
+Retained `DocumentCompression::{None,Snappy}` values are serialized configuration
+labels, not encoding selectors for the new Payload/native packages. Public docs
+now say this explicitly rather than advertising a removed Snappy docstore. No
+additional compatibility engine or old-format reader was introduced.

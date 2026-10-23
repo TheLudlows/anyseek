@@ -15,12 +15,13 @@ pub(crate) const MAX_QUERY_TERM_NUMBER: usize = 100;
 /// A document is a flattened, single level of key-value pairs, where key is an arbitrary string, and value represents any valid JSON value.
 pub type Document = IndexMap<String, Value>;
 
-/// Compression type for document store
+/// Legacy configuration tag retained in serialized index settings.
+/// It does not select canonical Payload or native Tantivy package encoding.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub enum DocumentCompression {
-    /// No compression (fastest, largest size)
+    /// Retained `None` configuration tag.
     None,
-    /// Snappy document compression (default).
+    /// Retained `Snappy` configuration tag (default); no Snappy docstore is built.
     Snappy,
 }
 
@@ -34,7 +35,7 @@ impl fmt::Display for DocumentCompression {
 }
 
 /// Committed index data is accessed through memory-mapped files.
-/// Uncommitted writes remain in memory until commit.
+/// Record publication, rather than an index commit, controls business visibility.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub enum AccessType {
     /// Memory-map committed index data; the OS manages resident pages.
@@ -204,7 +205,7 @@ pub struct SchemaField {
     pub field_type: FieldType,
     /// Enable metadata filtering and sorting for string and numerical fields.
     /// both numerical and string fields can be indexed (indexed=true) and stored (stored=true) in the json document,
-    /// but with field_facet=true they are additionally stored in a binary format, for fast filtering and sorting without docstore access (decompression, deserialization)
+    /// but with field_facet=true they are additionally stored in a binary format, for fast filtering and sorting without reading and deserializing canonical Payload
     #[serde(skip_serializing_if = "is_default_bool")]
     #[serde(default = "default_false")]
     pub facet: bool,
@@ -435,7 +436,7 @@ pub struct IndexMetaObject {
     #[serde(default = "ngram_indexing_default")]
     pub ngram_indexing: u8,
 
-    /// Compression algorithm for document store: None, Snappy
+    /// Retained configuration tag; does not change current Payload/native encoding.
     #[serde(default = "doc_store_compression_default")]
     pub document_compression: DocumentCompression,
 

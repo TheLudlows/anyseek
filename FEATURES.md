@@ -21,6 +21,8 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 
 全文派生包使用锁定版本的 Tantivy，保留正式 BM25F/邻近度和分析契约。向量/元数据使用独立组件，Payload 唯一保存规范原文和原向量。旧倒排压缩、docstore、Block-max WAND/MaxScore 执行器及公开 IndexArc/Commit/Search 入口已删除；调用方改用 RecordPartition。原生 commit 不是业务发布，认证包和 Record 权威状态决定可见 cut。仅支持新库，不提供旧格式读取、双写或迁移。Linux 最终回归和 Windows 验收状态见实施记录，不能把组件编译通过视为全部验收。
 
+`document_compression` 中的 None/Snappy 仅保留为配置序列化标记，不选择当前 Payload 或 Tantivy 包的编码，也不再构建 Snappy docstore。
+
 字段类型：U8/U16/U32/U64、I8/I16/I32/I64、Timestamp、F32/F64、Bool、String16/String32、StringSet16/StringSet32、Text、Json、Binary。类型存在不代表支持全部索引方式。向量使用 Json/Binary 加 index_vector；已配置向量字段可缺席，缺向量记录不参与该字段召回；后补向量须使用精确版本条件。过滤字段需显式 filterable:true。不提供分面统计聚合、直方图或字段 extrema。
 
 ## 默认 HTTP 路由
