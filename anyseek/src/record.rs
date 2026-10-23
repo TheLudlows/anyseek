@@ -312,7 +312,7 @@ struct State {
 enum Entry {
     #[serde(rename = "RecordAnchorV1")]
     Anchor(anchor::Reference),
-    #[serde(rename = "RecordCheckpointV13")]
+    #[serde(rename = "RecordCheckpointV14")]
     Checkpoint { config: RecordConfig, state: State },
     #[serde(rename = "RecordAppliedV12")]
     Applied(Applied),
@@ -818,11 +818,6 @@ fn clean_recovery_caches(path: &Path) -> Result<(), RecordError> {
     Ok(())
 }
 
-async fn detach(index: &IndexArc) {
-    for shard in &index.read().await.shard_vec {
-        shard.write().await.index_option = None;
-    }
-}
 // Search files contain candidates and scoring data, never a second copy of
 // authoritative Record JSON. Public schema.store still controls HTTP projection.
 fn retrieval_schema(config: &RecordConfig) -> Vec<SchemaField> {
@@ -864,7 +859,6 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
     .map_err(storage)?;
     // Break legacy ownership cycles so a rejected candidate can release mapped
     // files on Windows. The partition owns the root for the complete query.
-    detach(&index).await;
     index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
     index.read().await.shard_vec[0].write().await.build_input_covered=true;
     for shard in &index.read().await.shard_vec {
@@ -3077,7 +3071,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV13", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV14", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
@@ -4187,23 +4181,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        {
-            let inner = partition.inner.lock().await;
-            let index = inner.index.test_index().read().await;
-            let shard = index.shard_vec[0].read().await;
-            let sorts = vec![];
-            let mut heap = crate::min_heap::MinHeap::new(1, &shard, false, &sorts);
-            heap.add_topk(
-                crate::min_heap::Result {
-                    doc_id: 0,
-                    score: 1.0,
-                    ..Default::default()
-                },
-                1,
-            );
-            assert!(!heap.can_prune(1.0, 3, 1)); // physical 3 is logical "a", better than "z"
-            assert!(heap.can_prune(0.5, 3, 1));
-        }
+        // The retired lexical heap's pruning rules are not part of the native engine.
+        // The following end-to-end windows verify stable business-ID ties before
+        // checkpoint, after checkpoint and after reopening the selected package.
         for step in 0..3 {
             for (text, mode) in [
                 ("alpha", SearchMode::Lexical),

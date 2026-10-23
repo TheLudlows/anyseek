@@ -984,6 +984,8 @@ impl Shard {
             let cluster_number =
                 u32::from_le_bytes(cluster_number_bytes.try_into().unwrap()) as usize;
             offset += 4;
+            self.indexed_cluster_count=self.indexed_cluster_count.checked_sub(cluster_number)
+                .ok_or_else(||std::io::Error::other("vector cluster count underflow"))?;
 
             let mut clusters = Vec::with_capacity(cluster_number);
             let mut start_index = 0;
@@ -1139,8 +1141,8 @@ impl Shard {
         top_k: &mut TopK<'_>,
     ) {
         let level_id = if self.is_last_level_incomplete {
-            self.level_index.len() - 1
-        } else { self.level_index.len() };
+            self.vector_levels - 1
+        } else { self.vector_levels };
         let enable_scale = self.quantization != Quantization::None
             && (self.vector_similarity != VectorSimilarity::Cosine || self.quantization == Quantization::TurboQuantI8);
 
@@ -1293,7 +1295,7 @@ impl SearchVectorShard for ShardArc {
         }
 
         let mut offset = 0;
-        for level_id in 0..shard_ref.level_index.len() {
+        for level_id in 0..shard_ref.vector_levels {
             let cluster_number_bytes = &shard_ref.vector_file_mmap[offset..offset + 4];
             let cluster_number =
                 u32::from_le_bytes(cluster_number_bytes.try_into().unwrap()) as usize;

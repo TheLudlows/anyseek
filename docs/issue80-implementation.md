@@ -239,3 +239,15 @@ Tantivy自主merge改为关闭：其内部合并分配不能由当前owned build
 本阶段中间all-targets完整退出0：34组汇总345 passed / 0 failed / 13 ignored；它早于末尾关闭自主merge、跳过metadata词典/warmup及查询缓冲预留。末尾原生专项27 passed / 0 failed（22.21秒），包含这些改动。为避免冒用较早结果，已启动串行最终验证队列 `target/issue80-phase8/validate.sh`：all-targets → doctests → no-default core → build服务 → 默认15秒完整HTTP → 新二进制S3 storage fixture。每阶段退出码单独写入 `target/issue80-phase8/*.exit`，`current-stage`记录当前阶段，服务SHA单独保存；任一失败即停，必须诊断后续跑。运行期间禁止重编译正在测试的同一可执行文件。
 
 仍未运行Windows、真实S3、系统断电。旧API清理已授权，无需再次询问。尚未达到发布候选状态，没有推送/发布/合入/关闭issue。
+
+## 第九阶段检查点：实际删除旧执行器，独立向量/元数据格式（尚未完成测试迁移）
+
+第八阶段串行队列已结束：all-targets 34组汇总346 passed / 0 failed / 13 ignored；doctests 16 passed；no-default核心205 passed / 0 failed / 10 ignored。服务构建成功，SHA256 `74ff11f5182caebb5e33c5b86cf4a9effd9241ddfbd6a99c6e90413d50d15d5f`。完整HTTP按默认15秒运行，经过基础恢复/接管/备份等阶段后，在record_lease_smoke.py第69行过期清理状态断言失败，队列停止，S3 storage未执行。该轮失败不是15秒启动超时；不能据此声称之前的超时根因已解决。相同二进制单独执行lease故障部分通过，完整套件状态交互仍待诊断。断言现在包含fault/status以便下一轮定位。
+
+本阶段已从源码删除add_result、compress_postinglist、doc_store、field_length、index_posting、info、intersection、intersection_simd、iterator、realtime_search、single、union共12个旧模块；index.rs保留配置与分析类型，旧公开create/open/IndexArc及Search/Commit入口改为内部组件接口；search.rs只执行内部向量检索，明确拒绝词法请求。旧倒排构建、压缩、实时/冻结全文执行路径及旧docstore不再编译。
+
+新增独立component.rs，持有向量与metadata，写component.json、vectors.bin、metadata.bin及schema.json，不生成index.bin/docstore.bin/shards目录，不再借旧倒排level结构保存向量层级。Record checkpoint标签更新V14，认证manifest版本3；面向新库，不添加旧格式读取。修正向量末尾不完整层重建时重复累计cluster_count。活动成员集合与原生全文统计分离；保留原生BM25F/Proximity和向量量化实现。
+
+核心测试已迁移旧Corpus/heap/字典断言到实际Record或独立membership契约；中文分词位置断言保留，中文短语检索改经Record写入/compaction/重开。核心库check成功，lib tests --no-run成功；生产运行时专项6 passed / 0 failed（1.64秒），包含实际写入→即时查询→checkpoint→重开、纯文本、新组件无旧文件、混合计数和零权重向量。该结果对应本阶段源码，不是旧服务二进制结果。
+
+此提交是明确的中间检查点，不是可发布候选：外部集成测试仍引用已删除的公开低层API，尚待迁移，未运行新代码all-targets；旧微测试残留文件和无用依赖/文档还需清理。component描述符读取目前在读取后检查大小，必须改为读取前的大小/预算接纳；格式和取消/输出/download预算审计尚待完成。完整HTTP租约清理状态交互、原15秒超时证据及最终新二进制SQLite/S3/备份GC矩阵仍未收尾。Windows、真实S3、系统断电仍未运行。检查点时没有在运行的测试/构建进程；未推送、发布、合入或关闭issue。

@@ -196,27 +196,6 @@ pub enum FieldType {
     Binary,
 }
 
-/// Iterator
-#[derive(ToSchema, Serialize)]
-#[serde(remote = "crate::iterator::IteratorResult")]
-pub struct IteratorResult {
-    /// number of actually skipped documents
-    pub skip: usize,
-    /// document IDs, and optionally the documents themselves
-    #[schema(value_type = Vec<IteratorResultItem>)]
-    pub results: Vec<crate::iterator::IteratorResultItem>,
-}
-
-/// Iterator result
-#[derive(ToSchema, Serialize)]
-#[serde(remote = "crate::iterator::IteratorResultItem")]
-pub struct IteratorResultItem {
-    /// document ID
-    pub doc_id: u64,
-    /// document
-    pub doc: Option<IndexMap<String, Value>>,
-}
-
 /// Vector precision
 #[derive(ToSchema, Serialize)]
 #[serde(remote = "crate::vector::Precision")]

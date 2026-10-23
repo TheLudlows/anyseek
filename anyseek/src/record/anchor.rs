@@ -48,7 +48,7 @@ impl Frozen {
         let estimate=mapped.checked_mul(2).ok_or_else(||storage("loaded segment estimate overflow"))?;
         let mut reservation=build_budget::admit(config,std::iter::empty())?;
         reservation.grow(estimate).map_err(storage)?;
-        let index=crate::index::open_index(&path).await.map_err(storage)?;detach(&index).await;
+        let index=crate::index::open_index(&path).await.map_err(storage)?;
         index.write().await.record_lexical.push(lexical::runtime::Runtime::open(&path.join("native"),config)?);
         index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
         {
@@ -83,7 +83,7 @@ impl Reference {
         let mut pool=PoolBuilder::begin(root,prior,budget(config)?,format!("{:032x}",rand::random::<u128>())).map_err(storage)?;
         let referenced=segment_state::ReferencedState::write(config,state,&mut pool)?;
         let payloads=pool.finish().map_err(storage)?;
-        write_json(&prepared.join("manifest"),&Manifest{format:2,seq:state.seq,state:referenced,payloads})?;
+        write_json(&prepared.join("manifest"),&Manifest{format:3,seq:state.seq,state:referenced,payloads})?;
         let mut segments=Vec::new();let mut statistics=Vec::new();
         if !compact && previous.is_some_and(|p|p.segments.len()<8) {
             let previous=previous.unwrap();
@@ -117,7 +117,7 @@ impl Reference {
         let path=directory(root,&self.id)?;
         if serde_json::to_vec(&files(&path,closure_limit(authority_budget)?)?).map_err(storage)?!=serde_json::to_vec(&self.files).map_err(storage)?{return Err(storage("anchor closure checksum mismatch"));}
         let manifest:Manifest=serde_json::from_slice(&read_bounded(&path.join("manifest"),authority_budget)?).map_err(storage)?;
-        if manifest.format!=2{return Err(storage("unsupported anchor format"));}
+        if manifest.format!=3{return Err(storage("unsupported anchor format"));}
         validate_config(manifest.state.config())?;
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         let pool=PoolReader::open(root,manifest.payloads.clone(),limits).map_err(storage)?;
@@ -429,40 +429,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_index_file_creation_returns_error_and_drains_builders() {
-        use crate::index::{INDEX_FILENAME,INDEX_FORMAT_VERSION_MAJOR,INDEX_FORMAT_VERSION_MINOR,DOCSTORE_FILENAME,VECTOR_FILENAME,SCHEMA_FILENAME};
-        for blocked in [DOCSTORE_FILENAME,VECTOR_FILENAME,SCHEMA_FILENAME] {
-            let root=path();let shard=root.join("shards/0");std::fs::create_dir_all(&shard).unwrap();
-            let header=[INDEX_FORMAT_VERSION_MAJOR.to_le_bytes(),INDEX_FORMAT_VERSION_MINOR.to_le_bytes()].concat();
-            std::fs::write(root.join(INDEX_FILENAME),&header).unwrap();std::fs::write(shard.join(INDEX_FILENAME),&header).unwrap();
-            std::fs::create_dir(shard.join(blocked)).unwrap();
-            let sibling=root.join("shards/1");std::fs::create_dir_all(&sibling).unwrap();
-            std::fs::write(sibling.join(INDEX_FILENAME),&header).unwrap();
-            std::fs::write(sibling.join(".test-builder-wait"),b"hold accepted sibling").unwrap();
-            let target=root.clone();let cfg=config();
-            let mut task=tokio::spawn(async move {create_index(&target,cfg.index,&retrieval_schema(&config()),11,true,Some(2)).await});
-            tokio::time::timeout(std::time::Duration::from_secs(5),async {
-                while !sibling.join(".test-builder-entered").exists(){tokio::task::yield_now().await;}
-            }).await.unwrap();
-            // A real gate holds the successful sibling after the failing
-            // shard was accepted. The parent must not return while it is held.
-            assert!(tokio::time::timeout(std::time::Duration::from_millis(25),&mut task).await.is_err());
-            std::fs::remove_file(sibling.join(".test-builder-wait")).unwrap();
-            let result=task.await;
-            assert!(matches!(result,Ok(Err(_))),"{blocked}: builder must return an error, not panic");
-            // The other accepted builder has completed before the error returns.
-            assert!(sibling.join(SCHEMA_FILENAME).is_file());
+    async fn component_creation_rejects_existing_directory_without_overwriting_files() {
+        for filename in ["vectors.bin", "metadata.bin", "schema.json", "component.json"] {
+            let root=path();std::fs::create_dir(&root).unwrap();
+            std::fs::write(root.join(filename),b"existing data").unwrap();
+            let cfg=config();
+            assert!(create_index(&root,cfg.index,&retrieval_schema(&config()),11,true,Some(1)).await.is_err());
+            assert_eq!(std::fs::read(root.join(filename)).unwrap(),b"existing data");
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(),1);
             std::fs::remove_dir_all(root).unwrap();
         }
     }
 
     #[tokio::test]
-    async fn empty_tail_does_not_preallocate_dictionary_buckets() {
+    async fn empty_tail_does_not_preallocate_vector_rows() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         let inner=p.inner.lock().await;let index=inner.index.test_index().read().await;
         for shard in &index.shard_vec {
             let shard=shard.read().await;
-            assert_eq!(shard.segments_level0.iter().map(|s|s.segment.capacity()).sum::<usize>(),0);
+            assert_eq!(shard.block_vector_buffer.capacity(),0);
         }
         drop(index);drop(inner);drop(p);std::fs::remove_dir_all(root).unwrap();
     }

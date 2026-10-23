@@ -10,7 +10,6 @@ pub(super) struct RotationBudget {
 pub(super) struct RetrievalView {
     query: IndexArc,
     tail: IndexArc,
-    common: Option<Arc<std::sync::RwLock<crate::active::Corpus>>>,
 }
 impl RetrievalView {
     pub(super) async fn can_admit(&self,bytes:u64)->bool {
@@ -22,7 +21,6 @@ impl RetrievalView {
         Self {
             query: index.clone(),
             tail: index,
-            common: None,
         }
     }
     /// Install a new empty tail under the exclusive partition publication guard.
@@ -108,11 +106,9 @@ impl RetrievalView {
         if !local.keys.is_empty() {
             return Err(storage("replacement tail is not empty"));
         }
-        let common = Arc::new(std::sync::RwLock::new(crate::active::Corpus::default()));
         let mut statistics = Vec::new();
         statistics.try_reserve(next).map_err(storage)?;
         let mut new_stats = local.clone_local();
-        new_stats.attach(&common).map_err(storage)?;
         statistics.push(new_stats);
         for shard in &shards {
             let mut local = shard
@@ -120,7 +116,6 @@ impl RetrievalView {
                 .as_ref()
                 .ok_or_else(|| storage("missing segment statistics"))?
                 .clone_local();
-            local.attach(&common).map_err(storage)?;
             statistics.push(local);
         }
         let ids = (0..next)
@@ -148,7 +143,6 @@ impl RetrievalView {
         *ordinals = mapped;
         *locations = next_locations;
         self.tail = new_tail;
-        self.common = Some(common);
         Ok(())
     }
 
@@ -192,7 +186,6 @@ impl RetrievalView {
             .as_mut()
             .ok_or_else(|| storage("missing view statistics"))?
             .retire(local);
-        shard.invalidate_frequentword_results();
         Ok(())
     }
     pub(super) async fn search(
@@ -307,7 +300,7 @@ mod tests {
             drop(held);
             assert_eq!(*ordinals, original);
             assert_eq!(*locations, original_locations);
-            assert!(index.common.is_none());
+            assert_eq!(index.query.read().await.shard_number, 1);
             index
                 .rotate_tail(
                     tail,
@@ -398,7 +391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_active_view_ignores_pre_corpus_frequentword_cache() {
+    async fn native_snapshot_scores_survive_empty_tail_rotation() {
         use super::super::tests::{config, path, query, write};
         let root = path();
         let partition = RecordPartition::create(&root, config()).await.unwrap();
@@ -409,15 +402,7 @@ mod tests {
         let expected = query(&partition, SearchMode::Lexical).await;
         {
             let mut inner = partition.inner.lock().await;
-            // A committed frozen segment can carry a cache created before its
-            // shared active corpus was attached (open_index warms this cache).
             inner.index.test_index().commit().await.unwrap();
-            let shard = inner.index.query.read().await.shard_vec[0].clone();
-            shard
-                .write()
-                .await
-                .frequentword_results
-                .insert("alpha".into(), crate::search::ResultObject::default());
             let target = root.join(format!("cache-{:032x}", rand::random::<u128>()));
             let (tail, _) = build_at(&root, &target, &inner.config, &State::default())
                 .await

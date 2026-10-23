@@ -128,10 +128,6 @@ mod tests {
             let request=write(id,id,body,ExpectedVersion::Absent);
             partition.write(request.clone()).await.unwrap();oracle.write(request).await.unwrap();
         }
-        let corpus=std::sync::Arc::new(std::sync::RwLock::new(crate::active::Corpus::default()));
-        for partition in [&a,&b] {
-            partition.inner.lock().await.index.test_index().read().await.shard_vec[0].write().await.active.as_mut().unwrap().attach(&corpus).unwrap();
-        }
         let update=write("revision","a","alpha alpha alpha omega",ExpectedVersion::Match(1));
         a.write(update.clone()).await.unwrap();oracle.write(update).await.unwrap();
         let mut deletion=write("delete","d","",ExpectedVersion::Match(1));deletion.document=None;

@@ -381,6 +381,11 @@ mod tests {
             old.result_count_total, 0,
             "legacy lexical executor must not supply the hit"
         );
+        assert!(old.error.is_some(), "private vector component rejects lexical execution");
+        let component_path=std::path::PathBuf::from(&index.read().await.index_path_string);
+        assert!(!component_path.join("index.bin").exists());
+        assert!(!component_path.join("docstore.bin").exists());
+        assert!(!component_path.join("shards").exists());
         drop(index);
         partition.compact_journal().await.unwrap();
         assert_eq!(query(&partition, SearchMode::Lexical).await.count_total, 1);
@@ -411,8 +416,7 @@ mod tests {
         let index = inner.index.test_index().read().await;
         for shard in &index.shard_vec {
             let shard = shard.read().await;
-            assert!(shard.frequent_words.is_empty());
-            assert!(shard.frequent_hashset.is_empty());
+            assert!(shard.indexed_schema_vec.iter().all(|field| !field.index_lexical));
         }
     }
 

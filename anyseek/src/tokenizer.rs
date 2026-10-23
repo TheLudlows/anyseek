@@ -5,7 +5,7 @@ use finl_unicode::categories::{CharacterCategories, MinorCategory};
 
 use crate::{
     index::{
-        MAX_QUERY_TERM_NUMBER, NgramSet, NgramType, NonUniqueTermObject, Shard, TermObject,
+        MAX_QUERY_TERM_NUMBER, NgramSet, NgramType, NonUniqueTermObject, TermObject,
         TokenizerType, hash32, hash64,
     },
     search::QueryType,
@@ -142,42 +142,6 @@ pub(crate) struct AnalysisContext<'a> {
     #[cfg(feature = "zh")]
     pub word_segmentation_option: Option<&'a crate::word_segmentation::WordSegmentationTM>,
 }
-impl<'a> AnalysisContext<'a> {
-    fn from_shard(shard: &'a Shard) -> Self {
-        Self {
-            text_normalization: shard.meta.text_normalization,
-            stop_words: &shard.stop_words,
-            frequent_hashset: &shard.frequent_hashset,
-            #[cfg(feature = "zh")]
-            word_segmentation_option: shard.word_segmentation_option.as_ref(),
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::assigning_clones)]
-pub(crate) async fn tokenizer(
-    index: &Shard,
-    text: &str,
-    unique_terms: &mut AHashMap<String, TermObject>,
-    non_unique_terms: &mut Vec<NonUniqueTermObject>,
-    tokenizer: TokenizerType,
-    segment_number_mask1: u32,
-    nonunique_terms_count: &mut u32,
-    token_per_field_max: u32,
-    position_per_term_max: usize,
-    is_query: bool,
-    query_type: &mut QueryType,
-    ngram_indexing: u8,
-    indexed_field_id: usize,
-    indexed_field_number: usize,
-) {
-    analyze(&AnalysisContext::from_shard(index), text, unique_terms, non_unique_terms,
-        tokenizer, segment_number_mask1, nonunique_terms_count, token_per_field_max,
-        position_per_term_max, is_query, query_type, ngram_indexing, indexed_field_id,
-        indexed_field_number).await;
-}
-
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::assigning_clones)]
 pub(crate) async fn analyze(
@@ -1363,12 +1327,11 @@ pub(crate) async fn analyze(
 mod tests {
     use super::*;
     use crate::{
-        commit::Commit,
         index::{
-            AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-            IndexMetaObject, LexicalSimilarity, StopwordType, create_index, open_index,
+            AccessType, Clustering, DocumentCompression, FrequentwordType,
+            IndexMetaObject, LexicalSimilarity, StopwordType,
         },
-        search::{ResultType, Search, SearchMode},
+        search::{ResultType, SearchMode},
         vector::Inference,
     };
     use serde_json::json;
@@ -1397,12 +1360,15 @@ mod tests {
             {"field":"body", "field_type":"Text", "store":true, "index_lexical":true}
         ]))
         .unwrap();
-        let index = create_index(&path, meta, &schema, 11, true, Some(1))
-            .await
-            .unwrap();
+        let (stop_words,_,frequent_hashset)=crate::index::analysis_dictionaries(&meta);
+        let mut dictionary=crate::word_segmentation::WordSegmentationTM::new();
+        dictionary.load_dictionary(0,1,true);
+        let context=AnalysisContext { text_normalization:meta.text_normalization,stop_words:&stop_words,
+            frequent_hashset:&frequent_hashset,word_segmentation_option:Some(&dictionary) };
+        let config=crate::record::RecordConfig {index:meta,schema,change_feed:Default::default(),embedding_space_id:None,
+            max_records:32,max_record_bytes:4096,max_operations:100,max_journal_bytes:1024*1024,max_candidates:100};
+        let index=crate::record::RecordPartition::create(&path,config).await.unwrap();
         {
-            let index = index.read().await;
-            let shard = index.shard_vec[0].read().await;
             for (text, expected) in [
                 ("", vec![]),
                 ("中国", vec!["中国"]),
@@ -1417,13 +1383,13 @@ mod tests {
                         let mut terms = AHashMap::new();
                         let mut query_terms = Vec::new();
                         let mut count = 0;
-                        tokenizer(
-                            &shard,
+                        analyze(
+                            &context,
                             &input,
                             &mut terms,
                             &mut query_terms,
                             TokenizerType::UnicodeAlphanumericZH,
-                            shard.segment_number_mask1,
+                            0,
                             &mut count,
                             65_536,
                             65_536,
@@ -1459,57 +1425,31 @@ mod tests {
                 }
             }
         }
-        index
-            .index_documents(
-                [
-                    "中国 rust",
-                    "中国 rust。",
-                    "中国 rust search",
-                    "中国 search rust",
-                    "rust 中国",
-                ]
-                .into_iter()
-                .map(|body| serde_json::from_value(json!({"body":body})).unwrap())
-                .collect(),
-            )
-            .await
-            .unwrap();
-        index.commit().await.unwrap();
-        index.close().await.unwrap();
-        drop(index);
-        let index = open_index(&path).await.unwrap();
+        for (id,body) in ["中国 rust","中国 rust。","中国 rust search","中国 search rust","rust 中国"].into_iter().enumerate() {
+            let request=serde_json::from_value(json!({"operation_id":crate::record::OperationId::new(format!("zh-{id}")),
+                "record_id":id.to_string(),"routing_key":"zh","expected":"Absent","document":{"body":body}})).unwrap();
+            index.write(request).await.unwrap();
+        }
+        index.compact_journal().await.unwrap();drop(index);
+        let index=crate::record::RecordPartition::open(&path,1024*1024).await.unwrap();
         for query in ["中国 rust", "中国 rust。", "中国 rust "] {
-            let result = index
-                .search(
-                    query.into(),
-                    None,
-                    QueryType::Phrase,
-                    SearchMode::Lexical,
-                    false,
-                    0,
-                    10,
-                    ResultType::TopkCount,
-                    false,
-                    vec![],
-                    vec![],
-                    vec![],
-                )
-                .await;
-            assert!(result.error.is_none(), "{:?}", result.error);
-            assert_eq!(result.result_count_total, 3, "{query}");
+            let result=index.query(crate::record::RecordQuery {temporal:None,text:query.into(),vector:None,
+                query_type:QueryType::Phrase,mode:SearchMode::Lexical,offset:0,length:10,result_type:ResultType::TopkCount,
+                fields:vec![],filters:vec![],sort:vec![]}).await.unwrap();
+            assert_eq!(result.count_total, 3, "{query}");
             assert_eq!(
                 result
-                    .results
+                    .hits
                     .iter()
-                    .map(|r| r.doc_id)
+                    .map(|r| r.record.record_id.parse::<usize>().unwrap())
                     .collect::<BTreeSet<_>>(),
                 BTreeSet::from([0, 1, 2])
             );
-            let score = |id| {
+            let score = |id: usize| {
                 result
-                    .results
+                    .hits
                     .iter()
-                    .find(|r| r.doc_id == id)
+                    .find(|r| r.record.record_id == id.to_string())
                     .unwrap()
                     .score
             };
@@ -1519,7 +1459,6 @@ mod tests {
                 "punctuation must not change term frequency or document length"
             );
         }
-        index.close().await.unwrap();
         drop(index);
         fs::remove_dir_all(path).unwrap();
     }

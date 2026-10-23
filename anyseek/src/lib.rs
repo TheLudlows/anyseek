@@ -36,33 +36,23 @@ pub static INDEX_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
         .unwrap()
 });
 
-pub(crate) mod add_result;
 pub(crate) mod clustering;
 /// Commit moves indexed documents from the intermediate uncompressed data structure in RAM
 /// to the final compressed data structure on disk.
-pub mod commit;
+mod commit;
+mod component;
 pub(crate) mod compatible;
-pub(crate) mod compress_postinglist;
-pub(crate) mod doc_store;
 /// Operate the index: reate_index, open_index, clear_index, close_index, delete_index, index_document(s)
 pub mod index;
-pub(crate) mod index_posting;
 /// Collect index information independently of terminal rendering.
-pub mod info;
-pub(crate) mod intersection;
-pub(crate) mod intersection_simd;
 /// Iterator over all documents, also for search with empty query.
-pub mod iterator;
 pub(crate) mod min_heap;
 pub(crate) mod opencc_t2s;
-pub(crate) mod realtime_search;
 /// Search the index for all indexed documents, both for committed and uncommitted documents.
 /// The latter enables true realtime search: documents are available for search in exact the same millisecond they are indexed.
 pub mod search;
-pub(crate) mod single;
 /// Tokenizes text into tokens (words), supports Chinese word segmentation, folds (converts) diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters into their basic representation.
 pub(crate) mod tokenizer;
-pub(crate) mod union;
 /// Utils `truncate()` and `substring()`
 pub mod utils;
 /// Vector search by indexing vectors and searching for similar vectors based on cosine similarity, inner product, and Euclidean distance.
@@ -75,20 +65,13 @@ pub(crate) mod word_segmentation;
 
 mod metadata_filter;
 
-mod field_length;
 
-#[cfg(test)]
-mod field_length_tests;
 
-#[cfg(test)]
-mod warmup_cache_tests;
 
 mod term_hash;
 
 mod storage;
 
-#[cfg(test)]
-mod commit_io_tests;
 
 pub mod record;
 pub mod catalog;
