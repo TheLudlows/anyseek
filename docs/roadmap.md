@@ -2,6 +2,8 @@
 
 已合入能力见 [STATUS](../STATUS.md)，当前存储实现见[存储协议](storage.md)。路线不代替验收结果。
 
+截至主干 `3893cd54`，C3-2 已由 PR #78 合入。剩余工作的建议顺序为 Record 账本持续安全 GC → 服务总缓存预算 → C3-3 组合隔离验收与必要诊断 → 真实应用闭环 → 按容量需求推进 D；此顺序是建议，未批准新的实施批次。背景和完成标准见[项目全貌](project-overview.md)。[Tantivy 全文引擎评估](tantivy-evaluation.md) 单独记录可复用协议与必须重建的索引格式，尚未实施。
+
 ## B 收尾：SQLite + S3
 
 PR #72/#73/#74 已合入，当前源码基线为 `afbe323d`；第 1–6 项实现及第 7 项工具/用例已交付。PR #74 的 [Linux/Windows CI 五项全部通过](https://github.com/TheLudlows/anyseek/actions/runs/39814329888)，合入后主干 `a36e71e0` 的 [CI 五项通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455)。真实 S3 与系统故障/断电验收继续开放。
@@ -37,7 +39,7 @@ PR #72/#73/#74 已合入，当前源码基线为 `afbe323d`；第 1–6 项实�
 
 缓存返回独立字节，不暴露文件句柄/mmap；Segment 在另一路径完整校验并映射，因此淘汰不触碰查询中的 mmap。冷恢复仍由当前 SQLite head 选择 manifest + 完整 tail，授权/来源隐藏屏障不从缓存推导。无缓存验收删除 collection 和对象块两类目录。预取与直接映射缓存块后置；[PR #76](https://github.com/TheLudlows/anyseek/pull/76) 已合入为 `10e106b3`，最终 [PR CI 五项成功](https://github.com/TheLudlows/anyseek/actions/runs/39898818770)；合入后主干 CI 单独跟踪。
 
-C2 后继续推进 collection 的前台、下载、后台并发/队列/内存/I/O 公平准入。当前完整 State 驻内存及同步 compaction 串行行为仍是实际限制。
+C2 之后的 collection 前台、下载、后台分级准入已由 C3-2 交付，完整组合隔离验收和服务总缓存额度仍待完成。当前完整 State 驻内存及同步 compaction 串行行为仍是实际限制。
 
 ### C3-1：授权与执行屏障（PR #77 已合入）
 
@@ -47,7 +49,9 @@ C2 后继续推进 collection 的前台、下载、后台并发/队列/内存/I/
 
 本批保持 catalog 原有 64 个准入名额；collection gate 登记使用弱引用、稳定身份、256 字节身份长度和 64 项防御上限，不新增持久表。新增跨集合进展/排队撤权/取消、整 key 排空、并发 panic 与共同备份 cut 单测，以及真实 HTTP 暂停写入/其他集合查询/撤权/重启回执用例。[PR #77](https://github.com/TheLudlows/anyseek/pull/77) 已合入为 `b8faa553`，最终 PR 五项 CI 全部通过。
 
-### C3-2：分级资源与控制预留（本分支实现，尚未合入）
+### C3-2：分级资源与控制预留（PR #78 已合入）
+
+[PR #78](https://github.com/TheLudlows/anyseek/pull/78) 已合入为 `3893cd54`，最终[五项 PR CI](https://github.com/TheLudlows/anyseek/actions/runs/39927824162) 和[主干 CI](https://github.com/TheLudlows/anyseek/actions/runs/39933449425) 均通过，合入 tree 与测试版本相同。它不代表 C3-3、服务总缓存预算或账本持续 GC 已完成。
 
 在读取请求体前，按路由类别和 Axum 解码后、已在服务登记的稳定 collection ID 准入。未知身份共用服务额度，不按任意 URI 建资源表。认证/身份查找和 handler 共用同一 HTTP 截止时间，准入超时且未启动 handler 时返回 Busy；采用立即拒绝，无资源等待队列；普通请求默认全服务 32 / 每 collection 4，恢复 2 / 1，后台 2 / 1，可信控制 8 / 2，静态/存活 8 / 8。控制额度不借给数据请求，配置校验保留 catalog 准入余量。
 

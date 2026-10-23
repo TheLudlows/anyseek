@@ -4,6 +4,7 @@
 | --- | --- |
 | 启动与 API | [README](../README.md)、[服务指南](../anyseek/server/README.md)、[请求示例](../anyseek/server/test_api.rest) |
 | 当前能力 | [状态](../STATUS.md)、[功能与边界](../FEATURES.md)、[架构](../ARCHITECTURE.md) |
+| 全貌与决策 | [项目全貌与下一步建议](project-overview.md)、[Tantivy 全文引擎评估](tantivy-evaluation.md) |
 | 一致性与持久化 | [Record 语义](record-model.md)、[存储协议](storage.md) |
 | 开发与后续 | [开发与验证](development.md)、[Rust 示例](library-examples.md)、[后续路线](roadmap.md) |
 | 检索配置 | [过滤与排序](../FACETED_SEARCH.md)、[N-gram](../NGRAM_SEARCH.md)、[文本归一化](text-normalization.md)、[字段长度](field-length-normalization.md) |
