@@ -41,16 +41,18 @@ impl VerifiedCache {
     // processes. Contention or any filesystem failure simply bypasses caching.
     // No lock is held during remote I/O. No waiter queue is created.
     fn lock(&self) -> io::Result<fs::File> {
-        fs::create_dir_all(&self.root)?;
-        if !fs::symlink_metadata(&self.root)?.is_dir() {
-            return Err(io::Error::other("cache root must be a directory"));
-        }
-        let path = self.root.join(".lock");
+        // Keep the coordination inode outside the discardable directory. A
+        // concurrent cache clear must not create two independently locked roots.
+        let path = self.root.with_extension("object-cache.lock");
         if fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file()) {
             return Err(io::Error::other("cache lock must be a regular file"));
         }
         let lock = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
         lock.try_lock().map_err(io::Error::other)?;
+        fs::create_dir_all(&self.root)?;
+        if !fs::symlink_metadata(&self.root)?.is_dir() {
+            return Err(io::Error::other("cache root must be a directory"));
+        }
         Ok(lock)
     }
 
@@ -207,8 +209,11 @@ mod tests {
         let root = root(); let cache = VerifiedCache::new(root.clone(), &["scope"], 8);
         let r = reference("one", b"alpha");
         let lock = cache.lock().unwrap();
+        fs::remove_dir_all(&root).unwrap();
         cache.insert(&r, b"alpha"); assert!(cache.get(&r).is_none());
+        assert!(!root.exists(), "clearing the directory must not bypass an existing lock");
         drop(lock);
+        fs::create_dir_all(&root).unwrap();
         let temp = root.join(format!("temp-{:032x}", 1)); fs::write(&temp, b"incomplete").unwrap();
         cache.insert(&r, b"alpha");
         assert!(!temp.exists()); assert_eq!(cache.get(&r).unwrap(), b"alpha");
