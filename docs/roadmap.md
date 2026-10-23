@@ -19,7 +19,7 @@ PR #72/#73/#74 已合入，当前源码基线为 `afbe323d`；第 1–6 项实�
 - 多 collection 的前台、下载与后台任务各有并发/队列/内存/I/O 预算，避免热点耗尽全部资源。
 - owner 路由不能替代权威 fence。SQLite 首版仍为唯一持久卷权威；跨主机接管须先定义外部隔离和可用性协议。失联不能回退旧授权/缓存；多节点输出必须与撤权/隐藏屏障有序。
 
-### C1：有界后台 Indexer（开发中，尚未验收/合入）
+### C1：有界后台 Indexer（开发分支实现，尚未合入）
 
 目标是在构建索引时继续接收写入，缩短 partition 串行屏障占用，保持既有查询、删除与撤权契约。
 
@@ -29,7 +29,7 @@ PR #72/#73/#74 已合入，当前源码基线为 `afbe323d`；第 1–6 项实�
 4. 保留构建期间新增的完整提交 tail；过期、旧 owner 或基础已变化的任务不得覆盖新状态。
 5. 验收持续写入、索引暂停、重复任务、过期发布、退出恢复、删除与撤权输出；失败不得丢已提交数据。
 
-开发分支已加入 `start_index_committed` / `index_committed`、HTTP PATCH 后台构建、SQLite 构建 epoch/期限/pin、旧 cut 发布与完整新增 tail，以及并发/取消/过期/进程退出回归。当前开发机代理失联，依赖下载失败；Rust 测试与原生 CI 尚待当前提交结果，不能据此标完成。
+开发分支已加入 `start_index_committed` / `index_committed`、HTTP PATCH 后台构建、SQLite 构建 epoch/期限/pin、旧 cut 发布与完整新增 tail，以及并发/取消/过期/进程退出回归。当前开发机代理失联，依赖下载失败；通过 [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 的 GitHub CI 验证精确源码提交。CI、评审和合入状态分别跟踪，不因分支实现标记主线完成。
 
 C1 完成后再推进独立校验缓存和 collection 资源公平。当前完整 State 驻内存及 compaction 串行行为仍是实际限制，不能提前标为已解决。
 

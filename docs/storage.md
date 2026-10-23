@@ -33,7 +33,7 @@ SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本
 
 当前实现只在完整当前 cut 上推进检查点，不支持后台 indexer 与新写入并行发布的优化；这属于 C。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 feed floor 等状态。
 
-### 开发分支：有界后台 cut 发布（尚未验收）
+### 开发分支：有界后台 cut 发布（PR #75，未合入）
 
 `RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在 catalog 授权锁内只启动任务，锁外等待，交付仍验证原授权许可，因此构建等待不阻断普通写入或撤权。
 
@@ -45,7 +45,7 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 本地证书与完整新增 suffix 在私有 generation 中一起同步，然后发布目录，避免证书可见但后续已确认写入未落入新 generation。S3 在 SQLite 发布后本地失败继续 fenced，冷启动从远端 manifest 加完整 tail 恢复。构建失败、过期或 panic 不能把旧 cut 当成当前视图；panic 关闭输出，必须重开恢复。物理回收在候选 mmap 释放和任务结束后执行。
 
-这些是开发分支协议，当前 Rust/HTTP 与 Linux/Windows 回归尚待验证，不替代已合入实现的证据。
+这些是 [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 的开发分支协议；Rust/HTTP 与 Linux/Windows 验证以该 PR Checks 的精确源码提交为准，不替代已合入实现的证据。
 
 ## 2. 日志与 feed 保留
 
