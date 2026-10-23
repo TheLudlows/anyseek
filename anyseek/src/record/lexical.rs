@@ -297,6 +297,33 @@ impl Candidate {
         cut: Cut,
         byte_limit: u64,
     ) -> Result<Snapshot, RecordError> {
+        // Reserve before hashing, decoding metadata, mapping native files or
+        // allocating ordinal/length arrays. Retain the lease with the Searcher.
+        if self.files.len() > 1024 {
+            return Err(storage("lexical closure file budget exceeded"));
+        }
+        let declared = self
+            .files
+            .iter()
+            .try_fold(0u64, |n, file| n.checked_add(file.bytes))
+            .filter(|n| *n <= byte_limit)
+            .ok_or_else(|| storage("lexical closure byte budget exceeded"))?;
+        let estimate = declared
+            .checked_mul(8)
+            .and_then(|n| n.checked_add(64 * 1024))
+            .ok_or_else(|| storage("lexical reader estimate overflow"))?;
+        let memory = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
+        let scope = crate::resources::Scope::current();
+        let buffer = scope
+            .as_ref()
+            .map(|s| s.bytes(estimate))
+            .transpose()
+            .map_err(storage)?;
+        let _io = scope
+            .as_ref()
+            .map(|s| s.io())
+            .transpose()
+            .map_err(storage)?;
         let actual = segment::files(path, byte_limit)?;
         if serde_json::to_vec(&actual).map_err(storage)?
             != serde_json::to_vec(&self.files).map_err(storage)?
@@ -371,9 +398,12 @@ impl Candidate {
             searcher,
             fields,
             cut,
+            names: manifest.fields,
             identities: Arc::new(manifest.identities),
             addresses,
             lengths,
+            _memory: memory,
+            _buffer: buffer,
         })
     }
 }
@@ -383,10 +413,14 @@ impl Candidate {
 pub(super) struct Snapshot {
     searcher: Searcher,
     pub fields: Vec<Field>,
+    names: Vec<String>,
     pub cut: Cut,
     identities: Arc<Vec<Identity>>,
     addresses: Vec<Vec<usize>>,
     lengths: Vec<Vec<Vec<u64>>>,
+    // Declared after native handles so the charge outlives their destruction.
+    _memory: crate::storage::build_budget::MemoryLease,
+    _buffer: Option<crate::resources::Lease>,
 }
 
 pub(super) struct ActiveView<'a> {

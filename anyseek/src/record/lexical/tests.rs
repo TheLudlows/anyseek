@@ -808,3 +808,195 @@ async fn native_query_contract_parity_and_field_diagnostics() {
         std::fs::write(path, serde_json::to_vec_pretty(&field_differences).unwrap()).unwrap();
     }
 }
+
+#[test]
+fn native_corpus_uses_one_selected_population_across_frozen_and_tail() {
+    use super::scoring::CorpusView;
+    use crate::index::FieldLengthNormalization;
+    let roots = [Temp::new(), Temp::new(), Temp::new()];
+    let newer = Cut {
+        sequence: CUT.sequence + 1,
+        evaluation_time_ms: CUT.evaluation_time_ms + 1,
+    };
+    let frozen = Candidate::build(
+        &roots[0].0,
+        CUT,
+        vec!["body".into()],
+        vec![
+            input("a", 1, &["alpha alpha"]),
+            input("b", 1, &["alpha alpha alpha alpha"]),
+        ],
+        LIMIT,
+    )
+    .unwrap()
+    .open(&roots[0].0, CUT, LIMIT)
+    .unwrap();
+    let tail = Candidate::build(
+        &roots[1].0,
+        newer,
+        vec!["body".into()],
+        vec![
+            input("b", 2, &["beta"]),
+            input("c", 1, &["alpha gamma gamma"]),
+        ],
+        LIMIT,
+    )
+    .unwrap()
+    .open(&roots[1].0, newer, LIMIT)
+    .unwrap();
+    let clean = Candidate::build(
+        &roots[2].0,
+        newer,
+        vec!["body".into()],
+        vec![
+            input("a", 1, &["alpha alpha"]),
+            input("b", 2, &["beta"]),
+            input("c", 1, &["alpha gamma gamma"]),
+        ],
+        LIMIT,
+    )
+    .unwrap()
+    .open(&roots[2].0, newer, LIMIT)
+    .unwrap();
+    let selected = all(&clean);
+    let corpus = CorpusView::select(&[&frozen, &tail], newer, &selected).unwrap();
+    let oracle = clean.active(newer, &selected).unwrap();
+    let groups = vec![super::query::ScoreGroup {
+        matched_term: "alpha".into(),
+        components: vec!["alpha".into()],
+    }];
+    let query = term(clean.fields[0], "alpha");
+    for normalization in [
+        FieldLengthNormalization::Shared,
+        FieldLengthNormalization::PerField,
+    ] {
+        for limit in [0, 1, 10] {
+            for filtered in [false, true] {
+                let accepts = |i: &Identity| !filtered || i.id != "a";
+                assert_eq!(
+                    corpus
+                        .score_groups(
+                            &query,
+                            &groups,
+                            &[1.0],
+                            normalization.clone(),
+                            limit,
+                            accepts
+                        )
+                        .unwrap(),
+                    oracle
+                        .score_groups(
+                            &query,
+                            &groups,
+                            &[1.0],
+                            normalization.clone(),
+                            limit,
+                            accepts
+                        )
+                        .unwrap()
+                );
+            }
+        }
+    }
+    assert!(CorpusView::select(&[&frozen, &tail], CUT, &selected).is_err());
+    assert!(CorpusView::select(&[&frozen, &tail, &tail], newer, &selected).is_err());
+    assert!(CorpusView::select(&[&frozen], newer, &selected).is_err());
+    let mut ambiguous = selected.clone();
+    ambiguous.insert(identity("b", 1));
+    assert!(CorpusView::select(&[&frozen, &tail], newer, &ambiguous).is_err());
+}
+
+#[tokio::test]
+async fn minimal_field_or_documents_existing_commit_contradiction() {
+    use crate::commit::Commit;
+    use crate::record::tests::{config, write};
+    use crate::{
+        record::{ExpectedVersion, RecordPartition, RecordQuery},
+        search::{QueryType, ResultType, SearchMode},
+    };
+    let root = Temp::new();
+    let mut config = config();
+    config.schema.push(serde_json::from_value(serde_json::json!({"field":"title","field_type":"Text","store":false,"index_lexical":true})).unwrap());
+    let partition = RecordPartition::create(&root.0, config).await.unwrap();
+    let mut request = write("insert", "f", "alpha", ExpectedVersion::Absent);
+    request
+        .document
+        .as_mut()
+        .unwrap()
+        .insert("title".into(), "beta".into());
+    partition.write(request).await.unwrap();
+    let inner = partition.inner.lock().await;
+    for committed in [false, true] {
+        if committed {
+            inner.index.test_index().commit().await.unwrap();
+        }
+        let result = inner
+            .query_view(RecordQuery {
+                temporal: None,
+                text: "alpha beta".into(),
+                vector: None,
+                mode: SearchMode::Lexical,
+                query_type: QueryType::Union,
+                offset: 0,
+                length: 10,
+                result_type: ResultType::TopkCount,
+                fields: vec!["body".into()],
+                filters: vec![],
+                sort: vec![],
+            })
+            .await
+            .unwrap();
+        let ids: Vec<_> = result
+            .hits
+            .iter()
+            .map(|h| h.record.record_id.as_str())
+            .collect();
+        assert_eq!(ids, if committed { vec!["f"] } else { vec![] });
+        assert_eq!(result.count_total, usize::from(committed));
+    }
+}
+
+#[tokio::test]
+async fn native_reader_reservation_follows_snapshot_lifetime() {
+    use crate::resources::{Governor, Lane};
+    let root = Temp::new();
+    let candidate = Candidate::build(
+        &root.0,
+        CUT,
+        vec!["body".into()],
+        vec![input("a", 1, &["alpha"])],
+        LIMIT,
+    )
+    .unwrap();
+    let governor = Arc::new(Governor::default());
+    let scope = governor
+        .admit("reader-owner".into(), Lane::Foreground, 0)
+        .unwrap();
+    let charge = candidate.files.iter().map(|f| f.bytes).sum::<u64>() * 8 + 64 * 1024;
+    let cap = 256 * 1024 * 1024;
+    let observer = scope.clone();
+    let snapshot = scope
+        .run(async { candidate.open(&root.0, CUT, LIMIT).unwrap() })
+        .await;
+    assert!(observer.bytes(cap).is_err());
+    let remaining = observer.bytes(cap - charge).unwrap();
+    assert!(observer.bytes(1).is_err());
+    drop(remaining);
+    drop(snapshot);
+    drop(observer.bytes(cap).unwrap());
+    // Rejection must release partial admission and leave the authenticated files intact.
+    let blocked = observer.bytes(cap).unwrap();
+    assert!(
+        observer
+            .clone()
+            .run(async { candidate.open(&root.0, CUT, LIMIT) })
+            .await
+            .is_err()
+    );
+    drop(blocked);
+    drop(
+        observer
+            .run(async { candidate.open(&root.0, CUT, LIMIT).unwrap() })
+            .await,
+    );
+}

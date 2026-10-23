@@ -107,3 +107,35 @@ git diff --check
 ## 当前成本与限制
 
 本检查点 Cargo.lock 共 331 个 package 条目（含工作区包）；并非全部都会进入默认核心产物。原型每 writer 设置 20,000,000 字节 arena，一个 indexing worker、一个 merge worker，另有 Tantivy 自身的协调线程。输入分析缓冲按显式保守估计另计，预算不是 RSS 限制。候选执行目前遍历全部匹配，活动 df 查询也扫描原生 postings；这是有界正确性路径，尚无延迟/吞吐或维护成本改善结论。外层包不含规范 Payload，单独复制它不构成可恢复的数据库备份。
+
+## 第三阶段：最小契约证据与跨包组合
+
+### 限定字段 OR 最小复现
+
+只写入一条记录 f：`body="alpha"`、`title="beta"`。使用 `QueryType::Union`、查询 `alpha beta`，检索字段限定为 `body`（Record Rust 参数 `fields`，HTTP 的对应检索参数为 `search_fields`，不同于输出投影 `fields`）。
+
+| 状态 | 返回 ID | 总数 |
+| --- | --- | --- |
+| 写入已成功、旧引擎尚未内部 commit | 空 | 0 |
+| 同一记录和查询、仅执行旧引擎内部 commit 后 | f | 1 |
+
+新增 `minimal_field_or_documents_existing_commit_contradiction` 已实测以上行为。原 80 项数字来自配置矩阵，不是 80 种不同规则。文档 [查询示例](library-examples.md) 明确称 Union 为 OR；[字段说明](../FACETED_SEARCH.md) 把 search_fields 定义为选择检索字段。按这些定义，body 中命中 alpha 即满足 OR，title 中 beta 不应导致排除。因此推荐以提交后规则为准，修复实时错误。用户可见影响是成功写入后立即能查到 f；总数增加、分页和排名可能变化；匹配评分组只取选中字段中存在的词，公式/活动 DF/长度归一化保持不变。不是新增 OR 语法或新的字段加权 BM25，但因为纠正已有可见行为，仍保留待决，不静默接入。
+
+### 邻近度支持证据
+
+- [HTTP 创建集合配置](../anyseek/server/record_service.rs) 的 `record_config` 实际固定 `LexicalSimilarity::Bm25fProximity`、`FrequentwordType::English`、`ngram_indexing: 9`，服务默认请求会进入该功能。
+- [N-gram 文档](../NGRAM_SEARCH.md) 明确写“当前保留此功能”，说明 Rust 的独立 mask、HTTP 固定 FF | FFF、BM25F/Proximity 实时/提交/重启回归；不只是旧枚举残留。
+- [核心定义](../anyseek/src/index.rs) 保留 Bm25f/Bm25fProximity，现有矩阵在两种相似度和十个 mask 上执行真实查询。短语相邻 N-gram 评分与已删除的拼写纠正/自动补全无关；不恢复后者。
+- [字段长度说明](field-length-normalization.md) 仍记录 #42 历史实时 N-gram 问题；当前有限矩阵通过不代表该历史问题所有输入均已解决。
+
+### 新增组合与资源准备
+
+`CorpusView` 在一个外层选择的 cut 下组合冻结包和原生尾部包，拒绝未来 cut、字段顺序不同、缺失修订、跨包重复活动修订及同稳定 ID 的多个活动修订。统一活动 N、跨字段 DF 和解码长度均值，历史版本不计入；请求过滤在 Top-K 前执行，不改变统计。各包以同一语料评分后合并稳定 Top-K，尚未在此层做 RRF。测试用旧包中的 b/v1 和尾部中的 b/v2，验证与完全清洁重建的身份/计数/分数一致，并覆盖过滤与 K=0/1/10。
+
+原生打开现在在完整清单校验、元数据解析和 mmap 前预留内存及服务 buffer 额度；Snapshot 持有这些额度至固定 Searcher 释放，失败自动释放部分申请。资源测试覆盖已占满额度时拒绝、Snapshot 存活期间不可提前复用、Drop 后恢复以及拒绝后可重试。
+
+这些是正式接入需要的组件，**仍在测试隔离模块内**。本阶段尚未把 Record authority/anchor 改成 Tantivy 新格式，不能称为生产替换或新格式恢复/备份/GC 已完成。跨包统计目前重复扫描 postings，未声称性能优化；最终分析配置认证和统一生产调用点仍待接入。
+
+第二阶段后台无默认 feature 验证已结束：191 passed / 0 failed / 10 ignored（102.53 秒）。S3 fixture 原 PID 26879 继续运行，未重启；当前日志中的 real HTTP / real_s3_compatible_contract 名称不意味着使用真实 S3 服务。
+
+第三阶段验证：默认 feature 原生模块 17 passed / 0 failed（9.19 秒）；无默认 feature 同一模块 17 passed / 0 failed（8.48 秒）。日志在 `target/issue80-phase3/`。生产代码本阶段未变，未把前一提交的 all-targets/HTTP 结果冒充新生产引擎验收。S3 fixture 已继续完成 base、locator、graph、temporal 冷缓存阶段，当前 upload 阶段尚在运行，尚无最终报告。
