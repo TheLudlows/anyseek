@@ -28,6 +28,7 @@ const MAX_FIELDS: usize = 64;
 const MAX_TOKENS: usize = 65_536;
 
 mod directory;
+mod query;
 mod scoring;
 
 /// Includes vector enrichment revisions independently of the document version.
@@ -52,6 +53,16 @@ pub(super) struct Cut {
 pub(super) struct Input {
     pub identity: Identity,
     pub fields: Vec<Vec<String>>,
+}
+
+pub(super) struct AnalyzedField {
+    pub text: String,
+    pub tokens: Vec<Token>,
+    pub length: u32,
+}
+pub(super) struct AnalyzedInput {
+    pub identity: Identity,
+    pub fields: Vec<AnalyzedField>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -128,6 +139,51 @@ impl Candidate {
         inputs: Vec<Input>,
         byte_limit: u64,
     ) -> Result<Self, RecordError> {
+        let inputs = inputs
+            .into_iter()
+            .map(|input| AnalyzedInput {
+                identity: input.identity,
+                fields: input
+                    .fields
+                    .into_iter()
+                    .map(|words| {
+                        let mut text = String::new();
+                        let tokens = words
+                            .iter()
+                            .enumerate()
+                            .map(|(position, word)| {
+                                let offset_from = text.len();
+                                text.push_str(word);
+                                let token = Token {
+                                    offset_from,
+                                    offset_to: text.len(),
+                                    position,
+                                    text: word.clone(),
+                                    position_length: 1,
+                                };
+                                text.push(' ');
+                                token
+                            })
+                            .collect();
+                        AnalyzedField {
+                            text,
+                            tokens,
+                            length: words.len() as u32,
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
+        Self::build_analyzed(path, cut, names, inputs, byte_limit)
+    }
+
+    pub(super) fn build_analyzed(
+        path: &Path,
+        cut: Cut,
+        names: Vec<String>,
+        inputs: Vec<AnalyzedInput>,
+        byte_limit: u64,
+    ) -> Result<Self, RecordError> {
         if inputs.len() > MAX_DOCUMENTS {
             return Err(storage("lexical document budget exceeded"));
         }
@@ -140,19 +196,29 @@ impl Candidate {
                 || input.fields.len() != fields.len()
                 || !seen.insert(input.identity.clone())
                 || input.fields.iter().any(|f| {
-                    f.len() > MAX_TOKENS || f.iter().any(|t| t.is_empty() || t.len() > 4096)
+                    f.length as usize > MAX_TOKENS
+                        || f.tokens.len() > MAX_TOKENS * 3
+                        || f.tokens.iter().any(|t| {
+                            t.text.is_empty()
+                                || t.text.len() > 4096
+                                || t.position >= f.length as usize
+                                || t.offset_to > f.text.len()
+                                || t.offset_from > t.offset_to
+                        })
+                        || f.tokens.windows(2).any(|w| w[0].position > w[1].position)
                 })
             {
                 return Err(storage("invalid lexical input"));
             }
-            input_bytes = input
-                .fields
-                .iter()
-                .flatten()
-                .try_fold(input_bytes, |n, t| {
-                    n.checked_add(t.len() as u64 + 128)
-                        .ok_or_else(|| storage("lexical input budget overflow"))
-                })?;
+            input_bytes =
+                input
+                    .fields
+                    .iter()
+                    .flat_map(|f| &f.tokens)
+                    .try_fold(input_bytes, |n, t| {
+                        n.checked_add(t.text.len() as u64 + 128)
+                            .ok_or_else(|| storage("lexical input budget overflow"))
+                    })?;
         }
         let memory_bytes = input_bytes
             .checked_add(WRITER_BYTES as u64)
@@ -180,25 +246,17 @@ impl Candidate {
                     schema.get_field("identity").map_err(storage)?,
                     ordinal as u64,
                 );
-                for (i, words) in input.fields.iter().enumerate() {
-                    let mut text = String::new();
-                    let mut tokens = Vec::with_capacity(words.len());
-                    for (position, word) in words.iter().enumerate() {
-                        let offset_from = text.len();
-                        text.push_str(word);
-                        tokens.push(Token {
-                            offset_from,
-                            offset_to: text.len(),
-                            position,
-                            text: word.clone(),
-                            position_length: 1,
-                        });
-                        text.push(' ');
-                    }
-                    document.add_pre_tokenized_text(fields[i], PreTokenizedString { text, tokens });
+                for (i, field) in input.fields.iter().enumerate() {
+                    document.add_pre_tokenized_text(
+                        fields[i],
+                        PreTokenizedString {
+                            text: field.text.clone(),
+                            tokens: field.tokens.clone(),
+                        },
+                    );
                     document.add_u64(
                         schema.get_field(&format!("length_{i}")).map_err(storage)?,
-                        words.len() as u64,
+                        field.length as u64,
                     );
                 }
                 writer.add_document(document).map_err(storage)?;

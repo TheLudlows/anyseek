@@ -2907,6 +2907,11 @@ pub(crate) fn add_result_multiterm_multifield(
                 }
 
                 if !field_filter_set.is_empty() && !field_filter_set.contains(&i) {
+                    // The first position was read above. Account for it before
+                    // the next field drains the remainder of this field.
+                    for plo in non_unique_query_list.iter_mut() {
+                        plo.p_pos = 1;
+                    }
                     continue;
                 }
 

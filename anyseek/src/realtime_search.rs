@@ -352,6 +352,11 @@ pub(crate) fn add_result_multiterm_uncommitted(
                 }
 
                 if !field_filter_set.is_empty() && !field_filter_set.contains(&i) {
+                    // Keep the consumed-position cursor aligned when skipping
+                    // a field; otherwise the next field loses its first token.
+                    for plo in non_unique_query_list.iter_mut() {
+                        plo.p_pos = 1;
+                    }
                     continue;
                 }
 

@@ -18,7 +18,28 @@ impl ActiveView<'_> {
         limit: usize,
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
-        if terms.len() > 100
+        let groups = terms
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|term| super::query::ScoreGroup {
+                matched_term: term.clone(),
+                components: vec![term.clone()],
+            })
+            .collect::<Vec<_>>();
+        self.score_groups(query, &groups, boosts, normalization, limit, accepts)
+    }
+
+    pub(super) fn score_groups(
+        &self,
+        query: &dyn Query,
+        groups: &[super::query::ScoreGroup],
+        boosts: &[f32],
+        normalization: FieldLengthNormalization,
+        limit: usize,
+        accepts: impl Fn(&Identity) -> bool,
+    ) -> Result<(usize, Vec<Hit>), RecordError> {
+        if groups.len() > 100
             || limit > MAX_DOCUMENTS
             || boosts.len() != self.snapshot.fields.len()
             || boosts.iter().any(|b| !b.is_finite() || *b < 0.0)
@@ -29,7 +50,15 @@ impl ActiveView<'_> {
             return Ok((0, Vec::new()));
         }
         // Preserve accumulation order independently of Tantivy's execution order.
-        let terms = terms.iter().collect::<BTreeSet<_>>();
+        let terms = groups
+            .iter()
+            .flat_map(|group| std::iter::once(&group.matched_term).chain(group.components.iter()))
+            .collect::<BTreeSet<_>>();
+        let slots: BTreeMap<_, _> = terms
+            .iter()
+            .enumerate()
+            .map(|(slot, term)| (term.as_str(), slot))
+            .collect();
         let mut sums = vec![0u64; boosts.len()];
         let mut nonempty = vec![0u64; boosts.len()];
         for (segment, addresses) in self.snapshot.addresses.iter().enumerate() {
@@ -126,23 +155,36 @@ impl ActiveView<'_> {
                 if self.live.contains(&ordinal) && accepts(identity) {
                     count += 1;
                     let mut score = 0.0f32;
-                    for (fields, idf) in postings.iter_mut().zip(&idfs) {
-                        for (field, postings) in fields.iter_mut().enumerate() {
-                            let Some(postings) = postings else {
-                                continue;
-                            };
-                            if postings.doc() < doc {
-                                postings.seek(doc);
+                    for fields in &mut postings {
+                        for posting in fields.iter_mut().flatten() {
+                            if posting.doc() < doc {
+                                posting.seek(doc);
                             }
-                            if postings.doc() != doc {
-                                continue;
+                        }
+                    }
+                    for group in groups {
+                        let gate = &postings[slots[group.matched_term.as_str()]];
+                        if !gate.iter().flatten().any(|posting| posting.doc() == doc) {
+                            continue;
+                        }
+                        for component in &group.components {
+                            let slot = slots[component.as_str()];
+                            for (field, posting) in postings[slot].iter().enumerate() {
+                                let Some(posting) = posting else {
+                                    continue;
+                                };
+                                if posting.doc() != doc {
+                                    continue;
+                                }
+                                let tf = posting.term_freq() as f32;
+                                let length =
+                                    decoded(self.snapshot.lengths[segment_id][doc as usize][field]);
+                                let denominator =
+                                    1.2 * (1.0 - 0.75 + 0.75 * (length / averages[field]));
+                                score += boosts[field]
+                                    * idfs[slot]
+                                    * (tf * (1.2 + 1.0) / (tf + denominator));
                             }
-                            let tf = postings.term_freq() as f32;
-                            let length =
-                                decoded(self.snapshot.lengths[segment_id][doc as usize][field]);
-                            let denominator =
-                                1.2 * (1.0 - 0.75 + 0.75 * (length / averages[field]));
-                            score += boosts[field] * idf * (tf * (1.2 + 1.0) / (tf + denominator));
                         }
                     }
                     if !score.is_finite() {

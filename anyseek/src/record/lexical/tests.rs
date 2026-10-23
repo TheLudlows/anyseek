@@ -2,6 +2,67 @@ use super::*;
 use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Occur, PhraseQuery, TermQuery};
 use tantivy::schema::Document as _;
 
+#[tokio::test]
+async fn field_restricted_phrase_keeps_first_position_after_skipping_earlier_field() {
+    use crate::record::tests::{config, write};
+    use crate::{
+        commit::Commit,
+        record::{ExpectedVersion, RecordPartition, RecordQuery},
+        search::{QueryType, ResultType, SearchMode},
+    };
+    let root = Temp::new();
+    let mut config = config();
+    config.schema.push(serde_json::from_value(serde_json::json!({"field":"title","field_type":"Text","store":false,"index_lexical":true})).unwrap());
+    let partition = RecordPartition::create(&root.0, config).await.unwrap();
+    for (id, body, title) in [
+        (
+            "a",
+            "the of and the of and anchor of",
+            "the of and anchor of",
+        ),
+        ("c", "the anchor of red apple fishing car", "the of anchor"),
+    ] {
+        let mut request = write(id, id, body, ExpectedVersion::Absent);
+        request
+            .document
+            .as_mut()
+            .unwrap()
+            .insert("title".into(), title.into());
+        partition.write(request).await.unwrap();
+    }
+    let inner = partition.inner.lock().await;
+    for committed in [false, true] {
+        if committed {
+            inner.index.test_index().commit().await.unwrap();
+        }
+        let result = inner
+            .query_view(RecordQuery {
+                temporal: None,
+                text: "\"the of\"".into(),
+                vector: None,
+                mode: SearchMode::Lexical,
+                query_type: QueryType::Union,
+                offset: 0,
+                length: 10,
+                result_type: ResultType::TopkCount,
+                fields: vec!["title".into()],
+                filters: vec![],
+                sort: vec![],
+            })
+            .await
+            .unwrap();
+        let ids = result
+            .hits
+            .iter()
+            .map(|h| h.record.record_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids, BTreeSet::from(["a", "c"]), "committed={committed}");
+        assert_eq!(result.count_total, 2);
+    }
+    drop(inner);
+    drop(partition);
+}
+
 const LIMIT: u64 = 32 * 1024 * 1024;
 const CUT: Cut = Cut {
     sequence: 17,
@@ -536,5 +597,214 @@ async fn native_unigram_bm25f_matches_record_scores_at_the_vector_cut() {
         assert_eq!(vectors.hits.len(), 4);
         drop(inner);
         drop(partition);
+    }
+}
+
+#[tokio::test]
+async fn native_query_contract_parity_and_field_diagnostics() {
+    use crate::commit::Commit;
+    use crate::record::tests::{config, write};
+    use crate::{
+        index::{FieldLengthNormalization, FrequentwordType, LexicalSimilarity},
+        record::{ExpectedVersion, RecordPartition, RecordQuery},
+        search::{QueryType, ResultType, SearchMode},
+    };
+    let mut field_differences = Vec::new();
+    let documents = [
+        (
+            "a",
+            "the of and the of and anchor of",
+            "the of and anchor of",
+        ),
+        ("b", "of neutral neutral neutral neutral", "and neutral"),
+        ("c", "the anchor of red apple fishing car", "the of anchor"),
+        ("d", "anchor the of red green apple", "the anchor"),
+        ("e", "alpha beta alpha", "beta alpha"),
+        ("f", "alpha", "beta"),
+        ("g", "", ""),
+    ];
+    for normalization in [
+        FieldLengthNormalization::Shared,
+        FieldLengthNormalization::PerField,
+    ] {
+        for similarity in [LexicalSimilarity::Bm25f, LexicalSimilarity::Bm25fProximity] {
+            for mask in [0, 1, 2, 4, 8, 16, 32, 64, 9, 127] {
+                let root = Temp::new();
+                let native = Temp::new();
+                let mut config = config();
+                config.index.field_length_normalization = normalization.clone();
+                config.index.lexical_similarity = similarity.clone();
+                config.index.frequent_words = FrequentwordType::English;
+                config.index.ngram_indexing = mask;
+                config.schema[0].boost = 2.0;
+                config.schema.push(serde_json::from_value(serde_json::json!({"field":"title","field_type":"Text","store":false,"index_lexical":true,"boost":0.5})).unwrap());
+                let analyzer = super::query::Analyzer::new(config.index.clone());
+                let partition = RecordPartition::create(&root.0, config).await.unwrap();
+                let mut inputs = Vec::new();
+                for (id, body, title) in documents {
+                    let mut request = write(id, id, body, ExpectedVersion::Absent);
+                    request
+                        .document
+                        .as_mut()
+                        .unwrap()
+                        .insert("title".into(), title.into());
+                    partition.write(request).await.unwrap();
+                    inputs.push(AnalyzedInput {
+                        identity: identity(id, 1),
+                        fields: vec![analyzer.field(body).await, analyzer.field(title).await],
+                    });
+                }
+                let inner = partition.inner.lock().await;
+                let cut = Cut {
+                    sequence: inner.state.seq,
+                    evaluation_time_ms: inner.evaluation_time_ms,
+                };
+                let package = Candidate::build_analyzed(
+                    &native.0,
+                    cut,
+                    vec!["body".into(), "title".into()],
+                    inputs,
+                    LIMIT,
+                )
+                .unwrap();
+                let snapshot = package.open(&native.0, cut, LIMIT).unwrap();
+                let active = snapshot.active(cut, &all(&snapshot)).unwrap();
+                for committed in [false, true] {
+                    if committed {
+                        inner.index.test_index().commit().await.unwrap();
+                    }
+                    for field_choice in [None, Some(0usize), Some(1usize)] {
+                        for mode in [QueryType::Union, QueryType::Intersection, QueryType::Phrase] {
+                            for text in [
+                                "",
+                                " ",
+                                "alpha beta",
+                                "alpha missing",
+                                "alpha alpha",
+                                "\"alpha beta\"",
+                                "\"alpha alpha\"",
+                                "\"the of\"",
+                                "\"the of and\"",
+                                "\"the of and anchor\"",
+                                "\"anchor the of\"",
+                                "\"the of anchor\"",
+                                "\"the anchor of\"",
+                                "\"the anchor\"",
+                                "\"anchor of\"",
+                                "+red -green",
+                                "red +apple",
+                                "red -green",
+                                "-red",
+                                "applle",
+                                "r*",
+                                "FISHING",
+                                "fish",
+                                "automobile",
+                                "\"red apple\"",
+                                "\"red apple\" car",
+                            ] {
+                                let expected = inner
+                                    .query_view(RecordQuery {
+                                        temporal: None,
+                                        text: text.into(),
+                                        vector: None,
+                                        mode: SearchMode::Lexical,
+                                        query_type: mode.clone(),
+                                        offset: 0,
+                                        length: 20,
+                                        result_type: ResultType::TopkCount,
+                                        fields: field_choice
+                                            .map(|f| vec![["body", "title"][f].to_string()])
+                                            .unwrap_or_default(),
+                                        filters: vec![],
+                                        sort: vec![],
+                                    })
+                                    .await
+                                    .unwrap();
+                                let plan = analyzer
+                                    .query_fields(
+                                        text,
+                                        mode.clone(),
+                                        &snapshot.fields,
+                                        &field_choice
+                                            .map(|f| vec![snapshot.fields[f]])
+                                            .unwrap_or_default(),
+                                        true,
+                                    )
+                                    .await;
+                                let (count, hits) = active
+                                    .score_groups(
+                                        plan.predicate.as_ref(),
+                                        &plan.scores,
+                                        &[2.0, 0.5],
+                                        normalization.clone(),
+                                        20,
+                                        |_| true,
+                                    )
+                                    .unwrap();
+                                let label = format!(
+                                    "{normalization:?}/{similarity:?}/mask={mask}/{mode:?}/{text:?}/field={field_choice:?}/committed={committed}"
+                                );
+                                let actual_ids =
+                                    hits.iter().map(|h| &h.identity.id).collect::<Vec<_>>();
+                                let expected_ids = expected
+                                    .hits
+                                    .iter()
+                                    .map(|h| &h.record.record_id)
+                                    .collect::<Vec<_>>();
+                                let equivalent = count == expected.count_total
+                                    && actual_ids == expected_ids
+                                    && hits.iter().zip(&expected.hits).all(|(a, b)| {
+                                        (a.score - b.score).abs() <= 2e-5 * b.score.abs().max(1.0)
+                                    });
+                                if field_choice.is_some() && !equivalent {
+                                    field_differences.push(serde_json::json!({"case":label,"native":hits.iter().map(|h| (&h.identity.id,h.score)).collect::<Vec<_>>(),
+                                        "legacy":expected.hits.iter().map(|h| (&h.record.record_id,h.score)).collect::<Vec<_>>(), "native_count":count,"legacy_count":expected.count_total}));
+                                    continue;
+                                }
+                                assert_eq!(
+                                    count,
+                                    expected.count_total,
+                                    "{label}; native={:?}; old={:?}",
+                                    hits.iter().map(|h| &h.identity.id).collect::<Vec<_>>(),
+                                    expected
+                                        .hits
+                                        .iter()
+                                        .map(|h| &h.record.record_id)
+                                        .collect::<Vec<_>>()
+                                );
+                                assert_eq!(
+                                    hits.iter().map(|h| &h.identity.id).collect::<Vec<_>>(),
+                                    expected
+                                        .hits
+                                        .iter()
+                                        .map(|h| &h.record.record_id)
+                                        .collect::<Vec<_>>(),
+                                    "{label}"
+                                );
+                                for (hit, expected) in hits.iter().zip(&expected.hits) {
+                                    assert!(
+                                        (hit.score - expected.score).abs()
+                                            <= 2e-5 * expected.score.abs().max(1.0),
+                                        "{label}: {} got {} expected {}",
+                                        hit.identity.id,
+                                        hit.score,
+                                        expected.score
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                drop(inner);
+                drop(partition);
+            }
+        }
+    }
+    // These mismatches are evidence of an unresolved field restriction contract,
+    // NOT accepted parity. Unrestricted cases above must all match exactly.
+    assert!(!field_differences.is_empty());
+    if let Some(path) = std::env::var_os("ANYSEEK_TEST_CONTRACT_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&field_differences).unwrap()).unwrap();
     }
 }

@@ -25,14 +25,23 @@
 
 ## 评分决策及适配范围
 
-尚未批准改变公开排名。字段加权 Tantivy BM25 并不等价于现有 BM25F：字段 DF 与跨字段 DF 不同，平均长度分母不同，原有 Shared/PerField 和长度量化也不同；默认 Bm25fProximity 的 N-gram 评分不能直接取消。
+已明确选择保留实际支持的 BM25F / Bm25fProximity 契约，不改用字段加权 Tantivy BM25。字段 DF、平均长度分母、Shared/PerField、旧长度量化及默认 N-gram 评分都继续保留。`bm25_probe` 仅用于原生能力验证，不是生产排名选择。
 
-当前提供两个明确命名的测试探针：
+第二阶段的 `Analyzer` 复用原分析器及相同 stop/frequent 字典，生成含重叠 unigram/N-gram 位置的原生 postings，精确 unigram 长度另存 fast field。显式编译 Term/Boolean/PhraseQuery，不调用 Tantivy QueryParser，避免引入新语法或恢复已删除的改写、拼写纠正、补全、同义词、词干等能力。空串浏览、空白/标点无匹配、纯否定无匹配、短语位置和单一不同词的重复短语行为按现有实际路径保留。
 
-- `bm25_probe`：验证原生统计扩展、过滤、短语和字段加权的行为，不宣称旧排名等价。
-- `bm25f_unigram_probe`：在原生 postings 上保持跨字段活动 DF、原长度量化、Shared/PerField、boost 和稳定累加顺序；与同一 Record cut 下的实际旧引擎分数及向量视图比对。**尚未覆盖全部 N-gram/邻近度和查询语法**。
+评分在原生 postings 上采用跨字段活动 DF、原长度量化、Shared/PerField、boost 和稳定累加顺序。Bm25f 的 N-gram 由整体 gram 匹配门控后按组成词评分，Bm25fProximity 按整体 gram 评分。没有引入物理统计的 block-max pruning。
 
-需要的产品决策已提出：保留现有 BM25F/邻近度并完成专用适配，还是明确修改 API 采用新的字段加权 BM25。未答复时不将第二种探针接入生产。
+`native_query_contract_parity_and_field_diagnostics` 覆盖 2 种长度归一化、2 种相似度、10 个 N-gram mask（0/1/2/4/8/16/32/64/9/127）、提交前后、3 种查询模式、26 个查询和 3 个字段范围，共 18,720 次比较。其中 **6,240 个不限定字段的比较全部要求身份/总数/分数一致**；其余为字段范围诊断，不宣称完整兼容验收。
+
+### 需要统一的真实旧契约矛盾
+
+诊断发现 80 个分歧，全部是已提交路径的限定字段 OR 查询 `alpha beta`，横跨上述 40 个配置。记录 f 为 body=`alpha`, title=`beta`，查询限定 body 时，实时路径不返回 f，提交路径返回 f；限定 title 也存在同样矛盾。Shared/Bm25f/mask=0 时，body 路径提交后 f 分数为 3.5540719，title 为 0.888517975。因此不能同时保留两条旧路径，又保证同一 cut 的统一语义。
+
+已提出采用已提交路径作为兼容基准、修复实时漏召回的推荐选择，尚待答复。当前测试模块暂按实时限定字段规则编译，生产没有接入该规则；诊断 JSON 保存于 `target/issue80-phase2/field-contract-differences.json`。确定选择后，还需把评分组门控限制到选定字段（组成词 TF/DF 仍按既有评分范围），并将这些诊断改成严格一致断言。
+
+另一个独立的短语游标错误已修复：旧执行器跳过未选择字段时，已消费的首位置未计入 cursor，导致后续字段短语漏召回。`field_restricted_phrase_keeps_first_position_after_skipping_earlier_field` 对提交前后分别验证两条应命中的记录；此修复不修改评分公式。该修复同时使查询矩阵中的短语分歧消失。
+
+CI 依赖清理检查仅允许 Tantivy 依赖边下出现 crossbeam-channel/lz4_flex，仍禁止 anyseek 直接依赖及绕过 Tantivy 的传递路径；其余已裁剪能力依赖仍禁止。
 
 ## 后续实现边界
 
@@ -47,7 +56,7 @@
 
 | #80 项目 | 当前证据 | 尚未完成 |
 | --- | --- | --- |
-| 版本/schema/分词/评分 | 精确依赖、pre-tokenized schema、原分析器复用和两个评分探针 | 最终评分/API 与完整查询编译 |
+| 版本/schema/分词/评分 | 精确依赖、pre-tokenized schema、原分析器复用、BM25F/邻近度/N-gram 对照 | 限定字段 OR 统一决策、生产查询编译接入 |
 | 布局/身份/manifest | 原生候选完整清单、版本/修订映射、手动 Searcher | 正式 anchor/descriptor/tail 集成 |
 | 即时可见/过滤/活动统计 | 原生 commit 后立即打开、隐藏高分版本前置过滤、与干净语料统计比较 | 正式写入响应的统一可见边界 |
 | 全文/向量同 cut | 测试在 Record 锁内捕获实际向量查询和候选输入 | 所有正式通道及一次全局 RRF 集成 |
@@ -71,9 +80,29 @@ python3 scripts/check_docs_brand.py
 git diff --check
 ```
 
-2026-10-23 本检查点结果：默认核心单测 **190 passed / 0 failed / 10 ignored**（90.52 秒）；无默认 feature 核心单测 **189 passed / 0 failed / 10 ignored**（85.99 秒）。其中原生 Tantivy 验证为 12 项通过。ignored 包含由父测试单独调用的进程 worker；没有把 ignored 全部称为直接运行。文档检查通过（20 份 Markdown、115 个执行表面），diff 空白检查通过。server/all-targets、浏览器、Windows 和真实 S3 未在本检查点运行。
+2026-10-23 第一阶段检查点结果：默认核心单测 **190 passed / 0 failed / 10 ignored**（90.52 秒）；无默认 feature 核心单测 **189 passed / 0 failed / 10 ignored**（85.99 秒）。其中原生 Tantivy 验证为 12 项通过。ignored 包含由父测试单独调用的进程 worker；没有把 ignored 全部称为直接运行。文档检查通过（20 份 Markdown、115 个执行表面），diff 空白检查通过。server/all-targets、浏览器、Windows 和真实 S3 未在本检查点运行。
 
 初次新增测试发现过中文分词数量假设、测试 schema 缺少 store 和 postings 反向 seek 问题；均已修正并完成上述最终回归。日志及本地未发布的 draft PR 文本保存于 `target/issue80-checkpoint/`（构建证据，不纳入产品文件）。这些计数只证明本检查点，不能冒充未来生产替换版本的验收。
+
+## 第二阶段安全检查点（2026-10-23）
+
+新增完整现有词项/短语编译和 N-gram 评分适配测试、共享分析字典、两条旧执行路径的字段短语游标修复及 CI 依赖边审计。生产全文构建/查询仍使用旧引擎；本阶段没有完成生产替换、统一发布恢复、备份/GC 或旧实现清理。
+
+已实际完成的验证：
+
+- `cargo build --workspace --features server,fault-injection` 通过。
+- 当前最终 all-targets 运行已完成核心 **230 passed / 0 failed / 12 ignored**（含 14 个 lexical 测试）及 server **15 passed / 0 failed**；随后集成目标也全部结束，完整日志的 34 个 test-result 汇总共 331 passed / 0 failed / 13 ignored（核心和 server 已含在内）。
+- `python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults` 退出 0；Record/locator/relations/temporal/multipart/staging leases/feed 及对应进程故障矩阵通过。
+- 文档链接/品牌检查及 diff 空白检查通过；Tantivy 专属传递依赖审计通过。
+- 初次 all-targets 因上述短语漏召回失败；已修复，最终核心和专项回归均通过，未隐瞒早期失败。
+
+应父任务要求保存安全检查点时，无默认 feature 与 S3 fixture 运行继续保留，不能提前算通过；all-targets 已在保存过程中结束：
+
+- `cargo test --workspace --features server,fault-injection --all-targets`，原 PID 28223（已结束），日志 `/tmp/anyseek80-phase2-all-targets-final.log`。
+- `cargo test -p anyseek --no-default-features --lib`，PID 37660，工具 session 32994，日志 `/tmp/anyseek80-phase2-no-default-final.log`。
+- `python3 scripts/s3_acceptance.py --backend fixture --suite all --server target/debug/anyseek_server --faults --report target/issue80-phase2/s3-fixture.json`，PID 26879，工具 session 93332，日志 `/tmp/anyseek80-phase2-s3.log`。
+
+这些 PID 只是本环境检查点记录，续接必须先核验进程/完整日志，再决定是否重跑。HTTP 完成日志及查询差异 JSON 保存在 `target/issue80-phase2/`；运行日志仍以以上 `/tmp` 文件为最新来源。fixture 中名为 real_s3_compatible_contract 的测试实际使用本地 fixture，不代表真实 S3。Windows、真实 S3、系统断电均未运行。
 
 ## 当前成本与限制
 

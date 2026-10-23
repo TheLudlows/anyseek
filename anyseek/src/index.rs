@@ -1647,62 +1647,7 @@ pub(crate) fn create_shard(
 
             let shard_number = 1;
 
-            let stop_words: AHashSet<String> = match &meta.stop_words {
-                StopwordType::None => AHashSet::new(),
-                StopwordType::English => FREQUENT_EN.lines().map(|x| x.to_string()).collect(),
-                StopwordType::German => FREQUENT_DE.lines().map(|x| x.to_string()).collect(),
-                StopwordType::French => FREQUENT_FR.lines().map(|x| x.to_string()).collect(),
-                StopwordType::Spanish => FREQUENT_ES.lines().map(|x| x.to_string()).collect(),
-                StopwordType::Custom { terms } => terms.iter().map(|x| x.to_string()).collect(),
-            };
-
-            let frequent_words: Vec<String> = match &meta.frequent_words {
-                FrequentwordType::None => Vec::new(),
-                FrequentwordType::English => {
-                    let mut words: Vec<String> =
-                        FREQUENT_EN.lines().map(|x| x.to_string()).collect();
-                    words.sort_unstable();
-                    words
-                }
-                FrequentwordType::German => {
-                    let mut words: Vec<String> =
-                        FREQUENT_DE.lines().map(|x| x.to_string()).collect();
-                    words.sort_unstable();
-                    words
-                }
-                FrequentwordType::French => {
-                    let mut words: Vec<String> =
-                        FREQUENT_FR.lines().map(|x| x.to_string()).collect();
-                    words.sort_unstable();
-                    words
-                }
-                FrequentwordType::Spanish => {
-                    let mut words: Vec<String> =
-                        FREQUENT_ES.lines().map(|x| x.to_string()).collect();
-                    words.sort_unstable();
-                    words
-                }
-                FrequentwordType::Custom { terms } => {
-                    let mut words: Vec<String> = terms.iter().map(|x| x.to_string()).collect();
-                    words.sort_unstable();
-                    words
-                }
-            };
-
-            // Metadata remains as supplied; the analysis dictionaries use the same
-            // pinned normalization as document/query tokens, including after reopen.
-            let (stop_words, frequent_words) = if meta.text_normalization == TextNormalization::OpenCcT2s1_1_9 {
-                let stop_words = stop_words.into_iter().map(|word| crate::opencc_t2s::convert(&word).into_owned()).collect();
-                let mut frequent_words: Vec<String> = frequent_words.into_iter().map(|word| crate::opencc_t2s::convert(&word).into_owned()).collect();
-                frequent_words.sort_unstable();
-                frequent_words.dedup();
-                (stop_words, frequent_words)
-            } else { (stop_words, frequent_words) };
-
-            let frequent_hashset: AHashSet<u64> = frequent_words
-                .iter()
-                .map(|x| hash64(x.as_bytes()))
-                .collect();
+            let (stop_words, frequent_words, frequent_hashset) = analysis_dictionaries(&meta);
 
             let mut index = Shard {
                 semaphore: Arc::new(Semaphore::new(1)),
@@ -2474,6 +2419,74 @@ pub(crate) fn hash32(term_bytes: &[u8]) -> u32 {
 #[inline]
 pub(crate) fn hash64(term_bytes: &[u8]) -> u64 {
     crate::term_hash::term_key(term_bytes)
+}
+
+/// Build the exact persisted analysis dictionaries for both native and legacy callers.
+pub(crate) fn analysis_dictionaries(
+    meta: &IndexMetaObject,
+) -> (AHashSet<String>, Vec<String>, AHashSet<u64>) {
+    let stop_words: AHashSet<String> = match &meta.stop_words {
+        StopwordType::None => AHashSet::new(),
+        StopwordType::English => FREQUENT_EN.lines().map(|x| x.to_string()).collect(),
+        StopwordType::German => FREQUENT_DE.lines().map(|x| x.to_string()).collect(),
+        StopwordType::French => FREQUENT_FR.lines().map(|x| x.to_string()).collect(),
+        StopwordType::Spanish => FREQUENT_ES.lines().map(|x| x.to_string()).collect(),
+        StopwordType::Custom { terms } => terms.iter().map(|x| x.to_string()).collect(),
+    };
+
+    let frequent_words: Vec<String> = match &meta.frequent_words {
+        FrequentwordType::None => Vec::new(),
+        FrequentwordType::English => {
+            let mut words: Vec<String> = FREQUENT_EN.lines().map(|x| x.to_string()).collect();
+            words.sort_unstable();
+            words
+        }
+        FrequentwordType::German => {
+            let mut words: Vec<String> = FREQUENT_DE.lines().map(|x| x.to_string()).collect();
+            words.sort_unstable();
+            words
+        }
+        FrequentwordType::French => {
+            let mut words: Vec<String> = FREQUENT_FR.lines().map(|x| x.to_string()).collect();
+            words.sort_unstable();
+            words
+        }
+        FrequentwordType::Spanish => {
+            let mut words: Vec<String> = FREQUENT_ES.lines().map(|x| x.to_string()).collect();
+            words.sort_unstable();
+            words
+        }
+        FrequentwordType::Custom { terms } => {
+            let mut words: Vec<String> = terms.iter().map(|x| x.to_string()).collect();
+            words.sort_unstable();
+            words
+        }
+    };
+
+    // Metadata remains as supplied; the analysis dictionaries use the same
+    // pinned normalization as document/query tokens, including after reopen.
+    let (stop_words, frequent_words) =
+        if meta.text_normalization == TextNormalization::OpenCcT2s1_1_9 {
+            let stop_words = stop_words
+                .into_iter()
+                .map(|word| crate::opencc_t2s::convert(&word).into_owned())
+                .collect();
+            let mut frequent_words: Vec<String> = frequent_words
+                .into_iter()
+                .map(|word| crate::opencc_t2s::convert(&word).into_owned())
+                .collect();
+            frequent_words.sort_unstable();
+            frequent_words.dedup();
+            (stop_words, frequent_words)
+        } else {
+            (stop_words, frequent_words)
+        };
+
+    let frequent_hashset: AHashSet<u64> = frequent_words
+        .iter()
+        .map(|x| hash64(x.as_bytes()))
+        .collect();
+    (stop_words, frequent_words, frequent_hashset)
 }
 
 static FREQUENT_EN: &str = include_str!("../assets/dictionaries/frequent_en.txt");

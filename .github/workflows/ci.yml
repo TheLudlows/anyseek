@@ -45,11 +45,26 @@ jobs:
           python3 - <<'PYCODE'
           import json
           with open('/tmp/anyseek-metadata.json') as source:
-              packages = json.load(source)['packages']
+              metadata = json.load(source)
+              packages = metadata['packages']
               names = {package['name'] for package in packages}
-          forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs', 'rkyv', 'tabled', 'colored', 'num-format', 'crossbeam-channel', 'ctrlc', 'half', 'lz4_flex', 'zstd', 'snowball_stemmers_rs', 'gxhash', 'zstd-safe', 'zstd-sys'}
+          forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs', 'rkyv', 'tabled', 'colored', 'num-format', 'ctrlc', 'half', 'zstd', 'snowball_stemmers_rs', 'gxhash', 'zstd-safe', 'zstd-sys'}
           assert not forbidden, f'retired dependencies remain: {forbidden}'
           core = next(package for package in packages if package['name'] == 'anyseek')
+          # Native Tantivy uses channels and LZ4 internally. Permit those only
+          # behind its dependency edge; do not restore old direct code paths.
+          native_only = {'crossbeam-channel', 'lz4_flex'}
+          assert not native_only & {d['name'] for d in core['dependencies']}
+          by_id = {p['id']: p for p in packages}
+          nodes = {n['id']: n for n in metadata['resolve']['nodes']}
+          seen, pending = set(), [core['id']]
+          while pending:
+              current = pending.pop()
+              if current in seen or by_id[current]['name'] == 'tantivy':
+                  continue
+              seen.add(current)
+              pending.extend(d['pkg'] for d in nodes[current]['deps'])
+          assert not native_only & {by_id[p]['name'] for p in seen}, 'native-only dependency escaped Tantivy'
           assert not any(dependency['name'] == 'aho-corasick' for dependency in core['dependencies']), 'direct highlighter dependency remains'
           # The tokenizer retains regex-syntax; optional API dependencies are checked separately.
           print('PASS no direct highlighter dependency')

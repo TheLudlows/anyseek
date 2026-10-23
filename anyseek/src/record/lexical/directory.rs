@@ -176,7 +176,9 @@ impl Directory for BudgetDirectory {
         self.inner.sync_directory()
     }
     fn acquire_lock(&self, lock: &Lock) -> Result<DirectoryLock, LockError> {
-        self.budget.charge(&lock.filepath, 0).map_err(LockError::wrap_io_error)?;
+        self.budget
+            .charge(&lock.filepath, 0)
+            .map_err(LockError::wrap_io_error)?;
         let _io = self.budget.io().map_err(LockError::wrap_io_error)?;
         self.inner.acquire_lock(lock)
     }
