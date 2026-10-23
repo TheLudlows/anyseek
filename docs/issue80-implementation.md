@@ -1,6 +1,6 @@
 # Issue #80 实施记录
 
-本分支是进行中的实现，**不是完成声明**。Record 生产全文已使用 Tantivy；旧公开全文入口和执行/格式模块已删除，向量/metadata已独立。外部集成测试迁移后的全目标编译已恢复通过。阶段12新二进制的完整HTTP（默认15秒）和S3 storage fixture均通过；阶段13预算/生命周期补强后的最终矩阵正在重跑，Windows仍未运行。历史阶段按时间保留，不代表最新验收状态。
+本分支的实现与本轮 Linux 本地验收已完成，**issue 尚不能标为全部完成**：Windows CI、真实 S3、系统/硬断电尚未验收，分支未发布。Record 生产全文使用 Tantivy，旧低层全文 API/执行器已删除；最终代码 `3f09fe76fb7b9fd1eb17ae3381facf66a27bf234` 的结果见 [最终本地验收](#phase-19-final-local-acceptance)。下方历史阶段保留过程和纠错记录，不代表当前待办。
 
 ## 可复核基线
 
@@ -566,3 +566,84 @@ indexer command omitted --faults and failed before exercising the product;
 corrected indexer/authorization commands both passed. S3 and doctests were not
 started for that version. Final corrected-version validation must be collected
 separately, without substituting those historical results.
+
+## Phase 19: final local acceptance
+
+Production and test code: `3f09fe76fb7b9fd1eb17ae3381facf66a27bf234`.
+The subsequent acceptance-record commit changes Markdown only; it does not change
+that tested code or binary. Baseline remains master
+`3893cd54f0d8d47b6b9e35fa3cce34e579117764`; branch
+`issue-80/tantivy-new-format`, independent workspace only.
+
+Every phase-18 process exited 0. The serial runner finished with stage `complete`;
+there is no outstanding test process. Structured evidence is in
+`/tmp/anyseek80-phase18-results.json`, and each command has its own
+`/tmp/anyseek80-phase18-<name>.log`.
+
+| Final verification | Result |
+| --- | --- |
+| `cargo test -p anyseek --all-targets --features server,fault-injection --no-fail-fast` | 34 binaries, 338 passed, 0 failed, 13 ignored; exit 0; 3443.81 s |
+| No-default library | 197 passed, 0 failed, 10 ignored; exit 0 |
+| Default / no-default doctests | 9 passed each, 0 failed; both exit 0 |
+| Original 3000-record frequent-write fixture | Passed, unchanged scale; 133.53 s |
+| Large lexical corpus with both length policies | All 4 passed; 2250.63 s; no reduced fixtures |
+| Full HTTP fault matrix | Exit 0, 314.62 s; default local readiness remains 15 s |
+| Indexer / authorization HTTP | Both exit 0 with fault injection explicitly enabled |
+| S3 storage fixture | Exit 0, 139.285 s; checkpoint retention, backup, takeover and fault boundaries |
+| S3 cold-cache semantics | All 7 groups exit 0: base 427.787 s, locator 7.057 s, graph 11.746 s, temporal 7.701 s, upload 76.325 s, lease 28.964 s, feed 11.135 s |
+| S3 object contract fixture | 1 test passed, exit 0; real endpoint not exercised |
+| Isolated core consumer | Default and no-default dependency graph/build passed; exit 0; phase19-core-boundary.log |
+| Markdown/branding and diff whitespace | 20 Markdown files / 104 surfaces passed; baseline diff check passed |
+
+All service acceptance uses `/tmp/anyseek80-phase18-server`, SHA-256
+`f43acdcd2ff2fdeff1bf3653dd67ad8b83f6752ad510b38c1afbb823382e6c51`.
+The storage, semantic and contract reports all record this same hash,
+`backend=fixture`, `real_endpoint_exercised=false`, and
+`all_requested_checks_passed=true`. Reports:
+`/tmp/anyseek80-phase18-s3-{storage,semantic,contract}.json`.
+Earlier phase-13/16 results are historical and are not used to certify this head.
+
+The 13 ignored all-targets entries comprise 11 subprocess helpers exercised by
+their parent tests, the S3 contract explicitly run by the fixture suite, and the
+manual opposite-AES fixture. That manual cross-AES run has not been performed.
+Warnings remain. Whole-workspace `cargo fmt --all -- --check` exits 1 on this
+final code (`/tmp/anyseek80-phase19-format.log`), as it did on the isolated original
+master baseline. It is not presented as passed and is not a current CI gate;
+no unrelated repository-wide format rewrite was made.
+
+### Issue checklist evidence and remaining boundary
+
+| Issue #80 item | Local implementation and evidence |
+| --- | --- |
+| Version/schema/query/scoring contract | Tantivy 0.27.0 locked; supported analyzer, BM25F/Proximity, N-gram, phrase, field and empty-query contracts covered by native and external literal-oracle tests |
+| New layout/identity/manifest/publication | Native immutable package plus independent vector/metadata component, exact identity/revision mapping, certified outer publication and fixed Searcher tests |
+| Semantic prototype | Shared active N/DF/lengths and pre-Top-K visibility/filter selection validated before production cutover; final native corpus/fixed-cut tests pass |
+| Production replacement | Public Record write/query/checkpoint/reopen path uses native postings; vector component rejects lexical execution; no old full-text engine fallback |
+| Local and SQLite/S3 lifecycle | New-package certification, response-loss retry, cache-loss recovery, backup/takeover and pin/GC tests plus final storage/semantic fixtures pass |
+| Budgets and owned tasks | Writer/directory/build/read/output admission, cancellation, detached worker pins, held Searcher release and whole-generation rotation regressions pass |
+| Remove replaced code | Old full-text build/postings/docstore/executors/public entry points and unused direct dependencies deleted; no migration, dual write or runtime engine switch |
+| Query/business matrix | Final all-targets covers Chinese/normalization, fields, phrase, empty query, updates/deletes, generation, source/stale, TTL, enrichment, counts, stable ties and candidate limits |
+| Failure/output matrix | Final core, HTTP and S3 fixtures cover process exits, unknown/pending outcomes, original operation retry, cold cache, new-format backup recovery, revoke and unconsumed output |
+| Platforms/cost/docs | Linux local suite passed; current Windows CI not run. Cost and API/storage/feature docs updated. Issue remains open pending external acceptance |
+
+Record default candidate windows are global `offset + length` per channel;
+explicit caps are also global. The original layout-invariance assertion passes
+unchanged, as do independent one/three-component RRF and same-window pagination
+oracles. All channels use the same cut/evaluation time and one global fusion.
+A bounded candidate window is not exact whole-corpus fused recall;
+`relation_complete` covers adjacency traversal only. See the phase-18 correction
+for the explicitly recorded earlier low-level-versus-Record contract mistake.
+
+A final debug lexical-process sample at 2026-10-23T19:29:19Z recorded RSS 503048 KiB,
+peak 503360 KiB, 10 threads and 27 file descriptors; this includes test/allocator
+state across corpus configurations and is not a benchmark or an RSS limit.
+Evidence: `/tmp/anyseek80-phase18-resource-sample.json`. Per-write native commit/
+reload, bounded tail rotation, package hashing/materialization and active-posting
+statistics scans incur maintenance cost. Logical reservations do not cap total
+RSS, and the full Record State/receipt ledger remains resident. No speed or memory
+improvement is claimed and no broad performance campaign was resumed.
+
+Not run: current-branch native Windows CI, real S3 endpoint/bucket, system/filesystem
+crash or hard power loss, and manual opposite-AES fixture. Process exits and the
+S3 fixture do not substitute for those checks. Publication authorization is still
+pending: no push, PR creation, merge or issue closure has been performed.
