@@ -614,6 +614,10 @@ def main():
             if args.faults:lease_exercise(call,restart_with,root.parent,True,only_faults=True)
             from record_feed_smoke import exercise as feed_exercise
             feed_exercise(call,restart_with,root.parent,args.faults)
+        except Exception:
+            log.flush();log.seek(0)
+            print('SERVER LOG AT FAILURE:\n'+log.read()[-16384:],flush=True)
+            raise
         finally:
             if process and process.poll() is None:process.kill();process.wait(timeout=20)
             log.close()

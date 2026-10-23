@@ -101,10 +101,9 @@ async fn delete_out_of_range_ignored() {
     
 }
 
-/// clear_index reuses the docid namespace: a stale pre-clear docid addresses
-/// whatever new document reuses that number (documents id-reuse semantics).
+/// Deleted identities retain versions; stale requests cannot target later inserts.
 #[tokio::test]
-async fn delete_reused_docid_after_clear() {
+async fn stale_identity_after_clear_cannot_delete_new_records() {
     let index = fresh("tests/index_delete_clear/").await;
     records::insert(&index, vec![doc("hello world"), doc("foo bar")])
         .await.unwrap();
@@ -112,9 +111,25 @@ async fn delete_reused_docid_after_clear() {
     records::clear(&index).await;
     records::insert(&index, vec![doc("alphaone"), doc("betaone")])
         .await.unwrap();
-    records::delete(&index, vec![0]).await;
+    use anyseek::record::{ExpectedVersion, OperationId, RecordWrite};
+    let stale=RecordWrite {
+        operation_id:OperationId::new("stale-version".into()),record_id:"00000000000000000000".into(),
+        routing_key:"fixture".into(),expected:ExpectedVersion::Match(1),document:None,
+        vector_patch:None,generation:None,temporal:None,system:None,
+    };
+    assert!(matches!(index.write(stale.clone()).await,Err(anyseek::record::RecordError::Conflict(_))));
+    // Absent describes logical absence, including a tombstone. It does not reset
+    // the retained version or target another identity created after the clear.
+    let absent=RecordWrite {operation_id:OperationId::new("absent-tombstone".into()),expected:ExpectedVersion::Absent,..stale.clone()};
+    assert_eq!(index.write(absent).await.unwrap().version,3);
+    assert!(matches!(index.write(stale).await,Err(anyseek::record::RecordError::Conflict(_))));
+    assert!(index.get("00000000000000000000").await.unwrap().is_none());
+    assert_eq!(index.get("00000000000000000002").await.unwrap().unwrap().version,1);
+    assert_eq!(count(&index, "alphaone", false).await,1);
+    records::delete(&index, vec![2]).await;
     index.compact_journal().await.unwrap();
-    assert_eq!(count(&index, "alphaone", false).await, 0);
-    assert_eq!(count(&index, "betaone", false).await, 1);
-    
+    assert_eq!(count(&index, "alphaone", false).await,0);
+    assert_eq!(count(&index, "betaone", false).await,1);
+    assert_eq!(index.statistics().await.unwrap().retained_identities,4);
+
 }

@@ -267,3 +267,21 @@ component.json在读取前通过metadata限制64MiB，并在读取/解析前预�
 构建曾因32GiB盘耗尽失败。只清理本独立工作区target/debug/incremental（约11GiB）和本次已生成替代版本的56个旧可执行缓存（约15.7GiB），保留日志/检查点及当前测试二进制。清理清单 `/tmp/anyseek80-phase10-cache-cleanup.txt`；没有触碰旧任务工作区或部署数据。
 
 HTTP尚未用本轮二进制复现。阅读lease清理路径确认publish_anchor_state在healthy时失败可留下pending并被吞掉，需要下一轮记录具体错误、复现全套状态交互；这只是诊断线索，未确认根因，未放宽断言。先前15秒恢复超时也未闭环。下一步收取全量运行并修复真实失败，检查剩余测试旧状态预期，再完成生命周期审计、doctests/no-default及新服务二进制默认15秒完整HTTP和S3矩阵。Windows、真实S3、系统断电未运行；不发布、推送、合入或关闭issue。
+
+## 第十一阶段检查点：HTTP额度根因与空尾部writer修复
+
+先收取并保留第十阶段全量运行。核心229/0/12 ignored、服务15/0保持有效；密集删除两项通过（922.09秒）、配置统计1/0、删除计数2/0、外部向量3/0、规范Payload读取2/0、混合stored/nonstored邻接读取1/0。旧clear测试1失败已证明是迁移预期错误：Record不会把新插入的稳定ID复用为旧ordinal。新版直接验证Match(1)对已删除版本冲突，新ID记录仍存在；Absent按原mutation契约表示逻辑不存在，包括墓碑，允许操作但保留递增版本（返回3），不会重置身份。随后精确删除新ID，验证其余记录及4个保留身份。新版4项删除专项通过，不修改生产身份/版本语义。
+
+另有真实失败不能忽略：frequent_topk_consistency在第2299次写入返回DurablePending(2299)，耗时559.34秒。该失败发生于写入，尚未到Top-K断言；根因未查清，可能涉及原生文件/累计写入预算，但目前只是待证实线索，不能缩小夹具或修改期望掩盖。旧全量进程继续执行lexical_correctness，尚无总结果。
+
+HTTP完整故障套件用新组件二进制两次复现lease after_append_unknown：恢复version=2、staged_members=0正确，但private_cleanup_pending=true。新增healthy publication失败的warn日志和测试失败时服务日志尾部输出。第一次日志被执行环境继承的RUST_LOG error过滤；显式RUST_LOG=anyseek=warn,anyseek_server=warn重跑后，得到Storage("resource budget exhausted")，不是业务事件丢失或启动超时。
+
+增加无正文/无subject身份内容的Governor拒绝额度日志，进一步复现得到精确原因：Background已用786,913,140字节，再请求20,000,000字节，超过默认805,306,368字节全局上限。所有测试保持默认15秒启动期限和原断言，没有扩大生产额度。诊断日志 `/tmp/anyseek80-phase11-http-budget.log`；此前诊断二进制SHA记录在 `/tmp/anyseek80-phase11-budget-server.sha256`。
+
+最小核心复现：同一默认Governor创建39个空collection，保留owner，仅向其中一个写入一条记录，再checkpoint；修复前0 passed / 1 failed，checkpoint返回相同Storage资源拒绝（0.53秒）。旧Runtime在空尾部也提前启动并保留20MB writer额度。修复为首次实际append之前接纳并创建writer，空尾部flush仍发布空manifest/固定Searcher，immutable组件仍禁止append。writer额度保存在Directory共享owner中，原生线程持有的clone在取消/错误/Runtime释放时继续保有额度，Runtime析构仍join原生worker；不是去掉或扩大额度。最小复现现在通过，原生专项29/0（22.98秒）。它解释并修复已确认的空尾部资源浪费；完整HTTP仍在修复后二进制重跑，不能仅据此宣称HTTP全部通过。
+
+资源审计另外修正冻结包重开绕过Directory的问题：Runtime不再直接Index::open_in_dir，认证选择后的Directory检查文件/总字节边界，保留JSON元数据解析空间额度，并计费I/O；拒绝写入、删除和writer锁，允许读者meta锁。新增不可变读包/超限边界测试。component描述符读取增加I/O接纳；超64MiB稀疏描述符读取前拒绝测试1/0，未修改文件或生成组件。保留既有固定Searcher/pin、活动统计及输出屏障。
+
+本阶段源代码无默认feature核心完整192 passed / 0 failed / 10 ignored（79.67秒），doctests 9 passed（1.96秒），新版身份删除4/0；日志 `/tmp/anyseek80-phase11-nodefault-all.log`、`/tmp/anyseek80-phase11-doctests.log`、`/tmp/anyseek80-phase11-stable-delete.log`。这些对应本阶段lazy writer与只读Directory改动。默认全量仍是第十阶段二进制，不能混用为本阶段全量证据。
+
+检查点时两个运行队列须继续收取而非重启：原session96805/cargo203821（当前lexical_correctness PID321399），日志 `/tmp/anyseek80-phase10-all-tests.log`；修复后完整HTTP session48349，日志 `/tmp/anyseek80-phase11-http-fixed.log`，SHA `/tmp/anyseek80-phase11-fixed-server.sha256`。先前单次15秒就绪超时仍缺直接根因证据；本阶段复现的失败是资源清理拒绝，不将二者混称。S3最终新二进制矩阵、默认最终回归、完整预算/生命周期审计仍待完成；Windows、真实S3、系统断电未运行。未推送、发布、合入或关闭issue。

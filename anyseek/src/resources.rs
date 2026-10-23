@@ -55,7 +55,7 @@ impl Limits {
         Self { slots, subject_slots, bytes, subject_bytes, io, subject_io }
     }
 }
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 struct Usage { slots: usize, bytes: u64, io: usize }
 impl Usage {
     fn add(self, n: Self, cap: Limits, subject: bool) -> Option<Self> {
@@ -115,9 +115,14 @@ impl Governor {
     fn reserve(self: &Arc<Self>, subject: &str, lane: Lane, amount: Usage) -> Result<Lease, Busy> {
         let mut ledger = self.ledger.lock().map_err(|_| Busy)?;
         let i = lane.index();
-        if subject.len() > 272 || (!ledger.subjects.contains_key(subject) && ledger.subjects.len() >= 128) { return Err(Busy); }
-        let total = ledger.total[i].add(amount, self.limits[i], false).ok_or(Busy)?;
-        let local = ledger.subjects.get(subject).map(|u| u[i]).unwrap_or_default().add(amount, self.limits[i], true).ok_or(Busy)?;
+        if subject.len() > 272 || (!ledger.subjects.contains_key(subject) && ledger.subjects.len() >= 128) { log::warn!("resource subject admission exhausted: retained_subjects={}",ledger.subjects.len());return Err(Busy); }
+        let total = ledger.total[i].add(amount, self.limits[i], false).ok_or_else(|| {
+            log::warn!("resource global admission exhausted: lane={lane:?} used={:?} requested={amount:?} limits={:?}",ledger.total[i],self.limits[i]);Busy
+        })?;
+        let used=ledger.subjects.get(subject).map(|u|u[i]).unwrap_or_default();
+        let local = used.add(amount, self.limits[i], true).ok_or_else(|| {
+            log::warn!("resource collection admission exhausted: lane={lane:?} used={used:?} requested={amount:?} limits={:?}",self.limits[i]);Busy
+        })?;
         ledger.total[i] = total;
         ledger.subjects.entry(subject.into()).or_default()[i] = local;
         Ok(Lease { governor: self.clone(), subject: subject.into(), lane, amount })

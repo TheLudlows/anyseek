@@ -171,6 +171,8 @@ pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&Vec<Sch
     assemble(path,meta,schema,None)
 }
 pub(crate) async fn open_index(path:&Path)->Result<IndexArc,String>{
+    let io=crate::resources::Scope::current().map(|scope|scope.io())
+        .transpose().map_err(|e|e.to_string())?;
     let file=fs::File::open(path.join(DESCRIPTOR)).map_err(|e|e.to_string())?;
     let length=file.metadata().map_err(|e|e.to_string())?.len();
     if length>64*1024*1024 {return Err("component descriptor budget exceeded".into());}
@@ -181,6 +183,7 @@ pub(crate) async fn open_index(path:&Path)->Result<IndexArc,String>{
     let mut bytes=Vec::with_capacity(length as usize);
     file.take(length+1).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
     if bytes.len() as u64 != length {return Err("component descriptor changed while opening".into());}
+    drop(io);
     let saved:Descriptor=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
     if saved.format!=FORMAT {return Err("unsupported vector/metadata component format".into());}
     assemble(path,saved.meta.clone(),&saved.schema.clone(),Some(saved))
@@ -433,5 +436,20 @@ impl Commit for IndexArc {
         let root=self.read().await;
         for shard in &root.shard_vec {shard.write().await.commit_component().await?;}
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    #[tokio::test]
+    async fn oversized_descriptor_rejected_before_reading_or_parsing() {
+        let root=tempfile::tempdir().unwrap();
+        let path=root.path().join(super::DESCRIPTOR);
+        let file=std::fs::File::create(&path).unwrap();
+        file.set_len(64*1024*1024+1).unwrap();drop(file);
+        let error=match super::open_index(root.path()).await {Ok(_)=>panic!("oversized descriptor accepted"),Err(error)=>error};
+        assert_eq!(error,"component descriptor budget exceeded");
+        assert_eq!(std::fs::metadata(path).unwrap().len(),64*1024*1024+1);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(),1);
     }
 }

@@ -67,21 +67,8 @@ impl Runtime {
             .and_then(|n| n.checked_add(32 * 1024 * 1024))
             .ok_or_else(|| storage("native disk budget overflow"))?;
         let directory =
-            super::directory::BudgetDirectory::persistent(path, limit, 65536, WRITER_BYTES as u64)?;
+            super::directory::BudgetDirectory::persistent(path, limit, 65536, 0)?;
         let index = Index::create(directory.clone(), schema, Default::default()).map_err(storage)?;
-        let writer = index
-            .writer_with_options(
-                tantivy::indexer::IndexWriterOptions::builder()
-                    .num_worker_threads(1)
-                    .num_merge_threads(1)
-                    .memory_budget_per_thread(WRITER_BYTES)
-                    .build(),
-            )
-            .map_err(storage)?;
-        // Record compaction owns the bounded rebuild. Disable autonomous native
-        // merges: their private allocations cannot be admitted through our owned
-        // build budget. Tail segments are retired with their authenticated package.
-        writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -94,7 +81,7 @@ impl Runtime {
             data: Mutex::new(Data {
                 index,
                 reader,
-                writer: Some(writer),
+                writer: None,
                 identities: Vec::new(),
                 identity_charge: Charge::new(0)?,
                 snapshot: None,
@@ -127,7 +114,10 @@ impl Runtime {
         {
             return Err(storage("native Record configuration/format mismatch"));
         }
-        let index = Index::open_in_dir(path).map_err(storage)?;
+        let limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
+            .ok_or_else(||storage("native selected byte budget overflow"))?;
+        let directory=super::directory::BudgetDirectory::open_selected(path,limit)?;
+        let index = Index::open(directory).map_err(storage)?;
         let reader: IndexReader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -184,6 +174,17 @@ impl Runtime {
             fields.push(analyzer.field(&text).await);
         }
         let mut data = self.data.lock().await;
+        if data.writer.is_none() {
+            let directory=self.directory.as_ref().ok_or_else(||storage("immutable lexical package"))?;
+            directory.admit_writer(WRITER_BYTES as u64)?;
+            let writer=data.index.writer_with_options(
+                tantivy::indexer::IndexWriterOptions::builder().num_worker_threads(1)
+                    .num_merge_threads(1).memory_budget_per_thread(WRITER_BYTES).build()
+            ).map_err(storage)?;
+            // Record's owned compaction controls merge allocation and publication.
+            writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+            data.writer=Some(writer);
+        }
         data.identity_charge.grow(256 + identity.id.len() as u64)?;
         let mut doc = TantivyDocument::new();
         let native_schema = data.index.schema();
@@ -221,11 +222,10 @@ impl Runtime {
         Ok(())
     }
     fn flush_locked(&self, data: &mut Data) -> Result<(), RecordError> {
-        data.writer
-            .as_mut()
-            .ok_or_else(|| storage("immutable lexical package"))?
-            .commit()
-            .map_err(storage)?;
+        if self.directory.is_none() {return Err(storage("immutable lexical package"));}
+        if let Some(writer)=data.writer.as_mut() {
+            writer.commit().map_err(storage)?;
+        }
         data.reader.reload().map_err(storage)?;
         // Manifest cloning and serialization coexist with the retained identities.
         let temporary_bytes = data.identities.iter().try_fold(65536u64, |n, id| {
@@ -346,6 +346,26 @@ mod tests {
     use crate::record::tests::{config, query, write};
     use crate::record::{ExpectedVersion, RecordPartition};
     use crate::search::{QueryType, ResultType, Search, SearchMode};
+    #[tokio::test]
+    async fn idle_collections_leave_native_publication_headroom() {
+        let root=tempfile::tempdir().unwrap();
+        let governor=Arc::new(crate::resources::Governor::default());
+        let mut owners=Vec::new();
+        let mut settings=config();settings.index.inference=crate::vector::Inference::None;
+        settings.embedding_space_id=None;settings.schema.retain(|f|f.index_lexical);
+        for i in 0..39 {
+            let scope=governor.admit(format!("collection-{i}"),crate::resources::Lane::Foreground,0).unwrap();
+            let partition=scope.run(RecordPartition::create(&root.path().join(i.to_string()),settings.clone())).await.unwrap();
+            owners.push(partition);
+        }
+        let scope=governor.admit("collection-0".into(),crate::resources::Lane::Foreground,0).unwrap();
+        scope.run(async {
+            owners[0].write(write("first","r","alpha",ExpectedVersion::Absent)).await.unwrap();
+            owners[0].compact_journal().await.unwrap();
+            assert_eq!(owners[0].search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().hits.len(),1);
+        }).await;
+    }
+
     #[tokio::test]
     async fn record_native_write_query_checkpoint_reopen_has_no_legacy_lexical_postings() {
         let root = super::super::tests::Temp::new();

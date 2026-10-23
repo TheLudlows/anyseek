@@ -26,7 +26,12 @@ struct Ledger {
     written: u64,
     paths: BTreeSet<PathBuf>,
 }
+struct WriterReservation {
+    _memory: crate::storage::build_budget::MemoryLease,
+    _buffer: Option<resources::Lease>,
+}
 struct Budget {
+    writer_memory: Mutex<Option<WriterReservation>>,
     ledger: Mutex<Ledger>,
     bytes: u64,
     files: usize,
@@ -74,6 +79,7 @@ impl Budget {
 #[derive(Clone)]
 pub(super) struct BudgetDirectory {
     inner: MmapDirectory,
+    selected: bool,
     budget: Arc<Budget>,
 }
 impl fmt::Debug for BudgetDirectory {
@@ -110,6 +116,44 @@ impl BudgetDirectory {
             resources::Scope::current().map(|scope| scope.retained_io()),
         )
     }
+    /// Admit before the first worker starts. Directory clones retain the charge
+    /// through worker shutdown, including failure/cancellation of its caller.
+    pub(super) fn admit_writer(&self, bytes:u64)->Result<(),RecordError> {
+        if self.selected {return Err(storage("immutable native package"));}
+        let mut reservation=self.budget.writer_memory.lock().map_err(|_|storage("native writer reservation poisoned"))?;
+        if reservation.is_none() {
+            let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
+            let buffer=self.budget.scope.as_ref().map(|s|s.bytes(bytes)).transpose().map_err(storage)?;
+            *reservation=Some(WriterReservation {_memory:memory,_buffer:buffer});
+        }
+        Ok(())
+    }
+    /// The caller has authenticated the complete immutable package closure.
+    /// Keep reader metadata admission and I/O ownership with Directory clones.
+    pub(super) fn open_selected(path: &Path, limit: u64) -> Result<Self, RecordError> {
+        let scope = resources::Scope::current().map(|scope| scope.retained_io());
+        let gate=NATIVE_IO.lock().map_err(|_|storage("native I/O gate poisoned"))?;
+        let io = scope.as_ref().map(|s|s.io()).transpose().map_err(storage)?;
+        let mut total=0u64;let mut metadata=65536u64;let mut count=0usize;
+        for entry in std::fs::read_dir(path).map_err(storage)? {
+            let entry=entry.map_err(storage)?;let kind=entry.file_type().map_err(storage)?;
+            if !kind.is_file() {return Err(storage("native selected package contains a non-file"));}
+            count+=1;if count>65536 {return Err(storage("native selected file budget exceeded"));}
+            let length=entry.metadata().map_err(storage)?.len();
+            total=total.checked_add(length).filter(|n|*n<=limit).ok_or_else(||storage("native selected byte budget exceeded"))?;
+            if entry.path().extension().is_some_and(|s|s=="json") {
+                metadata=length.checked_mul(8).and_then(|n|metadata.checked_add(n)).ok_or_else(||storage("native selected metadata overflow"))?;
+            }
+        }
+        let memory=crate::storage::build_budget::reserve_memory(metadata).map_err(storage)?;
+        let buffer=scope.as_ref().map(|s|s.bytes(metadata)).transpose().map_err(storage)?;
+        let inner=MmapDirectory::open(path).map_err(storage)?;
+        drop(io);drop(gate);
+        Ok(Self {inner,selected:true,budget:Arc::new(Budget {
+            writer_memory:Mutex::new(None),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
+            _memory:memory,_buffer:buffer,
+        })})
+    }
     fn with_scope(
         path: &Path,
         bytes: u64,
@@ -128,7 +172,9 @@ impl BudgetDirectory {
             .map_err(storage)?;
         Ok(Self {
             inner: MmapDirectory::open(path).map_err(storage)?,
+            selected: false,
             budget: Arc::new(Budget {
+                writer_memory:Mutex::new(None),
                 ledger: Mutex::new(Ledger {
                     written: 0,
                     paths: BTreeSet::new(),
@@ -173,12 +219,16 @@ impl Directory for BudgetDirectory {
         self.inner.get_file_handle(path)
     }
     fn delete(&self, path: &Path) -> Result<(), DeleteError> {
+        if self.selected {return Err(DeleteError::IoError {io_error:Arc::new(io::Error::other("immutable native package")),filepath:path.to_owned()});}
+        let _io=self.budget.io().map_err(|error|DeleteError::IoError {io_error:Arc::new(error),filepath:path.to_owned()})?;
         self.inner.delete(path)
     }
     fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
+        let _io=self.budget.io().map_err(|e|OpenReadError::wrap_io_error(e,path.to_owned()))?;
         self.inner.exists(path)
     }
     fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
+        if self.selected {return Err(OpenWriteError::wrap_io_error(io::Error::other("immutable native package"),path.to_owned()));}
         self.budget
             .charge(path, 0)
             .map_err(|e| OpenWriteError::wrap_io_error(e, path.to_owned()))?;
@@ -202,6 +252,7 @@ impl Directory for BudgetDirectory {
         self.inner.atomic_read(path)
     }
     fn atomic_write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        if self.selected {return Err(io::Error::other("immutable native package"));}
         self.budget.charge(path, bytes.len() as u64)?;
         let _io = self.budget.io()?;
         self.inner.atomic_write(path, bytes)
@@ -211,6 +262,9 @@ impl Directory for BudgetDirectory {
         self.inner.sync_directory()
     }
     fn acquire_lock(&self, lock: &Lock) -> Result<DirectoryLock, LockError> {
+        if self.selected && lock.filepath != tantivy::directory::META_LOCK.filepath {
+            return Err(LockError::wrap_io_error(io::Error::other("immutable native package")));
+        }
         self.budget
             .charge(&lock.filepath, 0)
             .map_err(LockError::wrap_io_error)?;
@@ -226,6 +280,20 @@ impl Directory for BudgetDirectory {
 mod tests {
     use super::*;
     use crate::record::lexical::tests::Temp;
+
+    #[test]
+    fn selected_package_admits_reads_but_rejects_mutation() {
+        let root=Temp::new();std::fs::create_dir(&root.0).unwrap();
+        std::fs::write(root.0.join("a"),b"payload").unwrap();
+        assert!(BudgetDirectory::open_selected(&root.0,6).is_err());
+        let selected=BudgetDirectory::open_selected(&root.0,7).unwrap();
+        assert_eq!(selected.atomic_read(Path::new("a")).unwrap(),b"payload");
+        assert!(selected.atomic_write(Path::new("a"),b"changed").is_err());
+        assert!(selected.open_write(Path::new("b")).is_err());
+        assert!(selected.delete(Path::new("a")).is_err());
+        assert!(selected.acquire_lock(&tantivy::directory::INDEX_WRITER_LOCK).is_err());
+        assert_eq!(std::fs::read(root.0.join("a")).unwrap(),b"payload");
+    }
 
     #[tokio::test]
     async fn native_workers_serialize_single_subject_io_capacity() {
