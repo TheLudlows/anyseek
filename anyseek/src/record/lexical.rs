@@ -405,6 +405,7 @@ impl Candidate {
             lengths,
             _memory: memory,
             _buffer: buffer,
+            _pin: None,
         })
     }
 }
@@ -422,6 +423,7 @@ pub(super) struct Snapshot {
     // Declared after native handles so the charge outlives their destruction.
     _memory: crate::storage::build_budget::MemoryLease,
     _buffer: Option<crate::resources::Lease>,
+    _pin: Option<Arc<super::package_pins::Pin>>,
 }
 
 pub(super) struct ActiveView<'a> {

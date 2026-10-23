@@ -275,11 +275,14 @@ impl Inner {
             else if let Some(id)=name.strip_prefix("cache-") {valid(id)&&!caches.iter().any(|p|p==&entry.path())}
             else{false};
             if !remove{continue;}
+            package_pins::retire_if_unpinned(&entry.path(), || {
             let kind=entry.file_type().map_err(storage)?;
             if kind.is_symlink(){return Err(storage("retirement symlink rejected"));}
             if kind.is_dir(){std::fs::remove_dir_all(entry.path()).map_err(storage)?;}
             else if kind.is_file(){std::fs::remove_file(entry.path()).map_err(storage)?;}
             else{return Err(storage("retirement special file rejected"));}
+                Ok(())
+            })?;
         }
         Ok(())
     }

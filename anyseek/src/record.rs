@@ -43,6 +43,7 @@ pub use indexer::IndexJob;
 mod segment_state;
 mod segment;
 mod anchor;
+mod package_pins;
 #[cfg(feature="s3-object-store")]
 mod remote_checkpoint;
 pub(crate) mod build_budget;

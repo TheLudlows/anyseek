@@ -161,3 +161,19 @@ git diff --check
 正式切换前仍需把 native blocking worker 纳入已有 `Inner.background` 构建 pin/partition owner 生命周期，把 Snapshot 路径纳入 view 的 GC 保留集；当前独立组件只保证自身资源与私有目录所有权，尚不代表完整业务锁和 GC pin 已接上。还需覆盖无词法字段 schema 和单索引字段 boost 的旧规则，不能把当前限定矩阵当完整配置验收。
 
 第四阶段最终全目标运行已完成核心234 passed/0 failed/12 ignored（144.45秒）、server15 passed/0 failed（1.97秒）；保存检查点时集成测试仍在运行，日志 `/tmp/anyseek80-phase4-all-targets-final.log`、session68318。若后续报告补充完整总数，应以该进程退出和日志汇总为准。
+
+## 第五阶段：生产回收与原生 owner/pin 接通
+
+第四阶段最终 all-targets 已退出0：34个结果汇总335 passed / 0 failed / 13 ignored。此前有旧分页预期和重编译干扰的失败轮次保持记录，不用最终结果覆盖失败原因。
+
+本阶段的 `package_pins` 已被生产 `reclaim_anchor_objects` 调用。注册 pin 与完整删除操作由同一锁协调；不是先检查 pin 再无锁删除。按规范化父目录与直接子路径匹配，重复路径去重，引用计数溢出/锁中毒时拒绝回收。该注册表只保护本机文件生命周期，不能代替 SQLite 对象 manifest、备份 pin 或业务 authority。
+
+`NativePackage::prepare` 改为接收并持有 partition owner（`Arc<Mutex<Inner>>`），从 owner 获取根目录。后台 blocking worker 保留 owner、Scope 和资源额度至完成；调用方取消也不提前释放 journal 的 OS owner lock。构建前同时 pin 私有目录与最终不可变包名；成功返回的候选保留 pin，反序列化 descriptor 不自动取得 pin。加载时先 pin、再校验和打开，pin 随固定 Snapshot 释放。
+
+新增真实生产 GC 回归验证：未被 authority 选择的原生候选在构建句柄存在时不被回收；丢弃候选而保留 Snapshot 时仍不回收；最后一个 reader 释放后可以回收，随后重开失败。取消回归暂停真实 owned worker，取消请求并释放外层 RecordPartition 后尝试重开，确认 owner lock 仍阻止接管；释放 worker 后可恢复并清理未选包。3个包/生命周期专项全部通过（0.08秒）。
+
+仍未完成：Record authority 的正式构建/加载调用点未改选 NativePackage，生产检索仍是旧全文引擎。`Frozen::load` 返回 IndexArc，`RetrievalView` 的词法/向量/元数据仍共用旧 Shard；必须拆开这组接口后整体切换，不能插入双写或长期多引擎选择。新包在 SQLite/S3 的端到端发布/冷恢复、备份/GC 验收及旧实现清理仍待完成。
+
+第五阶段完整核心回归（server,fault-injection）236 passed / 0 failed / 12 ignored，143.24秒。随后把分析器/中文词典的创建移至资源预留之后，追加相关专项回归；此微调不改变发布/查询语义。日志位于 `/tmp/anyseek80-phase5-*.log`，保存副本位于 `target/issue80-phase5/`。
+
+预算顺序修正后的包专项最终结果：server/fault-injection 3 passed/0 failed，无默认feature 3 passed/0 failed，均0.08秒。该阶段测试均已退出，无待收取进程。

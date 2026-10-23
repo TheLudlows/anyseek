@@ -977,7 +977,11 @@ async fn field_or_matches_selected_field_before_and_after_commit() {
             );
             assert_eq!(result.count_total, 2);
             let scores: Vec<_> = result.hits.iter().map(|h| h.score).collect();
-            if committed { assert_eq!(scores, before.remove(0)); } else { before.push(scores); }
+            if committed {
+                assert_eq!(scores, before.remove(0));
+            } else {
+                before.push(scores);
+            }
         }
     }
 }
