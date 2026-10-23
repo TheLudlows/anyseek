@@ -11,8 +11,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Appended only AFTER directory publication completed successfully. The
-// existing three-witness WAL protocol makes this a crash-safe certificate.
+// Initial roots append this after directory publication. A background checkpoint
+// stages the certificate and complete concurrent suffix before publishing the
+// generation directory. The three-witness WAL authenticates all of these frames.
 const PUBLISHED: &[u8] = b"SPPARTITION-PUBLISHED-1";
 #[derive(Debug)]
 struct UncertifiedPartition;
@@ -386,6 +387,22 @@ impl PartitionJournal {
     pub(crate) fn append(&mut self, payload: &[u8]) -> io::Result<u64> {
         self.journal.append(payload)
     }
+    /// The new certificate and the complete concurrent suffix are staged together.
+    /// No generation containing a certificate but missing suffix can be selected.
+    pub(crate) fn checkpoint_with_tail(&mut self, payload: &[u8], tail: &[Vec<u8>]) -> Result<(), CreateError> {
+        Self::validate_initial(payload.len(), self.max_bytes)?;
+        self.clean_obsolete()?;
+        let next = self.generation.checked_add(1).ok_or_else(|| io::Error::other("generation exhausted"))?;
+        let mut frames: Vec<&[u8]> = vec![payload, PUBLISHED];
+        frames.extend(tail.iter().map(Vec::as_slice));
+        let candidate = Journal::create_initialized_frames(&generation_path(&self.path,next),self.max_bytes,&frames)?;
+        let previous = std::mem::replace(&mut self.journal,candidate);
+        self.generation = next;
+        drop(previous);
+        if let Err(error) = self.clean_obsolete() { log::warn!("checkpoint published; cleanup pending: {error}"); }
+        Ok(())
+    }
+
     pub(crate) fn checkpoint(&mut self, payload: &[u8]) -> Result<(), CreateError> {
         Self::validate_initial(payload.len(), self.max_bytes)?;
         // Before allocating another generation, reclaim leftovers from the

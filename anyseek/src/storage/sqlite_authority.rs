@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{path::{Path, PathBuf}, time::Duration};
 
+mod index_build;
+pub(crate) use index_build::IndexBuild;
+
 const SCHEMA_VERSION: i64 = 1;
 
 /// Immutable object identity; payload bytes are never stored in SQLite.
@@ -173,6 +176,12 @@ impl SqliteAuthority {
                  pin_kind TEXT NOT NULL CHECK(pin_kind IN ('reader','indexer','backup','staging')),
                  expires_at_ms INTEGER,
                  backup_id TEXT
+             );
+             CREATE TABLE IF NOT EXISTS index_builds (
+                 partition_id TEXT PRIMARY KEY,
+                 build_epoch INTEGER NOT NULL CHECK(build_epoch>0),
+                 binding_json TEXT NOT NULL,
+                 active INTEGER NOT NULL CHECK(active IN (0,1))
              );
              CREATE TABLE IF NOT EXISTS backup_exports (
                  backup_id TEXT PRIMARY KEY, snapshot BLOB NOT NULL

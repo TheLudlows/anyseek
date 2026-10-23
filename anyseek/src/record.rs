@@ -38,6 +38,8 @@ mod locator;
 pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
 mod publication;
+mod indexer;
+pub use indexer::IndexJob;
 mod segment_state;
 mod segment;
 mod anchor;
@@ -319,6 +321,7 @@ enum Entry {
     LeaseExpired(lease::Expiration),
 }
 struct Inner {
+    background: Option<indexer::Tail>,
     anchor:Option<anchor::Reference>,
     payloads:crate::storage::payload_pool::Closure,
     config: RecordConfig,
@@ -683,6 +686,11 @@ impl Inner {
             if self.remote.is_some() { return Err(RecordError::DurablePending(seq)); }
             let _ = seq;
             return Err(RecordError::OutcomeUnknown(error.to_string()));
+        }
+        if let Some(tail) = self.background.as_mut() {
+            // Existing WAL admission bounds these copies; admission also reserves
+            // the snapshot and full maximum tail before starting the worker.
+            tail.entries.push(bytes.to_vec());
         }
         Ok(())
     }
@@ -1075,6 +1083,7 @@ impl RecordPartition {
                 }
                 PartitionJournal::create(path,max_journal_bytes,&initial).map_err(creation_error)?
             };
+            remote.authority.lock().await.cancel_owner_index_builds(&remote.partition_id,remote.owner_epoch).map_err(storage)?;
             if let Some(anchor)=remote.materialize_checkpoint(path,max_journal_bytes).await? {
                 journal.checkpoint(&anchor).map_err(creation_error)?;
             }
@@ -1130,6 +1139,7 @@ impl RecordPartition {
         let owner=self.inner.clone();
         crate::INDEX_RUNTIME.spawn(async move {
             let mut inner=owner.lock().await;
+        if inner.background.is_some() { return Err(RecordError::Busy); }
             if !inner.healthy {return Err(RecordError::RecoveryRequired);}
             inner.remote.as_mut().ok_or_else(||RecordError::Rejected("not an S3 partition".into()))?
                 .collect_objects().await
@@ -1252,7 +1262,7 @@ impl RecordPartition {
         Ok(Self {
             output: output.clone(),
             inner: Arc::new(Mutex::new(Inner {
-                anchor:None,payloads:Default::default(),
+                background:None,anchor:None,payloads:Default::default(),
                 journal,
                 config,
                 state,
@@ -1350,7 +1360,7 @@ impl RecordPartition {
             revision: 0, fenced: state.sealed_for.is_some(),
         }));
         let mut inner=Inner {
-                anchor:selected,payloads,
+                background:None,anchor:selected,payloads,
                 journal,
                 config,
                 state,

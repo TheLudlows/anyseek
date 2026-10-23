@@ -33,6 +33,20 @@ SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本
 
 当前实现只在完整当前 cut 上推进检查点，不支持后台 indexer 与新写入并行发布的优化；这属于 C。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 feed floor 等状态。
 
+### 开发分支：有界后台 cut 发布（尚未验收）
+
+`RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在 catalog 授权锁内只启动任务，锁外等待，交付仍验证原授权许可，因此构建等待不阻断普通写入或撤权。
+
+当前进程最多两个构建，每 partition 一个，无额外等待队列；超额返回 Busy。期限由调用者指定，最大五分钟，HTTP 为三十秒。快照及最大 journal tail 使用既有共享内存准入，构建文件及并发 WAL 使用同一个磁盘 scope；这是保守估算，继续不承诺 RSS 硬上限。完整 State 仍驻内存。此批按固定 cut 全量构建，增量后台构建与自动调度后置。
+
+SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch、owner/cut/基础 manifest 与期限等发布绑定，完成后保留 epoch 防止 ABA，不复制 Record 或索引。登记与输入闭包 pin 同事务提交；输出对象分别登记并 pin。对象 I/O 使用同一 SQLite 文件的独立连接，避免跨网络持有前台 authority mutex；不会产生另一套 head。pin 不因时间经过自行解除，过期只禁止发布，清理必须精确绑定 epoch。取得独占 owner 锁后，重开会取消未完成任务及其 pin。
+
+候选在 partition 屏障外构建和认证；本地 owned worker 保护候选及输入文件，期间显式 GC 返回 Busy，同步维护不能替换基础。发布时在 guard 内重放有界新增 tail，对比完整逻辑状态，检查本地基础和期限；SQLite 再检查持久 build/owner epoch、基础 manifest/indexed seq 和期限。它只推进 manifest/indexed/log base 至固定 cut，保留后续 committed seq 和 WAL tip，不消费业务序号。
+
+本地证书与完整新增 suffix 在私有 generation 中一起同步，然后发布目录，避免证书可见但后续已确认写入未落入新 generation。S3 在 SQLite 发布后本地失败继续 fenced，冷启动从远端 manifest 加完整 tail 恢复。构建失败、过期或 panic 不能把旧 cut 当成当前视图；panic 关闭输出，必须重开恢复。物理回收在候选 mmap 释放和任务结束后执行。
+
+这些是开发分支协议，当前 Rust/HTTP 与 Linux/Windows 回归尚待验证，不替代已合入实现的证据。
+
 ## 2. 日志与 feed 保留
 
 完整 checkpoint 包含版本、删除、来源/generation、原始数据引用、操作回执、feed 状态和 staging 恢复状态，因此 `log_base_seq` 可推进至该 checkpoint cut。新 WAL 链从新 base 开始；旧链的不可变 predecessor 边不修改，仍被备份或其他 pin 保护时不能删除。
@@ -102,6 +116,6 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 - `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权、恢复与受控接管；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 缓存。
 - `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、十种接管路径、feed floor、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
 - `scripts/s3_acceptance.py`：统一执行上述存储矩阵、七组共享语义与不可变对象/共同备份合同；`--backend real` 只接受专用测试配置。命令及报告边界见[开发指南](development.md)。
-- [PR #74 CI](https://github.com/TheLudlows/anyseek/actions/runs/39814329888) 对最终 head `eb9431a3` 的五个任务全部通过，包含 Linux/Windows 原生持久化和 S3 语义/合同；合入源码为 `afbe323d`，与测试 head 的 Git tree 完全相同。最新主干 CI 独立核对。
+- [PR #74 CI](https://github.com/TheLudlows/anyseek/actions/runs/39814329888) 对最终 head `eb9431a3` 的五个任务全部通过，包含 Linux/Windows 原生持久化和 S3 语义/合同；合入源码为 `afbe323d`，与测试 head 的 Git tree 完全相同。主干 `a36e71e0` 的 [CI 五项也已通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455)；开发分支另行验收。
 
-HTTP fixture 不等于真实 S3 服务认证。本轮先交付合同工具与用例，实际 endpoint 尚未运行；最终修改的 PR 原生 Linux/Windows CI 已通过；最新主干 CI 与实际目标后端验收仍须核对。系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
+HTTP fixture 不等于真实 S3 服务认证。本轮先交付合同工具与用例，实际 endpoint 尚未运行；最终修改的 PR 原生 Linux/Windows CI 已通过；主干 `a36e71e0` CI 已核对；开发分支 CI 与实际目标后端验收仍待完成。系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。

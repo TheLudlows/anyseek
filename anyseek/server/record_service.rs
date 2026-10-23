@@ -1569,16 +1569,22 @@ async fn checkpoint(
 ) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
+    let current = p.clone();
     let (result, permit) = s
         .catalog
-        .authorized(key, id, move |_| async move { p.compact_journal().await })
+        .authorized(key, id, move |_| async move {
+            p.start_index_committed(std::time::Duration::from_secs(30))
+        })
         .await?;
-    protected(
-        result
-            .map(|seq| json!({"visible_seq":seq}))
-            .map_err(Into::into),
-        permit,
-    )
+    // Authorization protects admission and delivery. Waiting outside the catalog
+    // guard permits foreground writes and immediate grant revocation during build.
+    let result = match result { Ok(job) => job.finish().await, Err(error) => Err(error) };
+    let result = match result {
+        Ok(indexed_seq) => current.statistics().await.map(|statistics|
+            json!({"visible_seq":statistics.visible_seq,"indexed_seq":indexed_seq})),
+        Err(error) => Err(error),
+    };
+    protected(result.map_err(Into::into),permit)
 }
 async fn query(
     State(s): State<Arc<Service>>,
@@ -2237,7 +2243,7 @@ pub(crate) fn generate_openapi() {
         (
             "/api/v1/index/{id}",
             "patch",
-            "Online full checkpoint and WAL retirement",
+            "Bounded background checkpoint with concurrent committed tail",
             None,
         ),
         (

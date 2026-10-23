@@ -113,6 +113,12 @@ jobs:
         run: cargo test -p anyseek --lib commit_io_tests
       - name: Native record replay, snapshot and response-loss tests
         run: cargo test -p anyseek --lib record::tests
+      - name: Native bounded background index and fenced cut publication
+        run: |
+          cargo test -p anyseek --features s3-object-store --lib record::indexer::tests
+          cargo test -p anyseek --features s3-object-store --lib sqlite_authority::index_build::tests
+          cargo test -p anyseek --features s3-object-store --lib background_index
+          cargo test -p anyseek --features s3-object-store --lib expired_remote_index
       - name: Native catalog authorization and revocation recovery tests
         run: cargo test -p anyseek --lib catalog_
       - name: Native service output and admission barriers
