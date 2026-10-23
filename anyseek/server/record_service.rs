@@ -251,6 +251,7 @@ pub(crate) struct Service {
     resources: Arc<Governor>,
     preflight: Arc<Semaphore>,
     control_preflight: Arc<Semaphore>,
+    request_timeout: std::time::Duration,
     default_nprobe: std::num::NonZeroUsize,
     // Drop after catalog, partitions and mappings: stable across root repair.
     _root_owner: std::fs::File,
@@ -316,6 +317,7 @@ impl Service {
             resources: Governor::from_env()?,
             preflight: Arc::new(Semaphore::new(64)),
             control_preflight: Arc::new(Semaphore::new(16)),
+            request_timeout: std::time::Duration::from_secs(30),
             default_nprobe,
             _root_owner: root_owner,
         });
@@ -1682,9 +1684,13 @@ async fn request_guard(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let (request, scope) = match admission::request(&service, request).await {
-        Ok(value) => value,
-        Err(error) => return error.into_response(),
+    let deadline = tokio::time::Instant::now() + service.request_timeout;
+    let (request, scope) = match tokio::time::timeout_at(deadline, admission::request(&service, request)).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => return error.into_response(),
+        // No handler or owned data task has started. A previous attempt can
+        // still be running, so callers must keep the original operation ID.
+        Err(_) => return Error(StatusCode::TOO_MANY_REQUESTS, "busy", "admission deadline exceeded; retry the original operation identity".into()).into_response(),
     };
     if request.uri().path().ends_with("/query")
         && request.uri().query().is_some_and(|q| !q.is_empty())
@@ -1692,7 +1698,7 @@ async fn request_guard(
         return bad("query parameters belong in the JSON body").into_response();
     }
     let response =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), scope.clone().run(next.run(request))).await {
+        match tokio::time::timeout_at(deadline, scope.clone().run(next.run(request))).await {
             Ok(response) => response,
             Err(_) => Error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2190,6 +2196,32 @@ mod tests {
         drop(bytes);
         assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_ok());
         drop(others); drop(service);std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
+    async fn service_admission_wait_is_inside_request_deadline_and_never_reads_body() {
+        use tower::ServiceExt;
+        let (mut service,path,headers) = setup().await;
+        Arc::get_mut(&mut service).unwrap().request_timeout = std::time::Duration::from_millis(50);
+        let app = router(service.clone());
+        let gate = service.records.write().await;
+        struct NeverRead;
+        impl http_body::Body for NeverRead {
+            type Data = Bytes; type Error = std::io::Error;
+            fn poll_frame(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+                panic!("timed-out admission must never consume a body")
+            }
+        }
+        let request = axum::http::Request::builder().method("POST").uri("/api/v1/index/c/doc")
+            .header("apikey",headers["apikey"].clone()).body(Body::new(NeverRead)).unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), app.clone().oneshot(request)).await.unwrap().unwrap();
+        assert_eq!(response.status(),StatusCode::TOO_MANY_REQUESTS);
+        drop(response);drop(gate);
+        let request = axum::http::Request::builder().uri("/api/v1/index/c")
+            .header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);drop(response);
+        assert_eq!(service.records.read().await["c"].statistics().await.unwrap().visible_seq,0);
+        drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn service_oversize_and_serialization_errors_retain_output_barrier() {
