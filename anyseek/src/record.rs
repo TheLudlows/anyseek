@@ -48,6 +48,9 @@ mod remote_checkpoint;
 pub(crate) mod build_budget;
 mod view;
 mod recovery;
+// Semantic gate for issue #80; not a second production engine or a dual-write path.
+#[cfg(test)]
+mod lexical;
 pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
 
 /// Failures distinguish rejected requests from operations that require recovery.

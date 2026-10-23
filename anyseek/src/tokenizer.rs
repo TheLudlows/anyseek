@@ -1,6 +1,6 @@
 use std::cmp;
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use finl_unicode::categories::{CharacterCategories, MinorCategory};
 
 use crate::{
@@ -121,7 +121,7 @@ pub fn fold_diacritics_accents_ligatures_zalgo_umlaut(string: &str) -> String {
 // Keep it on the first term of the same lexical span. Lone signs, internal
 // C++/hyphens, and document analysis retain their existing behavior.
 #[cfg(feature = "zh")]
-fn segment_zh_span(index: &Shard, span: &str, is_query: bool) -> Vec<String> {
+fn segment_zh_span(index: &AnalysisContext<'_>, span: &str, is_query: bool) -> Vec<String> {
     let unary = is_query && span.len() > 1
         && matches!(span.as_bytes()[0], b'+' | b'-');
     let body = if unary { &span[1..] } else { span };
@@ -130,6 +130,28 @@ fn segment_zh_span(index: &Shard, span: &str, is_query: bool) -> Vec<String> {
         if let Some(first) = terms.first_mut() { first.insert(0, span.as_bytes()[0] as char); }
     }
     terms
+}
+
+/// Analysis configuration independent of the old posting codec and Shard.
+/// Native Tantivy indexing and query compilation can reuse the exact same
+/// normalization, segmentation and syntax without creating a legacy index.
+pub(crate) struct AnalysisContext<'a> {
+    pub text_normalization: crate::index::TextNormalization,
+    pub stop_words: &'a AHashSet<String>,
+    pub frequent_hashset: &'a AHashSet<u64>,
+    #[cfg(feature = "zh")]
+    pub word_segmentation_option: Option<&'a crate::word_segmentation::WordSegmentationTM>,
+}
+impl<'a> AnalysisContext<'a> {
+    fn from_shard(shard: &'a Shard) -> Self {
+        Self {
+            text_normalization: shard.meta.text_normalization,
+            stop_words: &shard.stop_words,
+            frequent_hashset: &shard.frequent_hashset,
+            #[cfg(feature = "zh")]
+            word_segmentation_option: shard.word_segmentation_option.as_ref(),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -150,9 +172,33 @@ pub(crate) async fn tokenizer(
     indexed_field_id: usize,
     indexed_field_number: usize,
 ) {
+    analyze(&AnalysisContext::from_shard(index), text, unique_terms, non_unique_terms,
+        tokenizer, segment_number_mask1, nonunique_terms_count, token_per_field_max,
+        position_per_term_max, is_query, query_type, ngram_indexing, indexed_field_id,
+        indexed_field_number).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::assigning_clones)]
+pub(crate) async fn analyze(
+    index: &AnalysisContext<'_>,
+    text: &str,
+    unique_terms: &mut AHashMap<String, TermObject>,
+    non_unique_terms: &mut Vec<NonUniqueTermObject>,
+    tokenizer: TokenizerType,
+    segment_number_mask1: u32,
+    nonunique_terms_count: &mut u32,
+    token_per_field_max: u32,
+    position_per_term_max: usize,
+    is_query: bool,
+    query_type: &mut QueryType,
+    ngram_indexing: u8,
+    indexed_field_id: usize,
+    indexed_field_number: usize,
+) {
     // Normalize only the transient analysis view, never the stored document.
     // Both index and query enter this same path with the persisted shard rule.
-    let normalized = match index.meta.text_normalization {
+    let normalized = match index.text_normalization {
         crate::index::TextNormalization::None => std::borrow::Cow::Borrowed(text),
         crate::index::TextNormalization::OpenCcT2s1_1_9 => crate::opencc_t2s::convert(text),
     };
