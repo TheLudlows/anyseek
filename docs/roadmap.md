@@ -53,7 +53,7 @@ C2 后继续推进 collection 的前台、下载、后台并发/队列/内存/I/
 
 普通请求、恢复、后台、控制各有共享和每集合字节及 I/O 并发额度。请求预留 2 MiB body + 16 MiB 输出工作区；任务上下文显式传入 Catalog/Record/indexer owned task，取消等待后不提前归还。Body 交付的 Bytes 所有者也保留上下文，丢弃 Body 后传输缓冲仍计费。序列化增长前检查 16 MiB。S3 缓存命中/下载返回自有计费缓冲；PUT 副本和读后验证另行预留，校验缓冲消费结束才归还字节。构建快照和捕获 tail 加入后台共享额度，文件包装器的 read/write/open/set_len 与对象 I/O 按类别立即准入；构建文件的既有磁盘增长预算继续生效。
 
-新增 key/grant/删除控制不再等待备份、恢复等长工作流的 service.control 锁；它们仍由 catalog 授权/全局快照屏障排序。共同备份、接管等必须的全局排空保持有意停顿。能证明未尝试 SQLite head 发布的资源拒绝返回 Busy，保留原 operation_id；未知持久结果仍关闭输出并返回 outcome_unknown。
+新增 key/grant 控制不再等待备份、恢复等长工作流的 service.control 锁；它们仍由 catalog 授权/全局快照屏障排序。删除仍与多阶段恢复/接管工作流串行；共同备份、接管等必须的全局排空保持有意停顿。能证明未尝试 SQLite head 发布的资源拒绝返回 Busy，保留原 operation_id；未知持久结果仍关闭输出并返回 outcome_unknown。
 
 配置和默认字节/I/O 额度见[服务指南](../anyseek/server/README.md)。这些是保守准入与显式缓冲约束，不是总 RSS、系统 I/O 带宽或完整磁盘硬上限；运行态 State 仍驻内存。服务级缓存总容量和 Record 操作账本持续回收不属于本批。C3-3 完整隔离验收仍单独跟踪，不能由本批单元用例直接标完成。
 

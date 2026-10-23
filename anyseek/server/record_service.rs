@@ -1574,6 +1574,9 @@ async fn delete_collection(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission = admission;
+        // Keep deletion ordered with multi-phase restore/takeover workflows.
+        // Key/grant revocation uses its own catalog barriers and can bypass this.
+        let _control = s.control.lock().await;
         let key = s.admin(&headers).await?;
         let receipt = s
             .catalog

@@ -136,7 +136,7 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 | collection backups | 32 个，可持久退役 |
 | service archives / 新恢复根 | 每源根最多 4 个 archive/准备项，托管父目录最多 4 个生成根，备份权威 payload 预检 1 GiB |
 
-资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。控制通道只在 master 认证后开放，不被数据工作借用；key/grant/删除控制不等待备份/恢复工作流锁，但仍遵守共同快照与授权屏障。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
+资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。控制通道只在 master 认证后开放，不被数据工作借用；key/grant 控制不等待备份/恢复工作流锁，但仍遵守共同快照与授权屏障；删除保留与多阶段恢复/接管工作流的原有顺序。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
 
 | 类别 | 全服务 / 每集合预留字节 | 全服务 / 每集合 I/O 并发 |
 | --- | --- | --- |
