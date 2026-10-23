@@ -19,6 +19,21 @@ async fn writer_waits(gate: Arc<tokio::sync::RwLock<()>>) {
     }).await.unwrap();
 }
 #[tokio::test]
+async fn catalog_execution_invalid_identity_preserves_original_retry_classification() {
+    let path = root(); let catalog = setup(&path).await;
+    let command = request("prepare", CatalogCommand::PrepareCollection {
+        collection_id: "shared".into(), owner_key: "a".into(), config: config(),
+    });
+    let original = catalog.execute(command.clone()).await.unwrap();
+    let mut mutated = command.clone();
+    mutated.command = CatalogCommand::PrepareCollection {
+        collection_id: "x".repeat(257), owner_key: "a".into(), config: config(),
+    };
+    assert!(matches!(catalog.execute(mutated).await, Err(CatalogError::Conflict(_))));
+    assert_eq!(catalog.execute(command).await.unwrap(), original);
+    drop(catalog); std::fs::remove_dir_all(path).unwrap();
+}
+#[tokio::test]
 async fn catalog_execution_scoped_revoke_and_cancel_do_not_block_other_collection() {
     let path = root(); let catalog = setup(&path).await;
     prepare(&catalog).await; activate(&catalog).await; other(&catalog).await;

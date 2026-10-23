@@ -59,7 +59,12 @@ impl Execution {
             _ => unreachable!("global commands handled above"),
         };
         let collection = match id {
-            Some(id) => Some(self.collection(id)?.write_owned().await),
+            // An invalid identity cannot name any retained collection. Leave
+            // its rejection to the authority, AFTER original operation lookup,
+            // so a reused operation ID still reports Conflict rather than a
+            // new request's validation error. It must not allocate a gate.
+            Some(id) if identity(id).is_ok() => Some(self.collection(id)?.write_owned().await),
+            Some(_) => None,
             None => None,
         };
         Ok(Control { _collection: collection, _global: Global::Read { _guard: global } })
