@@ -1,6 +1,6 @@
 # 持久化、对象存储与恢复
 
-本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/server/README.md)。
+本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/server/README.md)。
 
 ## 本地 Segment 与共同视图
 
@@ -102,6 +102,6 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 - `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权、恢复与受控接管；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 缓存。
 - `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、十种接管路径、feed floor、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
 - `scripts/s3_acceptance.py`：统一执行上述存储矩阵、七组共享语义与不可变对象/共同备份合同；`--backend real` 只接受专用测试配置。命令及报告边界见[开发指南](development.md)。
-- [CI #307](https://github.com/TheLudlows/anyseek/actions/runs/39784279098) 对 PR #72 最终 head 的 Linux、Windows 与构建/冒烟任务全部通过。这是该提交的证据，不替代后续修改验证。
+- [PR #74 CI](https://github.com/TheLudlows/anyseek/actions/runs/39814329888) 对最终 head `eb9431a3` 的五个任务全部通过，包含 Linux/Windows 原生持久化和 S3 语义/合同；合入源码为 `afbe323d`，与测试 head 的 Git tree 完全相同。最新主干 CI 独立核对。
 
-HTTP fixture 不等于真实 S3 服务认证。本轮先交付合同工具与用例，实际 endpoint 尚未运行；最终修改的原生 Linux/Windows CI 与实际目标后端验收仍须核对。系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
+HTTP fixture 不等于真实 S3 服务认证。本轮先交付合同工具与用例，实际 endpoint 尚未运行；最终修改的 PR 原生 Linux/Windows CI 已通过；最新主干 CI 与实际目标后端验收仍须核对。系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
