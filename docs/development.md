@@ -36,6 +36,30 @@ python3 scripts/s3_storage_smoke.py --server target/debug/anyseek_server --fault
 
 Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测试；测试后重新 `cargo build --workspace --features server` 得到默认二进制。测试环境变量前缀为 `ANYSEEK_`（例如 `ANYSEEK_TEST_ROOT`、`ANYSEEK_BROWSER_TEST`）；正常服务主密钥仍为 `MASTER_KEY_SECRET`。
 
+## S3 无缓存与合同验收
+
+统一入口复用现有测试，不维护第二份业务语义。`semantic` 分为 base、locator、graph、temporal、upload、lease、feed 七个隔离服务根；每次重启删除 `collection-*` 缓存目录，保留 catalog、SQLite 和 `s3-namespace`。`storage` 覆盖 checkpoint、GC、共同备份、恢复与接管中断；`contract` 运行显式 ignored 的对象合同测试，覆盖条件创建竞争、不可变重试、读回/HEAD、hash/长度、缺失/超限、旧 owner、共同备份原 cut 及删除。`all` 顺序运行三类。
+
+```sh
+cargo build -p anyseek --features server,fault-injection
+python3 scripts/s3_acceptance.py --backend fixture --suite all \
+  --server target/debug/anyseek_server --faults --report target/s3-acceptance.json
+```
+
+可用 `--suite semantic|storage|contract` 单独运行；合同单独运行不要求 `--server`，但需要 cargo。入口在运行前复制固定服务二进制，避免合同测试重新构建时替换正在验收的程序。报告记录二进制 SHA-256、每组退出状态和耗时，不记录凭据。进程退出或损坏对象的故障注入只在明确的测试构建启用。服务归档超过 HTTP 完成期限可能返回 `outcome_unknown`；脚本用**同一请求和 operation_id** 有界重试，不能通过新 ID 绕过原结果。
+
+真实模式必须使用专用、可销毁的测试 bucket，并从进程环境提供以下配置；不会回退读取正常服务的 S3 配置。测试会创建和删除对象，端到端矩阵留下本轮独立 namespace，由测试 bucket 的管理者在验收后销毁；底层合同仅清理本轮显式记录的 key，不执行 bucket LIST 或批量前缀删除。
+
+```sh
+# 在当前进程环境设置 ANYSEEK_S3_TEST_ENDPOINT、ANYSEEK_S3_TEST_BUCKET、
+# ANYSEEK_S3_TEST_REGION、ANYSEEK_S3_TEST_ACCESS_KEY_ID、
+# ANYSEEK_S3_TEST_SECRET_ACCESS_KEY；HTTP 另需 ANYSEEK_S3_TEST_ALLOW_HTTP=1。
+python3 scripts/s3_acceptance.py --backend real --suite all \
+  --server target/debug/anyseek_server --faults --report target/s3-real-acceptance.json
+```
+
+报告必须同时核对 `backend=real`、`real_endpoint_exercised=true`、`all_requested_checks_passed=true` 和所运行 suite；fixture 通过、空配置拒绝或只运行合同均不代表完整真实后端认证。本轮按约定先交付工具与用例，未运行真实 endpoint。CI 的 `s3-native-acceptance` 在 Linux/Windows 使用 fixture 跑合同、权威回归及七组无缓存语义，原 native-storage 矩阵继续跑存储故障验收。
+
 ## API 与文档
 
 ```sh

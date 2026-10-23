@@ -331,6 +331,18 @@ impl Inner {
             // A complete same-sequence checkpoint atomically publishes the feed
             // floor and its replay state. It also advances the recovery log base.
             self.publish_anchor_state(next,true).await?;
+            #[cfg(feature="fault-injection")]
+            match std::env::var("ANYSEEK_FEED_TRIM_FAULT").ok().as_deref() {
+                Some("after_append_unknown"|"after_durable")=>{
+                    // SQLite already confirmed this checkpoint. Keep the known
+                    // durable cut fenced until recovery rebuilds the feed cache.
+                    self.healthy=false;
+                    self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+                    return Err(RecordError::DurablePending(self.state.seq));
+                },
+                Some("crash_after_durable")=>std::process::exit(90),
+                _=>{},
+            }
             self.feed_cache.trim(floor);
             return Ok(());
         }

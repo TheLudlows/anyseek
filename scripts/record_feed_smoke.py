@@ -70,7 +70,9 @@ def exercise(call, restart_with, directory, faults):
             except (OSError,http.client.HTTPException):pass
             else:raise AssertionError('expected trim process exit')
         else:
-            assert call('POST',target+'/changes',{},status=503)['code'] in ('outcome_unknown','durable_pending')
+            code=call('POST',target+'/changes',{},status=503)['code']
+            if os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3':assert code=='durable_pending'
+            else:assert code in ('outcome_unknown','durable_pending')
         restart_with(env)
         assert call('POST',target+'/changes',{},status=410)['code']=='cursor_expired'
         assert call('POST',target+'/changes',{'after':page['next']})['events']==[]
@@ -78,4 +80,5 @@ def exercise(call, restart_with, directory, faults):
         prefix=call('GET',target+'/bootstrap')['request_id_prefix']
         rebuilt=call('POST',target+'/bootstrap',{'request_id':prefix+uuid.uuid4().hex[:16]})
         assert rebuilt['visible_seq']==receipt['seq'] and len(rebuilt['records'])==1
-    print('PASS feed trim faults: seven-day boundary, unknown/durable/process exit recovery, expired cursor, retained retry receipt and bootstrap')
+    boundary='SQLite-confirmed durable pending/process exit' if os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3' else 'unknown/durable/process exit'
+    print('PASS feed trim faults: seven-day boundary, '+boundary+' recovery, expired cursor, retained retry receipt and bootstrap')

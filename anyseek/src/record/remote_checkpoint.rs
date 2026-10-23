@@ -819,6 +819,87 @@ mod tests {
         assert!(restored.get("b").await.unwrap().is_some());
     }
     #[tokio::test]
+    async fn sqlite_owner_lock_is_independent_of_partition_cache() {
+        let db=path();
+        let mut settings=S3CompatibleRecordConfig {
+            authority_path:db.clone(),partition_id:"exclusive".into(),owner_epoch:1,
+            endpoint:"http://127.0.0.1:9".into(),bucket:"test".into(),region:"us-east-1".into(),
+            access_key_id:"fixture".into(),secret_access_key:"fixture-secret".into(),allow_http:true,
+            max_object_bytes:1024*1024,max_tail_blocks:100,max_tail_bytes:16*1024*1024,
+        };
+        let first=RemotePersistence::open(&settings).unwrap();
+        assert!(RemotePersistence::open(&settings).is_err());
+        settings.partition_id="another-cache".into();
+        assert!(RemotePersistence::open(&settings).is_err(),"a different cache/partition cannot bypass the authority owner");
+        drop(first);
+        settings.partition_id="exclusive".into();
+        drop(RemotePersistence::open(&settings).unwrap());
+        for file in [db.clone(),db.with_extension("sqlite-wal"),db.with_extension("sqlite-shm"),db.with_extension("sqlite.owner")] {let _=std::fs::remove_file(file);}
+    }
+
+    #[tokio::test]
+    async fn confirmed_remote_commit_and_expiry_survive_cache_append_failure() {
+        for expiration in [false,true] {
+            let (p,_,root,_,clock)=source().await;
+            let mut request=write("cache-fault","a","alpha",ExpectedVersion::Absent);
+            let now=clock.0.load(Ordering::SeqCst);
+            if expiration {
+                request.temporal=Some(TemporalMetadata {expire_at_ms:Some(now+10),..Default::default()});
+                p.write(request.clone()).await.unwrap();
+                clock.0.store(now+20,Ordering::SeqCst);
+            }
+            let permit=p.output_permit().unwrap();
+            std::fs::write(root.join(".test-cache-append-failure"),b"fail cache").unwrap();
+            let failed=if expiration {p.statistics().await.map(|_|())} else {p.write(request.clone()).await.map(|_|())};
+            assert_eq!(failed,Err(RecordError::DurablePending(if expiration {2} else {1})));
+            assert!(permit.deliver(||()).is_err());
+            assert!(p.output_permit().is_err());
+            let p=cold(p,&root,clock).await;
+            assert_eq!(p.write(request).await.unwrap().seq,1,"original receipt is retained");
+            if expiration {
+                assert!(p.get("a").await.unwrap().is_none());
+                assert_eq!(p.statistics().await.unwrap().visible_seq,2);
+            } else {assert!(p.get("a").await.unwrap().is_some());}
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_staging_expiration_survives_cache_append_failure() {
+        use super::super::tests::{source_write,generation_write,stage_generation};
+        let (p,_,root,_,clock)=source().await;
+        p.write(source_write("source","s",&[])).await.unwrap();
+        let stage=generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["a","b"]));
+        let receipt=p.write(stage.clone()).await.unwrap();
+        clock.0.fetch_add(1_800_001,Ordering::SeqCst);
+        std::fs::write(root.join(".test-cache-append-failure"),b"fail cache").unwrap();
+        assert!(matches!(p.generation_status("doc").await,Err(RecordError::DurablePending(3))));
+        assert!(p.output_permit().is_err());
+        let p=cold(p,&root,clock).await;
+        assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
+        assert_eq!(p.write(stage).await.unwrap(),receipt);
+        assert!(p.get("a").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_bootstrap_never_publishes_a_local_cache() {
+        for wrong_seq in [false,true] {
+            let root=path();let db=path();let store=Arc::new(InMemory::new());
+            let remote=remote(store,&db,"bad-bootstrap");
+            let mut settings=config();let mut state=State::default();
+            if wrong_seq {state.seq=1;} else {settings.max_journal_bytes+=1;}
+            let bytes=encode_entry(&Entry::Checkpoint {config:settings,state}).unwrap();
+            {
+                let mut authority=remote.authority.lock().await;
+                authority.create_partition("bad-bootstrap",1).unwrap();
+                remote.store.publish_bootstrap(&mut authority,"bad-bootstrap",1,&bytes,10).await.unwrap();
+            }
+            assert!(matches!(RecordPartition::open_s3_with_remote(&root,config().max_journal_bytes,remote).await,Err(RecordError::Rejected(_))));
+            assert!(!root.exists(),"unusable bootstrap must not create a local authority-looking cache");
+            for file in [db.clone(),db.with_extension("sqlite-wal"),db.with_extension("sqlite-shm")] {let _=std::fs::remove_file(file);}
+        }
+    }
+
+    #[tokio::test]
     async fn terminal_seal_uses_remote_authority_across_publication_failures() {
         for stage in ["before", "after"] {
             let (p, _, root, _, clock) = source().await;

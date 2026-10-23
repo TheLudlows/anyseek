@@ -325,6 +325,7 @@ impl Service {
             if name
                 .strip_prefix(".partition-prepare-")
                 .or_else(|| name.strip_prefix(".takeover-input-"))
+                .or_else(|| name.strip_prefix(".s3-service-export-"))
                 .is_some_and(|suffix| {
                     suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
                 })
@@ -1205,8 +1206,13 @@ async fn service_backup(
         let id=verifier(&serde_json::to_vec(&("service-backup",&request.operation_id)).map_err(bad)?);
         let target=s.root.join(format!("service-backup-{id}"));
         service_budget(&s.root,"service-backup-",&target)?;
-        let mut records=s.records.read().await.clone();
+        if let Some(receipt)=Catalog::completed_service_backup(&target)? {
+            if receipt.identity!=id {return Err(bad("backup request identity reused"));}
+            return response(json!({"backup_id":id,"snapshot":receipt,"operation_id":request.operation_id,"scope":"catalog, all retained collections and live collection backups; no recursive service archives"}),s.permit(&key).await?);
+        }
+        let records=s.records.read().await.clone();
         let temporary=s.root.join(format!(".s3-service-export-{:032x}",rand::random::<u128>()));
+        let result=async {
         let mut archives=BTreeMap::new();
         if std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref()==Ok("s3") {
             std::fs::create_dir(&temporary).map_err(storage)?;
@@ -1223,7 +1229,10 @@ async fn service_backup(
                 let p=if let Some(proof)=restored.as_ref().filter(|r|r.record_seqs.contains_key(&entry.collection_id)) {
                     RecordPartition::adopt_s3_snapshot(&path,entry.config.clone(),config,&proof.identity).await?
                 } else {RecordPartition::open_s3(&path,entry.config.clone(),config).await?};
-                records.insert(entry.collection_id.clone(),p);
+                let destination=temporary.join(&entry.directory);
+                p.checkpoint(&destination).await?;
+                drop(p);
+                archives.insert(entry.directory.clone(),destination);
             }
             for row in std::fs::read_dir(&s.root).map_err(storage)? {
                 let row=row.map_err(storage)?;
@@ -1238,10 +1247,11 @@ async fn service_backup(
                 config.authority_path=temporary.join(format!("{backup_id}.sqlite"));
                 let destination=temporary.join(backup_id);
                 RecordPartition::materialize_s3_backup_archive(&destination,marker.config,config,&marker.bundle_json).await?;
-                archives.insert(backup_id.to_owned(),RecordPartition::open(&destination,256*1024*1024).await?);
+                archives.insert(name,destination);
             }
         }
-        let result=s.catalog.backup_service_with_archives(s.root.clone(),target,id.clone(),records,archives).await;
+        s.catalog.backup_service_with_archives(s.root.clone(),target,id.clone(),records,archives).await.map_err(Error::from)
+        }.await;
         if temporary.exists(){let _=std::fs::remove_dir_all(&temporary);}
         let receipt=result?;
         response(json!({"backup_id":id,"snapshot":receipt,"operation_id":request.operation_id,"scope":"catalog, all retained collections and live collection backups; no recursive service archives"}),s.permit(&key).await?)
@@ -1295,13 +1305,28 @@ async fn create_s3_backup_pointer(
         let row = row?;
         Ok::<_,std::io::Error>(count + usize::from(row.file_name().to_string_lossy().starts_with("backup-")))
     }).map_err(storage)?;
-    if count >= 32 { return Err(bad("local backup pointer budget exhausted (32)")); }
+    // An interrupted pointer already owns its slot. Counting it again would
+    // strand the original accepted backup exactly at the 32-pointer boundary.
+    if count >= 32 && !path.exists() { return Err(bad("local backup pointer budget exhausted (32)")); }
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0);
     let (bundle_json, visible_seq, partition_id) = partition.create_s3_backup(
         backup_id, now_ms, 256 * 1024 * 1024,
     ).await?;
     std::fs::create_dir_all(path).map_err(storage)?;
+    if std::fs::symlink_metadata(path).map_err(storage)?.file_type().is_symlink() || path.join("owner").exists() {
+        return Err(storage("backup pointer path is not an isolated metadata directory"));
+    }
+    for row in std::fs::read_dir(path).map_err(storage)? {
+        let row=row.map_err(storage)?;
+        let name=row.file_name().to_string_lossy().into_owned();
+        if name.strip_prefix(".marker-").is_some_and(|id|id.len()==32 && id.bytes().all(|b|b.is_ascii_hexdigit()))
+            && row.file_type().map_err(storage)?.is_file() {
+            std::fs::remove_file(row.path()).map_err(storage)?;
+        }
+    }
+    #[cfg(feature="fault-injection")]
+    if std::env::var("ANYSEEK_BACKUP_POINTER_FAULT").as_deref()==Ok("after_directory") {std::process::exit(94);}
     let marker = S3BackupMarker {
         backup_id: backup_id.to_owned(),
         collection_id: collection_id.to_owned(),
@@ -1317,6 +1342,8 @@ async fn create_s3_backup_pointer(
         file.write_all(&serde_json::to_vec(&marker).map_err(bad)?).map_err(storage)?;
         file.sync_all().map_err(storage)?;
     }
+    #[cfg(feature="fault-injection")]
+    if std::env::var("ANYSEEK_BACKUP_POINTER_FAULT").as_deref()==Ok("after_marker_sync") {std::process::exit(94);}
     std::fs::rename(&temporary,path.join("s3-backup.json")).map_err(storage)?;
     #[cfg(unix)] {
         std::fs::File::open(path).and_then(|f|f.sync_all()).map_err(storage)?;
@@ -1762,6 +1789,22 @@ mod tests {
             .unwrap_or_else(std::env::temp_dir);
         std::fs::create_dir_all(&base).unwrap();
         base.join(format!("service-{:032x}", rand::random::<u128>()))
+    }
+    #[tokio::test]
+    async fn service_reclaims_only_owned_abandoned_export_directories() {
+        let root=path();
+        let service=Service::open(&root,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        drop(service);
+        let owned=root.join(format!(".s3-service-export-{:032x}",1));
+        let foreign=root.join(".s3-service-export-foreign");
+        let file=root.join(format!(".s3-service-export-{:032x}",2));
+        std::fs::create_dir(&owned).unwrap();
+        std::fs::write(owned.join("partial-input"),b"incomplete").unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(&file,b"unowned file").unwrap();
+        let service=Service::open(&root,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        assert!(!owned.exists());assert!(foreign.exists());assert!(file.exists());
+        drop(service);std::fs::remove_dir_all(root).unwrap();
     }
     async fn setup() -> (Arc<Service>, PathBuf, HeaderMap) {
         let path = path();
