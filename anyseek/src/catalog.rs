@@ -15,6 +15,9 @@ use std::{
 use tokio::sync::{Mutex, Semaphore};
 
 mod service_snapshot;
+mod execution;
+#[cfg(test)]
+mod execution_tests;
 mod takeover;
 pub use takeover::TakeoverIntent;
 pub use service_snapshot::ServiceSnapshot;
@@ -231,6 +234,7 @@ fn encode(entry: &Entry) -> Result<Vec<u8>, CatalogError> {
 #[derive(Default)]
 struct OutputState {
     healthy: bool,
+    failed: bool,
     keys: std::collections::BTreeSet<String>,
     grants: BTreeMap<String, BTreeMap<String, u64>>,
 }
@@ -252,7 +256,7 @@ impl OutputPermit {
             .state
             .read()
             .map_err(|_| CatalogError::RecoveryRequired)?;
-        if !state.healthy {
+        if !state.healthy || state.failed {
             return Err(CatalogError::RecoveryRequired);
         }
         if !state.keys.contains(&self.key)
@@ -277,6 +281,9 @@ struct Inner {
     fail_after_durable: bool,
 }
 impl Inner {
+    fn is_healthy(&self) -> bool {
+        self.healthy && self.output.read().is_ok_and(|output| !output.failed)
+    }
     fn fence(&mut self) {
         self.healthy = false;
         if let Ok(mut output) = self.output.write() {
@@ -288,6 +295,7 @@ impl Inner {
             .output
             .write()
             .map_err(|_| CatalogError::RecoveryRequired)?;
+        if output.failed { return Err(CatalogError::RecoveryRequired); }
         output.grants = self.state.grants.clone();
         output.keys = self
             .state
@@ -332,14 +340,19 @@ impl Inner {
         }
     }
 }
-struct AuthorizedWork<'a> {
-    inner: &'a mut Inner,
+struct AuthorizedWork {
+    output: Arc<RwLock<OutputState>>,
     complete: bool,
 }
-impl Drop for AuthorizedWork<'_> {
+impl Drop for AuthorizedWork {
     fn drop(&mut self) {
         if !self.complete {
-            self.inner.fence();
+            // This guard can fail while a different collection is publishing
+            // catalog metadata. The failure latch must survive that publication.
+            if let Ok(mut output) = self.output.write() {
+                output.failed = true;
+                output.healthy = false;
+            }
         }
     }
 }
@@ -355,6 +368,7 @@ impl Drop for Inner {
 pub struct Catalog {
     inner: Arc<Mutex<Inner>>,
     admission: Arc<Semaphore>,
+    execution: Arc<execution::Execution>,
 }
 
 fn identity(value: &str) -> Result<(), CatalogError> {
@@ -664,6 +678,7 @@ impl Catalog {
     fn from_parts(state: State, journal: PartitionJournal) -> Self {
         let output = Arc::new(RwLock::new(OutputState {
             healthy: true,
+            failed: false,
             keys: state
                 .keys
                 .iter()
@@ -684,6 +699,7 @@ impl Catalog {
                 fail_after_durable: false,
             })),
             admission: Arc::new(Semaphore::new(64)),
+            execution: Arc::new(execution::Execution::default()),
         }
     }
     /// Privileged control-plane entry point; caller authentication is required
@@ -711,11 +727,13 @@ impl Catalog {
             .try_acquire_owned()
             .map_err(|_| CatalogError::Busy)?;
         let owner = self.inner.clone();
+        let execution = self.execution.clone();
         crate::INDEX_RUNTIME
             .spawn(async move {
                 let _admission = admission;
+                let _execution = execution.control(&request.command).await?;
                 let mut inner = owner.lock().await;
-                if !inner.healthy {
+                if !inner.is_healthy() {
                     return Err(CatalogError::RecoveryRequired);
                 }
                 let now = epoch().max(inner.state.epoch_watermark);
@@ -854,22 +872,7 @@ impl Catalog {
                     ));
                 }
                 inner.state = next;
-                {
-                    let mut output = inner
-                        .output
-                        .write()
-                        .map_err(|_| CatalogError::RecoveryRequired)?;
-                    output.grants = inner.state.grants.clone();
-                    output.keys = inner
-                        .state
-                        .keys
-                        .iter()
-                        .filter(|(_, k)| k.active)
-                        .map(|(id, _)| id.clone())
-                        .collect();
-                    output.healthy = true;
-                }
-                inner.healthy = true;
+                inner.publish_output()?;
                 Ok(event.receipt)
             })
             .await
@@ -879,7 +882,7 @@ impl Catalog {
     /// are digests; compare in constant time in the public authentication layer.
     pub async fn authenticate(&self, verifier: &str) -> Result<String, CatalogError> {
         let inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
         }
         inner
@@ -895,7 +898,7 @@ impl Catalog {
         &self,
     ) -> Result<std::collections::BTreeSet<String>, CatalogError> {
         let inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
         }
         Ok(inner.state.retired_backups.clone())
@@ -903,7 +906,7 @@ impl Catalog {
     /// Privileged lifecycle inventory, including prepared but invisible entries.
     pub async fn collections(&self) -> Result<Vec<CollectionEntry>, CatalogError> {
         let inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
         }
         Ok(inner.state.collections.values().cloned().collect())
@@ -914,7 +917,7 @@ impl Catalog {
         key: &str,
     ) -> Result<(Vec<CollectionEntry>, OutputPermit), CatalogError> {
         let inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
         }
         if !inner.state.keys.get(key).is_some_and(|k| k.active) {
@@ -939,9 +942,10 @@ impl Catalog {
             },
         ))
     }
-    /// Service must keep this owned task around the ENTIRE Record operation,
-    /// including nested cancellation-safe publication. Revocation queues behind
-    /// it. Result serialization does not authorize output: use OutputPermit.
+    /// Own the complete operation behind the collection execution barrier.
+    /// Metadata is locked only for authorization capture; work on unrelated
+    /// collections can proceed. Revocation waits outside metadata, then changes
+    /// the grant before queued work can capture it. Output still needs a permit.
     pub async fn authorized<T, F, Fut>(
         &self,
         key: String,
@@ -959,11 +963,13 @@ impl Catalog {
             .try_acquire_owned()
             .map_err(|_| CatalogError::Busy)?;
         let owner = self.inner.clone();
+        let execution = self.execution.clone();
         crate::INDEX_RUNTIME
             .spawn(async move {
                 let _admission = admission;
-                let mut inner = owner.lock().await;
-                if !inner.healthy {
+                let _execution = execution.read(&collection).await?;
+                let inner = owner.lock().await;
+                if !inner.is_healthy() {
                     return Err(CatalogError::RecoveryRequired);
                 }
                 let revision = *inner
@@ -984,9 +990,10 @@ impl Catalog {
                     grants: vec![(collection, revision)],
                 };
                 let mut guard = AuthorizedWork {
-                    inner: &mut inner,
+                    output: inner.output.clone(),
                     complete: false,
                 };
+                drop(inner);
                 let result = work(entry).await;
                 guard.complete = true;
                 drop(guard);
@@ -999,8 +1006,10 @@ impl Catalog {
     /// are removed; identities, tombstones, collection intents and grant revisions
     /// survive. The persisted epoch watermark prevents rollback resurrection.
     pub async fn compact(&self) -> Result<(), CatalogError> {
+        let _admission = self.admission.clone().try_acquire_owned().map_err(|_| CatalogError::Busy)?;
+        let _execution = self.execution.freeze().await;
         let mut inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
         }
         let now = epoch().max(inner.state.epoch_watermark);
@@ -1013,7 +1022,7 @@ impl Catalog {
         id: &OperationId,
     ) -> Result<Option<CatalogReceipt>, CatalogError> {
         let inner = self.inner.lock().await;
-        if !inner.healthy {
+        if !inner.is_healthy() {
             return Err(CatalogError::RecoveryRequired);
         }
         let now = epoch().max(inner.state.epoch_watermark);
@@ -1039,7 +1048,7 @@ mod tests {
     use super::*;
     use crate::record::{ExpectedVersion, RecordPartition, RecordWrite};
     use serde_json::json;
-    fn root() -> std::path::PathBuf {
+    pub(super) fn root() -> std::path::PathBuf {
         let base = std::env::var_os("ANYSEEK_TEST_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -1047,10 +1056,10 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         path
     }
-    fn config() -> RecordConfig {
+    pub(super) fn config() -> RecordConfig {
         serde_json::from_value(json!({"index":{"id":0,"name":"shared","lexical_similarity":"Bm25f","tokenizer":"UnicodeAlphanumeric","stop_words":"None","frequent_words":"None","ngram_indexing":0,"access_type":"Mmap","clustering":"None","inference":"None"},"schema":[{"field":"body","field_type":"Text","store":false,"index_lexical":true}],"embedding_space_id":null,"max_records":32,"max_record_bytes":4096,"max_operations":100,"max_journal_bytes":1048576,"max_candidates":100})).unwrap()
     }
-    fn request(nonce: &str, command: CatalogCommand) -> CatalogRequest {
+    pub(super) fn request(nonce: &str, command: CatalogCommand) -> CatalogRequest {
         CatalogRequest {
             operation_id: OperationId::new(nonce.into()),
             command,
@@ -1099,7 +1108,7 @@ mod tests {
         // Additional allowance covers enum/container keys, watermarks and frame overhead.
         assert!(event_size + completed_size + grant_size + 1024 < 16384);
     }
-    async fn setup(path: &Path) -> Catalog {
+    pub(super) async fn setup(path: &Path) -> Catalog {
         let catalog = Catalog::create(&path.join("catalog")).await.unwrap();
         for (key, verifier) in [("a", "a".repeat(64)), ("b", "b".repeat(64))] {
             catalog
@@ -1115,7 +1124,7 @@ mod tests {
         }
         catalog
     }
-    async fn prepare(catalog: &Catalog) -> CatalogReceipt {
+    pub(super) async fn prepare(catalog: &Catalog) -> CatalogReceipt {
         catalog
             .execute(request(
                 "prepare",
@@ -1128,7 +1137,7 @@ mod tests {
             .await
             .unwrap()
     }
-    async fn activate(catalog: &Catalog) {
+    pub(super) async fn activate(catalog: &Catalog) {
         catalog
             .execute(request(
                 "activate",

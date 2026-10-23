@@ -163,6 +163,14 @@ jobs:
           else
             python3 scripts/s3_storage_smoke.py --server target/debug/anyseek_server --faults
           fi
+      - name: Native independent collection execution and scoped revocation HTTP
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --faults --section authorization
+          else
+            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults --section authorization
+          fi
 
   s3-native-acceptance:
     name: S3 semantics and contracts (${{ matrix.os }})

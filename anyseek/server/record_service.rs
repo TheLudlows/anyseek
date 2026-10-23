@@ -846,11 +846,32 @@ async fn write(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let operation_id = request.operation_id.clone();
+    #[cfg(feature = "fault-injection")]
+    let pause_collection = id.clone();
     let (result, permit) = s
         .catalog
-        .authorized(key, id, move |_| async move { p.write(request).await })
+        .authorized(key, id, move |_| async move {
+            #[cfg(feature = "fault-injection")]
+            pause_authorized_for_test(&pause_collection).await?;
+            p.write(request).await
+        })
         .await?;
     protected(result.map(|receipt|json!({"receipt":receipt,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()})).map_err(Into::into),permit)
+}
+
+// Explicit fault binary only, no remote activation path. Pause inside accepted
+// authorized work so HTTP tests can distinguish execution from metadata locking.
+#[cfg(feature = "fault-injection")]
+async fn pause_authorized_for_test(collection: &str) -> Result<(), RecordError> {
+    if std::env::var("ANYSEEK_AUTHORIZED_PAUSE_COLLECTION").as_deref() != Ok(collection) { return Ok(()); }
+    let Some(path) = std::env::var_os("ANYSEEK_AUTHORIZED_PAUSE_FILE") else { return Ok(()); };
+    let path = PathBuf::from(path);
+    if !path.exists() { return Ok(()); }
+    std::fs::write(path.with_extension("started"), b"accepted")
+        .map_err(|e| RecordError::Rejected(e.to_string()))?;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while path.exists() { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+    }).await.map_err(|_| RecordError::Busy)
 }
 async fn generation_status(
     State(s): State<Arc<Service>>, headers: HeaderMap, Path((id, record_id)): Path<(String, String)>,

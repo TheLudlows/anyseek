@@ -15,12 +15,13 @@ anyseek 是 AI 记忆与知识的存储、检索底座。PR #71 本地 Segment�
 | B：剩余工作 | 主干 a36e71e0 的 CI 五项已通过；实际目标 S3 合同与故障矩阵、系统故障/断电验收仍待完成 |
 | PR #74 验证 | 最终 head `eb9431a3` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39814329888)，包含构建/浏览器与 Linux/Windows 原生持久化、S3 语义及合同；本地 281 tests、44 doctests 通过；[主干 a36e71e0 CI 五项通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455) |
 | C1：已合入 | [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`；最终 PR 五项 CI 成功：有界后台 Indexer、构建 pin/epoch/期限、SQLite 条件发布与并行写入 tail 保留；见[路线](docs/roadmap.md) |
-| C2：开发分支 | 有界校验对象缓存已实现，尚未合入；每 authority 256 MiB / 4096 块；损坏、丢失或缓存 I/O 失败可回源，最终验证见本批 PR Checks |
+| C2：已合入 | [PR #76](https://github.com/TheLudlows/anyseek/pull/76) 已合入为 `10e106b3`；每 authority 256 MiB / 4096 块；最终 PR CI 五项成功、完整 Rust 301 passed / 0 failed / 13 ignored |
+| C3-1：开发分支 | collection 授权执行屏障与元数据锁分离，保留整 key 撤销/接管/完整备份的全局排空，以及取消与 panic 封锁；尚未合入，验收结果以本批 PR Checks 为准 |
 | C 后续 / D | collection 资源公平后续推进；超大 collection 按容量需求后置，均未实现 |
 | 系统故障 | 系统/文件系统崩溃和硬断电尚未验收；进程退出测试不能替代 |
 
-C1 最终提交 `96306e95` 的 [PR CI 五项成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)，完整 Rust 回归 294 passed / 0 failed / 12 ignored；合入后主干 CI 单独跟踪。C2 分支实现、验证与合入状态分开记录。当前运行态 State 仍驻内存，原同步 compaction 保留串行屏障；资源方案为保守准入与显式缓冲检查，不是全进程 RSS 硬上限。Record 操作账本尚无持续 GC，不承诺无界规模或稳定磁盘占用。
+C1 最终提交 `96306e95` 的 [PR CI 五项成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)，完整 Rust 回归 294 passed / 0 failed / 12 ignored；合入后主干 CI 单独跟踪。C2 已合入；[主干 CI](https://github.com/TheLudlows/anyseek/actions/runs/39909578676) 单独跟踪。C3-1 分支实现、验证与合入状态分开记录。当前运行态 State 仍驻内存，原同步 compaction 保留串行屏障；资源方案为保守准入与显式缓冲检查，不是全进程 RSS 硬上限。Record 操作账本尚无持续 GC，不承诺无界规模或稳定磁盘占用。
 
-S3 服务根中的 catalog、SQLite 权威库及 `s3-namespace` 是持久协调状态；collection 内日志、payload 和索引是可重建缓存。C2 开发分支另在权威库旁的 `*.object-cache` 目录保存可删除的校验对象块；无缓存验收同时删除两类缓存。独立恢复使用不同对象命名空间。SQLite 单主机、单持久卷，不提供跨主机 HA 或权威卷丢失零 RPO。
+S3 服务根中的 catalog、SQLite 权威库及 `s3-namespace` 是持久协调状态；collection 内日志、payload 和索引是可重建缓存。C2 另在权威库旁的 `*.object-cache` 目录保存可删除的校验对象块；无缓存验收同时删除两类缓存。独立恢复使用不同对象命名空间。SQLite 单主机、单持久卷，不提供跨主机 HA 或权威卷丢失零 RPO。
 
 保留 Web UI。不引入模型推理、解析切块、SQL/JOIN、完整图语言或旧格式升级迁移。[#57](https://github.com/TheLudlows/anyseek/issues/57) 保持开放。当前能力见 [FEATURES](FEATURES.md)，配置与使用见[服务指南](anyseek/server/README.md)。
