@@ -639,6 +639,18 @@ mod tests {
         p.compact_journal().await.unwrap();
     }
     #[tokio::test]
+    async fn background_index_owner_rejection_during_admission_also_closes_output() {
+        let (p,_,_,db,_)=source().await;
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let output=p.output_permit().unwrap();
+        let connection=rusqlite::Connection::open(db).unwrap();
+        connection.execute("UPDATE partition_heads SET owner_epoch=2 WHERE partition_id='source'",[]).unwrap();
+        drop(connection);
+        assert!(matches!(p.index_committed(std::time::Duration::from_secs(30)).await,Err(RecordError::RecoveryRequired)));
+        assert!(p.get("a").await.is_err());assert!(output.deliver(||()).is_err());
+    }
+
+    #[tokio::test]
     async fn background_index_old_owner_cannot_reopen_output_after_rejected_publication() {
         let (p,_,root,db,_)=source().await;
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
@@ -1245,6 +1257,8 @@ pub(super) struct RemoteBuild {
 impl RemotePersistence {
     pub(super) async fn begin_background_build(&mut self, timeout: std::time::Duration) -> Result<RemoteBuild,RecordError> {
         let mut authority = self.authority.lock().await;
+        let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch!=self.owner_epoch { return Err(RecordError::RecoveryRequired); }
         let now = unix_time_ms_i64();
         let deadline = now.checked_add(timeout.as_millis().max(1).try_into().map_err(storage)?)
             .ok_or_else(||storage("build deadline overflow"))?;

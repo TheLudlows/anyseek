@@ -254,8 +254,10 @@ impl RecordPartition {
             result
           }).catch_unwind().await;
           match outcome {
-            Ok(result) => result,
-            Err(_) => {
+            Ok(result) if !matches!(&result,Err(RecordError::RecoveryRequired)) => result,
+            // This also covers ownership rejection during initial admission,
+            // before a Plan/background pin exists and normal cleanup is reached.
+            _ => {
                 let mut inner = recovery.lock().await;
                 inner.healthy = false;
                 if let Ok(mut output) = inner.output.write() { output.fenced = true; }
