@@ -55,7 +55,7 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`，最终提交 `96306e95` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)。合入后主干 CI 单独记录。
 
-### 开发分支：collection 授权执行屏障（C3-1，尚未合入）
+### collection 授权执行屏障（C3-1，PR #77 已合入）
 
 锁顺序为全局快照屏障 → collection 执行屏障 → catalog 元数据。普通已接收工作持前两层共享 guard，只在捕获当前 collection entry 与 grant revision 时持元数据锁；Record future 在锁外执行。单 collection 授权变更与删除先取得该 collection 独占 guard，排在它之后的工作取得共享 guard 后重新查授权。不得在持 catalog 元数据锁时等待执行屏障。
 
@@ -63,7 +63,7 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 异常 guard 不依赖异步获取 catalog 锁即可同步关闭输出。共享的 sticky failure latch 在重开前不清除，其他 collection 即使正在持久发布或压缩，也不能重新开放旧授权输出；普通可证明未发布的 compaction 失败保留原有恢复语义。输出交付仍检查 grant revision 与 Record 数据屏障，已交付字节不可撤回。
 
-此协议为开发分支实现，验证/合入单独跟踪；尚未实现 C3-2 的前台/下载/后台分级与服务缓存总预算。现有总准入名额并不保证资源公平。
+C3-1 已合入。C3-2 本分支提供前台/恢复/后台分级准入、共享/每集合显式缓冲与 I/O 额度；取消后的 owned task 和传输 Bytes 保留租约。S3 GET 的租约随返回缓冲，而非下载函数返回就结束；PUT 读后验证仍访问远端。能证明 SQLite 发布前的预算拒绝为 Busy，其他不确定错误继续 fenced；既有 reader/build/backup 保护与 GC 闭包不变。默认值与范围见[服务指南](../anyseek/server/README.md)。服务缓存总容量及完整 C3-3 隔离验收未完成。
 
 ## 2. 日志与 feed 保留
 

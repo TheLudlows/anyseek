@@ -34,24 +34,32 @@ def main():
             log.seek(0);raise AssertionError('server startup timeout: '+log.read()[-8192:])
         def call(method,path,body=None,key=master,status=200):
             req=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),headers={'apikey':key,'Content-Type':'application/json'},method=method)
-            try:
-                with urllib.request.urlopen(req,timeout=40) as r: code=r.status;raw=r.read()
-            except urllib.error.HTTPError as e:code=e.code;raw=e.read()
-            if code==503 and status==200 and path in ['/api/v1/service-backups','/api/v1/service-restores']:
+            control_retry=status==200 and path in ['/api/v1/service-backups','/api/v1/service-restores']
+            deadline=time.monotonic()+300
+            while True:
+                try:
+                    with urllib.request.urlopen(req,timeout=40) as response:
+                        code=response.status;raw=response.read()
+                except urllib.error.HTTPError as error:
+                    code=error.code;raw=error.read()
+                except (OSError,urllib.error.URLError):
+                    # A reset can lose either the request or its response. Retry
+                    # only these idempotent controls and preserve the exact body.
+                    if not control_retry or process.poll() is not None:
+                        if control_retry and process.poll() not in [None,87,88]:
+                            log.seek(0);print('control transport lost; service exited '+str(process.returncode)+': '+log.read()[-8192:],flush=True)
+                        raise
+                    assert time.monotonic()<deadline,('control transport retry deadline',path)
+                    time.sleep(.1)
+                    continue
                 result=json.loads(raw)
-                if result.get('code')=='outcome_unknown':
-                    # The body retains the exact operation identity. The service
-                    # continues accepted work after its HTTP deadline.
-                    for _ in range(10):
-                        try:
-                            with urllib.request.urlopen(req,timeout=40) as response:
-                                return json.loads(response.read())
-                        except urllib.error.HTTPError as error:
-                            result=json.loads(error.read())
-                            if error.code!=503 or result.get('code')!='outcome_unknown':raise
-                    raise AssertionError(('control retry deadline',path))
-            assert code in (status if isinstance(status,tuple) else (status,)),(method,path,code,status,raw)
-            return json.loads(raw)
+                if control_retry and (code,result.get('code')) in [(503,'outcome_unknown'),(429,'busy')]:
+                    assert time.monotonic()<deadline,('control retry deadline',path)
+                    time.sleep(.1)
+                    continue
+                assert code in (status if isinstance(status,tuple) else (status,)),(method,path,code,status,raw)
+                return result
+
         def restart():
             process.kill();process.wait(timeout=20);start()
         def restart_with(fault_env):

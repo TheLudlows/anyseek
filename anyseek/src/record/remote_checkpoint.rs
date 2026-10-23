@@ -87,11 +87,17 @@ impl RemotePersistence {
             let mut hash = Sha256::new();
             let mut actual = 0u64;
             loop {
+                let _buffer = crate::resources::io_scope(crate::resources::Lane::Background)
+                    .bytes((self.max_object_bytes as u64).min(length.saturating_sub(actual)).saturating_mul(2))
+                    .map_err(|_| RecordError::Busy)?;
                 let mut bytes = Vec::new();
-                (&mut input)
-                    .take(self.max_object_bytes as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(storage)?;
+                {
+                    let _io = crate::resources::io_scope(crate::resources::Lane::Background).io().map_err(|_|RecordError::Busy)?;
+                    (&mut input)
+                        .take(self.max_object_bytes as u64)
+                        .read_to_end(&mut bytes)
+                        .map_err(storage)?;
+                }
                 if bytes.is_empty() {
                     break;
                 }
@@ -557,6 +563,27 @@ mod tests {
         inner.remote = Some(remote);
         drop(inner);
         (p, store, root, db, clock)
+    }
+    #[tokio::test]
+    async fn resource_refused_write_keeps_head_receipt_and_retry_classification() {
+        use crate::resources::{Governor, Lane};
+        let (p,_,_,_,_) = source().await;
+        let governor = Arc::new(Governor::default());
+        let scope = governor.admit("a".into(), Lane::Foreground, 0).unwrap();
+        let request = write("resource-refused", "a", "alpha", ExpectedVersion::Absent);
+        let first = scope.io().unwrap(); let second = scope.io().unwrap();
+        assert!(matches!(scope.clone().run(p.write(request.clone())).await, Err(RecordError::Busy)));
+        assert_eq!(p.statistics().await.unwrap().visible_seq, 0);
+        assert!(p.operation(&request.operation_id).await.unwrap().is_none());
+        {
+            let inner = p.inner.lock().await;
+            let remote = inner.remote.as_ref().unwrap();
+            assert_eq!(remote.authority.lock().await.read_head("source").unwrap().unwrap().committed_seq, 0);
+        }
+        drop(first);drop(second);
+        let receipt = scope.clone().run(p.write(request.clone())).await.unwrap();
+        assert_eq!(receipt.seq, 1);
+        assert_eq!(scope.run(p.write(request)).await.unwrap(), receipt);
     }
     async fn cold(p: RecordPartition, root: &Path, clock: Arc<Clock>) -> RecordPartition {
         let remote = p.inner.lock().await.remote.take().unwrap();
@@ -1306,7 +1333,7 @@ impl RemotePersistence {
             .ok_or_else(||storage("build deadline overflow"))?;
         let build = authority.begin_index_build(&self.partition_id,self.owner_epoch,now,deadline).map_err(storage)?
             .ok_or(RecordError::Busy)?;
-        Ok(RemoteBuild{build,store:self.store.clone(),authority_path:authority.database_path().to_path_buf(),
+        Ok(RemoteBuild{build,store:self.store.clone().background(),authority_path:authority.database_path().to_path_buf(),
             partition_id:self.partition_id.clone(),max_object_bytes:self.max_object_bytes,max_tail_blocks:self.max_tail_blocks})
     }
 }
@@ -1357,11 +1384,17 @@ impl RemoteBuild {
             let mut hash = Sha256::new();
             let mut actual = 0u64;
             loop {
+                let _buffer = crate::resources::io_scope(crate::resources::Lane::Background)
+                    .bytes((self.max_object_bytes as u64).min(length.saturating_sub(actual)).saturating_mul(2))
+                    .map_err(|_| RecordError::Busy)?;
                 let mut bytes = Vec::new();
-                (&mut input)
-                    .take(self.max_object_bytes as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(storage)?;
+                {
+                    let _io = crate::resources::io_scope(crate::resources::Lane::Background).io().map_err(|_|RecordError::Busy)?;
+                    (&mut input)
+                        .take(self.max_object_bytes as u64)
+                        .read_to_end(&mut bytes)
+                        .map_err(storage)?;
+                }
                 if bytes.is_empty() {
                     break;
                 }

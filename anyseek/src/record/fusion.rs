@@ -42,8 +42,7 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 let _permit = permit;
                 let mut inner = owner.lock().await;
                 inner.advance_time().await?;

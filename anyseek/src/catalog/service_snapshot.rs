@@ -310,8 +310,7 @@ impl Catalog {
         let admission = self.admission.clone().try_acquire_owned().map_err(|_| CatalogError::Busy)?;
         let owner = self.inner.clone();
         let execution = self.execution.clone();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 let _admission = admission;
                 let _execution = execution.freeze().await;
                 let inner = owner.lock().await;
@@ -475,8 +474,7 @@ impl Catalog {
         identity: String,
         current_master: String,
     ) -> Result<ServiceSnapshot, CatalogError> {
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 let input = validate(&archive).await?;
                 if !archive.join(COMPLETE).exists() {
                     return Err(storage("archive is not certified complete"));

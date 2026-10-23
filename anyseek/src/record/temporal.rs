@@ -256,7 +256,7 @@ impl Inner {
         #[cfg(feature = "s3-object-store")]
         if let Some(remote) = self.remote.as_mut() {
             remote.commit_entry(event.seq, format!("system:expired:{}", event.seq), &bytes)
-                .await.map_err(RecordError::OutcomeUnknown)?;
+                .await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?;
         }
         self.append_operation(&bytes,event.seq)?;
         #[cfg(feature = "fault-injection")]
@@ -313,8 +313,7 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 let _permit = admission;
                 owner.lock().await.advance_time().await
             })

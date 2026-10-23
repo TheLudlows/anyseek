@@ -1302,7 +1302,7 @@ pub(crate) async fn create_index_root(
                     let meta_clone = meta.clone();
                     let schema_clone = schema.clone();
                     let turbo_quant_clone = turbo_quant.clone();
-                    result_object_list.push(tokio::spawn(async move {
+                    result_object_list.push(tokio::spawn(crate::resources::inherit(async move {
                         let shard_path = index_path_clone2.join("shards").join(i.to_string());
                         #[cfg(test)]
                         if shard_path.join(".test-builder-wait").exists() {
@@ -1334,7 +1334,7 @@ pub(crate) async fn create_index_root(
 
                         let shard_arc = Arc::new(RwLock::new(shard));
                         Ok::<_,String>((shard_arc, i))
-                    }));
+                    })));
                 }
                 // Drain all accepted builders on failure; do not leave sibling
                 // mutations running after their parent returns an error.
@@ -2267,12 +2267,12 @@ pub async fn open_index(index_path: &Path) -> Result<IndexArc, String> {
                                 let index_path_clone2 = index_path_clone.clone();
                                 let vector_type_clone = vector_type;
                                 let dimensions_clone = dimensions;
-                                shard_handle_vec.push(tokio::spawn(async move {
+                                shard_handle_vec.push(tokio::spawn(crate::resources::inherit(async move {
                                     let path = index_path_clone2.join("shards").join(i.to_string());
 
                                     open_shard(&path, true, vector_type_clone, dimensions_clone)
                                         .await
-                                }));
+                                })));
                             }
 
                             for shard_handle in shard_handle_vec {
@@ -2788,9 +2788,9 @@ impl Index {
         let mut result_object_list = Vec::new();
         for shard in self.shard_vec.iter() {
             let shard_clone = shard.clone();
-            result_object_list.push(tokio::spawn(async move {
+            result_object_list.push(tokio::spawn(crate::resources::inherit(async move {
                 shard_clone.write().await.clear_shard().await;
-            }));
+            })));
         }
         future::join_all(result_object_list).await;
 
@@ -2826,7 +2826,7 @@ impl Close for IndexArc {
         let mut result_object_list = Vec::new();
         for shard in self.read().await.shard_vec.iter() {
             let shard_clone = shard.clone();
-            result_object_list.push(tokio::spawn(async move {
+            result_object_list.push(tokio::spawn(crate::resources::inherit(async move {
                 let mut mmap_options = MmapOptions::new();
                 let mmap: MmapMut = mmap_options.len(4).map_anon().unwrap();
                 shard_clone.write().await.index_file_mmap = mmap
@@ -2840,7 +2840,7 @@ impl Close for IndexArc {
                     .expect("Unable to make Mmap read-only");
 
                 shard_clone.write().await.index_option = None;
-            }));
+            })));
         }
         for result in future::join_all(result_object_list).await {
             result.map_err(std::io::Error::other)?;
@@ -3095,13 +3095,13 @@ async fn enqueue_document(index_arc: &IndexArc, document: Document) -> Result<()
     *docid_global += 1;
     drop(docid_global);
 
-    INDEX_RUNTIME.handle().spawn(async move {
+    INDEX_RUNTIME.handle().spawn(crate::resources::inherit(async move {
         let result = shard_arc
             .index_document_shard(document, docid_global_clone)
             .await;
         drop(permit);
         result
-    }).await.map_err(|e| format!("index task failed: {e}"))?
+    })).await.map_err(|e| format!("index task failed: {e}"))?
 
 }
 /// Indexes a single document

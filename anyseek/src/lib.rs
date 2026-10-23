@@ -92,6 +92,7 @@ mod commit_io_tests;
 
 pub mod record;
 pub mod catalog;
+pub mod resources;
 
 mod active;
 

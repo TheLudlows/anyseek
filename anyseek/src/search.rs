@@ -1010,7 +1010,7 @@ impl Search for IndexArc {
             let result_sort_clone = result_sort.clone();
             let shard_id = shard.read().await.meta.id;
 
-            result_object_list.push(INDEX_RUNTIME.handle().spawn(async move {
+            result_object_list.push(INDEX_RUNTIME.handle().spawn(crate::resources::inherit(async move {
                 #[cfg(test)]
                 crate::record::query_test_gate().await;
                 match query_mode_clone {
@@ -1102,7 +1102,7 @@ impl Search for IndexArc {
                         (Some(rlo_lexical), Some(rlo_vector))
                     }
                 }
-            }));
+            })));
         }
 
         let mut result_object: ResultObject = Default::default();

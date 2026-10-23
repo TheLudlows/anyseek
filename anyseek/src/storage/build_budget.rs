@@ -17,6 +17,9 @@ static MEMORY: LazyLock<Arc<AtomicU64>> = LazyLock::new(|| Arc::new(AtomicU64::n
 fn exceeded() -> io::Error {
     io::Error::other("record build resource budget exceeded")
 }
+fn io_admission() -> io::Result<Option<crate::resources::Lease>> {
+    crate::resources::Scope::current().map(|scope| scope.io()).transpose().map_err(io::Error::other)
+}
 pub(crate) struct MemoryLease(u64, Arc<AtomicU64>);
 pub(crate) fn reserve_memory(bytes: u64) -> io::Result<MemoryLease> {
     reserve_from(&MEMORY, bytes)
@@ -186,6 +189,7 @@ impl File {
         Ok(())
     }
     pub(crate) fn set_len(&self, len: u64) -> io::Result<()> {
+        let _io = io_admission()?;
         self.charge(len)?;
         self.inner.set_len(len)
     }
@@ -198,6 +202,7 @@ impl Deref for File {
 }
 impl Write for File {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        let _io = io_admission()?;
         let end = (if self.append {
             self.inner.metadata()?.len()
         } else {
@@ -214,6 +219,7 @@ impl Write for File {
 }
 impl Write for &File {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        let _io = io_admission()?;
         let mut f = &self.inner;
         let end = (if self.append {
             f.metadata()?.len()
@@ -231,6 +237,7 @@ impl Write for &File {
 }
 impl Read for File {
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        let _io = io_admission()?;
         self.inner.read(b)
     }
 }
@@ -288,6 +295,7 @@ impl OpenOptions {
         self
     }
     pub(crate) fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
+        let _io = io_admission()?;
         let path = path.as_ref();
         let absolute = if path.is_absolute() {
             path.to_path_buf()
@@ -312,6 +320,7 @@ impl OpenOptions {
 
 impl Read for &File {
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        let _io = io_admission()?;
         (&self.inner).read(b)
     }
 }
