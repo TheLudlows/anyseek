@@ -39,7 +39,7 @@ async fn retired_disk_metadata_is_not_silently_reinterpreted() {
     .unwrap();
     let index = Ok::<_, String>(records::create(path, meta, (&schema).to_vec()).await)
         .unwrap();
-    
+
     drop(index);
     // Unknown codecs/access types are rejected while decoding persisted configuration.
     // Record does not read the retired index.json format.

@@ -51,7 +51,7 @@ async fn boosted_single_term_matches_formula_in_every_state() {
             index.compact_journal().await.unwrap();
         }
         if stage == 2 {
-            
+
             drop(index);
             index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
         }
@@ -65,7 +65,7 @@ async fn boosted_single_term_matches_formula_in_every_state() {
             x.hits[0].score
         );
     }
-    
+
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }

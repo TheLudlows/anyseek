@@ -157,7 +157,7 @@ async fn scan32_topk_matches_global_ranking() {
     assert_eq!(topk.hits.len(), 100);
     assert_valid_topk(&topk, &oracle);
 
-    
+
 }
 
 /// Directly reproduces the original B2 puke case: disjoint terms, uniform
@@ -192,7 +192,7 @@ async fn scan32_sparse_uniform_fills_heap() {
     assert_eq!(topk.hits.len(), 100, "scan_32 under-filled the heap");
     assert_valid_topk(&topk, &oracle);
 
-    
+
 }
 
 /// Twenty score tiers of twenty docs each: top-100 selects five complete tiers.
@@ -240,7 +240,7 @@ async fn scan32_score_gap_exact_selection() {
         "score-gap top-100 must match the global ranking exactly"
     );
 
-    
+
 }
 
 /// TopkCount and Topk must agree on selection and on the returned count.
@@ -289,7 +289,7 @@ async fn scan32_topkcount_and_topk_agree() {
         .collect();
     assert_eq!(strict_key(&a), strict_key(&b));
 
-    
+
 }
 
 /// Pagination sanity on the fixed path: an offset slice of a scan_32 ranking
@@ -322,5 +322,5 @@ async fn scan32_pagination_is_consistent() {
         "pagination scores must match the full ranking slice"
     );
 
-    
+
 }

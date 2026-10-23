@@ -1,9 +1,9 @@
 //! Independent N-gram flags must preserve literal phrase matches through persistence.
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FrequentwordType, 
+        AccessType, Clustering, DocumentCompression, FrequentwordType,
          IndexMetaObject, LexicalSimilarity, SchemaField, StopwordType,
-        TokenizerType, 
+        TokenizerType,
     },
     search::{QueryType, ResultType, SearchMode},
     vector::Inference,
@@ -111,12 +111,12 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
     assert_phrases(&index, true, &format!("mask={mask}, realtime")).await;
     index.compact_journal().await.unwrap();
     assert_phrases(&index, false, &format!("mask={mask}, committed")).await;
-    
+
     drop(index);
     let index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
     assert_eq!(index.configuration().await.unwrap().index.ngram_indexing, mask);
     assert_phrases(&index, false, &format!("mask={mask}, reopened")).await;
-    
+
     drop(index);
     fs::remove_dir_all(path).unwrap();
 }

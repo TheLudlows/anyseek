@@ -1,6 +1,6 @@
 # Issue #80 实施记录
 
-本分支是进行中的实现，**不是完成声明**。Record 生产全文已使用 Tantivy；旧公开全文入口和执行/格式模块已删除，向量/metadata已独立。外部集成测试迁移后的全目标编译已恢复通过，最终运行回归、HTTP/S3 与 Windows 验收仍待完成。历史阶段按时间保留，不代表最新验收状态。
+本分支是进行中的实现，**不是完成声明**。Record 生产全文已使用 Tantivy；旧公开全文入口和执行/格式模块已删除，向量/metadata已独立。外部集成测试迁移后的全目标编译已恢复通过。阶段12新二进制的完整HTTP（默认15秒）和S3 storage fixture均通过；阶段13预算/生命周期补强后的最终矩阵正在重跑，Windows仍未运行。历史阶段按时间保留，不代表最新验收状态。
 
 ## 可复核基线
 
@@ -354,3 +354,83 @@ takeover boundaries, feed floors, joint backups and service archive restore.
 
 No-default doctests: 9 passed, 0 failed (1.88 s). Full HTTP session 83044
 (Python PID 362221) is still running; no final success is claimed for that suite.
+
+
+## Phase 13 — whole-generation admission and worker ownership
+
+Phase-12 full HTTP session 83044 completed successfully (exit 0), including lease
+cleanup and all process fault boundaries, using the recorded `ae607146...` binary
+and the unchanged default 15-second startup deadline. The earlier one-off startup
+failure has not been proven to have the same cause as the budget rejection; this
+is successful end-to-end evidence, not a retrospective root-cause claim.
+
+Native admission now counts every member of a pending generation Publish before
+WAL append. `current_updates + incoming_updates > 128` requests one certified
+rotation, so a generation cannot overshoot the mutable-tail commit bound. Stage,
+renew, abort and deletion do not invent native inserts. The regression starts with
+127 native updates and publishes 100 members, exercises normal and injected partial
+publication, verifies pre-WAL rotation, fenced output after failure, full 100-member
+recovery, and original operation ID replay at seq 129/version 2. Passed in 25.66 s.
+Its fixture uses 64 KiB maximum request bodies and 16 MiB journal capacity to admit
+a valid 100-member stage under existing checkpoint-reserve validation; production
+limits and validation are unchanged. Initial smaller fixture configurations were
+correctly rejected by request/checkpoint budgets rather than silently bypassed.
+
+Native Directory clones now own the package pin as well as byte leases. This
+closes the failed-join boundary: a worker that outlives Runtime cannot lose its GC
+protection. Successful join frees writer memory without waiting for a fixed
+Searcher to disappear. New tests check the live-writer reservation versus the
+joined-writer release while a Searcher remains, and a detached Directory clone's
+pin/reservation lifetime. Existing owned-builder cancellation and selected-reader
+GC tests remain. Native merges remain disabled; bounded Record reconstruction is
+the only merge/publication mechanism.
+
+Audit evidence: `storage/s3_compatible.rs::get_verified` admits I/O and twice the
+reference length before cache/network reads, checks committed lengths and hashes,
+and returns a lease-owning Buffer; `object_log` reserves decoded/flattening storage
+before parsing. HTTP `admission::encode` bounds serialization; response/frame
+owners retain Scope, and authorization plus data output permits are checked on
+handoff. `record/indexer` owns the partition, semaphore, snapshot/tail buffers and
+candidate through completion even if the caller drops its job. These are logical
+explicit-buffer/operation budgets, not allocator or process RSS limits.
+
+CI no longer invokes deleted `commit_io_tests` (which silently matched zero tests).
+Linux and Windows persistence jobs now invoke native lexical, independent component,
+public Record integration, no-default core and doctest suites. Job deadlines were
+extended for the added suites; no HTTP deadline or behavioral assertion was relaxed.
+The 3000-record regression now uses an isolated temporary directory and drops the
+partition before cleanup, preserving all 3000 writes and expected counts while
+avoiding a Unix-only shared path. Windows execution remains pending publication/CI.
+
+Final-code service binary copied to `/tmp/anyseek80-phase13-server`, SHA256
+`c8e32b37efc453e38df28477c57a1ecc919d87ca041059086cfd3576b11edc66`.
+Full HTTP, S3 storage fixture/faults and all-targets have been started against this
+source; no final result is claimed until their logs complete. Isolated standalone
+consumer dependency/build checks pass with default and no-default features.
+
+
+Phase-13 completed results (production sources unchanged since the fixed binary):
+- Default core: 237 passed / 0 failed / 12 ignored, 166.83 s; server: 15 passed,
+  2.39 s. The encompassing all-targets run continues with integration fixtures.
+- No-default core: 197 passed / 0 failed / 10 ignored, 132.87 s.
+- Default and no-default doctests: 9 passed each (2.43 s / 2.34 s).
+- S3 storage fixture/fault matrix: all requested checks passed, 189.818 s,
+  `server_sha256=c8e32b37...edc66`; object contract fixture separately passed.
+- Additional HTTP Indexer and authorization sections both exit 0, verifying owned
+  builds, concurrent acknowledged writes, source deletion, scoped revocation and
+  restart. Full HTTP and seven-group S3 cold-cache semantic results still pending.
+- Isolated core dependency/build and Markdown/branding checks passed. Baseline-wide
+  `git diff --check` now passes after removing only added trailing whitespace in
+  migrated tests; assertions, inputs and production code were not changed by that
+  cleanup. The executing tests were compiled before this whitespace-only cleanup.
+
+The default core's twelve ignored entries are eleven explicit child-process helpers
+(invoked by their parent crash/cancellation tests) plus the endpoint contract test;
+the latter was explicitly run against the fixture, not a real S3 endpoint. Logs:
+`/tmp/anyseek80-phase13-ignored-core.log` and `s3-contract-report.json`.
+
+Phase-13 full HTTP session 82612 subsequently completed with exit 0, unchanged
+15-second default startup limit, and all listed process fault/lease/feed scenarios.
+Generated OpenAPI parses successfully and contains 28 paths. The remaining active
+acceptance runs are external all-targets integration tests and the seven-group
+S3 cold-cache semantic fixture; no Windows/real-endpoint/power-loss claim is made.

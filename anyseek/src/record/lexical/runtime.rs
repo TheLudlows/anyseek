@@ -73,6 +73,7 @@ impl Runtime {
             .ok_or_else(|| storage("native disk budget overflow"))?;
         let directory =
             super::directory::BudgetDirectory::persistent(path, limit, 65536, 0)?;
+        directory.retain_pin(pin.clone())?;
         let index = Index::create(directory.clone(), schema, Default::default()).map_err(storage)?;
         let reader = index
             .reader_builder()
@@ -123,6 +124,7 @@ impl Runtime {
         let limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
             .ok_or_else(||storage("native selected byte budget overflow"))?;
         let directory=super::directory::BudgetDirectory::open_selected(path,limit)?;
+        directory.retain_pin(pin.clone())?;
         let index = Index::open(directory).map_err(storage)?;
         let reader: IndexReader = index
             .reader_builder()
@@ -151,8 +153,8 @@ impl Runtime {
     /// Bound native segment fanout and cumulative metadata rewrite traffic.
     /// Record certifies a replacement before accepting another durable operation.
     /// Bulk rebuilds publish once and do not consume this mutable-tail allowance.
-    pub(crate) async fn needs_rotation(&self) -> bool {
-        self.data.lock().await.published_updates >= 128
+    pub(crate) async fn needs_rotation(&self, incoming: usize) -> bool {
+        self.data.lock().await.published_updates.saturating_add(incoming) > 128
     }
     pub(crate) async fn append(
         &self,
@@ -361,6 +363,62 @@ mod tests {
     use crate::record::{ExpectedVersion, RecordPartition};
     use crate::search::{QueryType, ResultType, Search, SearchMode};
     #[tokio::test]
+    async fn joined_writer_releases_buffer_while_fixed_searcher_retains_pin() {
+        let root=tempfile::tempdir().unwrap();let package=root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let governor=Arc::new(crate::resources::Governor::default());
+        let scope=governor.admit("joined-writer".into(),crate::resources::Lane::Foreground,0).unwrap();
+        let accounting=scope.clone().in_lane(crate::resources::Lane::Background);
+        let native=scope.run(async {Runtime::create(&package.join("native"),&config()).unwrap()}).await;
+        native.append(Identity{id:"a".into(),version:1,revision:1},&serde_json::from_str(r#"{"body":"alpha"}"#).unwrap(),true).await.unwrap();
+        let held=native.snapshot().await.unwrap();
+        assert!(accounting.bytes(375*1024*1024).is_err(),"live native writer retains its buffer");
+        drop(native);
+        let capacity=accounting.bytes(375*1024*1024).expect("joined writer must release buffer even with fixed reader");
+        assert_eq!(held.identities.len(),1);
+        assert!(!crate::record::package_pins::retire_if_unpinned(&package,||{panic!("live Searcher must protect package")}).unwrap());
+        drop(held);drop(capacity);
+        assert!(crate::record::package_pins::retire_if_unpinned(&package,||Ok(())).unwrap());
+    }
+
+    #[tokio::test]
+    async fn complete_generation_is_admitted_before_rotation_and_recovers_atomically() {
+        use crate::record::tests::{generation_write,stage_generation,source_write};
+        use crate::record::GenerationCommand;
+        for fail in [false,true] {
+            let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");
+            let mut settings=config();settings.max_records=512;settings.max_operations=1024;settings.max_candidates=512;settings.max_record_bytes=64*1024;settings.max_journal_bytes=16*1024*1024;
+            let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+            p.write(source_write("s","s",&[])).await.unwrap();
+            for i in 0..126 {
+                p.write(write(&format!("o-{i}"),&format!("r-{i}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
+            }
+            let members=(0..100).map(|i|format!("member-{i}")).collect::<Vec<_>>();
+            p.write(generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&members.iter().map(String::as_str).collect::<Vec<_>>()))).await.unwrap();
+            assert!(p.inner.lock().await.anchor.is_none());
+            assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,0);
+            if fail {p.inner.lock().await.fail_publication_stage=1;}
+            let request=generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()});
+            let result=p.write(request.clone()).await;
+            assert!(p.inner.lock().await.anchor.is_some(),"127 + 100 must rotate before the durable publish");
+            if fail {
+                assert_eq!(result.unwrap_err(),crate::record::RecordError::DurablePending(129));
+                assert!(p.generation_status("doc").await.is_err());
+                assert!(p.search("generationword".into(),None,SearchMode::Lexical,vec![],10).await.is_err());
+            } else {
+                assert_eq!(result.unwrap().version,2);
+                assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,100);
+            }
+            drop(p);
+            let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+            let receipt=p.write(request.clone()).await.unwrap();assert_eq!(receipt.seq,129);assert_eq!(receipt.version,2);
+            assert_eq!(p.write(request).await.unwrap(),receipt);
+            assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,100);
+            assert_eq!(p.search("generationword".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,100);
+        }
+    }
+
+    #[tokio::test]
     async fn automatic_tail_rotation_preserves_durable_retry_and_fixed_searcher() {
         let root=tempfile::tempdir().unwrap();
         let path=root.path().join("partition");
@@ -395,7 +453,7 @@ mod tests {
         for i in 0..1000 {
             let result=native.append(Identity{id:format!("{i:020}"),version:1,revision:i+1},&doc,true).await;
             if let Err(error)=result {
-                eprintln!("first native failure after {i} visible writes: {error:?}");
+                log::info!("first native failure after {i} visible writes: {error:?}");
                 assert!(format!("{error:?}").contains("native writer byte budget exceeded"),"{error:?}");
                 return;
             }

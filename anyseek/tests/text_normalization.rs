@@ -1,9 +1,9 @@
 //! Versioned analysis must preserve source text and use one rule in every state.
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FrequentwordType, 
+        AccessType, Clustering, DocumentCompression, FrequentwordType,
          IndexMetaObject, LexicalSimilarity, StopwordType, TextNormalization,
-        TokenizerType, 
+        TokenizerType,
     },
     search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
     vector::Inference,
@@ -74,7 +74,7 @@ async fn rows_sorted(
                 vec![]
             },
         }).await.unwrap();
-    
+
     r.hits.iter().map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score)).collect()
 }
 async fn ids(index: &RecordPartition, q: &str, realtime: bool) -> BTreeSet<usize> {
@@ -108,7 +108,7 @@ async fn t2s_phrases_original_utf8_ngram_and_reopen() {
                 index.compact_journal().await.unwrap();
             }
             if stage == 2 {
-                
+
                 drop(index);
                 index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
             }
@@ -152,7 +152,7 @@ async fn t2s_phrases_original_utf8_ngram_and_reopen() {
                 [6, 7].into_iter().collect()
             );
         }
-        
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -176,7 +176,7 @@ async fn none_default_and_persisted_rule_are_explicit() {
     );
     value["text_normalization"] = json!("OpenCcLatest");
     assert!(serde_json::from_value::<IndexMetaObject>(value).is_err());
-    
+
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -206,7 +206,7 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                             index.compact_journal().await.unwrap();
                         }
                         if stage == 2 {
-                            
+
                             drop(index);
                             index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
                         }
@@ -234,7 +234,7 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                             }
                         }
                     }
-                    
+
                     drop(index);
                     std::fs::remove_dir_all(path).unwrap();
                 }
@@ -268,7 +268,7 @@ async fn nul_suffix_alone_has_independent_hits_in_every_state() {
                     records::append(&index, vec![serde_json::from_value(json!({"body":docs[2]})).unwrap()]).await;
                 }
                 if stage == 4 {
-                    
+
                     drop(index);
                     index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
                 }
@@ -304,7 +304,7 @@ async fn nul_suffix_alone_has_independent_hits_in_every_state() {
                     );
                 }
             }
-            
+
             drop(index);
             std::fs::remove_dir_all(path).unwrap();
         }

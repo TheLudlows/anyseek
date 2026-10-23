@@ -80,7 +80,7 @@ async fn single_count_excludes_deleted() {
     let mut ids: Vec<usize> = topk_count.hits.iter().map(|r| r.record.record_id.parse::<usize>().unwrap()).collect();
     ids.sort_unstable();
     assert_eq!(ids, vec![3, 4, 5, 6, 7, 8, 9]);
-    
+
 }
 
 /// Control: without deletes the Count fast path is untouched and exact.
@@ -96,5 +96,5 @@ async fn single_count_no_deletes_control() {
     assert_eq!(count.count_total, 10);
     assert_eq!(topk_count.count_total, 10);
     assert_eq!(topk_count.hits.len(), 10);
-    
+
 }

@@ -130,7 +130,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order() {
                 index.compact_journal().await.unwrap();
             }
             if stage == 2 {
-                
+
                 drop(index);
                 index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
             }
@@ -171,7 +171,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order() {
                 }
             }
         }
-        
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -195,7 +195,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
         index.compact_journal().await.unwrap();
         for reopened in [false, true] {
             if reopened {
-                
+
                 drop(index);
                 index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
             }
@@ -242,7 +242,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                 );
             }
         }
-        
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -295,7 +295,7 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
                 all[..2]
             );
         }
-        
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -354,7 +354,7 @@ async fn five_term_or_subsets_keep_all_pair_contributions() {
                 );
             }
         }
-        
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }

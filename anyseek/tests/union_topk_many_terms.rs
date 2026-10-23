@@ -79,5 +79,5 @@ async fn union_topk_forty_terms() {
     assert_eq!(topk_count.count_total, 1000);
     assert_eq!(topk_count.count_total, count.count_total);
 
-    
+
 }

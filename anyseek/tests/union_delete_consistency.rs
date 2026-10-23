@@ -84,7 +84,7 @@ async fn union_count_excludes_deleted() {
     assert_eq!(count.count_total, 17);
     assert_eq!(topk_count.count_total, 17);
     assert_eq!(topk_count.hits.len(), 17);
-    
+
 }
 
 /// Control: without deletes the OR fast path is untouched and exact.
@@ -105,5 +105,5 @@ async fn union_count_no_deletes_control() {
     let topk_count = search(&index, "alpha beta", ResultType::TopkCount).await;
     assert_eq!(count.count_total, 20);
     assert_eq!(topk_count.count_total, 20);
-    
+
 }

@@ -50,7 +50,7 @@ HTTP 使用 `/api/v1`、`apikey` 请求头和 JSON。创建 collection 时声明
 - [HTTP 请求示例](anyseek/server/test_api.rest)与[服务契约](anyseek/server/README.md)：记录、generation、查询、授权、备份等完整流程。
 - `POST /api/v1/index/{id}/query`：文本、向量或混合查询；空对象浏览可见记录。
 - `target/debug/anyseek_server generate_openapi=true`：在可执行文件旁生成 OpenAPI JSON/YAML。
-- [Rust 库示例](docs/library-examples.md)：从本仓库使用 path/git 依赖；低层 Index API 与默认 Record 服务的持久化契约不同。
+- [Rust 库示例](docs/library-examples.md)：从本仓库使用 path/git 依赖；统一使用 RecordPartition 访问数据；旧低层 Index API 已移除。
 
 单 package 同时提供核心库与 `anyseek_server` 二进制；服务须显式启用 `server` feature，默认库依赖不包含 HTTP/OpenAPI。
 

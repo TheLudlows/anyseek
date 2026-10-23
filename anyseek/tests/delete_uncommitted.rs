@@ -67,7 +67,7 @@ async fn delete_uncommitted_survives_commit() {
     index.compact_journal().await.unwrap();
     assert_eq!(count(&index, "hello", false).await, 0);
     assert_eq!(index.statistics().await.unwrap().active_records, 1);
-    
+
 }
 
 /// Control: delete-after-commit keeps working as before.
@@ -81,7 +81,7 @@ async fn delete_committed_control() {
     index.compact_journal().await.unwrap();
     assert_eq!(count(&index, "hello", false).await, 0);
     assert_eq!(index.statistics().await.unwrap().active_records, 1);
-    
+
 }
 
 /// Out-of-range deletes stay silent no-ops: no panic, counts unchanged.
@@ -98,7 +98,7 @@ async fn delete_out_of_range_ignored() {
     index.compact_journal().await.unwrap();
     assert_eq!(count(&index, "hello", false).await, 0);
     assert_eq!(index.statistics().await.unwrap().active_records, 1);
-    
+
 }
 
 /// Deleted identities retain versions; stale requests cannot target later inserts.

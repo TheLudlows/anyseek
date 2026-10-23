@@ -12,10 +12,10 @@ pub(super) struct RetrievalView {
     tail: IndexArc,
 }
 impl RetrievalView {
-    pub(super) async fn can_admit(&self,bytes:u64)->bool {
+    pub(super) async fn can_admit(&self,bytes:u64,native_updates:usize)->bool {
         let root=self.tail.read().await;
         for native in &root.record_lexical {
-            if native.needs_rotation().await {return false;}
+            if native.needs_rotation(native_updates).await {return false;}
         }
         let shard=root.shard_vec[0].read().await;
         shard.build_reservation.as_ref().is_some_and(|r|r.can_grow(bytes))

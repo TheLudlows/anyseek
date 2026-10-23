@@ -119,7 +119,7 @@ async fn realtime_single_count_excludes_deleted() {
     let count = search(&index, "base", QueryType::Union, ResultType::Count, true).await;
     assert_eq!(topk.count_total, 8);
     assert_eq!(count.count_total, 8);
-    
+
 }
 
 /// OR realtime totals must drop deleted uncommitted documents (no double count).
@@ -156,5 +156,5 @@ async fn realtime_union_count_excludes_deleted() {
     assert_eq!(topk.count_total, 17);
     assert_eq!(topk.hits.len(), 17);
     assert_eq!(count.count_total, 17);
-    
+
 }

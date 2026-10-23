@@ -16,7 +16,7 @@ concurrency:
 jobs:
   build-and-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -100,7 +100,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     # Includes cold-cache S3 takeover and joint-archive process fault matrices.
-    timeout-minutes: 40
+    timeout-minutes: 90
     env:
       ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/p1-native-data
     steps:
@@ -124,8 +124,17 @@ jobs:
         run: cargo test -p anyseek --lib journal_
       - name: Native partition publication and owner-lock tests
         run: cargo test -p anyseek --lib partition_
-      - name: Native existing-index I/O errors and mapping lifecycle
-        run: cargo test -p anyseek --lib commit_io_tests
+      - name: Native Tantivy admission, fixed readers, cancellation and package pins
+        run: cargo test -p anyseek --lib record::lexical::
+      - name: Native vector and metadata component format
+        run: cargo test -p anyseek --lib component::
+      - name: Native retained public Record integration contracts
+        run: cargo test -p anyseek --tests --features server,fault-injection
+      - name: Native standalone core and documentation
+        run: |
+          cargo test -p anyseek --no-default-features --lib
+          cargo test -p anyseek --no-default-features --doc
+          cargo test -p anyseek --doc
       - name: Native record replay, snapshot and response-loss tests
         run: cargo test -p anyseek --lib record::tests
       - name: Native bounded background index and fenced cut publication

@@ -10,7 +10,6 @@ use anyseek::index::{
     TokenizerType, };
 use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
-use std::{fs, path::Path};
 
 async fn search(
     index_arc: &RecordPartition,
@@ -24,8 +23,8 @@ async fn search(
 
 #[tokio::test]
 async fn frequent_terms_topk_returns_results() {
-    let index_path = Path::new("/tmp/repro_frequent_topk/");
-    let _ = fs::remove_dir_all(index_path);
+    let root = tempfile::tempdir().unwrap();
+    let index_path = root.path().join("index");
     let schema_json = r#"
     [{"field":"title","field_type":"Text","store":false,"index_lexical":true,"longest":true}]"#;
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
@@ -45,7 +44,7 @@ async fn frequent_terms_topk_returns_results() {
         inference: Inference::None,
     };
     // NOTE: keep on the single-shard fast path; multi-shard covered by suite.
-    let index_arc = Ok::<_, String>(records::create(index_path, meta, (&schema).to_vec()).await)
+    let index_arc = Ok::<_, String>(records::create(&index_path, meta, (&schema).to_vec()).await)
         .unwrap();
 
     // 3000 docs: "common" in all (100%), "half" in evens (50%) -> every query
@@ -105,6 +104,6 @@ async fn frequent_terms_topk_returns_results() {
     .await;
     assert_eq!(c.count_total, 1500);
 
-    
-    let _ = fs::remove_dir_all(index_path);
+
+    drop(index_arc);
 }

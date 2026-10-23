@@ -151,7 +151,7 @@ async fn docid3_disjoint_terms_fill_heap() {
     let topk_sel: Vec<(usize, f32)> = topk.hits.iter().map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score)).collect();
     assert_valid_selection(&topk_sel, &score_table, total);
 
-    
+
 }
 
 /// Overlapping terms keep using the fast WAND path and must stay exact.
@@ -197,7 +197,7 @@ async fn docid3_overlap_control() {
         }
     }
 
-    
+
 }
 
 /// Mixed corpus with a short strict distinct-score tail to also pin the exact
@@ -228,5 +228,5 @@ async fn docid3_topkcount_total_consistent() {
     assert_eq!(topkcount.count_total, 130);
     assert_eq!(topkcount.hits.len(), 130);
 
-    
+
 }

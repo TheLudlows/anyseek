@@ -183,7 +183,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
             result.hits.iter().map(|r| r.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(),
             (83..90).rev().collect::<Vec<_>>()
         );
-        
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap(); // Only this test's newly created fixture.
     }
@@ -248,7 +248,7 @@ async fn stable_equal_score_block_boundary_and_explicit_id_sort() {
             }
         }
     }
-    
+
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }

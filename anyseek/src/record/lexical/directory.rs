@@ -31,6 +31,7 @@ struct WriterReservation {
     _buffer: Option<resources::Lease>,
 }
 struct Budget {
+    pin: Mutex<Option<Arc<crate::record::package_pins::Pin>>>,
     writer_memory: Mutex<Option<WriterReservation>>,
     ledger: Mutex<Ledger>,
     bytes: u64,
@@ -131,6 +132,12 @@ impl BudgetDirectory {
         }
         Ok(())
     }
+    // Directory clones outlive Runtime on a failed worker join. They must retain
+    // the same GC pin as the worker's bytes, until the last worker/reader drops.
+    pub(super) fn retain_pin(&self,pin:Arc<crate::record::package_pins::Pin>)->Result<(),RecordError> {
+        *self.budget.pin.lock().map_err(|_|storage("native pin ownership poisoned"))?=Some(pin);
+        Ok(())
+    }
     /// Called only after Tantivy has successfully joined indexing and merge
     /// workers. Fixed Searchers may retain this Directory, but no writer buffer.
     pub(super) fn release_joined_writer(&self) {
@@ -160,7 +167,7 @@ impl BudgetDirectory {
         let inner=MmapDirectory::open(path).map_err(storage)?;
         drop(io);drop(gate);
         Ok(Self {inner,selected:true,budget:Arc::new(Budget {
-            writer_memory:Mutex::new(None),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
+            pin:Mutex::new(None),writer_memory:Mutex::new(None),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
             _memory:memory,_buffer:buffer,
         })})
     }
@@ -184,7 +191,7 @@ impl BudgetDirectory {
             inner: MmapDirectory::open(path).map_err(storage)?,
             selected: false,
             budget: Arc::new(Budget {
-                writer_memory:Mutex::new(None),
+                pin:Mutex::new(None),writer_memory:Mutex::new(None),
                 ledger: Mutex::new(Ledger {
                     written: 0,
                     paths: BTreeSet::new(),
@@ -290,6 +297,19 @@ impl Directory for BudgetDirectory {
 mod tests {
     use super::*;
     use crate::record::lexical::tests::Temp;
+
+    #[test]
+    fn detached_directory_worker_retains_package_pin_and_reservation() {
+        let root=Temp::new();std::fs::create_dir(&root.0).unwrap();
+        let directory=BudgetDirectory::persistent(&root.0,1024,8,0).unwrap();
+        directory.retain_pin(crate::record::package_pins::Pin::acquire(&[root.0.clone()]).unwrap()).unwrap();
+        directory.admit_writer(20_000_000).unwrap();
+        let worker=directory.clone();drop(directory);
+        assert!(worker.budget.writer_memory.lock().unwrap().is_some());
+        assert!(!crate::record::package_pins::retire_if_unpinned(&root.0,||{panic!("worker owns package")}).unwrap());
+        drop(worker);
+        assert!(crate::record::package_pins::retire_if_unpinned(&root.0,||Ok(())).unwrap());
+    }
 
     #[test]
     fn selected_package_admits_reads_but_rejects_mutation() {

@@ -9,7 +9,7 @@ use anyseek::{
     index::{
         AccessType, Clustering, Document, DocumentCompression,
         FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet,
-        SchemaField, StopwordType, TokenizerType, 
+        SchemaField, StopwordType, TokenizerType,
         },
 
     vector::{Embedding, Inference, Precision, Quantization},
@@ -260,7 +260,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             .await;
             assert_eq!(labels(&index, &r, false).await, vec![25]);
         }
-        
+
         drop(index);
         let index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
         for name in ["Lexical", "Vector", "Hybrid"] {
@@ -275,7 +275,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             .await;
             assert_eq!(labels(&index, &r, false).await, vec![25]);
         }
-        
+
         drop(index);
         fs::remove_dir_all(path).unwrap();
     }
@@ -406,7 +406,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","filter":[{"StringSet32":{"field":"tags","filter":["even"]}}]})).unwrap();
             let result = index.query(RecordQuery {text:r.query_string.clone(),vector:None,query_type:r.query_type(),mode:r.search_mode(std::num::NonZeroUsize::new(anyseek::server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(),offset:0,length:10,result_type:r.result_type(),fields:vec![],filters:r.facet_filter,sort:vec![],temporal:None}).await.unwrap();
             assert!(labels(&index, &result, false).await.is_empty());
-            
+
             drop(index);
             fs::remove_dir_all(path).unwrap();
         }

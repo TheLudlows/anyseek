@@ -1,9 +1,9 @@
 //! Independent NOT membership, posting-rank and count regression (#37).
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FrequentwordType, 
+        AccessType, Clustering, DocumentCompression, FrequentwordType,
          IndexMetaObject, LexicalSimilarity, StopwordType, TokenizerType,
-        
+
     },
     search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
     vector::Inference,
@@ -73,7 +73,7 @@ async fn rows_sorted(
                 vec![]
             },
         }).await.unwrap();
-    
+
     (
         r.hits.iter().map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score)).collect(),
         r.count_total,
@@ -104,7 +104,7 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                             index.compact_journal().await.unwrap();
                         }
                         if stage == 2 {
-                            
+
                             drop(index);
                             index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
                         }
@@ -133,7 +133,7 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                             }
                         }
                     }
-                    
+
                     drop(index);
                     std::fs::remove_dir_all(path).unwrap();
                 }

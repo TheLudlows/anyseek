@@ -149,7 +149,7 @@ pub async fn exercise(proximity: bool) {
                             index.compact_journal().await.unwrap();
                         }
                         if stage == 2 {
-                            
+
                             drop(index);
                             index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
                         }
@@ -172,7 +172,7 @@ pub async fn exercise(proximity: bool) {
                                                 vec![]
                                             },
                                         }).await.unwrap();
-                                    
+
                                     let visible = true; // Successful Record writes are durable and visible.
                                     let want_ids = if !visible {
                                         vec![]
@@ -210,7 +210,7 @@ pub async fn exercise(proximity: bool) {
                             }
                         }
                     }
-                    
+
                     drop(index);
                     std::fs::remove_dir_all(path).unwrap();
                 }
@@ -266,7 +266,7 @@ pub async fn exercise_quantized_df() {
                 index.compact_journal().await.unwrap();
             }
             if stage == 3 {
-                
+
                 drop(index);
                 index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
             }
@@ -309,7 +309,7 @@ pub async fn exercise_quantized_df() {
                 }
             }
         }
-        
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }

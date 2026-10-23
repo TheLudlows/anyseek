@@ -1,5 +1,7 @@
 # anyseek 当前状态
 
+本工作分支正在完成 #80：生产全文已切换为 Tantivy 0.27.0，旧低层全文 API/执行器已删除，向量与元数据独立，使用新库格式。Linux 最终集成矩阵正在运行，当前分支的 Windows 尚未运行；下列已合入 PR 的历史 CI 不能替代此次验收。精确版本与证据见 [#80 实施记录](docs/issue80-implementation.md)。本分支尚未发布或合入。
+
 anyseek 是 AI 记忆与知识的存储、检索底座。PR #71 本地 Segment、[PR #72](https://github.com/TheLudlows/anyseek/pull/72) SQLite/S3 及 [PR #73](https://github.com/TheLudlows/anyseek/pull/73) 维护路径与清理、[PR #74](https://github.com/TheLudlows/anyseek/pull/74) 审计修复与无缓存验收已合入 master（源码基线 `afbe323d`）；B 尚未全部验收。
 
 进度核验：2026-10-23。

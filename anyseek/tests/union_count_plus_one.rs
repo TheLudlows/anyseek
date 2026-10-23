@@ -77,5 +77,5 @@ async fn union_count_overlap_same_block() {
     assert_eq!(count.count_total, expected);
     assert_eq!(topk_count.count_total, expected);
 
-    
+
 }

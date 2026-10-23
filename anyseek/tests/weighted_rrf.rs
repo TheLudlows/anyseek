@@ -118,12 +118,12 @@ async fn weighted_global_shards() {
         // Fixed explicit budgets make pagination a slice of the same fused ranking.
         let page = index.query(RecordQuery {text:"alpha".into(),vector:vector,query_type:QueryType::Union,mode:weighted(options),offset:1,length:1,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
         assert_eq!(page.hits[0].record.record_id.parse::<usize>().unwrap(),result.hits[1].record.record_id.parse::<usize>().unwrap());
-        
+
         drop(index);
         let reopened = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
         let again = query(&reopened, weighted(options), Some(Embedding::F32(vec![1.0,0.0,0.0]))).await;
         assert_eq!(serde_json::to_value(&result.hits).unwrap(),serde_json::to_value(&again.hits).unwrap());
-        
+
         drop(reopened);
         std::fs::remove_dir_all(path).unwrap();
     }

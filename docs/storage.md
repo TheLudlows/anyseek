@@ -4,13 +4,13 @@
 
 ## 本地 Segment 与共同视图
 
-`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订、generation 与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。低层独立 Index API 仍可保存自己的投影。
+`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订、generation 与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV14/manifest 3，不读取旧格式、迁移或双写。
 
 `record/view.rs` 在同一 partition guard 下检索多个冻结段与可变 tail。更新/墓碑先排除旧版本，再截断 Top-K；各段共享活动 N/df/字段长度上下文，每个通道先形成全局排名再融合。查询、过滤、回表与统计固定同一视图，缺少必要 tail 时失败，不能只搜旧段。
 
-Flush 复用未变冻结段、冻结当前 tail；compaction 重建完整等价闭包。先完成构建、校验及同步，再发布选择证书，最后安装内存共同视图。发布后应用失败保持 fenced，恢复只采用认证选择结果。构建拒绝不得改变当前选择；退休失败可以重试，不回滚已提交状态。
+Flush 复用未变冻结段、冻结当前 tail；compaction 重建完整等价闭包。写入前按整个业务操作的原生成员数进行准入，超过 tail 的 128 次更新额度时先完成认证轮换；generation 不会因轮换而拆成多个业务提交。先完成构建、校验及同步，再发布选择证书，最后安装内存共同视图。发布后应用失败保持 fenced，恢复只采用认证选择结果。构建拒绝不得改变当前选择；退休失败可以重试，不回滚已提交状态。
 
-本地读者/构建由 partition guard 保护；仍被 mmap 使用的文件不能删除。备份导出独立权威，不借用将被源端 GC 的可变路径。构建与回收有显式预算，当前仍保留完整内存 State 与保守准入，不承诺全进程 RSS 硬上限。
+本地读者/构建由 partition guard 和包 pin 保护；固定 Searcher、原生 worker 与 mmap 使用的文件在最后一个持有者退出前不能删除。备份导出独立权威，不借用将被源端 GC 的可变路径。构建与回收有显式预算，当前仍保留完整内存 State 与保守准入，不承诺全进程 RSS 硬上限。
 
 ## 权威与数据归属
 
@@ -22,7 +22,7 @@ SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本
 
 ## 1. 远端检查点与 Segment 发布
 
-复用 A 的 `anchor::Reference`、已有 Segment 编码和规范 payload pool。远端 checkpoint descriptor 映射所选 anchor/Segment/payload 文件到有界对象块，保存原文件长度和 SHA-256，不再制作一套正文/向量镜像。对象块按不可变文件身份和内容摘要命名，未变化的所选文件可以复用。
+复用 `anchor::Reference` 的认证闭包及规范 payload pool，Segment 包含 Tantivy 原生文件与独立向量/元数据组件。远端 checkpoint descriptor 映射所选 anchor/Segment/payload 文件到有界对象块，保存原文件长度和 SHA-256，不再制作一套正文/向量镜像。对象块按不可变文件身份和内容摘要命名，未变化的所选文件可以复用。
 
 在 partition 串行屏障下：
 
@@ -31,7 +31,7 @@ SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本
 3. SQLite 以 expected head version、owner epoch 和精确 committed seq 条件发布 manifest、indexed seq、log base，并清空已覆盖的 live WAL tip。
 4. 再发布本地恢复证书与共同检索视图。SQLite 发布后的本地失败保持 fenced，重开时采用远端选择结果。
 
-当前实现只在完整当前 cut 上推进检查点，不支持后台 indexer 与新写入并行发布的优化；这属于 C。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 feed floor 等状态。
+同步检查点在完整当前 cut 上发布；后台固定 cut 的并行构建和条件发布见下文 C1。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 feed floor 等状态。
 
 ### 有界校验对象缓存（C2，PR #76 已合入）
 

@@ -117,7 +117,7 @@ async fn union_count_cross_block_consistent() {
         );
     }
 
-    
+
 }
 
 /// Control: 2-term union (no cross-block issue) must be stable.
@@ -142,5 +142,5 @@ async fn union_count_two_terms_stable() {
     assert_eq!(count.count_total, 20);
     assert_eq!(topk_count.count_total, 20);
 
-    
+
 }

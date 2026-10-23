@@ -138,7 +138,7 @@ async fn bitmap_and_count_excludes_deleted() {
     .await;
     assert_eq!(count.count_total, live_and.len());
     assert_eq!(topk.count_total, live_and.len());
-    
+
 }
 
 /// Bitmap OR total must drop deleted documents.
@@ -156,7 +156,7 @@ async fn bitmap_or_count_excludes_deleted() {
     .await;
     assert_eq!(count.count_total, live_or.len());
     assert_eq!(topk.count_total, live_or.len());
-    
+
 }
 
 fn ground_truth(set_x: &HashSet<u64>, set_y: &HashSet<u64>) -> (HashSet<u64>, HashSet<u64>) {

@@ -10,7 +10,9 @@ constant 0.6, equal unit weights, and the existing per-shard candidate window
 Rust callers opt into `SearchMode::WeightedHybrid { similarity_threshold,
 ann_mode, rrf: RrfOptions { ..Default::default() } }`. Adding a variant preserves
 existing Hybrid struct literals but downstream exhaustive SearchMode matches
-must handle the new variant. Search signatures and index persistence are unchanged.
+must handle the new variant. Storage/query access uses `RecordPartition`; the
+retired low-level IndexArc/Search/Commit API is not available. The current
+Tantivy package format is for new databases; it does not read legacy indexes.
 The HTTP API accepts an optional `rrf` object only with nonempty query text and a
 query vector:
 

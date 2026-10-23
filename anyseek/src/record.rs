@@ -1443,12 +1443,12 @@ impl RecordPartition {
                     mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve } =>
                         (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve),
                 };
-                let growth=build_budget::write_estimate(&inner.state,&inner.config,&applied)?;
-                if growth>0 && !inner.index.can_admit(growth).await {
+                let (growth,native_updates)=build_budget::write_estimate(&inner.state,&inner.config,&applied)?;
+                if growth>0 && !inner.index.can_admit(growth,native_updates).await {
                     // One bounded flush attempt before rejecting, never discard
                     // selected history to manufacture admission space.
                     inner.publish_anchor().await?;
-                    if !inner.index.can_admit(growth).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
+                    if !inner.index.can_admit(growth,native_updates).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
                 }
                 let feed_point = change_feed::pending(&inner.state,&applied)?;
                 inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;

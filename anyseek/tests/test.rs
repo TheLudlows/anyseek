@@ -52,7 +52,7 @@ async fn test_01_create_index() {
     .unwrap();
     let result = index_arc.configuration().await.unwrap().index.id;
     assert_eq!(result, 0);
-    
+
 }
 
 #[tokio::test]
@@ -82,7 +82,7 @@ async fn test_02_index_document() {
     let result = index_arc.statistics().await.unwrap().active_records;
     assert_eq!(result, 4);
 
-    
+
 }
 
 #[tokio::test]
@@ -139,7 +139,7 @@ async fn test_04_query_index() {
     let result = result_object.count_total;
     assert_eq!(result, 2);
 
-    
+
 }
 
 #[tokio::test]
@@ -210,7 +210,7 @@ async fn test_05_empty_query() {
     let result = result_object.count_total;
     assert_eq!(result, 4);
 
-    
+
 }
 
 #[tokio::test]
@@ -248,7 +248,7 @@ async fn test_06_clear_index() {
     let result = result_object.count_total;
     assert_eq!(result, 1);
 
-    
+
 }
 
 #[tokio::test]
@@ -266,7 +266,7 @@ async fn test_07_get_document() {
     let result = serde_json::from_value::<String>(value).unwrap();
 
     assert_eq!(result, "body1");
-    
+
 }
 
 #[tokio::test]
@@ -341,7 +341,7 @@ async fn test_09_create_index_vector_supplied() {
     .unwrap();
     let result = index_arc.configuration().await.unwrap().index.id;
     assert_eq!(result, 0);
-    
+
 }
 
 #[tokio::test]
@@ -365,7 +365,7 @@ async fn test_10_index_document_vector_supplied() {
     let result = index_arc.statistics().await.unwrap().active_records;
     assert_eq!(result, 3);
 
-    
+
 }
 
 #[tokio::test]
@@ -433,7 +433,7 @@ async fn test_12_create_index_vector_external() {
     .unwrap();
     let result = index_arc.configuration().await.unwrap().index.id;
     assert_eq!(result, 0);
-    
+
 }
 
 #[tokio::test]
@@ -457,7 +457,7 @@ async fn test_13_index_document_vector_external() {
     let result = index_arc.statistics().await.unwrap().active_records;
     assert_eq!(result, 3);
 
-    
+
 }
 
 #[tokio::test]
@@ -590,6 +590,6 @@ async fn test_15_filter_scope() {
     assert_eq!(count, 0);
     assert!(ids.is_empty());
 
-    
+
     let _ = fs::remove_dir_all(index_path);
 }
