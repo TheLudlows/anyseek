@@ -143,6 +143,14 @@ jobs:
           else
             python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults
           fi
+      - name: Native concurrent Indexer HTTP authorization and restart
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --faults --section indexer
+          else
+            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults --section indexer
+          fi
       - name: Native S3 checkpoint retention and joint backup fault matrix
         shell: bash
         run: |

@@ -688,9 +688,14 @@ impl Inner {
             return Err(RecordError::OutcomeUnknown(error.to_string()));
         }
         if let Some(tail) = self.background.as_mut() {
-            // Existing WAL admission bounds these copies; admission also reserves
-            // the snapshot and full maximum tail before starting the worker.
-            tail.entries.push(bytes.to_vec());
+            // Capture has its own pre-reserved bound. Exceeding it abandons this
+            // build, never reclassifies an acknowledged foreground write or lets
+            // the worker publish an incomplete suffix.
+            if !tail.overflowed {
+                if let Some(total)=tail.bytes.checked_add(bytes.len() as u64).filter(|n|*n<=tail.max_bytes) {
+                    tail.entries.push(bytes.to_vec());tail.bytes=total;
+                } else {tail.overflowed=true;tail.entries.clear();}
+            }
         }
         Ok(())
     }

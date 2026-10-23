@@ -19,12 +19,15 @@ fn crash_boundary(point:&str) {
 pub(super) struct Tail {
     id: u128,
     pub entries: Vec<Vec<u8>>,
+    pub bytes:u64,
+    pub max_bytes:u64,
+    pub overflowed:bool,
 }
 struct Plan {
     root: PathBuf, config:RecordConfig, snapshot:State,
     prior:crate::storage::payload_pool::Closure, base:Vec<u8>,
     disk:crate::storage::build_budget::DiskScope,
-    memory:crate::storage::build_budget::MemoryLease,
+    memory:(crate::storage::build_budget::MemoryLease,crate::storage::build_budget::MemoryLease),
     #[cfg(feature="s3-object-store")]
     remote:Option<remote_checkpoint::RemoteBuild>,
 }
@@ -89,9 +92,10 @@ impl RecordPartition {
                 inner.advance_time().await?;
                 inner.reclaim_anchor_objects().await?;
                 let estimate = (inner.snapshot_bytes as u64).checked_mul(4)
-                    .and_then(|n|n.checked_add(inner.config.max_journal_bytes))
                     .ok_or_else(||storage("index snapshot estimate overflow"))?;
-                let memory = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
+                let tail_bytes=inner.config.max_journal_bytes.min(crate::storage::build_budget::EXPLICIT_BUFFERS);
+                let memory = (crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?,
+                    crate::storage::build_budget::reserve_memory(tail_bytes).map_err(storage)?);
                 let root = inner.journal.root().to_path_buf();
                 let limit = inner.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
                     .ok_or_else(||storage("index disk budget overflow"))?;
@@ -108,14 +112,14 @@ impl RecordPartition {
                 let result = Plan {root,config:inner.config.clone(),snapshot:inner.state.clone(),prior:inner.payloads.clone(),
                     base:serde_json::to_vec(&inner.anchor).map_err(storage)?,disk,memory,
                     #[cfg(feature="s3-object-store")] remote};
-                inner.background = Some(Tail{id,entries:Vec::new()});
+                inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false});
                 result
             };
             let Plan{root,config,snapshot,prior,base,disk,memory,
                 #[cfg(feature="s3-object-store")] remote} = plan;
             let cut = snapshot.seq;
-            #[cfg(test)]
-            pause(&root).await;
+            #[cfg(any(test,feature="fault-injection"))]
+            pause(&root,timeout).await;
             let result = async {
                 if started.elapsed() >= timeout { return Err(RecordError::Busy); }
                 let reference = anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true).await?;
@@ -147,7 +151,7 @@ impl RecordPartition {
                 };
                 let mut inner = owner.lock().await;
                 if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
-                if started.elapsed() >= timeout || inner.background.as_ref().is_none_or(|t|t.id!=id)
+                if started.elapsed() >= timeout || inner.background.as_ref().is_none_or(|t|t.id!=id || t.overflowed)
                     || serde_json::to_vec(&inner.anchor).map_err(storage)? != base { return Err(RecordError::Busy); }
                 let entries = &inner.background.as_ref().unwrap().entries;
                 let entries: Vec<Entry> = entries.iter().map(|b|serde_json::from_slice(b).map_err(storage)).collect::<Result<_,_>>()?;
@@ -250,11 +254,25 @@ impl RecordPartition {
     }
 }
 
-#[cfg(test)]
-async fn pause(root:&Path) {
+#[cfg(any(test,feature="fault-injection"))]
+async fn pause(root:&Path,timeout:Duration) {
+    let mut gate=None;
+    #[cfg(test)]
     if root.join(".test-indexer-pause").exists() {
-        std::fs::write(root.join(".test-indexer-started"),b"snapshot fixed").unwrap();
-        while root.join(".test-indexer-pause").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
+        gate=Some((root.join(".test-indexer-pause"),root.join(".test-indexer-started")));
+    }
+    #[cfg(feature="fault-injection")]
+    if let Ok(path)=std::env::var("ANYSEEK_INDEXER_PAUSE_FILE") {
+        let path=PathBuf::from(path);let started=path.with_extension("started");
+        gate=Some((path,started));
+    }
+    let _=root;
+    if let Some((path,started))=gate {
+        if path.exists() {
+            std::fs::write(started,b"snapshot fixed").expect("write indexer test witness");
+            let until=Instant::now()+timeout;
+            while path.exists() && Instant::now()<until { tokio::time::sleep(Duration::from_millis(5)).await; }
+        }
     }
 }
 
@@ -361,6 +379,24 @@ mod tests {
             assert_eq!(p.index_committed(Duration::from_secs(30)).await.unwrap(),2);
             drop(p);std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn background_tail_budget_abandons_build_without_losing_accepted_write() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        let job=p.start_index_committed(Duration::from_secs(20)).unwrap();wait_started(&root).await;
+        p.inner.lock().await.background.as_mut().unwrap().max_bytes=1;
+        let request=write("second","b","alpha",ExpectedVersion::Absent);
+        let receipt=p.write(request.clone()).await.unwrap();
+        assert!(p.inner.lock().await.background.as_ref().unwrap().overflowed);
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+        assert!(matches!(job.finish().await,Err(RecordError::Busy)));
+        assert_eq!(p.write(request.clone()).await.unwrap(),receipt);
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(request).await.unwrap(),receipt);assert!(p.get("b").await.unwrap().is_some());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
 }
