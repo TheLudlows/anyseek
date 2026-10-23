@@ -25,6 +25,7 @@ impl ActiveView<'_> {
             .map(|term| super::query::ScoreGroup {
                 matched_term: term.clone(),
                 components: vec![term.clone()],
+                match_fields: vec![],
             })
             .collect::<Vec<_>>();
         self.score_groups(query, &groups, boosts, normalization, limit, accepts)
@@ -193,7 +194,11 @@ impl ActiveView<'_> {
                     }
                     for group in groups {
                         let gate = &postings[slots[group.matched_term.as_str()]];
-                        if !gate.iter().flatten().any(|posting| posting.doc() == doc) {
+                        if !gate.iter().enumerate().any(|(field, posting)| {
+                            (group.match_fields.is_empty()
+                                || group.match_fields.contains(&self.snapshot.fields[field]))
+                                && posting.as_ref().is_some_and(|posting| posting.doc() == doc)
+                        }) {
                             continue;
                         }
                         for component in &group.components {

@@ -601,7 +601,7 @@ async fn native_unigram_bm25f_matches_record_scores_at_the_vector_cut() {
 }
 
 #[tokio::test]
-async fn native_query_contract_parity_and_field_diagnostics() {
+async fn native_query_contract_matches_before_and_after_commit() {
     use crate::commit::Commit;
     use crate::record::tests::{config, write};
     use crate::{
@@ -803,7 +803,7 @@ async fn native_query_contract_parity_and_field_diagnostics() {
     }
     // These mismatches are evidence of an unresolved field restriction contract,
     // NOT accepted parity. Unrestricted cases above must all match exactly.
-    assert!(!field_differences.is_empty());
+    assert!(field_differences.is_empty());
     if let Some(path) = std::env::var_os("ANYSEEK_TEST_CONTRACT_REPORT") {
         std::fs::write(path, serde_json::to_vec_pretty(&field_differences).unwrap()).unwrap();
     }
@@ -864,6 +864,7 @@ fn native_corpus_uses_one_selected_population_across_frozen_and_tail() {
     let groups = vec![super::query::ScoreGroup {
         matched_term: "alpha".into(),
         components: vec!["alpha".into()],
+        match_fields: vec![],
     }];
     let query = term(clean.fields[0], "alpha");
     for normalization in [
@@ -907,7 +908,7 @@ fn native_corpus_uses_one_selected_population_across_frozen_and_tail() {
 }
 
 #[tokio::test]
-async fn minimal_field_or_documents_existing_commit_contradiction() {
+async fn field_or_matches_selected_field_before_and_after_commit() {
     use crate::commit::Commit;
     use crate::record::tests::{config, write};
     use crate::{
@@ -918,41 +919,66 @@ async fn minimal_field_or_documents_existing_commit_contradiction() {
     let mut config = config();
     config.schema.push(serde_json::from_value(serde_json::json!({"field":"title","field_type":"Text","store":false,"index_lexical":true})).unwrap());
     let partition = RecordPartition::create(&root.0, config).await.unwrap();
-    let mut request = write("insert", "f", "alpha", ExpectedVersion::Absent);
-    request
-        .document
-        .as_mut()
-        .unwrap()
-        .insert("title".into(), "beta".into());
-    partition.write(request).await.unwrap();
+    for (id, body, title) in [
+        ("f", "alpha", "beta"),
+        ("g", "beta", "alpha"),
+        ("h", "gamma", "alpha"),
+    ] {
+        let mut request = write(id, id, body, ExpectedVersion::Absent);
+        request
+            .document
+            .as_mut()
+            .unwrap()
+            .insert("title".into(), title.into());
+        partition.write(request).await.unwrap();
+    }
     let inner = partition.inner.lock().await;
+    let mut before = Vec::new();
     for committed in [false, true] {
         if committed {
             inner.index.test_index().commit().await.unwrap();
         }
-        let result = inner
-            .query_view(RecordQuery {
-                temporal: None,
-                text: "alpha beta".into(),
-                vector: None,
-                mode: SearchMode::Lexical,
-                query_type: QueryType::Union,
-                offset: 0,
-                length: 10,
-                result_type: ResultType::TopkCount,
-                fields: vec!["body".into()],
-                filters: vec![],
-                sort: vec![],
-            })
-            .await
-            .unwrap();
-        let ids: Vec<_> = result
-            .hits
-            .iter()
-            .map(|h| h.record.record_id.as_str())
-            .collect();
-        assert_eq!(ids, if committed { vec!["f"] } else { vec![] });
-        assert_eq!(result.count_total, usize::from(committed));
+        for (offset, kind) in [
+            (0, ResultType::TopkCount),
+            (1, ResultType::TopkCount),
+            (2, ResultType::TopkCount),
+            (0, ResultType::Count),
+        ] {
+            let result = inner
+                .query_view(RecordQuery {
+                    temporal: None,
+                    text: "alpha beta".into(),
+                    vector: None,
+                    mode: SearchMode::Lexical,
+                    query_type: QueryType::Union,
+                    offset,
+                    length: 1,
+                    result_type: kind.clone(),
+                    fields: vec!["body".into()],
+                    filters: vec![],
+                    sort: vec![],
+                })
+                .await
+                .unwrap();
+            let ids: Vec<_> = result
+                .hits
+                .iter()
+                .map(|h| h.record.record_id.as_str())
+                .collect();
+            assert_eq!(
+                ids,
+                if kind == ResultType::Count || offset == 2 {
+                    vec![]
+                } else if offset == 0 {
+                    vec!["g"]
+                } else {
+                    vec!["f"]
+                }
+            );
+            assert_eq!(result.count_total, 2);
+            let scores: Vec<_> = result.hits.iter().map(|h| h.score).collect();
+            if committed { assert_eq!(scores, before.remove(0)); } else { before.push(scores); }
+        }
     }
 }
 

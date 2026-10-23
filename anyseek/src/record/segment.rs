@@ -3,6 +3,81 @@ use super::*;
 use sha2::{Digest,Sha256};
 use std::io::{Read,Write};
 
+/// Immutable file closure. This descriptor is meaningful only when selected
+/// by the partition certificate (local) or SQLite head (remote).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Package {
+    pub(super) id: String,
+    pub(super) files: Vec<FileRef>,
+}
+impl Package {
+    pub(super) fn path(&self, root: &Path) -> Result<PathBuf, RecordError> {
+        if self.id.len() != 32
+            || !self
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(storage("invalid immutable package identity"));
+        }
+        Ok(root.join(format!("segment-{}", self.id)))
+    }
+    /// Seal after all writers have drained. Rename makes the closure available,
+    /// not authoritative; callers must still publish the business certificate.
+    pub(super) fn seal(
+        root: &Path,
+        prepared: &Path,
+        id: String,
+        limit: u64,
+    ) -> Result<Self, RecordError> {
+        let package = Self {
+            id,
+            files: files(prepared, limit)?,
+        };
+        let target = package.path(root)?;
+        sync_tree(prepared)?;
+        crate::storage::partition::publish_bundle(prepared, &target).map_err(storage)?;
+        Ok(package)
+    }
+    pub(super) fn verify(&self, root: &Path, limit: u64) -> Result<PathBuf, RecordError> {
+        let path = self.path(root)?;
+        if serde_json::to_vec(&files(&path, limit)?).map_err(storage)?
+            != serde_json::to_vec(&self.files).map_err(storage)?
+        {
+            return Err(storage("immutable package closure mismatch"));
+        }
+        Ok(path)
+    }
+}
+/// Validate the complete closure before syncing, including symlink/special-file
+/// rejection. This is shared by native and existing production package builders.
+pub(super) fn sync_tree(path: &Path) -> Result<(), RecordError> {
+    for entry in std::fs::read_dir(path).map_err(storage)? {
+        let entry = entry.map_err(storage)?;
+        let kind = entry.file_type().map_err(storage)?;
+        if kind.is_dir() {
+            sync_tree(&entry.path())?;
+        } else if kind.is_file() {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(entry.path())
+                .map_err(storage)?
+                .sync_all()
+                .map_err(storage)?;
+        } else {
+            return Err(storage(
+                "immutable package contains symlink or special file",
+            ));
+        }
+    }
+    #[cfg(unix)]
+    std::fs::File::open(path)
+        .map_err(storage)?
+        .sync_all()
+        .map_err(storage)?;
+    Ok(())
+}
 #[derive(Debug,Serialize,Deserialize,Clone)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FileRef { pub(super) path:String, pub(super) bytes:u64, pub(super) sha256:[u8;32] }

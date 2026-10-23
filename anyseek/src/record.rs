@@ -48,8 +48,7 @@ mod remote_checkpoint;
 pub(crate) mod build_budget;
 mod view;
 mod recovery;
-// Semantic gate for issue #80; not a second production engine or a dual-write path.
-#[cfg(test)]
+// Native package implementation; authority routing switches atomically after integration.
 mod lexical;
 pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
 

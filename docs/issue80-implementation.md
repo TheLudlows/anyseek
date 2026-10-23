@@ -1,6 +1,6 @@
 # Issue #80 实施记录
 
-本分支是进行中的实现，**不是完成声明**。生产 Record 查询尚未切换到 Tantivy，旧全文实现尚未删除。测试模块不是生产双写、引擎切换开关或多引擎框架。
+本分支是进行中的实现，**不是完成声明**。生产 Record 查询尚未切换到 Tantivy，旧全文实现尚未删除。第四阶段原生包模块已进入正常编译，并与现有生产冻结包共享封存/认证实现；尚未切换 authority 所选择包的构建类型，不引入双写或多引擎选择开关。
 
 ## 可复核基线
 
@@ -13,7 +13,7 @@
 
 ## 已实现的语义验证组件
 
-`record/lexical` 由 `cfg(test)` 隔离。Tantivy 精确固定 `=0.27.0`，关闭默认 feature，只启用 mmap 和 lz4-compression；Cargo.lock 固定完整依赖解析。原生内部格式与 anyseek 外层包格式分别标识，禁止把旧 format 8 当作 Tantivy 编码读取。
+第一至三阶段 `record/lexical` 由 `cfg(test)` 隔离；第四阶段已移除此隔离，历史阶段证据仍按对应提交理解。Tantivy 精确固定 `=0.27.0`，关闭默认 feature，只启用 mmap 和 lz4-compression；Cargo.lock 固定完整依赖解析。原生内部格式与 anyseek 外层包格式分别标识，禁止把旧 format 8 当作 Tantivy 编码读取。
 
 私有候选包含 `package.json` 和 `lexical/` 原生文件。元数据保存候选 cut、字段顺序和 `(record_id, version, revision)`；原生 fast field 只保存包内身份序号及精确字段长度。正文只作为瞬时 pre-tokenized 输入，不配置任何 stored 正文字段或向量字段。完整文件清单及 SHA-256 由外层 authority 持有；打开时重验整个清单、schema、数量和每个 DocAddress 的唯一映射。找出一个较新的 meta.json 不能选定它。
 
@@ -139,3 +139,25 @@ git diff --check
 第二阶段后台无默认 feature 验证已结束：191 passed / 0 failed / 10 ignored（102.53 秒）。S3 fixture 原 PID 26879 继续运行，未重启；当前日志中的 real HTTP / real_s3_compatible_contract 名称不意味着使用真实 S3 服务。
 
 第三阶段验证：默认 feature 原生模块 17 passed / 0 failed（9.19 秒）；无默认 feature 同一模块 17 passed / 0 failed（8.48 秒）。日志在 `target/issue80-phase3/`。生产代码本阶段未变，未把前一提交的 all-targets/HTTP 结果冒充新生产引擎验收。S3 fixture 已继续完成 base、locator、graph、temporal 冷缓存阶段，当前 upload 阶段尚在运行，尚无最终报告。
+
+## 第四阶段：生产包边界与确认后的 OR 修复
+
+用户已确认统一限定字段 OR：选定字段存在任意查询词即满足查询，不再等待语义决策。生产实时执行器现在仅排除不在选定字段匹配的评分组，而非排除整个记录；Intersection/短语仍要求相应条件。原生编译器使用同一选定字段谓词和评分组门控，TF/活动 DF/长度公式保持原有范围。矩阵的字段差异断言改为必须为空，共 18,720 次比较均要求身份、计数和分数一致。
+
+原最小复现已转为修复回归，并加入 f=(alpha,beta)、g=(beta,alpha)、h=(gamma,alpha) 三记录，限定 body，验证两个命中、两页和越界页、Count，并逐项比较提交前后分数。g 的 beta 活动 DF 更低，应在 f 之前；初版分页测试误以为两者平分，已修正测试预期，没有为通过测试改评分。
+
+### 实际生产变更
+
+- 生产 `anchor::Frozen` 改用共享 `segment::Package`。原本内嵌于旧 index loader 的路径校验、封存、同步、发布目录及认证完整文件闭包，已抽到与引擎无关的不可变包边界。已有 local/SQLite/S3 anchor 仍使用相同 id/files 序列化和外层业务证书，目录发布不会赋予业务可见性。没有添加双写或第二套 head。
+- `lexical::package::NativePackage` 在正常生产编译中提供构建/加载：按现有字段类型提取正文，复用分析器，记录分析配置指纹，调用原生 writer 后通过上述相同 Package 边界封存。加载时验证所选完整闭包、配置指纹、cut 和原生结构，返回持有额度的固定 Snapshot。
+- 原生同步 writer 在 owned blocking worker 内运行；请求取消后 worker 继续持有 Scope、输入额度、磁盘预算至原生线程 drain。私有目录由 worker 清理；已经封存但尚未被 authority 选定的对象保留为可回收候选，不擅自删除部署数据。
+
+**尚未接上的部分**：Record anchor 当前仍调用旧 Frozen 构建器；NativePackage 还没有替代该调用点，SQLite/S3 的新原生包发布与恢复也尚未运行。这里的生产包组件接入不等于生产全文替换完成。下一阶段需要把向量/metadata 从旧全文 Shard 中拆出，再一次性替换 frozen/tail 的构建和查询调用，不能靠长期双写过渡。backup/GC 的路径清单已共用，但新格式的业务端到端验收仍待完成。
+
+原始 S3 fixture PID26879 已结束，9 阶段全部 exit0，`all_requested_checks_passed=true`、`real_endpoint_exercised=false`。报告 `target/issue80-phase2/s3-fixture.json`；固定服务二进制 SHA256 为 `7f90125d036ef19b916f4331a5954221773912e3dac47d00e81eab04843df1d4`。这仍是第二阶段二进制，不能算第四阶段原生包或当前生产变更的验证。base 阶段用时702.535秒，期间日志持续进展；总共约1176秒，没有卡住或重启。
+
+第四阶段验证过程中，首轮 all-targets 除旧分页预期外还出现 11 个子进程启动 `NotFound`：在该轮仍运行时重编译了相同测试可执行文件，旧进程通过 current_exe 启动 worker 的路径已被替换。此轮结果为222 passed/12 failed/12 ignored，不算通过。已启动最终全目标运行，并停止同时重编译相同 feature 的测试目标；必须以最终日志为准。专项默认18 passed/0 failed（7.12秒）、无默认18 passed/0 failed（6.54秒），生产 anchor 专项7 passed/0 failed。
+
+正式切换前仍需把 native blocking worker 纳入已有 `Inner.background` 构建 pin/partition owner 生命周期，把 Snapshot 路径纳入 view 的 GC 保留集；当前独立组件只保证自身资源与私有目录所有权，尚不代表完整业务锁和 GC pin 已接上。还需覆盖无词法字段 schema 和单索引字段 boost 的旧规则，不能把当前限定矩阵当完整配置验收。
+
+第四阶段最终全目标运行已完成核心234 passed/0 failed/12 ignored（144.45秒）、server15 passed/0 failed（1.97秒）；保存检查点时集成测试仍在运行，日志 `/tmp/anyseek80-phase4-all-targets-final.log`、session68318。若后续报告补充完整总数，应以该进程退出和日志汇总为准。

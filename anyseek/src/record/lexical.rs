@@ -1,7 +1,7 @@
 //! Tantivy package and fixed-view semantic gate for issue #80.
 //!
-//! This module is deliberately test-only until the scoring/API decision and
-//! Record publication integration are complete. A native commit is a private
+//! Package construction is available to production persistence. Record view
+//! routing is being integrated separately. A native commit is a private
 //! candidate, never a Record commit. No original body or vector is stored here.
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -28,6 +28,7 @@ const MAX_FIELDS: usize = 64;
 const MAX_TOKENS: usize = 65_536;
 
 mod directory;
+pub(super) mod package;
 mod query;
 mod scoring;
 

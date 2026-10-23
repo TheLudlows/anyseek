@@ -20,6 +20,7 @@ pub(super) struct ScoreGroup {
     /// A component-scored ngram contributes only when this whole gram matches.
     pub matched_term: String,
     pub components: Vec<String>,
+    pub match_fields: Vec<Field>,
 }
 pub(super) struct Plan {
     pub predicate: Box<dyn Query>,
@@ -216,6 +217,7 @@ impl Analyzer {
                 .or_insert(ScoreGroup {
                     matched_term: token.term.clone(),
                     components,
+                    match_fields: selected.to_vec(),
                 });
             positive.push((
                 if mode == QueryType::Union {
@@ -223,7 +225,7 @@ impl Analyzer {
                 } else {
                     Occur::Must
                 },
-                across(fields, &token.term),
+                across(selected, &token.term),
             ));
         }
         if positive.is_empty() || fields.is_empty() {
@@ -238,23 +240,6 @@ impl Analyzer {
             Box::new(BooleanQuery::new(positive)) as Box<dyn Query>,
         )];
         clauses.extend(negative);
-        if selected != fields {
-            // Existing field restrictions test every matching positive term,
-            // while negative terms and scoring remain across all fields.
-            for group in score_groups.values() {
-                let absent: Box<dyn Query> = Box::new(BooleanQuery::new(vec![
-                    (Occur::Must, Box::new(AllQuery)),
-                    (Occur::MustNot, across(fields, &group.matched_term)),
-                ]));
-                clauses.push((
-                    Occur::Must,
-                    Box::new(BooleanQuery::new(vec![
-                        (Occur::Should, absent),
-                        (Occur::Should, across(selected, &group.matched_term)),
-                    ])),
-                ));
-            }
-        }
         // The existing one-distinct-term path collapses repeated terms even
         // inside quotes. Preserve that established behavior in this replacement;
         // fixing its membership is a separate query-contract change.

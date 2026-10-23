@@ -7,9 +7,7 @@ use segment::{files,write_json,read_bounded,FileRef};
 #[derive(Debug,Clone,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Reference {id:String,files:Vec<FileRef>,segments:Vec<Frozen>}
-#[derive(Debug,Clone,Serialize,Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Frozen {id:String,files:Vec<FileRef>}
+type Frozen = segment::Package;
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {format:u32,seq:u64,state:segment_state::ReferencedState,payloads:Closure}
@@ -30,34 +28,19 @@ fn budget(config:&RecordConfig)->Result<Budget,RecordError>{
 }
 // This is an acceptance bound, not yet the final build-time allocator quota.
 fn closure_limit(authority:u64)->Result<u64,RecordError>{authority.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("anchor closure budget overflow"))}
-fn sync_tree(path:&Path)->Result<(),RecordError>{
-    for entry in std::fs::read_dir(path).map_err(storage)? {
-        let entry=entry.map_err(storage)?;
-        if entry.file_type().map_err(storage)?.is_dir(){sync_tree(&entry.path())?;}
-        else{std::fs::OpenOptions::new().write(true).open(entry.path()).map_err(storage)?.sync_all().map_err(storage)?;}
-    }
-    #[cfg(unix)] std::fs::File::open(path).map_err(storage)?.sync_all().map_err(storage)?;
-    Ok(())
-}
+use segment::sync_tree;
 impl Frozen {
-    fn path(&self,root:&Path)->Result<PathBuf,RecordError>{
-        if !valid(&self.id){return Err(storage("invalid frozen segment identity"));}
-        Ok(root.join(format!("segment-{}",self.id)))
-    }
     async fn prepare(root:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(Self,crate::active::ActiveStatistics),RecordError>{
         let id=format!("{:032x}",rand::random::<u128>());
         let prepared=root.join(format!(".segment-prepare-{id}"));
         let (index,_)=build_at_selected(root,&prepared,config,state,selected).await?;
         let active=index.read().await.shard_vec[0].read().await.active.as_ref().ok_or_else(||storage("missing frozen statistics"))?.clone_local();
         drop(index);
-        let reference=Self{id,files:files(&prepared,closure_limit(config.max_journal_bytes)?)?};
-        sync_tree(&prepared)?;
-        crate::storage::partition::publish_bundle(&prepared,&reference.path(root)?).map_err(storage)?;
+        let reference=Self::seal(root,&prepared,id,closure_limit(config.max_journal_bytes)?)?;
         Ok((reference,active))
     }
     async fn load(&self,root:&Path,config:&RecordConfig,active:crate::active::ActiveStatistics)->Result<IndexArc,RecordError>{
-        let path=self.path(root)?;
-        if serde_json::to_vec(&files(&path,closure_limit(config.max_journal_bytes)?)?).map_err(storage)?!=serde_json::to_vec(&self.files).map_err(storage)? {return Err(storage("frozen segment closure mismatch"));}
+        let path=self.verify(root,closure_limit(config.max_journal_bytes)?)?;
         active.validate_sparse(retrieval_schema(config).iter().filter(|f|f.index_lexical||f.index_vector).count()).map_err(storage)?;
         let schema:Vec<SchemaField>=serde_json::from_slice(&read_bounded(&path.join("schema.json"),config.max_journal_bytes)?).map_err(storage)?;
         if serde_json::to_vec(&schema).map_err(storage)?!=serde_json::to_vec(&retrieval_schema(config)).map_err(storage)?{return Err(storage("frozen segment schema mismatch"));}

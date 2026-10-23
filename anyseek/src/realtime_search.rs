@@ -157,6 +157,7 @@ pub(crate) fn add_result_multiterm_uncommitted(
     query_list: &mut [PostingListObjectQuery],
     not_query_list: &mut [PostingListObjectQuery],
     phrase_query: bool,
+    union_query: bool,
 ) {
     if !shard.delete_hashset.is_empty() && shard.delete_hashset.contains(&docid) {
         return;
@@ -199,6 +200,9 @@ pub(crate) fn add_result_multiterm_uncommitted(
     }
 
     for plo in query_list.iter_mut() {
+        if union_query && !plo.bm25_flag {
+            continue;
+        }
         shard.decode_positions_uncommitted(plo, phrase_query);
 
         if !field_filter_set.is_empty()
@@ -211,9 +215,17 @@ pub(crate) fn add_result_multiterm_uncommitted(
                 }
             }
             if !match_flag {
-                return;
+                if union_query {
+                    plo.bm25_flag = false;
+                } else {
+                    return;
+                }
             }
         }
+    }
+
+    if union_query && !query_list.iter().any(|p| p.bm25_flag) {
+        return;
     }
 
     if phrase_query {
@@ -1857,6 +1869,7 @@ impl Shard {
                         query_list,
                         not_query_list,
                         phrase_query,
+                        false,
                     );
 
                     query_list[t1].p_docid += 1;
@@ -2057,6 +2070,7 @@ impl Shard {
                         query_list,
                         not_query_list,
                         false,
+                        true,
                     );
                 }
             } else {
