@@ -16,6 +16,15 @@ pub(crate) struct VerifiedCache {
     max_entries: usize,
 }
 
+struct CacheLock(fs::File);
+impl Drop for CacheLock {
+    fn drop(&mut self) {
+        // Explicitly release before closing: a concurrently spawned Unix child
+        // can briefly inherit the open description until exec closes its copy.
+        let _ = self.0.unlock();
+    }
+}
+
 impl VerifiedCache {
     pub(crate) fn new(root: PathBuf, scope: &[&str], max_bytes: u64) -> Self {
         let mut hash = Sha256::new();
@@ -40,7 +49,7 @@ impl VerifiedCache {
     // Every operation takes the same nonblocking OS lock, including across
     // processes. Contention or any filesystem failure simply bypasses caching.
     // No lock is held during remote I/O. No waiter queue is created.
-    fn lock(&self) -> io::Result<fs::File> {
+    fn lock(&self) -> io::Result<CacheLock> {
         // Keep the coordination inode outside the discardable directory. A
         // concurrent cache clear must not create two independently locked roots.
         let path = self.root.with_extension("object-cache.lock");
@@ -49,6 +58,7 @@ impl VerifiedCache {
         }
         let lock = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
         lock.try_lock().map_err(io::Error::other)?;
+        let lock = CacheLock(lock);
         fs::create_dir_all(&self.root)?;
         if !fs::symlink_metadata(&self.root)?.is_dir() {
             return Err(io::Error::other("cache root must be a directory"));
@@ -133,11 +143,15 @@ impl VerifiedCache {
         let result = (|| {
             let mut output = fs::OpenOptions::new().create_new(true).write(true).open(&temporary)?;
             output.write_all(bytes)?;
+            #[cfg(test)] crash_at("written");
             output.sync_all()?;
+            #[cfg(test)] crash_at("synced");
             drop(output);
             // Same-directory atomic promotion. A crash can lose cache entries;
             // every hit rechecks hash/length, so no cache durability is assumed.
-            fs::rename(&temporary, &target)
+            fs::rename(&temporary, &target)?;
+            #[cfg(test)] crash_at("published");
+            Ok(())
         })();
         if result.is_err() { let _ = fs::remove_file(temporary); }
         result
@@ -151,6 +165,11 @@ fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collec
 fn matches(reference: &ObjectRef, bytes: &[u8]) -> bool {
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     bytes.len() as u64 == reference.length && digest == reference.sha256
+}
+
+#[cfg(test)]
+fn crash_at(point: &str) {
+    if std::env::var("ANYSEEK_CACHE_TEST_CRASH").as_deref() == Ok(point) { std::process::exit(94); }
 }
 
 #[cfg(test)]
@@ -221,5 +240,36 @@ mod tests {
         fs::remove_dir_all(&root).unwrap(); fs::write(&root, b"unavailable").unwrap();
         cache.insert(&r, b"alpha"); assert!(cache.get(&r).is_none());
         fs::remove_file(root).unwrap();
+    }
+
+    #[test]
+    fn process_exit_during_cache_publication_never_selects_partial_bytes() {
+        for point in ["written", "synced", "published"] {
+            let root = root();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "storage::verified_cache::tests::cache_crash_worker", "--ignored", "--nocapture"])
+                .env("ANYSEEK_CACHE_TEST_ROOT", &root)
+                .env("ANYSEEK_CACHE_TEST_CRASH", point).status().unwrap();
+            assert_eq!(result.code(), Some(94), "worker did not reach {point}");
+            let cache = VerifiedCache::new(root.clone(), &["scope"], 5);
+            let r = reference("one", b"alpha");
+            if let Some(bytes) = cache.get(&r) { assert_eq!(bytes, b"alpha"); }
+            cache.insert(&r, b"alpha");
+            assert_eq!(cache.get(&r).unwrap(), b"alpha");
+            let rows = fs::read_dir(&root).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].metadata().unwrap().len(), 5);
+            fs::remove_dir_all(&root).unwrap();
+            fs::remove_file(root.with_extension("object-cache.lock")).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "invoked by the parent publication process-exit test"]
+    fn cache_crash_worker() {
+        let root = PathBuf::from(std::env::var_os("ANYSEEK_CACHE_TEST_ROOT").unwrap());
+        let cache = VerifiedCache::new(root, &["scope"], 5);
+        cache.insert(&reference("one", b"alpha"), b"alpha");
+        panic!("cache crash point was not reached");
     }
 }

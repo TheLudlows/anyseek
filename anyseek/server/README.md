@@ -38,7 +38,7 @@ export ANYSEEK_S3_SECRET_ACCESS_KEY='your-secret-key'
 
 只有明确配置的开发 HTTP endpoint 才设置 `ANYSEEK_S3_ALLOW_HTTP=1`。可选 `ANYSEEK_S3_MAX_OBJECT_BYTES` 默认 64 MiB，`ANYSEEK_S3_MAX_TAIL_BLOCKS` 默认 1,000,000；单次 tail 字节预算同时受 collection 日志预算和 1 GiB 上限约束。凭证只在运行时使用。
 
-保留整个服务根中的 catalog、SQLite 权威文件及其 WAL、`s3-namespace`。这些是持久协调状态，不能作为缓存删除或在运行中复制 SQLite 文件作备份。collection 内的本地日志/payload/索引可从权威检查点及 tail 重建；备份应使用服务 API，以同时固定元数据和对象闭包。
+保留整个服务根中的 catalog、SQLite 权威文件及其 WAL、`s3-namespace`。这些是持久协调状态，不能作为缓存删除或在运行中复制 SQLite 文件作备份。collection 内的本地日志/payload/索引可从权威检查点及 tail 重建。C2 开发分支另在每个权威库旁的 `*.object-cache` 保存校验对象块（256 MiB / 4096 块，损坏或丢失回源）；旁边的 `*.object-cache.lock` 仅用于本机缓存操作协调，运行中清空缓存目录时保留该锁文件。缓存不包含凭据，也不决定当前 head 或权限；备份应使用服务 API，以同时固定元数据和对象闭包。
 
 PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到独立对象命名空间，不恢复原 grants，受保护证据保持隔离。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到新的服务 namespace。
 
