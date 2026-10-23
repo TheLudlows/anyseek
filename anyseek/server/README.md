@@ -131,10 +131,24 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 | 操作 / HTTP body / 响应 | 1 MiB / 2 MiB / 16 MiB |
 | Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
 | catalog | 16 MiB 代、10,000 操作，仅安全回收过期控制回执 |
-| admission | 64 请求、16 控制任务、8 partition 操作；30 秒请求期限 |
-| 调度 | catalog 屏障覆盖完整授权操作，当前不同 collection 也会相互等待 |
+| admission | 普通 32/每集合 4、恢复 2/1、后台 2/1、可信控制 8/2、静态/存活 8/8；partition 内部 8；30 秒请求期限 |
+| 调度 | 不同 collection 可并行；key 撤销/接管/共同快照等保留全局排空，资源不足立即 Busy |
 | collection backups | 32 个，可持久退役 |
 | service archives / 新恢复根 | 每源根最多 4 个 archive/准备项，托管父目录最多 4 个生成根，备份权威 payload 预检 1 GiB |
+
+资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。控制通道只在 master 认证后开放，不被数据工作借用；key/grant/删除控制不等待备份/恢复工作流锁，但仍遵守共同快照与授权屏障。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
+
+| 类别 | 全服务 / 每集合预留字节 | 全服务 / 每集合 I/O 并发 |
+| --- | --- | --- |
+| FOREGROUND | 1024 / 256 MiB | 8 / 2 |
+| RECOVERY | 512 / 256 MiB | 2 / 1 |
+| BACKGROUND | 768 / 384 MiB | 2 / 1 |
+| CONTROL | 144 / 36 MiB | 2 / 1 |
+| PUBLIC | 144 / 144 MiB | 1 / 1 |
+
+部署可设置 `ANYSEEK_{类别}_SLOTS`、`_PER_COLLECTION`、`_BYTES`、`_PER_COLLECTION_BYTES`、`_IO`、`_PER_COLLECTION_IO`，类别取上表大写名称，字节值为十进制字节数。例如 `ANYSEEK_FOREGROUND_PER_COLLECTION=2`。配置必须为正整数、局部不大于全局、每集合字节至少 18 MiB；单类 slots/I/O 不超过 64，前三类 slots 总和不超过 48、CONTROL slots 不超过 8，以保留 catalog 控制余量。非法配置阻止启动。
+
+每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲额度跟随实际所有者，owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存容量保持原值，服务缓存总额度另行实现。
 
 Service archive/root 清理是明确的离线操作，不提供删除运行根的接口。系统崩溃、文件系统崩溃、断电矩阵尚未验收；原生进程 kill/exit、故障注入与 fsync 调用不能代替。长期物理回收、Record 账本 GC、SQLite 云端协调和分布式留在后续阶段；来源/evidence 与可选向量已实现。
 

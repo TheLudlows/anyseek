@@ -72,10 +72,10 @@ UI 增加实体目录/一跳关系检查及有界 bootstrap/feed 检查与响应
 
 ## 资源与未完成项
 
-Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；请求/control/partition admission 分别为 64/16/8。catalog 全局屏障覆盖完整授权操作，不同 collection 也会互相等待；请求期限不等于取消已接管的持久任务。
+Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，key 撤销/接管/共同快照仍全局排空；分级字节和 I/O 额度见[服务指南](anyseek/server/README.md)；请求期限不等于取消已接管的持久任务。
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 
-尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、通用任意历史读取、独立时间候选排名、管理型 Blob、B 维护路径及真实 S3 服务验收、分布式。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
+尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、通用任意历史读取、独立时间候选排名、管理型 Blob、真实 S3 服务验收、分布式。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
 
 当前接入以服务指南为准，不提供旧格式迁移。历史裁剪与验证通过 Git 历史和对应 PR/CI 查阅。

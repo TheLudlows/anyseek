@@ -591,8 +591,7 @@ impl Catalog {
     /// lifetime lock outside this root, including while the root name is absent.
     pub async fn resume_initialization(path: &Path) -> Result<(), CatalogError> {
         let path = path.to_owned();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 PartitionJournal::resume_initial(&path, BUDGET).map_err(|error| match error {
                     CreateError::NotPublished(error) => storage(error),
                     CreateError::PublicationUnknown(error) => {
@@ -634,8 +633,7 @@ impl Catalog {
     }
     async fn create_state(path: &Path, state: State) -> Result<Self, CatalogError> {
         let path = path.to_path_buf();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 let payload = encode(&Entry::Snapshot(state.clone()))?;
                 let journal =
                     PartitionJournal::create(&path, BUDGET, &payload).map_err(|e| match e {
@@ -652,8 +650,7 @@ impl Catalog {
     /// Recover the certified catalog; never substitute an empty authority.
     pub async fn open(path: &Path) -> Result<Self, CatalogError> {
         let path = path.to_path_buf();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 let (journal, entries) = PartitionJournal::open(&path, BUDGET).map_err(storage)?;
                 let mut entries = entries.into_iter();
                 let first = entries
@@ -728,8 +725,7 @@ impl Catalog {
             .map_err(|_| CatalogError::Busy)?;
         let owner = self.inner.clone();
         let execution = self.execution.clone();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 let _admission = admission;
                 let _execution = execution.control(&request.command).await?;
                 let mut inner = owner.lock().await;
@@ -964,8 +960,7 @@ impl Catalog {
             .map_err(|_| CatalogError::Busy)?;
         let owner = self.inner.clone();
         let execution = self.execution.clone();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 let _admission = admission;
                 let _execution = execution.read(&collection).await?;
                 let inner = owner.lock().await;

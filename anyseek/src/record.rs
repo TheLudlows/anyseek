@@ -388,6 +388,19 @@ pub struct S3CompatibleRecordConfig {
 }
 
 #[cfg(feature = "s3-object-store")]
+#[derive(Debug)]
+enum RemoteCommitError { Busy, Unknown(String) }
+#[cfg(feature = "s3-object-store")]
+impl From<String> for RemoteCommitError { fn from(error: String) -> Self { Self::Unknown(error) } }
+#[cfg(feature = "s3-object-store")]
+impl From<&str> for RemoteCommitError { fn from(error: &str) -> Self { Self::Unknown(error.into()) } }
+#[cfg(feature = "s3-object-store")]
+impl std::fmt::Display for RemoteCommitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { Self::Busy => f.write_str("resource budget exhausted before commit publication"), Self::Unknown(error) => f.write_str(error) }
+    }
+}
+#[cfg(feature = "s3-object-store")]
 impl RemotePersistence {
     fn open(config: &S3CompatibleRecordConfig) -> Result<Self, RecordError> {
         if config.partition_id.is_empty()
@@ -419,19 +432,19 @@ impl RemotePersistence {
         })
     }
 
-    async fn commit(&mut self, applied: &Applied, payload: &[u8]) -> Result<(), String> {
+    async fn commit(&mut self, applied: &Applied, payload: &[u8]) -> Result<(), RemoteCommitError> {
         let operation_id = format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce);
         self.commit_entry(applied.receipt.seq, operation_id, payload).await
     }
 
-    async fn commit_entry(&mut self, seq: u64, operation_id: String, payload: &[u8]) -> Result<(), String> {
+    async fn commit_entry(&mut self, seq: u64, operation_id: String, payload: &[u8]) -> Result<(), RemoteCommitError> {
         use sha2::{Digest, Sha256};
         let mut authority = self.authority.lock().await;
         let head = authority.read_head(&self.partition_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "remote partition authority is missing".to_owned())?;
         if seq != head.committed_seq.saturating_add(1) {
-            return Err(format!("remote commit sequence conflict: local={seq}, remote={}", head.committed_seq));
+            return Err(format!("remote commit sequence conflict: local={seq}, remote={}", head.committed_seq).into());
         }
         if head.owner_epoch != self.owner_epoch {
             return Err("remote owner epoch changed; this writer is fenced".into());
@@ -449,7 +462,10 @@ impl RemotePersistence {
         let reference = crate::storage::object_log::upload_log_block(
             &self.store, &mut authority, &key, &block,
             unix_time_ms_i64(), self.max_object_bytes,
-        ).await.map_err(|error| error.to_string())?;
+        ).await.map_err(|error| match error {
+            crate::storage::object_log::TailError::ObjectStore(ref object) if crate::storage::s3_compatible::is_resource_error(object) => RemoteCommitError::Busy,
+            error => RemoteCommitError::Unknown(error.to_string()),
+        })?;
         match authority.publish_commit(
             &self.partition_id, head.head_version, self.owner_epoch, &operation_id,
             digest, seq, reference, None,
@@ -1133,7 +1149,7 @@ impl RecordPartition {
         max_snapshot_bytes: usize,
     ) -> Result<(String, u64, String), RecordError> {
         let owner=self.inner.clone();let backup_id=backup_id.to_owned();
-        crate::INDEX_RUNTIME.spawn(async move {
+        crate::resources::spawn(async move {
         let mut inner = owner.lock().await;
         if inner.background.is_some() { return Err(RecordError::Busy); }
         if !inner.healthy || inner.state.sealed_for.is_some() {
@@ -1154,7 +1170,7 @@ impl RecordPartition {
     #[cfg(feature="s3-object-store")]
     pub async fn collect_s3_garbage(&self)->Result<usize,RecordError> {
         let owner=self.inner.clone();
-        crate::INDEX_RUNTIME.spawn(async move {
+        crate::resources::spawn(async move {
             let mut inner=owner.lock().await;
         if inner.background.is_some() { return Err(RecordError::Busy); }
             if !inner.healthy {return Err(RecordError::RecoveryRequired);}
@@ -1246,8 +1262,7 @@ impl RecordPartition {
     /// Create a new authoritative partition. Parent directory must exist.
     pub async fn create(path: &Path, config: RecordConfig) -> Result<Self, RecordError> {
         let path = path.to_owned();
-        crate::INDEX_RUNTIME
-            .spawn(async move { Self::create_owned(&path, config).await })
+        crate::resources::spawn(async move { Self::create_owned(&path, config).await })
             .await
             .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
     }
@@ -1314,8 +1329,7 @@ impl RecordPartition {
         let path = path.to_owned();
         // The owned task retains the journal lock until every indexing task has
         // drained, even if the caller cancels recovery.
-        crate::INDEX_RUNTIME
-            .spawn(async move { Self::open_owned(&path, max_journal_bytes).await })
+        crate::resources::spawn(async move { Self::open_owned(&path, max_journal_bytes).await })
             .await
             .map_err(storage)?
     }
@@ -1414,8 +1428,7 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.clone();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 let _permit = permit;
                 let mut inner = inner.lock().await;
                 if !inner.healthy || inner.state.sealed_for.is_some() {
@@ -1460,8 +1473,18 @@ impl RecordPartition {
                 }
                 #[cfg(feature = "s3-object-store")]
                 if let Some(remote) = inner.remote.as_mut() {
-                    remote.commit(&applied, &bytes).await
-                        .map_err(|error| RecordError::OutcomeUnknown(error))?;
+                    match remote.commit(&applied, &bytes).await {
+                        Ok(()) => {},
+                        Err(RemoteCommitError::Busy) => {
+                            // Only the upload stage can produce this typed refusal;
+                            // SQLite publication has not been attempted. Orphan
+                            // objects remain registered for ordinary dependency GC.
+                            inner.healthy = true;
+                            inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced = false;
+                            return Err(RecordError::Busy);
+                        },
+                        Err(RemoteCommitError::Unknown(error)) => return Err(RecordError::OutcomeUnknown(error)),
+                    }
                 }
                 inner.append_operation(&bytes,receipt.seq)?;
                 #[cfg(feature = "fault-injection")]
@@ -1579,7 +1602,7 @@ impl RecordPartition {
     pub async fn query(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
         let permit = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
-        crate::INDEX_RUNTIME.spawn(async move {
+        crate::resources::spawn(async move {
             let _permit = permit;
             let mut inner = owner.lock().await;
             inner.advance_time().await?;
@@ -1650,8 +1673,7 @@ impl RecordPartition {
     /// missing-target windows. Certified corruption is never permission to reset.
     pub async fn resume_initialization(path: &Path, budget: u64) -> Result<(), RecordError> {
         let path = path.to_owned();
-        crate::INDEX_RUNTIME
-            .spawn(async move {
+        crate::resources::spawn(async move {
                 PartitionJournal::resume_initial(&path, budget).map_err(|e| match e {
                     CreateError::NotPublished(e) => storage(e),
                     CreateError::PublicationUnknown(e) => {
@@ -1667,8 +1689,7 @@ impl RecordPartition {
     /// the parent service lock and durably retire the backup identity first.
     pub async fn retire_snapshot(path: &Path) -> Result<(), RecordError> {
         let path = path.to_owned();
-        crate::INDEX_RUNTIME
-            .spawn(async move { PartitionJournal::retire_snapshot(&path).map_err(creation_error) })
+        crate::resources::spawn(async move { PartitionJournal::retire_snapshot(&path).map_err(creation_error) })
             .await
             .map_err(storage)?
     }
@@ -1702,7 +1723,7 @@ impl RecordPartition {
     pub async fn compact_journal(&self) -> Result<u64, RecordError> {
         let permit=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let owner=self.inner.clone();
-        crate::INDEX_RUNTIME.spawn(async move {
+        crate::resources::spawn(async move {
             let _permit=permit;let mut inner=owner.lock().await;
             if !inner.healthy{return Err(RecordError::RecoveryRequired);}
             inner.publish_anchor().await

@@ -16,6 +16,7 @@ use std::{fmt, sync::Arc};
 use futures::StreamExt;
 use super::verified_cache::VerifiedCache;
 use super::sqlite_authority::{AuthorityBackupSnapshot, SqliteAuthority};
+use crate::resources::{self, Buffer, Lane, Lease, Scope};
 
 /// Error from the object-first persistence stage.
 #[derive(Debug)]
@@ -79,7 +80,10 @@ pub(crate) struct S3CompatibleStore {
     store: Arc<dyn ObjectStore>,
     max_object_bytes: usize,
     cache: Option<VerifiedCache>,
+    resources: Scope,
+    background: bool,
 }
+struct UploadBudget { _io: Lease, _payload: Lease, readback: Lease }
 
 impl S3CompatibleStore {
     /// Build an S3-compatible client. Endpoint, bucket and credentials are supplied
@@ -101,12 +105,17 @@ impl S3CompatibleStore {
             .with_secret_access_key(secret_access_key)
             .with_allow_http(allow_http)
             .build()?;
-        Ok(Self { store: Arc::new(store), max_object_bytes, cache: None })
+        Ok(Self { store: Arc::new(store), max_object_bytes, cache: None, resources: resources::isolated_scope(), background: false })
     }
 
     pub(crate) fn with_cache(mut self, cache: VerifiedCache) -> Self {
         self.cache = Some(cache);
         self
+    }
+    pub(crate) fn background(mut self) -> Self { self.background = true; self }
+    fn scope(&self, fallback: Lane) -> Scope {
+        let scope = Scope::current().unwrap_or_else(|| self.resources.clone().in_lane(fallback));
+        if self.background { scope.in_lane(Lane::Background) } else { scope }
     }
 
     fn object_path(key: &str) -> object_store::Result<ObjectPath> {
@@ -133,12 +142,29 @@ impl S3CompatibleStore {
         key: &str,
         bytes: &[u8],
     ) -> object_store::Result<ObjectRef> {
-        if bytes.len() > self.max_object_bytes {
+        let budget = self.upload_budget(key, bytes.len())?;
+        self.put_budgeted(key, bytes, budget).await
+    }
+
+    fn upload_budget(&self, key: &str, length: usize) -> object_store::Result<UploadBudget> {
+        Self::object_path(key)?;
+        if length > self.max_object_bytes {
             return Err(object_store::Error::Generic {
                 store: "s3-compatible",
-                source: format!("object size {} exceeds configured limit {}", bytes.len(), self.max_object_bytes).into(),
+                source: format!("object size {length} exceeds configured limit {}", self.max_object_bytes).into(),
             });
         }
+        let scope = self.scope(Lane::Foreground);
+        let _io = scope.io().map_err(resource_error)?;
+        let _payload = scope.bytes(length as u64).map_err(resource_error)?;
+        let readback = scope.bytes((length as u64).checked_mul(2).ok_or_else(||object_error("object byte budget overflow"))?).map_err(resource_error)?;
+        Ok(UploadBudget { _io, _payload, readback })
+    }
+
+    async fn put_budgeted(&self, key: &str, bytes: &[u8], budget: UploadBudget) -> object_store::Result<ObjectRef> {
+        // Prepay payload copy AND verification before inventory mutation or PUT.
+        // The original input remains charged to its producer.
+        let UploadBudget { _io, _payload, readback } = budget;
         let location = Self::object_path(key)?;
         let digest: [u8; 32] = Sha256::digest(bytes).into();
         let reference = ObjectRef { key: key.to_owned(), sha256: digest, length: bytes.len() as u64 };
@@ -152,7 +178,7 @@ impl S3CompatibleStore {
         // may observe an existing key. Resolve that ambiguity only by reading
         // the existing bytes and proving they are byte-identical.
         if let Err(put_error) = put_result {
-            match self.download_verified(&reference).await {
+            match self.download_verified(&reference, readback).await {
                 Ok(existing) => {
                     if existing == bytes {
                         return Ok(reference);
@@ -167,7 +193,7 @@ impl S3CompatibleStore {
         // through the read path used by later readers before publishing metadata.
         // Always read the backend here. An older cached copy must never certify
         // that this PUT is durable/readable at the remote service.
-        let downloaded = self.download_verified(&reference).await?;
+        let downloaded = self.download_verified(&reference, readback).await?;
         if downloaded != bytes {
             return Err(object_store::Error::Generic {
                 store: "s3-compatible",
@@ -187,9 +213,13 @@ impl S3CompatibleStore {
         bytes: &[u8],
         created_at_ms: i64,
     ) -> Result<ObjectRef, UploadRegisterError> {
+        let budget = self.upload_budget(key, bytes.len()).map_err(UploadRegisterError::ObjectStore)?;
+        self.register_budgeted(authority, key, bytes, created_at_ms, budget).await
+    }
+    async fn register_budgeted(&self, authority: &mut SqliteAuthority, key: &str, bytes: &[u8], created_at_ms: i64, budget: UploadBudget) -> Result<ObjectRef, UploadRegisterError> {
         let planned=ObjectRef{key:key.to_owned(),sha256:Sha256::digest(bytes).into(),length:bytes.len() as u64};
         authority.reserve_upload(&planned,created_at_ms).map_err(UploadRegisterError::Metadata)?;
-        let reference = self.put_verified(key, bytes).await.map_err(UploadRegisterError::ObjectStore)?;
+        let reference = self.put_budgeted(key, bytes, budget).await.map_err(UploadRegisterError::ObjectStore)?;
         authority.register_durable_object(&reference, created_at_ms)
             .map_err(UploadRegisterError::Metadata)?;
         Ok(reference)
@@ -197,33 +227,37 @@ impl S3CompatibleStore {
 
     async fn put_backup_object(&self,authority:&mut SqliteAuthority,backup_id:&str,key:&str,bytes:&[u8],at:i64)
         ->Result<ObjectRef,UploadRegisterError> {
+        let budget = self.upload_budget(key, bytes.len()).map_err(UploadRegisterError::ObjectStore)?;
         let planned=ObjectRef{key:key.to_owned(),sha256:Sha256::digest(bytes).into(),length:bytes.len() as u64};
         authority.reserve_backup_upload(&planned,at,Some(backup_id)).map_err(UploadRegisterError::Metadata)?;
         #[cfg(feature="fault-injection")]
         if std::env::var("ANYSEEK_REMOTE_BACKUP_FAULT").as_deref()==Ok("after_inventory") {std::process::exit(92);}
-        self.put_and_register(authority,key,bytes,at).await
+        self.register_budgeted(authority,key,bytes,at,budget).await
     }
 
     /// Fetch and verify an object against an authority-published reference.
     pub(crate) async fn get_verified(
         &self,
         reference: &ObjectRef,
-    ) -> object_store::Result<Vec<u8>> {
+    ) -> object_store::Result<Buffer> {
         // Validate the reference even on a hit. Cache keys bind endpoint/bucket,
         // full object key (including partition namespace), hash and exact length.
         Self::object_path(&reference.key)?;
         if reference.length > self.max_object_bytes as u64 {
             return Err(object_error("object reference exceeds configured size limit"));
         }
+        let scope = self.scope(Lane::Recovery);
+        let _io = scope.io().map_err(resource_error)?;
+        let lease = scope.bytes(reference.length.checked_mul(2).ok_or_else(|| object_error("object byte budget overflow"))?).map_err(resource_error)?;
         if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.get(reference)) {
-            return Ok(bytes);
+            return Ok(Buffer::new(bytes, lease));
         }
-        let bytes = self.download_verified(reference).await?;
+        let bytes = self.download_verified(reference, lease).await?;
         if let Some(cache) = &self.cache { cache.insert(reference, &bytes); }
         Ok(bytes)
     }
 
-    async fn download_verified(&self, reference: &ObjectRef) -> object_store::Result<Vec<u8>> {
+    async fn download_verified(&self, reference: &ObjectRef, lease: Lease) -> object_store::Result<Buffer> {
         if reference.length > self.max_object_bytes as u64 {
             return Err(object_store::Error::Generic {
                 store: "s3-compatible",
@@ -231,12 +265,16 @@ impl S3CompatibleStore {
             });
         }
         let location = Self::object_path(&reference.key)?;
+        // Covers the accumulating Vec and one in-flight stream chunk. The lease
+        // follows the returned buffer, rather than ending when GET completes.
         let result = self.store.get(&location).await?;
         if result.meta.size as u64 != reference.length {
             return Err(object_error("object length does not match committed reference"));
         }
         let mut stream = result.into_stream();
         let mut bytes = Vec::new();
+        bytes.try_reserve_exact(usize::try_from(reference.length).map_err(|_| object_error("object length overflow"))?)
+            .map_err(|_| object_error("object buffer allocation failed"))?;
         let mut hash = Sha256::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -250,7 +288,7 @@ impl S3CompatibleStore {
         if bytes.len() as u64 != reference.length || digest != reference.sha256 {
             return Err(object_error("object length or SHA-256 does not match committed reference"));
         }
-        Ok(bytes)
+        Ok(Buffer::new(bytes, lease))
     }
 
     /// Persist and publish the immutable initial checkpoint/configuration for an
@@ -463,6 +501,7 @@ impl S3CompatibleStore {
         };
         let location = Self::object_path(&reference.key)
             .map_err(UploadRegisterError::ObjectStore)?;
+        let _io = self.scope(Lane::Background).io().map_err(resource_error).map_err(UploadRegisterError::ObjectStore)?;
         match self.store.delete(&location).await {
             Ok(())|Err(object_store::Error::NotFound{..})=>{},
             Err(error)=>return Err(UploadRegisterError::ObjectStore(error)),
@@ -477,8 +516,15 @@ impl S3CompatibleStore {
 
     #[cfg(test)]
     pub(crate) fn from_store(store: Arc<dyn ObjectStore>, max_object_bytes: usize) -> Self {
-        Self { store, max_object_bytes, cache: None }
+        Self { store, max_object_bytes, cache: None, resources: resources::isolated_scope(), background: false }
     }
+}
+
+fn resource_error(error: resources::Busy) -> object_store::Error {
+    object_store::Error::Generic { store: "resource-budget", source: Box::new(error) }
+}
+pub(crate) fn is_resource_error(error: &object_store::Error) -> bool {
+    matches!(error, object_store::Error::Generic { source, .. } if source.downcast_ref::<resources::Busy>().is_some())
 }
 
 fn object_error(message: &'static str) -> object_store::Error {
@@ -488,6 +534,31 @@ fn object_error(message: &'static str) -> object_store::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn resource_refusal_precedes_put_and_verified_buffer_owns_charge() {
+        let store = S3CompatibleStore::from_store(Arc::new(object_store::memory::InMemory::new()), 1024);
+        let governor = Arc::new(resources::Governor::default());
+        let cap = 256 * 1024 * 1024;
+        let scope = governor.admit("a".into(), Lane::Foreground, 0).unwrap();
+        scope.clone().run(async {
+            let full = scope.bytes(cap).unwrap();
+            let error = store.put_verified("first", b"1234").await.unwrap_err();
+            assert!(is_resource_error(&error));
+            assert!(matches!(store.store.get(&ObjectPath::from("first")).await, Err(object_store::Error::NotFound { .. })));
+            drop(full);
+            let reference = store.put_verified("first", b"1234").await.unwrap();
+            let buffer = store.get_verified(&reference).await.unwrap();
+            let rest = scope.bytes(cap - 8).unwrap();
+            assert!(scope.bytes(1).is_err());
+            drop(buffer);
+            assert!(scope.bytes(8).is_ok());
+            drop(rest);
+            let first = scope.io().unwrap(); let second = scope.io().unwrap();
+            assert!(is_resource_error(&store.get_verified(&reference).await.unwrap_err()));
+            drop(first); drop(second);
+            assert_eq!(store.get_verified(&reference).await.unwrap(),b"1234");
+        }).await;
+    }
     use object_store::memory::InMemory;
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 //! Default reliable service. No route delegates to the legacy per-key index map.
 mod takeover;
+mod admission;
 use crate::api_types::{CreateIndexRequest, FieldRequest, SearchRequestObject};
 use axum::{
     Json, Router,
@@ -11,6 +12,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use anyseek::{
+    resources::{Governor, Scope as ResourceScope},
     catalog::{
         Catalog, CatalogCommand, CatalogError, CatalogRequest, CollectionEntry, OutputPermit,
     },
@@ -132,7 +134,8 @@ fn internal_id(nonce: String) -> OperationId {
 async fn owned<T: Send + 'static>(
     work: impl Future<Output = Result<T, Error>> + Send + 'static,
 ) -> Result<T, Error> {
-    tokio::spawn(work).await.map_err(|e| {
+    let scope = ResourceScope::current();
+    tokio::spawn(async move { match scope { Some(scope) => scope.run(work).await, None => work.await } }).await.map_err(|e| {
         Error(
             StatusCode::SERVICE_UNAVAILABLE,
             "outcome_unknown",
@@ -195,9 +198,9 @@ fn protected_data<T: Serialize>(
     // handoff check. Successful data and other errors keep the data barrier.
     let data = if matches!(&result, Err(Error(_, "durable_pending" | "outcome_unknown", _))) { None } else { data };
     let encoded = match result {
-        Ok(value) => serde_json::to_vec(&value)
+        Ok(value) => admission::encode(&value)
             .map(|bytes| (StatusCode::OK, bytes))
-            .map_err(|_| storage("response serialization failed")),
+            .map_err(|error| if error.is_io() { bad("response budget exceeded; reduce page size") } else { storage("response serialization failed") }),
         Err(error) => Err(error),
     };
     let encoded = encoded.and_then(|(status, bytes)| {
@@ -238,7 +241,9 @@ pub(crate) struct Service {
     records: RwLock<BTreeMap<String, RecordPartition>>,
     control: Mutex<()>,
     control_admission: Arc<Semaphore>,
-    requests: Arc<Semaphore>,
+    resources: Arc<Governor>,
+    preflight: Arc<Semaphore>,
+    control_preflight: Arc<Semaphore>,
     default_nprobe: std::num::NonZeroUsize,
     // Drop after catalog, partitions and mappings: stable across root repair.
     _root_owner: std::fs::File,
@@ -301,7 +306,9 @@ impl Service {
             records: RwLock::new(BTreeMap::new()),
             control: Mutex::new(()),
             control_admission: Arc::new(Semaphore::new(16)),
-            requests: Arc::new(Semaphore::new(64)),
+            resources: Governor::from_env()?,
+            preflight: Arc::new(Semaphore::new(64)),
+            control_preflight: Arc::new(Semaphore::new(16)),
             default_nprobe,
             _root_owner: root_owner,
         });
@@ -352,7 +359,9 @@ impl Service {
             .await
             .map_err(|e| e.to_string())?
         {
-            service.finish_collection(entry).await.map_err(|e| e.2)?;
+            let scope = service.resources.admit(format!("collection:{}", entry.collection_id), anyseek::resources::Lane::Recovery,
+                (MAX_BODY + MAX_RESPONSE) as u64).map_err(|e|e.to_string())?;
+            scope.run(service.finish_collection(entry)).await.map_err(|e| e.2)?;
         }
         Ok(service)
     }
@@ -657,7 +666,6 @@ async fn create_key(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission = admission;
-        let _control = s.control.lock().await;
         let key = s.admin(&headers).await?;
         if request.key_id == "master" {
             return Err(bad("master identity is reserved"));
@@ -686,7 +694,6 @@ async fn revoke_key(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission = admission;
-        let _control = s.control.lock().await;
         let key = s.admin(&headers).await?;
         if request.key_id == "master" {
             return Err(bad("master key cannot revoke itself"));
@@ -715,7 +722,6 @@ async fn grants(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission = admission;
-        let _control = s.control.lock().await;
         let key = s.admin(&headers).await?;
         let command = if request.allow {
             CatalogCommand::Grant {
@@ -1561,7 +1567,6 @@ async fn delete_collection(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission = admission;
-        let _control = s.control.lock().await;
         let key = s.admin(&headers).await?;
         let receipt = s
             .catalog
@@ -1647,7 +1652,7 @@ async fn delivery_gate(request: axum::extract::Request, next: axum::middleware::
 }
 struct AdmissionBody {
     inner: Body,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    scope: ResourceScope,
 }
 impl http_body::Body for AdmissionBody {
     type Data = Bytes;
@@ -1656,7 +1661,10 @@ impl http_body::Body for AdmissionBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
-        Pin::new(&mut self.inner).poll_frame(cx)
+        let scope = self.scope.clone();
+        Pin::new(&mut self.inner).poll_frame(cx).map(|frame| frame.map(|frame| frame.map(|frame| frame.map_data(|bytes| {
+            Bytes::from_owner(admission::OutputBytes { bytes, _scope: scope })
+        }))))
     }
 }
 async fn request_guard(
@@ -1664,13 +1672,9 @@ async fn request_guard(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let Ok(_permit) = service.requests.clone().try_acquire_owned() else {
-        return Error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "busy",
-            "request queue full".into(),
-        )
-        .into_response();
+    let (request, scope) = match admission::request(&service, request).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
     };
     if request.uri().path().ends_with("/query")
         && request.uri().query().is_some_and(|q| !q.is_empty())
@@ -1678,7 +1682,7 @@ async fn request_guard(
         return bad("query parameters belong in the JSON body").into_response();
     }
     let response =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), next.run(request)).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), scope.clone().run(next.run(request))).await {
             Ok(response) => response,
             Err(_) => Error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1692,7 +1696,7 @@ async fn request_guard(
         parts,
         Body::new(AdmissionBody {
             inner: body,
-            _permit,
+            scope,
         }),
     )
 }
@@ -2052,7 +2056,7 @@ mod tests {
         let (service, path, _) = setup().await;
         let app = router(service.clone());
         let mut responses = Vec::new();
-        for _ in 0..64 {
+        for _ in 0..8 {
             let response = app
                 .clone()
                 .oneshot(
@@ -2094,6 +2098,69 @@ mod tests {
         drop(app);
         drop(service);
         std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
+    async fn service_hot_collection_aliases_share_quota_and_control_bypasses_workflow_lock() {
+        use tower::ServiceExt;
+        use http_body::Body as _;
+        let (service, path, master) = setup().await;
+        let create = json!({"operation_id":OperationId::new("create-d".into()),"collection_id":"d","config":{"index_name":"other","schema":[{"field":"body","field_type":"Text"}]}});
+        drop(create_collection(State(service.clone()), master.clone(), serde_json::to_vec(&create).unwrap().into()).await.unwrap());
+        let app = router(service.clone());
+        let key = STANDARD.encode([7;32]);
+        let mut slow = Vec::new();
+        for id in ["c", "%63", "c", "%63"] {
+            let response = app.clone().oneshot(axum::http::Request::builder()
+                .uri(format!("/api/v1/index/{id}")).header("apikey", &key).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK); slow.push(response);
+        }
+        struct NeverRead;
+        impl http_body::Body for NeverRead {
+            type Data = Bytes; type Error = std::io::Error;
+            fn poll_frame(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+                panic!("quota refusal must precede request body consumption")
+            }
+        }
+        let refused = app.clone().oneshot(axum::http::Request::builder().method("POST")
+            .uri("/api/v1/index/%63/doc").header("apikey", &key).body(Body::new(NeverRead)).unwrap()).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        let other = app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/index/d")
+            .header("apikey", master["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(other.status(), StatusCode::OK); drop(other);
+        // A long restore/backup workflow must not occupy the revoke workflow lock.
+        let workflow = service.control.lock().await;
+        let body = json!({"operation_id":OperationId::new("reserved-revoke".into()),"key_id":"a"});
+        let revoked = tokio::time::timeout(std::time::Duration::from_secs(2), app.clone().oneshot(axum::http::Request::builder()
+            .method("DELETE").uri("/api/v1/apikey").header("apikey",master["apikey"].clone())
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())).await.unwrap().unwrap();
+        assert_eq!(revoked.status(), StatusCode::OK); drop(revoked); drop(workflow);
+        for response in slow {
+            let mut body = response.into_body();
+            assert!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().is_err());
+        }
+        assert_eq!(service.records.read().await["c"].statistics().await.unwrap().visible_seq, 0);
+        drop(app); drop(service); std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
+    async fn service_transport_frame_retains_quota_after_body_drop() {
+        use tower::ServiceExt;
+        use http_body::Body as _;
+        let (service,path,_) = setup().await;
+        let app = router(service.clone());
+        let mut frames = Vec::new();
+        for _ in 0..8 {
+            let response = app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/live").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(),StatusCode::OK);
+            let mut body = response.into_body();
+            frames.push(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().unwrap().into_data().unwrap());
+            drop(body);
+        }
+        let response = app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/live").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::TOO_MANY_REQUESTS); drop(response);
+        drop(frames);
+        let response = app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/live").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK); drop(response);
+        drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn service_oversize_and_serialization_errors_retain_output_barrier() {

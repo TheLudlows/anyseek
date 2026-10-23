@@ -73,7 +73,7 @@ impl Inner {
         #[cfg(feature = "s3-object-store")]
         if let Some(remote) = self.remote.as_mut() {
             remote.commit_entry(event.seq, format!("system:lease-expired:{}", event.seq), &bytes)
-                .await.map_err(RecordError::OutcomeUnknown)?;
+                .await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?;
         }
         self.append_operation(&bytes,event.seq)?;
         #[cfg(feature="fault-injection")]

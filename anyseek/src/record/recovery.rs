@@ -86,7 +86,7 @@ impl RecordPartition {
     pub async fn seal_for_takeover(&self, request: SealRequest) -> Result<SealCertificate, RecordError> {
         let admission = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
-        crate::INDEX_RUNTIME.spawn(async move {
+        crate::resources::spawn(async move {
             let _admission = admission;
             let mut inner = owner.lock().await;
             if !inner.healthy { return Err(RecordError::RecoveryRequired); }
@@ -144,7 +144,7 @@ impl RecordPartition {
         let source = self.inner.clone();
         let backup = backup.inner.clone();
         let target = target.to_owned();
-        crate::INDEX_RUNTIME.spawn(async move {
+        crate::resources::spawn(async move {
             let original = source.lock().await;
             let snapshot = backup.lock().await;
             if !original.healthy || !snapshot.healthy { return Err(RecordError::RecoveryRequired); }

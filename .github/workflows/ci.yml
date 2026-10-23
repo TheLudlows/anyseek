@@ -127,6 +127,10 @@ jobs:
           cargo test -p anyseek --features s3-object-store --lib cache_corruption
       - name: Native service output and admission barriers
         run: cargo test -p anyseek --features server record_service::tests
+      - name: Native collection budgets, cancellation ownership and object buffer leases
+        run: |
+          cargo test -p anyseek --features server --lib resources::tests
+          cargo test -p anyseek --features s3-object-store --lib resource_
       - name: Build native service
         run: cargo build -p anyseek --features server
       - name: Native service HTTP and restart acceptance

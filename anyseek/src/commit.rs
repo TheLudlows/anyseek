@@ -47,7 +47,7 @@ impl Commit for IndexArc {
         let mut join_set = JoinSet::new();
 
         for shard in shard_vec {
-            join_set.spawn(async move {
+            join_set.spawn(crate::resources::inherit(async move {
                 let semaphore = { shard.read().await.semaphore.clone() };
                 let _permit = semaphore.acquire_owned().await.map_err(std::io::Error::other)?;
 
@@ -79,7 +79,7 @@ impl Commit for IndexArc {
                 } else {
                     Ok((0usize, 0usize))
                 }
-            });
+            }));
         }
 
         // Drain every task even after a failure: returning early must not detach

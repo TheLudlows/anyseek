@@ -28,6 +28,7 @@ struct Plan {
     prior:crate::storage::payload_pool::Closure, base:Vec<u8>,
     disk:crate::storage::build_budget::DiskScope,
     memory:(crate::storage::build_budget::MemoryLease,crate::storage::build_budget::MemoryLease),
+    resources: crate::resources::Lease,
     #[cfg(feature="s3-object-store")]
     remote:Option<remote_checkpoint::RemoteBuild>,
 }
@@ -79,7 +80,7 @@ impl RecordPartition {
         let admission = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
         let recovery = owner.clone();
-        let handle = crate::INDEX_RUNTIME.spawn(async move {
+        let handle = crate::resources::spawn_background(async move {
           let outcome = std::panic::AssertUnwindSafe(async move {
             let _worker = worker;
             let _admission = admission;
@@ -94,6 +95,9 @@ impl RecordPartition {
                 let estimate = (inner.snapshot_bytes as u64).checked_mul(4)
                     .ok_or_else(||storage("index snapshot estimate overflow"))?;
                 let tail_bytes=inner.config.max_journal_bytes.min(crate::storage::build_budget::EXPLICIT_BUFFERS);
+                let resources = crate::resources::io_scope(crate::resources::Lane::Background)
+                    .bytes(estimate.checked_add(tail_bytes).ok_or(RecordError::Busy)?)
+                    .map_err(|_|RecordError::Busy)?;
                 let memory = (crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?,
                     crate::storage::build_budget::reserve_memory(tail_bytes).map_err(storage)?);
                 let root = inner.journal.root().to_path_buf();
@@ -110,12 +114,12 @@ impl RecordPartition {
                     return Err(RecordError::RecoveryRequired);
                 }
                 let result = Plan {root,config:inner.config.clone(),snapshot:inner.state.clone(),prior:inner.payloads.clone(),
-                    base:serde_json::to_vec(&inner.anchor).map_err(storage)?,disk,memory,
+                    base:serde_json::to_vec(&inner.anchor).map_err(storage)?,disk,memory,resources,
                     #[cfg(feature="s3-object-store")] remote};
                 inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false});
                 result
             };
-            let Plan{root,config,snapshot,prior,base,disk,memory,
+            let Plan{root,config,snapshot,prior,base,disk,memory,resources:_resources,
                 #[cfg(feature="s3-object-store")] remote} = plan;
             let cut = snapshot.seq;
             #[cfg(any(test,feature="fault-injection"))]
