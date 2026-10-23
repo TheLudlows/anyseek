@@ -67,15 +67,26 @@ impl SqliteAuthority {
         Ok(Some(build))
     }
 
-    /// Output objects are protected until publication or explicit cancellation.
-    pub(crate) fn pin_index_build_output(&mut self,build:&IndexBuild,object:&ObjectRef,now_ms:i64) -> rusqlite::Result<()> {
+    /// Reserve and pin output identity atomically before PUT. Even an unfinished
+    /// or response-lost upload cannot race retirement while the job is active.
+    pub(crate) fn reserve_index_build_output(&mut self,build:&IndexBuild,object:&ObjectRef,now_ms:i64) -> rusqlite::Result<()> {
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let binding:Option<String>=tx.query_row("SELECT binding_json FROM index_builds WHERE partition_id=?1 AND build_epoch=?2 AND active=1",
             params![build.partition_id,to_i64(build.build_epoch)?],|r|r.get(0)).optional()?;
         if binding.as_deref()!=Some(serde_json::to_string(build).map_err(|_|rusqlite::Error::InvalidQuery)?.as_str()) || now_ms>=build.deadline_ms {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        ensure_durable_object(&tx,object)?;
+        let row:Option<(Vec<u8>,i64,i64)>=tx.query_row(
+            "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
+            [&object.key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        if let Some((digest,length,state))=row {
+            if digest.as_slice()!=object.sha256 || length!=to_i64(object.length)? || !matches!(state,0|1) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        } else {
+            tx.execute("INSERT INTO object_uploads VALUES(?1,?2,?3,0,?4)",
+                params![object.key,object.sha256.as_slice(),to_i64(object.length)?,now_ms])?;
+        }
         tx.execute("INSERT OR IGNORE INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms) VALUES(?1,?2,?3,'indexer',?4)",
             params![format!("{}{}:output:{}",pin_prefix(&build.partition_id),build.build_epoch,object.key),build.partition_id,object.key,build.deadline_ms])?;
         tx.commit()
@@ -168,7 +179,7 @@ mod tests {
         assert!(db.begin_index_build("p",1,11,100).unwrap().is_none());
         let last=commit(&mut db,2);
         let manifest=object(&mut db,"manifest/cut-1");
-        db.pin_index_build_output(&build,&manifest,12).unwrap();
+        db.reserve_index_build_output(&build,&manifest,12).unwrap();
         let selected=db.publish_index_build(&build,manifest.clone(),13).unwrap().unwrap();
         assert_eq!((selected.committed_seq,selected.indexed_seq,selected.log_base_seq),(2,1,1));
         assert_eq!(selected.wal_tip,last.wal_tip);
@@ -203,15 +214,29 @@ mod tests {
         let (_path,mut db)=database();db.create_partition("p",1).unwrap();
         let build=db.begin_index_build("p",1,1,10).unwrap().unwrap();
         let output=object(&mut db,"candidate");
-        db.pin_index_build_output(&build,&output,2).unwrap();
+        db.reserve_index_build_output(&build,&output,2).unwrap();
         assert!(db.unreferenced_objects().unwrap().iter().all(|o|o.key!=output.key));
         assert!(!db.retire_object(&output.key,1,1000).unwrap());
         db.cancel_index_build(&build).unwrap();
         let successor=db.begin_index_build("p",1,1000,2000).unwrap().unwrap();
-        db.pin_index_build_output(&successor,&output,1001).unwrap();
+        db.reserve_index_build_output(&successor,&output,1001).unwrap();
         db.cancel_index_build(&build).unwrap();
         assert!(db.unreferenced_objects().unwrap().iter().all(|o|o.key!=output.key));
         db.cancel_index_build(&successor).unwrap();
         assert!(db.unreferenced_objects().unwrap().iter().any(|o|o.key==output.key));
     }
+    #[test]
+    fn index_build_reserves_output_pin_before_put_and_defeats_independent_gc() {
+        let (_path,mut db)=database();db.create_partition("p",1).unwrap();
+        let build=db.begin_index_build("p",1,1,100).unwrap().unwrap();
+        let planned=ObjectRef{key:"unuploaded-output".into(),sha256:[2;32],length:64};
+        db.reserve_index_build_output(&build,&planned,2).unwrap();
+        assert!(!db.retire_object(&planned.key,1,3).unwrap());
+        db.register_durable_object(&planned,4).unwrap();
+        assert!(!db.retire_object(&planned.key,1,5).unwrap());
+        db.cancel_index_build(&build).unwrap();
+        assert!(db.retire_object(&planned.key,1,6).unwrap());
+        assert!(db.reserve_index_build_output(&build,&planned,7).is_err());
+    }
+
 }

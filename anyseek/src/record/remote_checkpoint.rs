@@ -639,6 +639,25 @@ mod tests {
         p.compact_journal().await.unwrap();
     }
     #[tokio::test]
+    async fn background_index_old_owner_cannot_reopen_output_after_rejected_publication() {
+        let (p,_,root,db,_)=source().await;
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let output=p.output_permit().unwrap();
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        let job=p.start_index_committed(std::time::Duration::from_secs(30)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !root.join(".test-indexer-started").exists() { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        // Exercise the authority fence even if an obsolete worker is still alive.
+        let connection=rusqlite::Connection::open(db).unwrap();
+        connection.execute("UPDATE partition_heads SET owner_epoch=2 WHERE partition_id='source'",[]).unwrap();
+        drop(connection);
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+        assert!(matches!(job.finish().await,Err(RecordError::RecoveryRequired)));
+        assert!(p.get("a").await.is_err());assert!(output.deliver(||()).is_err());
+    }
+
+    #[tokio::test]
     async fn expired_remote_index_build_cleans_pins_without_advancing_manifest() {
         let (p,_,root,_,clock)=source().await;
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
@@ -1236,7 +1255,7 @@ impl RemotePersistence {
     }
 }
 impl RemoteBuild {
-    pub(super) async fn publish(&self,active:&mut RemotePersistence,manifest:ObjectRef,root:&Path) -> Result<bool,RecordError> {
+    pub(super) async fn publish(&self,active:&mut RemotePersistence,manifest:ObjectRef,root:&Path,expected_seq:u64) -> Result<bool,RecordError> {
         #[cfg(test)]
         if root.join(".test-remote-before-checkpoint").exists() { return Err(storage("injected before remote checkpoint publication")); }
         #[cfg(feature="fault-injection")]
@@ -1244,7 +1263,16 @@ impl RemoteBuild {
         #[cfg(feature="fault-injection")]
         if fault_partition && std::env::var("ANYSEEK_REMOTE_CHECKPOINT_FAULT").as_deref()==Ok("before_publish") { std::process::exit(91); }
         let published=active.authority.lock().await.publish_index_build(&self.build,manifest,unix_time_ms_i64()).map_err(storage)?;
-        let Some(head)=published else {return Ok(false)};
+        let Some(head)=published else {
+            let head=active.authority.lock().await.read_head(&self.partition_id).map_err(storage)?
+                .ok_or(RecordError::RecoveryRequired)?;
+            if head.owner_epoch!=self.build.owner_epoch || head.committed_seq!=expected_seq
+                || head.manifest!=self.build.base_manifest || head.indexed_seq!=self.build.base_indexed_seq {
+                return Err(RecordError::RecoveryRequired);
+            }
+            return Ok(false);
+        };
+        if head.committed_seq!=expected_seq { return Err(RecordError::RecoveryRequired); }
         #[cfg(feature="fault-injection")]
         if fault_partition && std::env::var("ANYSEEK_REMOTE_CHECKPOINT_FAULT").as_deref()==Ok("after_publish") { std::process::exit(91); }
         #[cfg(test)]
@@ -1298,8 +1326,9 @@ impl RemoteBuild {
                     path,
                     chunks.len()
                 );
+                let planned=ObjectRef{key:key.clone(),sha256:Sha256::digest(&bytes).into(),length:bytes.len() as u64};
+                authority.reserve_index_build_output(&self.build,&planned,unix_time_ms_i64()).map_err(storage)?;
                 let object = self.store.put_and_register(&mut authority,&key,&bytes,unix_time_ms_i64()).await.map_err(storage)?;
-                authority.pin_index_build_output(&self.build,&object,unix_time_ms_i64()).map_err(storage)?;
                 chunks.push(object);
                 chunk_count=chunk_count.checked_add(1).ok_or_else(||storage("checkpoint chunk count overflow"))?;
                 if chunk_count > self.max_tail_blocks {
@@ -1330,12 +1359,13 @@ impl RemoteBuild {
             self.partition_id,
             reference.identity()
         );
+        let planned=ObjectRef{key:key.clone(),sha256:Sha256::digest(&bytes).into(),length:bytes.len() as u64};
+        authority.reserve_index_build_output(&self.build,&planned,unix_time_ms_i64()).map_err(storage)?;
         let manifest = self
             .store
             .put_and_register(&mut authority, &key, &bytes, unix_time_ms_i64())
             .await
             .map_err(storage)?;
-        authority.pin_index_build_output(&self.build,&manifest,unix_time_ms_i64()).map_err(storage)?;
         for file in &checkpoint.files {
             for child in &file.chunks {
                 authority

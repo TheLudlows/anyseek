@@ -39,7 +39,7 @@ SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本
 
 当前进程最多两个构建，每 partition 一个，无额外等待队列；超额返回 Busy。期限由调用者指定，最大五分钟，HTTP 为三十秒。快照与新增 tail 分别使用既有共享内存准入；捕获 tail 上限为 journal 预算与 64 MiB 的较小值，超限取消本轮构建，保留前台已确认操作，构建文件及并发 WAL 使用同一个磁盘 scope；这是保守估算，继续不承诺 RSS 硬上限。完整 State 仍驻内存。此批按固定 cut 全量构建，增量后台构建与自动调度后置。
 
-SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch、owner/cut/基础 manifest 与期限等发布绑定，完成后保留 epoch 防止 ABA，不复制 Record 或索引。登记与输入闭包 pin 同事务提交；输出对象分别登记并 pin。对象 I/O 使用同一 SQLite 文件的独立连接，避免跨网络持有前台 authority mutex；不会产生另一套 head。pin 不因时间经过自行解除，过期只禁止发布，清理必须精确绑定 epoch。取得独占 owner 锁后，重开会取消未完成任务及其 pin。
+SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch、owner/cut/基础 manifest 与期限等发布绑定，完成后保留 epoch 防止 ABA，不复制 Record 或索引。登记与输入闭包 pin 同事务提交；输出对象在 PUT 前原子登记并 pin；后台构建期间新的共同 S3 备份返回 Busy，避免把未完成上传作为备份输入。对象 I/O 使用同一 SQLite 文件的独立连接，避免跨网络持有前台 authority mutex；不会产生另一套 head。pin 不因时间经过自行解除，过期只禁止发布，清理必须精确绑定 epoch。取得独占 owner 锁后，重开会取消未完成任务及其 pin。
 
 候选在 partition 屏障外构建和认证；本地 owned worker 保护候选及输入文件，期间显式 GC 返回 Busy，同步维护不能替换基础。发布时在 guard 内重放有界新增 tail，对比完整逻辑状态，检查本地基础和期限；SQLite 再检查持久 build/owner epoch、基础 manifest/indexed seq 和期限。它只推进 manifest/indexed/log base 至固定 cut，保留后续 committed seq 和 WAL tip，不消费业务序号。
 

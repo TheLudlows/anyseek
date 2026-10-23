@@ -191,8 +191,9 @@ impl RecordPartition {
                 };
                 #[cfg(feature="s3-object-store")]
                 if let (Some(remote),Some(manifest)) = (&remote,manifest) {
+                    let expected_seq=inner.state.seq;
                     let active = inner.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
-                    let published = remote.publish(active,manifest,&root).await?;
+                    let published = remote.publish(active,manifest,&root,expected_seq).await?;
                     if !published {
                         inner.healthy = true;
                         inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced = fenced;
@@ -226,9 +227,21 @@ impl RecordPartition {
             // Drop construction accounting before rescanning/removing orphans.
             drop(disk); drop(memory);
             let mut inner = owner.lock().await;
+            if matches!(&result,Err(RecordError::RecoveryRequired)) {
+                inner.healthy=false;
+                inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+            }
             if inner.background.as_ref().is_some_and(|t|t.id==id) { inner.background = None; }
             #[cfg(feature="s3-object-store")]
             if let Some(remote) = &remote {
+                let current=if let Some(active)=inner.remote.as_ref() {
+                    active.authority.lock().await.read_head(&remote.build.partition_id)
+                        .ok().flatten()
+                } else {None};
+                if current.as_ref().is_none_or(|head|head.owner_epoch!=remote.build.owner_epoch || head.committed_seq!=inner.state.seq) {
+                    inner.healthy=false;
+                    inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+                }
                 if let Some(active) = inner.remote.as_mut() {
                     if let Err(error) = active.authority.lock().await.cancel_index_build(&remote.build) {
                         log::warn!("index build pin cleanup pending: {error}");

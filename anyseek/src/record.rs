@@ -692,7 +692,9 @@ impl Inner {
             // build, never reclassifies an acknowledged foreground write or lets
             // the worker publish an incomplete suffix.
             if !tail.overflowed {
-                if let Some(total)=tail.bytes.checked_add(bytes.len() as u64).filter(|n|*n<=tail.max_bytes) {
+                if let Some(total)=tail.bytes.checked_add(bytes.len() as u64)
+                    .and_then(|n|n.checked_add((2*std::mem::size_of::<Vec<u8>>()) as u64))
+                    .filter(|n|*n<=tail.max_bytes) {
                     tail.entries.push(bytes.to_vec());tail.bytes=total;
                 } else {tail.overflowed=true;tail.entries.clear();}
             }
@@ -1124,6 +1126,7 @@ impl RecordPartition {
         let owner=self.inner.clone();let backup_id=backup_id.to_owned();
         crate::INDEX_RUNTIME.spawn(async move {
         let mut inner = owner.lock().await;
+        if inner.background.is_some() { return Err(RecordError::Busy); }
         if !inner.healthy || inner.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
         }
