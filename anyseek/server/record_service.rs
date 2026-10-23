@@ -220,12 +220,19 @@ fn protected_data<T: Serialize>(
         ),
     };
     deliver(&permit, data.as_ref(), || ())?;
+    // The response may be produced by an owned task after the HTTP waiter has
+    // gone away. Charge its bytes immediately, before the task-local is dropped.
+    let bytes: Bytes = bytes.into();
+    let bytes = match ResourceScope::current() {
+        Some(scope) => Bytes::from_owner(admission::OutputBytes { bytes, _scope: scope }),
+        None => bytes,
+    };
     let mut response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::new(AuthorizedBody {
-            bytes: Some(bytes.into()),
+            bytes: Some(bytes),
             permit: permit.clone(),
             data: data.clone(),
         }))
@@ -2161,6 +2168,25 @@ mod tests {
         let response = app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/live").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(),StatusCode::OK); drop(response);
         drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
+    async fn service_owned_response_retains_scope_before_middleware_handoff() {
+        use http_body::Body as _;
+        let (service,path,_) = setup().await;
+        let (_,permit) = service.catalog.authorized("a".into(),"c".into(),|_|async{}).await.unwrap();
+        let governor = Arc::new(Governor::default());
+        let scope = governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap();
+        let response = scope.run(async { protected(Ok("pending output"), permit).unwrap() }).await;
+        let mut others = Vec::new();
+        for _ in 0..3 { others.push(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap()); }
+        assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_err());
+        let mut body = response.into_body();
+        let bytes = std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().unwrap().into_data().unwrap();
+        drop(body);
+        assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_err());
+        drop(bytes);
+        assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_ok());
+        drop(others); drop(service);std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn service_oversize_and_serialization_errors_retain_output_barrier() {
