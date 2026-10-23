@@ -22,7 +22,7 @@ def main():
             if args.cold_restarts:
                 assert os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3','cold-restarts requires the S3 backend'
                 if root.exists():
-                    for cache in root.glob('collection-*'):
+                    for cache in [*root.glob('collection-*'), *root.glob('*.object-cache')]:
                         if cache.is_dir():shutil.rmtree(cache)
             process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**(fault_env or {})},stdout=log,stderr=log)
             for _ in range(2400 if args.cold_restarts else 300):

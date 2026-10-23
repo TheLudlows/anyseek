@@ -6,6 +6,8 @@ pub(crate) mod sqlite_authority;
 #[cfg(feature = "s3-object-store")]
 pub(crate) mod s3_compatible;
 #[cfg(feature = "s3-object-store")]
+pub(crate) mod verified_cache;
+#[cfg(feature = "s3-object-store")]
 pub(crate) mod object_log;
 mod platform;
 

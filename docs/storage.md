@@ -33,7 +33,15 @@ SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本
 
 当前实现只在完整当前 cut 上推进检查点，不支持后台 indexer 与新写入并行发布的优化；这属于 C。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 feed floor 等状态。
 
-### 开发分支：有界后台 cut 发布（PR #75，未合入）
+### 开发分支：有界校验对象缓存（C2，尚未合入）
+
+`*.object-cache` 位于对应 SQLite 权威库旁，是完全可丢弃的派生缓存。容量为每库 256 MiB、4096 个块；按最早插入淘汰，不把命中频率写回磁盘。缓存身份绑定 endpoint/bucket/region、完整对象 key、SHA-256 和长度；不保存凭据。每次命中重新检查长度和 hash；损坏作为 miss 删除，无法访问或锁竞争时直接回源。远端流按认证长度有界累积，过长、缺失或校验失败不能入缓存。
+
+私有临时文件完整写入并同步后同目录原子发布；跨进程非阻塞文件锁保护扫描、删除与发布。临时文件、孤儿块计入清理，删除失败不释放额度；启动后不要求缓存持久化成功。PUT 和不确定 PUT 的确认始终从远端读回，不能用缓存代替后端持久化证明。SQLite 仍独立验证当前 owner/head/水位，缓存命中不授予读取或输出权限。
+
+缓存只返回自有字节，不供 mmap；materialize 后的 Segment 位于独立目录，由现有认证流程映射与保护。淘汰、损坏和清空缓存均不删除在用 Segment mmap。预取和直接映射缓存块暂不实现。跨 collection 的总容量及前台/下载/后台资源公平仍待 C 后续；该上限不是全服务磁盘或 RSS 硬上限。
+
+### 有界后台 cut 发布（PR #75 已合入）
 
 `RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在 catalog 授权锁内只启动任务，锁外等待，交付仍验证原授权许可，因此构建等待不阻断普通写入或撤权。
 
@@ -45,7 +53,7 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 本地证书与完整新增 suffix 在私有 generation 中一起同步，然后发布目录，避免证书可见但后续已确认写入未落入新 generation。S3 在 SQLite 发布后本地失败继续 fenced，冷启动从远端 manifest 加完整 tail 恢复。构建失败、过期或 panic 不能把旧 cut 当成当前视图；panic 关闭输出，必须重开恢复。物理回收在候选 mmap 释放和任务结束后执行。
 
-这些是 [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 的开发分支协议；Rust/HTTP 与 Linux/Windows 验证以该 PR Checks 的精确源码提交为准，不替代已合入实现的证据。
+[PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`，最终提交 `96306e95` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)。合入后主干 CI 单独记录。
 
 ## 2. 日志与 feed 保留
 
@@ -113,7 +121,7 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 ## 验证入口与边界
 
 - `cargo test --workspace --features server --all-targets`：Record/catalog、Segment、SQLite、上传/依赖/GC 和现有检索回归。
-- `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权、恢复与受控接管；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 缓存。
+- `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权、恢复与受控接管；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 与 `*.object-cache` 两类缓存。
 - `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、十种接管路径、feed floor、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
 - `scripts/s3_acceptance.py`：统一执行上述存储矩阵、七组共享语义与不可变对象/共同备份合同；`--backend real` 只接受专用测试配置。命令及报告边界见[开发指南](development.md)。
 - [PR #74 CI](https://github.com/TheLudlows/anyseek/actions/runs/39814329888) 对最终 head `eb9431a3` 的五个任务全部通过，包含 Linux/Windows 原生持久化和 S3 语义/合同；合入源码为 `afbe323d`，与测试 head 的 Git tree 完全相同。主干 `a36e71e0` 的 [CI 五项也已通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455)；开发分支另行验收。

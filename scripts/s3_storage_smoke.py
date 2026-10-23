@@ -105,7 +105,7 @@ def main():
                 print('RETRY original control identity: '+path,flush=True)
         def cold_restart():
             stop()
-            for path in root.glob('collection-*'):
+            for path in [*root.glob('collection-*'), *root.glob('*.object-cache')]:
                 if path.is_dir():shutil.rmtree(path)
             start()
         def query(collection='main'):
@@ -258,7 +258,7 @@ def main():
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'copied-archive','backup_id':copied})
             assert call('GET','/api/v1/index/copied-archive/doc/a')['version']==2
             stop()
-            for path in target_root.glob('collection-*'):
+            for path in [*target_root.glob('collection-*'), *target_root.glob('*.object-cache')]:
                 if path.is_dir():shutil.rmtree(path)
             start(target=target_root)
             assert call('GET','/api/v1/index/main/doc/a')['version']==2

@@ -13,6 +13,8 @@ use object_store::{
 use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
+use futures::StreamExt;
+use super::verified_cache::VerifiedCache;
 use super::sqlite_authority::{AuthorityBackupSnapshot, SqliteAuthority};
 
 /// Error from the object-first persistence stage.
@@ -76,6 +78,7 @@ impl std::error::Error for BackupError {}
 pub(crate) struct S3CompatibleStore {
     store: Arc<dyn ObjectStore>,
     max_object_bytes: usize,
+    cache: Option<VerifiedCache>,
 }
 
 impl S3CompatibleStore {
@@ -98,7 +101,12 @@ impl S3CompatibleStore {
             .with_secret_access_key(secret_access_key)
             .with_allow_http(allow_http)
             .build()?;
-        Ok(Self { store: Arc::new(store), max_object_bytes })
+        Ok(Self { store: Arc::new(store), max_object_bytes, cache: None })
+    }
+
+    pub(crate) fn with_cache(mut self, cache: VerifiedCache) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     fn object_path(key: &str) -> object_store::Result<ObjectPath> {
@@ -133,6 +141,7 @@ impl S3CompatibleStore {
         }
         let location = Self::object_path(key)?;
         let digest: [u8; 32] = Sha256::digest(bytes).into();
+        let reference = ObjectRef { key: key.to_owned(), sha256: digest, length: bytes.len() as u64 };
         let put_result = self.store.put_opts(
             &location,
             PutPayload::from(bytes.to_vec()),
@@ -143,14 +152,10 @@ impl S3CompatibleStore {
         // may observe an existing key. Resolve that ambiguity only by reading
         // the existing bytes and proving they are byte-identical.
         if let Err(put_error) = put_result {
-            match self.store.get(&location).await {
-                Ok(result) => {
-                    let existing = result.bytes().await?;
-                    let existing_digest: [u8; 32] = Sha256::digest(&existing).into();
-                    if existing.len() == bytes.len()
-                        && existing_digest == digest
-                        && existing.as_ref() == bytes {
-                        return Ok(ObjectRef { key: key.to_owned(), sha256: digest, length: bytes.len() as u64 });
+            match self.download_verified(&reference).await {
+                Ok(existing) => {
+                    if existing == bytes {
+                        return Ok(reference);
                     }
                     return Err(put_error);
                 }
@@ -160,15 +165,16 @@ impl S3CompatibleStore {
 
         // Successful PUT alone is not enough: verify visibility and exact content
         // through the read path used by later readers before publishing metadata.
-        let downloaded = self.store.get(&location).await?.bytes().await?;
-        let actual: [u8; 32] = Sha256::digest(&downloaded).into();
-        if downloaded.len() != bytes.len() || actual != digest || downloaded.as_ref() != bytes {
+        // Always read the backend here. An older cached copy must never certify
+        // that this PUT is durable/readable at the remote service.
+        let downloaded = self.download_verified(&reference).await?;
+        if downloaded != bytes {
             return Err(object_store::Error::Generic {
                 store: "s3-compatible",
                 source: "read-after-write verification failed".into(),
             });
         }
-        Ok(ObjectRef { key: key.to_owned(), sha256: digest, length: bytes.len() as u64 })
+        Ok(reference)
     }
 
     /// Execute the object-first stage and register the verified reference in SQLite.
@@ -203,6 +209,21 @@ impl S3CompatibleStore {
         &self,
         reference: &ObjectRef,
     ) -> object_store::Result<Vec<u8>> {
+        // Validate the reference even on a hit. Cache keys bind endpoint/bucket,
+        // full object key (including partition namespace), hash and exact length.
+        Self::object_path(&reference.key)?;
+        if reference.length > self.max_object_bytes as u64 {
+            return Err(object_error("object reference exceeds configured size limit"));
+        }
+        if let Some(bytes) = self.cache.as_ref().and_then(|cache| cache.get(reference)) {
+            return Ok(bytes);
+        }
+        let bytes = self.download_verified(reference).await?;
+        if let Some(cache) = &self.cache { cache.insert(reference, &bytes); }
+        Ok(bytes)
+    }
+
+    async fn download_verified(&self, reference: &ObjectRef) -> object_store::Result<Vec<u8>> {
         if reference.length > self.max_object_bytes as u64 {
             return Err(object_store::Error::Generic {
                 store: "s3-compatible",
@@ -210,15 +231,26 @@ impl S3CompatibleStore {
             });
         }
         let location = Self::object_path(&reference.key)?;
-        let bytes = self.store.get(&location).await?.bytes().await?;
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        if bytes.len() as u64 != reference.length || digest != reference.sha256 {
-            return Err(object_store::Error::Generic {
-                store: "s3-compatible",
-                source: "object length or SHA-256 does not match committed reference".into(),
-            });
+        let result = self.store.get(&location).await?;
+        if result.meta.size as u64 != reference.length {
+            return Err(object_error("object length does not match committed reference"));
         }
-        Ok(bytes.to_vec())
+        let mut stream = result.into_stream();
+        let mut bytes = Vec::new();
+        let mut hash = Sha256::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if chunk.len() as u64 > reference.length.saturating_sub(bytes.len() as u64) {
+                return Err(object_error("object stream exceeds committed length"));
+            }
+            hash.update(&chunk);
+            bytes.extend_from_slice(&chunk);
+        }
+        let digest: [u8; 32] = hash.finalize().into();
+        if bytes.len() as u64 != reference.length || digest != reference.sha256 {
+            return Err(object_error("object length or SHA-256 does not match committed reference"));
+        }
+        Ok(bytes)
     }
 
     /// Persist and publish the immutable initial checkpoint/configuration for an
@@ -445,14 +477,66 @@ impl S3CompatibleStore {
 
     #[cfg(test)]
     pub(crate) fn from_store(store: Arc<dyn ObjectStore>, max_object_bytes: usize) -> Self {
-        Self { store, max_object_bytes }
+        Self { store, max_object_bytes, cache: None }
     }
+}
+
+fn object_error(message: &'static str) -> object_store::Error {
+    object_store::Error::Generic { store: "s3-compatible", source: message.into() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
+
+    #[tokio::test]
+    async fn verified_cache_hit_corruption_loss_and_put_verification() {
+        let root = std::env::temp_dir().join(format!("anyseek-object-cache-{:032x}", rand::random::<u128>()));
+        let backend = Arc::new(InMemory::new());
+        let store = S3CompatibleStore::from_store(backend.clone(), 32)
+            .with_cache(VerifiedCache::new(root.clone(), &["endpoint", "bucket"], 32));
+        let reference = store.put_verified("partitions/a/test", b"alpha").await.unwrap();
+        assert_eq!(store.get_verified(&reference).await.unwrap(), b"alpha");
+        let location = ObjectPath::from("partitions/a/test");
+        backend.delete(&location).await.unwrap();
+        // A proven immutable copy remains usable without another GET; the
+        // SQLite caller must still select this exact reference at its current cut.
+        assert_eq!(store.get_verified(&reference).await.unwrap(), b"alpha");
+        // A cached copy must NOT resolve a failed/conflicting remote PUT.
+        backend.put(&location, PutPayload::from(b"WRONG".to_vec())).await.unwrap();
+        assert!(store.put_verified(&reference.key, b"alpha").await.is_err());
+        for row in std::fs::read_dir(&root).unwrap() {
+            let row = row.unwrap();
+            if row.file_name().to_string_lossy().starts_with("block-") {
+                std::fs::write(row.path(), b"other").unwrap();
+            }
+        }
+        assert!(store.get_verified(&reference).await.is_err());
+        backend.put(&location, PutPayload::from(b"alpha".to_vec())).await.unwrap();
+        assert_eq!(store.get_verified(&reference).await.unwrap(), b"alpha");
+        std::fs::remove_dir_all(&root).unwrap();
+        backend.delete(&location).await.unwrap();
+        assert!(store.get_verified(&reference).await.is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn verified_cache_cannot_cross_backend_namespace_or_reference_budget() {
+        let root = std::env::temp_dir().join(format!("anyseek-object-cache-{:032x}", rand::random::<u128>()));
+        let a = S3CompatibleStore::from_store(Arc::new(InMemory::new()), 32)
+            .with_cache(VerifiedCache::new(root.clone(), &["endpoint", "bucket-a"], 32));
+        let reference = a.put_verified("same-key", b"alpha").await.unwrap();
+        a.get_verified(&reference).await.unwrap();
+        let b = S3CompatibleStore::from_store(Arc::new(InMemory::new()), 32)
+            .with_cache(VerifiedCache::new(root.clone(), &["endpoint", "bucket-b"], 32));
+        assert!(b.get_verified(&reference).await.is_err());
+        let mut restricted = a.clone(); restricted.max_object_bytes = 4;
+        assert!(restricted.get_verified(&reference).await.is_err());
+        let mut forged = reference.clone(); forged.length = 4;
+        assert!(a.get_verified(&forged).await.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// Explicit test-bucket contract; the same test runs against the disposable
     /// HTTP fixture in CI. Only a real endpoint run is provider evidence.

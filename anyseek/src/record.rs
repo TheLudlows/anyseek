@@ -399,7 +399,13 @@ impl RemotePersistence {
         let store = crate::storage::s3_compatible::S3CompatibleStore::connect(
             &config.endpoint, &config.bucket, &config.region, &config.access_key_id,
             &config.secret_access_key, config.allow_http, config.max_object_bytes,
-        ).map_err(|error| storage(error))?;
+        ).map_err(|error| storage(error))?.with_cache(
+            crate::storage::verified_cache::VerifiedCache::new(
+                config.authority_path.with_extension("object-cache"),
+                &[&config.endpoint, &config.bucket, &config.region],
+                crate::storage::verified_cache::DEFAULT_BYTES,
+            ),
+        );
         let authority = crate::storage::sqlite_authority::SqliteAuthority::open(
             &config.authority_path, std::time::Duration::from_secs(5),
         ).map_err(storage)?;
