@@ -63,6 +63,44 @@ impl From<UploadRegisterError> for TailError {
     }
 }
 
+/// Decoded recovery inputs retain their aggregate charge after individual GET
+/// buffers are released, including while the caller consumes the iterator.
+pub(crate) struct CommittedEntries {
+    entries: Vec<ObjectLogEntry>,
+    leases: std::sync::Arc<Vec<crate::resources::Lease>>,
+}
+impl std::ops::Deref for CommittedEntries {
+    type Target = [ObjectLogEntry];
+    fn deref(&self) -> &[ObjectLogEntry] { &self.entries }
+}
+impl std::fmt::Debug for CommittedEntries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.entries.fmt(f) }
+}
+impl PartialEq<Vec<ObjectLogEntry>> for CommittedEntries {
+    fn eq(&self, other: &Vec<ObjectLogEntry>) -> bool { &self.entries == other }
+}
+pub(crate) struct CommittedIter {
+    entries: std::vec::IntoIter<ObjectLogEntry>,
+    leases: std::sync::Arc<Vec<crate::resources::Lease>>,
+}
+pub(crate) struct CommittedEntry {
+    entry: ObjectLogEntry,
+    _leases: std::sync::Arc<Vec<crate::resources::Lease>>,
+}
+impl std::ops::Deref for CommittedEntry {
+    type Target = ObjectLogEntry;
+    fn deref(&self) -> &ObjectLogEntry { &self.entry }
+}
+impl Iterator for CommittedIter {
+    type Item = CommittedEntry;
+    fn next(&mut self) -> Option<Self::Item> { self.entries.next().map(|entry| CommittedEntry {entry, _leases:self.leases.clone()}) }
+}
+impl IntoIterator for CommittedEntries {
+    type Item = CommittedEntry;
+    type IntoIter = CommittedIter;
+    fn into_iter(self) -> Self::IntoIter { CommittedIter { entries: self.entries.into_iter(), leases: self.leases } }
+}
+
 /// Serialize and upload a block, verify it through the read path, and register it
 /// as durable. This does not advance the commit watermark.
 pub(crate) async fn upload_log_block(
@@ -158,7 +196,7 @@ pub(crate) async fn load_committed_tail(
     head: &PartitionHead,
     max_blocks: usize,
     max_total_bytes: usize,
-) -> Result<Vec<ObjectLogEntry>, TailError> {
+) -> Result<CommittedEntries, TailError> {
     if head.indexed_seq > head.committed_seq {
         return Err(TailError::Invalid("invalid index watermark"));
     }
@@ -174,7 +212,7 @@ pub(crate) async fn load_committed_entries_after(
     after_seq: u64,
     max_blocks: usize,
     max_total_bytes: usize,
-) -> Result<Vec<ObjectLogEntry>, TailError> {
+) -> Result<CommittedEntries, TailError> {
     if head.log_base_seq > head.committed_seq || after_seq > head.committed_seq {
         return Err(TailError::Invalid("invalid log watermarks"));
     }
@@ -182,7 +220,7 @@ pub(crate) async fn load_committed_entries_after(
         return Err(TailError::Invalid("requested sequence is behind retained log anchor"));
     }
     if after_seq == head.committed_seq {
-        return Ok(Vec::new());
+        return Ok(CommittedEntries { entries: Vec::new(), leases: std::sync::Arc::new(Vec::new()) });
     }
     if max_blocks == 0 || max_total_bytes == 0 {
         return Err(TailError::Invalid("empty committed-tail budget"));
@@ -192,6 +230,7 @@ pub(crate) async fn load_committed_entries_after(
     let mut blocks_read = 0usize;
     let mut total_bytes = 0usize;
     let mut reverse_blocks: Vec<Vec<ObjectLogEntry>> = Vec::new();
+    let mut leases = Vec::new();
 
     while expected_last > head.indexed_seq {
         if blocks_read >= max_blocks {
@@ -202,16 +241,20 @@ pub(crate) async fn load_committed_entries_after(
         if total_bytes > max_total_bytes {
             return Err(TailError::Invalid("committed tail exceeds byte budget"));
         }
+        // Reserve before deserializing or retaining decoded payloads. Charge
+        // both decoded entries and the temporary flattening/address workspace.
+        let lease = store.retain_bytes((bytes.len() as u64).checked_mul(2)
+            .ok_or(TailError::Invalid("tail reservation overflow"))?).map_err(TailError::ObjectStore)?;
         let block: ObjectLogBlock = serde_json::from_slice(&bytes).map_err(TailError::Decode)?;
         validate_block(&block)?;
         if block.partition_id != head.partition_id || block.last_seq != expected_last {
             return Err(TailError::Invalid("partition or log chain sequence mismatch"));
         }
-        let filtered: Vec<_> = block.entries.iter()
+        let filtered: Vec<_> = block.entries.into_iter()
             .filter(|entry| entry.seq > after_seq)
-            .cloned()
             .collect();
         reverse_blocks.push(filtered);
+        leases.push(lease);
         blocks_read += 1;
 
         if block.first_seq <= after_seq.checked_add(1).ok_or(TailError::Invalid("sequence overflow"))? {
@@ -233,7 +276,7 @@ pub(crate) async fn load_committed_entries_after(
             return Err(TailError::Invalid("non-contiguous operation sequence"));
         }
     }
-    Ok(entries)
+    Ok(CommittedEntries { entries, leases: std::sync::Arc::new(leases) })
 }
 
 fn validate_block(block: &ObjectLogBlock) -> Result<(), TailError> {
@@ -263,6 +306,34 @@ mod tests {
     fn temp_db() -> std::path::PathBuf {
         let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("anyseek-tail-{stamp}-{}.sqlite",std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn resource_tail_charge_survives_get_and_partial_iterator_consumption() {
+        use crate::resources::{Governor, Lane};
+        let path = temp_db();
+        let mut authority = SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        authority.create_partition("p0",1).unwrap();
+        let store = S3CompatibleStore::from_store(Arc::new(InMemory::new()),4096);
+        let outcome = append_and_commit(&store,&mut authority,"p0",1,"op-1",[1;32],b"payload".to_vec(),1,2048).await.unwrap();
+        let AppendCommitOutcome::Published { head, object } = outcome else { panic!("expected publication") };
+        let governor = Arc::new(Governor::default());
+        let scope = governor.admit("a".into(),Lane::Recovery,0).unwrap();
+        let tail = scope.clone().run(load_committed_tail(&store,&head,4,4096)).await.unwrap();
+        let rest = scope.bytes(256*1024*1024-object.length*2).unwrap();
+        assert!(scope.bytes(1).is_err());
+        let mut iterator = tail.into_iter();
+        let entry = iterator.next().unwrap();
+        assert_eq!(entry.payload,b"payload");
+        assert!(scope.bytes(1).is_err());
+        drop(iterator);
+        assert!(scope.bytes(1).is_err());
+        drop(entry);
+        assert!(scope.bytes(object.length*2).is_ok());
+        drop(rest);
+        let full = scope.bytes(256*1024*1024).unwrap();
+        assert!(scope.clone().run(load_committed_tail(&store,&head,4,4096)).await.is_err());
+        drop(full);drop(authority);let _=std::fs::remove_file(path);
     }
 
     #[tokio::test]

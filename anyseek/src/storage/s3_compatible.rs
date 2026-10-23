@@ -117,6 +117,9 @@ impl S3CompatibleStore {
         let scope = Scope::current().unwrap_or_else(|| self.resources.clone().in_lane(fallback));
         if self.background { scope.in_lane(Lane::Background) } else { scope }
     }
+    pub(crate) fn retain_bytes(&self, bytes: u64) -> object_store::Result<Lease> {
+        self.scope(Lane::Recovery).bytes(bytes).map_err(resource_error)
+    }
 
     fn object_path(key: &str) -> object_store::Result<ObjectPath> {
         if key.is_empty() || key.starts_with('/') || key.contains('\\') {

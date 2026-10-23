@@ -148,7 +148,7 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 
 部署可设置 `ANYSEEK_{类别}_SLOTS`、`_PER_COLLECTION`、`_BYTES`、`_PER_COLLECTION_BYTES`、`_IO`、`_PER_COLLECTION_IO`，类别取上表大写名称，字节值为十进制字节数。例如 `ANYSEEK_FOREGROUND_PER_COLLECTION=2`。配置必须为正整数、局部不大于全局、每集合字节至少 18 MiB；单类 slots/I/O 不超过 64，前三类 slots 总和不超过 48、CONTROL slots 不超过 8，以保留 catalog 控制余量。非法配置阻止启动。
 
-每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲额度跟随实际所有者，owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存容量保持原值，服务缓存总额度另行实现。
+每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲及累积解码 tail 额度跟随实际所有者（包括迭代器和已取出的条目），owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存容量保持原值，服务缓存总额度另行实现。
 
 Service archive/root 清理是明确的离线操作，不提供删除运行根的接口。系统崩溃、文件系统崩溃、断电矩阵尚未验收；原生进程 kill/exit、故障注入与 fsync 调用不能代替。长期物理回收、Record 账本 GC、SQLite 云端协调和分布式留在后续阶段；来源/evidence 与可选向量已实现。
 
