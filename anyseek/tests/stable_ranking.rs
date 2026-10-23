@@ -81,18 +81,14 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
         let index = Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await)
             .unwrap();
         // Identical scores, with reverse-valued facets to test secondary ordering.
-        records::insert(&index, (0..90)
-                    .map(|i| {
-                        serde_json::from_value(
-                            json!({"body":"alpha beta","priority":89-i,"vector":[1,0,0]}),
-                        )
-                        .unwrap()
-                    })
-                    .collect())
-            .await
-            .unwrap();
-        // Bulk indexing enqueues background shard work. Wait for the fixed
-        // candidate set before asserting ties; this deliberately does not commit.
+        for component in 0..shards {
+            let start = component * (90 / shards);
+            records::insert(&index, (start..start + 90 / shards).map(|i| {
+                serde_json::from_value(json!({"body":"alpha beta","priority":89-i,"vector":[1,0,0]})).unwrap()
+            }).collect()).await.unwrap();
+            if component + 1 < shards { index.compact_journal().await.unwrap(); }
+        }
+        // All public writes must already be visible, including the unsealed last component.
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while index.statistics().await.unwrap().physical_versions != 90 {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -166,8 +162,8 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
                 (0..7).collect::<Vec<_>>()
             );
         }
-        // Empty browsing retains its existing descending-ID default, while an
-        // explicit score sort (all zero) uses the same ascending-ID tie break.
+        // Record empty browsing and explicit score sort (all zero) share the
+        // existing stable-identity ascending tie break.
         for order in [SortOrder::Ascending, SortOrder::Descending] {
             let result = index.query(RecordQuery {text:"".into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:7,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![ResultSort {
                         field: "_score".into(),
@@ -181,7 +177,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
         let result = index.query(RecordQuery {text:"".into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:7,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
         assert_eq!(
             result.hits.iter().map(|r| r.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(),
-            (83..90).rev().collect::<Vec<_>>()
+            (0..7).collect::<Vec<_>>()
         );
 
         drop(index);

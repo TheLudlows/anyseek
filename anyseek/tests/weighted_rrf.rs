@@ -68,7 +68,13 @@ async fn weighted_global_shards() {
         let path = std::env::temp_dir().join(format!("rrf-{}-{shards}", std::process::id()));
         assert!(!path.exists());
         let index = Ok::<_, String>(records::create(&path, meta(), (&schema()).to_vec()).await).unwrap();
-        records::insert(&index, (0..18).map(|i| document(if i % 2 == 0 {"alpha"} else {"beta"}, json!([1,0,0]))).collect()).await.unwrap();
+        // Build actual Record components instead of a discarded legacy shard argument.
+        // Each component contains at most six candidates in the three-component case.
+        for component in 0..shards {
+            let start = component * (18 / shards);
+            records::insert(&index, (start..start + 18 / shards).map(|i| document(if i % 2 == 0 {"alpha"} else {"beta"}, json!([1,0,0]))).collect()).await.unwrap();
+            if component + 1 < shards { index.compact_journal().await.unwrap(); }
+        }
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while index.statistics().await.unwrap().physical_versions != 18 {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -86,6 +92,28 @@ async fn weighted_global_shards() {
             let vector = if shards > 1 || hit.record.record_id.parse::<usize>().unwrap() < 10 { 1.0 / (0.6 + hit.record.record_id.parse::<usize>().unwrap() as f32) } else { 0.0 };
             assert_eq!(hit.score.to_bits(), (keyword + vector).to_bits());
         }
+        // Independent default-window oracle: choose three candidates per component,
+        // globally rank each channel, then fuse once. This distinguishes both
+        // missing caps from explicit global caps even with only three output hits.
+        let mut keyword_ids = Vec::new();
+        let mut vector_ids = Vec::new();
+        for component in 0..shards {
+            let start = component * (18 / shards);
+            keyword_ids.extend((start..start + 18 / shards).filter(|id| id % 2 == 0).take(3));
+            vector_ids.extend((start..start + 18 / shards).take(3));
+        }
+        let mut expected = std::collections::BTreeMap::<usize, f32>::new();
+        for channel in [keyword_ids, vector_ids] {
+            for (rank, id) in channel.into_iter().enumerate() {
+                *expected.entry(id).or_default() += 1.0 / (0.6 + rank as f32);
+            }
+        }
+        let mut expected: Vec<_> = expected.into_iter().collect();
+        expected.sort_by(|a,b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        expected.truncate(3);
+        let small = index.query(RecordQuery {text:"alpha".into(),vector:vector.clone(),query_type:QueryType::Union,mode:weighted(RrfOptions::default()),offset:0,length:3,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
+        assert_eq!(small.count_total, 18);
+        assert_eq!(small.hits.iter().map(|hit| (hit.record.record_id.parse::<usize>().unwrap(),hit.score.to_bits())).collect::<Vec<_>>(), expected.iter().map(|(id,score)| (*id,score.to_bits())).collect::<Vec<_>>());
         let options = RrfOptions { constant:5.0, keyword_weight:0.5, vector_weight:1.0, keyword_candidates:Some(2), vector_candidates:Some(3) };
         let result = query(&index, weighted(options), vector.clone()).await;
         // Keyword ranks: 0,2. Vector ranks: 0,1,2. Missing keyword hit 1 contributes only vector.

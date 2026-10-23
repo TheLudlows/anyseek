@@ -152,12 +152,12 @@ async fn test_05_empty_query() {
     let result = index_arc.statistics().await.unwrap().active_records;
     assert_eq!(result, 4);
 
-    // default (descending)
+    // Record browse ties use stable identity ascending, as on the original Record path.
 
     let result_object = index_arc.query(RecordQuery {text:"".into(),vector:None,query_type:QueryType::Intersection,mode:SearchMode::Lexical,offset:0,length:10,result_type:ResultType::TopkCount,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap();
 
     let result = result_object.hits.first().unwrap().record.record_id.parse::<usize>().unwrap();
-    assert_eq!(result, 3);
+    assert_eq!(result, 0);
 
     let result = result_object.hits.len();
     assert_eq!(result, 4);
@@ -527,7 +527,7 @@ async fn test_15_filter_scope() {
         inference: Inference::None,
     };
 
-    // 3 shards: the 3 documents are distributed round-robin, one document per shard
+    // Public Record fixture: three stable identities with two facet values.
     let index_arc = Ok::<_, String>(records::create(index_path, meta, (&schema).to_vec()).await)
         .unwrap();
 
@@ -545,7 +545,6 @@ async fn test_15_filter_scope() {
     async fn kind_results(
         index_arc: &RecordPartition,
         query: &str,
-        enable_empty_query: bool,
         facet_filter: Vec<FacetFilter>,
     ) -> (usize, Vec<String>) {
         let result_object = index_arc.query(RecordQuery {text:query.into(),vector:None,query_type:QueryType::Intersection,mode:SearchMode::Lexical,offset:0,length:10,result_type:ResultType::TopkCount,fields:Vec::new(),filters:facet_filter,sort:Vec::new(),temporal:None}).await.unwrap();
@@ -559,19 +558,19 @@ async fn test_15_filter_scope() {
         (result_object.count_total, ids)
     }
 
-    let (count, facets) = kind_results(&index_arc, "alpha", false, Vec::new()).await;
+    let (count, facets) = kind_results(&index_arc, "alpha", Vec::new()).await;
     assert_eq!(count, 2);
     assert_eq!(facets, vec!["a".to_string(), "b".to_string()]);
 
-    let (count, facets) = kind_results(&index_arc, "charlie", false, Vec::new()).await;
+    let (count, facets) = kind_results(&index_arc, "charlie", Vec::new()).await;
     assert_eq!(count, 1);
     assert_eq!(facets, vec!["c".to_string()]);
 
-    let (count, facets) = kind_results(&index_arc, "zulu", false, Vec::new()).await;
+    let (count, facets) = kind_results(&index_arc, "zulu", Vec::new()).await;
     assert_eq!(count, 0);
     assert!(facets.is_empty());
 
-    let (count, facets) = kind_results(&index_arc, "", true, Vec::new()).await;
+    let (count, facets) = kind_results(&index_arc, "", Vec::new()).await;
     assert_eq!(count, 3);
     assert_eq!(
         facets,
@@ -582,13 +581,20 @@ async fn test_15_filter_scope() {
         field: "kind".into(),
         filter: vec!["invoice".into()],
     }];
-    let (count, facets) = kind_results(&index_arc, "", true, facet_filter).await;
+    let (count, facets) = kind_results(&index_arc, "", facet_filter).await;
     assert_eq!(count, 2);
     assert_eq!(facets, vec!["a".to_string(), "b".to_string()]);
 
-    let (count, ids) = kind_results(&index_arc, "", false, Vec::new()).await;
+    // Record always enables empty browsing; an unmatched filter still yields no hits.
+    let (count, ids) = kind_results(&index_arc, "", vec![FacetFilter::String16 {
+        field: "kind".into(), filter: vec!["missing".into()],
+    }]).await;
     assert_eq!(count, 0);
     assert!(ids.is_empty());
+    let page = index_arc.query(RecordQuery {text:"".into(),vector:None,query_type:QueryType::Intersection,mode:SearchMode::Lexical,offset:1,length:1,result_type:ResultType::TopkCount,fields:vec![],filters:vec![FacetFilter::String16 {field:"kind".into(),filter:vec!["invoice".into()]}],sort:vec![],temporal:None}).await.unwrap();
+    assert_eq!(page.count_total, 2);
+    assert_eq!(page.hits.len(), 1);
+    assert_eq!(page.hits[0].record.document.as_ref().unwrap()["id"], "b");
 
 
     let _ = fs::remove_dir_all(index_path);

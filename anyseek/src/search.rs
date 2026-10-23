@@ -636,7 +636,7 @@ impl Search for IndexArc {
     ) -> ResultObject {
         search_with_counts(self, query_string, query_vector, query_type_default, search_mode,
             enable_empty_query, offset, length, result_type, include_uncommitted,
-            field_filter, facet_filter, result_sort, &mut Vec::new()).await
+            field_filter, facet_filter, result_sort, &mut Vec::new(), false).await
     }
 }
 
@@ -655,6 +655,7 @@ pub(crate) async fn search_with_counts(
     facet_filter: Vec<FacetFilter>,
     result_sort: Vec<ResultSort>,
     component_counts: &mut Vec<usize>,
+    retain_component_candidates: bool,
 ) -> ResultObject {
         if !matches!(search_mode, SearchMode::Vector { .. }) {
             return ResultObject { error: Some("vector component cannot execute lexical queries".into()), ..Default::default() };
@@ -891,7 +892,7 @@ pub(crate) async fn search_with_counts(
         if failure.is_some() { result.error = failure; result.results.clear(); return result; }
         let shards = futures::future::join_all(index_ref.shard_vec.iter().map(|shard| shard.read())).await;
         result.results.sort_by(|a,b| crate::min_heap::rank_with_shards(&shards,b.score,b.doc_id,a.score,a.doc_id));
-        result.results.truncate(offset + length);
+        if !retain_component_candidates { result.results.truncate(offset + length); }
         let sorts = result_sort.iter().filter_map(|sort| Some(ResultSortIndex {
             idx: match sort.field.as_str() { "_id" => usize::MAX, "_score" => usize::MAX-1,
                 _ => *shards[0].facets_map.get(&sort.field)? }, order: sort.order.clone(),
@@ -899,7 +900,9 @@ pub(crate) async fn search_with_counts(
         if !sorts.is_empty() {
             result.results.sort_by(|a,b| result_ordering_root(&shards,shard_number,false,&sorts,*b,*a));
         }
-        result.results = result.results.into_iter().skip(offset).take(length).collect();
+        if !retain_component_candidates {
+            result.results = result.results.into_iter().skip(offset).take(length).collect();
+        }
         result.result_count = result.results.len();
         result
 }

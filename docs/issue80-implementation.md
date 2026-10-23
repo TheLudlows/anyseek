@@ -486,3 +486,48 @@ uses many compact declarations that rustfmt would expand. Logs are
 `/tmp/anyseek80-phase14-format.log` and `format-baseline.log`. This is reported as a
 non-passing format check, not hidden as success; no unrelated repository-wide
 format rewrite was made. CI does not currently gate on rustfmt.
+
+
+## Phase 16 — complete first suite, migration corrections and RRF fix
+
+The phase-13 all-targets process completed with exit 101: 34 test binaries,
+334 passed, 4 failed, 13 ignored. The full-size lexical fixture passed all four
+cases (2474.27 s), Top-K ranking all five (218.85 s), and 40-term OR passed
+(52.99 s). Log: `/tmp/anyseek80-phase13-alltargets.log`; machine-readable totals:
+`/tmp/anyseek80-phase16-prior-results.json`. This is a failed full run, not final
+acceptance.
+
+Three failures were migrated assertions for the removed low-level API. At master
+baseline `3893cd54`, `record.rs::query_view` always enables empty browsing;
+`min_heap.rs::result_ordering_root` chooses `rank_with_shards` for active Record
+views before the legacy descending-empty branch. Record ties already use ascending
+stable identities. Tests now retain explicit ascending/descending sorting, filtered
+empty counts and filtered pagination, without introducing a new production browse
+semantic or a removed disable-empty option.
+
+The fourth failure uncovered a real production regression in default RRF candidate
+windows. A discarded legacy shard fixture argument first concealed the topology;
+the test now builds actual one/three certified Record components. Native search
+had globally truncated each default channel to output length before fusion. It now
+retains each component's existing `offset + length` window, globally ranks each
+channel, and applies RRF exactly once. Explicit candidate caps remain global caps.
+The independent 18-record/three-component oracle selects three candidates per
+component and checks fused identities and exact f32 scores, plus total count.
+Existing explicit caps, zero weights, pagination and reopened scores remain covered.
+Stable-ranking concurrency tests now also construct actual multiple components.
+No scoring formula, admission limit or public API was changed.
+
+Targeted stable-ranking (2), numbered public Record tests (15), weighted RRF (2)
+all passed, exit 0: `/tmp/anyseek80-phase16-targeted-fixed.log`. The additional
+independent default-window oracle passed (2/0, 2.23 s), exit 0:
+`/tmp/anyseek80-phase16-rrf-oracle.log`. These do not replace the full rerun.
+Production query code changed: phase-13 HTTP/S3/core evidence is historical and
+must not be labeled final-code acceptance. A fresh all-targets run is next, followed
+by final feature/doctest and new-binary HTTP/S3 checks.
+
+CI splits standalone commands and uses fail-fast bash for multi-cargo native steps
+so Windows cannot hide earlier failure behind a successful last command. Full
+workspace and native persistence job deadlines are 120 minutes, reflecting the
+measured over-one-hour suite plus build/HTTP work; the HTTP 15-second readiness
+assertion and fixture sizes remain unchanged. Windows CI, real S3 and system power
+loss remain unrun; no push, draft PR publication, merge or issue closure authorized.
