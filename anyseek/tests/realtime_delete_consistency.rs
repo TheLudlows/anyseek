@@ -1,24 +1,25 @@
-//! Regression tests: realtime (`include_uncommitted = true`) totals must
-//! exclude deleted documents, for both `Count` and `TopkCount`.
-//!
-//! Root causes were in anyseek/src/realtime_search.rs: the single-term
-//! tail redefined `filtered` without deletes/facets and fell back to the raw
-//! `posting_count`; `union_count_uncommitted` never consulted `delete_hashset`;
-//! and the `union_scan_uncommitted` single-hit branch double-counted filtered
-//! docs (callee and caller each added one).
-//! Depends on the single-term Count fix (#71) for committed reads.
-//!
-//! Self-contained (own index directory). The only waits are bounded polls
-//! for the async indexer to settle (fails loudly on timeout, no sleeps
-//! past settled state).
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Regression tests: realtime (`include_uncommitted = true`) totals must
+// exclude deleted documents, for both `Count` and `TopkCount`.
+//
+// Root causes were in anyseek/src/realtime_search.rs: the single-term
+// tail redefined `filtered` without deletes/facets and fell back to the raw
+// `posting_count`; `union_count_uncommitted` never consulted `delete_hashset`;
+// and the `union_scan_uncommitted` single-hit branch double-counted filtered
+// docs (callee and caller each added one).
+// Depends on the single-term Count fix (#71) for committed reads.
+//
+// Self-contained (own index directory). The only waits are bounded polls
+// for the async indexer to settle (fails loudly on timeout, no sleeps
+// past settled state).
 
-use anyseek::commit::Commit;
+
 use anyseek::index::{
-    AccessType, Close, Clustering, DeleteDocuments, DocumentCompression, FrequentwordType,
-    IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
-    TokenizerType, create_index,
-};
-use anyseek::search::{QueryType, ResultType, Search, SearchMode};
+    AccessType, Clustering, DocumentCompression, FrequentwordType,
+    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
+    TokenizerType, };
+use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
 use std::{fs, path::Path, time::Duration};
 
@@ -52,36 +53,19 @@ fn doc(title: &str) -> anyseek::index::Document {
 }
 
 async fn search(
-    index: &anyseek::index::IndexArc,
+    index: &RecordPartition,
     query: &str,
     query_type: QueryType,
     result_type: ResultType,
     uncommitted: bool,
-) -> anyseek::search::ResultObject {
-    index
-        .search(
-            query.into(),
-            None,
-            query_type,
-            SearchMode::Lexical,
-            false,
-            0,
-            100,
-            result_type,
-            uncommitted,
-            Vec::new(),
-
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
+) -> anyseek::record::RecordSearch {
+    index.query(RecordQuery {text:query.into(),vector:None,query_type:query_type,mode:SearchMode::Lexical,offset:0,length:100,result_type:result_type,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap()
 }
 
-async fn fresh(dir: &str) -> anyseek::index::IndexArc {
+async fn fresh(dir: &str) -> RecordPartition {
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
-    create_index(path, meta(), &schema(), 11, true, None)
-        .await
+    Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
         .unwrap()
 }
 
@@ -90,7 +74,7 @@ async fn fresh(dir: &str) -> anyseek::index::IndexArc {
 /// task *starts* (index.rs), so it cannot be used here. Settle on the
 /// observable search state instead: all docs must be visible first.
 async fn settle_search(
-    index: &anyseek::index::IndexArc,
+    index: &RecordPartition,
     query: &str,
     query_type: QueryType,
     expected: usize,
@@ -104,7 +88,7 @@ async fn settle_search(
             true,
         )
         .await;
-        if r.result_count_total == expected && r.results.len() == expected.min(100) {
+        if r.count_total == expected && r.hits.len() == expected.min(100) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -117,12 +101,12 @@ async fn settle_search(
 async fn realtime_single_count_excludes_deleted() {
     let index = fresh("tests/index_delete_realtime_single/").await;
     let docs: Vec<_> = (0..5).map(|i| doc(&format!("base doc{i}"))).collect();
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
     let docs: Vec<_> = (0..5).map(|i| doc(&format!("base extra{i}"))).collect();
-    index.index_documents(docs).await.unwrap();
+    records::insert(&index, docs).await.unwrap();
     settle_search(&index, "base", QueryType::Union, 10).await;
-    index.delete_documents(vec![9, 0]).await;
+    records::delete(&index, vec![9, 0]).await;
 
     let topk = search(
         &index,
@@ -133,9 +117,9 @@ async fn realtime_single_count_excludes_deleted() {
     )
     .await;
     let count = search(&index, "base", QueryType::Union, ResultType::Count, true).await;
-    assert_eq!(topk.result_count_total, 8);
-    assert_eq!(count.result_count_total, 8);
-    index.close().await.unwrap();
+    assert_eq!(topk.count_total, 8);
+    assert_eq!(count.count_total, 8);
+    
 }
 
 /// OR realtime totals must drop deleted uncommitted documents (no double count).
@@ -149,9 +133,9 @@ async fn realtime_union_count_excludes_deleted() {
     for i in 0..10 {
         docs.push(doc(&format!("beta uniqb{i}")));
     }
-    index.index_documents(docs).await.unwrap();
+    records::insert(&index, docs).await.unwrap();
     settle_search(&index, "alpha beta", QueryType::Union, 20).await;
-    index.delete_documents(vec![0, 1, 10]).await;
+    records::delete(&index, vec![0, 1, 10]).await;
 
     let topk = search(
         &index,
@@ -169,8 +153,8 @@ async fn realtime_union_count_excludes_deleted() {
         true,
     )
     .await;
-    assert_eq!(topk.result_count_total, 17);
-    assert_eq!(topk.results.len(), 17);
-    assert_eq!(count.result_count_total, 17);
-    index.close().await.unwrap();
+    assert_eq!(topk.count_total, 17);
+    assert_eq!(topk.hits.len(), 17);
+    assert_eq!(count.count_total, 17);
+    
 }

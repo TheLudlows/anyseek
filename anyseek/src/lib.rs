@@ -27,7 +27,7 @@ use std::sync::LazyLock;
 
 use tokio::runtime::Runtime;
 /// Global Tokio runtime for index operations, initialized lazily on first use.
-pub static INDEX_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
+pub(crate) static INDEX_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(num_cpus::get())
         .thread_name("anyseek-indexer")
@@ -37,19 +37,16 @@ pub static INDEX_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
 });
 
 pub(crate) mod clustering;
-/// Commit moves indexed documents from the intermediate uncompressed data structure in RAM
-/// to the final compressed data structure on disk.
+// Private vector/metadata component checkpoint.
 mod commit;
 mod component;
 pub(crate) mod compatible;
-/// Operate the index: reate_index, open_index, clear_index, close_index, delete_index, index_document(s)
+/// Schema, analysis, scoring and vector configuration for RecordPartition.
 pub mod index;
-/// Collect index information independently of terminal rendering.
-/// Iterator over all documents, also for search with empty query.
+// Internal ranking helpers.
 pub(crate) mod min_heap;
 pub(crate) mod opencc_t2s;
-/// Search the index for all indexed documents, both for committed and uncommitted documents.
-/// The latter enables true realtime search: documents are available for search in exact the same millisecond they are indexed.
+/// Query configuration and result types. Execute public queries through RecordPartition.
 pub mod search;
 /// Tokenizes text into tokens (words), supports Chinese word segmentation, folds (converts) diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters into their basic representation.
 pub(crate) mod tokenizer;

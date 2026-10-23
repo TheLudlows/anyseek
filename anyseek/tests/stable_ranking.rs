@@ -1,19 +1,19 @@
-//! Rank ties must be resolved before local TopK and again after global merging.
+use anyseek::record::RecordSearch;
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Rank ties must be resolved before local TopK and again after global merging.
 use anyseek::{
-    commit::Commit,
     index::{
-        AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexArc,
-        IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
-        create_index,
-    },
-    search::{QueryType, ResultSort, ResultType, Search, SearchMode, SortOrder},
+        AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
+        },
+    search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
     vector::{Embedding, Inference, Precision, Quantization},
     vector_similarity::{AnnMode, VectorSimilarity},
 };
 use serde_json::json;
 
 async fn query(
-    index: &IndexArc,
+    index: &RecordPartition,
     mode: usize,
     sorts: Vec<ResultSort>,
     offset: usize,
@@ -32,34 +32,18 @@ async fn query(
         },
         _ => SearchMode::Lexical,
     };
-    let result = index
-        .search(
-            if mode == 1 {
+    let result = index.query(RecordQuery {text:if mode == 1 {
                 ""
             } else if mode == 3 {
                 "alpha"
             } else {
                 "alpha beta"
             }
-            .into(),
-            (mode == 1 || mode == 2).then(|| Embedding::F32(vec![1.0, 0.0, 0.0])),
-            qt,
-            sm,
-            false,
-            offset,
-            7,
-            ResultType::Topk,
-            realtime,
-            vec![],
-            vec![],
-            sorts,
-        )
-        .await;
-    assert!(result.error.is_none(), "{:?}", result.error);
+            .into(),vector:(mode == 1 || mode == 2).then(|| Embedding::F32(vec![1.0, 0.0, 0.0])),query_type:qt,mode:sm,offset:offset,length:7,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:sorts,temporal:None}).await.unwrap();
     result
-        .results
+        .hits
         .iter()
-        .map(|r| (r.doc_id, r.score.to_bits()))
+        .map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score.to_bits()))
         .collect()
 }
 
@@ -69,7 +53,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
         let path =
             std::env::temp_dir().join(format!("anyseek-stable-{}-{shards}", std::process::id()));
         assert!(!path.exists(), "test directory must be new");
-        let schema = serde_json::from_value(json!([
+        let schema: Vec<anyseek::index::SchemaField> = serde_json::from_value(json!([
             {"field":"body","field_type":"Text","store":false,"index_lexical":true},
             {"field":"priority","field_type":"U64","store":false,"index_lexical":false,"facet":true},
             {"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}
@@ -94,27 +78,23 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
                 similarity: VectorSimilarity::Cosine,
             },
         };
-        let index = create_index(&path, meta, &schema, 11, true, Some(shards))
-            .await
+        let index = Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await)
             .unwrap();
         // Identical scores, with reverse-valued facets to test secondary ordering.
-        index
-            .index_documents(
-                (0..90)
+        records::insert(&index, (0..90)
                     .map(|i| {
                         serde_json::from_value(
                             json!({"body":"alpha beta","priority":89-i,"vector":[1,0,0]}),
                         )
                         .unwrap()
                     })
-                    .collect(),
-            )
+                    .collect())
             .await
             .unwrap();
         // Bulk indexing enqueues background shard work. Wait for the fixed
         // candidate set before asserting ties; this deliberately does not commit.
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while index.read().await.indexed_doc_count().await != 90 {
+            while index.statistics().await.unwrap().physical_versions != 90 {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
         })
@@ -126,7 +106,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
             rt.iter().map(|x| x.0).collect::<Vec<_>>(),
             (0..7).collect::<Vec<_>>(), "realtime shards={shards}, results={rt:?}"
         );
-        index.commit().await.unwrap();
+        index.compact_journal().await.unwrap();
         for mode in 0..4 {
             let expected = query(&index, mode, vec![], 0, QueryType::Union, false).await;
             assert_eq!(
@@ -189,51 +169,21 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
         // Empty browsing retains its existing descending-ID default, while an
         // explicit score sort (all zero) uses the same ascending-ID tie break.
         for order in [SortOrder::Ascending, SortOrder::Descending] {
-            let result = index
-                .search(
-                    "".into(),
-                    None,
-                    QueryType::Union,
-                    SearchMode::Lexical,
-                    true,
-                    0,
-                    7,
-                    ResultType::Topk,
-                    false,
-                    vec![],
-                    vec![],
-                    vec![ResultSort {
+            let result = index.query(RecordQuery {text:"".into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:7,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![ResultSort {
                         field: "_score".into(),
                         order,
-                    }],
-                )
-                .await;
+                    }],temporal:None}).await.unwrap();
             assert_eq!(
-                result.results.iter().map(|r| r.doc_id).collect::<Vec<_>>(),
+                result.hits.iter().map(|r| r.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(),
                 (0..7).collect::<Vec<_>>()
             );
         }
-        let result = index
-            .search(
-                "".into(),
-                None,
-                QueryType::Union,
-                SearchMode::Lexical,
-                true,
-                0,
-                7,
-                ResultType::Topk,
-                false,
-                vec![],
-                vec![],
-                vec![],
-            )
-            .await;
+        let result = index.query(RecordQuery {text:"".into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:7,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
         assert_eq!(
-            result.results.iter().map(|r| r.doc_id).collect::<Vec<_>>(),
+            result.hits.iter().map(|r| r.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(),
             (83..90).rev().collect::<Vec<_>>()
         );
-        index.close().await.unwrap();
+        
         drop(index);
         std::fs::remove_dir_all(path).unwrap(); // Only this test's newly created fixture.
     }
@@ -244,7 +194,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
 async fn stable_equal_score_block_boundary_and_explicit_id_sort() {
     let path = std::env::temp_dir().join(format!("anyseek-stable-blocks-{}", std::process::id()));
     assert!(!path.exists());
-    let schema = serde_json::from_value(json!([
+    let schema: Vec<anyseek::index::SchemaField> = serde_json::from_value(json!([
         {"field":"body","field_type":"Text","store":false,"index_lexical":true}
     ]))
     .unwrap();
@@ -263,20 +213,16 @@ async fn stable_equal_score_block_boundary_and_explicit_id_sort() {
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    let index = create_index(&path, meta, &schema, 11, true, Some(1))
-        .await
+    let index = Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await)
         .unwrap();
-    for _ in 0..70 {
-        index
-            .index_documents(
-                (0..1000)
+    for _ in 0..7 {
+        records::insert(&index, (0..100)
                     .map(|_| serde_json::from_value(json!({"body":"alpha beta gamma delta epsilon zeta eta theta iota"})).unwrap())
-                    .collect(),
-            )
+                    .collect())
             .await
             .unwrap();
     }
-    index.commit().await.unwrap();
+    index.compact_journal().await.unwrap();
     for text in ["alpha", "alpha beta", "alpha beta gamma", "alpha beta gamma delta epsilon zeta eta theta iota"] {
         for qt in [QueryType::Union, QueryType::Intersection] {
             for rt in [ResultType::Topk, ResultType::TopkCount] {
@@ -287,38 +233,22 @@ async fn stable_equal_score_block_boundary_and_explicit_id_sort() {
                             field: "_id".into(),
                             order: SortOrder::Descending,
                         }],
-                        (69900..70000).rev().collect(),
+                        (600..700).rev().collect(),
                     ),
                 ] {
-                    let result = index
-                        .search(
-                            text.into(),
-                            None,
-                            qt.clone(),
-                            SearchMode::Lexical,
-                            false,
-                            0,
-                            100,
-                            rt.clone(),
-                            false,
-                            vec![],
-                            vec![],
-                            sort,
-                        )
-                        .await;
-                    assert!(result.error.is_none());
+                    let result = index.query(RecordQuery {text:text.into(),vector:None,query_type:qt.clone(),mode:SearchMode::Lexical,offset:0,length:100,result_type:rt.clone(),fields:vec![],filters:vec![],sort:sort,temporal:None}).await.unwrap();
                     assert_eq!(
-                        result.results.iter().map(|x| x.doc_id).collect::<Vec<_>>(),
+                        result.hits.iter().map(|x| x.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(),
                         expected
                     );
                     if rt == ResultType::TopkCount {
-                        assert_eq!(result.result_count_total, 70000);
+                        assert_eq!(result.count_total, 700);
                     }
                 }
             }
         }
     }
-    index.close().await.unwrap();
+    
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }

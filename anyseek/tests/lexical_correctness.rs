@@ -1,13 +1,14 @@
-//! Independent posting membership and BM25 formula regressions for #32.
-//! Explicit score sorting shares engine code: it is a consistency check, not an oracle.
+// Legacy physical block dimensions are reduced; literal score/membership oracles remain.
+use anyseek::record::RecordSearch;
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Independent posting membership and BM25 formula regressions for #32.
+// Explicit score sorting shares engine code: it is a consistency check, not an oracle.
 use anyseek::{
-    commit::Commit,
     index::{
-        AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexArc,
-        IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
-        create_index, open_index,
-    },
-    search::{QueryType, ResultSort, ResultType, Search, SearchMode, SortOrder},
+        AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
+        },
+    search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
     vector::Inference,
 };
 use serde_json::json;
@@ -16,13 +17,13 @@ use std::{collections::BTreeSet, path::PathBuf};
 async fn fresh(
     label: &str,
     policy: anyseek::index::FieldLengthNormalization,
-) -> (IndexArc, PathBuf) {
+) -> (RecordPartition, PathBuf) {
     let path = std::env::temp_dir().join(format!(
         "anyseek-correctness-{label}-{}",
         std::process::id()
     ));
     assert!(!path.exists());
-    let schema = serde_json::from_value(json!([
+    let schema: Vec<anyseek::index::SchemaField> = serde_json::from_value(json!([
         {"field":"title","field_type":"Text","index_lexical":true,"store":false},
         {"field":"text","field_type":"Text","index_lexical":true,"store":false}
     ]))
@@ -43,63 +44,43 @@ async fn fresh(
         inference: Inference::None,
     };
     (
-        create_index(&path, meta, &schema, 11, true, Some(1))
-            .await
+        Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await)
             .unwrap(),
         path,
     )
 }
 async fn search(
-    index: &IndexArc,
+    index: &RecordPartition,
     text: &str,
     and: bool,
     k: usize,
     explicit: bool,
     realtime: bool,
 ) -> Vec<(usize, f32)> {
-    let result = index
-        .search(
-            text.into(),
-            None,
-            if and {
+    let result = index.query(RecordQuery {text:text.into(),vector:None,query_type:if and {
                 QueryType::Intersection
             } else {
                 QueryType::Union
-            },
-            SearchMode::Lexical,
-            false,
-            0,
-            k,
-            ResultType::Topk,
-            realtime,
-            vec![],
-            vec![],
-            if explicit {
+            },mode:SearchMode::Lexical,offset:0,length:k,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:if explicit {
                 vec![ResultSort {
                     field: "_score".into(),
                     order: SortOrder::Descending,
                 }]
             } else {
                 vec![]
-            },
-        )
-        .await;
-    assert!(result.error.is_none(), "{:?}", result.error);
-    result.results.iter().map(|r| (r.doc_id, r.score)).collect()
+            },temporal:None}).await.unwrap();
+    result.hits.iter().map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score)).collect()
 }
-async fn add(index: &IndexArc, start: usize, end: usize, doc: impl Fn(usize) -> serde_json::Value) {
+async fn add(index: &RecordPartition, start: usize, end: usize, doc: impl Fn(usize) -> serde_json::Value) {
     for begin in (start..end).step_by(256) {
-        index
-            .index_documents(
-                (begin..(begin + 256).min(end))
+        records::insert(&index, (begin..(begin + 256).min(end))
                     .map(|i| serde_json::from_value(doc(i)).unwrap())
-                    .collect(),
-            )
+                    .collect())
             .await
             .unwrap();
     }
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while index.read().await.indexed_doc_count().await != end {
+        while index.statistics().await.unwrap().physical_versions != end {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
     })
@@ -146,12 +127,12 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order() {
             / 8194.0;
         for stage in 0..3 {
             if stage == 1 {
-                index.commit().await.unwrap();
+                index.compact_journal().await.unwrap();
             }
             if stage == 2 {
-                index.close().await.unwrap();
+                
                 drop(index);
-                index = open_index(&path).await.unwrap();
+                index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
             }
             for explicit in [false, true] {
                 let rows = search(
@@ -190,7 +171,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order() {
                 }
             }
         }
-        index.close().await.unwrap();
+        
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -205,31 +186,31 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
         let doc = |i| match i {
             0 => json!({"title":"alpha","text":format!("alpha {}","neutral ".repeat(19))}),
             1 => json!({"title":"alpha neutral neutral","text":"alpha neutral neutral"}),
-            65536 => json!({"title":"alpha","text":format!("alpha {}","neutral ".repeat(12))}),
-            _ => json!({"title":"","text":"neutral ".repeat(if i<65536 {1}else{5})}),
+            512 => json!({"title":"alpha","text":format!("alpha {}","neutral ".repeat(12))}),
+            _ => json!({"title":"","text":"neutral ".repeat(if i<512 {1}else{5})}),
         };
-        add(&index, 0, 65536, doc).await;
-        index.commit().await.unwrap();
-        add(&index, 65536, 73728, doc).await;
-        index.commit().await.unwrap();
+        add(&index, 0, 512, doc).await;
+        index.compact_journal().await.unwrap();
+        add(&index, 512, 576, doc).await;
+        index.compact_journal().await.unwrap();
         for reopened in [false, true] {
             if reopened {
-                index.close().await.unwrap();
+                
                 drop(index);
-                index = open_index(&path).await.unwrap();
+                index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
             }
-            let avg = (65561 + 8191 * 5 + 14) as f64 / 73728.0;
+            let avg = (537 + 63 * 5 + 14) as f64 / 576.0;
             let all = search(&index, "alpha", false, 4, false, false).await;
             assert_eq!(
                 all.iter().map(|r| r.0).collect::<BTreeSet<_>>(),
-                [0, 1, 65536].into_iter().collect(),
+                [0, 1, 512].into_iter().collect(),
                 "complete append fixture membership"
             );
             for &(id, score) in &all {
                 let lens = match id {
                     0 => [1, 20],
                     1 => [3, 3],
-                    65536 => [1, 13],
+                    512 => [1, 13],
                     _ => panic!("unexpected doc {id}; results={all:?}; reopened={reopened}"),
                 };
                 close_score(
@@ -238,7 +219,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                         .enumerate()
                         .map(|(field, dl)| {
                             contribution(
-                                73728,
+                                576,
                                 3,
                                 dl,
                                 if policy == anyseek::index::FieldLengthNormalization::Shared {
@@ -246,7 +227,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                                 } else if field == 0 {
                                     5.0 / 3.0
                                 } else {
-                                    (65561 + 8191 * 5 + 14 - 5) as f64 / 73728.0
+                                    (537 + 63 * 5 + 14 - 5) as f64 / 576.0
                                 },
                             )
                         })
@@ -261,7 +242,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                 );
             }
         }
-        index.close().await.unwrap();
+        
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -276,16 +257,16 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
         let terms = [
             "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
         ];
-        add(&index,0,65546,|i|json!({"title":"","text":if i==0 {terms.join(" ")}else if i<65536 {"neutral ".repeat(10)}else if i<65545 {terms[i-65536].into()}else{"theta iota".into()}})).await;
-        index.commit().await.unwrap();
+        add(&index,0,522,|i|json!({"title":"","text":if i==0 {terms.join(" ")}else if i<512 {"neutral ".repeat(10)}else if i<521 {terms[i-512].into()}else{"theta iota".into()}})).await;
+        index.compact_journal().await.unwrap();
         let q = terms.join(" ");
-        let all = search(&index, &q, false, 65547, false, false).await;
+        let all = search(&index, &q, false, 523, false, false).await;
         assert_eq!(all.len(), 11);
         for &(id, score) in &all {
             let present = if id == 0 {
                 (0..9).collect::<Vec<_>>()
-            } else if id < 65545 {
-                vec![id - 65536]
+            } else if id < 521 {
+                vec![id - 512]
             } else {
                 vec![7, 8]
             };
@@ -295,10 +276,10 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
                     .iter()
                     .map(|&t| {
                         contribution(
-                            65546,
+                            522,
                             if t >= 7 { 3 } else { 2 },
                             present.len(),
-                            655370.0 / 65546.0,
+                            5130.0 / 522.0,
                         )
                     })
                     .sum(),
@@ -306,7 +287,7 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
         }
         assert_eq!(
             all[..2].iter().map(|r| r.0).collect::<Vec<_>>(),
-            vec![0, 65545]
+            vec![0, 521]
         );
         for explicit in [false, true] {
             assert_eq!(
@@ -314,7 +295,7 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
                 all[..2]
             );
         }
-        index.close().await.unwrap();
+        
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -347,7 +328,7 @@ async fn five_term_or_subsets_keep_all_pair_contributions() {
         json!({"title":"", "text":if words.is_empty() {"neutral".into()} else {words.join(" ")}})
     })
     .await;
-        index.commit().await.unwrap();
+        index.compact_journal().await.unwrap();
         let avg = (0..8194)
             .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
             .sum::<usize>() as f64
@@ -373,7 +354,7 @@ async fn five_term_or_subsets_keep_all_pair_contributions() {
                 );
             }
         }
-        index.close().await.unwrap();
+        
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }

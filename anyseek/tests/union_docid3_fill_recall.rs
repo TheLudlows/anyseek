@@ -1,29 +1,29 @@
-//! Regression tests for the `union_docid_3` WAND recursion cap fix (B1).
-//!
-//! `union_docid_3` (in anyseek/src/union.rs) enumerates word-combination
-//! subsets via recursive intersection, bounded by `recursion_count < 200`.
-//! For disjoint (or generally sparse, low-idf) terms every intersection is
-//! empty, the WAND pruning never triggers, and the cap truncates the
-//! enumeration: documents owned only by subsets still enqueued are silently
-//! dropped. The fix falls back to a single `union_blockid` linear pass over
-//! the union of the remaining subsets once the cap is hit.
-//!
-//! Oracle for this path cannot reuse the "unbounded length" trick (the cap
-//! truncates even a full ranking), so the ground truth is built out of one
-//! exact single-term top-k per query term (single-term search is exact), and
-//! the union result must be a valid top-k of the merged per-word score
-//! tables. Comparison is the tie-tolerant score-threshold invariant used by
-//! union_topk_fill_ranking.
-//!
-//! Self-contained (own index directory), deterministic, no sleeps.
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Regression tests for the `union_docid_3` WAND recursion cap fix (B1).
+//
+// `union_docid_3` (in anyseek/src/union.rs) enumerates word-combination
+// subsets via recursive intersection, bounded by `recursion_count < 200`.
+// For disjoint (or generally sparse, low-idf) terms every intersection is
+// empty, the WAND pruning never triggers, and the cap truncates the
+// enumeration: documents owned only by subsets still enqueued are silently
+// dropped. The fix falls back to a single `union_blockid` linear pass over
+// the union of the remaining subsets once the cap is hit.
+//
+// Oracle for this path cannot reuse the "unbounded length" trick (the cap
+// truncates even a full ranking), so the ground truth is built out of one
+// exact single-term top-k per query term (single-term search is exact), and
+// the union result must be a valid top-k of the merged per-word score
+// tables. Comparison is the tie-tolerant score-threshold invariant used by
+// union_topk_fill_ranking.
+//
+// Self-contained (own index directory), deterministic, no sleeps.
 
-use anyseek::commit::Commit;
+
 use anyseek::index::{
-    AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
-    create_index,
-};
-use anyseek::search::{QueryType, ResultType, Search, SearchMode};
+    AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
+    };
+use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
 use std::{fs, path::Path};
 
@@ -57,35 +57,18 @@ fn doc(title: &str) -> anyseek::index::Document {
 }
 
 async fn search(
-    index: &anyseek::index::IndexArc,
+    index: &RecordPartition,
     query: &str,
     length: usize,
     result_type: ResultType,
-) -> anyseek::search::ResultObject {
-    index
-        .search(
-            query.into(),
-            None,
-            QueryType::Union,
-            SearchMode::Lexical,
-            false,
-            0,
-            length,
-            result_type,
-            false,
-            Vec::new(),
-
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
+) -> anyseek::record::RecordSearch {
+    index.query(RecordQuery {text:query.into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:length,result_type:result_type,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap()
 }
 
-async fn fresh(dir: &str) -> anyseek::index::IndexArc {
+async fn fresh(dir: &str) -> RecordPartition {
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
-    create_index(path, meta(), &schema(), 11, true, None)
-        .await
+    Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
         .unwrap()
 }
 
@@ -140,8 +123,8 @@ async fn docid3_disjoint_terms_fill_heap() {
             docs.push(doc(&format!("{w} uniq{} {pad}x", i)));
         }
     }
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
 
     let total: usize = dfs.iter().sum();
     assert_eq!(total, 181);
@@ -150,9 +133,9 @@ async fn docid3_disjoint_terms_fill_heap() {
     let mut score_table: Vec<(usize, f32)> = Vec::new();
     for w in words.iter() {
         let r = search(&index, w, 200, ResultType::Topk).await;
-        assert_eq!(r.results.len() as u32, r.result_count as u32);
-        for res in r.results.iter() {
-            score_table.push((res.doc_id, res.score));
+        assert_eq!(r.hits.len() as u32, r.hits.len() as u32);
+        for res in r.hits.iter() {
+            score_table.push((res.record.record_id.parse::<usize>().unwrap(), res.score));
         }
     }
     assert_eq!(score_table.len(), total);
@@ -160,15 +143,15 @@ async fn docid3_disjoint_terms_fill_heap() {
     let query = words.join(" ");
     let topk = search(&index, &query, 100, ResultType::TopkCount).await;
     assert_eq!(
-        topk.results.len(),
+        topk.hits.len(),
         100,
         "union_docid_3 WAND cap dropped recall (got {} of 100)",
-        topk.results.len()
+        topk.hits.len()
     );
-    let topk_sel: Vec<(usize, f32)> = topk.results.iter().map(|r| (r.doc_id, r.score)).collect();
+    let topk_sel: Vec<(usize, f32)> = topk.hits.iter().map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score)).collect();
     assert_valid_selection(&topk_sel, &score_table, total);
 
-    index.close().await.unwrap();
+    
 }
 
 /// Overlapping terms keep using the fast WAND path and must stay exact.
@@ -189,8 +172,8 @@ async fn docid3_overlap_control() {
             .collect();
         docs.push(doc(&format!("{} uniq{i}", keep.join(" "))));
     }
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
 
     // Overlapping terms never approach the recursion cap, so the fast WAND
     // path must behave exactly as before the fix: heap full, no duplicate
@@ -199,22 +182,22 @@ async fn docid3_overlap_control() {
     let query = words.join(" ");
     let topk = search(&index, &query, 100, ResultType::Topk).await;
     assert_eq!(
-        topk.results.len(),
+        topk.hits.len(),
         100,
         "overlap union must still fill the heap"
     );
     let mut seen = std::collections::HashSet::new();
-    for (pos, r) in topk.results.iter().enumerate() {
-        assert!(seen.insert(r.doc_id), "duplicate doc {}", r.doc_id);
+    for (pos, r) in topk.hits.iter().enumerate() {
+        assert!(seen.insert(r.record.record_id.parse::<usize>().unwrap()), "duplicate doc {}", r.record.record_id.parse::<usize>().unwrap());
         if pos > 0 {
             assert!(
-                topk.results[pos - 1].score >= r.score,
+                topk.hits[pos - 1].score >= r.score,
                 "results not sorted desc"
             );
         }
     }
 
-    index.close().await.unwrap();
+    
 }
 
 /// Mixed corpus with a short strict distinct-score tail to also pin the exact
@@ -235,15 +218,15 @@ async fn docid3_topkcount_total_consistent() {
             docs.push(doc(&format!("{w} only{}{}", w, i)));
         }
     }
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
 
     let query = words.join(" ");
     let count = search(&index, &query, 1, ResultType::Count).await;
     let topkcount = search(&index, &query, 200, ResultType::TopkCount).await;
-    assert_eq!(count.result_count_total, 130);
-    assert_eq!(topkcount.result_count_total, 130);
-    assert_eq!(topkcount.results.len(), 130);
+    assert_eq!(count.count_total, 130);
+    assert_eq!(topkcount.count_total, 130);
+    assert_eq!(topkcount.hits.len(), 130);
 
-    index.close().await.unwrap();
+    
 }

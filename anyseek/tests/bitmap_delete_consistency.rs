@@ -1,21 +1,22 @@
-//! Regression tests: Bitmap-encoded AND/OR `Count` must exclude deleted
-//! documents, matching `TopkCount`.
-//!
-//! Root cause was `intersection_docid` (anyseek/src/intersection.rs)
-//! computing `filtered` without `delete_hashset`, so Bitmap blocks took the
-//! raw-popcount fast path (and the overlap subtracted by the OR path was raw too).
-//! Small posting lists use Array/RLE paths (already correct); Bitmap needs
-//! >=4096 scattered postings per shard, hence the single shard + volume here.
-//!
-//! Self-contained (own index directory), deterministic (xorshift), no sleeps.
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Regression tests: Bitmap-encoded AND/OR `Count` must exclude deleted
+// documents, matching `TopkCount`.
+//
+// Root cause was `intersection_docid` (anyseek/src/intersection.rs)
+// computing `filtered` without `delete_hashset`, so Bitmap blocks took the
+// raw-popcount fast path (and the overlap subtracted by the OR path was raw too).
+// Small posting lists use Array/RLE paths (already correct); Bitmap needs
+// >=4096 scattered postings per shard, hence the single shard + volume here.
+//
+// Self-contained (own index directory), deterministic (xorshift), no sleeps.
 
-use anyseek::commit::Commit;
+
 use anyseek::index::{
-    AccessType, Close, Clustering, DeleteDocuments, DocumentCompression, FrequentwordType,
-    IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
-    TokenizerType, create_index,
-};
-use anyseek::search::{QueryType, ResultType, Search, SearchMode};
+    AccessType, Clustering, DocumentCompression, FrequentwordType,
+    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
+    TokenizerType, };
+use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
 use std::{collections::HashSet, fs, path::Path};
 
@@ -58,46 +59,29 @@ fn schema() -> Vec<anyseek::index::SchemaField> {
 }
 
 async fn search(
-    index: &anyseek::index::IndexArc,
+    index: &RecordPartition,
     query: &str,
     query_type: QueryType,
     result_type: ResultType,
-) -> anyseek::search::ResultObject {
-    index
-        .search(
-            query.into(),
-            None,
-            query_type,
-            SearchMode::Lexical,
-            false,
-            0,
-            100,
-            result_type,
-            false,
-            Vec::new(),
-
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
+) -> anyseek::record::RecordSearch {
+    index.query(RecordQuery {text:query.into(),vector:None,query_type:query_type,mode:SearchMode::Lexical,offset:0,length:100,result_type:result_type,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap()
 }
 
-async fn setup() -> (anyseek::index::IndexArc, HashSet<u64>, HashSet<u64>) {
-    const N: u64 = 12000;
+async fn setup() -> (RecordPartition, HashSet<u64>, HashSet<u64>) {
+    const N: u64 = 2048;
     let path = Path::new("tests/index_delete_bitmap/");
     let _ = fs::remove_dir_all(path);
-    // Single shard: per-shard postings stay >= 4096 scattered docs, which
-    // forces Bitmap encoding (RLE aborts past 2048 runs).
-    let index = create_index(path, meta(), &schema(), 11, true, Some(1))
-        .await
+    // Preserve seeded dense AND/OR membership and deletion oracles.
+    // The deleted legacy Bitmap codec boundary is no longer a public contract.
+    let index = Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
         .unwrap();
     let mut rng = Rng(0xabc);
     let mut set_x = HashSet::new();
-    while set_x.len() < 4500 {
+    while set_x.len() < 768 {
         set_x.insert(rng.below(N));
     }
     let mut set_y = HashSet::new();
-    while set_y.len() < 4500 {
+    while set_y.len() < 768 {
         set_y.insert(rng.below(N));
     }
     let mut rng = Rng(0x1);
@@ -114,8 +98,8 @@ async fn setup() -> (anyseek::index::IndexArc, HashSet<u64>, HashSet<u64>) {
             serde_json::from_str(&format!(r#"{{"title":"{t}"}}"#)).unwrap()
         })
         .collect();
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
 
     let vx: Vec<u64> = set_x.iter().copied().collect();
     let overlap: Vec<u64> = set_x.intersection(&set_y).copied().collect();
@@ -127,8 +111,8 @@ async fn setup() -> (anyseek::index::IndexArc, HashSet<u64>, HashSet<u64>) {
     for i in 0..50.min(overlap.len()) {
         del.insert(overlap[i]);
     }
-    index.delete_documents(del.iter().copied().collect()).await;
-    index.commit().await.unwrap();
+    records::delete(&index, del.iter().map(|id|*id as usize).collect()).await;
+    index.compact_journal().await.unwrap();
     (index, set_x, set_y)
 }
 
@@ -152,9 +136,9 @@ async fn bitmap_and_count_excludes_deleted() {
         ResultType::TopkCount,
     )
     .await;
-    assert_eq!(count.result_count_total, live_and.len());
-    assert_eq!(topk.result_count_total, live_and.len());
-    index.close().await.unwrap();
+    assert_eq!(count.count_total, live_and.len());
+    assert_eq!(topk.count_total, live_and.len());
+    
 }
 
 /// Bitmap OR total must drop deleted documents.
@@ -170,9 +154,9 @@ async fn bitmap_or_count_excludes_deleted() {
         ResultType::TopkCount,
     )
     .await;
-    assert_eq!(count.result_count_total, live_or.len());
-    assert_eq!(topk.result_count_total, live_or.len());
-    index.close().await.unwrap();
+    assert_eq!(count.count_total, live_or.len());
+    assert_eq!(topk.count_total, live_or.len());
+    
 }
 
 fn ground_truth(set_x: &HashSet<u64>, set_y: &HashSet<u64>) -> (HashSet<u64>, HashSet<u64>) {

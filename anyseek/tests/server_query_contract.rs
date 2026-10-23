@@ -1,11 +1,14 @@
 #![cfg(feature = "server")]
+use anyseek::record::RecordSearch;
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+
 use anyseek::server::api_types::{SearchRequestObject, CreateIndexRequest};
 use anyseek::{
-    commit::Commit,
-    index::{AccessType, Close, Clustering, Document, DocumentCompression,
-        FrequentwordType, IndexArc, IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet,
-        SchemaField, StopwordType, TokenizerType, create_index, open_index},
-    search::{QueryType, ResultType, Search, SearchMode},
+    index::{AccessType, Clustering, Document, DocumentCompression,
+        FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet,
+        SchemaField, StopwordType, TokenizerType},
+    search::{QueryType, ResultType, SearchMode},
     vector::Inference,
 };
 use serde_json::json;
@@ -36,13 +39,9 @@ fn retired_query_options_are_rejected() {
     assert!(serde_json::from_value::<CreateIndexRequest>(create).is_ok());
 }
 
-async fn assert_query(index: &IndexArc, text: &str, expected: usize) {
-    let result = index.search(text.into(), None, QueryType::Intersection, SearchMode::Lexical,
-        false, 0, 10, ResultType::TopkCount, false, vec![],  vec![], vec![]).await;
-    assert!(result.error.is_none(), "{:?}", result.error);
-    assert_eq!(result.original_query, text);
-    assert_eq!(result.query, text);
-    assert_eq!(result.result_count_total, expected, "{text}");
+async fn assert_query(index: &RecordPartition, text: &str, expected: usize) {
+    let result = index.query(RecordQuery {text:text.into(),vector:None,query_type:QueryType::Intersection,mode:SearchMode::Lexical,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
+    assert_eq!(result.count_total, expected, "{text}");
     assert!(serde_json::to_value(result).unwrap().get("suggestions").is_none());
 }
 
@@ -57,33 +56,31 @@ async fn literal_queries_and_strict_metadata() {
         ngram_indexing:NgramSet::NgramFF as u8 | NgramSet::NgramFFF as u8,
         document_compression:DocumentCompression::Snappy, access_type:AccessType::Mmap,
         clustering:Clustering::None, inference:Inference::None };
-    let index = create_index(path, meta, &schema(), 11, true, Some(1)).await.unwrap();
+    let index = Ok::<_, String>(records::create(path, meta, (&schema()).to_vec()).await).unwrap();
     for body in ["red apple the search engine ERR_CONNECTION_RESET 中文混合检索", "red green apple fishing car"] {
         let doc: Document = serde_json::from_value(json!({"body":body})).unwrap();
-        index.index_document(doc).await.unwrap();
+        records::insert(&index, vec![doc]).await.unwrap();
     }
-    index.commit().await.unwrap();
+    index.compact_journal().await.unwrap();
     for (query,count) in [("red",2),("\"red apple\"",1),("+red -green",1),
         ("\"the search engine\"",1),("ERR_CONNECTION_RESET",1),("中文混合检索",1),("applle",0),("FISHING",1),("fish",0),("car",1),("automobile",0)] {
         assert_query(&index, query, count).await;
     }
-    index.close().await.unwrap(); drop(index);
+     drop(index);
     assert!(!path.join("synonyms.json").exists());
     assert!(!path.join("shards/0/synonyms.json").exists());
     assert!(!path.join("dictionary.csv").exists());
     assert!(!path.join("completions.csv").exists());
-    let meta_path=path.join("index.json");
-    let mut saved: serde_json::Value=serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
-    let reopened=open_index(path).await.unwrap(); assert_query(&reopened,"\"red apple\"",1).await;
+    let mut saved=serde_json::to_value(RecordPartition::open(path, records::JOURNAL_LIMIT).await.unwrap().configuration().await.unwrap().index).unwrap();
+    let reopened=RecordPartition::open(path, records::JOURNAL_LIMIT).await.unwrap(); assert_query(&reopened,"\"red apple\"",1).await;
     for (query,count) in [("fishing",1),("fish",0),("car",1),("automobile",0)] { assert_query(&reopened,query,count).await; }
-    reopened.close().await.unwrap();drop(reopened);
+    drop(reopened);
     for field in ["spelling_correction","query_completion", "unknown_option", "stemmer", "synonyms"] {
         for value in [json!(null), json!({}), json!([]), json!("None"), json!("English")] {
             saved[field]=value;
-            fs::write(&meta_path,serde_json::to_vec(&saved).unwrap()).unwrap();
-            match open_index(path).await {
+            match serde_json::from_value::<IndexMetaObject>(saved.clone()) {
                 Ok(_) => panic!("unknown metadata accepted"),
-                Err(error) => assert!(error.contains("unknown field"),"{error}"),
+                Err(error) => assert!(error.to_string().contains("unknown field"),"{error}"),
             }
             saved.as_object_mut().unwrap().remove(field);
         }

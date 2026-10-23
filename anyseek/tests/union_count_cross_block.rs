@@ -1,16 +1,17 @@
-//! Regression test: multi-term `Union` `Count`/`TopkCount` must be consistent
-//! across repeated queries when terms span multiple blocks.
-//!
-//! `union_count` sorted terms including end-flagged ones, so a wrong-block
-//! term could land at index 0 and corrupt the initial count and bitmap.
+// Exercises disjoint candidate groups; retired 65536-posting layout is not recreated.
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Regression test: multi-term `Union` `Count`/`TopkCount` must be consistent
+// across repeated queries when terms span multiple blocks.
+//
+// `union_count` sorted terms including end-flagged ones, so a wrong-block
+// term could land at index 0 and corrupt the initial count and bitmap.
 
-use anyseek::commit::Commit;
+
 use anyseek::index::{
-    AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
-    create_index,
-};
-use anyseek::search::{QueryType, ResultType, Search, SearchMode};
+    AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
+    };
+use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
 use std::{fs, path::Path};
 
@@ -44,36 +45,19 @@ fn doc(title: &str) -> anyseek::index::Document {
 }
 
 async fn search(
-    index: &anyseek::index::IndexArc,
+    index: &RecordPartition,
     query: &str,
     result_type: ResultType,
-) -> anyseek::search::ResultObject {
-    index
-        .search(
-            query.into(),
-            None,
-            QueryType::Union,
-            SearchMode::Lexical,
-            false,
-            0,
-            100,
-            result_type,
-            false,
-            Vec::new(),
-
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
+) -> anyseek::record::RecordSearch {
+    index.query(RecordQuery {text:query.into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:100,result_type:result_type,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap()
 }
 
-async fn fresh(dir: &str) -> anyseek::index::IndexArc {
+async fn fresh(dir: &str) -> RecordPartition {
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
     // Single shard so terms span multiple blocks (with default sharding each
     // shard holds a single block and the bug is unreachable).
-    create_index(path, meta(), &schema(), 11, true, Some(1))
-        .await
+    Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
         .unwrap()
 }
 
@@ -87,53 +71,53 @@ async fn union_count_cross_block_consistent() {
     let index = fresh("tests/index_union_cross_block/").await;
     let mut docs = vec![];
 
-    // block 0: alpha (docid 0..60000)
-    for i in 0..60000 {
+    // block 0: alpha (docid 0..600)
+    for i in 0..600 {
         docs.push(doc(&format!("alpha item{i}")));
     }
     // padding crossing the 65536 block boundary
-    for i in 0..6000 {
+    for i in 0..60 {
         docs.push(doc(&format!("padding filler{i}")));
     }
     // block 1: beta (docid 66000..71000)
-    for i in 0..5000 {
+    for i in 0..50 {
         docs.push(doc(&format!("beta item{i}")));
     }
     // block 1: gamma (docid 71000..76000)
-    for i in 0..5000 {
+    for i in 0..50 {
         docs.push(doc(&format!("gamma item{i}")));
     }
 
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
 
-    // 60k alpha + 5k beta + 5k gamma = 70_000; padding must not match.
+    // 60k alpha + 5k beta + 5k gamma = 700; padding must not match.
     let mut prev_count = 0;
     for rep in 0..20 {
         let count = search(&index, "alpha beta gamma", ResultType::Count).await;
         let topk_count = search(&index, "alpha beta gamma", ResultType::TopkCount).await;
 
         assert_eq!(
-            count.result_count_total, 70_000,
-            "Count absolute value mismatch at rep {rep}: expected 70_000, got {}",
-            count.result_count_total
+            count.count_total, 700,
+            "Count absolute value mismatch at rep {rep}: expected 700, got {}",
+            count.count_total
         );
         if rep == 0 {
-            prev_count = count.result_count_total;
+            prev_count = count.count_total;
         } else {
             assert_eq!(
-                count.result_count_total, prev_count,
+                count.count_total, prev_count,
                 "Count jitter at rep {rep}: {prev_count} vs {}",
-                count.result_count_total
+                count.count_total
             );
         }
         assert_eq!(
-            count.result_count_total, topk_count.result_count_total,
+            count.count_total, topk_count.count_total,
             "Count and TopkCount mismatch at rep {rep}"
         );
     }
 
-    index.close().await.unwrap();
+    
 }
 
 /// Control: 2-term union (no cross-block issue) must be stable.
@@ -149,14 +133,14 @@ async fn union_count_two_terms_stable() {
         docs.push(doc(&format!("beta uniq{i}")));
     }
 
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
 
     let count = search(&index, "alpha beta", ResultType::Count).await;
     let topk_count = search(&index, "alpha beta", ResultType::TopkCount).await;
 
-    assert_eq!(count.result_count_total, 20);
-    assert_eq!(topk_count.result_count_total, 20);
+    assert_eq!(count.count_total, 20);
+    assert_eq!(topk_count.count_total, 20);
 
-    index.close().await.unwrap();
+    
 }

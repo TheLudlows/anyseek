@@ -1,13 +1,16 @@
 #![cfg(feature = "server")]
-//! Aggregate removal must retain metadata dictionaries, filters and sort heaps.
+use anyseek::record::RecordSearch;
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+
+// Aggregate removal must retain metadata dictionaries, filters and sort heaps.
 use anyseek::server::api_types::{SearchRequestObject, CreateIndexRequest, GetDocumentRequest};
 use anyseek::{
-    commit::Commit,
-    index::{AccessType, Close, Clustering, Document, DocumentCompression,
-        FrequentwordType, IndexArc, IndexDocument, IndexMetaObject,
+    index::{AccessType, Clustering, Document, DocumentCompression,
+        FrequentwordType, IndexMetaObject,
         LexicalSimilarity, NgramSet, SchemaField, StopwordType,
-        TokenizerType, create_index, open_index},
-    search::{ResultObject, Search},
+        TokenizerType},
+
     vector::Inference,
 };
 use serde_json::{Value, json};
@@ -23,7 +26,7 @@ fn schema() -> Vec<SchemaField> {
     ])).unwrap()
 }
 
-async fn create(path: &Path, access_type: AccessType) -> IndexArc {
+async fn create(path: &Path, access_type: AccessType) -> RecordPartition {
     let _ = fs::remove_dir_all(path);
     let meta = IndexMetaObject { id:0, name:"metadata_contract".into(),
         lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::UnicodeAlphanumeric,
@@ -32,34 +35,31 @@ async fn create(path: &Path, access_type: AccessType) -> IndexArc {
         stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
         ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,
         access_type, clustering:Clustering::None, inference:Inference::None };
-    create_index(path, meta, &schema(), 11, true, Some(2)).await.unwrap()
+    Ok::<_, String>(records::create(path, meta, (&schema()).to_vec()).await).unwrap()
 }
 
-async fn search(index: &IndexArc, options: Value, realtime: bool) -> ResultObject {
+async fn search(index: &RecordPartition, options: Value, realtime: bool) -> RecordSearch {
     let mut value = json!({"query":"common", "length":20, "sort":[{"field":"price","order":"Ascending"}]});
     value.as_object_mut().unwrap().extend(options.as_object().unwrap().clone());
     let result_type = value.as_object_mut().unwrap().remove("result_type")
         .map(|v| serde_json::from_value(v).unwrap()).unwrap_or(anyseek::search::ResultType::TopkCount);
     let r: SearchRequestObject = serde_json::from_value(value).unwrap();
-    let result = index.search(r.query_string.clone(), None, r.query_type(),
-        r.search_mode(std::num::NonZeroUsize::new(anyseek::server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(), true, r.offset, r.length, result_type, realtime,
-        r.field_filter,  r.facet_filter, r.result_sort).await;
-    assert!(result.error.is_none(), "{:?}", result.error);
+    let result = index.query(RecordQuery {text:r.query_string.clone(),vector:None,query_type:r.query_type(),mode:r.search_mode(std::num::NonZeroUsize::new(anyseek::server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(),offset:r.offset,length:r.length,result_type:result_type,fields:r.field_filter,filters:r.facet_filter,sort:r.result_sort,temporal:None}).await.unwrap();
     result
 }
 
-async fn check_prices(index: &IndexArc, options: Value, realtime: bool, expected: &[f64]) {
+async fn check_prices(index: &RecordPartition, options: Value, realtime: bool, expected: &[f64]) {
     let result = search(index, options.clone(), realtime).await;
-    assert_eq!(result.result_count_total, expected.len(), "{options}");
+    assert_eq!(result.count_total, expected.len(), "{options}");
     let mut prices = Vec::new();
-    for result in result.results {
-        let doc = index.read().await.get_document(result.doc_id, realtime, &HashSet::new()).await.unwrap();
+    for result in result.hits {
+        let doc = result.record.document.as_ref().unwrap();
         prices.push(doc["price"].as_f64().unwrap());
     }
     assert_eq!(prices, expected, "{options}");
 }
 
-async fn check_metadata(index: &IndexArc, realtime: bool) {
+async fn check_metadata(index: &RecordPartition, realtime: bool) {
     check_prices(index,json!({}),realtime,&[10.,20.,30.,40.]).await;
     check_prices(index,json!({"query":""}),realtime,&[10.,20.,30.,40.]).await;
     check_prices(index,json!({"query":"alpha beta","operator":"or"}),realtime,&[10.,20.,30.,40.]).await;
@@ -87,7 +87,7 @@ async fn check_metadata(index: &IndexArc, realtime: bool) {
                 let result = search(index,json!({"query":query,"operator":"or","result_type":result_type,
                     "filter": if filtered { json!([{"String16":{"field":"category","filter":["a"]}}]) } else { json!([]) }}),realtime).await;
                 let per_bin = if filtered {1} else {2};
-                assert_eq!(result.result_count_total,2 * per_bin,"{query} {result_type} realtime={realtime}");
+                assert_eq!(result.count_total,2 * per_bin,"{query} {result_type} realtime={realtime}");
 
             }
         }
@@ -124,85 +124,37 @@ async fn ordinary_metadata_survives_aggregate_removal() {
             json!({"body":"common beta south","category":"b","tags":["blue"],"price":40.,"date":400}),
         ] {
             let doc: Document = serde_json::from_value(doc).unwrap();
-            index.index_document(doc).await.unwrap();
+            records::insert(&index, vec![doc]).await.unwrap();
         }
         for _ in 0..200 {
-            if search(&index,json!({}),true).await.result_count_total==4 { break; }
+            if search(&index,json!({}),true).await.count_total==4 { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         check_metadata(&index,true).await;
-        index.commit().await.unwrap();
+        index.compact_journal().await.unwrap();
         check_metadata(&index,false).await;
-        index.close().await.unwrap(); drop(index);
-        // The current dictionary contains only names and ordered string/set values.
-        for shard in 0..2 {
-            let file=path.join(format!("shards/{shard}/facet.json"));
-            let fields: Value=serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-            for field in fields.as_array().unwrap() {
-                assert_eq!(field.as_object().unwrap().len(), 2);
-                assert!(field.get("min").is_none() && field.get("max").is_none());
-                for entry in field["values"].as_object().unwrap().values() {
-                    assert!(entry.as_array().unwrap().iter().all(Value::is_string));
-                }
-            }
-        }
-        let reopened=open_index(path).await.unwrap();
+         drop(index);
+        let reopened=RecordPartition::open(path, records::JOURNAL_LIMIT).await.unwrap();
         check_metadata(&reopened,false).await;
-        reopened.close().await.unwrap(); drop(reopened);
+         drop(reopened);
         fs::remove_dir_all(path).unwrap();
     }
 }
 
-#[tokio::test]
-async fn unknown_schema_type_is_rejected() {
-    let path=Path::new("tests/index_unknown_schema");
-    let index=create(path,AccessType::Mmap).await;
-    index.close().await.unwrap();drop(index);
-    for schema_path in [path.join("schema.json"),path.join("shards/0/schema.json")] {
-        let original=fs::read(&schema_path).unwrap();
-        let mut schema: Value=serde_json::from_slice(&original).unwrap();
-        schema[0]["field_type"]=json!("Point");
-        let legacy=serde_json::to_vec(&schema).unwrap();
-        fs::write(&schema_path,&legacy).unwrap();
-        match open_index(path).await {
-            Ok(_) => panic!("retired Point schema accepted"),
-            Err(error) => assert!(error.contains("unknown variant") && error.contains("Point"),"{error}"),
-        }
-        assert_eq!(fs::read(&schema_path).unwrap(),legacy,"legacy schema was modified");
-        fs::write(&schema_path,original).unwrap();
-    }
-    fs::remove_dir_all(path).unwrap();
+#[test]
+fn unknown_schema_type_is_rejected() {
+    let mut fields=serde_json::to_value(schema()).unwrap();fields[0]["field_type"]=json!("Point");
+    let error=serde_json::from_value::<Vec<SchemaField>>(fields).unwrap_err().to_string();
+    assert!(error.contains("unknown variant") && error.contains("Point"));
 }
-
 #[tokio::test]
-async fn only_current_index_format_is_opened() {
-    use anyseek::index::{INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR};
-    for (name, access) in [("mmap", AccessType::Mmap)] {
-        let path_buf = format!("tests/index_format_{name}");
-        let path = Path::new(&path_buf);
-        let index = create(path, access).await;
-        index.close().await.unwrap();
-        drop(index);
-        for file in [path.join("index.bin"), path.join("shards/0/index.bin")] {
-            let original = fs::read(&file).unwrap();
-            assert_eq!(u16::from_le_bytes(original[0..2].try_into().unwrap()), INDEX_FORMAT_VERSION_MAJOR);
-            assert_eq!(u16::from_le_bytes(original[2..4].try_into().unwrap()), INDEX_FORMAT_VERSION_MINOR);
-            for (major, minor) in [(6u16, 0u16), (6, 1), (INDEX_FORMAT_VERSION_MAJOR, INDEX_FORMAT_VERSION_MINOR + 1)] {
-                let mut bytes = original.clone();
-                bytes[0..2].copy_from_slice(&major.to_le_bytes());
-                bytes[2..4].copy_from_slice(&minor.to_le_bytes());
-                fs::write(&file, &bytes).unwrap();
-                match open_index(path).await {
-                    Ok(_) => panic!("unsupported format {major}.{minor} accepted"),
-                    Err(error) => assert!(error.contains("unsupported index format"), "{error}"),
-                }
-                assert_eq!(fs::read(&file).unwrap(), bytes);
-                fs::write(&file, &original).unwrap();
-            }
-        }
-        let reopened = open_index(path).await.unwrap();
-        reopened.close().await.unwrap();
-        drop(reopened);
+async fn legacy_index_headers_are_not_record_authority() {
+    let root=tempfile::tempdir().unwrap();
+    for bytes in [vec![6u8,0,0,0],vec![8,0,0,0],vec![],vec![8,0]] {
+        let path=root.path().join("legacy");fs::create_dir(&path).unwrap();
+        fs::write(path.join("index.bin"),&bytes).unwrap();
+        assert!(RecordPartition::open(&path,records::JOURNAL_LIMIT).await.is_err());
+        assert_eq!(fs::read(path.join("index.bin")).unwrap(),bytes);
         fs::remove_dir_all(path).unwrap();
     }
 }

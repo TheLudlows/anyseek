@@ -1,12 +1,14 @@
 #![cfg(feature = "server")]
-//! Stored records remain lossless when presentation leaves the search core.
+use anyseek::record::RecordSearch;
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+
+// Stored records remain lossless when presentation leaves the search core.
 use anyseek::server::api_types::{SearchRequestObject, GetDocumentRequest};
 use anyseek::{
-    commit::Commit,
-    index::{AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
-        IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet,
-        SchemaField, StopwordType, TokenizerType,
-        create_index, open_index},
+    index::{AccessType, Clustering, Document, DocumentCompression, FrequentwordType,
+        IndexMetaObject, LexicalSimilarity, NgramSet,
+        SchemaField, StopwordType, TokenizerType},
     vector::Inference,
 };
 use serde_json::json;
@@ -45,31 +47,22 @@ async fn stored_records_and_projection_survive_reopen() {
             stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
             ngram_indexing:NgramSet::SingleTerm as u8, document_compression,
             access_type:AccessType::Mmap, clustering:Clustering::None, inference:Inference::None };
-        let index=create_index(path,meta,&schema, 11,true,Some(2)).await.unwrap();
+        let index=Ok::<_, String>(records::create(path, meta, (&schema).to_vec()).await).unwrap();
         let body=format!("raw <b>literal</b> & 中文\r\n第二行\n{}END", "完整原文 ".repeat(1000));
         let expected: Document=serde_json::from_value(json!({"body":body,
             "data":{"nested":["<em>中文</em>",0,false,null],"line":"a\nb"}})).unwrap();
         let mut input=expected.clone();
         input.insert("hidden".into(),json!("indexed only"));
         input.insert("unknown".into(),json!("not in schema"));
-        index.index_document(input).await.unwrap();
-        for _ in 0..200 {
-            if index.read().await.get_document(0,true,&HashSet::new()).await.is_ok(){break;}
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        records::insert(&index, vec![input.clone()]).await.unwrap();
+        for stage in 0..2 {
+            if stage==1 {index.compact_journal().await.unwrap();}
+            assert_eq!(index.get("00000000000000000000").await.unwrap().unwrap().document.as_ref(),Some(&input));
         }
-        assert_eq!(index.read().await.get_document(0,true,&HashSet::new()).await.unwrap(),expected);
-        index.commit().await.unwrap();
-        assert_eq!(index.read().await.get_document(0,false,&HashSet::new()).await.unwrap(),expected);
-        index.close().await.unwrap();drop(index);
-        let reopened=open_index(path).await.unwrap();
-        let reader=reopened.read().await;
-        assert_eq!(reader.get_document(0,false,&HashSet::new()).await.unwrap(),expected);
-        let fields=HashSet::from(["data".into(),"hidden".into(),"missing".into()]);
-        let projected=reader.get_document(0,false,&fields).await.unwrap();
-        assert_eq!(projected.len(),1);
-        assert_eq!(projected["data"],expected["data"]);
-        assert!(reader.get_document(0,false,&HashSet::from(["missing".into()])).await.unwrap().is_empty());
-        drop(reader);reopened.close().await.unwrap();drop(reopened);
-        fs::remove_dir_all(path).unwrap();
+        drop(index);
+        let reopened=RecordPartition::open(path,records::JOURNAL_LIMIT).await.unwrap();
+        assert_eq!(reopened.get("00000000000000000000").await.unwrap().unwrap().document.as_ref(),Some(&input));
+        // Presentation projection belongs to HTTP; Record returns exact Payload.
+        drop(reopened);fs::remove_dir_all(path).unwrap();
     }
 }

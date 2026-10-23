@@ -1,16 +1,17 @@
 //! Independent N-gram flags must preserve literal phrase matches through persistence.
 use anyseek::{
-    commit::Commit,
     index::{
-        AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexArc,
-        IndexDocuments, IndexMetaObject, LexicalSimilarity, SchemaField, StopwordType,
-        TokenizerType, create_index, open_index,
+        AccessType, Clustering, DocumentCompression, FrequentwordType, 
+         IndexMetaObject, LexicalSimilarity, SchemaField, StopwordType,
+        TokenizerType, 
     },
-    search::{QueryType, ResultType, Search, SearchMode},
+    search::{QueryType, ResultType, SearchMode},
     vector::Inference,
 };
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
 use serde_json::json;
-use std::{collections::BTreeSet, fs, time::Duration};
+use std::{collections::BTreeSet, fs};
 
 const DOCUMENTS: &[&str] = &[
     "of the art",
@@ -35,7 +36,7 @@ const PHRASES: &[&str] = &[
     "of missing the",
 ];
 
-async fn assert_phrases(index: &IndexArc, realtime: bool, context: &str) {
+async fn assert_phrases(index: &RecordPartition, _realtime: bool, context: &str) {
     for phrase in PHRASES {
         let terms: Vec<_> = phrase.split_whitespace().collect();
         let expected: BTreeSet<_> = DOCUMENTS
@@ -51,33 +52,23 @@ async fn assert_phrases(index: &IndexArc, realtime: bool, context: &str) {
             .collect();
         for result_type in [ResultType::TopkCount, ResultType::Count] {
             let result = index
-                .search(
-                    format!("\"{phrase}\""),
-                    None,
-                    QueryType::Intersection,
-                    SearchMode::Lexical,
-                    false,
-                    0,
-                    DOCUMENTS.len(),
-                    result_type.clone(),
-                    realtime,
-                    vec![],
-                    vec![],
-                    vec![],
-                )
-                .await;
-            assert!(result.error.is_none(), "{context}: {:?}", result.error);
+                .query(RecordQuery {
+                    text: format!("\"{phrase}\""), vector: None, temporal: None,
+                    query_type: QueryType::Intersection, mode: SearchMode::Lexical,
+                    offset: 0, length: DOCUMENTS.len(), result_type: result_type.clone(),
+                    fields: vec![], filters: vec![], sort: vec![],
+                }).await.unwrap();
             assert_eq!(
-                result.result_count_total,
+                result.count_total,
                 expected.len(),
                 "{context}: {phrase}"
             );
             if result_type == ResultType::TopkCount {
                 assert_eq!(
                     result
-                        .results
+                        .hits
                         .iter()
-                        .map(|hit| hit.doc_id)
+                        .map(|hit| hit.record.record_id.parse::<usize>().unwrap())
                         .collect::<BTreeSet<_>>(),
                     expected,
                     "{context}: {phrase}"
@@ -114,36 +105,18 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    let index = create_index(&path, meta, &schema, 11, true, Some(1))
-        .await
-        .unwrap();
-    index
-        .index_documents(
-            DOCUMENTS
-                .iter()
-                .map(|body| serde_json::from_value(json!({"body":body})).unwrap())
-                .collect(),
-        )
-        .await
-        .unwrap();
-    // Writes are queued. Wait for indexing completion, without committing the realtime data.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while index.read().await.indexed_doc_count().await != DOCUMENTS.len() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .expect("indexing completes");
-    assert_eq!(index.read().await.committed_doc_count().await, 0);
+    let index = records::create(&path, meta, schema).await;
+    records::append(&index, DOCUMENTS.iter().map(|body| serde_json::from_value(json!({"body":body})).unwrap()).collect()).await;
+    assert_eq!(index.statistics().await.unwrap().active_records, DOCUMENTS.len());
     assert_phrases(&index, true, &format!("mask={mask}, realtime")).await;
-    index.commit().await.unwrap();
+    index.compact_journal().await.unwrap();
     assert_phrases(&index, false, &format!("mask={mask}, committed")).await;
-    index.close().await.unwrap();
+    
     drop(index);
-    let index = open_index(&path).await.unwrap();
-    assert_eq!(index.read().await.meta.ngram_indexing, mask);
+    let index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
+    assert_eq!(index.configuration().await.unwrap().index.ngram_indexing, mask);
     assert_phrases(&index, false, &format!("mask={mask}, reopened")).await;
-    index.close().await.unwrap();
+    
     drop(index);
     fs::remove_dir_all(path).unwrap();
 }

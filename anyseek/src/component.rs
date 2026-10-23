@@ -8,7 +8,7 @@ use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use memmap2::{Mmap, MmapMut, MmapOptions};
 use serde::{Serialize, Deserialize};
-use std::{collections::HashMap, fs, io::{Seek, SeekFrom, Write}, path::{Path, PathBuf}, sync::Arc};
+use std::{collections::HashMap, fs, io::{Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, sync::Arc};
 use tokio::sync::RwLock;
 
 const FORMAT: u32 = 1;
@@ -171,8 +171,16 @@ pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&Vec<Sch
     assemble(path,meta,schema,None)
 }
 pub(crate) async fn open_index(path:&Path)->Result<IndexArc,String>{
-    let bytes=fs::read(path.join(DESCRIPTOR)).map_err(|e|e.to_string())?;
-    if bytes.len()>64*1024*1024 {return Err("component descriptor budget exceeded".into());}
+    let file=fs::File::open(path.join(DESCRIPTOR)).map_err(|e|e.to_string())?;
+    let length=file.metadata().map_err(|e|e.to_string())?.len();
+    if length>64*1024*1024 {return Err("component descriptor budget exceeded".into());}
+    let estimate=length.checked_mul(8).and_then(|n|n.checked_add(4096)).ok_or("component descriptor size overflow")?;
+    let _memory=crate::storage::build_budget::reserve_memory(estimate).map_err(|e|e.to_string())?;
+    let _buffer=crate::resources::Scope::current().map(|s|s.retained_io().bytes(estimate))
+        .transpose().map_err(|e|e.to_string())?;
+    let mut bytes=Vec::with_capacity(length as usize);
+    file.take(length+1).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
+    if bytes.len() as u64 != length {return Err("component descriptor changed while opening".into());}
     let saved:Descriptor=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
     if saved.format!=FORMAT {return Err("unsupported vector/metadata component format".into());}
     assemble(path,saved.meta.clone(),&saved.schema.clone(),Some(saved))

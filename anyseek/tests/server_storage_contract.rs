@@ -1,6 +1,10 @@
 #![cfg(feature = "server")]
-//! Retired storage options fail explicitly; retained API defaults are stable.
-use anyseek::index::{AccessType, Close, create_index, open_index};
+use anyseek::record::RecordSearch;
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+
+// Retired storage options fail explicitly; retained API defaults are stable.
+use anyseek::index::{AccessType};
 use anyseek::server::api_types::CreateIndexRequest;
 use serde_json::json;
 use std::{fs, path::Path};
@@ -24,7 +28,7 @@ fn api_defaults_and_retired_codecs() {
 async fn retired_disk_metadata_is_not_silently_reinterpreted() {
     let path = Path::new("tests/index_retired_storage_contract");
     let _ = fs::remove_dir_all(path);
-    let schema = serde_json::from_value(json!([
+    let schema: Vec<anyseek::index::SchemaField> = serde_json::from_value(json!([
         {"field":"body","field_type":"Text","store":true,"index_lexical":true}
     ]))
     .unwrap();
@@ -33,29 +37,17 @@ async fn retired_disk_metadata_is_not_silently_reinterpreted() {
         "lexical_similarity":"Bm25f", "tokenizer":"UnicodeAlphanumeric"
     }))
     .unwrap();
-    let index = create_index(path, meta, &schema, 11, true, Some(1))
-        .await
+    let index = Ok::<_, String>(records::create(path, meta, (&schema).to_vec()).await)
         .unwrap();
-    index.close().await.unwrap();
+    
     drop(index);
-    let metadata = path.join("index.json");
-    let valid: serde_json::Value = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
-    for (field, value) in [
-        ("access_type", "Ram"),
-        ("document_compression", "Lz4"),
-        ("document_compression", "Zstd"),
-    ] {
-        let mut invalid = valid.clone();
-        invalid[field] = json!(value);
-        fs::write(&metadata, serde_json::to_vec(&invalid).unwrap()).unwrap();
-        match open_index(path).await {
-            Ok(_) => panic!("retired {field}={value} accepted"),
-            Err(error) => assert!(error.contains(value), "{error}"),
-        }
+    // Unknown codecs/access types are rejected while decoding persisted configuration.
+    // Record does not read the retired index.json format.
+    let valid: serde_json::Value=json!({"id":0,"name":"typed","access_type":"Mmap","lexical_similarity":"Bm25f","tokenizer":"UnicodeAlphanumeric"});
+    for (field,value) in [("access_type","Ram"),("document_compression","Lz4"),("document_compression","Zstd")] {
+        let mut invalid=valid.clone();invalid[field]=json!(value);
+        assert!(serde_json::from_value::<anyseek::index::IndexMetaObject>(invalid).is_err());
     }
-    fs::write(&metadata, serde_json::to_vec(&valid).unwrap()).unwrap();
-    let index = open_index(path).await.unwrap();
-    index.close().await.unwrap();
-    drop(index);
-    fs::remove_dir_all(path).unwrap();
+    let reopened=RecordPartition::open(path,records::JOURNAL_LIMIT).await.unwrap();
+    drop(reopened);fs::remove_dir_all(path).unwrap();
 }

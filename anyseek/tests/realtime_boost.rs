@@ -1,12 +1,11 @@
-//! Independent formula for the realtime single-term multifield boost regression.
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Independent formula for the realtime single-term multifield boost regression.
 use anyseek::{
-    commit::Commit,
     index::{
-        AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-        IndexMetaObject, LexicalSimilarity, StopwordType, TextNormalization, TokenizerType,
-        create_index, open_index,
-    },
-    search::{QueryType, ResultType, Search, SearchMode},
+        AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, StopwordType, TextNormalization, TokenizerType,
+        },
+    search::{QueryType, ResultType, SearchMode},
     vector::Inference,
 };
 use serde_json::json;
@@ -30,19 +29,17 @@ async fn boosted_single_term_matches_formula_in_every_state() {
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    let schema=serde_json::from_value(json!([{"field":"a","field_type":"Text","index_lexical":true,"store":true,"boost":2},{"field":"b","field_type":"Text","index_lexical":true,"store":true,"boost":4}])).unwrap();
-    let mut index = create_index(&path, meta, &schema, 11, true, Some(1))
-        .await
+    let schema: Vec<anyseek::index::SchemaField>=serde_json::from_value(json!([{"field":"a","field_type":"Text","index_lexical":true,"store":true,"boost":2},{"field":"b","field_type":"Text","index_lexical":true,"store":true,"boost":4}])).unwrap();
+    let mut index = Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await)
         .unwrap();
-    index
-        .index_documents(vec![
+    records::insert(&index, vec![
             serde_json::from_value(json!({"a":"alpha","b":"alpha"})).unwrap(),
             serde_json::from_value(json!({"a":"beta","b":"beta"})).unwrap(),
         ])
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while index.read().await.indexed_doc_count().await != 2 {
+        while index.statistics().await.unwrap().physical_versions != 2 {
             tokio::task::yield_now().await;
         }
     })
@@ -51,40 +48,24 @@ async fn boosted_single_term_matches_formula_in_every_state() {
     let expected = 6.0 * 2.0_f64.ln() * 2.2 / (1.0 + 1.2 * (0.25 + 0.75 / 2.0));
     for stage in 0..3 {
         if stage == 1 {
-            index.commit().await.unwrap();
+            index.compact_journal().await.unwrap();
         }
         if stage == 2 {
-            index.close().await.unwrap();
+            
             drop(index);
-            index = open_index(&path).await.unwrap();
+            index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
         }
-        let x = index
-            .search(
-                "alpha".into(),
-                None,
-                QueryType::Union,
-                SearchMode::Lexical,
-                false,
-                0,
-                10,
-                ResultType::TopkCount,
-                stage == 0,
-                vec![],
-                vec![],
-                vec![],
-            )
-            .await;
-        assert!(x.error.is_none());
-        assert_eq!(x.result_count_total, 1);
-        assert_eq!(x.results.len(), 1);
-        assert_eq!(x.results[0].doc_id, 0);
+        let x = index.query(RecordQuery {text:"alpha".into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
+        assert_eq!(x.count_total, 1);
+        assert_eq!(x.hits.len(), 1);
+        assert_eq!(x.hits[0].record.record_id.parse::<usize>().unwrap(), 0);
         assert!(
-            (x.results[0].score as f64 - expected).abs() < 2e-6,
+            (x.hits[0].score as f64 - expected).abs() < 2e-6,
             "stage={stage}, actual={}",
-            x.results[0].score
+            x.hits[0].score
         );
     }
-    index.close().await.unwrap();
+    
     drop(index);
     std::fs::remove_dir_all(path).unwrap();
 }

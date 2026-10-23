@@ -1,15 +1,17 @@
 #![cfg(feature = "server")]
-//! A closer excluded vector must not consume the filtered result window.
+use anyseek::record::RecordSearch;
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+
+// A closer excluded vector must not consume the filtered result window.
 use anyseek::server::api_types::SearchRequestObject;
 use anyseek::{
-    commit::Commit,
     index::{
-        AccessType, Close, Clustering, DeleteDocument, Document, DocumentCompression,
-        FrequentwordType, IndexArc, IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet,
-        SchemaField, StopwordType, TokenizerType, UpdateDocument,
-        create_index, open_index,
-    },
-    search::{ResultObject, Search},
+        AccessType, Clustering, Document, DocumentCompression,
+        FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet,
+        SchemaField, StopwordType, TokenizerType, 
+        },
+
     vector::{Embedding, Inference, Precision, Quantization},
     vector_similarity::VectorSimilarity,
 };
@@ -55,56 +57,28 @@ fn mode(name: &str, ann: Value) -> Value {
         json!({name:{"ann_mode":ann,"similarity_threshold":null}})
     }
 }
-async fn query(
-    index: &IndexArc,
+async fn try_query(
+    index: &RecordPartition,
     name: &str,
     filter: Value,
     realtime: bool,
     length: usize,
     ann: Value,
-) -> ResultObject {
+) -> Result<RecordSearch, anyseek::record::RecordError> {
     let r: SearchRequestObject = serde_json::from_value(json!({"query":"common", "length":length,
         "filter":filter}))
     .unwrap();
-    index
-        .search(
-            r.query_string.clone(),
-            if name == "Lexical" {
+    index.query(RecordQuery {text:r.query_string.clone(),vector:if name == "Lexical" {
                 None
             } else {
                 Some(Embedding::F32(vec![1., 0., 0.]))
-            },
-            r.query_type(),
-            serde_json::from_value(mode(name, ann.clone())).unwrap(),
-            false,
-            r.offset,
-            r.length,
-            r.result_type(),
-            realtime,
-            r.field_filter,
-            r.facet_filter,
-            r.result_sort,
-        )
-        .await
+            },query_type:r.query_type(),mode:serde_json::from_value(mode(name, ann.clone())).unwrap(),offset:r.offset,length:r.length,result_type:r.result_type(),fields:r.field_filter,filters:r.facet_filter,sort:r.result_sort,temporal:None}).await
 }
-async fn labels(index: &IndexArc, result: &ResultObject, realtime: bool) -> Vec<usize> {
-    assert!(result.error.is_none(), "{:?}", result.error);
-    let mut labels = Vec::new();
-    for hit in &result.results {
-        labels.push(
-            index
-                .read()
-                .await
-                .get_document(hit.doc_id, realtime, &HashSet::new())
-                .await
-                .unwrap()["label"]
-                .as_u64()
-                .unwrap() as usize,
-        );
-    }
-    labels
+async fn query(index: &RecordPartition, mode: &str, filter: Value, realtime: bool, length: usize, ann: Value) -> RecordSearch {try_query(index,mode,filter,realtime,length,ann).await.unwrap()}
+async fn labels(_index: &RecordPartition, result: &RecordSearch, _realtime: bool) -> Vec<usize> {
+    result.hits.iter().map(|hit| hit.record.document.as_ref().unwrap()["label"].as_u64().unwrap() as usize).collect()
 }
-async fn check(index: &IndexArc, realtime: bool, removed: &[usize]) {
+async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
     let mut cases = vec![
         (
             json!([{"String16":{"field":"category","filter":["allowed"]}}]),
@@ -198,11 +172,9 @@ async fn check(index: &IndexArc, realtime: bool, removed: &[usize]) {
     ] {
         for name in ["Lexical", "Vector", "Hybrid"] {
             assert!(
-                query(index, name, bad.clone(), realtime, 3, json!("All"))
+                try_query(index, name, bad.clone(), realtime, 3, json!("All"))
                     .await
-                    .error
-                    .as_ref()
-                    .unwrap()
+                    .unwrap_err().to_string()
                     .contains("facet_filter")
             );
         }
@@ -237,16 +209,14 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
                 similarity: VectorSimilarity::Cosine,
             },
         };
-        let index = create_index(&path, meta, &schema(), 11, true, Some(shards))
-            .await
+        let index = Ok::<_, String>(records::create(&path, meta, (&schema()).to_vec()).await)
             .unwrap();
-        index
-            .index_documents((0..24).map(doc).collect())
+        records::insert(&index, (0..24).map(doc).collect())
             .await
             .unwrap();
         for attempt in 0..300 {
             let r = query(&index, "Lexical", json!([]), true, 30, json!("All")).await;
-            if r.results.len() == 24 {
+            if r.hits.len() == 24 {
                 break;
             }
             assert!(attempt < 299, "index queue did not finish");
@@ -258,15 +228,15 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
         let map: HashMap<_, _> = labels(&index, &all, true)
             .await
             .into_iter()
-            .zip(all.results.iter().map(|hit| hit.doc_id as u64))
+            .zip(all.hits.iter().map(|hit| hit.record.record_id.parse::<usize>().unwrap()))
             .collect();
-        index.delete_document(map[&23]).await;
+        records::delete(&index, vec![map[&23]]).await;
         check(&index, true, &[23]).await;
-        index.commit().await.unwrap();
+        index.compact_journal().await.unwrap();
         check(&index, false, &[23]).await;
-        index.delete_document(map[&22]).await;
-        index.update_document((map[&21], doc(25))).await.unwrap();
-        index.commit().await.unwrap();
+        records::delete(&index, vec![map[&22]]).await;
+        records::update(&index, map[&21], doc(25)).await;
+        index.compact_journal().await.unwrap();
         // Updated/deleted IDs do not retain old metadata or old vectors.
         for name in ["Lexical", "Vector", "Hybrid"] {
             let r = query(
@@ -290,9 +260,9 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             .await;
             assert_eq!(labels(&index, &r, false).await, vec![25]);
         }
-        index.close().await.unwrap();
+        
         drop(index);
-        let index = open_index(&path).await.unwrap();
+        let index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
         for name in ["Lexical", "Vector", "Hybrid"] {
             let r = query(
                 &index,
@@ -305,7 +275,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             .await;
             assert_eq!(labels(&index, &r, false).await, vec![25]);
         }
-        index.close().await.unwrap();
+        
         drop(index);
         fs::remove_dir_all(path).unwrap();
     }
@@ -362,8 +332,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             };
             let mut vector_schema = schema();
             vector_schema.push(serde_json::from_value(json!({"field":"other_vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true})).unwrap());
-            let index = create_index(&path, config, &vector_schema, 11, true, Some(1))
-                .await
+            let index = Ok::<_, String>(records::create(&path, config, (&vector_schema).to_vec()).await)
                 .unwrap();
             let mut docs: Vec<_> = (0..24).map(doc).collect();
             for (i, d) in docs.iter_mut().enumerate() {
@@ -379,8 +348,8 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                     d.insert("vector".into(), json!([24, i, 0]));
                 }
             }
-            index.index_documents(docs).await.unwrap();
-            index.commit().await.unwrap();
+            records::insert(&index, docs).await.unwrap();
+            index.compact_journal().await.unwrap();
             let predicate = json!([{"String16":{"field":"category","filter":["allowed"]}}]);
             for name in ["Vector", "Hybrid"] {
                 for ann in [
@@ -395,22 +364,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                     } else {
                         Embedding::F32(vec![1., 0., 0.])
                     };
-                    let result = index
-                        .search(
-                            r.query_string.clone(),
-                            Some(embedding),
-                            r.query_type(),
-                            serde_json::from_value(mode(name, ann.clone())).unwrap(),
-                            false,
-                            0,
-                            r.length,
-                            r.result_type(),
-                            false,
-                            r.field_filter,
-                            r.facet_filter,
-                            vec![],
-                        )
-                        .await;
+                    let result = index.query(RecordQuery {text:r.query_string.clone(),vector:Some(embedding),query_type:r.query_type(),mode:serde_json::from_value(mode(name, ann.clone())).unwrap(),offset:0,length:r.length,result_type:r.result_type(),fields:r.field_filter,filters:r.facet_filter,sort:vec![],temporal:None}).await.unwrap();
                     let actual = labels(&index, &result, false).await;
                     assert!(
                         actual.iter().all(|i| *i >= 16 && *i < 24),
@@ -433,7 +387,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                     }
                 }
             }
-            index.write().await.clear_index().await;
+            records::clear(&index).await;
             let mut replacement = doc(1);
             replacement.insert(
                 "other_vector".into(),
@@ -446,28 +400,13 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             if precision == Precision::I8 {
                 replacement.insert("vector".into(), json!([24, 1, 0]));
             }
-            index.index_documents(vec![replacement]).await.unwrap();
-            index.commit().await.unwrap();
+            records::insert(&index, vec![replacement]).await.unwrap();
+            index.compact_journal().await.unwrap();
             // The set dictionary reuses ID 0 after clear; old memberships must not survive.
             let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","filter":[{"StringSet32":{"field":"tags","filter":["even"]}}]})).unwrap();
-            let result = index
-                .search(
-                    r.query_string.clone(),
-                    None,
-                    r.query_type(),
-                    r.search_mode(std::num::NonZeroUsize::new(anyseek::server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(),
-                    false,
-                    0,
-                    10,
-                    r.result_type(),
-                    false,
-                    vec![],
-                    r.facet_filter,
-                    vec![],
-                )
-                .await;
+            let result = index.query(RecordQuery {text:r.query_string.clone(),vector:None,query_type:r.query_type(),mode:r.search_mode(std::num::NonZeroUsize::new(anyseek::server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(),offset:0,length:10,result_type:r.result_type(),fields:vec![],filters:r.facet_filter,sort:vec![],temporal:None}).await.unwrap();
             assert!(labels(&index, &result, false).await.is_empty());
-            index.close().await.unwrap();
+            
             drop(index);
             fs::remove_dir_all(path).unwrap();
         }

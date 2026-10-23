@@ -1,6 +1,6 @@
 # Issue #80 实施记录
 
-本分支是进行中的实现，**不是完成声明**。第六阶段已经把 Record 的生产全文构建/查询接到 Tantivy：旧 IndexArc 在 Record 路径仅保存向量与元数据，不再构建词法 postings；冻结包与尾部均有原生组件。旧低层公开 IndexArc 及其全文代码仍未清理。新服务二进制的 HTTP/S3 与 Windows 验收尚未完成。
+本分支是进行中的实现，**不是完成声明**。Record 生产全文已使用 Tantivy；旧公开全文入口和执行/格式模块已删除，向量/metadata已独立。外部集成测试迁移后的全目标编译已恢复通过，最终运行回归、HTTP/S3 与 Windows 验收仍待完成。历史阶段按时间保留，不代表最新验收状态。
 
 ## 可复核基线
 
@@ -251,3 +251,19 @@ Tantivy自主merge改为关闭：其内部合并分配不能由当前owned build
 核心测试已迁移旧Corpus/heap/字典断言到实际Record或独立membership契约；中文分词位置断言保留，中文短语检索改经Record写入/compaction/重开。核心库check成功，lib tests --no-run成功；生产运行时专项6 passed / 0 failed（1.64秒），包含实际写入→即时查询→checkpoint→重开、纯文本、新组件无旧文件、混合计数和零权重向量。该结果对应本阶段源码，不是旧服务二进制结果。
 
 此提交是明确的中间检查点，不是可发布候选：外部集成测试仍引用已删除的公开低层API，尚待迁移，未运行新代码all-targets；旧微测试残留文件和无用依赖/文档还需清理。component描述符读取目前在读取后检查大小，必须改为读取前的大小/预算接纳；格式和取消/输出/download预算审计尚待完成。完整HTTP租约清理状态交互、原15秒超时证据及最终新二进制SQLite/S3/备份GC矩阵仍未收尾。Windows、真实S3、系统断电仍未运行。检查点时没有在运行的测试/构建进程；未推送、发布、合入或关闭issue。
+
+## 第十阶段检查点：外部测试迁移恢复编译，清理旧依赖，运行回归中
+
+已把外部集成测试的旧公开创建/写入/检索/删除接口迁移到RecordPartition。测试辅助common/records.rs仅调用公共Record写入、版本条件删除/更新与统计，不实现旧引擎兼容层。实际全目标 `cargo check -p anyseek --all-targets --features server,fault-injection --keep-going` 退出0，修复了上阶段整体无法编译的状态。随后删除残留旧模块微测试、清理依赖后启动全目标运行，已完成编译并进入测试。
+
+迁移保留N-gram字面公式、BM25F/Proximity、NOT、规范化/原文、稳定排序、RRF、向量精度/量化/阈值、元数据过滤、删除计数及重开回归。Record查询结果使用稳定ID和规范Payload；错误用Result；已成功写入的可见性不取决于旧include_uncommitted参数。原Record的active::scoring_df在活动集合存在时已覆盖物理压缩DF，因此100/104/105条评分边界现在断言精确活动DF，而非旧低层96/104量化值，生产公式未改变。canonical Payload即使store:false或字段不在派生schema也保留原文；HTTP投影应由HTTP验收覆盖。
+
+旧65,536倒排块、Bitmap内部编码和70k物理ordinal夹具不再假装验证已删除编码；迁移保留独立成员集合/排序/计数/公式，缩小为Record限额内数据。真实向量物理块边界仍由核心record_incremental_crosses_physical_block_with_retired_history覆盖。旧clear复用ordinal的测试尚需按稳定ID不复用审查运行结果；不能把机械迁移编译通过视作行为验收。完整有效覆盖的逐项复核仍在进行。
+
+component.json在读取前通过metadata限制64MiB，并在读取/解析前预留保守8倍解析空间的全局与服务额度；有界读取检测文件长度变化。长期组件内存、I/O及取消/output/download完整审计尚未结束。物理删除了已取消编译的scoring_buffer_tests、scoring_order_tests、field_length_tests、warmup_cache_tests、commit_io_tests；去掉snap、smallvec、async-recursion直接依赖。更新公共模块说明、FEATURES、字段长度与持久化格式文档；历史实现记录按阶段保留。
+
+实测：第一组迁移测试共11 passed / 0 failed（N-gram DF2、flags3、Proximity1、NOT1、规范化4），日志 `/tmp/anyseek80-phase10-text.log`；随后又有清理改动，因此仍在最终全量重跑。当前全量日志 `/tmp/anyseek80-phase10-all-tests.log`：核心229 passed / 0 failed / 12 ignored（105.15秒），服务15 passed / 0 failed（2.14秒）。检查点时外部bitmap_delete_consistency仍运行，不能宣称全部外部回归通过。命令 `CARGO_INCREMENTAL=0 cargo test -p anyseek --all-targets --features server,fault-injection --no-fail-fast`；session96805，cargo PID203821，当前测试PID210346。下一阶段先收取结果，不重复启动或覆盖正在执行的测试二进制。
+
+构建曾因32GiB盘耗尽失败。只清理本独立工作区target/debug/incremental（约11GiB）和本次已生成替代版本的56个旧可执行缓存（约15.7GiB），保留日志/检查点及当前测试二进制。清理清单 `/tmp/anyseek80-phase10-cache-cleanup.txt`；没有触碰旧任务工作区或部署数据。
+
+HTTP尚未用本轮二进制复现。阅读lease清理路径确认publish_anchor_state在healthy时失败可留下pending并被吞掉，需要下一轮记录具体错误、复现全套状态交互；这只是诊断线索，未确认根因，未放宽断言。先前15秒恢复超时也未闭环。下一步收取全量运行并修复真实失败，检查剩余测试旧状态预期，再完成生命周期审计、doctests/no-default及新服务二进制默认15秒完整HTTP和S3矩阵。Windows、真实S3、系统断电未运行；不发布、推送、合入或关闭issue。
