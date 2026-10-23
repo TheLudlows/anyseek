@@ -50,7 +50,8 @@ pub(crate) async fn search(
     rrf.validate().map_err(RecordError::Rejected)?;
     let hybrid = !matches!(mode, SearchMode::Lexical);
     let mut vector_result = ResultObject::default();
-    if hybrid && rrf.vector_weight > 0.0 {
+    // Weights control rank contribution, not channel counts or validation.
+    if hybrid {
         let vector_mode = match &mode {
             SearchMode::Hybrid {
                 similarity_threshold,

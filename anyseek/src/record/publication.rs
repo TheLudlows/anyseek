@@ -29,7 +29,7 @@ impl Inner {
         if document.is_some() { affected.remove(&receipt.record_id); }
         let old_location = self.locations.get(&receipt.record_id).copied();
         if let Some(document) = &document {
-            let id=self.index.append(receipt.record_id.clone(),receipt.version,receipt.seq,temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms })).await.map_err(|_|RecordError::DurablePending(receipt.seq))?;
+            let id=self.index.append(receipt.record_id.clone(),receipt.version,receipt.seq,temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms })).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
             #[cfg(test)]
             if self.fail_publication_stage == 1 {
                 return Err(RecordError::DurablePending(receipt.seq));
@@ -41,11 +41,11 @@ impl Inner {
             self.locations.remove(&receipt.record_id);
         }
         if let Some(old_id) = old_location {
-            self.index.retire(old_id).await.map_err(|_|RecordError::DurablePending(receipt.seq))?;
+            self.index.retire(old_id).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
         }
         for id in affected {
             if let Some(ordinal) = self.locations.remove(&id) {
-                self.index.retire(ordinal).await.map_err(|_|RecordError::DurablePending(receipt.seq))?;
+                self.index.retire(ordinal).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
             }
         }
         #[cfg(test)]
@@ -78,12 +78,12 @@ impl Inner {
             let retired: Vec<_> = self.locations.keys().filter(|id| visible.get(*id) != Some(&true)).cloned().collect();
             for id in retired {
                 if let Some(ordinal) = self.locations.remove(&id) {
-                    self.index.retire(ordinal).await.map_err(|_|RecordError::DurablePending(applied.receipt.seq))?;
+                    self.index.retire(ordinal).await.map_err(|error| { log::error!("Record generation publication failed at sequence {}: {:?}", applied.receipt.seq, error); RecordError::DurablePending(applied.receipt.seq) })?;
                 }
             }
             for (id, record) in next.records.iter().filter(|(id, _)| !self.state.records.contains_key(*id)) {
                 if visible.get(id) != Some(&true) { return Err(RecordError::DurablePending(applied.receipt.seq)); }
-                let ordinal=self.index.append(id.clone(),record.version,applied.receipt.seq,temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)).await.map_err(|_|RecordError::DurablePending(applied.receipt.seq))?;
+                let ordinal=self.index.append(id.clone(),record.version,applied.receipt.seq,temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)).await.map_err(|error| { log::error!("Record generation publication failed at sequence {}: {:?}", applied.receipt.seq, error); RecordError::DurablePending(applied.receipt.seq) })?;
                 if self.ordinals.len()<=ordinal {self.ordinals.resize(ordinal+1,String::new());}
                 self.ordinals[ordinal]=id.clone();self.locations.insert(id.clone(),ordinal);
                 #[cfg(test)]

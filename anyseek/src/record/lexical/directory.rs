@@ -17,6 +17,11 @@ use tantivy::directory::{
     error::{DeleteError, LockError, OpenReadError, OpenWriteError},
 };
 
+// Native merge, indexing and reload may overlap. Serialize their short filesystem
+// operations before service admission so they cannot reject one another mid-commit.
+// This gate does not retain an I/O lease between operations.
+static NATIVE_IO: Mutex<()> = Mutex::new(());
+
 struct Ledger {
     written: u64,
     paths: BTreeSet<PathBuf>,
@@ -55,12 +60,14 @@ impl Budget {
         // refund charged traffic. Each new private build gets a fresh ledger.
         Ok(())
     }
-    fn io(&self) -> io::Result<Option<resources::Lease>> {
-        self.scope
+    fn io(&self) -> io::Result<(Option<resources::Lease>, std::sync::MutexGuard<'static, ()>)> {
+        let gate = NATIVE_IO.lock().map_err(|_| io::Error::other("native I/O gate poisoned"))?;
+        let lease = self.scope
             .as_ref()
             .map(|s| s.io())
             .transpose()
-            .map_err(io::Error::other)
+            .map_err(io::Error::other)?;
+        Ok((lease, gate))
     }
 }
 
@@ -219,6 +226,26 @@ impl Directory for BudgetDirectory {
 mod tests {
     use super::*;
     use crate::record::lexical::tests::Temp;
+
+    #[tokio::test]
+    async fn native_workers_serialize_single_subject_io_capacity() {
+        let root = Temp::new();
+        std::fs::create_dir(&root.0).unwrap();
+        let governor = Arc::new(resources::Governor::default());
+        let scope = governor.admit("native-io".into(), resources::Lane::Foreground, 0).unwrap();
+        let directory = scope.run(async { BudgetDirectory::persistent(&root.0, 1024, 8, 0).unwrap() }).await;
+        directory.atomic_write(Path::new("a"), b"content").unwrap();
+        std::thread::scope(|threads| {
+            for _ in 0..8 {
+                let directory = &directory;
+                threads.spawn(move || {
+                    for _ in 0..100 {
+                        assert_eq!(directory.atomic_read(Path::new("a")).unwrap(), b"content");
+                    }
+                });
+            }
+        });
+    }
 
     #[test]
     fn reserve_before_native_write_and_no_refund_on_delete() {

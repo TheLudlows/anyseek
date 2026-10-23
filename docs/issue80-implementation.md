@@ -203,3 +203,19 @@ git diff --check
 - 当前生产Runtime与前期NativePackage构建辅助均属同一Tantivy编码；后续应合并重复辅助路径、收敛接口，不保留多引擎框架。
 
 第六阶段最后的纵向/请求slot专项2 passed / 0 failed（0.64秒），覆盖末尾Background计费调整。当前无后台测试进程。
+
+## 第七阶段：切换后的服务验收与 I/O 竞争修复
+
+生产检索已在第六阶段切换，本阶段首先使用新服务二进制跑 HTTP 和 SQLite/S3 fixture。S3 storage 套件完整退出0，262.215秒，`all_requested_checks_passed=true`、`real_endpoint_exercised=false`，二进制 SHA256 `8add9f8620f8e0df3f1849017bd6369d2ec96b3047fd2ad4464e4cd409bd3db2`，报告 `target/issue80-phase7/s3-storage.json`。覆盖 checkpoint 与未索引 tail 的冷缓存词法/向量/混合恢复、SQLite 发布故障、接管各边界、远端 feed floor、联合备份中断恢复/命名空间隔离/回收以及完整服务归档恢复。它是原生切换后的证据，但早于本阶段后续修复，不能冒充最终二进制全矩阵验收。
+
+HTTP 暴露两处真实问题：纯文本集合的 vector/metadata 组件没有 indexed field，旧初始化的 `len()-1` 下溢；现改为饱和减法，新增纯文本 Record 写入/查询/checkpoint/重开测试。随后 HTTP 通过向量后补、来源修订、generation 基本测试，但 generation 故障重启时返回 DurablePending(15)。增加不包含文档正文的组件错误日志后，定位为 native reload 打开 term 文件时 I/O admission Busy：原生 merge/index/reload 内部线程竞争同一主体仅1个Background I/O额度。
+
+为避免一次已接纳的 native commit 因自身并发而拒绝，本阶段为原生短文件操作增加共享串行 gate，在 gate 内获取服务 I/O 额度，释放额度后才解锁；不扩大服务额度，不在操作间保留额度。全进程串行化是明确维护成本，仍需观察对服务吞吐的影响，本任务不展开性能专项。其他非原生工作耗尽额度时仍可拒绝，不能声称消除了全部资源拒绝。新增8线程各100次读取的单主体额度回归。首次 gate 构建期间修改过 guard/lease 释放顺序，其 HTTP 仍失败；以最终重跑结果为准。
+
+同时修正 WeightedHybrid 的零向量权重：仍执行向量计数和验证，只禁止其 RRF 贡献，保留旧实际契约。新增两条文档（一条alpha、一条beta）在零向量权重时返回1个关键词hit但总数2的写后/checkpoint/重开回归。跨包 `max(global counts)` 与旧 `sum(per-shard max)` 的布局相关计数差异尚未解决，不能将此回归泛化为完整混合计数验收。
+
+Runtime 身份 manifest 写入改走同一个计费 Directory 的原子写入与目录同步，计入文件/累计写入预算，不再直接绕过预算用 std::File。固定 Searcher 的内存估计纳入 ID 字符串长度，读取长度行拒绝超过原生 MAX_TOKENS 的值。尚需完整核对 Analyzer、身份长期持有/序列化临时副本、merge/download/output 等额度与取消生命周期；并非本阶段已全部完成。
+
+旧公开低层 create_index/open_index/IndexArc、Commit/Search trait、iterator 的去留已提出具体 API 选择，待答复：推荐 RecordPartition 为唯一公开存储检索入口，保留查询/评分/schema/向量配置类型，删除旧低层全文执行器；这将要求直接使用旧 Rust 接口的调用方改用 Record API，默认 HTTP 不变。未收到答复前未静默删除公开接口。Windows CI、真实S3和系统断电均未运行；没有推送、发布PR、合入或关闭issue。
+
+本阶段最终 native 专项25 passed / 0 failed（20.03秒），已覆盖manifest计费改动。最终 gate 的 HTTP 重跑通过此前失败的generation四类故障、source及revision故障，随后在接管恢复的本地15秒就绪期限超时，未出现新的明确组件错误。没有据此宣称HTTP通过：脚本新增可选 `--startup-timeout`（默认仍15秒），当前使用60秒诊断重跑，超过5秒时打印实际READY耗时；完整all-targets同时运行。检查点若在运行中，须收取日志而不是重复启动。

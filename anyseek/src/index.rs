@@ -1598,7 +1598,7 @@ pub(crate) fn create_shard(
             }
 
             let indexed_field_id_bits =
-                (usize::BITS - (indexed_field_vec.len() - 1).leading_zeros()) as usize;
+                (usize::BITS - indexed_field_vec.len().saturating_sub(1).leading_zeros()) as usize;
 
             let index_file_mmap;
             let docstore_file_mmap = {

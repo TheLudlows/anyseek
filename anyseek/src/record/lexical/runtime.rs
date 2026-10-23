@@ -7,8 +7,8 @@ use tokio::sync::Mutex;
 
 pub(crate) struct Runtime {
     pub(crate) config: RecordConfig,
-    path: std::path::PathBuf,
     data: Mutex<Data>,
+    directory: Option<super::directory::BudgetDirectory>,
     pin: Arc<crate::record::package_pins::Pin>,
 }
 struct Data {
@@ -47,7 +47,7 @@ impl Runtime {
             .ok_or_else(|| storage("native disk budget overflow"))?;
         let directory =
             super::directory::BudgetDirectory::persistent(path, limit, 65536, WRITER_BYTES as u64)?;
-        let index = Index::create(directory, schema, Default::default()).map_err(storage)?;
+        let index = Index::create(directory.clone(), schema, Default::default()).map_err(storage)?;
         let writer = index
             .writer_with_options(
                 tantivy::indexer::IndexWriterOptions::builder()
@@ -64,7 +64,7 @@ impl Runtime {
             .map_err(storage)?;
         Ok(Arc::new(Self {
             config: config.clone(),
-            path: path.to_owned(),
+            directory: Some(directory),
             data: Mutex::new(Data {
                 index,
                 reader,
@@ -104,7 +104,7 @@ impl Runtime {
         snapshot._pin = Some(pin.clone());
         Ok(Arc::new(Self {
             config: config.clone(),
-            path: path.to_owned(),
+            directory: None,
             data: Mutex::new(Data {
                 index,
                 reader,
@@ -215,11 +215,10 @@ impl Runtime {
         if bytes.len() as u64 > self.config.max_journal_bytes {
             return Err(storage("native identity manifest budget exceeded"));
         }
-        use std::io::Write;
-        let mut file =
-            std::fs::File::create(self.path.join("record-native.json")).map_err(storage)?;
-        file.write_all(&bytes).map_err(storage)?;
-        file.sync_all().map_err(storage)?;
+        use tantivy::directory::Directory;
+        let directory = self.directory.as_ref().ok_or_else(|| storage("immutable lexical package"))?;
+        directory.atomic_write(Path::new("record-native.json"), &bytes).map_err(storage)?;
+        directory.sync_directory().map_err(storage)?;
         Ok(())
     }
     pub(crate) async fn flush(&self) -> Result<(), RecordError> {
@@ -241,6 +240,7 @@ fn capture(searcher: Searcher, manifest: &Manifest) -> Result<Snapshot, RecordEr
     }
     let estimate = (manifest.identities.len() as u64)
         .checked_mul(128 + fields.len() as u64 * 32)
+        .and_then(|n| manifest.identities.iter().try_fold(n, |n, id| n.checked_add(id.id.len() as u64)))
         .and_then(|n| n.checked_add(65536))
         .ok_or_else(|| storage("native view memory overflow"))?;
     let memory = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
@@ -272,7 +272,7 @@ fn capture(searcher: Searcher, manifest: &Manifest) -> Result<Snapshot, RecordEr
             let mut row = Vec::new();
             for column in &columns {
                 let values = column.values_for_doc(doc).collect::<Vec<_>>();
-                if values.len() != 1 {
+                if values.len() != 1 || values[0] > MAX_TOKENS as u64 {
                     return Err(storage("native runtime length mismatch"));
                 }
                 row.push(values[0]);
@@ -355,6 +355,30 @@ mod tests {
         assert_eq!(query(&reopened, SearchMode::Lexical).await.count_total, 2);
     }
     #[tokio::test]
+    async fn zero_weight_vector_preserves_count_before_and_after_checkpoint() {
+        let root = super::super::tests::Temp::new();
+        let cfg = config();
+        let p = RecordPartition::create(&root.0, cfg.clone()).await.unwrap();
+        for (id, body) in [("a", "alpha"), ("b", "beta")] {
+            p.write(write(id, id, body, ExpectedVersion::Absent)).await.unwrap();
+        }
+        let mode = SearchMode::WeightedHybrid {
+            similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All,
+            rrf: crate::search::RrfOptions { vector_weight: 0.0, ..Default::default() },
+        };
+        for checkpoint in [false, true] {
+            if checkpoint { p.compact_journal().await.unwrap(); }
+            let result = query(&p, mode.clone()).await;
+            assert_eq!(result.count_total, 2);
+            assert_eq!(result.hits.len(), 1);
+            assert_eq!(result.hits[0].record.record_id, "a");
+        }
+        drop(p);
+        let p = RecordPartition::open(&root.0, cfg.max_journal_bytes).await.unwrap();
+        assert_eq!(query(&p, mode).await.count_total, 2);
+    }
+
+    #[tokio::test]
     async fn retained_native_writer_releases_request_slot() {
         let root = super::super::tests::Temp::new();
         let governor = Arc::new(crate::resources::Governor::default());
@@ -392,4 +416,19 @@ mod tests {
         drop(slots);
         drop(partition);
     }
+    #[tokio::test]
+    async fn text_only_record_uses_zero_field_metadata_component_and_recovers() {
+        let root=super::super::tests::Temp::new();
+        let mut cfg=config();cfg.schema.retain(|field|field.field=="body");
+        cfg.index.inference=crate::vector::Inference::None;cfg.embedding_space_id=None;
+        let p=RecordPartition::create(&root.0,cfg.clone()).await.unwrap();
+        let mut request=write("a","a","alpha",ExpectedVersion::Absent);
+        request.document.as_mut().unwrap().remove("vector");
+        p.write(request).await.unwrap();
+        assert_eq!(query(&p,SearchMode::Lexical).await.count_total,1);
+        p.compact_journal().await.unwrap();drop(p);
+        let p=RecordPartition::open(&root.0,cfg.max_journal_bytes).await.unwrap();
+        assert_eq!(query(&p,SearchMode::Lexical).await.count_total,1);
+    }
+
 }

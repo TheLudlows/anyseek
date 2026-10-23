@@ -8,7 +8,7 @@ def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','feed','indexer','authorization']);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','feed','indexer','authorization']);args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
     with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
@@ -25,11 +25,15 @@ def main():
                     for cache in [*root.glob('collection-*'), *root.glob('*.object-cache')]:
                         if cache.is_dir():shutil.rmtree(cache)
             process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**(fault_env or {})},stdout=log,stderr=log)
-            for _ in range(2400 if args.cold_restarts else 300):
+            started=time.monotonic()
+            for _ in range(int(max(args.startup_timeout,120 if args.cold_restarts else 0)/.05)):
                 if process.poll() is not None:
                     log.seek(0);raise AssertionError(log.read())
                 try:
-                    urllib.request.urlopen(base+'/api/v1/live',timeout=1).read();return
+                    urllib.request.urlopen(base+'/api/v1/live',timeout=1).read()
+                    elapsed=time.monotonic()-started
+                    if elapsed>5:print(f'READY after {elapsed:.3f}s',flush=True)
+                    return
                 except (OSError,urllib.error.URLError):time.sleep(.05)
             log.seek(0);raise AssertionError('server startup timeout: '+log.read()[-8192:])
         def call(method,path,body=None,key=master,status=200):
@@ -534,7 +538,7 @@ def main():
             restored_process=subprocess.Popen([binary,f"index_path={restored['target_root']}",f'local_port={other_port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test'},stdout=log,stderr=log)
             try:
                 base=f'http://127.0.0.1:{other_port}'
-                for _ in range(2400 if args.cold_restarts else 300):
+                for _ in range(int(max(args.startup_timeout,120 if args.cold_restarts else 0)/.05)):
                     if restored_process.poll() is not None:
                         log.seek(0);raise AssertionError(log.read())
                     try:urllib.request.urlopen(base+'/api/v1/live',timeout=1).read();break
