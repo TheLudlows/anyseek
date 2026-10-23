@@ -369,6 +369,8 @@ struct RemotePersistence {
 
 /// Configuration for the first S3-compatible durable Record backend.
 /// Credentials are runtime-only and are never written into SQLite or backup metadata.
+/// Reads use a discardable verified object cache beside `authority_path`, bounded
+/// to 256 MiB / 4096 blocks per authority. Cache failure falls back to the backend.
 #[cfg(feature = "s3-object-store")]
 pub struct S3CompatibleRecordConfig {
     pub authority_path: PathBuf,
@@ -399,7 +401,13 @@ impl RemotePersistence {
         let store = crate::storage::s3_compatible::S3CompatibleStore::connect(
             &config.endpoint, &config.bucket, &config.region, &config.access_key_id,
             &config.secret_access_key, config.allow_http, config.max_object_bytes,
-        ).map_err(|error| storage(error))?;
+        ).map_err(|error| storage(error))?.with_cache(
+            crate::storage::verified_cache::VerifiedCache::new(
+                config.authority_path.with_extension("object-cache"),
+                &[&config.endpoint, &config.bucket, &config.region],
+                crate::storage::verified_cache::DEFAULT_BYTES,
+            ),
+        );
         let authority = crate::storage::sqlite_authority::SqliteAuthority::open(
             &config.authority_path, std::time::Duration::from_secs(5),
         ).map_err(storage)?;
@@ -1051,7 +1059,8 @@ impl RecordPartition {
     }
     /// Open a local partition and reconcile every SQLite-committed S3 log entry
     /// before making its read view available. A missing/corrupt committed object
-    /// fails closed and never falls back to the local cache as authoritative.
+    /// fails closed if neither the backend nor an authenticated exact-reference
+    /// cache copy supplies it. A cached journal never selects the current head.
     #[cfg(feature = "s3-object-store")]
     pub async fn open_s3(
         path: &Path,

@@ -121,6 +121,10 @@ jobs:
           cargo test -p anyseek --features s3-object-store --lib expired_remote_index
       - name: Native catalog authorization and revocation recovery tests
         run: cargo test -p anyseek --lib catalog_
+      - name: Native verified object cache corruption, eviction and cold recovery
+        run: |
+          cargo test -p anyseek --features s3-object-store --lib verified_cache
+          cargo test -p anyseek --features s3-object-store --lib cache_corruption
       - name: Native service output and admission barriers
         run: cargo test -p anyseek --features server record_service::tests
       - name: Build native service

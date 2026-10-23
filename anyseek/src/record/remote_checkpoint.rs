@@ -608,6 +608,48 @@ mod tests {
         results
     }
     #[tokio::test]
+    async fn cache_corruption_and_loss_preserve_checkpoint_tail_and_hidden_evidence() {
+        let (p,_,root,db,clock) = source().await;
+        p.write(source_write("source","s",&[])).await.unwrap();
+        p.write(source_write("derived","d",&[("s",1)])).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let request = write("tail","a","alpha tail",ExpectedVersion::Absent);
+        let receipt = p.write(request.clone()).await.unwrap();
+        let mut deletion = write("delete-source","s","",ExpectedVersion::Match(1)); deletion.document = None;
+        p.write(deletion).await.unwrap();
+        let expected = scores(&p).await;
+        let cache_root = db.with_extension("object-cache");
+        {
+            let mut inner = p.inner.lock().await;
+            let remote = inner.remote.as_mut().unwrap();
+            remote.store = remote.store.clone().with_cache(crate::storage::verified_cache::VerifiedCache::new(
+                cache_root.clone(), &["fixture", "bucket"], 16 * 1024 * 1024,
+            ));
+        }
+        let p = cold(p, &root, clock.clone()).await;
+        assert_eq!(scores(&p).await, expected);
+        let mut damaged = 0;
+        for row in std::fs::read_dir(&cache_root).unwrap() {
+            let row = row.unwrap();
+            if row.file_name().to_string_lossy().starts_with("block-") {
+                std::fs::write(row.path(), b"corrupted cached block").unwrap(); damaged += 1;
+            }
+        }
+        assert!(damaged > 0);
+        let p = cold(p, &root, clock.clone()).await;
+        assert_eq!(scores(&p).await, expected);
+        assert!(p.get("d").await.unwrap().is_none());
+        assert_eq!(p.write(request.clone()).await.unwrap(), receipt);
+        std::fs::remove_dir_all(&cache_root).unwrap();
+        let p = cold(p, &root, clock).await;
+        assert_eq!(scores(&p).await, expected);
+        assert!(p.get("d").await.unwrap().is_none());
+        assert_eq!(p.write(request).await.unwrap(), receipt);
+        drop(p);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[tokio::test]
     async fn background_index_keeps_new_commits_and_hidden_evidence_after_cache_loss() {
         let (p,_,root,_,clock)=source().await;
         p.write(source_write("source","s",&[])).await.unwrap();

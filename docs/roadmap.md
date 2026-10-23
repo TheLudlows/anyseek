@@ -19,7 +19,7 @@ PR #72/#73/#74 已合入，当前源码基线为 `afbe323d`；第 1–6 项实�
 - 多 collection 的前台、下载与后台任务各有并发/队列/内存/I/O 预算，避免热点耗尽全部资源。
 - owner 路由不能替代权威 fence。SQLite 首版仍为唯一持久卷权威；跨主机接管须先定义外部隔离和可用性协议。失联不能回退旧授权/缓存；多节点输出必须与撤权/隐藏屏障有序。
 
-### C1：有界后台 Indexer（开发分支实现，尚未合入）
+### C1：有界后台 Indexer（PR #75 已合入）
 
 目标是在构建索引时继续接收写入，缩短 partition 串行屏障占用，保持既有查询、删除与撤权契约。
 
@@ -29,9 +29,15 @@ PR #72/#73/#74 已合入，当前源码基线为 `afbe323d`；第 1–6 项实�
 4. 保留构建期间新增的完整提交 tail；过期、旧 owner 或基础已变化的任务不得覆盖新状态。
 5. 验收持续写入、索引暂停、重复任务、过期发布、退出恢复、删除与撤权输出；失败不得丢已提交数据。
 
-开发分支已加入 `start_index_committed` / `index_committed`、HTTP PATCH 后台构建、SQLite 构建 epoch/期限/pin、旧 cut 发布与完整新增 tail，以及并发/取消/过期/进程退出回归。当前开发机代理失联，依赖下载失败；通过 [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 的 GitHub CI 验证精确源码提交。CI、评审和合入状态分别跟踪，不因分支实现标记主线完成。
+[PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`，最终提交 `96306e95` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)。已交付 `start_index_committed` / `index_committed`、HTTP PATCH 后台构建、SQLite 构建 epoch/期限/pin、旧 cut 发布与完整新增 tail，以及并发/取消/过期/进程退出回归。合入后主干 CI 单独跟踪。
 
-C1 完成后再推进独立校验缓存和 collection 资源公平。当前完整 State 驻内存及 compaction 串行行为仍是实际限制，不能提前标为已解决。
+### C2：有界校验缓存（开发分支实现，尚未合入）
+
+远端读取按 endpoint/bucket/region、完整对象 key、SHA-256 与精确长度隔离对象块；每次命中重新认证，损坏删除并回源。每 authority 库旁的 `*.object-cache` 目录限 256 MiB / 4096 块，按最早写入淘汰；先清理中断临时文件，删除失败不退额度，非阻塞文件锁协调进程（锁文件位于缓存目录旁，清空缓存不替换锁 inode）。缓存错误不改变提交结果。下载验证完整后同步私有文件、同目录原子发布；PUT 的读后验证始终访问远端，不能由缓存证明远端持久化。
+
+缓存返回独立字节，不暴露文件句柄/mmap；Segment 在另一路径完整校验并映射，因此淘汰不触碰查询中的 mmap。冷恢复仍由当前 SQLite head 选择 manifest + 完整 tail，授权/来源隐藏屏障不从缓存推导。无缓存验收删除 collection 和对象块两类目录。预取与直接映射缓存块后置；本批验证见 PR Checks，不据分支实现标主线完成。
+
+C2 后继续推进 collection 的前台、下载、后台并发/队列/内存/I/O 公平准入。当前完整 State 驻内存及同步 compaction 串行行为仍是实际限制。
 
 ## D：超大 collection，按容量需求后置
 
