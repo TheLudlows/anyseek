@@ -89,19 +89,14 @@ async fn weighted_global_shards() {
         assert_eq!(serde_json::to_value(&old.hits).unwrap(), serde_json::to_value(&new.hits).unwrap());
         for hit in &old.hits {
             let keyword = if hit.record.record_id.parse::<usize>().unwrap() % 2 == 0 { 1.0 / (0.6 + (hit.record.record_id.parse::<usize>().unwrap() / 2) as f32) } else { 0.0 };
-            let vector = if shards > 1 || hit.record.record_id.parse::<usize>().unwrap() < 10 { 1.0 / (0.6 + hit.record.record_id.parse::<usize>().unwrap() as f32) } else { 0.0 };
+            let vector = if hit.record.record_id.parse::<usize>().unwrap() < 10 { 1.0 / (0.6 + hit.record.record_id.parse::<usize>().unwrap() as f32) } else { 0.0 };
             assert_eq!(hit.score.to_bits(), (keyword + vector).to_bits());
         }
-        // Independent default-window oracle: choose three candidates per component,
-        // globally rank each channel, then fuse once. This distinguishes both
-        // missing caps from explicit global caps even with only three output hits.
-        let mut keyword_ids = Vec::new();
-        let mut vector_ids = Vec::new();
-        for component in 0..shards {
-            let start = component * (18 / shards);
-            keyword_ids.extend((start..start + 18 / shards).filter(|id| id % 2 == 0).take(3));
-            vector_ids.extend((start..start + 18 / shards).take(3));
-        }
+        // Independent Record oracle: globally select offset + length per channel,
+        // then fuse once, independent of the one/three-component physical layout.
+        // Baseline search.rs applies this cap whenever all shards have ActiveStatistics.
+        let keyword_ids = vec![0usize, 2, 4];
+        let vector_ids = vec![0usize, 1, 2];
         let mut expected = std::collections::BTreeMap::<usize, f32>::new();
         for channel in [keyword_ids, vector_ids] {
             for (rank, id) in channel.into_iter().enumerate() {
@@ -114,6 +109,9 @@ async fn weighted_global_shards() {
         let small = index.query(RecordQuery {text:"alpha".into(),vector:vector.clone(),query_type:QueryType::Union,mode:weighted(RrfOptions::default()),offset:0,length:3,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
         assert_eq!(small.count_total, 18);
         assert_eq!(small.hits.iter().map(|hit| (hit.record.record_id.parse::<usize>().unwrap(),hit.score.to_bits())).collect::<Vec<_>>(), expected.iter().map(|(id,score)| (*id,score.to_bits())).collect::<Vec<_>>());
+        // Same global window (1 + 2 == 3) must produce a slice of the same ranks.
+        let page_default = index.query(RecordQuery {text:"alpha".into(),vector:vector.clone(),query_type:QueryType::Union,mode:weighted(RrfOptions::default()),offset:1,length:2,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
+        assert_eq!(page_default.hits.iter().map(|hit| (hit.record.record_id.parse::<usize>().unwrap(),hit.score.to_bits())).collect::<Vec<_>>(), expected.iter().skip(1).map(|(id,score)| (*id,score.to_bits())).collect::<Vec<_>>());
         let options = RrfOptions { constant:5.0, keyword_weight:0.5, vector_weight:1.0, keyword_candidates:Some(2), vector_candidates:Some(3) };
         let result = query(&index, weighted(options), vector.clone()).await;
         // Keyword ranks: 0,2. Vector ranks: 0,1,2. Missing keyword hit 1 contributes only vector.

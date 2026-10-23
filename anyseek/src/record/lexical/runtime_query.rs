@@ -83,7 +83,6 @@ pub(crate) async fn search(
                 filters.clone(),
                 vec![],
                 &mut vector_counts,
-                rrf.vector_candidates.is_none(),
             )
             .await;
         if let Some(error) = &vector_result.error {
@@ -233,18 +232,7 @@ pub(crate) async fn search(
     };
     if hybrid {
         let mut fused = BTreeMap::<usize, crate::min_heap::Result>::new();
-        if let Some(cap) = rrf.keyword_candidates {
-            lexical.truncate(cap);
-        } else {
-            // Preserve the existing per-component window before one global RRF.
-            // A missing cap is not an implicit global output-length cap.
-            let mut retained = vec![0usize; n];
-            lexical.retain(|hit| {
-                let count = &mut retained[hit.doc_id % n];
-                *count += 1;
-                *count <= offset + length
-            });
-        }
+        lexical.truncate(rrf.keyword_candidates.unwrap_or(offset + length));
         lexical.sort_by(|a, b| {
             crate::min_heap::rank_with_shards(&shards, b.score, b.doc_id, a.score, a.doc_id)
         });

@@ -531,3 +531,38 @@ workspace and native persistence job deadlines are 120 minutes, reflecting the
 measured over-one-hour suite plus build/HTTP work; the HTTP 15-second readiness
 assertion and fixture sizes remain unchanged. Windows CI, real S3 and system power
 loss remain unrun; no push, draft PR publication, merge or issue closure authorized.
+
+
+## Phase 18 — correct the Record versus removed API contract error
+
+This supersedes the phase-16 RRF diagnosis and the interim phase-17 suggestion to
+change the layout oracle. Commit `79017aa` incorrectly restored the removed
+low-level API's default per-component window to Record. Master baseline
+`3893cd54` search.rs:1238 and :1262 already globally caps both Record channels at
+`offset + length` when all components have active statistics (initialized in
+record.rs:869). The unchanged layout-invariance regression also exists in master
+segment.rs:85–97. Its failure is a production regression, not a bad assertion.
+
+Observed counterexample: active bodies a="alpha alpha alpha omega",
+b="alpha omega omega", c="beta", e="alpha"; all vectors [2,0]. Components
+{a,c}/{b,e}; Hybrid All query alpha/[1,0], offset=1, length=1, no explicit sort.
+The erroneous per-component path gives b=1.0096154 (vector 1/1.6 plus lexical
+1/2.6), while the single-component global-window result is b=0.625. The global
+lexical window excludes b. A single selected cut and one RRF pass alone cannot
+prevent a wrong, layout-dependent candidate pool.
+
+Restore the pre-79017aa production query implementation. Keep the layout oracle
+unchanged. The migrated weighted-RRF fixture retains actual one/three Record
+components, but now uses an independent global-window oracle, same-window default
+pagination, explicit caps, stable ties and reopen assertions. The documentation
+now distinguishes Record defaults from the removed low-level interface. This
+preserves the authorized existing contract; it does not weaken scoring or change
+budget values. Candidate-window results are not globally exact fused recall;
+relation_complete covers adjacency only, never overall retrieval completeness.
+
+Evidence for the erroneous version remains historical: phase-16 core 236 passed,
+1 failed, 12 ignored; server 15 passed. Full HTTP passed in 372.91 s. The first
+indexer command omitted --faults and failed before exercising the product;
+corrected indexer/authorization commands both passed. S3 and doctests were not
+started for that version. Final corrected-version validation must be collected
+separately, without substituting those historical results.
