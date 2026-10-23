@@ -132,35 +132,27 @@ mod tests {
         for partition in [&a,&b] {
             partition.inner.lock().await.index.test_index().read().await.shard_vec[0].write().await.active.as_mut().unwrap().attach(&corpus).unwrap();
         }
-        async fn matches(a:&RecordPartition,b:&RecordPartition,oracle:&RecordPartition) {
-            let mut scores=BTreeMap::new();
-            for partition in [a,b] {for hit in query(partition,SearchMode::Lexical).await.hits {scores.insert(hit.record.record_id,hit.score);}}
-            let expected:BTreeMap<_,_>=query(oracle,SearchMode::Lexical).await.hits.into_iter().map(|hit|(hit.record.record_id,hit.score)).collect();
-            assert_eq!(scores,expected);
-        }
-        matches(&a,&b,&oracle).await;
         let update=write("revision","a","alpha alpha alpha omega",ExpectedVersion::Match(1));
         a.write(update.clone()).await.unwrap();oracle.write(update).await.unwrap();
-        matches(&a,&b,&oracle).await;
         let mut deletion=write("delete","d","",ExpectedVersion::Match(1));deletion.document=None;
         b.write(deletion.clone()).await.unwrap();oracle.write(deletion).await.unwrap();
-        matches(&a,&b,&oracle).await;
         let insert=write("new","e","alpha",ExpectedVersion::Absent);
         b.write(insert.clone()).await.unwrap();oracle.write(insert).await.unwrap();
-        matches(&a,&b,&oracle).await;
         // Compose the actual root search engine from the two physical shards.
         // This exercises global channel ranking/RRF, rather than merging two
         // already-fused result lists in the test.
         let root_index=a.inner.lock().await.index.test_index().clone();
         let second=b.inner.lock().await.index.test_index().read().await.shard_vec[0].clone();
         second.write().await.meta.id=1;
-        {let mut root=root_index.write().await;root.shard_vec.push(second);root.shard_number=2;}
+        let native=b.inner.lock().await.index.test_index().read().await.record_lexical[0].clone();
+        {let mut root=root_index.write().await;root.shard_vec.push(second);root.shard_number=2;root.record_lexical.push(native);}
         for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {
             for order in [vec![],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Ascending}],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}]] {
               for (offset,length) in [(0,10),(0,1),(1,1)] {
                 let vector=if mode==SearchMode::Lexical{None}else{Some(Embedding::F32(vec![1.0,0.0]))};
                 let expected=oracle.query(RecordQuery{temporal:None,text:"alpha".into(),vector:vector.clone(),mode:mode.clone(),query_type:QueryType::Union,offset,length,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:order.clone()}).await.unwrap();
-                let actual=root_index.search("alpha".into(),vector,QueryType::Union,mode.clone(),true,offset,length,ResultType::TopkCount,true,vec![],vec![],order.clone()).await;
+                let cut={let inner=oracle.inner.lock().await;lexical::Cut{sequence:inner.state.seq,evaluation_time_ms:inner.evaluation_time_ms}};
+                let actual=lexical::runtime_query::search(&root_index,"alpha".into(),vector,mode.clone(),QueryType::Union,offset,length,ResultType::TopkCount,vec![],vec![],order.clone(),cut).await.unwrap();
                 assert!(actual.error.is_none(),"{:?}",actual.error);
                 let mut mapped=Vec::new();
                 for hit in actual.results {

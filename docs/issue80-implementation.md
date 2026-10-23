@@ -1,6 +1,6 @@
 # Issue #80 实施记录
 
-本分支是进行中的实现，**不是完成声明**。生产 Record 查询尚未切换到 Tantivy，旧全文实现尚未删除。第四阶段原生包模块已进入正常编译，并与现有生产冻结包共享封存/认证实现；尚未切换 authority 所选择包的构建类型，不引入双写或多引擎选择开关。
+本分支是进行中的实现，**不是完成声明**。第六阶段已经把 Record 的生产全文构建/查询接到 Tantivy：旧 IndexArc 在 Record 路径仅保存向量与元数据，不再构建词法 postings；冻结包与尾部均有原生组件。旧低层公开 IndexArc 及其全文代码仍未清理。新服务二进制的 HTTP/S3 与 Windows 验收尚未完成。
 
 ## 可复核基线
 
@@ -177,3 +177,29 @@ git diff --check
 第五阶段完整核心回归（server,fault-injection）236 passed / 0 failed / 12 ignored，143.24秒。随后把分析器/中文词典的创建移至资源预留之后，追加相关专项回归；此微调不改变发布/查询语义。日志位于 `/tmp/anyseek80-phase5-*.log`，保存副本位于 `target/issue80-phase5/`。
 
 预算顺序修正后的包专项最终结果：server/fault-injection 3 passed/0 failed，无默认feature 3 passed/0 failed，均0.08秒。该阶段测试均已退出，无待收取进程。
+
+## 第六阶段：Record 的真实生产纵向切换
+
+`build_at_selected` 现在把 Record 的旧 retrieval schema 中 `index_lexical` 全部关闭，旧 IndexArc 只构建向量与 metadata；同一批规范 Payload 输入经 Runtime 生成原生 postings，不进行全文双写。普通 publication 的 append 同时传入稳定 ID、业务 version 和本次 sequence 作为索引 revision。向量后补保留业务 version，但形成不同索引 revision。批量构建后一次 native commit；live tail 每次写入 native commit/reload 后捕获固定 Searcher。只有外层 Record durable + visible 协议完成，才开放查询，native commit 不是业务提交。
+
+`Frozen::load` 在认证完整 segment 文件闭包之后打开 `native/`，检查原生格式、完整原配置、身份序号和字段长度映射。tail rotation/多冻结包合成同时搬移原生组件与 vector/metadata 分片。Record checkpoint 格式改为 `RecordCheckpointV13`，anchor manifest 改为2；不读取旧 Record 格式、不迁移、不删除部署数据。原生文件在同一个已认证 segment 闭包中，现有远端文件清单能够包含它们；尚未用新服务二进制完成远端恢复验收。
+
+`RetrievalView::search` 的全文入口改为 native runtime query。在同一业务 cut/evaluation_time 下按 metadata 的精确活动 ordinal 选择原生身份；来源隐藏、stale/TTL、generation 等仍由同一受保护活动视图控制。全局活动 N/DF/解码长度供 BM25F/Proximity 评分，metadata 过滤发生在 Top-K 前。向量通道继续用旧向量执行器，全局一次 RRF；关系融合继续调用同一 Inner 视图。排序复用原 metadata 排序比较器。无词法字段的 schema 现在允许 identity-only native schema；单个实际 indexed field 的 boost 按旧规则取1。
+
+### 新的直接证据
+
+`record_native_write_query_checkpoint_reopen_has_no_legacy_lexical_postings` 通过真实 Record 写入 alpha，立即查询命中；断言旧 metadata Index 的 body.index_lexical=false，且直接调用旧全文执行器返回0条，而 Record 查询返回1条；checkpoint 后、重开后仍返回1条，重开再写入第二条立即返回2条。这证明生产纵向链路实际使用 Tantivy，而不是只编译了组件或仍由旧 postings 提供结果。
+
+扩大后的默认 Record 回归120 passed / 0 failed / 5 ignored（119.29秒）。初轮118/2失败是测试夹具仍只拼接/注入旧 Shard：跨包统计测试手动把旧统计 corpus 挂到两个不同 partition，64K 边界测试只注入旧物理 rows。现已将跨包对照改为组合实际 native + vector 组件，64K 夹具同时通过实际 native writer 注入对应的退休物理历史；未忽略测试或取消断言。所有其他源隐藏、generation、TTL、向量后补、混合/关系融合和恢复默认测试继续执行。
+
+常驻 native writer 使用计费 Directory，限制单 indexing worker、单 merge worker及20MB arena。保留组件的 I/O/字节额度归 Background lane、保留相同subject，不占用已经结束的请求 slot、不长期占用Control预算。Runtime和固定Snapshot pin所属cache/segment路径，释放writer和Searcher后才释放pin；Inner字段释放顺序保持索引先于journal owner。末尾另加请求slot释放专项。
+
+### 尚未完成及需核验的限制
+
+- 未构建/运行切换后的服务HTTP、SQLite/S3冷恢复、backup/GC故障矩阵；旧S3九阶段只证明旧检查点。Windows、真实S3、系统断电仍未运行。
+- 旧低层 IndexArc 全文API/代码仍存在；Record没有旧全文回退，但最终清理尚未执行。
+- 当前live tail每次写入commit/reload，快照身份/长度映射重新读取；尚无维护/延迟成本改善结论。长期资源预算、中文分析器构造成本及高历史量情形还需完整验证。
+- 混合结果计数当前按全局两通道总数max，需专门核验与旧多分片sum(max)布局相关行为的差别；不能把已通过的有限RRF测试泛化为全部API边界已验收。
+- 当前生产Runtime与前期NativePackage构建辅助均属同一Tantivy编码；后续应合并重复辅助路径、收敛接口，不保留多引擎框架。
+
+第六阶段最后的纵向/请求slot专项2 passed / 0 failed（0.64秒），覆盖末尾Background计费调整。当前无后台测试进程。

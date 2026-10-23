@@ -42,6 +42,7 @@ impl RetrievalView {
         {
             return Err(storage("replacement must be a separate single-shard tail"));
         }
+        let native_tail = tail_root.record_lexical.first().cloned().ok_or_else(|| storage("missing native tail"))?;
         let tail_shard = tail_root.shard_vec[0].clone();
         let tail_meta = serde_json::to_value(&tail_root.meta).map_err(storage)?;
         let tail_schema = serde_json::to_value(&tail_root.schema_map).map_err(storage)?;
@@ -141,6 +142,7 @@ impl RetrievalView {
         }
         drop(tail);
         drop(shards);
+        root.record_lexical.insert(0, native_tail);
         root.shard_vec.insert(0, tail_shard);
         root.shard_number = next;
         *ordinals = mapped;
@@ -153,8 +155,11 @@ impl RetrievalView {
     pub(super) async fn append(
         &self,
         key: String,
+        version: u64,
+        revision: u64,
         document: Document,
     ) -> Result<usize, RecordError> {
+        let key_for_native = key.clone();
         let shard = self.tail.read().await.shard_vec[0].clone();
         let local = {
             let mut shard = shard.write().await;
@@ -166,6 +171,8 @@ impl RetrievalView {
             active.keys.push(key);
             local
         };
+        let native = self.tail.read().await.record_lexical[0].clone();
+        native.append(lexical::Identity { id:key_for_native, version, revision }, &document, true).await?;
         self.tail
             .index_documents(vec![document])
             .await
@@ -202,23 +209,13 @@ impl RetrievalView {
         fields: Vec<String>,
         filters: Vec<FacetFilter>,
         sort: Vec<ResultSort>,
+        cut: lexical::Cut,
     ) -> crate::search::ResultObject {
-        self.query
-            .search(
-                text,
-                vector,
-                query_type,
-                mode,
-                empty,
-                offset,
-                length,
-                result_type,
-                uncommitted,
-                fields,
-                filters,
-                sort,
-            )
-            .await
+        let _ = (empty, uncommitted);
+        match lexical::runtime_query::search(&self.query,text,vector,mode,query_type,offset,length,result_type,fields,filters,sort,cut).await {
+            Ok(result)=>result,
+            Err(error)=>crate::search::ResultObject{error:Some(error.to_string()),..Default::default()},
+        }
     }
     pub(super) async fn with_filter<T>(
         &self,

@@ -81,10 +81,38 @@ impl BudgetDirectory {
         files: usize,
         memory_bytes: u64,
     ) -> Result<Self, RecordError> {
+        Self::with_scope(
+            path,
+            bytes,
+            files,
+            memory_bytes,
+            resources::Scope::current(),
+        )
+    }
+    pub(super) fn persistent(
+        path: &Path,
+        bytes: u64,
+        files: usize,
+        memory_bytes: u64,
+    ) -> Result<Self, RecordError> {
+        Self::with_scope(
+            path,
+            bytes,
+            files,
+            memory_bytes,
+            resources::Scope::current().map(|scope| scope.retained_io()),
+        )
+    }
+    fn with_scope(
+        path: &Path,
+        bytes: u64,
+        files: usize,
+        memory_bytes: u64,
+        scope: Option<resources::Scope>,
+    ) -> Result<Self, RecordError> {
         if std::fs::read_dir(path).map_err(storage)?.next().is_some() {
             return Err(storage("native candidate directory must be empty"));
         }
-        let scope = resources::Scope::current();
         let memory = crate::storage::build_budget::reserve_memory(memory_bytes).map_err(storage)?;
         let buffer = scope
             .as_ref()

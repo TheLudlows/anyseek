@@ -50,7 +50,7 @@ pub(crate) mod build_budget;
 mod view;
 mod recovery;
 // Native package implementation; authority routing switches atomically after integration.
-mod lexical;
+pub(crate) mod lexical;
 pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
 
 /// Failures distinguish rejected requests from operations that require recovery.
@@ -312,7 +312,7 @@ struct State {
 enum Entry {
     #[serde(rename = "RecordAnchorV1")]
     Anchor(anchor::Reference),
-    #[serde(rename = "RecordCheckpointV12")]
+    #[serde(rename = "RecordCheckpointV13")]
     Checkpoint { config: RecordConfig, state: State },
     #[serde(rename = "RecordAppliedV12")]
     Applied(Applied),
@@ -827,7 +827,7 @@ async fn detach(index: &IndexArc) {
 // authoritative Record JSON. Public schema.store still controls HTTP projection.
 fn retrieval_schema(config: &RecordConfig) -> Vec<SchemaField> {
     let mut schema = temporal::schema(config);
-    for field in &mut schema { field.store = false; }
+    for field in &mut schema { field.store = false; field.index_lexical = false; }
     schema
 }
 
@@ -887,7 +887,9 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
         }
     }
 
+    let native = lexical::runtime::Runtime::create(&cache.join("native"), config)?;
     for record in &records {
+        native.append(lexical::Identity { id:record.record_id.clone(),version:record.version,revision:state.seq },record.document.as_ref().unwrap(),false).await?;
         index.read().await.shard_vec[0]
             .write()
             .await
@@ -901,6 +903,8 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
             .await
             .map_err(storage)?;
     }
+    native.flush().await?;
+    index.write().await.record_lexical.push(native);
     index.commit().await.map_err(storage)?;
     index.read().await.shard_vec[0].write().await.build_input_covered=false;
     Ok((
@@ -3073,7 +3077,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV12", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV13", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
@@ -3915,8 +3919,10 @@ mod tests {
         {
             let mut inner = partition.inner.lock().await;
             let shard = inner.index.test_index().read().await.shard_vec[0].clone();
+            let native=inner.index.test_index().read().await.record_lexical[0].clone();
             shard.write().await.build_input_covered=true;
             for id in 1..65536 {
+                native.append(lexical::Identity{id:"a".into(),version:id as u64+1,revision:0},&original.document.clone().unwrap(),false).await.unwrap();
                 shard
                     .write()
                     .await
@@ -3935,6 +3941,7 @@ mod tests {
                 shard.active.as_mut().unwrap().retire(id - 1);
                 inner.ordinals.push("a".into());
             }
+            native.flush().await.unwrap();
             shard.write().await.build_input_covered=false;
             inner.locations.insert("a".into(), 65535);
         }
@@ -4783,6 +4790,7 @@ impl Inner {
                         fields,
                         filters,
                         sort,
+                        lexical::Cut { sequence:self.state.seq,evaluation_time_ms:self.evaluation_time_ms },
                     )
                     .await;
                 if let Some(error) = result.error {

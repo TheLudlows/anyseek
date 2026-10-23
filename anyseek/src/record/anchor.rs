@@ -49,6 +49,7 @@ impl Frozen {
         let mut reservation=build_budget::admit(config,std::iter::empty())?;
         reservation.grow(estimate).map_err(storage)?;
         let index=crate::index::open_index(&path).await.map_err(storage)?;detach(&index).await;
+        index.write().await.record_lexical.push(lexical::runtime::Runtime::open(&path.join("native"),config)?);
         index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
         {
             let index=index.read().await;
@@ -82,7 +83,7 @@ impl Reference {
         let mut pool=PoolBuilder::begin(root,prior,budget(config)?,format!("{:032x}",rand::random::<u128>())).map_err(storage)?;
         let referenced=segment_state::ReferencedState::write(config,state,&mut pool)?;
         let payloads=pool.finish().map_err(storage)?;
-        write_json(&prepared.join("manifest"),&Manifest{format:1,seq:state.seq,state:referenced,payloads})?;
+        write_json(&prepared.join("manifest"),&Manifest{format:2,seq:state.seq,state:referenced,payloads})?;
         let mut segments=Vec::new();let mut statistics=Vec::new();
         if !compact && previous.is_some_and(|p|p.segments.len()<8) {
             let previous=previous.unwrap();
@@ -116,7 +117,7 @@ impl Reference {
         let path=directory(root,&self.id)?;
         if serde_json::to_vec(&files(&path,closure_limit(authority_budget)?)?).map_err(storage)?!=serde_json::to_vec(&self.files).map_err(storage)?{return Err(storage("anchor closure checksum mismatch"));}
         let manifest:Manifest=serde_json::from_slice(&read_bounded(&path.join("manifest"),authority_budget)?).map_err(storage)?;
-        if manifest.format!=1{return Err(storage("unsupported anchor format"));}
+        if manifest.format!=2{return Err(storage("unsupported anchor format"));}
         validate_config(manifest.state.config())?;
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         let pool=PoolReader::open(root,manifest.payloads.clone(),limits).map_err(storage)?;
@@ -143,7 +144,8 @@ impl Reference {
         if live!=expected{return Err(storage("anchor visible identity mismatch"));}
         let index=indexes[0].clone();
         let mut shards=Vec::new();for component in &indexes{shards.push(component.read().await.shard_vec[0].clone());}
-        {let mut root=index.write().await;root.shard_vec=shards;root.shard_number=n;}
+        let mut native=Vec::new();for component in &indexes{native.extend(component.read().await.record_lexical.iter().cloned());}
+        {let mut root=index.write().await;root.shard_vec=shards;root.shard_number=n;root.record_lexical=native;}
         Ok(Loaded{config,state,index,ordinals,locations,payloads:manifest.payloads})
     }
 }

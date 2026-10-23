@@ -148,6 +148,9 @@ tokio::task_local! { static CURRENT: Scope; }
 impl Scope {
     /// Capture the context before spawning; task locals are not implicitly inherited.
     pub fn current() -> Option<Self> { CURRENT.try_with(Clone::clone).ok() }
+    /// Retained storage uses background capacity and the same subject, without
+    /// borrowing control capacity or retaining a completed request slot.
+    pub(crate) fn retained_io(&self) -> Self { Self { governor:self.governor.clone(),subject:self.subject.clone(),lane:Lane::Background,_entry:None } }
     /// Run work under this context, including synchronous response serialization.
     pub async fn run<F: Future>(self, future: F) -> F::Output { CURRENT.scope(self, future).await }
     /// Reserve explicit buffer bytes before allocation, retained by the buffer owner.

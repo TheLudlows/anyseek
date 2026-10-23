@@ -29,6 +29,8 @@ const MAX_TOKENS: usize = 65_536;
 
 mod directory;
 pub(super) mod package;
+pub(crate) mod runtime;
+pub(crate) mod runtime_query;
 mod query;
 mod scoring;
 
@@ -83,8 +85,7 @@ pub(super) struct Candidate {
 }
 
 fn schema(names: &[String]) -> Result<(Schema, Vec<Field>), RecordError> {
-    if names.is_empty()
-        || names.len() > MAX_FIELDS
+    if names.len() > MAX_FIELDS
         || names.iter().any(|n| n.is_empty())
         || names.iter().collect::<BTreeSet<_>>().len() != names.len()
     {

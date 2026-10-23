@@ -963,6 +963,7 @@ pub struct Shard {
 /// The root object of the index. It contains all levels and all segments of the index.
 /// It also contains all properties that control indexing and intersection.
 pub struct Index {
+    pub(crate) record_lexical: Vec<Arc<crate::record::lexical::runtime::Runtime>>,
     pub(crate) docid_global: Arc<RwLock<usize>>,
 
     /// Current on-disk format major version; opening requires an exact version match.
@@ -1350,6 +1351,7 @@ pub(crate) async fn create_index_root(
             }
 
             let mut index = Index {
+                record_lexical: Vec::new(),
                 docid_global: Arc::new(RwLock::new(0)),
                 index_format_version_major: INDEX_FORMAT_VERSION_MAJOR,
                 index_format_version_minor: INDEX_FORMAT_VERSION_MINOR,
