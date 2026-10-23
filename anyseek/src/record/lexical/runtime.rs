@@ -36,13 +36,18 @@ struct Data {
     writer: Option<IndexWriter<TantivyDocument>>,
     identities: Vec<Identity>,
     identity_charge: Charge,
+    published_updates: usize,
     snapshot: Option<Arc<Snapshot>>,
     cut: Cut,
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
         if let Some(writer) = self.data.get_mut().writer.take() {
-            let _ = writer.wait_merging_threads();
+            if writer.wait_merging_threads().is_ok() {
+                if let Some(directory)=&self.directory {directory.release_joined_writer();}
+            }
+            // On join failure Directory ownership conservatively retains the
+            // charge until the remaining workers and snapshots release it.
         }
     }
 }
@@ -82,6 +87,7 @@ impl Runtime {
                 index,
                 reader,
                 writer: None,
+                published_updates: 0,
                 identities: Vec::new(),
                 identity_charge: Charge::new(0)?,
                 snapshot: None,
@@ -133,6 +139,7 @@ impl Runtime {
                 index,
                 reader,
                 writer: None,
+                published_updates: 0,
                 identities: manifest.identities,
                 identity_charge,
                 snapshot: Some(Arc::new(snapshot)),
@@ -140,6 +147,12 @@ impl Runtime {
             }),
             pin,
         }))
+    }
+    /// Bound native segment fanout and cumulative metadata rewrite traffic.
+    /// Record certifies a replacement before accepting another durable operation.
+    /// Bulk rebuilds publish once and do not consume this mutable-tail allowance.
+    pub(crate) async fn needs_rotation(&self) -> bool {
+        self.data.lock().await.published_updates >= 128
     }
     pub(crate) async fn append(
         &self,
@@ -218,6 +231,7 @@ impl Runtime {
         data.identities.push(identity);
         if publish {
             self.flush_locked(&mut data)?;
+            data.published_updates += 1;
         }
         Ok(())
     }
@@ -347,13 +361,56 @@ mod tests {
     use crate::record::{ExpectedVersion, RecordPartition};
     use crate::search::{QueryType, ResultType, Search, SearchMode};
     #[tokio::test]
+    async fn automatic_tail_rotation_preserves_durable_retry_and_fixed_searcher() {
+        let root=tempfile::tempdir().unwrap();
+        let path=root.path().join("partition");
+        let mut settings=config(); settings.max_records=512;settings.max_operations=1024;settings.max_candidates=512;
+        let partition=RecordPartition::create(&path,settings.clone()).await.unwrap();
+        for i in 0..128 {
+            partition.write(write(&format!("op-{i}"),&format!("r-{i}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
+        }
+        let held=partition.inner.lock().await.index.test_index().read().await.record_lexical[0].snapshot().await.unwrap();
+        assert_eq!(held.identities.len(),128);
+        partition.inner.lock().await.fail_publication_stage=1;
+        let request=write("rotate-and-retry","r-new","alpha",ExpectedVersion::Absent);
+        assert_eq!(partition.write(request.clone()).await.unwrap_err(),crate::record::RecordError::DurablePending(129));
+        assert!(partition.inner.lock().await.anchor.is_some(),"rotation must certify before WAL append");
+        assert_eq!(held.identities.len(),128,"captured Searcher remains at its original cut");
+        drop(partition);
+        let partition=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        let receipt=partition.write(request.clone()).await.unwrap();
+        assert_eq!(receipt.seq,129);assert_eq!(receipt.version,1);
+        assert_eq!(partition.write(request).await.unwrap(),receipt);
+        assert_eq!(partition.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,129);
+    }
+
+    // Keep this direct-native boundary test: Record must maintain its tail before
+    // this finite traffic budget is exhausted; commit is not business authority.
+    #[tokio::test]
+    async fn repeated_native_commits_expose_finite_traffic_budget() {
+        let root=tempfile::tempdir().unwrap();
+        let mut settings=config(); settings.max_journal_bytes=1024*1024;
+        let native=Runtime::create(&root.path().join("native"),&settings).unwrap();
+        let doc=serde_json::from_str(r#"{"body":"common half"}"#).unwrap();
+        for i in 0..1000 {
+            let result=native.append(Identity{id:format!("{i:020}"),version:1,revision:i+1},&doc,true).await;
+            if let Err(error)=result {
+                eprintln!("first native failure after {i} visible writes: {error:?}");
+                assert!(format!("{error:?}").contains("native writer byte budget exceeded"),"{error:?}");
+                return;
+            }
+        }
+        panic!("expected bounded native traffic admission to reject repeated commits");
+    }
+
+    #[tokio::test]
     async fn idle_collections_leave_native_publication_headroom() {
         let root=tempfile::tempdir().unwrap();
         let governor=Arc::new(crate::resources::Governor::default());
         let mut owners=Vec::new();
         let mut settings=config();settings.index.inference=crate::vector::Inference::None;
         settings.embedding_space_id=None;settings.schema.retain(|f|f.index_lexical);
-        for i in 0..39 {
+        for i in 0..65 {
             let scope=governor.admit(format!("collection-{i}"),crate::resources::Lane::Foreground,0).unwrap();
             let partition=scope.run(RecordPartition::create(&root.path().join(i.to_string()),settings.clone())).await.unwrap();
             owners.push(partition);

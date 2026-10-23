@@ -1,6 +1,6 @@
 //! Conservative logical admission. Deliberately not allocator/RSS accounting.
 use super::*;
-use crate::storage::build_budget::{EXPLICIT_BUFFERS, MemoryLease, reserve_memory};
+use crate::storage::build_budget::{MemoryLease, reserve_memory};
 pub(crate) fn document_estimate(
     document: &Document,
     schema: &[SchemaField],
@@ -75,7 +75,11 @@ pub(super) fn admit<'a>(
     config: &RecordConfig,
     records: impl Iterator<Item = &'a Record>,
 ) -> Result<MemoryLease, RecordError> {
-    let mut estimate = EXPLICIT_BUFFERS + config.schema.len() as u64 * 65536 * 32;
+    // Retain only component metadata/document capacity. The retired posting
+    // builder's 64 MiB scratch buffer no longer exists. Native writer buffers,
+    // analyzer tables and reader metadata own separate admission leases; charging
+    // the removed scratch buffer for every idle collection exhausts shared memory.
+    let mut estimate = config.schema.len() as u64 * 65536 * 32;
     #[cfg(feature = "zh")]
     if config.index.tokenizer == crate::index::TokenizerType::UnicodeAlphanumericZH {
         estimate += 64 * 1024 * 1024;

@@ -26,13 +26,17 @@ pub(crate) fn reserve_memory(bytes: u64) -> io::Result<MemoryLease> {
 }
 fn reserve_from(counter: &Arc<AtomicU64>, bytes: u64) -> io::Result<MemoryLease> {
     if bytes > BUILD_MEMORY {
+        log::warn!("record build single reservation rejected: requested={bytes} limit={BUILD_MEMORY}");
         return Err(exceeded());
     }
     counter
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             used.checked_add(bytes).filter(|n| *n <= SHARED_MEMORY)
         })
-        .map_err(|_| exceeded())?;
+        .map_err(|used| {
+            log::warn!("record build shared reservation rejected: used={used} requested={bytes} limit={SHARED_MEMORY}");
+            exceeded()
+        })?;
     Ok(MemoryLease(bytes, counter.clone()))
 }
 impl MemoryLease {

@@ -285,3 +285,72 @@ HTTP完整故障套件用新组件二进制两次复现lease after_append_unknow
 本阶段源代码无默认feature核心完整192 passed / 0 failed / 10 ignored（79.67秒），doctests 9 passed（1.96秒），新版身份删除4/0；日志 `/tmp/anyseek80-phase11-nodefault-all.log`、`/tmp/anyseek80-phase11-doctests.log`、`/tmp/anyseek80-phase11-stable-delete.log`。这些对应本阶段lazy writer与只读Directory改动。默认全量仍是第十阶段二进制，不能混用为本阶段全量证据。
 
 检查点时两个运行队列须继续收取而非重启：原session96805/cargo203821（当前lexical_correctness PID321399），日志 `/tmp/anyseek80-phase10-all-tests.log`；修复后完整HTTP session48349，日志 `/tmp/anyseek80-phase11-http-fixed.log`，SHA `/tmp/anyseek80-phase11-fixed-server.sha256`。先前单次15秒就绪超时仍缺直接根因证据；本阶段复现的失败是资源清理拒绝，不将二者混称。S3最终新二进制矩阵、默认最终回归、完整预算/生命周期审计仍待完成；Windows、真实S3、系统断电未运行。未推送、发布、合入或关闭issue。
+
+
+## Phase 12 — native tail maintenance and idle component reservations
+
+Baseline: `e8f5d9d85a46bd8e991d7d394f76b1996ecff395`, independent
+`issue-80/tantivy-new-format` branch. No remote publication.
+
+The obsolete phase-10 all-targets run (cargo 203821, lexical child 321399)
+was identified by executable/parent before stopping only those processes;
+`/tmp/anyseek80-phase12-stopped-old-run.txt` records the action. Its results are
+historical, not final-code acceptance. Phase-11 HTTP session 48349 completed
+with `crash_after_visible` private cleanup pending and a Record build resource
+budget rejection; lazy native writers alone did not resolve the full suite.
+
+A direct native reproduction with a 1 MiB journal-derived budget fails after
+349 visible writes with `native writer byte budget exceeded` in a segment term
+file. This confirms cumulative metadata rewrite traffic can exhaust the native
+budget despite a small live directory. The historical 2299 failure had no logger,
+so its exact first error cannot be recovered from that old log. New diagnostics
+record requested/cumulative bytes, cap and file count without document contents.
+The original 3000-record fixture is preserved at its original size in source.
+
+Production now requests an ordinary certified anchor rotation before WAL append
+when the mutable native tail has published 128 updates. Bulk rebuilds commit once;
+Tantivy commits still do not select business state. Existing Record publication,
+pins, recovery and GC select the replacement. Generation publication remains one
+business operation (maximum 100 members); its admission fanout needs a final
+boundary audit, including a generation beginning just below the rotation boundary.
+No byte/file/worker budget was raised. A retained fixed Searcher continues to own
+its original cut. Successfully joined writers release their 20 MB reservation even
+if reader Directory clones remain; a failed join conservatively retains accounting.
+
+A 65-idle-collection regression reproduced shared build-budget exhaustion. Each
+component retained a legacy 64 MiB posting-builder scratch allowance although that
+builder and allocation have been removed. Removed that obsolete reservation;
+component schema/document admission and independently owned native writer,
+analyzer and reader reservations remain. The same 65-collection write/checkpoint/
+query test now passes. Global 4 GiB and per-reservation 256 MiB limits are unchanged.
+
+Evidence so far (all logs under `/tmp/anyseek80-phase12-*`):
+- `native-budget.log`: direct finite-traffic reproduction, 1 pass, 16.23 s.
+- `idle-before.log`: failure before obsolete reservation removal;
+  `idle-after.log`: 1 pass, 0.69 s afterwards.
+- `rotation-retry.log`: 1 pass, 5.86 s. Certifies rotation before write 129,
+  injects DurablePending, fences output, reopens, retries original operation ID
+  twice with identical seq 129/version 1; 129 matches and original 128-identity
+  Searcher retained. This is an injected recovery proof, not recovery of the
+  historical unlogged 2299 failure directory.
+- `frequent3000.log`: original 3000 writes and Top-K/count assertions pass,
+  138.58 s. This binary includes rotation and reservation fix but predates the
+  subsequent joined-writer release edit; final all-targets must rerun it.
+- New full HTTP (default readiness deadline 15 s) and S3 storage fixture/fault
+  suites use server SHA256 `ae607146fa981b5a5ca24a1d4f98633e38cd8c08d1d239eb8def8ef32a2f666f`.
+  Their final results and current no-default lib result are pending below.
+
+Remaining: collect these suites; final default all-targets/doctests/no-default
+matrix; boundary/resource lifecycle audit (including generation fanout); documentation
+and draft PR review. Windows, real S3, and system power loss have not been run.
+Process exit fault fixtures do not substitute for those platforms/failures.
+
+Phase-12 completed results: no-default library 194 passed / 0 failed / 10 ignored
+(105.09 s); new-binary S3 storage fixture/fault suite all requested checks passed
+(152.019 s), report `/tmp/anyseek80-phase12-s3-report.json`. Includes checkpoint
+and tail cold recovery, SQLite publication failures, original receipt replay,
+takeover boundaries, feed floors, joint backups and service archive restore.
+`real_endpoint_exercised=false`; this is not real-S3 or system power-loss evidence.
+
+No-default doctests: 9 passed, 0 failed (1.88 s). Full HTTP session 83044
+(Python PID 362221) is still running; no final success is claimed for that suite.

@@ -55,7 +55,10 @@ impl Budget {
             .written
             .checked_add(bytes)
             .filter(|n| *n <= self.bytes)
-            .ok_or_else(|| io::Error::other("native writer byte budget exceeded"))?;
+            .ok_or_else(|| {
+                log::error!("native writer byte budget rejected: written={} requested={bytes} limit={} files={}", ledger.written, self.bytes, ledger.paths.len());
+                io::Error::other("native writer byte budget exceeded")
+            })?;
         if !ledger.paths.contains(path) && ledger.paths.len() >= self.files {
             return Err(io::Error::other("native writer file budget exceeded"));
         }
@@ -127,6 +130,13 @@ impl BudgetDirectory {
             *reservation=Some(WriterReservation {_memory:memory,_buffer:buffer});
         }
         Ok(())
+    }
+    /// Called only after Tantivy has successfully joined indexing and merge
+    /// workers. Fixed Searchers may retain this Directory, but no writer buffer.
+    pub(super) fn release_joined_writer(&self) {
+        if let Ok(mut reservation)=self.budget.writer_memory.lock() {
+            reservation.take();
+        }
     }
     /// The caller has authenticated the complete immutable package closure.
     /// Keep reader metadata admission and I/O ownership with Directory clones.
