@@ -33,7 +33,7 @@ SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本
 
 当前实现只在完整当前 cut 上推进检查点，不支持后台 indexer 与新写入并行发布的优化；这属于 C。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 feed floor 等状态。
 
-### 开发分支：有界校验对象缓存（C2，尚未合入）
+### 有界校验对象缓存（C2，PR #76 已合入）
 
 `*.object-cache` 位于对应 SQLite 权威库旁，是完全可丢弃的派生缓存。容量为每库 256 MiB、4096 个块；按最早插入淘汰，不把命中频率写回磁盘。缓存身份绑定 endpoint/bucket/region、完整对象 key、SHA-256 和长度；不保存凭据。每次命中重新检查长度和 hash；损坏作为 miss 删除，无法访问或锁竞争时直接回源。远端流按认证长度有界累积，过长、缺失或校验失败不能入缓存。
 
@@ -54,6 +54,16 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 本地证书与完整新增 suffix 在私有 generation 中一起同步，然后发布目录，避免证书可见但后续已确认写入未落入新 generation。S3 在 SQLite 发布后本地失败继续 fenced，冷启动从远端 manifest 加完整 tail 恢复。构建失败、过期或 panic 不能把旧 cut 当成当前视图；panic 关闭输出，必须重开恢复。物理回收在候选 mmap 释放和任务结束后执行。
 
 [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`，最终提交 `96306e95` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)。合入后主干 CI 单独记录。
+
+### 开发分支：collection 授权执行屏障（C3-1，尚未合入）
+
+锁顺序为全局快照屏障 → collection 执行屏障 → catalog 元数据。普通已接收工作持前两层共享 guard，只在捕获当前 collection entry 与 grant revision 时持元数据锁；Record future 在锁外执行。单 collection 授权变更与删除先取得该 collection 独占 guard，排在它之后的工作取得共享 guard 后重新查授权。不得在持 catalog 元数据锁时等待执行屏障。
+
+整 key 撤销、接管、备份退休使用全局独占屏障；完整服务快照与显式 catalog compaction 也先排空普通工作。已接收但未完成的工作仍归 owned task 所有，调用方取消不能释放它的屏障；共同快照包含排空前的完整已接收操作，不混入快照之后排队的写入。全局操作仍是有意的停顿点。
+
+异常 guard 不依赖异步获取 catalog 锁即可同步关闭输出。共享的 sticky failure latch 在重开前不清除，其他 collection 即使正在持久发布或压缩，也不能重新开放旧授权输出；普通可证明未发布的 compaction 失败保留原有恢复语义。输出交付仍检查 grant revision 与 Record 数据屏障，已交付字节不可撤回。
+
+此协议为开发分支实现，验证/合入单独跟踪；尚未实现 C3-2 的前台/下载/后台分级与服务缓存总预算。现有总准入名额并不保证资源公平。
 
 ## 2. 日志与 feed 保留
 

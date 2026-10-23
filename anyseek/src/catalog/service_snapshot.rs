@@ -307,11 +307,15 @@ impl Catalog {
         &self,source_root:PathBuf,target:PathBuf,identity:String,
         records:BTreeMap<String,RecordPartition>,archives:BTreeMap<String,PathBuf>,
     )->Result<ServiceSnapshot,CatalogError> {
+        let admission = self.admission.clone().try_acquire_owned().map_err(|_| CatalogError::Busy)?;
         let owner = self.inner.clone();
+        let execution = self.execution.clone();
         crate::INDEX_RUNTIME
             .spawn(async move {
+                let _admission = admission;
+                let _execution = execution.freeze().await;
                 let inner = owner.lock().await;
-                if !inner.healthy {
+                if !inner.is_healthy() {
                     return Err(CatalogError::RecoveryRequired);
                 }
                 if inner.state.collections.values().any(|c| c.takeover.as_ref().is_some_and(|t| t.completed.is_none())) {

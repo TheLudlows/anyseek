@@ -31,13 +31,23 @@ PR #72/#73/#74 已合入，当前源码基线为 `afbe323d`；第 1–6 项实�
 
 [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`，最终提交 `96306e95` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)。已交付 `start_index_committed` / `index_committed`、HTTP PATCH 后台构建、SQLite 构建 epoch/期限/pin、旧 cut 发布与完整新增 tail，以及并发/取消/过期/进程退出回归。合入后主干 CI 单独跟踪。
 
-### C2：有界校验缓存（开发分支实现，尚未合入）
+### C2：有界校验缓存（PR #76 已合入）
 
 远端读取按 endpoint/bucket/region、完整对象 key、SHA-256 与精确长度隔离对象块；每次命中重新认证，损坏删除并回源。每 authority 库旁的 `*.object-cache` 目录限 256 MiB / 4096 块，按最早写入淘汰；先清理中断临时文件，删除失败不退额度，非阻塞文件锁协调进程（锁文件位于缓存目录旁，清空缓存不替换锁 inode）。缓存错误不改变提交结果。下载验证完整后同步私有文件、同目录原子发布；PUT 的读后验证始终访问远端，不能由缓存证明远端持久化。
 
-缓存返回独立字节，不暴露文件句柄/mmap；Segment 在另一路径完整校验并映射，因此淘汰不触碰查询中的 mmap。冷恢复仍由当前 SQLite head 选择 manifest + 完整 tail，授权/来源隐藏屏障不从缓存推导。无缓存验收删除 collection 和对象块两类目录。预取与直接映射缓存块后置；本批验证见 PR Checks，不据分支实现标主线完成。
+缓存返回独立字节，不暴露文件句柄/mmap；Segment 在另一路径完整校验并映射，因此淘汰不触碰查询中的 mmap。冷恢复仍由当前 SQLite head 选择 manifest + 完整 tail，授权/来源隐藏屏障不从缓存推导。无缓存验收删除 collection 和对象块两类目录。预取与直接映射缓存块后置；[PR #76](https://github.com/TheLudlows/anyseek/pull/76) 已合入为 `10e106b3`，最终 [PR CI 五项成功](https://github.com/TheLudlows/anyseek/actions/runs/39898818770)；合入后主干 CI 单独跟踪。
 
 C2 后继续推进 collection 的前台、下载、后台并发/队列/内存/I/O 公平准入。当前完整 State 驻内存及同步 compaction 串行行为仍是实际限制。
+
+### C3-1：授权与执行屏障（开发分支实现，尚未合入）
+
+普通已准入工作先持全局共享屏障，再持 collection 共享屏障，只在捕获当前授权修订时短持 catalog 元数据锁。单 collection 的 grant/撤权/删除及创建激活在对应独占屏障内发布，等待屏障时不能持元数据锁。排在撤权之后的工作重新验证授权，不沿用排队前的结果。
+
+整 key 撤销、接管、备份退休、完整服务快照和显式 catalog compaction 保留全局排空；这些少见维护会有意暂停普通工作，不能宣称所有控制操作互不阻塞。共同备份仍固定完整已接收 cut。取消 HTTP 等待方不取消 owned task；异常以同步 sticky failure latch 关闭输出，并禁止其他 collection 的并发发布重新打开，重开后从持久权威恢复。
+
+本批保持 catalog 原有 64 个准入名额；collection gate 登记使用弱引用、稳定身份、256 字节身份长度和 64 项防御上限，不新增持久表。新增跨集合进展/排队撤权/取消、整 key 排空、并发 panic 与共同备份 cut 单测，以及真实 HTTP 暂停写入/其他集合查询/撤权/重启回执用例。结果以本批最终 PR Checks 为准，尚未合入。
+
+本批只移除普通工作占用全局元数据锁的瓶颈。HTTP 总 64/控制 16 名额、慢响应持有、下载/后台字节与 I/O 分级、全服务缓存总额度仍待 C3-2；完整故障隔离与资源公平不能据此提前标完成。
 
 ## D：超大 collection，按容量需求后置
 

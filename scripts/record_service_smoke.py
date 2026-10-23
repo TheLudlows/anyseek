@@ -8,7 +8,7 @@ def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','feed','indexer']);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','feed','indexer','authorization']);args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
     with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
@@ -50,7 +50,7 @@ def main():
                             result=json.loads(error.read())
                             if error.code!=503 or result.get('code')!='outcome_unknown':raise
                     raise AssertionError(('control retry deadline',path))
-            assert code==status,(method,path,code,status,raw)
+            assert code in (status if isinstance(status,tuple) else (status,)),(method,path,code,status,raw)
             return json.loads(raw)
         def restart():
             process.kill();process.wait(timeout=20);start()
@@ -60,7 +60,7 @@ def main():
         def section(name):
             import importlib
             exercise=importlib.import_module('record_'+name+'_smoke').exercise
-            if name in ['temporal','feed','indexer']:
+            if name in ['temporal','feed','indexer','authorization']:
                 exercise(call,restart_with,root.parent,args.faults)
             elif name=='lease':
                 exercise(call,restart_with,root.parent,False)
