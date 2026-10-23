@@ -37,18 +37,20 @@ def main():
             try:
                 with urllib.request.urlopen(req,timeout=40) as r: code=r.status;raw=r.read()
             except urllib.error.HTTPError as e:code=e.code;raw=e.read()
-            if code==503 and status==200 and path in ['/api/v1/service-backups','/api/v1/service-restores']:
+            if code in [429,503] and status==200 and path in ['/api/v1/service-backups','/api/v1/service-restores']:
                 result=json.loads(raw)
-                if result.get('code')=='outcome_unknown':
+                if result.get('code') in ['outcome_unknown','busy']:
                     # The body retains the exact operation identity. The service
                     # continues accepted work after its HTTP deadline.
-                    for _ in range(10):
+                    deadline=time.monotonic()+300
+                    while time.monotonic()<deadline:
+                        time.sleep(.1)
                         try:
                             with urllib.request.urlopen(req,timeout=40) as response:
                                 return json.loads(response.read())
                         except urllib.error.HTTPError as error:
                             result=json.loads(error.read())
-                            if error.code!=503 or result.get('code')!='outcome_unknown':raise
+                            if (error.code,result.get('code')) not in [(503,'outcome_unknown'),(429,'busy')]:raise
                     raise AssertionError(('control retry deadline',path))
             assert code in (status if isinstance(status,tuple) else (status,)),(method,path,code,status,raw)
             return json.loads(raw)

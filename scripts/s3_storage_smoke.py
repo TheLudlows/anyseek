@@ -97,12 +97,15 @@ def main():
         def control(method,path,body):
             deadline=time.monotonic()+300
             while True:
-                result=call(method,path,body,status=(200,503))
-                if result.get('code')!='outcome_unknown':
+                result=call(method,path,body,status=(200,429,503))
+                if result.get('code') not in ['outcome_unknown','busy']:
                     assert 'code' not in result,(path,result)
                     return result
                 assert time.monotonic()<deadline,('control retry deadline',path)
                 print('RETRY original control identity: '+path,flush=True)
+                # The original owned task retains its class reservation after
+                # the HTTP deadline. Never create another operation identity.
+                time.sleep(.1)
         def cold_restart():
             stop()
             for path in [*root.glob('collection-*'), *root.glob('*.object-cache')]:
