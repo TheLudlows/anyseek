@@ -37,7 +37,7 @@ Record partition 的 mutex 覆盖候选检索和原始数据回表。同一个�
 
 ## 授权与生命周期
 
-API key 身份独立于 collection 数据目录。master 管理身份和 grants，普通 key 可访问其授权集合；撤销不删除数据。catalog 当前持有全局 mutex 执行完整授权工作，确定撤销和写入提交先后；代价是跨 collection 的查询/写入也会等待。OutputPermit 捕获 grant revision，在最终响应和 body frame 交付时复核，撤销再授权不能复活旧响应。
+API key 身份独立于 collection 数据目录。master 管理身份和 grants，普通 key 可访问其授权集合；撤销不删除数据。普通工作按全局快照共享屏障 → collection 共享执行屏障 → 短持 catalog 元数据锁的顺序捕获授权，在元数据锁外执行 Record future。单集合授权变更使用对应独占屏障；整 key 撤销、接管、完整服务快照等仍全局排空。分级资源准入在读 body 前按稳定 collection 身份计费，已接收 owned task 和传输缓冲保留额度至实际结束。OutputPermit 捕获 grant revision，在最终响应和 body frame 交付时复核，撤销再授权不能复活旧响应。
 
 创建为持久 Prepare → 初始化 partition → Activate。删除 collection 保留墓碑并撤销 grants，物理回收后置。全服务备份在 catalog 屏障下取得一致切面。恢复发布到新未启动根，历史 key 禁用和 grants 清空，当前 master 获取初始访问，但独立恢复内容保持隔离，不等于正文立即可读。只有仍有完整可信历史的同服务受控接管可核验最终封存水位后激活新目标；无强制绕过或跨服务自动灾备。
 
@@ -51,6 +51,6 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 ## 当前边界
 
-这是 P1-A 与 P2 的有界单机功能实现：Record 累计账本 10,000 项、完整 checkpoint 16 MiB 等限制见 [FEATURES](FEATURES.md)。checkpoint 回收旧 WAL 代，不等于持续账本/物理版本 GC。P2 的 source/evidence、generation、TTL、feed、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint 和安全回收已合入；B 维护路径/真实后端验收、系统断电与分布式尚未完成。原生进程故障测试不能替代主机掉电验收。
+这是有界单机实现：Record 累计账本默认 10,000 项、完整 checkpoint 16 MiB 等限制见 [FEATURES](FEATURES.md)。checkpoint 回收旧 WAL 代，不等于持续账本/物理版本 GC。P2 的 source/evidence、generation、TTL、feed、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、服务总缓存预算和完整资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文替换的复用边界见 [Tantivy 评估](docs/tantivy-evaluation.md)。
 
 [Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/server/README.md) · [上游来源](UPSTREAM.md) · [许可](LICENSE)

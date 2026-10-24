@@ -31,7 +31,7 @@ SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本
 3. SQLite 以 expected head version、owner epoch 和精确 committed seq 条件发布 manifest、indexed seq、log base，并清空已覆盖的 live WAL tip。
 4. 再发布本地恢复证书与共同检索视图。SQLite 发布后的本地失败保持 fenced，重开时采用远端选择结果。
 
-当前实现只在完整当前 cut 上推进检查点，不支持后台 indexer 与新写入并行发布的优化；这属于 C。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 feed floor 等状态。
+同步维护在完整当前 cut 上推进检查点；C1 已支持后台 Indexer 在固定已提交 cut 构建、条件发布，并保留期间新增 tail，详见下文。冷恢复下载并验证完整所选文件，直接加载已有 Segment，然后重放检查点之后的 tail。即使本地 seq 相同，也必须采用权威选择的新 manifest，因为同序号维护可能改变 feed floor 等状态。
 
 ### 有界校验对象缓存（C2，PR #76 已合入）
 
@@ -39,7 +39,7 @@ SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本
 
 私有临时文件完整写入并同步后同目录原子发布；跨进程非阻塞文件锁保护扫描、删除与发布；锁文件在缓存目录旁，清空缓存不能替换锁 inode。临时文件、孤儿块计入清理，删除失败不释放额度；启动后不要求缓存持久化成功。PUT 和不确定 PUT 的确认始终从远端读回，不能用缓存代替后端持久化证明。SQLite 仍独立验证当前 owner/head/水位，缓存命中不授予读取或输出权限。
 
-缓存只返回自有字节，不供 mmap；materialize 后的 Segment 位于独立目录，由现有认证流程映射与保护。淘汰、损坏和清空缓存均不删除在用 Segment mmap。预取和直接映射缓存块暂不实现。跨 collection 的总容量及前台/下载/后台资源公平仍待 C 后续；该上限不是全服务磁盘或 RSS 硬上限。
+缓存只返回自有字节，不供 mmap；materialize 后的 Segment 位于独立目录，由现有认证流程映射与保护。淘汰、损坏和清空缓存均不删除在用 Segment mmap。预取和直接映射缓存块暂不实现。C3-2 已提供分级准入与显式缓冲/I/O 预算；跨 collection 的缓存总容量及 C3-3 完整资源隔离验收仍待完成；该缓存上限不是全服务磁盘或 RSS 硬上限。
 
 ### 有界后台 cut 发布（PR #75 已合入）
 
@@ -63,7 +63,7 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 异常 guard 不依赖异步获取 catalog 锁即可同步关闭输出。共享的 sticky failure latch 在重开前不清除，其他 collection 即使正在持久发布或压缩，也不能重新开放旧授权输出；普通可证明未发布的 compaction 失败保留原有恢复语义。输出交付仍检查 grant revision 与 Record 数据屏障，已交付字节不可撤回。
 
-C3-1 已合入。C3-2 本分支提供前台/恢复/后台分级准入、共享/每集合显式缓冲与 I/O 额度；取消后的 owned task 和传输 Bytes 保留租约。S3 GET 的租约随返回缓冲，而非下载函数返回就结束；PUT 读后验证仍访问远端。能证明 SQLite 发布前的预算拒绝为 Busy，其他不确定错误继续 fenced；既有 reader/build/backup 保护与 GC 闭包不变。默认值与范围见[服务指南](../anyseek/server/README.md)。服务缓存总容量及完整 C3-3 隔离验收未完成。
+C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级准入、共享/每集合显式缓冲与 I/O 额度；取消后的 owned task 和传输 Bytes 保留租约。S3 GET 的租约随返回缓冲，而非下载函数返回就结束；PUT 读后验证仍访问远端。能证明 SQLite 发布前的预算拒绝为 Busy，其他不确定错误继续 fenced；既有 reader/build/backup 保护与 GC 闭包不变。默认值与范围见[服务指南](../anyseek/server/README.md)。服务缓存总容量及完整 C3-3 隔离验收未完成。
 
 ## 2. 日志与 feed 保留
 

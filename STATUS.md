@@ -1,6 +1,6 @@
 # anyseek 当前状态
 
-anyseek 是 AI 记忆与知识的存储、检索底座。PR #71 本地 Segment、[PR #72](https://github.com/TheLudlows/anyseek/pull/72) SQLite/S3 及 [PR #73](https://github.com/TheLudlows/anyseek/pull/73) 维护路径与清理、[PR #74](https://github.com/TheLudlows/anyseek/pull/74) 审计修复与无缓存验收已合入 master（源码基线 `afbe323d`）；B 尚未全部验收。
+anyseek 是 AI 记忆与知识的存储、检索底座。PR #71–#78 已合入 master，当前核验基线为 `3893cd54`，包含本地 Segment、SQLite/S3、后台 Indexer、校验缓存、授权执行屏障和分级资源准入；B 尚未全部验收。[项目全貌与下一步建议](docs/project-overview.md) 汇总能力、限制和决策依据；[Tantivy 评估](docs/tantivy-evaluation.md) 为待决方案，未引入依赖或更换引擎。
 
 进度核验：2026-10-23。
 
@@ -17,10 +17,11 @@ anyseek 是 AI 记忆与知识的存储、检索底座。PR #71 本地 Segment�
 | C1：已合入 | [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`；最终 PR 五项 CI 成功：有界后台 Indexer、构建 pin/epoch/期限、SQLite 条件发布与并行写入 tail 保留；见[路线](docs/roadmap.md) |
 | C2：已合入 | [PR #76](https://github.com/TheLudlows/anyseek/pull/76) 已合入为 `10e106b3`；每 authority 256 MiB / 4096 块；最终 PR CI 五项成功、完整 Rust 301 passed / 0 failed / 13 ignored |
 | C3-1：已合入 #77 | collection 授权执行屏障与元数据锁分离，保留整 key 撤销/接管/完整备份的全局排空，以及取消与 panic 封锁；合入为 `b8faa553`，最终 PR 五项 CI 全部成功 |
-| C 后续 / D | C3-2 本分支实现部分资源隔离；C3-3 整体验收、服务缓存总额度仍未完成；超大 collection 按容量需求后置 |
+| C3-2：已合入 #78 | collection 公平准入、控制预留、前台/恢复/后台分级并发、字节和 I/O 预算；合入为 `3893cd54`，最终 PR 与合入后主干 CI 均通过 |
+| C 后续 / D | C3-3 整体验收、服务缓存总额度、Record 账本持续 GC 未完成；超大 collection 按容量需求后置 |
 | 系统故障 | 系统/文件系统崩溃和硬断电尚未验收；进程退出测试不能替代 |
 
-C1 最终提交 `96306e95` 的 [PR CI 五项成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)，完整 Rust 回归 294 passed / 0 failed / 12 ignored；合入后主干 CI 单独跟踪。C2 已合入；[主干 CI](https://github.com/TheLudlows/anyseek/actions/runs/39909578676) 单独跟踪。C3-1 已合入；C3-2 本分支实现前两个高优先级项：分集合公平准入/控制预留与前台/恢复/后台分级并发、字节和 I/O 预算；验证与合入状态另行记录，服务缓存总额度与账本 GC 未实现。当前运行态 State 仍驻内存，原同步 compaction 保留串行屏障；资源方案为保守准入与显式缓冲检查，不是全进程 RSS 硬上限。Record 操作账本尚无持续 GC，不承诺无界规模或稳定磁盘占用。
+C1 最终提交 `96306e95` 的 [PR CI 五项成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)，完整 Rust 回归 294 passed / 0 failed / 12 ignored；合入后主干 CI 单独跟踪。C2 已合入；[主干 CI](https://github.com/TheLudlows/anyseek/actions/runs/39909578676) 单独跟踪。C3-1 已合入；C3-2 [PR #78 最终五项 CI 成功](https://github.com/TheLudlows/anyseek/actions/runs/39927824162)，完整 Rust 317 passed / 0 failed / 13 ignored，合入提交与测试版本 tree 相同，[主干 CI 通过](https://github.com/TheLudlows/anyseek/actions/runs/39933449425)。服务缓存总额度与账本 GC 未实现。当前运行态 State 仍驻内存，原同步 compaction 保留串行屏障；资源方案为保守准入与显式缓冲检查，不是全进程 RSS 硬上限。Record 操作账本尚无持续 GC，不承诺无界规模或稳定磁盘占用。
 
 S3 服务根中的 catalog、SQLite 权威库及 `s3-namespace` 是持久协调状态；collection 内日志、payload 和索引是可重建缓存。C2 另在权威库旁的 `*.object-cache` 目录保存可删除的校验对象块；无缓存验收同时删除两类缓存。独立恢复使用不同对象命名空间。SQLite 单主机、单持久卷，不提供跨主机 HA 或权威卷丢失零 RPO。
 

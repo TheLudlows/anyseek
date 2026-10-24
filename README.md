@@ -4,7 +4,7 @@
 
 anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、切块、embedding、实体抽取及记忆反思/重算由上层应用完成。自定义内容保存在 `document`，引擎管理稳定身份和系统元数据，不引入 SQL/JOIN 或完整图查询语言。
 
-[服务指南](anyseek/server/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [文档索引](docs/README.md)
+[服务指南](anyseek/server/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
 
 ## 当前能力
 
