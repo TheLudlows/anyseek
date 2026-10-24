@@ -8,7 +8,7 @@
 | 持久化 | 本地认证发布、SQLite/S3 唯一协调权威、不可变包、恢复、备份和安全 GC 已实现 |
 | #80 全文替换 | 原生 Tantivy 构建与固定 Searcher；独立向量/元数据组件；活动统计和正式评分契约保留；旧全文引擎及公开低层 API 已删除 |
 | Indexer / 缓存 / 准入 | 有界后台构建、每 authority 校验缓存、collection 授权屏障与分级资源预算已实现 |
-| 本地验证 | 本轮全目标编译、受影响回归 265 passed、no-default 197 passed、两组 doctest 各 9 passed；完整最终平台矩阵待 PR CI。清理前 338 passed 与 HTTP/S3 仅为历史证据 |
+| 平台验证 | `199cdd0`：Linux 全目标 339 passed、13 ignored；两平台 S3 fixture 通过。Windows 常规集成超过 job 的 120 分钟上限，后续步骤未执行；现已按完整大用例/长度策略独立分配 Windows job，最新结果见 [PR #81](https://github.com/TheLudlows/anyseek/pull/81) |
 | 尚未验收 | 当前分支 Windows CI、真实 S3、系统/文件系统崩溃及硬断电、手工跨 AES 验证 |
 | 核心剩余 | Record 操作账本持续 GC、完整 State 驻内存限制、全服务缓存总额、组合资源隔离验收 |
 

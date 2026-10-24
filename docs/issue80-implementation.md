@@ -59,6 +59,14 @@ Record 默认候选窗口为每通道全局 `offset + length`，显式候选 cap
 
 本轮最终代码的全目标编译通过；核心 + stable_ranking / weighted_rrf / test / server_query_contract / server_shared_filters / server_ann_contract 共 265 passed / 0 failed / 12 ignored；no-default lib 为 197 passed / 0 failed / 10 ignored；默认和无默认 doctest 各 9 passed。所有命令 exit 0。文档链接检查为 22 Markdown / 103 surfaces 通过，git diff 空白检查通过；全仓 rustfmt 仍 exit 1，沿用下述基线问题。证据：工作环境 `/tmp/anyseek80-phase20-final-results.json` 及各步骤日志。完整 all-targets 执行、HTTP/S3 和 Linux/Windows 平台矩阵由本轮最终提交的 PR CI 重新验收，不借用旧版本通过替代。
 
+### 平台 CI 与 Windows 任务边界
+
+[`199cdd0` 的 CI](https://github.com/TheLudlows/anyseek/actions/runs/40054343256) 为 4 个 job 成功、Windows Persistence 因 120 分钟上限取消。Linux 全目标 339 passed / 0 failed / 13 ignored，no-default 198 passed / 10 ignored，两组 doctest 各 9 passed，HTTP 与存储故障矩阵通过；两平台 S3 fixture 通过。Windows 已通过原 3000 条写入（920.99 s）和跨平台预算回归，但后续 feature、doctest、HTTP/存储矩阵未执行，不算 Windows 完整通过。
+
+超时时词法大用例仍未返回，旧日志没有内部水位，不能据此断言挂死。Linux 两个大用例各需约 22.5 分钟，均在一个测试内串行执行 Shared/PerField。现在将它们拆成四个独立 Windows job，每项仍写入 8194 条并保留全部原断言；两个小用例仍各自遍历两种策略。常规 Windows job 仅排除这四项，继续执行其他所有验收；Linux 仍跑完整集合。每个 job 保持 120 分钟。`check_lexical_partition.py` 对比实际编译清单、排除集合和 matrix，防止漏测或名称错误导致零测试成功。
+
+测试新增每 256 条写入、checkpoint、重开和查询前后的耗时水位；独立 job 使用 `--nocapture`。这是验收任务拆分与诊断，没有改变生产执行、语料、评分、断言或超时。最新提交的结果以 [PR 检查](https://github.com/TheLudlows/anyseek/pull/81/checks) 为准；上述通过项绑定旧 SHA，不能替代新 SHA 实测。
+
 ### 13 个忽略项
 
 11 个进程 worker 由父测试显式启动，不是遗漏执行：

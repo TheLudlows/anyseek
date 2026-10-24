@@ -131,7 +131,15 @@ jobs:
         run: |
           cargo test -p anyseek --lib component::
       - name: Native retained public Record integration contracts
+        if: runner.os != 'Windows'
         run: cargo test -p anyseek --tests --features server,fault-injection
+      - name: Verify Windows lexical partition
+        if: runner.os == 'Windows'
+        run: python scripts/check_lexical_partition.py
+      - name: Native retained public Record integration contracts (Windows remainder)
+        if: runner.os == 'Windows'
+        # The four exact large cases run below on independent Windows runners.
+        run: cargo test -p anyseek --tests --features server,fault-injection -- --skip five_term_or_subsets_keep_all_pair_contributions_ --skip mixed_rle_array_bitmap_membership_scores_and_order_
       - name: Native standalone core
         run: cargo test -p anyseek --no-default-features --lib
       - name: Native standalone documentation
@@ -205,6 +213,26 @@ jobs:
           else
             python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults --section authorization
           fi
+
+  windows-lexical:
+    name: Windows lexical (${{ matrix.test }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - five_term_or_subsets_keep_all_pair_contributions_shared
+          - five_term_or_subsets_keep_all_pair_contributions_per_field
+          - mixed_rle_array_bitmap_membership_scores_and_order_shared
+          - mixed_rle_array_bitmap_membership_scores_and_order_per_field
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native toolchain
+        run: rustc --version --verbose
+      - name: Verify complete partition and run exact full-size case
+        run: python scripts/check_lexical_partition.py --case ${{ matrix.test }}
 
   s3-native-acceptance:
     name: S3 semantics and contracts (${{ matrix.os }})
