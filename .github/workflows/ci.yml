@@ -125,9 +125,11 @@ jobs:
       - name: Native partition publication and owner-lock tests
         run: cargo test -p anyseek --lib partition_
       - name: Native Tantivy admission, fixed readers, cancellation and package pins
-        run: cargo test -p anyseek --lib record::lexical::
+        run: |
+          cargo test -p anyseek --lib record::lexical::
       - name: Native vector and metadata component format
-        run: cargo test -p anyseek --lib component::
+        run: |
+          cargo test -p anyseek --lib component::
       - name: Native retained public Record integration contracts
         run: cargo test -p anyseek --tests --features server,fault-injection
       - name: Native standalone core
