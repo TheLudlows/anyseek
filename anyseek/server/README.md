@@ -131,7 +131,7 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 | 操作 / HTTP body / 响应 | 1 MiB / 2 MiB / 16 MiB |
 | Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
 | catalog | 16 MiB 代、10,000 操作，仅安全回收过期控制回执 |
-| admission | 普通 32/每集合 4、恢复 2/1、后台 2/1、可信控制 8/2、静态/存活 8/8；partition 内部 8；30 秒请求期限 |
+| admission | 普通 32/每集合 16、恢复 2/1、后台 2/1、可信控制 8/2、静态/存活 8/8；partition 内部 16；30 秒请求期限 |
 | 调度 | 不同 collection 可并行；key 撤销/接管/共同快照等保留全局排空，资源不足立即 Busy |
 | collection backups | 32 个，可持久退役 |
 | service archives / 新恢复根 | 每源根最多 4 个 archive/准备项，托管父目录最多 4 个生成根，备份权威 payload 预检 1 GiB |
@@ -140,9 +140,9 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 
 | 类别 | 全服务 / 每集合预留字节 | 全服务 / 每集合 I/O 并发 |
 | --- | --- | --- |
-| FOREGROUND | 1024 / 256 MiB | 8 / 2 |
+| FOREGROUND | 2048 / 512 MiB | 8 / 2 |
 | RECOVERY | 512 / 256 MiB | 2 / 1 |
-| BACKGROUND | 768 / 384 MiB | 2 / 1 |
+| BACKGROUND | 4096 / 2048 MiB | 2 / 1 |
 | CONTROL | 144 / 36 MiB | 2 / 1 |
 | PUBLIC | 144 / 144 MiB | 1 / 1 |
 
@@ -299,3 +299,19 @@ Every Record query hit contains `channels`, alongside the unchanged final `score
 Lexical/vector raw scores are the engine's unmodified channel scores before RRF, not calibrated probabilities; the vector metric/representation remains the collection's existing one. In Hybrid/WeightedHybrid and relation fusion, contributions use the actual weights and zero-based constant; absent or disabled channels contribute nothing and have no entry. Relation ranks follow stable adjacency order after deduplicating neighbors; `raw_score` is null because declared edge weights are not similarity scores. Browse likewise has no raw relevance score. Outside fusion, `rrf_contribution` is null.
 
 Hybrid channel ranks are assigned before final fusion sorting/pagination. A pure channel query reports its retrieval-window position (`offset + position`), marked `requested_order` when a field sort is requested; it is not then a relevance rank. Other bases are `score`, `stable_adjacency`, or `browse_order`. No rank implies full ANN recall. Explanation metadata does not change scoring, candidate budgets, visibility or authorization. UI displays this same evidence in a per-hit disclosure and the relation inspector. There is no new persistent state or disk format change in this explanation batch.
+
+
+### 构建与准入预算调整
+
+构建逻辑内存单份默认1 GiB、全进程共享4 GiB；可通过启动环境
+`ANYSEEK_BUILD_MEMORY_BYTES` / `ANYSEEK_BUILD_SHARED_MEMORY_BYTES` 配置，要求
+64 MiB <= 单份 <= 共享 <= 8 GiB。按进程固定，不支持运行中热改。
+Governor各通道的全局字节配置不得超过8 GiB，其他层级/控制余量约束不变。
+这都是保守逻辑预留，并非RSS硬上限；中文分析器、旧视图、候选构建与输出可同时存活，
+部署前应为这些预算和未计入的运行时开销准备足够RAM。16 GiB测试宿主上的验证结果另行记录；
+小内存部署应显式降低预算，不能把默认值视为任意规模容量承诺。
+
+资源不足仍立即拒绝，没有无限等待队列。HTTP/1在读取请求体之前拒绝时明确发送
+`Connection: close`，客户端须为下一请求新建连接，写入重试保持原operation_id；
+HTTP/2不发送该连接级头。错误详情区分Governor全局/集合预算与构建单份/共享预算，
+报告used/requested/limit，不改变Busy/outcome_unknown/durable_pending提交语义。

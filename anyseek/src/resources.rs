@@ -46,9 +46,9 @@ impl Limits {
     fn defaults(lane: Lane) -> Self {
         let mib = 1024 * 1024;
         let (slots, subject_slots, bytes, subject_bytes, io, subject_io) = match lane {
-            Lane::Foreground => (32, 4, 1024*mib, 256*mib, 8, 2),
+            Lane::Foreground => (32, 16, 2048*mib, 512*mib, 8, 2),
             Lane::Recovery => (2, 1, 512*mib, 256*mib, 2, 1),
-            Lane::Background => (2, 1, 768*mib, 384*mib, 2, 1),
+            Lane::Background => (2, 1, 4096*mib, 2048*mib, 2, 1),
             Lane::Control => (8, 2, 144*mib, 36*mib, 2, 1),
             Lane::Public => (8, 8, 144*mib, 144*mib, 1, 1),
         };
@@ -73,9 +73,10 @@ struct Ledger { total: [Usage; 5], subjects: BTreeMap<String, [Usage; 5]> }
 pub struct Governor { limits: [Limits; 5], ledger: Mutex<Ledger> }
 /// A definite refusal to acquire resources, before the guarded I/O/allocation.
 #[derive(Debug)]
-pub struct Busy;
+pub struct Busy { detail: String }
+impl Busy { fn new(detail: impl Into<String>) -> Self { Self { detail: detail.into() } } }
 impl std::fmt::Display for Busy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("resource budget exhausted") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "resource budget exhausted: {}", self.detail) }
 }
 impl std::error::Error for Busy {}
 impl Default for Governor {
@@ -85,6 +86,7 @@ impl Governor {
     /// Load optional ANYSEEK_{LANE}_{SLOTS,PER_COLLECTION,BYTES,PER_COLLECTION_BYTES,IO,PER_COLLECTION_IO}.
     /// Reject malformed/unsafe configuration, including loss of catalog control headroom.
     pub fn from_env() -> Result<Arc<Self>, String> {
+        crate::storage::build_budget::validate_configuration()?;
         let mut governor = Self::default();
         for lane in Lane::ALL {
             let limits = &mut governor.limits[lane.index()];
@@ -104,7 +106,7 @@ impl Governor {
             limits.io = number("IO", limits.io)?;
             limits.subject_io = number("PER_COLLECTION_IO", limits.subject_io)?;
             if limits.subject_slots > limits.slots || limits.subject_bytes > limits.bytes || limits.subject_io > limits.io
-                || limits.slots > 64 || limits.io > 64 || limits.subject_bytes < 18 * 1024 * 1024 {
+                || limits.slots > 64 || limits.io > 64 || limits.subject_bytes < 18 * 1024 * 1024 || limits.bytes > 8 * 1024 * 1024 * 1024 {
                 return Err(format!("invalid {} resource hierarchy", lane.name()));
             }
         }
@@ -113,15 +115,15 @@ impl Governor {
         Ok(Arc::new(governor))
     }
     fn reserve(self: &Arc<Self>, subject: &str, lane: Lane, amount: Usage) -> Result<Lease, Busy> {
-        let mut ledger = self.ledger.lock().map_err(|_| Busy)?;
+        let mut ledger = self.ledger.lock().map_err(|_| Busy::new("class=ledger_poisoned"))?;
         let i = lane.index();
-        if subject.len() > 272 || (!ledger.subjects.contains_key(subject) && ledger.subjects.len() >= 128) { log::warn!("resource subject admission exhausted: retained_subjects={}",ledger.subjects.len());return Err(Busy); }
+        if subject.len() > 272 || (!ledger.subjects.contains_key(subject) && ledger.subjects.len() >= 128) { log::warn!("resource subject admission exhausted: retained_subjects={}",ledger.subjects.len());return Err(Busy::new("class=subject_registry")); }
         let total = ledger.total[i].add(amount, self.limits[i], false).ok_or_else(|| {
-            log::warn!("resource global admission exhausted: lane={lane:?} used={:?} requested={amount:?} limits={:?}",ledger.total[i],self.limits[i]);Busy
+            log::warn!("resource global admission exhausted: lane={lane:?} used={:?} requested={amount:?} limits={:?}",ledger.total[i],self.limits[i]);Busy::new(format!("class=global lane={lane:?} used={:?} requested={amount:?} limits={:?}",ledger.total[i],self.limits[i]))
         })?;
         let used=ledger.subjects.get(subject).map(|u|u[i]).unwrap_or_default();
         let local = used.add(amount, self.limits[i], true).ok_or_else(|| {
-            log::warn!("resource collection admission exhausted: lane={lane:?} used={used:?} requested={amount:?} limits={:?}",self.limits[i]);Busy
+            log::warn!("resource collection admission exhausted: lane={lane:?} used={used:?} requested={amount:?} limits={:?}",self.limits[i]);Busy::new(format!("class=collection lane={lane:?} used={used:?} requested={amount:?} limits={:?}",self.limits[i]))
         })?;
         ledger.total[i] = total;
         ledger.subjects.entry(subject.into()).or_default()[i] = local;
@@ -139,7 +141,7 @@ pub struct Lease { governor: Arc<Governor>, subject: String, lane: Lane, amount:
 impl Lease {
     /// Extend a retained byte reservation before its owner allocates more storage.
     pub(crate) fn grow_bytes(&mut self, bytes: u64) -> Result<(), Busy> {
-        let next = self.amount.bytes.checked_add(bytes).ok_or(Busy)?;
+        let next = self.amount.bytes.checked_add(bytes).ok_or_else(|| Busy::new("class=byte_overflow"))?;
         let mut added = self.governor.reserve(&self.subject, self.lane, Usage { bytes, ..Usage::default() })?;
         self.amount.bytes = next;
         added.amount.bytes = 0;
@@ -215,10 +217,10 @@ mod tests {
     async fn hot_subject_refuses_before_global_exhaustion_and_control_has_reserved_capacity() {
         let governor = Arc::new(Governor::default());
         let mut hot = Vec::new();
-        for _ in 0..4 { hot.push(governor.admit("a".into(), Lane::Foreground, 18*1024*1024).unwrap()); }
+        for _ in 0..16 { hot.push(governor.admit("a".into(), Lane::Foreground, 18*1024*1024).unwrap()); }
         assert!(governor.admit("a".into(), Lane::Foreground, 1).is_err());
         let cold = governor.admit("b".into(), Lane::Foreground, 1).unwrap();
-        for id in 0..27 { hot.push(governor.admit(id.to_string(), Lane::Foreground, 1).unwrap()); }
+        for id in 0..15 { hot.push(governor.admit(id.to_string(), Lane::Foreground, 1).unwrap()); }
         assert!(governor.admit("other".into(), Lane::Foreground, 1).is_err());
         assert!(governor.admit("a".into(), Lane::Control, 1).is_ok());
         drop(cold); drop(hot);
@@ -281,7 +283,7 @@ mod tests {
         let scope = governor.admit("a".into(), Lane::Foreground, 0).unwrap();
         let one = scope.io().unwrap(); let two = scope.io().unwrap();
         assert!(scope.io().is_err());
-        let bytes = scope.bytes(256*1024*1024).unwrap();
+        let bytes = scope.bytes(512*1024*1024).unwrap();
         assert!(scope.bytes(1).is_err());
         assert!(scope.clone().in_lane(Lane::Recovery).io().is_ok());
         assert!(governor.admit("b".into(), Lane::Foreground, 1).is_ok());
