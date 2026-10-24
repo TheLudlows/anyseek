@@ -1,18 +1,20 @@
 //! Independent NOT membership, posting-rank and count regression (#37).
 use anyseek::{
-    commit::Commit,
     index::{
-        AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexArc,
-        IndexDocuments, IndexMetaObject, LexicalSimilarity, StopwordType, TokenizerType,
-        create_index, open_index,
+        AccessType, Clustering, DocumentCompression, FrequentwordType,
+         IndexMetaObject, LexicalSimilarity, StopwordType, TokenizerType,
+
     },
-    search::{QueryType, ResultSort, ResultType, Search, SearchMode, SortOrder},
+    search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
     vector::Inference,
 };
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+use records::JOURNAL_LIMIT;
 use serde_json::json;
 use std::path::PathBuf;
 
-async fn fresh(label: &str, ngrams: u8) -> (IndexArc, PathBuf) {
+async fn fresh(label: &str, ngrams: u8) -> (RecordPartition, PathBuf) {
     let path = std::env::temp_dir().join(format!("anyseek-t2s-{label}-{}", std::process::id()));
     assert!(!path.exists());
     let meta = IndexMetaObject {
@@ -34,58 +36,34 @@ async fn fresh(label: &str, ngrams: u8) -> (IndexArc, PathBuf) {
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    let schema = serde_json::from_value(
+    let schema: Vec<anyseek::index::SchemaField> = serde_json::from_value(
         json!([{"field":"body","field_type":"Text","store":true,"index_lexical":true}]),
     )
     .unwrap();
     (
-        create_index(&path, meta, &schema, 11, true, Some(1))
-            .await
-            .unwrap(),
+        records::create(&path, meta, schema).await,
         path,
     )
 }
-async fn add(index: &IndexArc, docs: &[&str]) {
-    index
-        .index_documents(
-            docs.iter()
-                .map(|body| serde_json::from_value(json!({"body":body})).unwrap())
-                .collect(),
-        )
-        .await
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while index.read().await.indexed_doc_count().await != docs.len() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+async fn add(index: &RecordPartition, docs: &[&str]) {
+    records::append(index, docs.iter().map(|body| serde_json::from_value(json!({"body":body})).unwrap()).collect()).await;
 }
 async fn rows_sorted(
-    index: &IndexArc,
+    index: &RecordPartition,
     q: &str,
-    realtime: bool,
+    _realtime: bool,
     explicit: bool,
     count: bool,
 ) -> (Vec<(usize, f32)>, usize) {
     let r = index
-        .search(
-            q.into(),
-            None,
-            QueryType::Union,
-            SearchMode::Lexical,
-            false,
-            0,
-            100,
+        .query(RecordQuery {
+            text: q.into(), vector: None, temporal: None, query_type: QueryType::Union, mode: SearchMode::Lexical, offset: 0, length: 100, result_type:
             if count {
                 ResultType::TopkCount
             } else {
                 ResultType::Topk
             },
-            realtime,
-            vec![],
-            vec![],
+            fields: vec![], filters: vec![], sort:
             if explicit {
                 vec![ResultSort {
                     field: "_score".into(),
@@ -94,12 +72,11 @@ async fn rows_sorted(
             } else {
                 vec![]
             },
-        )
-        .await;
-    assert!(r.error.is_none(), "{:?}", r.error);
+        }).await.unwrap();
+
     (
-        r.results.iter().map(|r| (r.doc_id, r.score)).collect(),
-        r.result_count_total,
+        r.hits.iter().map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score)).collect(),
+        r.count_total,
     )
 }
 #[tokio::test]
@@ -124,12 +101,12 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                     add(&index, &[&first, &second]).await;
                     for stage in 0..3 {
                         if stage == 1 {
-                            index.commit().await.unwrap();
+                            index.compact_journal().await.unwrap();
                         }
                         if stage == 2 {
-                            index.close().await.unwrap();
+
                             drop(index);
-                            index = open_index(&path).await.unwrap();
+                            index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
                         }
                         for explicit in [false, true] {
                             let (result, total) = rows_sorted(
@@ -156,7 +133,7 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                             }
                         }
                     }
-                    index.close().await.unwrap();
+
                     drop(index);
                     std::fs::remove_dir_all(path).unwrap();
                 }

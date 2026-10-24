@@ -66,7 +66,7 @@ python3 scripts/s3_acceptance.py --backend real --suite all \
 target/debug/anyseek_server generate_openapi=true
 ```
 
-生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 归可选 `anyseek::server` 模块；低层 Rust Index API 与默认 Record 服务的持久化契约不同。参见 [服务指南](../anyseek/server/README.md) 和 [Rust 示例](library-examples.md)。
+生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 归可选 `anyseek::server` 模块；Rust 数据访问统一使用 RecordPartition，旧低层 Index API 已移除。参见 [服务指南](../anyseek/server/README.md) 和 [Rust 示例](library-examples.md)。
 
 ## 验证边界
 

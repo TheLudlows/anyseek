@@ -4,13 +4,15 @@
 
 
 Existing `SearchMode::Hybrid` and HTTP requests without `rrf` retain zero-based
-constant 0.6, equal unit weights, and the existing per-shard candidate window
-`offset + length`. These defaults have **not** been retuned.
+constant 0.6, equal unit weights, and the existing Record global candidate window
+`offset + length` per channel. These defaults have **not** been retuned.
 
 Rust callers opt into `SearchMode::WeightedHybrid { similarity_threshold,
 ann_mode, rrf: RrfOptions { ..Default::default() } }`. Adding a variant preserves
 existing Hybrid struct literals but downstream exhaustive SearchMode matches
-must handle the new variant. Search signatures and index persistence are unchanged.
+must handle the new variant. Storage/query access uses `RecordPartition`; the
+retired low-level IndexArc/Search/Commit API is not available. The current
+Tantivy package format is for new databases; it does not read legacy indexes.
 The HTTP API accepts an optional `rrf` object only with nonempty query text and a
 query vector:
 
@@ -34,8 +36,8 @@ not independently validated recommendations.
 
 For each document, the score is the sum over participating channels of
 `weight / (constant + rank)`. Rank starts at **zero**, after each channel is merged
-across shards and sorted by descending score, then ascending global document ID.
-Missing hits contribute zero. Final relevance ties retain ascending global ID.
+across components and sorted by descending score, then ascending stable Record identity.
+Missing hits contribute zero. Final relevance ties retain ascending stable identity.
 Zero-based constant 5 equals one-based constant 4; the conventional one-based
 constant 60 comparison requires `constant: 61` here.
 
@@ -46,20 +48,22 @@ including hits found only in that channel. Retrieval still runs both channels,
 so zero weights do not imply cheaper queries or relaxed vector validation.
 Raw-score diagnostics and source labels describe contributing channels.
 
-Each explicit candidate budget must be a positive integer. That channel retrieves
-up to the budget **per shard**, merges and ranks the candidates, then truncates to
-the budget **globally before fusion**. These values bound retained TopK
+Each explicit candidate budget must be a positive integer. Each channel retains
+at most that many candidates **globally before fusion**. Component-local prefixes
+may be used to retrieve that global window; component count does not multiply
+the admitted fusion window. These values bound retained TopK
 candidates, not documents examined, elapsed time or vector probes. The two budgets are independent of each
 other, the output window, and `nprobe`/`all` (which retain their vector probing
 semantics). A cap below the output window can yield fewer results. Omitted/null
-candidate caps retain the legacy per-shard window, with no extra global cap;
-this distinction preserves multi-shard default scores. Other numeric fields and
+candidate caps use a global `offset + length` window for each channel. This is
+the pre-existing Record contract, including across frozen components and the tail;
+the removed low-level API had a different default and does not define Record behavior. Other numeric fields and
 the HTTP `rrf` object reject null. Unknown RRF fields are rejected.
 
 Explicit budgets held fixed across pages keep the fusion candidate pool fixed.
 With omitted budgets it can change with `offset + length`, as before. Count-only
 core requests retain existing count semantics; hybrid totals remain the existing
-per-shard maximum of channel counts, not an exact union or fused-candidate count.
+sum of per-component maxima of channel counts, not an exact union or fused-candidate count.
 HTTP vector/hybrid requests still require positive output length. Filters,
 realtime visibility, explicit final sort and vector thresholds retain existing
 behavior. Explicit field sorts retain existing lexical candidate-selection
@@ -69,6 +73,13 @@ Larger budgets increase per-shard TopK work, merge memory and sorting work; a
 rough merge bound is shards times the sum of budgets. More vector candidates do
 not replace a sufficient probe budget. No latency, resource or relevance gain is
 claimed without measurement on the same frozen corpus and vectors.
+
+Neither default nor explicit windows guarantee whole-corpus fused recall. ANN
+can also omit candidates. Ordinary `RecordSearch` has no generic completeness
+boolean: `count_total` is mode-specific, not a completeness certificate. For
+relation fusion, `fusion.count_relation="candidate_window"` describes the bounded
+candidate union, while `relation_complete` describes adjacency traversal only.
+A complete adjacency traversal does not imply complete lexical/vector recall.
 
 ## Evaluation boundary
 

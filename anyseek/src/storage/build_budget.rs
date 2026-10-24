@@ -26,13 +26,17 @@ pub(crate) fn reserve_memory(bytes: u64) -> io::Result<MemoryLease> {
 }
 fn reserve_from(counter: &Arc<AtomicU64>, bytes: u64) -> io::Result<MemoryLease> {
     if bytes > BUILD_MEMORY {
+        log::warn!("record build single reservation rejected: requested={bytes} limit={BUILD_MEMORY}");
         return Err(exceeded());
     }
     counter
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             used.checked_add(bytes).filter(|n| *n <= SHARED_MEMORY)
         })
-        .map_err(|_| exceeded())?;
+        .map_err(|used| {
+            log::warn!("record build shared reservation rejected: used={used} requested={bytes} limit={SHARED_MEMORY}");
+            exceeded()
+        })?;
     Ok(MemoryLease(bytes, counter.clone()))
 }
 impl MemoryLease {
@@ -390,12 +394,28 @@ mod tests {
     }
     #[test]
     fn renamed_open_handle_is_conservatively_charged_after_rescan() {
+        assert_renamed_open_handle_charge(false);
+    }
+    #[cfg(not(windows))]
+    #[test]
+    fn renamed_parent_with_open_handle_is_conservatively_charged_after_rescan() {
+        assert_renamed_open_handle_charge(true);
+    }
+    fn assert_renamed_open_handle_charge(rename_parent: bool) {
         let root = root();
         fs::create_dir(root.join("prepared")).unwrap();
         let scope = DiskScope::begin(&root, 16).unwrap();
         let mut file = File::create(root.join("prepared/data")).unwrap();
         file.write_all(&[1; 4]).unwrap();
-        fs::rename(root.join("prepared"), root.join("selected")).unwrap();
+        if rename_parent {
+            fs::rename(root.join("prepared"), root.join("selected")).unwrap();
+        } else {
+            // Windows rejects renaming a directory with an open child. Moving
+            // the shared-delete file preserves the same stale-path accounting
+            // case without requiring that unsupported directory operation.
+            fs::create_dir(root.join("selected")).unwrap();
+            fs::rename(root.join("prepared/data"), root.join("selected/data")).unwrap();
+        }
         drop(scope);
         let scope = DiskScope::begin(&root, 16).unwrap();
         file.write_all(&[2; 4]).unwrap();

@@ -16,7 +16,7 @@ concurrency:
 jobs:
   build-and-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -45,11 +45,26 @@ jobs:
           python3 - <<'PYCODE'
           import json
           with open('/tmp/anyseek-metadata.json') as source:
-              packages = json.load(source)['packages']
+              metadata = json.load(source)
+              packages = metadata['packages']
               names = {package['name'] for package in packages}
-          forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs', 'rkyv', 'tabled', 'colored', 'num-format', 'crossbeam-channel', 'ctrlc', 'half', 'lz4_flex', 'zstd', 'snowball_stemmers_rs', 'gxhash', 'zstd-safe', 'zstd-sys'}
+          forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs', 'rkyv', 'tabled', 'colored', 'num-format', 'ctrlc', 'half', 'zstd', 'snowball_stemmers_rs', 'gxhash', 'zstd-safe', 'zstd-sys'}
           assert not forbidden, f'retired dependencies remain: {forbidden}'
           core = next(package for package in packages if package['name'] == 'anyseek')
+          # Native Tantivy uses channels and LZ4 internally. Permit those only
+          # behind its dependency edge; do not restore old direct code paths.
+          native_only = {'crossbeam-channel', 'lz4_flex'}
+          assert not native_only & {d['name'] for d in core['dependencies']}
+          by_id = {p['id']: p for p in packages}
+          nodes = {n['id']: n for n in metadata['resolve']['nodes']}
+          seen, pending = set(), [core['id']]
+          while pending:
+              current = pending.pop()
+              if current in seen or by_id[current]['name'] == 'tantivy':
+                  continue
+              seen.add(current)
+              pending.extend(d['pkg'] for d in nodes[current]['deps'])
+          assert not native_only & {by_id[p]['name'] for p in seen}, 'native-only dependency escaped Tantivy'
           assert not any(dependency['name'] == 'aho-corasick' for dependency in core['dependencies']), 'direct highlighter dependency remains'
           # The tokenizer retains regex-syntax; optional API dependencies are checked separately.
           print('PASS no direct highlighter dependency')
@@ -85,7 +100,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     # Includes cold-cache S3 takeover and joint-archive process fault matrices.
-    timeout-minutes: 40
+    timeout-minutes: 120
     env:
       ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/p1-native-data
     steps:
@@ -109,11 +124,32 @@ jobs:
         run: cargo test -p anyseek --lib journal_
       - name: Native partition publication and owner-lock tests
         run: cargo test -p anyseek --lib partition_
-      - name: Native existing-index I/O errors and mapping lifecycle
-        run: cargo test -p anyseek --lib commit_io_tests
+      - name: Native Tantivy admission, fixed readers, cancellation and package pins
+        run: |
+          cargo test -p anyseek --lib record::lexical::
+      - name: Native vector and metadata component format
+        run: |
+          cargo test -p anyseek --lib component::
+      - name: Native retained public Record integration contracts
+        if: runner.os != 'Windows'
+        run: cargo test -p anyseek --tests --features server,fault-injection
+      - name: Verify Windows lexical partition
+        if: runner.os == 'Windows'
+        run: python scripts/check_lexical_partition.py
+      - name: Native retained public Record integration contracts (Windows remainder)
+        if: runner.os == 'Windows'
+        # The four exact large cases run below on independent Windows runners.
+        run: cargo test -p anyseek --tests --features server,fault-injection -- --skip five_term_or_subsets_keep_all_pair_contributions_ --skip mixed_rle_array_bitmap_membership_scores_and_order_
+      - name: Native standalone core
+        run: cargo test -p anyseek --no-default-features --lib
+      - name: Native standalone documentation
+        run: cargo test -p anyseek --no-default-features --doc
+      - name: Native default documentation
+        run: cargo test -p anyseek --doc
       - name: Native record replay, snapshot and response-loss tests
         run: cargo test -p anyseek --lib record::tests
       - name: Native bounded background index and fenced cut publication
+        shell: bash
         run: |
           cargo test -p anyseek --features s3-object-store --lib record::indexer::tests
           cargo test -p anyseek --features s3-object-store --lib sqlite_authority::index_build::tests
@@ -122,12 +158,14 @@ jobs:
       - name: Native catalog authorization and revocation recovery tests
         run: cargo test -p anyseek --lib catalog_
       - name: Native verified object cache corruption, eviction and cold recovery
+        shell: bash
         run: |
           cargo test -p anyseek --features s3-object-store --lib verified_cache
           cargo test -p anyseek --features s3-object-store --lib cache_corruption
       - name: Native service output and admission barriers
         run: cargo test -p anyseek --features server record_service::tests
       - name: Native collection budgets, cancellation ownership and object buffer leases
+        shell: bash
         run: |
           cargo test -p anyseek --features server --lib resources::tests
           cargo test -p anyseek --features s3-object-store --lib resource_
@@ -175,6 +213,26 @@ jobs:
           else
             python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults --section authorization
           fi
+
+  windows-lexical:
+    name: Windows lexical (${{ matrix.test }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - five_term_or_subsets_keep_all_pair_contributions_shared
+          - five_term_or_subsets_keep_all_pair_contributions_per_field
+          - mixed_rle_array_bitmap_membership_scores_and_order_shared
+          - mixed_rle_array_bitmap_membership_scores_and_order_per_field
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native toolchain
+        run: rustc --version --verbose
+      - name: Verify complete partition and run exact full-size case
+        run: python scripts/check_lexical_partition.py --case ${{ matrix.test }}
 
   s3-native-acceptance:
     name: S3 semantics and contracts (${{ matrix.os }})

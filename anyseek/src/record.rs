@@ -4,7 +4,7 @@
 use crate::{
     commit::Commit,
     index::{Document, IndexArc, IndexDocuments, IndexMetaObject, SchemaField, create_index},
-    search::{FacetFilter, QueryType, ResultSort, ResultType, Search, SearchMode},
+    search::{FacetFilter, QueryType, ResultSort, ResultType, SearchMode},
     storage::{journal::CreateError, partition::PartitionJournal},
     vector::Embedding,
 };
@@ -43,11 +43,14 @@ pub use indexer::IndexJob;
 mod segment_state;
 mod segment;
 mod anchor;
+mod package_pins;
 #[cfg(feature="s3-object-store")]
 mod remote_checkpoint;
 pub(crate) mod build_budget;
 mod view;
 mod recovery;
+// Native package implementation; authority routing switches atomically after integration.
+pub(crate) mod lexical;
 pub use recovery::{RecoveryIdentity, SealCertificate, SealRequest};
 
 /// Failures distinguish rejected requests from operations that require recovery.
@@ -309,7 +312,7 @@ struct State {
 enum Entry {
     #[serde(rename = "RecordAnchorV1")]
     Anchor(anchor::Reference),
-    #[serde(rename = "RecordCheckpointV12")]
+    #[serde(rename = "RecordCheckpointV14")]
     Checkpoint { config: RecordConfig, state: State },
     #[serde(rename = "RecordAppliedV12")]
     Applied(Applied),
@@ -815,16 +818,11 @@ fn clean_recovery_caches(path: &Path) -> Result<(), RecordError> {
     Ok(())
 }
 
-async fn detach(index: &IndexArc) {
-    for shard in &index.read().await.shard_vec {
-        shard.write().await.index_option = None;
-    }
-}
 // Search files contain candidates and scoring data, never a second copy of
 // authoritative Record JSON. Public schema.store still controls HTTP projection.
 fn retrieval_schema(config: &RecordConfig) -> Vec<SchemaField> {
     let mut schema = temporal::schema(config);
-    for field in &mut schema { field.store = false; }
+    for field in &mut schema { field.store = false; field.index_lexical = false; }
     schema
 }
 
@@ -861,7 +859,6 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
     .map_err(storage)?;
     // Break legacy ownership cycles so a rejected candidate can release mapped
     // files on Windows. The partition owns the root for the complete query.
-    detach(&index).await;
     index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
     index.read().await.shard_vec[0].write().await.build_input_covered=true;
     for shard in &index.read().await.shard_vec {
@@ -884,7 +881,9 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
         }
     }
 
+    let native = lexical::runtime::Runtime::create(&cache.join("native"), config)?;
     for record in &records {
+        native.append(lexical::Identity { id:record.record_id.clone(),version:record.version,revision:state.seq },record.document.as_ref().unwrap(),false).await?;
         index.read().await.shard_vec[0]
             .write()
             .await
@@ -898,6 +897,8 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
             .await
             .map_err(storage)?;
     }
+    native.flush().await?;
+    index.write().await.record_lexical.push(native);
     index.commit().await.map_err(storage)?;
     index.read().await.shard_vec[0].write().await.build_input_covered=false;
     Ok((
@@ -1442,12 +1443,12 @@ impl RecordPartition {
                     mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve } =>
                         (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve),
                 };
-                let growth=build_budget::write_estimate(&inner.state,&inner.config,&applied)?;
-                if growth>0 && !inner.index.can_admit(growth).await {
+                let (growth,native_updates)=build_budget::write_estimate(&inner.state,&inner.config,&applied)?;
+                if growth>0 && !inner.index.can_admit(growth,native_updates).await {
                     // One bounded flush attempt before rejecting, never discard
                     // selected history to manufacture admission space.
                     inner.publish_anchor().await?;
-                    if !inner.index.can_admit(growth).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
+                    if !inner.index.can_admit(growth,native_updates).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
                 }
                 let feed_point = change_feed::pending(&inner.state,&applied)?;
                 inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;
@@ -3070,7 +3071,7 @@ mod tests {
     async fn source_protocol_rejects_p1_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV12", "Checkpoint", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV14", "Checkpoint", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
@@ -3912,8 +3913,10 @@ mod tests {
         {
             let mut inner = partition.inner.lock().await;
             let shard = inner.index.test_index().read().await.shard_vec[0].clone();
+            let native=inner.index.test_index().read().await.record_lexical[0].clone();
             shard.write().await.build_input_covered=true;
             for id in 1..65536 {
+                native.append(lexical::Identity{id:"a".into(),version:id as u64+1,revision:0},&original.document.clone().unwrap(),false).await.unwrap();
                 shard
                     .write()
                     .await
@@ -3932,6 +3935,7 @@ mod tests {
                 shard.active.as_mut().unwrap().retire(id - 1);
                 inner.ordinals.push("a".into());
             }
+            native.flush().await.unwrap();
             shard.write().await.build_input_covered=false;
             inner.locations.insert("a".into(), 65535);
         }
@@ -4177,23 +4181,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        {
-            let inner = partition.inner.lock().await;
-            let index = inner.index.test_index().read().await;
-            let shard = index.shard_vec[0].read().await;
-            let sorts = vec![];
-            let mut heap = crate::min_heap::MinHeap::new(1, &shard, false, &sorts);
-            heap.add_topk(
-                crate::min_heap::Result {
-                    doc_id: 0,
-                    score: 1.0,
-                    ..Default::default()
-                },
-                1,
-            );
-            assert!(!heap.can_prune(1.0, 3, 1)); // physical 3 is logical "a", better than "z"
-            assert!(heap.can_prune(0.5, 3, 1));
-        }
+        // The retired lexical heap's pruning rules are not part of the native engine.
+        // The following end-to-end windows verify stable business-ID ties before
+        // checkpoint, after checkpoint and after reopening the selected package.
         for step in 0..3 {
             for (text, mode) in [
                 ("alpha", SearchMode::Lexical),
@@ -4646,12 +4636,14 @@ mod tests {
                 &mut authority, "record-test", 1, &checkpoint, unix_time_ms_i64(),
             ).await.unwrap();
         }
+        // Native packages add postings/positions/fast-field files; this test covers
+        // remote reconciliation, not a 32-object capacity limit. Keep the limit finite.
         let mut remote = RemotePersistence { _owner:None,
             store,
             authority: tokio::sync::Mutex::new(authority),
             partition_id: "record-test".into(),
             owner_epoch: 1,
-            max_tail_blocks: 32,
+            max_tail_blocks: 128,
             max_tail_bytes: 1024 * 1024,
             max_object_bytes: 1024 * 1024,
         };
@@ -4677,7 +4669,7 @@ mod tests {
         let store = S3CompatibleStore::from_store(object_store.clone(), 1024 * 1024);
         let mut remote = RemotePersistence { _owner:None,
             store, authority: tokio::sync::Mutex::new(authority), partition_id: "record-test".into(),
-            owner_epoch: 1, max_tail_blocks: 32, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
+            owner_epoch: 1, max_tail_blocks: 128, max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024,
         };
         {
             let mut inner = recovered.inner.lock().await;
@@ -4772,14 +4764,13 @@ impl Inner {
                         vector,
                         query_type,
                         mode,
-                        true,
                         offset,
                         limit,
                         result_type,
-                        true,
                         fields,
                         filters,
                         sort,
+                        lexical::Cut { sequence:self.state.seq,evaluation_time_ms:self.evaluation_time_ms },
                     )
                     .await;
                 if let Some(error) = result.error {

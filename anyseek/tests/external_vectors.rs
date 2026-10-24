@@ -1,10 +1,12 @@
-//! External embedding contract: reject invalid inputs before writes or vector search.
+use anyseek::record::RecordSearch;
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// External embedding contract: reject invalid inputs before writes or vector search.
 use anyseek::{
-    commit::Commit,
-    index::{create_index, open_index, AccessType, Close, Clustering, Document, DocumentCompression,
-        FrequentwordType, IndexArc, IndexDocument, IndexDocuments, IndexMetaObject,
-        LexicalSimilarity, NgramSet, SchemaField, StopwordType, TokenizerType, UpdateDocument, UpdateDocuments},
-    search::{QueryType, ResultObject, ResultType, Search, SearchMode},
+    index::{AccessType, Clustering, Document, DocumentCompression,
+        FrequentwordType, IndexMetaObject,
+        LexicalSimilarity, NgramSet, SchemaField, StopwordType, TokenizerType},
+    search::{QueryType,  ResultType, SearchMode},
     vector::{embedding_to_bytes_be, parse_external_embedding, validate_embedding, validate_vector_schema,
         Embedding, Inference, Precision, Quantization},
     vector_similarity::{AnnMode, VectorSimilarity},
@@ -34,10 +36,10 @@ fn meta() -> IndexMetaObject {
         ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,
         access_type:AccessType::Mmap, clustering:Clustering::None, inference:inference() }
 }
-async fn query(index: &IndexArc, mode: SearchMode, vector: Option<Embedding>) -> ResultObject {
-    index.search("alpha".into(), vector, QueryType::Union, mode, false, 0, 10,
-        ResultType::TopkCount, false, vec![],  vec![], vec![],).await
+async fn try_query(index: &RecordPartition, mode: SearchMode, vector: Option<Embedding>) -> Result<RecordSearch, anyseek::record::RecordError> {
+    index.query(RecordQuery {text:"alpha".into(),vector:vector,query_type:QueryType::Union,mode:mode,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await
 }
+async fn query(index: &RecordPartition, mode: SearchMode, vector: Option<Embedding>) -> RecordSearch {try_query(index,mode,vector).await.unwrap()}
 #[test]
 fn external_config_and_numeric_validation() {
     assert!(validate_vector_schema(&inference(), &schema()).is_ok());
@@ -68,40 +70,41 @@ fn external_config_and_numeric_validation() {
 #[tokio::test]
 async fn external_write_query_reopen_contract() {
     let path = Path::new("tests/index_external_contract"); let _ = fs::remove_dir_all(path);
-    let index = create_index(path, meta(), &schema(), 11, true, Some(1)).await.unwrap();
-    let missing: Document = serde_json::from_value(json!({"body":"invalid vector","vector":null})).unwrap();
-    assert!(index.index_document(missing.clone()).await.is_err());
-    assert!(index.index_documents(vec![document("partial",json!([1,0,0])), missing.clone()]).await.is_err());
-    index.commit().await.unwrap();
-    assert_eq!(index.read().await.indexed_doc_count().await, 0);
-    index.index_documents(vec![document("alpha",json!([1,0,0])),document("beta",json!([0,1,0]))]).await.unwrap();
-    index.commit().await.unwrap();
-    assert!(index.update_document((0,missing.clone())).await.is_err());
-    assert!(index.update_documents(vec![(0,document("changed",json!([0,0,1]))),(1,missing)]).await.is_err());
-    index.commit().await.unwrap();
-    assert_eq!(query(&index,SearchMode::Lexical,None).await.results.len(),1);
+    let index = Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await).unwrap();
+    let missing: Document = serde_json::from_value(json!({"body":"invalid vector","vector":[1,2]})).unwrap();
+    assert!(records::insert(&index, vec![missing.clone()]).await.is_err());
+    // Record writes are individually atomic; no retired batch API emulation.
+    index.compact_journal().await.unwrap();
+    assert_eq!(index.statistics().await.unwrap().physical_versions, 0);
+    records::insert(&index, vec![document("alpha",json!([1,0,0])),document("beta",json!([0,1,0]))]).await.unwrap();
+    index.compact_journal().await.unwrap();
+    let old=index.get("00000000000000000000").await.unwrap().unwrap();
+    assert!(index.write(anyseek::record::RecordWrite {
+        operation_id:anyseek::record::OperationId::new("invalid-update".into()),record_id:old.record_id.clone(),
+        routing_key:old.routing_key.clone(),expected:anyseek::record::ExpectedVersion::Match(old.version),
+        document:Some(missing),vector_patch:None,generation:None,temporal:None,system:None,
+    }).await.is_err());
+    assert_eq!(index.get(&old.record_id).await.unwrap().unwrap().version,old.version);
+    index.compact_journal().await.unwrap();
+    assert_eq!(query(&index,SearchMode::Lexical,None).await.hits.len(),1);
     for mode in [SearchMode::Vector { similarity_threshold:None, ann_mode:AnnMode::All },
                  SearchMode::Hybrid { similarity_threshold:None, ann_mode:AnnMode::All }] {
-        assert!(query(&index,mode.clone(),None).await.error.is_some());
-        assert!(query(&index,mode.clone(),Some(Embedding::F32(vec![1.0]))).await.error.is_some());
+        assert!(try_query(&index,mode.clone(),None).await.is_err());
+        assert!(try_query(&index,mode.clone(),Some(Embedding::F32(vec![1.0]))).await.is_err());
         let result = query(&index,mode,Some(Embedding::F32(vec![1.0,0.0,0.0]))).await;
-        assert!(result.error.is_none(),"{:?}",result.error);
-        assert_eq!(result.results[0].doc_id,0);
+        assert_eq!(result.hits[0].record.record_id.parse::<usize>().unwrap(),0);
     }
     let pending: Document = serde_json::from_value(json!({"body":"alpha pending"})).unwrap();
-    index.index_document(pending).await.unwrap(); index.commit().await.unwrap();
-    assert_eq!(query(&index,SearchMode::Lexical,None).await.results.len(),2);
-    index.close().await.unwrap(); drop(index);
-    let reopened = open_index(path).await.unwrap();
+    records::insert(&index, vec![pending]).await.unwrap(); index.compact_journal().await.unwrap();
+    assert_eq!(query(&index,SearchMode::Lexical,None).await.hits.len(),2);
+     drop(index);
+    let reopened = RecordPartition::open(path, records::JOURNAL_LIMIT).await.unwrap();
     let result = query(&reopened,SearchMode::Vector { similarity_threshold:Some(0.7),ann_mode:AnnMode::All },
-        Some(Embedding::F32(vec![1.0,0.0,0.0]))).await;
-    assert!(result.error.is_none()); assert_eq!(result.results.len(),1); assert_eq!(result.results[0].doc_id,0);
-    reopened.close().await.unwrap(); drop(reopened);
-    let meta_path = path.join("index.json");
-    let mut old_meta: serde_json::Value = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+        Some(Embedding::F32(vec![1.0,0.0,0.0]))).await; assert_eq!(result.hits.len(),1); assert_eq!(result.hits[0].record.record_id.parse::<usize>().unwrap(),0);
+     drop(reopened);
+    let mut old_meta=serde_json::to_value(meta()).unwrap();
     old_meta["inference"] = json!({"Model2Vec":{"model":"PotionBase2M","chunk_size":1000,"quantization":"None"}});
-    fs::write(meta_path, serde_json::to_vec(&old_meta).unwrap()).unwrap();
-    assert!(open_index(path).await.err().unwrap().contains("unsupported or invalid index metadata"));
+    assert!(serde_json::from_value::<IndexMetaObject>(old_meta).is_err());
     fs::remove_dir_all(path).unwrap();
 }
 
@@ -116,17 +119,16 @@ async fn external_f32_and_quantized_thresholds() {
         if let Inference::External { quantization: q, dimensions: d, similarity: metric, .. } = &mut config.inference { *q = quantization; *d = dimensions; *metric = similarity; }
         let mut alpha = vec![0.0; dimensions]; alpha[0] = 1.0;
         let mut beta = vec![0.0; dimensions]; beta[1] = 1.0;
-        let index = create_index(&path, config, &schema(), 11, true, Some(1)).await.unwrap();
-        index.index_documents(vec![document("alpha",json!(alpha.clone())), document("beta",json!(beta))]).await.unwrap();
-        index.commit().await.unwrap();
+        let index = Ok::<_, String>(records::create(&path, config, (&schema()).to_vec()).await).unwrap();
+        records::insert(&index, vec![document("alpha",json!(alpha.clone())), document("beta",json!(beta))]).await.unwrap();
+        index.compact_journal().await.unwrap();
         for ann_mode in [AnnMode::All, AnnMode::Nprobe(1)] {
             let result = query(&index,SearchMode::Vector {similarity_threshold:Some(0.7),ann_mode},
                 Some(Embedding::F32(alpha.clone()))).await;
-            assert!(result.error.is_none());
-            assert_eq!(result.results.len(),1,"{similarity} {quantization} dimensions={dimensions}");
-            assert_eq!(result.results[0].doc_id,0,"{similarity} {quantization} dimensions={dimensions}");
+            assert_eq!(result.hits.len(),1,"{similarity} {quantization} dimensions={dimensions}");
+            assert_eq!(result.hits[0].record.record_id.parse::<usize>().unwrap(),0,"{similarity} {quantization} dimensions={dimensions}");
         }
-        index.close().await.unwrap(); drop(index); fs::remove_dir_all(path).unwrap();
+         drop(index); fs::remove_dir_all(path).unwrap();
     }
 }
 }

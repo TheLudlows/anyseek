@@ -1,11 +1,11 @@
 use std::cmp;
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use finl_unicode::categories::{CharacterCategories, MinorCategory};
 
 use crate::{
     index::{
-        MAX_QUERY_TERM_NUMBER, NgramSet, NgramType, NonUniqueTermObject, Shard, TermObject,
+        MAX_QUERY_TERM_NUMBER, NgramSet, NgramType, NonUniqueTermObject, TermObject,
         TokenizerType, hash32, hash64,
     },
     search::QueryType,
@@ -121,7 +121,7 @@ pub fn fold_diacritics_accents_ligatures_zalgo_umlaut(string: &str) -> String {
 // Keep it on the first term of the same lexical span. Lone signs, internal
 // C++/hyphens, and document analysis retain their existing behavior.
 #[cfg(feature = "zh")]
-fn segment_zh_span(index: &Shard, span: &str, is_query: bool) -> Vec<String> {
+fn segment_zh_span(index: &AnalysisContext<'_>, span: &str, is_query: bool) -> Vec<String> {
     let unary = is_query && span.len() > 1
         && matches!(span.as_bytes()[0], b'+' | b'-');
     let body = if unary { &span[1..] } else { span };
@@ -132,10 +132,20 @@ fn segment_zh_span(index: &Shard, span: &str, is_query: bool) -> Vec<String> {
     terms
 }
 
+/// Analysis configuration independent of the old posting codec and Shard.
+/// Native Tantivy indexing and query compilation can reuse the exact same
+/// normalization, segmentation and syntax without creating a legacy index.
+pub(crate) struct AnalysisContext<'a> {
+    pub text_normalization: crate::index::TextNormalization,
+    pub stop_words: &'a AHashSet<String>,
+    pub frequent_hashset: &'a AHashSet<u64>,
+    #[cfg(feature = "zh")]
+    pub word_segmentation_option: Option<&'a crate::word_segmentation::WordSegmentationTM>,
+}
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::assigning_clones)]
-pub(crate) async fn tokenizer(
-    index: &Shard,
+pub(crate) async fn analyze(
+    index: &AnalysisContext<'_>,
     text: &str,
     unique_terms: &mut AHashMap<String, TermObject>,
     non_unique_terms: &mut Vec<NonUniqueTermObject>,
@@ -152,7 +162,7 @@ pub(crate) async fn tokenizer(
 ) {
     // Normalize only the transient analysis view, never the stored document.
     // Both index and query enter this same path with the persisted shard rule.
-    let normalized = match index.meta.text_normalization {
+    let normalized = match index.text_normalization {
         crate::index::TextNormalization::None => std::borrow::Cow::Borrowed(text),
         crate::index::TextNormalization::OpenCcT2s1_1_9 => crate::opencc_t2s::convert(text),
     };
@@ -1317,12 +1327,11 @@ pub(crate) async fn tokenizer(
 mod tests {
     use super::*;
     use crate::{
-        commit::Commit,
         index::{
-            AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-            IndexMetaObject, LexicalSimilarity, StopwordType, create_index, open_index,
+            AccessType, Clustering, DocumentCompression, FrequentwordType,
+            IndexMetaObject, LexicalSimilarity, StopwordType,
         },
-        search::{ResultType, Search, SearchMode},
+        search::{ResultType, SearchMode},
         vector::Inference,
     };
     use serde_json::json;
@@ -1351,12 +1360,15 @@ mod tests {
             {"field":"body", "field_type":"Text", "store":true, "index_lexical":true}
         ]))
         .unwrap();
-        let index = create_index(&path, meta, &schema, 11, true, Some(1))
-            .await
-            .unwrap();
+        let (stop_words,_,frequent_hashset)=crate::index::analysis_dictionaries(&meta);
+        let mut dictionary=crate::word_segmentation::WordSegmentationTM::new();
+        dictionary.load_dictionary(0,1,true);
+        let context=AnalysisContext { text_normalization:meta.text_normalization,stop_words:&stop_words,
+            frequent_hashset:&frequent_hashset,word_segmentation_option:Some(&dictionary) };
+        let config=crate::record::RecordConfig {index:meta,schema,change_feed:Default::default(),embedding_space_id:None,
+            max_records:32,max_record_bytes:4096,max_operations:100,max_journal_bytes:1024*1024,max_candidates:100};
+        let index=crate::record::RecordPartition::create(&path,config).await.unwrap();
         {
-            let index = index.read().await;
-            let shard = index.shard_vec[0].read().await;
             for (text, expected) in [
                 ("", vec![]),
                 ("中国", vec!["中国"]),
@@ -1371,13 +1383,13 @@ mod tests {
                         let mut terms = AHashMap::new();
                         let mut query_terms = Vec::new();
                         let mut count = 0;
-                        tokenizer(
-                            &shard,
+                        analyze(
+                            &context,
                             &input,
                             &mut terms,
                             &mut query_terms,
                             TokenizerType::UnicodeAlphanumericZH,
-                            shard.segment_number_mask1,
+                            0,
                             &mut count,
                             65_536,
                             65_536,
@@ -1413,57 +1425,31 @@ mod tests {
                 }
             }
         }
-        index
-            .index_documents(
-                [
-                    "中国 rust",
-                    "中国 rust。",
-                    "中国 rust search",
-                    "中国 search rust",
-                    "rust 中国",
-                ]
-                .into_iter()
-                .map(|body| serde_json::from_value(json!({"body":body})).unwrap())
-                .collect(),
-            )
-            .await
-            .unwrap();
-        index.commit().await.unwrap();
-        index.close().await.unwrap();
-        drop(index);
-        let index = open_index(&path).await.unwrap();
+        for (id,body) in ["中国 rust","中国 rust。","中国 rust search","中国 search rust","rust 中国"].into_iter().enumerate() {
+            let request=serde_json::from_value(json!({"operation_id":crate::record::OperationId::new(format!("zh-{id}")),
+                "record_id":id.to_string(),"routing_key":"zh","expected":"Absent","document":{"body":body}})).unwrap();
+            index.write(request).await.unwrap();
+        }
+        index.compact_journal().await.unwrap();drop(index);
+        let index=crate::record::RecordPartition::open(&path,1024*1024).await.unwrap();
         for query in ["中国 rust", "中国 rust。", "中国 rust "] {
-            let result = index
-                .search(
-                    query.into(),
-                    None,
-                    QueryType::Phrase,
-                    SearchMode::Lexical,
-                    false,
-                    0,
-                    10,
-                    ResultType::TopkCount,
-                    false,
-                    vec![],
-                    vec![],
-                    vec![],
-                )
-                .await;
-            assert!(result.error.is_none(), "{:?}", result.error);
-            assert_eq!(result.result_count_total, 3, "{query}");
+            let result=index.query(crate::record::RecordQuery {temporal:None,text:query.into(),vector:None,
+                query_type:QueryType::Phrase,mode:SearchMode::Lexical,offset:0,length:10,result_type:ResultType::TopkCount,
+                fields:vec![],filters:vec![],sort:vec![]}).await.unwrap();
+            assert_eq!(result.count_total, 3, "{query}");
             assert_eq!(
                 result
-                    .results
+                    .hits
                     .iter()
-                    .map(|r| r.doc_id)
+                    .map(|r| r.record.record_id.parse::<usize>().unwrap())
                     .collect::<BTreeSet<_>>(),
                 BTreeSet::from([0, 1, 2])
             );
-            let score = |id| {
+            let score = |id: usize| {
                 result
-                    .results
+                    .hits
                     .iter()
-                    .find(|r| r.doc_id == id)
+                    .find(|r| r.record.record_id == id.to_string())
                     .unwrap()
                     .score
             };
@@ -1473,7 +1459,6 @@ mod tests {
                 "punctuation must not change term frequency or document length"
             );
         }
-        index.close().await.unwrap();
         drop(index);
         fs::remove_dir_all(path).unwrap();
     }

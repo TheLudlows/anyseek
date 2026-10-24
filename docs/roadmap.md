@@ -1,72 +1,23 @@
-# 后续核心路线
+# 下一步路线
 
-已合入能力见 [STATUS](../STATUS.md)，当前存储实现见[存储协议](storage.md)。路线不代替验收结果。
+当前完成度见 [STATUS](../STATUS.md)，架构和容量边界见[项目全貌](project-overview.md)，#80 验收见[实施记录](issue80-implementation.md)。以下是建议顺序，不表示已经实施或扩展本轮范围。
 
-截至主干 `3893cd54`，C3-2 已由 PR #78 合入。剩余工作的建议顺序为 Record 账本持续安全 GC → 服务总缓存预算 → C3-3 组合隔离验收与必要诊断 → 真实应用闭环 → 按容量需求推进 D；此顺序是建议，未批准新的实施批次。背景和完成标准见[项目全貌](project-overview.md)。[Tantivy 全文引擎评估](tantivy-evaluation.md) 单独记录可复用协议与必须重建的索引格式，尚未实施。
+| 顺序 | 核心工作 | 完成标准 |
+| --- | --- | --- |
+| 1 | 审阅 #80 与安排外部验收 | 代码 `94d0a60` 的双平台 CI 已 9/9 通过；审阅实现，并单独安排真实 S3、系统故障/断电和跨 AES，不以 fixture 或进程退出替代 |
+| 2 | Record 操作账本持续安全 GC | 持久化重试/回收水位，窗口内原回执保持，过期请求不可复活；跨重启、checkpoint、备份恢复一致；其他预算允许时累计操作可超过账本容量 |
+| 3 | 按需加载 State 与容量边界 | 先明确身份/版本、原始 Payload、派生 Segment 的唯一归属，再设计有界加载；不把正文、原始向量或倒排复制到 SQLite；保留同一 cut、完整 tail 与即时隐藏 |
+| 4 | 全服务对象缓存总预算 | 多 authority 共享额度，删除失败不退额，在用查询、构建及备份继续受 pin 保护；清空缓存仍可恢复 |
+| 5 | 组合资源隔离与实际应用闭环 | 热点、冷恢复、慢 I/O、慢输出、取消和预算拒绝下其他集合及控制入口仍按契约推进；重复导入、更新、来源删除、TTL、Feed、备份恢复形成可核查容量目标 |
 
-## B 收尾：SQLite + S3
+账本重试窗口为当前及前一 UTC 日，持久 epoch 防止时钟回退。GC 不能只删除旧回执或提高 `max_operations`：需审计结果引用、Feed、来源/证据、私有上传、备份和旧视图各自的保留要求。现有 WAL/对象 GC 不等于 Record 账本 GC；账本回收也不自动解除身份数量与完整快照限制。
 
-PR #72/#73/#74 已合入，当前源码基线为 `afbe323d`；第 1–6 项实现及第 7 项工具/用例已交付。PR #74 的 [Linux/Windows CI 五项全部通过](https://github.com/TheLudlows/anyseek/actions/runs/39814329888)，合入后主干 `a36e71e0` 的 [CI 五项通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455)。真实 S3 与系统故障/断电验收继续开放。
+SQLite 继续只负责 owner/head/水位、依赖、pin、退休及必要协调记录。规范原文/原向量归 Payload，Tantivy 负责派生全文格式，向量/元数据组件负责检索；避免为了按需加载另建一份 SQLite 内容库或 Segment 正文镜像。
 
-1. 维护路径审计已落实到远端 seal/接管/归档、提交后的缓存失败分类、bootstrap 发布前校验和备份指针中断修复；对应协议与失败行为见[存储协议](storage.md)。后续修改继续维持唯一权威、失败 fenced 和原意图重试。
-2. 无缓存检索与失效验收复用七组现有 HTTP 用例，覆盖 generation、TTL、staging 清理、来源/关系、过滤/统计和撤权输出；七组 fixture 验收及 PR 原生 Linux/Windows CI 均已通过。
-3. 实际 endpoint 合同工具和用例已提供，按本轮约定先完成工具，不连接外部服务。仍需在专用真实 bucket 跑完整合同与故障矩阵；HTTP fixture 只覆盖协议回归，不能证明云服务兼容性。
-4. PR 最终源码的 Linux/Windows CI、维护协议及共同恢复审查已完成；主干 `a36e71e0` CI 已核对通过；后续源码单独验收。系统/文件系统崩溃、硬断电需要隔离环境和外部确认见证，单独记录。
+必要诊断优先覆盖账本余量、提交/索引水位差、tail 字节、段数、缓存占用、pin/退休阻塞、资源拒绝、unknown 和恢复时间，不先建设产品看板或启动全面性能调优。
 
-## C：Indexer、缓存与 collection 服务化
+## 延期与范围
 
-- Indexer 消费已提交连续范围，带 pin、owner/build epoch、期限与有界队列；发布检查基础，保留构建期间新增 tail，不提交业务操作。
-- 缓存仅保存有命名空间、hash/长度认证的不可变块，下载验证后原子入缓存。淘汰不能删除正在使用的 mmap；丢失缓存仍可恢复。先完整小段下载，块级预取按实际需求推进。
-- 一次查询固定 manifest、indexed/committed 水位、完整 tail、活动统计和 evaluation_time；必要 tail 缺失时失败。先各通道全局排名，再融合一次。
-- 多 collection 的前台、下载与后台任务各有并发/队列/内存/I/O 预算，避免热点耗尽全部资源。
-- owner 路由不能替代权威 fence。SQLite 首版仍为唯一持久卷权威；跨主机接管须先定义外部隔离和可用性协议。失联不能回退旧授权/缓存；多节点输出必须与撤权/隐藏屏障有序。
+超大 collection 分片、可恢复 split/merge、跨主机 HA、直接远端 Directory、缓存预取与自动调度按实际容量需求后置。分片前须定义稳定路由、跨分片统计/一次全局融合以及来源/关系边界，不能按变化的 partition 数取模。
 
-### C1：有界后台 Indexer（PR #75 已合入）
-
-目标是在构建索引时继续接收写入，缩短 partition 串行屏障占用，保持既有查询、删除与撤权契约。
-
-1. 建立有界任务队列及并发、内存、I/O 准入；固定构建输入范围。
-2. 构建绑定 owner/build epoch、期限及完整依赖 pin，SQLite 继续承担唯一发布权威。
-3. 在串行屏障外构建并验证候选文件，在短发布阶段条件检查基础 manifest/水位。
-4. 保留构建期间新增的完整提交 tail；过期、旧 owner 或基础已变化的任务不得覆盖新状态。
-5. 验收持续写入、索引暂停、重复任务、过期发布、退出恢复、删除与撤权输出；失败不得丢已提交数据。
-
-[PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`，最终提交 `96306e95` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)。已交付 `start_index_committed` / `index_committed`、HTTP PATCH 后台构建、SQLite 构建 epoch/期限/pin、旧 cut 发布与完整新增 tail，以及并发/取消/过期/进程退出回归。合入后主干 CI 单独跟踪。
-
-### C2：有界校验缓存（PR #76 已合入）
-
-远端读取按 endpoint/bucket/region、完整对象 key、SHA-256 与精确长度隔离对象块；每次命中重新认证，损坏删除并回源。每 authority 库旁的 `*.object-cache` 目录限 256 MiB / 4096 块，按最早写入淘汰；先清理中断临时文件，删除失败不退额度，非阻塞文件锁协调进程（锁文件位于缓存目录旁，清空缓存不替换锁 inode）。缓存错误不改变提交结果。下载验证完整后同步私有文件、同目录原子发布；PUT 的读后验证始终访问远端，不能由缓存证明远端持久化。
-
-缓存返回独立字节，不暴露文件句柄/mmap；Segment 在另一路径完整校验并映射，因此淘汰不触碰查询中的 mmap。冷恢复仍由当前 SQLite head 选择 manifest + 完整 tail，授权/来源隐藏屏障不从缓存推导。无缓存验收删除 collection 和对象块两类目录。预取与直接映射缓存块后置；[PR #76](https://github.com/TheLudlows/anyseek/pull/76) 已合入为 `10e106b3`，最终 [PR CI 五项成功](https://github.com/TheLudlows/anyseek/actions/runs/39898818770)；合入后主干 CI 单独跟踪。
-
-C2 之后的 collection 前台、下载、后台分级准入已由 C3-2 交付，完整组合隔离验收和服务总缓存额度仍待完成。当前完整 State 驻内存及同步 compaction 串行行为仍是实际限制。
-
-### C3-1：授权与执行屏障（PR #77 已合入）
-
-普通已准入工作先持全局共享屏障，再持 collection 共享屏障，只在捕获当前授权修订时短持 catalog 元数据锁。单 collection 的 grant/撤权/删除及创建激活在对应独占屏障内发布，等待屏障时不能持元数据锁。排在撤权之后的工作重新验证授权，不沿用排队前的结果。
-
-整 key 撤销、接管、备份退休、完整服务快照和显式 catalog compaction 保留全局排空；这些少见维护会有意暂停普通工作，不能宣称所有控制操作互不阻塞。共同备份仍固定完整已接收 cut。取消 HTTP 等待方不取消 owned task；异常以同步 sticky failure latch 关闭输出，并禁止其他 collection 的并发发布重新打开，重开后从持久权威恢复。
-
-本批保持 catalog 原有 64 个准入名额；collection gate 登记使用弱引用、稳定身份、256 字节身份长度和 64 项防御上限，不新增持久表。新增跨集合进展/排队撤权/取消、整 key 排空、并发 panic 与共同备份 cut 单测，以及真实 HTTP 暂停写入/其他集合查询/撤权/重启回执用例。[PR #77](https://github.com/TheLudlows/anyseek/pull/77) 已合入为 `b8faa553`，最终 PR 五项 CI 全部通过。
-
-### C3-2：分级资源与控制预留（PR #78 已合入）
-
-[PR #78](https://github.com/TheLudlows/anyseek/pull/78) 已合入为 `3893cd54`，最终[五项 PR CI](https://github.com/TheLudlows/anyseek/actions/runs/39927824162) 和[主干 CI](https://github.com/TheLudlows/anyseek/actions/runs/39933449425) 均通过，合入 tree 与测试版本相同。它不代表 C3-3、服务总缓存预算或账本持续 GC 已完成。
-
-在读取请求体前，按路由类别和 Axum 解码后、已在服务登记的稳定 collection ID 准入。未知身份共用服务额度，不按任意 URI 建资源表。认证/身份查找和 handler 共用同一 HTTP 截止时间，准入超时且未启动 handler 时返回 Busy；采用立即拒绝，无资源等待队列；普通请求默认全服务 32 / 每 collection 4，恢复 2 / 1，后台 2 / 1，可信控制 8 / 2，静态/存活 8 / 8。控制额度不借给数据请求，配置校验保留 catalog 准入余量。
-
-普通请求、恢复、后台、控制各有共享和每集合字节及 I/O 并发额度。请求预留 2 MiB body + 16 MiB 输出工作区；任务上下文显式传入 Catalog/Record/indexer owned task，取消等待后不提前归还。Body 交付的 Bytes 所有者也保留上下文，丢弃 Body 后传输缓冲仍计费。序列化增长前检查 16 MiB。S3 缓存命中/下载返回自有计费缓冲；累积恢复 tail 在解码前预留，迭代器和已取出的条目继续持有额度；PUT 副本和读后验证另行预留，校验缓冲消费结束才归还字节。构建快照和捕获 tail 加入后台共享额度，文件包装器的 read/write/open/set_len 与对象 I/O 按类别立即准入；构建文件的既有磁盘增长预算继续生效。
-
-新增 key/grant 控制不再等待备份、恢复等长工作流的 service.control 锁；它们仍由 catalog 授权/全局快照屏障排序。删除仍与多阶段恢复/接管工作流串行；共同备份、接管等必须的全局排空保持有意停顿。能证明未尝试 SQLite head 发布的资源拒绝返回 Busy，保留原 operation_id；未知持久结果仍关闭输出并返回 outcome_unknown。
-
-配置和默认字节/I/O 额度见[服务指南](../anyseek/server/README.md)。这些是保守准入与显式缓冲约束，不是总 RSS、系统 I/O 带宽或完整磁盘硬上限；运行态 State 仍驻内存。服务级缓存总容量和 Record 操作账本持续回收不属于本批。C3-3 完整隔离验收仍单独跟踪，不能由本批单元用例直接标完成。
-
-## D：超大 collection，按容量需求后置
-
-先稳定路由与静态分片、显式分片视图及有界扇出，再持久化 Prepare → Build → Catch up → Fence → Publish → Cleanup，最后自动调度。不能用随 partition 数变化的取模路由。来源/关系跨 partition 语义未定义前，不自动分裂。
-
-跨分片先合并各通道候选和活动统计，再做全局融合；必要分片失败默认整次查询失败。候选不完整不能豁免版本、删除与授权检查。
-
-## 范围
-
-保留 Web UI、现有 HTTP API 和 Record 契约。模型推理、解析切块、embedding/reflect、托管大文件、自动语义关系、SQL/JOIN、完整图语言、旧格式升级迁移均不进入当前主线。监控先覆盖验收必需水位差、tail 字节、段数、pin/退休阻塞、unknown、恢复时间和资源拒绝，不先扩展产品看板。
+保留 Rust/HTTP/Web UI 和既定数据语义；模型推理、解析切块、Embedding/Reflect、托管大文件、自动语义关系、SQL/JOIN、完整图语言、旧格式升级迁移不进入当前主线。

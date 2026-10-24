@@ -177,24 +177,6 @@ pub fn embedding_from_json(
     }
 }
 
-pub(crate) fn read_min_max(bytes: &[u8], dimensions: usize) -> (f32, f32) {
-    let size = size_of::<VectorHeader>() + dimensions;
-    if bytes.len() < size {
-        return (f32::MIN, f32::MAX);
-    }
-    let start_last_vector = bytes.len() - size;
-    let header: &VectorHeader =
-        from_bytes(&bytes[start_last_vector..start_last_vector + size_of::<VectorHeader>()]);
-
-    if header.zero_point == 0 && header.sum_q == 0 {
-        return (0.0, f32::MIN);
-    }
-
-    let min_val = header.scale * (-header.zero_point - 128) as f32;
-    let max_val = (127 - header.zero_point) as f32 * header.scale;
-    (min_val, max_val)
-}
-
 pub(crate) fn read_record(
     bytes: &[u8],
     dimensions: usize,
@@ -332,11 +314,7 @@ pub fn parse_external_embedding(value: &Value, inference: &Inference) -> Result<
     Ok(embedding)
 }
 
-pub(crate) fn validate_document_vectors(index: &crate::index::Index, document: &Document) -> Result<(), String> {
-    validate_vectors_in_schema(&index.meta.inference, index.schema_map.values(), document)
-}
-
-/// Pure schema validation shared by Record planning and the physical index API.
+/// Pure schema validation used by Record planning.
 /// It deliberately does not normalize or mutate original caller values.
 pub(crate) fn validate_vectors_in_schema<'a>(
     inference: &Inference,
@@ -984,6 +962,8 @@ impl Shard {
             let cluster_number =
                 u32::from_le_bytes(cluster_number_bytes.try_into().unwrap()) as usize;
             offset += 4;
+            self.indexed_cluster_count=self.indexed_cluster_count.checked_sub(cluster_number)
+                .ok_or_else(||std::io::Error::other("vector cluster count underflow"))?;
 
             let mut clusters = Vec::with_capacity(cluster_number);
             let mut start_index = 0;
@@ -1139,8 +1119,8 @@ impl Shard {
         top_k: &mut TopK<'_>,
     ) {
         let level_id = if self.is_last_level_incomplete {
-            self.level_index.len() - 1
-        } else { self.level_index.len() };
+            self.vector_levels - 1
+        } else { self.vector_levels };
         let enable_scale = self.quantization != Quantization::None
             && (self.vector_similarity != VectorSimilarity::Cosine || self.quantization == Quantization::TurboQuantI8);
 
@@ -1293,7 +1273,7 @@ impl SearchVectorShard for ShardArc {
         }
 
         let mut offset = 0;
-        for level_id in 0..shard_ref.level_index.len() {
+        for level_id in 0..shard_ref.vector_levels {
             let cluster_number_bytes = &shard_ref.vector_file_mmap[offset..offset + 4];
             let cluster_number =
                 u32::from_le_bytes(cluster_number_bytes.try_into().unwrap()) as usize;

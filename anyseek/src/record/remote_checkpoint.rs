@@ -51,6 +51,20 @@ fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, RecordError> {
     }
     Ok(path)
 }
+// Reject an undersized object-count budget before uploading any part of a
+// certified closure. Native packages have more files than the former format.
+fn admit_checkpoint_chunks(files: &[(String, u64, [u8; 32])], object_bytes: usize, limit: usize) -> Result<(), RecordError> {
+    if object_bytes == 0 { return Err(storage("zero checkpoint object budget")); }
+    let required = files.iter().try_fold(0u64, |count, (_, length, _)| {
+        count.checked_add(length.div_ceil(object_bytes as u64))
+            .ok_or_else(|| storage("checkpoint chunk count overflow"))
+    })?;
+    if required > limit as u64 {
+        return Err(storage(format!("checkpoint chunk budget exceeded: requires {required}, limit {limit}")));
+    }
+    Ok(())
+}
+
 impl RemotePersistence {
     pub(super) async fn publish_anchor(
         &mut self,
@@ -72,7 +86,9 @@ impl RemotePersistence {
         let mut files = Vec::new();
         let mut total = 0u64;
         let mut chunk_count = 0usize;
-        for (path, length, sha256) in reference.remote_files(payloads)? {
+        let closure = reference.remote_files(payloads)?;
+        admit_checkpoint_chunks(&closure, self.max_object_bytes, self.max_tail_blocks)?;
+        for (path, length, sha256) in closure {
             total = total
                 .checked_add(length)
                 .filter(|n| {
@@ -512,6 +528,14 @@ impl RecordPartition {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checkpoint_object_admission_counts_every_native_file_and_partial_chunk() {
+        let files = vec![("a".into(), 0, [0; 32]), ("b".into(), 4, [0; 32]), ("c".into(), 5, [0; 32])];
+        assert!(super::admit_checkpoint_chunks(&files, 4, 3).is_ok());
+        assert!(super::admit_checkpoint_chunks(&files, 4, 2).is_err());
+        assert!(super::admit_checkpoint_chunks(&files, 0, 100).is_err());
+    }
+
     use super::super::tests::{config, path, query, write, source_write};
     use super::*;
     use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
@@ -1369,7 +1393,9 @@ impl RemoteBuild {
         let mut files = Vec::new();
         let mut total = 0u64;
         let mut chunk_count = 0usize;
-        for (path, length, sha256) in reference.remote_files(payloads)? {
+        let closure = reference.remote_files(payloads)?;
+        admit_checkpoint_chunks(&closure, self.max_object_bytes, self.max_tail_blocks)?;
+        for (path, length, sha256) in closure {
             total = total
                 .checked_add(length)
                 .filter(|n| {

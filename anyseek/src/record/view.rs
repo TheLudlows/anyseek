@@ -10,11 +10,14 @@ pub(super) struct RotationBudget {
 pub(super) struct RetrievalView {
     query: IndexArc,
     tail: IndexArc,
-    common: Option<Arc<std::sync::RwLock<crate::active::Corpus>>>,
 }
 impl RetrievalView {
-    pub(super) async fn can_admit(&self,bytes:u64)->bool {
-        let root=self.tail.read().await;let shard=root.shard_vec[0].read().await;
+    pub(super) async fn can_admit(&self,bytes:u64,native_updates:usize)->bool {
+        let root=self.tail.read().await;
+        for native in &root.record_lexical {
+            if native.needs_rotation(native_updates).await {return false;}
+        }
+        let shard=root.shard_vec[0].read().await;
         shard.build_reservation.as_ref().is_some_and(|r|r.can_grow(bytes))
     }
 
@@ -22,7 +25,6 @@ impl RetrievalView {
         Self {
             query: index.clone(),
             tail: index,
-            common: None,
         }
     }
     /// Install a new empty tail under the exclusive partition publication guard.
@@ -42,6 +44,7 @@ impl RetrievalView {
         {
             return Err(storage("replacement must be a separate single-shard tail"));
         }
+        let native_tail = tail_root.record_lexical.first().cloned().ok_or_else(|| storage("missing native tail"))?;
         let tail_shard = tail_root.shard_vec[0].clone();
         let tail_meta = serde_json::to_value(&tail_root.meta).map_err(storage)?;
         let tail_schema = serde_json::to_value(&tail_root.schema_map).map_err(storage)?;
@@ -107,11 +110,9 @@ impl RetrievalView {
         if !local.keys.is_empty() {
             return Err(storage("replacement tail is not empty"));
         }
-        let common = Arc::new(std::sync::RwLock::new(crate::active::Corpus::default()));
         let mut statistics = Vec::new();
         statistics.try_reserve(next).map_err(storage)?;
         let mut new_stats = local.clone_local();
-        new_stats.attach(&common).map_err(storage)?;
         statistics.push(new_stats);
         for shard in &shards {
             let mut local = shard
@@ -119,7 +120,6 @@ impl RetrievalView {
                 .as_ref()
                 .ok_or_else(|| storage("missing segment statistics"))?
                 .clone_local();
-            local.attach(&common).map_err(storage)?;
             statistics.push(local);
         }
         let ids = (0..next)
@@ -141,20 +141,23 @@ impl RetrievalView {
         }
         drop(tail);
         drop(shards);
+        root.record_lexical.insert(0, native_tail);
         root.shard_vec.insert(0, tail_shard);
         root.shard_number = next;
         *ordinals = mapped;
         *locations = next_locations;
         self.tail = new_tail;
-        self.common = Some(common);
         Ok(())
     }
 
     pub(super) async fn append(
         &self,
         key: String,
+        version: u64,
+        revision: u64,
         document: Document,
     ) -> Result<usize, RecordError> {
+        let key_for_native = key.clone();
         let shard = self.tail.read().await.shard_vec[0].clone();
         let local = {
             let mut shard = shard.write().await;
@@ -166,6 +169,8 @@ impl RetrievalView {
             active.keys.push(key);
             local
         };
+        let native = self.tail.read().await.record_lexical[0].clone();
+        native.append(lexical::Identity { id:key_for_native, version, revision }, &document, true).await?;
         self.tail
             .index_documents(vec![document])
             .await
@@ -185,7 +190,6 @@ impl RetrievalView {
             .as_mut()
             .ok_or_else(|| storage("missing view statistics"))?
             .retire(local);
-        shard.invalidate_frequentword_results();
         Ok(())
     }
     pub(super) async fn search(
@@ -194,31 +198,18 @@ impl RetrievalView {
         vector: Option<Embedding>,
         query_type: QueryType,
         mode: SearchMode,
-        empty: bool,
         offset: usize,
         length: usize,
         result_type: ResultType,
-        uncommitted: bool,
         fields: Vec<String>,
         filters: Vec<FacetFilter>,
         sort: Vec<ResultSort>,
+        cut: lexical::Cut,
     ) -> crate::search::ResultObject {
-        self.query
-            .search(
-                text,
-                vector,
-                query_type,
-                mode,
-                empty,
-                offset,
-                length,
-                result_type,
-                uncommitted,
-                fields,
-                filters,
-                sort,
-            )
-            .await
+        match lexical::runtime_query::search(&self.query,text,vector,mode,query_type,offset,length,result_type,fields,filters,sort,cut).await {
+            Ok(result)=>result,
+            Err(error)=>crate::search::ResultObject{error:Some(error.to_string()),..Default::default()},
+        }
     }
     pub(super) async fn with_filter<T>(
         &self,
@@ -310,7 +301,7 @@ mod tests {
             drop(held);
             assert_eq!(*ordinals, original);
             assert_eq!(*locations, original_locations);
-            assert!(index.common.is_none());
+            assert_eq!(index.query.read().await.shard_number, 1);
             index
                 .rotate_tail(
                     tail,
@@ -401,7 +392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_active_view_ignores_pre_corpus_frequentword_cache() {
+    async fn native_snapshot_scores_survive_empty_tail_rotation() {
         use super::super::tests::{config, path, query, write};
         let root = path();
         let partition = RecordPartition::create(&root, config()).await.unwrap();
@@ -412,15 +403,7 @@ mod tests {
         let expected = query(&partition, SearchMode::Lexical).await;
         {
             let mut inner = partition.inner.lock().await;
-            // A committed frozen segment can carry a cache created before its
-            // shared active corpus was attached (open_index warms this cache).
             inner.index.test_index().commit().await.unwrap();
-            let shard = inner.index.query.read().await.shard_vec[0].clone();
-            shard
-                .write()
-                .await
-                .frequentword_results
-                .insert("alpha".into(), crate::search::ResultObject::default());
             let target = root.join(format!("cache-{:032x}", rand::random::<u128>()));
             let (tail, _) = build_at(&root, &target, &inner.config, &State::default())
                 .await

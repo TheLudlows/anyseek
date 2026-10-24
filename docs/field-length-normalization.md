@@ -1,20 +1,9 @@
 # Field length normalization
 
-[文档索引](README.md) · [当前功能与限制](../FEATURES.md) · [开发与验证](development.md)
+Record configuration accepts `field_length_normalization: "Shared" | "PerField"`; Shared is the default. The setting is immutable. Rust callers use `IndexMetaObject::field_length_normalization`.
 
+The production Tantivy scorer retains BM25F/Bm25fProximity, field boosts, k1/b, and decoded length quantization. PerField changes each field denominator to the mean decoded nonempty length of that field. Shared uses the shared mean. Empty populations use mean 1. Term DF is exact across the active Record population and across fields, including live tail and frozen components at the same cut and evaluation time. Retired, hidden and expired records do not contribute active statistics. Metadata filters restrict candidates before Top-K; they do not silently redefine the corpus statistics.
 
-Index creation accepts `field_length_normalization: "Shared" | "PerField"`. Omission keeps Shared. The setting is immutable for an index; create a new index to change it. Rust callers set `IndexMetaObject::field_length_normalization`. The HTTP index response reports the setting.
+Successful Record writes are durable and visible. Checkpoint is an authenticated publication/reclamation operation, not a second visibility switch. Native commit is not business authority. No physical shard-local DF, compressed posting DF, old field-length snapshot layout, or uncommitted-query flag is exposed by the Record API. These were low-level engine details; the previous Record active-statistics override already used exact active DF.
 
-PerField keeps the sum of field contributions, global-across-fields term DF, boosts, decoded document lengths, k1 and b. It changes each field denominator to its own mean decoded length. Each shard maintains the sum and the number of physical documents with a nonzero decoded length for each indexed field. Missing/empty fields contribute neither count nor sum; an empty field population uses mean 1. Tombstones remain in length statistics and physical DF, but deleted documents are excluded from hits and exact counts. Duplicate deletion does not alter statistics. Clear resets sums, counts and lookup caches.
-
-Completed appends update statistics and a 256-entry denominator cache under the shard write lock. Statistics include completed uncommitted writes even when a query excludes realtime candidates. Commit writes a pair of u64 values (sum, count) per field with each level snapshot. Reopen restores the latest snapshot directly. Neither queries nor reopening reconstruct statistics by scanning documents. Statistics and DF retain existing shard-local semantics; no cross-shard DF aggregation is introduced.
-
-Shared retains the prior disk layout and opens existing indexes whose metadata omits the setting. PerField uses a distinct metadata-selected layout and requires this implementation to read it; older binaries must not open PerField indexes. There is no in-place migration. A snapshot adds 16 bytes per indexed field per level; each field also has a 256-f32 lookup table and count in memory. The cache is currently allocated for Shared fields too, although Shared scoring uses its existing shared table. PerField refresh work is O(256) per updated field per document; query lookup is O(1).
-
-The statistical definition matches the earlier experiment: decoded stored lengths, nonempty physical field count, tombstones retained, per-shard means, float32 division. The mechanism differs: the experiment reconstructed statistics at open, while this implementation maintains and persists them. Fresh correctness and paired measurements are required; earlier experiment metrics are not substituted.
-
-## Scope and known limitations
-
-Shared remains the default. Performance acceptance budget #35 remains unresolved, and this draft does not enable PerField by default. Independent correctness fixes #40 (realtime boost), #41 (mixed scoring DF), #43 (wide OR membership), #44 (deleted exact counts), and #45 (clear/reindex field identity) apply to both configurations. Controls must use the same corrected binary.
-
-Existing issue #42 (realtime ngram behavior under Bm25fProximity) remains open; this change does not claim to repair all ngram modes. The synthetic component oracle covers Bm25f ngram masks 0/9/127. The fixed Chinese retrieval workload and results must be reported with their actual tokenizer/configuration rather than generalized to the affected proximity case.
+Independent literal-formula tests in `tests/common/ngram_oracle.rs` and `tests/lexical_correctness.rs` cover boosts, unequal DF, Shared/PerField and persistence states. Physical legacy block tests have been migrated to Record behavior; they are not evidence of retaining the deleted codec. This replacement makes no performance claim and does not restart performance-budget work.

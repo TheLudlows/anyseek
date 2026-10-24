@@ -1,12 +1,12 @@
-//! Same-block overlapping union must count exactly (pins the `+1` encoding).
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Same-block overlapping union must count exactly (pins the `+1` encoding).
 
-use anyseek::commit::Commit;
+
 use anyseek::index::{
-    AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexArc, IndexDocuments,
-    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
-    create_index,
-};
-use anyseek::search::{QueryType, ResultType, Search, SearchMode};
+    AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
+    };
+use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
 use std::{fs, path::Path};
 
@@ -40,27 +40,11 @@ fn doc(title: &str) -> anyseek::index::Document {
 }
 
 async fn search(
-    index: &IndexArc,
+    index: &RecordPartition,
     query: &str,
     result_type: ResultType,
-) -> anyseek::search::ResultObject {
-    index
-        .search(
-            query.into(),
-            None,
-            QueryType::Union,
-            SearchMode::Lexical,
-            false,
-            0,
-            100,
-            result_type,
-            false,
-            Vec::new(),
-
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
+) -> anyseek::record::RecordSearch {
+    index.query(RecordQuery {text:query.into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:100,result_type:result_type,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap()
 }
 
 #[tokio::test]
@@ -68,8 +52,7 @@ async fn union_count_overlap_same_block() {
     let dir = "tests/index_union_plus_one/";
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
-    let index = create_index(path, meta(), &schema(), 11, true, Some(1))
-        .await
+    let index = Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
         .unwrap();
 
     // Overlapping docs: doc2, doc4 contain BOTH alpha and beta.
@@ -81,18 +64,18 @@ async fn union_count_overlap_same_block() {
         doc("alpha beta both item"),
         doc("beta only item"),
     ];
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
 
     // 6 docs total in the same block; all contain at least one of alpha/beta.
     let count = search(&index, "alpha beta", ResultType::Count).await;
     let topk_count = search(&index, "alpha beta", ResultType::TopkCount).await;
 
     let expected = 6;
-    println!("Count result: {}", count.result_count_total);
-    println!("TopkCount result: {}", topk_count.result_count_total);
-    assert_eq!(count.result_count_total, expected);
-    assert_eq!(topk_count.result_count_total, expected);
+    println!("Count result: {}", count.count_total);
+    println!("TopkCount result: {}", topk_count.count_total);
+    assert_eq!(count.count_total, expected);
+    assert_eq!(topk_count.count_total, expected);
 
-    index.close().await.unwrap();
+
 }

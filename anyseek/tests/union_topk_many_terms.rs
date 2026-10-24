@@ -1,13 +1,13 @@
-//! `union_scan_32` bitmask holds at most 32 terms; >32-term TopkCount must
-//! not panic (`32 - len` underflow) and must report the exact total.
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// `union_scan_32` bitmask holds at most 32 terms; >32-term TopkCount must
+// not panic (`32 - len` underflow) and must report the exact total.
 
-use anyseek::commit::Commit;
+
 use anyseek::index::{
-    AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
-    create_index,
-};
-use anyseek::search::{QueryType, ResultType, Search, SearchMode};
+    AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
+    };
+use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
 use std::{fs, path::Path};
 
@@ -41,27 +41,11 @@ fn doc(title: &str) -> anyseek::index::Document {
 }
 
 async fn search(
-    index: &anyseek::index::IndexArc,
+    index: &RecordPartition,
     query: &str,
     result_type: ResultType,
-) -> anyseek::search::ResultObject {
-    index
-        .search(
-            query.into(),
-            None,
-            QueryType::Union,
-            SearchMode::Lexical,
-            false,
-            0,
-            100,
-            result_type,
-            false,
-            Vec::new(),
-
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
+) -> anyseek::record::RecordSearch {
+    index.query(RecordQuery {text:query.into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:100,result_type:result_type,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap()
 }
 
 /// 40-term union TopkCount: no panic, exact total, top-k hits returned.
@@ -70,8 +54,7 @@ async fn union_topk_forty_terms() {
     let dir = "tests/index_union_topk_many_terms/";
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
-    let index = create_index(path, meta(), &schema(), 11, true, Some(1))
-        .await
+    let index = Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
         .unwrap();
 
     // 40 disjoint terms x 25 docs each = 1000 docs, all in one block.
@@ -81,8 +64,8 @@ async fn union_topk_forty_terms() {
             docs.push(doc(&format!("w{t:02} z{i}")));
         }
     }
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
 
     let query = (0..40)
         .map(|t| format!("w{t:02}"))
@@ -90,11 +73,11 @@ async fn union_topk_forty_terms() {
         .join(" ");
 
     let count = search(&index, &query, ResultType::Count).await;
-    assert_eq!(count.result_count_total, 1000);
+    assert_eq!(count.count_total, 1000);
 
     let topk_count = search(&index, &query, ResultType::TopkCount).await;
-    assert_eq!(topk_count.result_count_total, 1000);
-    assert_eq!(topk_count.result_count_total, count.result_count_total);
+    assert_eq!(topk_count.count_total, 1000);
+    assert_eq!(topk_count.count_total, count.count_total);
 
-    index.close().await.unwrap();
+
 }

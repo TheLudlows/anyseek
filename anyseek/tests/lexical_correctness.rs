@@ -1,28 +1,79 @@
-//! Independent posting membership and BM25 formula regressions for #32.
-//! Explicit score sorting shares engine code: it is a consistency check, not an oracle.
+// Retained literal membership/score corpora; both length policies run in full.
+#[path = "common/records.rs"]
+mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Independent posting membership and BM25 formula regressions for #32.
+// Explicit score sorting shares engine code: it is a consistency check, not an oracle.
 use anyseek::{
-    commit::Commit,
     index::{
-        AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexArc,
-        IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
-        create_index, open_index,
+        AccessType, Clustering, DocumentCompression, FieldLengthNormalization, FrequentwordType,
+        IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
     },
-    search::{QueryType, ResultSort, ResultType, Search, SearchMode, SortOrder},
+    search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
     vector::Inference,
 };
 use serde_json::json;
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    time::Instant,
+};
+
+struct Progress {
+    label: String,
+    started: Instant,
+}
+impl Progress {
+    fn new(case: &str, policy: FieldLengthNormalization) -> Self {
+        let progress = Self {
+            label: format!("{case}/{policy:?}"),
+            started: Instant::now(),
+        };
+        progress.log("fixture start");
+        progress
+    }
+    fn log(&self, phase: impl std::fmt::Display) {
+        eprintln!(
+            "[lexical-progress] {} elapsed={:.3}s {phase}",
+            self.label,
+            self.started.elapsed().as_secs_f64()
+        );
+    }
+}
+
+async fn checkpoint(index: &RecordPartition) {
+    let started = Instant::now();
+    eprintln!("[lexical-progress] checkpoint begin");
+    index.compact_journal().await.unwrap();
+    eprintln!(
+        "[lexical-progress] checkpoint complete elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+}
+
+async fn reopen(path: &Path) -> RecordPartition {
+    let started = Instant::now();
+    eprintln!("[lexical-progress] reopen begin");
+    let index = RecordPartition::open(path, records::JOURNAL_LIMIT)
+        .await
+        .unwrap();
+    eprintln!(
+        "[lexical-progress] reopen complete elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+    index
+}
 
 async fn fresh(
     label: &str,
     policy: anyseek::index::FieldLengthNormalization,
-) -> (IndexArc, PathBuf) {
+) -> (RecordPartition, PathBuf) {
     let path = std::env::temp_dir().join(format!(
         "anyseek-correctness-{label}-{}",
         std::process::id()
     ));
     assert!(!path.exists());
-    let schema = serde_json::from_value(json!([
+    let schema: Vec<anyseek::index::SchemaField> = serde_json::from_value(json!([
         {"field":"title","field_type":"Text","index_lexical":true,"store":false},
         {"field":"text","field_type":"Text","index_lexical":true,"store":false}
     ]))
@@ -43,38 +94,36 @@ async fn fresh(
         inference: Inference::None,
     };
     (
-        create_index(&path, meta, &schema, 11, true, Some(1))
-            .await
-            .unwrap(),
+        Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await).unwrap(),
         path,
     )
 }
 async fn search(
-    index: &IndexArc,
+    index: &RecordPartition,
     text: &str,
     and: bool,
     k: usize,
     explicit: bool,
-    realtime: bool,
+    _realtime: bool,
 ) -> Vec<(usize, f32)> {
+    let started = Instant::now();
+    eprintln!("[lexical-progress] query begin text={text:?} and={and} k={k} explicit={explicit}");
     let result = index
-        .search(
-            text.into(),
-            None,
-            if and {
+        .query(RecordQuery {
+            text: text.into(),
+            vector: None,
+            query_type: if and {
                 QueryType::Intersection
             } else {
                 QueryType::Union
             },
-            SearchMode::Lexical,
-            false,
-            0,
-            k,
-            ResultType::Topk,
-            realtime,
-            vec![],
-            vec![],
-            if explicit {
+            mode: SearchMode::Lexical,
+            offset: 0,
+            length: k,
+            result_type: ResultType::Topk,
+            fields: vec![],
+            filters: vec![],
+            sort: if explicit {
                 vec![ResultSort {
                     field: "_score".into(),
                     order: SortOrder::Descending,
@@ -82,29 +131,54 @@ async fn search(
             } else {
                 vec![]
             },
-        )
-        .await;
-    assert!(result.error.is_none(), "{:?}", result.error);
-    result.results.iter().map(|r| (r.doc_id, r.score)).collect()
+            temporal: None,
+        })
+        .await
+        .unwrap();
+    eprintln!(
+        "[lexical-progress] query complete hits={} elapsed={:.3}s",
+        result.hits.len(),
+        started.elapsed().as_secs_f64()
+    );
+    result
+        .hits
+        .iter()
+        .map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score))
+        .collect()
 }
-async fn add(index: &IndexArc, start: usize, end: usize, doc: impl Fn(usize) -> serde_json::Value) {
+async fn add(
+    index: &RecordPartition,
+    start: usize,
+    end: usize,
+    progress: &Progress,
+    doc: impl Fn(usize) -> serde_json::Value,
+) {
     for begin in (start..end).step_by(256) {
-        index
-            .index_documents(
-                (begin..(begin + 256).min(end))
-                    .map(|i| serde_json::from_value(doc(i)).unwrap())
-                    .collect(),
-            )
-            .await
-            .unwrap();
+        progress.log(format!(
+            "write begin records={begin}..{} target={end}",
+            (begin + 256).min(end)
+        ));
+        records::insert(
+            &index,
+            (begin..(begin + 256).min(end))
+                .map(|i| serde_json::from_value(doc(i)).unwrap())
+                .collect(),
+        )
+        .await
+        .unwrap();
+        progress.log(format!(
+            "write complete records={}/{end}",
+            (begin + 256).min(end)
+        ));
     }
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while index.read().await.indexed_doc_count().await != end {
+        while index.statistics().await.unwrap().physical_versions != end {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
     })
     .await
     .unwrap();
+    progress.log(format!("physical versions confirmed={end}"));
 }
 fn contribution(n: usize, df: usize, dl: usize, avg: f64) -> f64 {
     (1.0 + (n as f64 - df as f64 + 0.5) / (df as f64 + 0.5)).ln() * 2.2
@@ -116,84 +190,79 @@ fn close_score(actual: f32, expected: f64) {
         "{actual} != {expected}"
     );
 }
-#[tokio::test]
-async fn mixed_rle_array_bitmap_membership_scores_and_order() {
-    for policy in [
-        anyseek::index::FieldLengthNormalization::Shared,
-        anyseek::index::FieldLengthNormalization::PerField,
-    ] {
-        let (mut index, path) = fresh("mixed", policy).await;
-        let sets = [
-            (100..104).collect::<BTreeSet<_>>(),
-            [100, 103, 200, 300, 400].into_iter().collect(),
-            (1..8194).step_by(2).collect(),
-        ];
-        let terms = ["alpha", "beta", "gamma"];
-        add(&index, 0, 8194, |i| {
-            let words: Vec<_> = terms
-                .iter()
-                .zip(&sets)
-                .filter(|(_, s)| s.contains(&i))
-                .map(|(t, _)| *t)
-                .collect();
-            json!({"title":"","text":if words.is_empty(){"neutral".into()}else{words.join(" ")}})
-        })
-        .await;
-        let union: BTreeSet<_> = sets.iter().flat_map(|s| s.iter().copied()).collect();
-        let avg = (0..8194)
-            .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
-            .sum::<usize>() as f64
-            / 8194.0;
-        for stage in 0..3 {
-            if stage == 1 {
-                index.commit().await.unwrap();
+async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLengthNormalization) {
+    let progress = Progress::new("mixed", policy);
+    let (mut index, path) = fresh("mixed", policy).await;
+    let sets = [
+        (100..104).collect::<BTreeSet<_>>(),
+        [100, 103, 200, 300, 400].into_iter().collect(),
+        (1..8194).step_by(2).collect(),
+    ];
+    let terms = ["alpha", "beta", "gamma"];
+    add(&index, 0, 8194, &progress, |i| {
+        let words: Vec<_> = terms
+            .iter()
+            .zip(&sets)
+            .filter(|(_, s)| s.contains(&i))
+            .map(|(t, _)| *t)
+            .collect();
+        json!({"title":"","text":if words.is_empty(){"neutral".into()}else{words.join(" ")}})
+    })
+    .await;
+    let union: BTreeSet<_> = sets.iter().flat_map(|s| s.iter().copied()).collect();
+    let avg = (0..8194)
+        .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
+        .sum::<usize>() as f64
+        / 8194.0;
+    for stage in 0..3 {
+        if stage == 1 {
+            checkpoint(&index).await;
+        }
+        if stage == 2 {
+            drop(index);
+            index = reopen(&path).await;
+        }
+        for explicit in [false, true] {
+            let rows = search(
+                &index,
+                "alpha beta gamma",
+                false,
+                8195,
+                explicit,
+                stage == 0,
+            )
+            .await;
+            assert_eq!(rows.iter().map(|r| r.0).collect::<BTreeSet<_>>(), union);
+            for (id, score) in &rows {
+                let dl = sets.iter().filter(|s| s.contains(id)).count();
+                let expected = sets
+                    .iter()
+                    .filter(|s| s.contains(id))
+                    .map(|s| contribution(8194, s.len(), dl, avg))
+                    .sum();
+                close_score(*score, expected);
             }
-            if stage == 2 {
-                index.close().await.unwrap();
-                drop(index);
-                index = open_index(&path).await.unwrap();
-            }
-            for explicit in [false, true] {
-                let rows = search(
-                    &index,
-                    "alpha beta gamma",
-                    false,
-                    8195,
-                    explicit,
-                    stage == 0,
-                )
-                .await;
-                assert_eq!(rows.iter().map(|r| r.0).collect::<BTreeSet<_>>(), union);
-                for (id, score) in &rows {
-                    let dl = sets.iter().filter(|s| s.contains(id)).count();
-                    let expected = sets
-                        .iter()
-                        .filter(|s| s.contains(id))
-                        .map(|s| contribution(8194, s.len(), dl, avg))
-                        .sum();
-                    close_score(*score, expected);
-                }
+            assert_eq!(
+                search(&index, "alpha beta gamma", true, 8195, explicit, stage == 0)
+                    .await
+                    .iter()
+                    .map(|r| r.0)
+                    .collect::<Vec<_>>(),
+                vec![103]
+            );
+            for q in ["gamma alpha beta", "beta gamma alpha"] {
                 assert_eq!(
-                    search(&index, "alpha beta gamma", true, 8195, explicit, stage == 0)
-                        .await
-                        .iter()
-                        .map(|r| r.0)
-                        .collect::<Vec<_>>(),
-                    vec![103]
+                    rows,
+                    search(&index, q, false, 8195, explicit, stage == 0).await,
+                    "stage {stage}, query {q}"
                 );
-                for q in ["gamma alpha beta", "beta gamma alpha"] {
-                    assert_eq!(
-                        rows,
-                        search(&index, q, false, 8195, explicit, stage == 0).await,
-                        "stage {stage}, query {q}"
-                    );
-                }
             }
         }
-        index.close().await.unwrap();
-        drop(index);
-        std::fs::remove_dir_all(path).unwrap();
     }
+
+    drop(index);
+    std::fs::remove_dir_all(path).unwrap();
+    progress.log("fixture complete; all assertions passed");
 }
 #[tokio::test]
 async fn append_changes_representative_but_not_upper_bound_safety() {
@@ -201,35 +270,35 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
         anyseek::index::FieldLengthNormalization::Shared,
         anyseek::index::FieldLengthNormalization::PerField,
     ] {
+        let progress = Progress::new("bound", policy);
         let (mut index, path) = fresh("bound", policy).await;
         let doc = |i| match i {
             0 => json!({"title":"alpha","text":format!("alpha {}","neutral ".repeat(19))}),
             1 => json!({"title":"alpha neutral neutral","text":"alpha neutral neutral"}),
-            65536 => json!({"title":"alpha","text":format!("alpha {}","neutral ".repeat(12))}),
-            _ => json!({"title":"","text":"neutral ".repeat(if i<65536 {1}else{5})}),
+            512 => json!({"title":"alpha","text":format!("alpha {}","neutral ".repeat(12))}),
+            _ => json!({"title":"","text":"neutral ".repeat(if i<512 {1}else{5})}),
         };
-        add(&index, 0, 65536, doc).await;
-        index.commit().await.unwrap();
-        add(&index, 65536, 73728, doc).await;
-        index.commit().await.unwrap();
+        add(&index, 0, 512, &progress, doc).await;
+        checkpoint(&index).await;
+        add(&index, 512, 576, &progress, doc).await;
+        checkpoint(&index).await;
         for reopened in [false, true] {
             if reopened {
-                index.close().await.unwrap();
                 drop(index);
-                index = open_index(&path).await.unwrap();
+                index = reopen(&path).await;
             }
-            let avg = (65561 + 8191 * 5 + 14) as f64 / 73728.0;
+            let avg = (537 + 63 * 5 + 14) as f64 / 576.0;
             let all = search(&index, "alpha", false, 4, false, false).await;
             assert_eq!(
                 all.iter().map(|r| r.0).collect::<BTreeSet<_>>(),
-                [0, 1, 65536].into_iter().collect(),
+                [0, 1, 512].into_iter().collect(),
                 "complete append fixture membership"
             );
             for &(id, score) in &all {
                 let lens = match id {
                     0 => [1, 20],
                     1 => [3, 3],
-                    65536 => [1, 13],
+                    512 => [1, 13],
                     _ => panic!("unexpected doc {id}; results={all:?}; reopened={reopened}"),
                 };
                 close_score(
@@ -238,7 +307,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                         .enumerate()
                         .map(|(field, dl)| {
                             contribution(
-                                73728,
+                                576,
                                 3,
                                 dl,
                                 if policy == anyseek::index::FieldLengthNormalization::Shared {
@@ -246,7 +315,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                                 } else if field == 0 {
                                     5.0 / 3.0
                                 } else {
-                                    (65561 + 8191 * 5 + 14 - 5) as f64 / 73728.0
+                                    (537 + 63 * 5 + 14 - 5) as f64 / 576.0
                                 },
                             )
                         })
@@ -261,9 +330,10 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                 );
             }
         }
-        index.close().await.unwrap();
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
+        progress.log("fixture complete; all assertions passed");
     }
 }
 #[tokio::test]
@@ -272,20 +342,21 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
         anyseek::index::FieldLengthNormalization::Shared,
         anyseek::index::FieldLengthNormalization::PerField,
     ] {
+        let progress = Progress::new("mask", policy);
         let (index, path) = fresh("mask", policy).await;
         let terms = [
             "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
         ];
-        add(&index,0,65546,|i|json!({"title":"","text":if i==0 {terms.join(" ")}else if i<65536 {"neutral ".repeat(10)}else if i<65545 {terms[i-65536].into()}else{"theta iota".into()}})).await;
-        index.commit().await.unwrap();
+        add(&index,0,522,&progress,|i|json!({"title":"","text":if i==0 {terms.join(" ")}else if i<512 {"neutral ".repeat(10)}else if i<521 {terms[i-512].into()}else{"theta iota".into()}})).await;
+        checkpoint(&index).await;
         let q = terms.join(" ");
-        let all = search(&index, &q, false, 65547, false, false).await;
+        let all = search(&index, &q, false, 523, false, false).await;
         assert_eq!(all.len(), 11);
         for &(id, score) in &all {
             let present = if id == 0 {
                 (0..9).collect::<Vec<_>>()
-            } else if id < 65545 {
-                vec![id - 65536]
+            } else if id < 521 {
+                vec![id - 512]
             } else {
                 vec![7, 8]
             };
@@ -295,10 +366,10 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
                     .iter()
                     .map(|&t| {
                         contribution(
-                            65546,
+                            522,
                             if t >= 7 { 3 } else { 2 },
                             present.len(),
-                            655370.0 / 65546.0,
+                            5130.0 / 522.0,
                         )
                     })
                     .sum(),
@@ -306,7 +377,7 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
         }
         assert_eq!(
             all[..2].iter().map(|r| r.0).collect::<Vec<_>>(),
-            vec![0, 65545]
+            vec![0, 521]
         );
         for explicit in [false, true] {
             assert_eq!(
@@ -314,30 +385,27 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
                 all[..2]
             );
         }
-        index.close().await.unwrap();
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
+        progress.log("fixture complete; all assertions passed");
     }
 }
 
 /// Five terms force recursive OR subsets; literal posting sets and scores are
 /// independent of both the subset enumerator and the explicit-sort reference.
-#[tokio::test]
-async fn five_term_or_subsets_keep_all_pair_contributions() {
-    for policy in [
-        anyseek::index::FieldLengthNormalization::Shared,
-        anyseek::index::FieldLengthNormalization::PerField,
-    ] {
-        let (index, path) = fresh("subsets", policy).await;
-        let terms = ["alpha", "beta", "gamma", "delta", "epsilon"];
-        let sets: Vec<BTreeSet<usize>> = vec![
-            (100..104).collect(),
-            [100, 103, 200, 300, 400].into_iter().collect(),
-            (1..8194).step_by(2).collect(),
-            (0..8194).step_by(3).collect(),
-            (0..8194).step_by(7).collect(),
-        ];
-        add(&index, 0, 8194, |i| {
+async fn five_term_or_subsets_keep_all_pair_contributions_case(policy: FieldLengthNormalization) {
+    let progress = Progress::new("subsets", policy);
+    let (index, path) = fresh("subsets", policy).await;
+    let terms = ["alpha", "beta", "gamma", "delta", "epsilon"];
+    let sets: Vec<BTreeSet<usize>> = vec![
+        (100..104).collect(),
+        [100, 103, 200, 300, 400].into_iter().collect(),
+        (1..8194).step_by(2).collect(),
+        (0..8194).step_by(3).collect(),
+        (0..8194).step_by(7).collect(),
+    ];
+    add(&index, 0, 8194, &progress, |i| {
         let words: Vec<_> = terms
             .iter()
             .zip(&sets)
@@ -347,34 +415,55 @@ async fn five_term_or_subsets_keep_all_pair_contributions() {
         json!({"title":"", "text":if words.is_empty() {"neutral".into()} else {words.join(" ")}})
     })
     .await;
-        index.commit().await.unwrap();
-        let avg = (0..8194)
-            .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
-            .sum::<usize>() as f64
-            / 8194.0;
-        let union: BTreeSet<_> = sets.iter().flat_map(|s| s.iter().copied()).collect();
-        for explicit in [false, true] {
-            let all = search(&index, &terms.join(" "), false, 8195, explicit, false).await;
-            assert_eq!(all.iter().map(|r| r.0).collect::<BTreeSet<_>>(), union);
-            for &(id, score) in &all {
-                let dl = sets.iter().filter(|s| s.contains(&id)).count();
-                close_score(
-                    score,
-                    sets.iter()
-                        .filter(|s| s.contains(&id))
-                        .map(|s| contribution(8194, s.len(), dl, avg))
-                        .sum(),
-                );
-            }
-            for k in [1, 10, 100] {
-                assert_eq!(
-                    search(&index, &terms.join(" "), false, k, explicit, false).await,
-                    all[..k]
-                );
-            }
+    checkpoint(&index).await;
+    let avg = (0..8194)
+        .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
+        .sum::<usize>() as f64
+        / 8194.0;
+    let union: BTreeSet<_> = sets.iter().flat_map(|s| s.iter().copied()).collect();
+    for explicit in [false, true] {
+        let all = search(&index, &terms.join(" "), false, 8195, explicit, false).await;
+        assert_eq!(all.iter().map(|r| r.0).collect::<BTreeSet<_>>(), union);
+        for &(id, score) in &all {
+            let dl = sets.iter().filter(|s| s.contains(&id)).count();
+            close_score(
+                score,
+                sets.iter()
+                    .filter(|s| s.contains(&id))
+                    .map(|s| contribution(8194, s.len(), dl, avg))
+                    .sum(),
+            );
         }
-        index.close().await.unwrap();
-        drop(index);
-        std::fs::remove_dir_all(path).unwrap();
+        for k in [1, 10, 100] {
+            assert_eq!(
+                search(&index, &terms.join(" "), false, k, explicit, false).await,
+                all[..k]
+            );
+        }
     }
+
+    drop(index);
+    std::fs::remove_dir_all(path).unwrap();
+    progress.log("fixture complete; all assertions passed");
+}
+
+#[tokio::test]
+async fn mixed_rle_array_bitmap_membership_scores_and_order_shared() {
+    mixed_rle_array_bitmap_membership_scores_and_order_case(FieldLengthNormalization::Shared).await;
+}
+
+#[tokio::test]
+async fn mixed_rle_array_bitmap_membership_scores_and_order_per_field() {
+    mixed_rle_array_bitmap_membership_scores_and_order_case(FieldLengthNormalization::PerField)
+        .await;
+}
+
+#[tokio::test]
+async fn five_term_or_subsets_keep_all_pair_contributions_shared() {
+    five_term_or_subsets_keep_all_pair_contributions_case(FieldLengthNormalization::Shared).await;
+}
+
+#[tokio::test]
+async fn five_term_or_subsets_keep_all_pair_contributions_per_field() {
+    five_term_or_subsets_keep_all_pair_contributions_case(FieldLengthNormalization::PerField).await;
 }

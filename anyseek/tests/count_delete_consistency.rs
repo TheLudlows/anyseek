@@ -1,19 +1,20 @@
-//! Regression tests: single-term `ResultType::Count` must exclude deleted
-//! documents, matching `TopkCount`/`results.len()`.
-//!
-//! Root cause was `single_docid` (anyseek/src/single.rs) treating
-//! "deletes exist" as unfiltered and taking the `Count` fast path,
-//! while `single_blockid` already treated deletes as filtered.
-//!
-//! Self-contained (own index directory), deterministic, no sleeps.
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Regression tests: single-term `ResultType::Count` must exclude deleted
+// documents, matching `TopkCount`/`results.len()`.
+//
+// Root cause was `single_docid` (anyseek/src/single.rs) treating
+// "deletes exist" as unfiltered and taking the `Count` fast path,
+// while `single_blockid` already treated deletes as filtered.
+//
+// Self-contained (own index directory), deterministic, no sleeps.
 
-use anyseek::commit::Commit;
+
 use anyseek::index::{
-    AccessType, Close, Clustering, DeleteDocuments, DocumentCompression, FrequentwordType,
-    IndexDocuments, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
-    TokenizerType, create_index,
-};
-use anyseek::search::{QueryType, ResultType, Search, SearchMode};
+    AccessType, Clustering, DocumentCompression, FrequentwordType,
+    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
+    TokenizerType, };
+use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
 use std::{fs, path::Path};
 
@@ -47,34 +48,17 @@ fn doc(title: &str) -> anyseek::index::Document {
 }
 
 async fn search(
-    index: &anyseek::index::IndexArc,
+    index: &RecordPartition,
     query: &str,
     result_type: ResultType,
-) -> anyseek::search::ResultObject {
-    index
-        .search(
-            query.into(),
-            None,
-            QueryType::Union,
-            SearchMode::Lexical,
-            false,
-            0,
-            100,
-            result_type,
-            false,
-            Vec::new(),
-
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
+) -> anyseek::record::RecordSearch {
+    index.query(RecordQuery {text:query.into(),vector:None,query_type:QueryType::Union,mode:SearchMode::Lexical,offset:0,length:100,result_type:result_type,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap()
 }
 
-async fn fresh(dir: &str) -> anyseek::index::IndexArc {
+async fn fresh(dir: &str) -> RecordPartition {
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
-    create_index(path, meta(), &schema(), 11, true, None)
-        .await
+    Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
         .unwrap()
 }
 
@@ -83,20 +67,20 @@ async fn fresh(dir: &str) -> anyseek::index::IndexArc {
 async fn single_count_excludes_deleted() {
     let index = fresh("tests/index_delete_count/").await;
     let docs: Vec<_> = (0..10).map(|i| doc(&format!("common word{i}"))).collect();
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
-    index.delete_documents(vec![0, 1, 2]).await;
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
+    records::delete(&index, vec![0, 1, 2]).await;
+    index.compact_journal().await.unwrap();
 
     let count = search(&index, "common", ResultType::Count).await;
     let topk_count = search(&index, "common", ResultType::TopkCount).await;
-    assert_eq!(count.result_count_total, 7);
-    assert_eq!(topk_count.result_count_total, 7);
-    assert_eq!(topk_count.results.len(), 7);
-    let mut ids: Vec<usize> = topk_count.results.iter().map(|r| r.doc_id).collect();
+    assert_eq!(count.count_total, 7);
+    assert_eq!(topk_count.count_total, 7);
+    assert_eq!(topk_count.hits.len(), 7);
+    let mut ids: Vec<usize> = topk_count.hits.iter().map(|r| r.record.record_id.parse::<usize>().unwrap()).collect();
     ids.sort_unstable();
     assert_eq!(ids, vec![3, 4, 5, 6, 7, 8, 9]);
-    index.close().await.unwrap();
+
 }
 
 /// Control: without deletes the Count fast path is untouched and exact.
@@ -104,13 +88,13 @@ async fn single_count_excludes_deleted() {
 async fn single_count_no_deletes_control() {
     let index = fresh("tests/index_delete_count_control/").await;
     let docs: Vec<_> = (0..10).map(|i| doc(&format!("common word{i}"))).collect();
-    index.index_documents(docs).await.unwrap();
-    index.commit().await.unwrap();
+    records::insert(&index, docs).await.unwrap();
+    index.compact_journal().await.unwrap();
 
     let count = search(&index, "common", ResultType::Count).await;
     let topk_count = search(&index, "common", ResultType::TopkCount).await;
-    assert_eq!(count.result_count_total, 10);
-    assert_eq!(topk_count.result_count_total, 10);
-    assert_eq!(topk_count.results.len(), 10);
-    index.close().await.unwrap();
+    assert_eq!(count.count_total, 10);
+    assert_eq!(topk_count.count_total, 10);
+    assert_eq!(topk_count.hits.len(), 10);
+
 }

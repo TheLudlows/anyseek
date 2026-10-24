@@ -1,31 +1,33 @@
 use anyseek::{
-    commit::Commit,
     index::{
-        AccessType, Close, Clustering, DocumentCompression, FieldLengthNormalization,
-        FrequentwordType, IndexArc, IndexDocuments, IndexMetaObject, LexicalSimilarity,
-        StopwordType, TextNormalization, TokenizerType, create_index, open_index,
+        AccessType, Clustering, DocumentCompression, FieldLengthNormalization,
+        FrequentwordType,  IndexMetaObject, LexicalSimilarity,
+        StopwordType, TextNormalization, TokenizerType,
     },
-    search::{QueryType, ResultSort, ResultType, Search, SearchMode, SortOrder},
+    search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
     vector::Inference,
 };
 use serde_json::{Value, json};
-async fn add(index: &IndexArc, docs: &[Value], total: usize) {
-    index
-        .index_documents(
-            docs.iter()
-                .cloned()
-                .map(|d| serde_json::from_value(d).unwrap())
-                .collect(),
-        )
-        .await
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while index.read().await.indexed_doc_count().await != total {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+use anyseek::record::{RecordPartition, RecordConfig, RecordQuery, RecordWrite, ExpectedVersion, OperationId};
+const JOURNAL_LIMIT: u64 = 64 * 1024 * 1024;
+async fn create_records(path: &std::path::Path, index: IndexMetaObject, schema: &[anyseek::index::SchemaField]) -> RecordPartition {
+    RecordPartition::create(path, RecordConfig {
+        change_feed: Default::default(), index, schema: schema.to_vec(), embedding_space_id: None,
+        max_records: 1000, max_record_bytes: 64*1024, max_operations: 10000,
+        max_journal_bytes: JOURNAL_LIMIT, max_candidates: 1000,
+    }).await.unwrap()
+}
+async fn add(index: &RecordPartition, docs: &[Value], total: usize) {
+    for (ordinal, document) in docs.iter().enumerate() {
+        let id = format!("{:020}", total - docs.len() + ordinal);
+        index.write(RecordWrite {
+            operation_id: OperationId::new(format!("insert-{id}")), record_id: id,
+            routing_key: "oracle".into(), expected: ExpectedVersion::Absent,
+            document: Some(serde_json::from_value(document.clone()).unwrap()),
+            vector_patch: None, generation: None, temporal: None, system: None,
+        }).await.unwrap();
+    }
+    assert_eq!(index.statistics().await.unwrap().active_records, total);
 }
 fn idf(n: f64, df: f64) -> f64 {
     (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
@@ -110,7 +112,7 @@ pub async fn exercise(proximity: bool) {
                         clustering: Clustering::None,
                         inference: Inference::None,
                     };
-                    let schema=serde_json::from_value(if fields==1 {json!([{"field":"a","field_type":"Text","index_lexical":true,"store":false,"boost":1.0}])}else{json!([{"field":"a","field_type":"Text","index_lexical":true,"store":false,"boost":2.0},{"field":"b","field_type":"Text","index_lexical":true,"store":false,"boost":0.5}])}).unwrap();
+                    let schema: Vec<anyseek::index::SchemaField>=serde_json::from_value(if fields==1 {json!([{"field":"a","field_type":"Text","index_lexical":true,"store":false,"boost":1.0}])}else{json!([{"field":"a","field_type":"Text","index_lexical":true,"store":false,"boost":2.0},{"field":"b","field_type":"Text","index_lexical":true,"store":false,"boost":0.5}])}).unwrap();
                     // Constant per-field lengths keep legacy Shared committed means unchanged on append,
                     // isolating ngram scoring from the separate length-update policy.
                     // Literal physical DFs: the/of/and/anchor=1/2/3/1 (plus one with extra_match).
@@ -134,24 +136,22 @@ pub async fn exercise(proximity: bool) {
                     if extra_match {
                         docs.push(docs[0].clone());
                     }
-                    let mut index = create_index(&path, meta, &schema, 11, true, Some(1))
-                        .await
-                        .unwrap();
+                    let mut index = create_records(&path, meta, &schema).await;
                     if mixed {
                         add(&index, &docs[..1], 1).await;
-                        index.commit().await.unwrap();
+                        index.compact_journal().await.unwrap();
                         add(&index, &docs[1..], docs.len()).await;
                     } else {
                         add(&index, &docs, docs.len()).await;
                     }
                     for stage in 0..3 {
                         if stage == 1 {
-                            index.commit().await.unwrap();
+                            index.compact_journal().await.unwrap();
                         }
                         if stage == 2 {
-                            index.close().await.unwrap();
+
                             drop(index);
-                            index = open_index(&path).await.unwrap();
+                            index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
                         }
                         for (words, q) in [
                             (2, "\"the of\""),
@@ -161,18 +161,8 @@ pub async fn exercise(proximity: bool) {
                             for realtime in [false, true] {
                                 for explicit in [false, true] {
                                     let r = index
-                                        .search(
-                                            q.into(),
-                                            None,
-                                            QueryType::Union,
-                                            SearchMode::Lexical,
-                                            false,
-                                            0,
-                                            100,
-                                            ResultType::TopkCount,
-                                            realtime,
-                                            vec![],
-                                            vec![],
+                                        .query(RecordQuery {
+                                            text: q.into(), vector: None, temporal: None, query_type: QueryType::Union, mode: SearchMode::Lexical, offset: 0, length: 100, result_type: ResultType::TopkCount, fields: vec![], filters: vec![], sort:
                                             if explicit {
                                                 vec![ResultSort {
                                                     field: "_score".into(),
@@ -181,24 +171,23 @@ pub async fn exercise(proximity: bool) {
                                             } else {
                                                 vec![]
                                             },
-                                        )
-                                        .await;
-                                    assert!(r.error.is_none(), "{:?}", r.error);
-                                    let visible = stage > 0 || mixed || realtime;
+                                        }).await.unwrap();
+
+                                    let visible = true; // Successful Record writes are durable and visible.
                                     let want_ids = if !visible {
                                         vec![]
-                                    } else if extra_match && (stage > 0 || realtime) {
+                                    } else if extra_match {
                                         vec![0, 4]
                                     } else {
                                         vec![0]
                                     };
                                     assert_eq!(
-                                        r.results.iter().map(|x| x.doc_id).collect::<Vec<_>>(),
+                                        r.hits.iter().map(|x| x.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(),
                                         want_ids,
                                         "{label} stage={stage} q={q}"
                                     );
-                                    assert_eq!(r.result_count_total, want_ids.len());
-                                    for hit in r.results {
+                                    assert_eq!(r.count_total, want_ids.len());
+                                    for hit in r.hits {
                                         let want = expected(
                                             fields,
                                             policy,
@@ -221,7 +210,7 @@ pub async fn exercise(proximity: bool) {
                             }
                         }
                     }
-                    index.close().await.unwrap();
+
                     drop(index);
                     std::fs::remove_dir_all(path).unwrap();
                 }
@@ -260,34 +249,33 @@ pub async fn exercise_quantized_df() {
             clustering: Clustering::None,
             inference: Inference::None,
         };
-        let schema = serde_json::from_value(
+        let schema: Vec<anyseek::index::SchemaField> = serde_json::from_value(
             json!([{"field":"a","field_type":"Text","index_lexical":true,"store":false}]),
         )
         .unwrap();
-        let mut index = create_index(&path, meta, &schema, 11, true, Some(1))
-            .await
-            .unwrap();
+        let mut index = create_records(&path, meta, &schema).await;
         let mut docs = vec![json!({"a":"of neutral"}); 100];
         docs[0] = json!({"a":"the of"});
         add(&index, &docs, 100).await;
-        index.commit().await.unwrap();
+        index.compact_journal().await.unwrap();
         for stage in 0..6 {
             if stage == 1 {
                 add(&index, &vec![json!({"a":"of neutral"}); 4], 104).await;
             }
             if stage == 2 || stage == 5 {
-                index.commit().await.unwrap();
+                index.compact_journal().await.unwrap();
             }
             if stage == 3 {
-                index.close().await.unwrap();
+
                 drop(index);
-                index = open_index(&path).await.unwrap();
+                index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
             }
             if stage == 4 {
                 add(&index, &[json!({"a":"the of"})], 105).await;
             }
-            // Literal codec boundaries:100 ->96;104/105 ->104. Realtime counts
-            // are added without quantization, preserving the previous convention.
+            // Record has always used active exact DF, overriding compressed
+            // physical posting DF (legacy Shard::scoring_df with active view).
+            // Retain the boundary-sized corpus, but assert that public contract.
             let n = if stage == 0 {
                 100.0
             } else if stage < 4 {
@@ -296,39 +284,23 @@ pub async fn exercise_quantized_df() {
                 105.0
             };
             let df_the = if stage < 4 { 1.0 } else { 2.0 };
-            let df_of = match stage {
-                0 => 96.0,
-                1 => 100.0,
-                4 => 105.0,
-                _ => 104.0,
-            };
+            let df_of = n;
             let expected = ((n - df_the + 0.5) / (df_the + 0.5) + 1.0_f64).ln()
                 + ((n - df_of + 0.5) / (df_of + 0.5) + 1.0_f64).ln();
-            for realtime in [false, true] {
+            for _repeat in 0..2 {
                 let r = index
-                    .search(
-                        "\"the of\"".into(),
-                        None,
-                        QueryType::Union,
-                        SearchMode::Lexical,
-                        false,
-                        0,
-                        100,
-                        ResultType::TopkCount,
-                        realtime,
+                    .query(RecordQuery {
+                        text: "\"the of\"".into(), vector: None, temporal: None, query_type: QueryType::Union, mode: SearchMode::Lexical, offset: 0, length: 100, result_type: ResultType::TopkCount, fields: vec![], filters: vec![], sort:
                         vec![],
-                        vec![],
-                        vec![],
-                    )
-                    .await;
-                let want = if stage == 5 || (stage == 4 && realtime) {
+                    }).await.unwrap();
+                let want = if stage >= 4 {
                     vec![0, 104]
                 } else {
                     vec![0]
                 };
-                assert_eq!(r.results.iter().map(|x| x.doc_id).collect::<Vec<_>>(), want);
-                assert_eq!(r.result_count_total, want.len());
-                for hit in r.results {
+                assert_eq!(r.hits.iter().map(|x| x.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(), want);
+                assert_eq!(r.count_total, want.len());
+                for hit in r.hits {
                     assert!(
                         (hit.score as f64 - expected).abs() < 2e-5,
                         "stage={stage} got={} expected={expected}",
@@ -337,7 +309,7 @@ pub async fn exercise_quantized_df() {
                 }
             }
         }
-        index.close().await.unwrap();
+
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
     }

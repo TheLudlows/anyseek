@@ -55,7 +55,7 @@ impl Limits {
         Self { slots, subject_slots, bytes, subject_bytes, io, subject_io }
     }
 }
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 struct Usage { slots: usize, bytes: u64, io: usize }
 impl Usage {
     fn add(self, n: Self, cap: Limits, subject: bool) -> Option<Self> {
@@ -115,9 +115,14 @@ impl Governor {
     fn reserve(self: &Arc<Self>, subject: &str, lane: Lane, amount: Usage) -> Result<Lease, Busy> {
         let mut ledger = self.ledger.lock().map_err(|_| Busy)?;
         let i = lane.index();
-        if subject.len() > 272 || (!ledger.subjects.contains_key(subject) && ledger.subjects.len() >= 128) { return Err(Busy); }
-        let total = ledger.total[i].add(amount, self.limits[i], false).ok_or(Busy)?;
-        let local = ledger.subjects.get(subject).map(|u| u[i]).unwrap_or_default().add(amount, self.limits[i], true).ok_or(Busy)?;
+        if subject.len() > 272 || (!ledger.subjects.contains_key(subject) && ledger.subjects.len() >= 128) { log::warn!("resource subject admission exhausted: retained_subjects={}",ledger.subjects.len());return Err(Busy); }
+        let total = ledger.total[i].add(amount, self.limits[i], false).ok_or_else(|| {
+            log::warn!("resource global admission exhausted: lane={lane:?} used={:?} requested={amount:?} limits={:?}",ledger.total[i],self.limits[i]);Busy
+        })?;
+        let used=ledger.subjects.get(subject).map(|u|u[i]).unwrap_or_default();
+        let local = used.add(amount, self.limits[i], true).ok_or_else(|| {
+            log::warn!("resource collection admission exhausted: lane={lane:?} used={used:?} requested={amount:?} limits={:?}",self.limits[i]);Busy
+        })?;
         ledger.total[i] = total;
         ledger.subjects.entry(subject.into()).or_default()[i] = local;
         Ok(Lease { governor: self.clone(), subject: subject.into(), lane, amount })
@@ -131,6 +136,16 @@ impl Governor {
 }
 /// A reservation released only when its actual owner is dropped.
 pub struct Lease { governor: Arc<Governor>, subject: String, lane: Lane, amount: Usage }
+impl Lease {
+    /// Extend a retained byte reservation before its owner allocates more storage.
+    pub(crate) fn grow_bytes(&mut self, bytes: u64) -> Result<(), Busy> {
+        let next = self.amount.bytes.checked_add(bytes).ok_or(Busy)?;
+        let mut added = self.governor.reserve(&self.subject, self.lane, Usage { bytes, ..Usage::default() })?;
+        self.amount.bytes = next;
+        added.amount.bytes = 0;
+        Ok(())
+    }
+}
 impl Drop for Lease {
     fn drop(&mut self) {
         let mut ledger = self.governor.ledger.lock().unwrap_or_else(|e| e.into_inner());
@@ -148,6 +163,9 @@ tokio::task_local! { static CURRENT: Scope; }
 impl Scope {
     /// Capture the context before spawning; task locals are not implicitly inherited.
     pub fn current() -> Option<Self> { CURRENT.try_with(Clone::clone).ok() }
+    /// Retained storage uses background capacity and the same subject, without
+    /// borrowing control capacity or retaining a completed request slot.
+    pub(crate) fn retained_io(&self) -> Self { Self { governor:self.governor.clone(),subject:self.subject.clone(),lane:Lane::Background,_entry:None } }
     /// Run work under this context, including synchronous response serialization.
     pub async fn run<F: Future>(self, future: F) -> F::Output { CURRENT.scope(self, future).await }
     /// Reserve explicit buffer bytes before allocation, retained by the buffer owner.
@@ -204,6 +222,20 @@ mod tests {
         assert!(governor.admit("other".into(), Lane::Foreground, 1).is_err());
         assert!(governor.admit("a".into(), Lane::Control, 1).is_ok());
         drop(cold); drop(hot);
+        assert!(governor.ledger.lock().unwrap().subjects.is_empty());
+    }
+    #[test]
+    fn retained_bytes_grow_atomically_and_release_the_full_reservation() {
+        let governor = Arc::new(Governor::default());
+        let scope = governor.admit("native-identities".into(), Lane::Background, 0).unwrap();
+        let cap = governor.limits[Lane::Background.index()].subject_bytes;
+        let mut bytes = scope.bytes(cap - 1).unwrap();
+        assert!(bytes.grow_bytes(2).is_err());
+        bytes.grow_bytes(1).unwrap();
+        assert!(scope.bytes(1).is_err());
+        drop(bytes);
+        assert!(scope.bytes(cap).is_ok());
+        drop(scope);
         assert!(governor.ledger.lock().unwrap().subjects.is_empty());
     }
     #[tokio::test]

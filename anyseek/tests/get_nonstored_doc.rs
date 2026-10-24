@@ -1,21 +1,8 @@
-//! Regression tests: reading a document with no stored fields must return
-//! `Err`, not panic with a reversed slice (`[262144..0]`).
-//!
-//! Root cause was `get_document_shard` (anyseek/src/doc_store.rs) only
-//! treating `previous_pointer == pointer` as "not found"; a non-stored-only
-//! (or empty) document leaves slot 0 with `previous_pointer > pointer`.
-//!
-//! Self-contained (own index directory), deterministic, no sleeps.
-
-use anyseek::commit::Commit;
-use anyseek::index::{
-    AccessType, Close, Clustering, DocumentCompression, FrequentwordType, IndexDocuments,
-    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
-    create_index,
-};
-use anyseek::vector::Inference;
-use std::{collections::HashSet, fs, path::Path};
-
+//! Payload retains original fields independently of derived index storage options.
+#[path = "common/records.rs"] mod records;
+use anyseek::index::{AccessType, Clustering, DocumentCompression, FrequentwordType,
+    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType};
+use anyseek::{record::RecordPartition, vector::Inference};
 fn meta(access_type: AccessType) -> IndexMetaObject {
     IndexMetaObject {
         id: 0,
@@ -41,48 +28,28 @@ fn schema() -> Vec<anyseek::index::SchemaField> {
     .unwrap()
 }
 
-async fn fresh(dir: &str, access_type: AccessType) -> anyseek::index::IndexArc {
-    let path = Path::new(dir);
-    let _ = fs::remove_dir_all(path);
-    create_index(
-        path,
-        meta(access_type),
-        &schema(), 11,
-        true,
-        None,
-    )
-    .await
-    .unwrap()
-}
 
-async fn index_one(index: &anyseek::index::IndexArc, json: &str) {
-    let doc: anyseek::index::Document = serde_json::from_str(json).unwrap();
-    index.index_documents(vec![doc]).await.unwrap();
-    index.commit().await.unwrap();
+async fn check(document: serde_json::Value) {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("records");
+    let mut partition = records::create(&path, meta(AccessType::Mmap), schema()).await;
+    records::append(&partition, vec![serde_json::from_value(document.clone()).unwrap()]).await;
+    for stage in 0..3 {
+        if stage == 1 { partition.compact_journal().await.unwrap(); }
+        if stage == 2 {
+            drop(partition);
+            partition = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
+        }
+        let stored = partition.get("00000000000000000000").await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(stored.document.unwrap()).unwrap(), document);
+        assert!(partition.get("absent").await.unwrap().is_none());
+    }
 }
-
-async fn get0(index: &anyseek::index::IndexArc) -> Result<anyseek::index::Document, String> {
-    index
-        .read()
-        .await
-        .get_document(0, false, &HashSet::new())
-        .await
-}
-
-/// A document with only non-stored fields must read as Err (mmap branch).
 #[tokio::test]
-async fn get_nonstored_only_mmap() {
-    let index = fresh("tests/index_get_nonstored_mmap/", AccessType::Mmap).await;
-    index_one(&index, r#"{"nostore":"only indexed content"}"#).await;
-    assert!(get0(&index).await.is_err());
-    index.close().await.unwrap();
+async fn nonstored_fields_remain_canonical_payload() {
+    check(serde_json::json!({"nostore":"only indexed content"})).await;
 }
-
-/// Control: a normal stored document still reads back.
 #[tokio::test]
-async fn get_stored_control() {
-    let index = fresh("tests/index_get_control/", AccessType::Mmap).await;
-    index_one(&index, r#"{"title":"hello world"}"#).await;
-    assert!(get0(&index).await.is_ok());
-    index.close().await.unwrap();
+async fn stored_fields_remain_canonical_payload() {
+    check(serde_json::json!({"title":"hello world"})).await;
 }

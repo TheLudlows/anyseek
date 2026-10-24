@@ -1,49 +1,33 @@
-//! Repro: multi-term Topk/TopkCount over all-frequent terms must return results,
-//! not an empty heap. Pure public API.
-//! Run: cargo test -p anyseek --test frequent_topk_consistency
-use anyseek::commit::Commit;
+#[path = "common/records.rs"] mod records;
+use anyseek::record::{RecordPartition, RecordQuery};
+// Repro: multi-term Topk/TopkCount over all-frequent terms must return results,
+// not an empty heap. Pure public API.
+// Run: cargo test -p anyseek --test frequent_topk_consistency
+
 use anyseek::index::{
-    AccessType, Close, Clustering, Document, DocumentCompression, FrequentwordType,
-    IndexDocument, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
-    TokenizerType, create_index,
-};
-use anyseek::search::{QueryType, ResultType, Search, SearchMode};
+    AccessType, Clustering, Document, DocumentCompression, FrequentwordType,
+    IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
+    TokenizerType, };
+use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
-use std::{fs, path::Path};
 
 async fn search(
-    index_arc: &anyseek::index::IndexArc,
+    index_arc: &RecordPartition,
     q: &str,
     qt: QueryType,
     rt: ResultType,
     len: usize,
-) -> anyseek::search::ResultObject {
-    index_arc
-        .search(
-            q.into(),
-            None,
-            qt,
-            SearchMode::Lexical,
-            false,
-            0,
-            len,
-            rt,
-            false,
-            Vec::new(),
-
-            Vec::new(),
-            Vec::new(),
-        )
-        .await
+) -> anyseek::record::RecordSearch {
+    index_arc.query(RecordQuery {text:q.into(),vector:None,query_type:qt,mode:SearchMode::Lexical,offset:0,length:len,result_type:rt,fields:Vec::new(),filters:Vec::new(),sort:Vec::new(),temporal:None}).await.unwrap()
 }
 
 #[tokio::test]
 async fn frequent_terms_topk_returns_results() {
-    let index_path = Path::new("/tmp/repro_frequent_topk/");
-    let _ = fs::remove_dir_all(index_path);
+    let root = tempfile::tempdir().unwrap();
+    let index_path = root.path().join("index");
     let schema_json = r#"
     [{"field":"title","field_type":"Text","store":false,"index_lexical":true,"longest":true}]"#;
-    let schema = serde_json::from_str(schema_json).unwrap();
+    let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
     let meta = IndexMetaObject {
         id: 0,
         name: "repro".into(),
@@ -60,8 +44,7 @@ async fn frequent_terms_topk_returns_results() {
         inference: Inference::None,
     };
     // NOTE: keep on the single-shard fast path; multi-shard covered by suite.
-    let index_arc = create_index(index_path, meta, &schema, 11, false, Some(1))
-        .await
+    let index_arc = Ok::<_, String>(records::create(&index_path, meta, (&schema).to_vec()).await)
         .unwrap();
 
     // 3000 docs: "common" in all (100%), "half" in evens (50%) -> every query
@@ -72,9 +55,9 @@ async fn frequent_terms_topk_returns_results() {
             t.push_str("half ");
         }
         let doc: Document = serde_json::from_str(&format!(r#"{{"title":"{t}"}}"#)).unwrap();
-        index_arc.index_document(doc).await.unwrap();
+        records::insert(&index_arc, vec![doc]).await.unwrap();
     }
-    index_arc.commit().await.unwrap();
+    index_arc.compact_journal().await.unwrap();
 
     // Intersection Topk must not come back empty with 1500 matches.
     let rlo = search(
@@ -86,7 +69,7 @@ async fn frequent_terms_topk_returns_results() {
     )
     .await;
     assert_eq!(
-        rlo.results.len(),
+        rlo.hits.len(),
         10,
         "BUG: intersection Topk empty for all-frequent terms"
     );
@@ -101,12 +84,12 @@ async fn frequent_terms_topk_returns_results() {
     )
     .await;
     assert_eq!(
-        rtc.results.len(),
+        rtc.hits.len(),
         10,
         "BUG: intersection TopkCount results empty"
     );
     assert_eq!(
-        rtc.result_count_total, 1500,
+        rtc.count_total, 1500,
         "intersection total must count all matches"
     );
 
@@ -119,8 +102,8 @@ async fn frequent_terms_topk_returns_results() {
         10,
     )
     .await;
-    assert_eq!(c.result_count_total, 1500);
+    assert_eq!(c.count_total, 1500);
 
-    index_arc.close().await.unwrap();
-    let _ = fs::remove_dir_all(index_path);
+
+    drop(index_arc);
 }

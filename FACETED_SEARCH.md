@@ -21,7 +21,7 @@
 {"query":"database","filter":[{"String16":{"field":"category","filter":["guide"]}},{"Timestamp":{"field":"date","filter":{"start":1704067200,"end":1735689600}}}],"sort":[{"field":"date","order":"Descending"}],"fields":["body","date"]}
 ```
 
-范围过滤为左闭右开；start=end 合法但没有匹配结果，start>end 或非有限浮点边界报错。各谓词之间为 AND（包括同字段重复条件），单个字符串/集合谓词中的值为 OR。空字符串值列表或不存在的字典值没有匹配结果。未知字段、未启用过滤/排序 或类型不匹配返回 400，Rust 调用检查 ResultObject.error。
+范围过滤为左闭右开；start=end 合法但没有匹配结果，start>end 或非有限浮点边界报错。各谓词之间为 AND（包括同字段重复条件），单个字符串/集合谓词中的值为 OR。空字符串值列表或不存在的字典值没有匹配结果。未知字段、未启用过滤/排序 或类型不匹配返回 400，Rust Record 调用通过 `Result<_, RecordError>` 返回错误。
 
 Lexical、Vector、Hybrid 复用共享过滤逻辑。向量在评分及 Top-K 入堆前过滤，Hybrid 的两路候选都过滤后再融合。HTTP 默认包含的未提交记录使用当前字典；已删除候选不入堆。字符串集合按实际成员匹配，不按字典组合键匹配。
 

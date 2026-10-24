@@ -66,7 +66,7 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
                 except (OSError,http.client.HTTPException):pass
                 else:raise AssertionError('expected lease process exit')
             else:assert call('GET',endpoint+'/doc/doc/generation',status=503)['code'] in ('outcome_unknown','durable_pending')
-            restart_with(env);status=call('GET',endpoint+'/doc/doc/generation');assert status['staged_members']==0 and status['version']==2 and not status['private_cleanup_pending']
+            restart_with(env);status=call('GET',endpoint+'/doc/doc/generation');assert status['staged_members']==0 and status['version']==2 and not status['private_cleanup_pending'], (fault, status)
             assert call('POST',endpoint+'/doc',request)['receipt']==receipt
             call('POST',endpoint+'/doc',command('renew',1),status=409)
             assert [e['kind'] for e in call('POST',endpoint+'/changes',{})['events']]==['source_created']

@@ -90,7 +90,10 @@ impl Inner {
         // contain both live and retired payloads and cannot be truncated in place.
         match self.publish_anchor_state(candidate,false).await {
             Ok(_)=>{self.state.private_cleanup_pending=self.reclaim_anchor_objects().await.is_err();Ok(())},
-            Err(_) if self.healthy=>Ok(()),
+            Err(error) if self.healthy=>{
+                log::warn!("private cleanup remains pending after healthy publication rejection: {error}");
+                Ok(())
+            },
             Err(error)=>Err(error),
         }
     }
