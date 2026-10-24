@@ -308,7 +308,7 @@ Hybrid channel ranks are assigned before final fusion sorting/pagination. A pure
 64 MiB <= 单份 <= 共享 <= 8 GiB。按进程固定，不支持运行中热改。
 Governor各通道的全局字节配置不得超过8 GiB，其他层级/控制余量约束不变。
 这都是保守逻辑预留，并非RSS硬上限；中文分析器、旧视图、候选构建与输出可同时存活，
-部署前应为这些预算和未计入的运行时开销准备足够RAM。16 GiB测试宿主上的验证结果另行记录；
+部署前应为这些预算和未计入的运行时开销准备足够RAM。16 GiB测试宿主上的[验证结果与限制](../../docs/resource-budget-followup.md)已单独记录；
 小内存部署应显式降低预算，不能把默认值视为任意规模容量承诺。
 
 资源不足仍立即拒绝，没有无限等待队列。HTTP/1在读取请求体之前拒绝时明确发送

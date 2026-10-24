@@ -1003,7 +1003,7 @@ async fn native_reader_reservation_follows_snapshot_lifetime() {
         .admit("reader-owner".into(), Lane::Foreground, 0)
         .unwrap();
     let charge = candidate.files.iter().map(|f| f.bytes).sum::<u64>() * 8 + 64 * 1024;
-    let cap = 256 * 1024 * 1024;
+    let cap = 512 * 1024 * 1024;
     let observer = scope.clone();
     let snapshot = scope
         .run(async { candidate.open(&root.0, CUT, LIMIT).unwrap() })
