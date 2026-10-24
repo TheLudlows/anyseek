@@ -37,35 +37,28 @@ Record 默认候选窗口为每通道全局 `offset + length`，显式候选 cap
 
 ## 验证版本与结果
 
-### 清理前完整验收（历史证据）
+### 最终代码验收
 
-生产及测试代码 `3f09fe76fb7b9fd1eb17ae3381facf66a27bf234`；`6bbc244` 仅更新 Markdown。原代码基线 master `3893cd54`，发布前并入 master `31a4d059` 的文档更新。
+已验收代码为 **`94d0a60079ae7b8604223b130559bc14004816fe`**，目标 master `31a4d059`。[CI 40063214949](https://github.com/TheLudlows/anyseek/actions/runs/40063214949) 的 **9/9 jobs 全部成功**。此后的状态整理仅修改 Markdown；文档 HEAD 与已验收代码 SHA 分开记录，不借用旧版本测试冒充新代码结果。
 
-| 检查 | 结果 |
+| 检查 | 代码 SHA `94d0a60` 的实际结果 |
 | --- | --- |
-| all-targets，server + fault-injection | 34 binaries，338 passed / 0 failed / 13 ignored，exit 0，3443.81 s |
-| no-default library | 197 passed / 0 failed / 10 ignored，exit 0 |
-| default / no-default doctests | 各 9 passed / 0 failed，exit 0 |
-| 原 3000 条写入及大词法夹具 | 分别 133.53 s、2250.63 s；规模和两种长度策略保持 |
-| HTTP faults / Indexer / authorization | 均 exit 0；健康恢复默认仍为 15 s，未放宽超时 |
-| S3 storage fixture | exit 0：checkpoint、保留、备份、接管及故障边界 |
-| S3 无缓存语义 | base、locator、graph、temporal、upload、lease、feed 七组全部 exit 0 |
-| S3 object contract fixture | 1 passed；未使用真实 endpoint |
-| 独立 core 默认/无默认依赖边界 | 通过 |
+| Linux all-targets / server + fault-injection 集成 | 各 34 binaries，341 passed / 0 failed / 13 ignored |
+| Windows 完整集成集合 | 常规 337 passed + 四项独立大用例 = 341 passed / 0 failed / 13 ignored |
+| Linux / Windows no-default library | 各 198 passed / 0 failed / 10 ignored |
+| Linux / Windows default、no-default doctests | 四组各 9 passed |
+| 两平台原生 Tantivy | 各 34 passed，含固定 reader、取消、预算和包 pin |
+| 两平台 HTTP、Indexer、授权、备份/GC | 全部通过；健康恢复默认仍为 15 s |
+| 两平台 S3 fixture | 各 17 项恢复回归、1 项对象合同、七组无缓存语义通过 |
+| build-and-smoke | 全量、10 项 Chromium、core/依赖边界、文档及 API 生成通过 |
 
-证据为工作环境 `/tmp/anyseek80-phase18-results.json` 和对应 phase18 日志、S3 JSON 报告。服务二进制 SHA-256：`f43acdcd2ff2fdeff1bf3653dd67ad8b83f6752ad510b38c1afbb823382e6c51`；三个 S3 报告均明确 backend=fixture、real_endpoint_exercised=false。这些结果不冒充本轮私有查询清理后的验证。
+四项独立 Windows 大用例均完整写入 8194 条：mixed Shared / PerField 为 1239.28 / 1705.24 s，five-term Shared / PerField 为 1815.44 / 1741.25 s。每项保留全部原断言与 120 分钟上限。写入占主要耗时，checkpoint 约 10–18 s，mixed 重开约 2–3 s。跨平台重命名预算断言在 Windows 默认及 no-default 均实际通过。
 
-### 本轮发布前清理
+原综合 Windows job 的[历史运行](https://github.com/TheLudlows/anyseek/actions/runs/40054343256) 达到 120 分钟上限取消；原日志没有内部水位，不能判定死锁。现在两个大用例各按 Shared/PerField 拆成四个独立 Windows job，常规 job 仅排除这四项并完成后续全部验收，Linux 仍执行完整集合。`check_lexical_partition.py` 对比编译清单、排除集合和 matrix，防止漏测或零测试成功。每 256 条写入、checkpoint、重开和查询均有耗时水位；未缩减语料、忽略慢用例、扩大超时或进行性能专项。
 
-本轮最终代码的全目标编译通过；核心 + stable_ranking / weighted_rrf / test / server_query_contract / server_shared_filters / server_ann_contract 共 265 passed / 0 failed / 12 ignored；no-default lib 为 197 passed / 0 failed / 10 ignored；默认和无默认 doctest 各 9 passed。所有命令 exit 0。文档链接检查为 22 Markdown / 103 surfaces 通过，git diff 空白检查通过；全仓 rustfmt 仍 exit 1，沿用下述基线问题。证据：工作环境 `/tmp/anyseek80-phase20-final-results.json` 及各步骤日志。完整 all-targets 执行、HTTP/S3 和 Linux/Windows 平台矩阵由本轮最终提交的 PR CI 重新验收，不借用旧版本通过替代。
+最终证据为该 CI 的完整日志与 artifacts，以及工作环境 `/tmp/anyseek80-phase22-final-evidence.json`。两平台七组 S3 报告均明确 backend=fixture、real_endpoint_exercised=false；Linux/Windows 服务 SHA-256 分别为 `114d90eefe85b2862fd3b42a5a33d59bd8194afad0404f5cb2c81ca2583ae01f` / `4af79a19ee77cdc413bb25f895409db1388cc329f53aa4c94cb3ba4fb138882a`。
 
-### 平台 CI 与 Windows 任务边界
-
-[`199cdd0` 的 CI](https://github.com/TheLudlows/anyseek/actions/runs/40054343256) 为 4 个 job 成功、Windows Persistence 因 120 分钟上限取消。Linux 全目标 339 passed / 0 failed / 13 ignored，no-default 198 passed / 10 ignored，两组 doctest 各 9 passed，HTTP 与存储故障矩阵通过；两平台 S3 fixture 通过。Windows 已通过原 3000 条写入（920.99 s）和跨平台预算回归，但后续 feature、doctest、HTTP/存储矩阵未执行，不算 Windows 完整通过。
-
-超时时词法大用例仍未返回，旧日志没有内部水位，不能据此断言挂死。Linux 两个大用例各需约 22.5 分钟，均在一个测试内串行执行 Shared/PerField。现在将它们拆成四个独立 Windows job，每项仍写入 8194 条并保留全部原断言；两个小用例仍各自遍历两种策略。常规 Windows job 仅排除这四项，继续执行其他所有验收；Linux 仍跑完整集合。每个 job 保持 120 分钟。`check_lexical_partition.py` 对比实际编译清单、排除集合和 matrix，防止漏测或名称错误导致零测试成功。
-
-测试新增每 256 条写入、checkpoint、重开和查询前后的耗时水位；独立 job 使用 `--nocapture`。这是验收任务拆分与诊断，没有改变生产执行、语料、评分、断言或超时。最新提交的结果以 [PR 检查](https://github.com/TheLudlows/anyseek/pull/81/checks) 为准；上述通过项绑定旧 SHA，不能替代新 SHA 实测。
+更早本地阶段的 338 passed（`3f09fe76`）与发布前定向 265 passed 保留在 Git 历史、phase18/phase20 日志中，仅作历史证据。最终结果不由这些旧测试替代。
 
 ### 13 个忽略项
 
@@ -87,4 +80,4 @@ Record 默认候选窗口为每通道全局 `offset + length`，显式候选 cap
 
 2026-10-23 调试词法测试进程样本：RSS 503048 KiB、峰值 503360 KiB、10 线程、27 文件描述符（phase18-resource-sample.json）。不是 benchmark 或 RSS 限额。每次即时写入的 commit/reload、tail 轮换、包 hash/物化、活动 postings 统计均有维护成本；完整 Record State/回执账本仍驻内存，不声称速度或内存收益。
 
-当前分支 Windows 待 CI；真实 S3、系统/文件系统崩溃、硬断电和手工跨 AES 尚未验收。进程退出与 fixture 不替代这些验证。核心剩余及建议顺序见[路线](roadmap.md)，本轮不扩展实现下一阶段。
+真实 S3、系统/文件系统崩溃、硬断电和手工跨 AES 尚未验收。进程退出与 fixture 不替代这些验证。核心剩余及建议顺序见[路线](roadmap.md)，本轮不扩展实现下一阶段。
