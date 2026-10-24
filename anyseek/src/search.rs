@@ -1,8 +1,8 @@
 //! Query configuration and Record's private vector-component execution.
-use crate::{INDEX_RUNTIME, index::{Index, IndexArc, Shard, FieldType}, min_heap::{Result, result_ordering_root},
+use crate::{INDEX_RUNTIME, index::IndexArc, min_heap::{Result, result_ordering_root},
     vector::{Embedding, Inference, Quantization, SearchVectorShard},
     vector_similarity::{AnnMode, QuantizedVector, VectorSimilarity, normalize_f32, normalize_f32_simd,
-        quantize_f32_to_i8, quantize_f32_to_i8_simd}, utils::*};
+        quantize_f32_to_i8, quantize_f32_to_i8_simd}};
 use serde::{Serialize, Deserialize};
 use std::ops::Range;
 /// Specifies the default QueryType: The following query types are supported:
@@ -12,6 +12,47 @@ use std::ops::Range;
 /// - **Not** (-).
 ///
 /// The default QueryType is superseded if the query parser detects that a different query type is specified within the query string (+ - "").
+/// Intersection, AND `+`
+///
+/// ```rust ,no_run
+/// use anyseek::search::QueryType;
+/// let query_type=QueryType::Union;
+/// let query_string="+red +apple".to_string();
+/// ```
+/// ```rust ,no_run
+/// use anyseek::search::QueryType;
+/// let query_type=QueryType::Intersection;
+/// let query_string="red apple".to_string();
+/// ```
+/// Union, OR
+/// ```rust ,no_run
+/// use anyseek::search::QueryType;
+/// let query_type=QueryType::Union;
+/// let query_string="red apple".to_string();
+/// ```
+/// Phrase `""`
+/// ```rust ,no_run
+/// use anyseek::search::QueryType;
+/// let query_type=QueryType::Union;
+/// let query_string="\"red apple\"".to_string();
+/// ```
+/// ```rust ,no_run
+/// use anyseek::search::QueryType;
+/// let query_type=QueryType::Phrase;
+/// let query_string="red apple".to_string();
+/// ```
+/// Except, minus, NOT `-`
+/// ```rust ,no_run
+/// use anyseek::search::QueryType;
+/// let query_type=QueryType::Union;
+/// let query_string="apple -red".to_string();
+/// ```
+/// Mixed phrase and intersection
+/// ```rust ,no_run
+/// use anyseek::search::QueryType;
+/// let query_type=QueryType::Union;
+/// let query_string="+\"the who\" +uk".to_string();
+/// ```
 #[derive(Default, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub enum QueryType {
     /// Union (OR, disjunction)
@@ -71,9 +112,9 @@ pub struct RrfOptions {
     pub keyword_weight: f32,
     /// Finite nonnegative vector contribution weight.
     pub vector_weight: f32,
-    /// Positive per-shard keyword TopK budget and global fusion cap; None uses the legacy window.
+    /// Positive global keyword candidate cap; None uses offset + length.
     pub keyword_candidates: Option<usize>,
-    /// Positive per-shard vector TopK budget and global fusion cap; None uses the legacy window.
+    /// Positive global vector candidate cap; None uses offset + length.
     pub vector_candidates: Option<usize>,
 }
 
@@ -175,205 +216,6 @@ pub struct ResultObject {
 
     /// List of search results: doc ID and BM25 score
     pub results: Vec<Result>,
-}
-
-/// FacetValue: Facet field value types
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug, Default)]
-pub enum FacetValue {
-    /// Boolean value
-    Bool(bool),
-    /// Unsigned 8-bit integer
-    U8(u8),
-    /// Unsigned 16-bit integer
-    U16(u16),
-    /// Unsigned 32-bit integer
-    U32(u32),
-    /// Unsigned 64-bit integer
-    U64(u64),
-    /// Signed 8-bit integer
-    I8(i8),
-    /// Signed 16-bit integer
-    I16(i16),
-    /// Signed 32-bit integer
-    I32(i32),
-    /// Signed 64-bit integer
-    I64(i64),
-    /// Unix timestamp: the number of seconds since 1 January 1970
-    Timestamp(i64),
-    /// 32-bit floating point number
-    F32(f32),
-    /// 64-bit floating point number
-    F64(f64),
-    /// String value
-    String(String),
-    /// String set value
-    StringSet(Vec<String>),
-    /// No value
-    #[default]
-    None,
-}
-
-impl Index {
-    /// get_facet_value: Returns value from facet field for a doc_id even if schema stored=false (field not stored in document JSON).
-    /// Facet fields are more compact than fields stored in document JSON.
-    /// Strings are stored more compact as indices to a unique term dictionary. Numbers are stored binary, not as strings.
-    /// Facet fields are faster because no document loading, decompression and JSON decoding is required.
-    /// Facet fields are always memory mapped, internally always stored with fixed byte length layout, regardless of string size.
-    #[inline]
-    pub async fn get_facet_value(self: &Index, field: &str, doc_id: usize) -> FacetValue {
-        let shard_id = doc_id % self.shard_number;
-        let doc_id_shard = doc_id / self.shard_number;
-
-        self.shard_vec[shard_id]
-            .read()
-            .await
-            .get_facet_value_shard(field, doc_id_shard)
-    }
-}
-
-impl Shard {
-    #[inline]
-    pub(crate) fn get_facet_value_shard(self: &Shard, field: &str, doc_id: usize) -> FacetValue {
-        if let Some(field_idx) = self.facets_map.get(field) {
-            match &self.facets[*field_idx].field_type {
-                FieldType::U8 => {
-                    let facet_value = &self.facets_file_mmap
-                        [(self.facets_size_sum * doc_id) + self.facets[*field_idx].offset];
-                    FacetValue::U8(*facet_value)
-                }
-                FieldType::U16 => {
-                    let facet_value = read_u16(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::U16(facet_value)
-                }
-                FieldType::U32 => {
-                    let facet_value = read_u32(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::U32(facet_value)
-                }
-                FieldType::U64 => {
-                    let facet_value = read_u64(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::U64(facet_value)
-                }
-                FieldType::I8 => {
-                    let facet_value = read_i8(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::I8(facet_value)
-                }
-                FieldType::I16 => {
-                    let facet_value = read_i16(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::I16(facet_value)
-                }
-                FieldType::I32 => {
-                    let facet_value = read_i32(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::I32(facet_value)
-                }
-                FieldType::I64 => {
-                    let facet_value = read_i64(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::I64(facet_value)
-                }
-                FieldType::Timestamp => {
-                    let facet_value = read_i64(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::Timestamp(facet_value)
-                }
-                FieldType::F32 => {
-                    let facet_value = read_f32(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::F32(facet_value)
-                }
-                FieldType::F64 => {
-                    let facet_value = read_f64(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-                    FacetValue::F64(facet_value)
-                }
-
-                FieldType::String16 => {
-                    let facet_id = read_u16(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-
-                    let facet_value = self.facets[*field_idx]
-                        .values
-                        .get_index((facet_id).into())
-                        .unwrap();
-
-                    FacetValue::String(facet_value.1[0].clone())
-                }
-
-                FieldType::StringSet16 => {
-                    let facet_id = read_u16(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-
-                    let facet_value = self.facets[*field_idx]
-                        .values
-                        .get_index((facet_id).into())
-                        .unwrap();
-
-                    FacetValue::StringSet(facet_value.1.clone())
-                }
-
-                FieldType::String32 => {
-                    let facet_id = read_u32(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-
-                    let facet_value = self.facets[*field_idx]
-                        .values
-                        .get_index(facet_id as usize)
-                        .unwrap();
-
-                    FacetValue::String(facet_value.1[0].clone())
-                }
-
-                FieldType::StringSet32 => {
-                    let facet_id = read_u32(
-                        &self.facets_file_mmap,
-                        (self.facets_size_sum * doc_id) + self.facets[*field_idx].offset,
-                    );
-
-                    let facet_value = self.facets[*field_idx]
-                        .values
-                        .get_index(facet_id as usize)
-                        .unwrap();
-
-                    FacetValue::StringSet(facet_value.1.clone())
-                }
-
-                _ => FacetValue::None,
-            }
-        } else {
-            FacetValue::None
-        }
-    }
 }
 
 /// FacetFilter:
@@ -518,135 +360,11 @@ pub(crate) struct ResultSortIndex {
     pub order: SortOrder,
 }
 
-pub(crate) trait Search {
-    /// Search the index for all indexed documents, both for committed and uncommitted documents.
-    /// The latter enables true realtime search: documents are available for search in exact the same millisecond they are indexed.
-    ///
-    /// Arguments:
-    /// * `query_string`: query string `+` `-` `""` search operators are recognized.
-    /// * `query_type_default`: Specifiy default QueryType:
-    ///   * **Union**, disjunction, OR,
-    ///   * **Intersection**,  conjunction, AND, `+`,
-    ///   * **Phrase** `""`,
-    ///   * **Not**, except, minus `-`.
-    ///
-    /// The default QueryType is superseded if the query parser detects that a different query type is specified within the query string (`+` `-` `""`).
-    ///
-    /// Boolean queries are specified in the search method either via the query_type parameter or via operator chars within the query parameter.
-    /// The interpretation of operator chars within the query string (set `query_type=QueryType::Union`) allows to specify advanced search operations via a simple search box.
-    ///
-    /// Intersection, AND `+`
-    ///
-    /// ```rust ,no_run
-    /// use anyseek::search::QueryType;
-    /// let query_type=QueryType::Union;
-    /// let query_string="+red +apple".to_string();
-    /// ```
-    /// ```rust ,no_run
-    /// use anyseek::search::QueryType;
-    /// let query_type=QueryType::Intersection;
-    /// let query_string="red apple".to_string();
-    /// ```
-    /// Union, OR
-    /// ```rust ,no_run
-    /// use anyseek::search::QueryType;
-    /// let query_type=QueryType::Union;
-    /// let query_string="red apple".to_string();
-    /// ```
-    /// Phrase `""`
-    /// ```rust ,no_run
-    /// use anyseek::search::QueryType;
-    /// let query_type=QueryType::Union;
-    /// let query_string="\"red apple\"".to_string();
-    /// ```
-    /// ```rust ,no_run
-    /// use anyseek::search::QueryType;
-    /// let query_type=QueryType::Phrase;
-    /// let query_string="red apple".to_string();
-    /// ```
-    /// Except, minus, NOT `-`
-    /// ```rust ,no_run
-    /// use anyseek::search::QueryType;
-    /// let query_type=QueryType::Union;
-    /// let query_string="apple -red".to_string();
-    /// ```
-    /// Mixed phrase and intersection
-    /// ```rust ,no_run
-    /// use anyseek::search::QueryType;
-    /// let query_type=QueryType::Union;
-    /// let query_string="+\"the who\" +uk".to_string();
-    /// ```
-    /// * `offset`: offset of search results to return.
-    /// * `length`: number of search results to return.
-    ///   With length=0, resultType::TopkCount will be automatically downgraded to resultType::Count, returning the number of results only, without returning the results itself.
-    ///
-    /// * `result_type`: type of search results to return: Count, Topk, TopkCount.
-    /// * `include_uncommitted`: true realtime search: include indexed documents which where not yet committed into search results.
-    /// * `field_filter`: Specify field names where to search at querytime, whereas SchemaField.indexed is set at indextime. If set to Vec::new() then all indexed fields are searched.
-    /// * `facet_filter`: Search results are filtered to documents matching specific string values or numerical ranges in the facet fields. If set to Vec::new() then result are not facet filtered.
-    ///   The filter parameter filters the returned results to those documents both matching the query AND matching for all (boolean AND) stated facet filter fields at least one (boolean OR) of the stated values.
-    ///   Examples:
-    ///   facet_filter=vec![FacetFilter::String{field:"language".into(),filter:vec!["german".into()]},FacetFilter::String{field:"brand".into(),filter:vec!["apple".into(),"google".into()]}];
-    ///   facet_filter=vec![FacetFilter::U8{field:"age".into(),filter: 21..65}];
-    ///
-    /// * `result_sort`: Sort field and order: Search results are sorted by the specified facet field, either in ascending or descending order.
-    ///   If no sort field is specified, then the search results are sorted by rank in descending order per default.
-    ///   Multiple sort fields are combined by a "sort by, then sort by"-method ("tie-breaking"-algorithm).
-    ///   The results are sorted by the first field, and only for those results where the first field value is identical (tie) the results are sub-sorted by the second field,
-    ///   until the n-th field value is either not equal or the last field is reached.
-    ///   A special _score field (BM25x), reflecting how relevant the result is for a given search query (phrase match, match in title etc.) can be combined with any of the other sort fields as primary, secondary or n-th search criterium.
-    ///   Sort is only enabled on facet fields that are defined in schema at create_index!
-    ///   Examples:
-    ///   result_sort = vec![ResultSort {field: "price".into(), order: SortOrder::Descending},ResultSort {field: "language".into(), order: SortOrder::Ascending}];
-    ///
-    async fn search(
-        &self,
-        query_string: String,
-        query_vector: Option<Embedding>,
-        query_type_default: QueryType,
-        search_mode: SearchMode,
-        enable_empty_query: bool,
-        offset: usize,
-        length: usize,
-        result_type: ResultType,
-        include_uncommitted: bool,
-        field_filter: Vec<String>,
-
-        facet_filter: Vec<FacetFilter>,
-        result_sort: Vec<ResultSort>,
-    ) -> ResultObject;
-}
-
-impl Search for IndexArc {
-    async fn search(
-        &self,
-        query_string: String,
-        query_vector: Option<Embedding>,
-        query_type_default: QueryType,
-        search_mode: SearchMode,
-        enable_empty_query: bool,
-        offset: usize,
-        length: usize,
-        result_type: ResultType,
-        include_uncommitted: bool,
-        field_filter: Vec<String>,
-
-        facet_filter: Vec<FacetFilter>,
-        result_sort: Vec<ResultSort>,
-    ) -> ResultObject {
-        search_with_counts(self, query_string, query_vector, query_type_default, search_mode,
-            enable_empty_query, offset, length, result_type, include_uncommitted,
-            field_filter, facet_filter, result_sort, &mut Vec::new()).await
-    }
-}
-
 pub(crate) async fn search_with_counts(
     index: &IndexArc,
     query_string: String,
     query_vector: Option<Embedding>,
-    query_type_default: QueryType,
     search_mode: SearchMode,
-    enable_empty_query: bool,
     offset: usize,
     length: usize,
     result_type: ResultType,
@@ -658,16 +376,6 @@ pub(crate) async fn search_with_counts(
 ) -> ResultObject {
         if !matches!(search_mode, SearchMode::Vector { .. }) {
             return ResultObject { error: Some("vector component cannot execute lexical queries".into()), ..Default::default() };
-        }
-        let rrf = match &search_mode {
-            SearchMode::WeightedHybrid { rrf, .. } => *rrf,
-            _ => RrfOptions::default(),
-        };
-        if let Err(error) = rrf.validate() {
-            return ResultObject {
-                error: Some(error),
-                ..Default::default()
-            };
         }
         let index_ref = index.read().await;
         if let Err(error) =
@@ -688,8 +396,7 @@ pub(crate) async fn search_with_counts(
                 ..Default::default()
             };
         }
-        if !matches!(search_mode, SearchMode::Lexical)
-            && (length == 0 || offset.checked_add(length).is_none())
+        if length == 0 || offset.checked_add(length).is_none()
         {
             return ResultObject {
                 error: Some("vector search requires a positive, bounded result window".into()),
@@ -697,7 +404,6 @@ pub(crate) async fn search_with_counts(
             };
         }
         let query_vector = if index_ref.is_vector_indexing
-            && !matches!(search_mode, SearchMode::Lexical)
         {
             Some(if let Some(mut qv) = query_vector {
                 if index_ref.vector_similarity == VectorSimilarity::Cosine

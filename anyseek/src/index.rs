@@ -10,7 +10,6 @@ use crate::{search::QueryType, vector::Inference};
 pub(crate) use crate::component::{Index, IndexArc, Shard, ShardArc, create_index, open_index, IndexDocuments};
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const ROARING_BLOCK_SIZE: usize = 65536;
-pub(crate) const MAX_POSITIONS_PER_TERM: usize = 65536;
 pub(crate) const MAX_QUERY_TERM_NUMBER: usize = 100;
 /// A document is a flattened, single level of key-value pairs, where key is an arbitrary string, and value represents any valid JSON value.
 pub type Document = IndexMap<String, Value>;

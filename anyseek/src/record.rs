@@ -4,7 +4,7 @@
 use crate::{
     commit::Commit,
     index::{Document, IndexArc, IndexDocuments, IndexMetaObject, SchemaField, create_index},
-    search::{FacetFilter, QueryType, ResultSort, ResultType, Search, SearchMode},
+    search::{FacetFilter, QueryType, ResultSort, ResultType, SearchMode},
     storage::{journal::CreateError, partition::PartitionJournal},
     vector::Embedding,
 };
@@ -4764,11 +4764,9 @@ impl Inner {
                         vector,
                         query_type,
                         mode,
-                        true,
                         offset,
                         limit,
                         result_type,
-                        true,
                         fields,
                         filters,
                         sort,

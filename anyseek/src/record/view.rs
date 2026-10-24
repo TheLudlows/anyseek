@@ -198,17 +198,14 @@ impl RetrievalView {
         vector: Option<Embedding>,
         query_type: QueryType,
         mode: SearchMode,
-        empty: bool,
         offset: usize,
         length: usize,
         result_type: ResultType,
-        uncommitted: bool,
         fields: Vec<String>,
         filters: Vec<FacetFilter>,
         sort: Vec<ResultSort>,
         cut: lexical::Cut,
     ) -> crate::search::ResultObject {
-        let _ = (empty, uncommitted);
         match lexical::runtime_query::search(&self.query,text,vector,mode,query_type,offset,length,result_type,fields,filters,sort,cut).await {
             Ok(result)=>result,
             Err(error)=>crate::search::ResultObject{error:Some(error.to_string()),..Default::default()},

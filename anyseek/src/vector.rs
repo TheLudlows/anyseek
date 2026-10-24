@@ -177,24 +177,6 @@ pub fn embedding_from_json(
     }
 }
 
-pub(crate) fn read_min_max(bytes: &[u8], dimensions: usize) -> (f32, f32) {
-    let size = size_of::<VectorHeader>() + dimensions;
-    if bytes.len() < size {
-        return (f32::MIN, f32::MAX);
-    }
-    let start_last_vector = bytes.len() - size;
-    let header: &VectorHeader =
-        from_bytes(&bytes[start_last_vector..start_last_vector + size_of::<VectorHeader>()]);
-
-    if header.zero_point == 0 && header.sum_q == 0 {
-        return (0.0, f32::MIN);
-    }
-
-    let min_val = header.scale * (-header.zero_point - 128) as f32;
-    let max_val = (127 - header.zero_point) as f32 * header.scale;
-    (min_val, max_val)
-}
-
 pub(crate) fn read_record(
     bytes: &[u8],
     dimensions: usize,
@@ -332,11 +314,7 @@ pub fn parse_external_embedding(value: &Value, inference: &Inference) -> Result<
     Ok(embedding)
 }
 
-pub(crate) fn validate_document_vectors(index: &crate::index::Index, document: &Document) -> Result<(), String> {
-    validate_vectors_in_schema(&index.meta.inference, index.schema_map.values(), document)
-}
-
-/// Pure schema validation shared by Record planning and the physical index API.
+/// Pure schema validation used by Record planning.
 /// It deliberately does not normalize or mutate original caller values.
 pub(crate) fn validate_vectors_in_schema<'a>(
     inference: &Inference,

@@ -5,7 +5,7 @@ use crate::{
     index::IndexArc,
     search::{
         ChannelExplanation, FacetFilter, QueryType, ResultObject, ResultSort, ResultSortIndex,
-        ResultType, RrfOptions, Search, SearchMode, rrf_contribution,
+        ResultType, RrfOptions, SearchMode, rrf_contribution,
     },
     vector::Embedding,
 };
@@ -25,13 +25,11 @@ pub(crate) async fn search(
     cut: Cut,
 ) -> Result<ResultObject, RecordError> {
     if matches!(mode, SearchMode::Vector { .. }) {
-        return Ok(index
-            .search(
+        return Ok(crate::search::search_with_counts(
+                index,
                 text,
                 vector,
-                query_type,
                 mode,
-                true,
                 offset,
                 length,
                 result_type,
@@ -39,6 +37,7 @@ pub(crate) async fn search(
                 fields,
                 filters,
                 sort,
+                &mut Vec::new(),
             )
             .await);
     }
@@ -72,9 +71,7 @@ pub(crate) async fn search(
                 index,
                 String::new(),
                 vector,
-                QueryType::Union,
                 vector_mode,
-                true,
                 0,
                 rrf.vector_candidates.unwrap_or(offset + length),
                 result_type.clone(),

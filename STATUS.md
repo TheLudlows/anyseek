@@ -1,29 +1,17 @@
 # anyseek 当前状态
 
-本工作分支已完成 #80 的实现与 Linux 本地验收：生产全文使用 Tantivy 0.27.0，旧低层全文 API/执行器已删除，向量与元数据独立，仅面向新库。最终代码 `3f09fe76` 的 all-targets 为 338 通过、0 失败；HTTP 与 S3 fixture 矩阵通过。当前分支的 Windows、真实 S3、系统/硬断电尚未验收，不能用下列历史 CI 替代。精确版本、资源成本及非通过项见 [#80 实施记录](docs/issue80-implementation.md)。本分支尚未发布或合入，issue 未关闭。
+核验日期：2026-10-24。本任务分支已将生产全文替换为 Tantivy 0.27.0，数据访问统一使用 `RecordPartition`，仅支持新库；尚未合入。主干文档已同步至 `31a4d059`。具体契约、验证版本与忽略项见 [#80 实施与验收](docs/issue80-implementation.md)。
 
-anyseek 是 AI 记忆与知识的存储、检索底座。PR #71 本地 Segment、[PR #72](https://github.com/TheLudlows/anyseek/pull/72) SQLite/S3 及 [PR #73](https://github.com/TheLudlows/anyseek/pull/73) 维护路径与清理、[PR #74](https://github.com/TheLudlows/anyseek/pull/74) 审计修复与无缓存验收已合入 master（源码基线 `afbe323d`）；B 尚未全部验收。
-
-进度核验：2026-10-23。
-
-| 范围 | 当前状态 |
+| 范围 | 状态 |
 | --- | --- |
-| Record 与 P2 | 已合入：稳定身份/版本、幂等、来源/证据、generation、TTL、feed、显式关系、解释和授权屏障；见[语义](docs/record-model.md) |
-| A：本地 Segment | 已合入：多不可变段 + tail、认证 anchor、增量 flush、compaction、安全回收与资源准入 |
-| B：SQLite + S3 | 已合入：唯一协调权威、对象先持久化、提交 tail 查询、远端 checkpoint、日志/feed 保留、依赖 GC 和共同备份恢复；见[存储协议](docs/storage.md) |
-| B：维护路径 | 已合入远端 seal、S3 受控接管及 retained collection 归档；PR #74 已合入，修复缓存失败分类、bootstrap 校验、备份指针容量边界及多备份归档同时持有索引导致的预算耗尽 |
-| B：无缓存语义 | base、locator、graph、temporal、upload、lease、feed 七组已通过本地及 PR 原生 Linux/Windows 验收；每次重启删除 collection 缓存，保留 SQLite/catalog/namespace |
-| B：后端合同 | `scripts/s3_acceptance.py` 统一 fixture/专用真实 bucket 入口；真实目标 endpoint 尚未运行，不能标为已认证 |
-| B：剩余工作 | 主干 a36e71e0 的 CI 五项已通过；实际目标 S3 合同与故障矩阵、系统故障/断电验收仍待完成 |
-| PR #74 验证 | 最终 head `eb9431a3` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39814329888)，包含构建/浏览器与 Linux/Windows 原生持久化、S3 语义及合同；本地 281 tests、44 doctests 通过；[主干 a36e71e0 CI 五项通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455) |
-| C1：已合入 | [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`；最终 PR 五项 CI 成功：有界后台 Indexer、构建 pin/epoch/期限、SQLite 条件发布与并行写入 tail 保留；见[路线](docs/roadmap.md) |
-| C2：已合入 | [PR #76](https://github.com/TheLudlows/anyseek/pull/76) 已合入为 `10e106b3`；每 authority 256 MiB / 4096 块；最终 PR CI 五项成功、完整 Rust 301 passed / 0 failed / 13 ignored |
-| C3-1：已合入 #77 | collection 授权执行屏障与元数据锁分离，保留整 key 撤销/接管/完整备份的全局排空，以及取消与 panic 封锁；合入为 `b8faa553`，最终 PR 五项 CI 全部成功 |
-| C 后续 / D | C3-2 本分支实现部分资源隔离；C3-3 整体验收、服务缓存总额度仍未完成；超大 collection 按容量需求后置 |
-| 系统故障 | 系统/文件系统崩溃和硬断电尚未验收；进程退出测试不能替代 |
+| Record / P2 | 稳定身份、版本、幂等、来源与证据、generation、TTL、Feed、显式关系和输出授权屏障已实现 |
+| 持久化 | 本地认证发布、SQLite/S3 唯一协调权威、不可变包、恢复、备份和安全 GC 已实现 |
+| #80 全文替换 | 原生 Tantivy 构建与固定 Searcher；独立向量/元数据组件；活动统计和正式评分契约保留；旧全文引擎及公开低层 API 已删除 |
+| Indexer / 缓存 / 准入 | 有界后台构建、每 authority 校验缓存、collection 授权屏障与分级资源预算已实现 |
+| 本地验证 | 本轮全目标编译、受影响回归 265 passed、no-default 197 passed、两组 doctest 各 9 passed；完整最终平台矩阵待 PR CI。清理前 338 passed 与 HTTP/S3 仅为历史证据 |
+| 尚未验收 | 当前分支 Windows CI、真实 S3、系统/文件系统崩溃及硬断电、手工跨 AES 验证 |
+| 核心剩余 | Record 操作账本持续 GC、完整 State 驻内存限制、全服务缓存总额、组合资源隔离验收 |
 
-C1 最终提交 `96306e95` 的 [PR CI 五项成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)，完整 Rust 回归 294 passed / 0 failed / 12 ignored；合入后主干 CI 单独跟踪。C2 已合入；[主干 CI](https://github.com/TheLudlows/anyseek/actions/runs/39909578676) 单独跟踪。C3-1 已合入；C3-2 本分支实现前两个高优先级项：分集合公平准入/控制预留与前台/恢复/后台分级并发、字节和 I/O 预算；验证与合入状态另行记录，服务缓存总额度与账本 GC 未实现。当前运行态 State 仍驻内存，原同步 compaction 保留串行屏障；资源方案为保守准入与显式缓冲检查，不是全进程 RSS 硬上限。Record 操作账本尚无持续 GC，不承诺无界规模或稳定磁盘占用。
+SQLite 保存必要协调元数据，Payload 唯一保存原始正文与向量，Segment 保存派生检索数据；不增加重复正文、向量或倒排镜像。S3 模式必须保留 catalog、SQLite 权威库及其 WAL、`s3-namespace`，不能仅靠 bucket 恢复权威。
 
-S3 服务根中的 catalog、SQLite 权威库及 `s3-namespace` 是持久协调状态；collection 内日志、payload 和索引是可重建缓存。C2 另在权威库旁的 `*.object-cache` 目录保存可删除的校验对象块；无缓存验收同时删除两类缓存。独立恢复使用不同对象命名空间。SQLite 单主机、单持久卷，不提供跨主机 HA 或权威卷丢失零 RPO。
-
-保留 Web UI。不引入模型推理、解析切块、SQL/JOIN、完整图语言或旧格式升级迁移。[#57](https://github.com/TheLudlows/anyseek/issues/57) 保持开放。当前能力见 [FEATURES](FEATURES.md)，配置与使用见[服务指南](anyseek/server/README.md)。
+下一步建议及完成标准集中在[路线](docs/roadmap.md)，能力与限制见[项目全貌](docs/project-overview.md)，使用见[服务指南](anyseek/server/README.md)。不实施旧格式迁移，不引入模型，不重启性能专项；不承诺无限容量、跨主机 HA 或权威卷丢失零 RPO。[#57](https://github.com/TheLudlows/anyseek/issues/57) 仍开放。

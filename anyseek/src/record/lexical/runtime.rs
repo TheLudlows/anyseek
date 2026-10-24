@@ -361,7 +361,7 @@ mod tests {
     use super::*;
     use crate::record::tests::{config, query, write};
     use crate::record::{ExpectedVersion, RecordPartition};
-    use crate::search::{QueryType, ResultType, Search, SearchMode};
+    use crate::search::{ResultType, SearchMode};
     #[tokio::test]
     async fn joined_writer_releases_buffer_while_fixed_searcher_retains_pin() {
         let root=tempfile::tempdir().unwrap();let package=root.path().join("package");
@@ -496,13 +496,11 @@ mod tests {
         let index = partition.inner.lock().await.index.test_index().clone();
         assert!(!index.read().await.schema_map["body"].index_lexical);
         assert_eq!(index.read().await.record_lexical.len(), 1);
-        let old = index
-            .search(
+        let old = crate::search::search_with_counts(
+                &index,
                 "alpha".into(),
                 None,
-                QueryType::Union,
                 SearchMode::Lexical,
-                true,
                 0,
                 10,
                 ResultType::TopkCount,
@@ -510,6 +508,7 @@ mod tests {
                 vec![],
                 vec![],
                 vec![],
+                &mut Vec::new(),
             )
             .await;
         assert_eq!(
