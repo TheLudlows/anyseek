@@ -26,6 +26,13 @@
 
 错误详情保留分类、used/requested/limit，HTTP Busy和提交语义不变；控制通道和授权输出屏障未放宽。测试按新上限真正占满额度再检查拒绝/保留/撤权，未删除断言。
 
+## 总额与部署风险
+
+**默认账目额度算术和约10.78 GiB，不是RSS上限，不能保证小内存机器安全。**
+Governor各通道全局bytes为2048+512+4096+144+144=6944 MiB（6.78 GiB），加独立共享构建4096 MiB，共11040 MiB。账目可能重叠，且并未覆盖全部State、运行时、分配器、mmap和OS缓存；因此不能用相加结果预测实际RSS或保证不会OOM。每通道合法配置上限也不等于全机安全容量。
+
+实验环境的cgroup内存上限17179869184字节（16 GiB）、CPU配额4、无swap；性能测试中服务和客户端各固定2个CPU，串行运行各产品。仅验证所列单集合负载，未验证各通道/集合同时满额。全量编译时容器接近内存上限，主要是文件缓存；累计oom/oom_kill为0。这是整个环境的历史计数，不是单次benchmark RSS或小内存安全证据。小内存部署须显式降低额度并验证负载。
+
 ## 验证状态
 
 - cargo check通过；资源单测5项、构建预算6项、服务单测16项通过。独立release进程的8项非法配置（解析、上下界、层级和控制预留）均在开始服务前拒绝，详见 `scripts/verify_resource_configuration.py`；显式有效低额度覆盖见强制Busy实验。
@@ -33,7 +40,9 @@
 - 普通release完整HTTP/restart验收通过；启动仍采用原15秒边界。取消waiter、实际writer/directory所有者与保留准入额度测试通过。
 - 初轮核心3个失败来自旧预算夹具；调整为实际占满新额度，并保留拒绝、WAL前原子性、归还和I/O断言，定向及上述核心重跑均通过。
 - S3首次误用普通release，测试时钟未编译导致8天推进失效，过期cursor期望410但得到200。原日志保留；按CI构建独立fault-injection服务后，S3全矩阵9组全部通过（对象契约、base/locator/graph/temporal/upload/lease/feed冷缓存语义、checkpoint/备份/takeover），退出码0，原410断言通过；未改断言或生产时钟。首次启动all套件另遇PATH缺少cargo，补齐环境后运行，原失败日志同样保留。最终报告 `s3-all-fault-env.json`，二进制SHA256 `5dd8a8d90f43cddb515039d4dcf6824633c51b5d4388f967584df1fab849ac22`。
-- 本预算分支Windows CI及完整all-targets未运行；PR #82 CI仅覆盖原生产代码和报告，不能冒充本实现验收。真实S3、硬断电和手工跨AES未测。
+- 最终Linux `cargo test --locked -p anyseek --all-targets --features server,fault-injection -- --test-threads=1`：343通过、0失败、13忽略，34个测试程序，退出码0。测试源码为 `f71594f938d9e6d61b820af09f681700f12dcdb1`，生产代码对应 `62135f2`；随后只改本文和README。13忽略为11个由已通过父测试调用的子进程worker、1个专用真实S3测试、1个要求相反AES构建的手工测试。未缩小语料或调整断言/超时。
+- 报告PR #82 HEAD `230d63f3bab42c26b3452c1e0d86090f6fee5650` 的[CI 40106616646](https://github.com/TheLudlows/anyseek/actions/runs/40106616646)已9/9成功，仍为未合入草稿；它仅覆盖原生产代码和报告，不能冒充本预算实现的Windows验收。
+- 本预算分支Windows CI、真实S3、硬断电和手工跨AES仍未测。
 
 本分支未发布。#80的关闭不替代本轮资源验证。日志与结构化结果位于本工作区 `artifacts/benchmark/validation-final/`。
 
@@ -67,7 +76,9 @@
 
 - 旧：35次确认成功、63次429、2次Broken pipe；新：100次确认成功，独立重开后100次更新均存在，无未确认但持久化更新。双方读写都持续取得进展，不等于任意过载下无拒绝。
 - 旧查询：2001次recovery_required、1604次Busy、290次传输错误，总错误率10.16%；新：8177次recovery_required、1次连接提前关闭，总错误率21.43%。成功QPS 689.1→599.6，P95 7.35→8.49ms。新配置实际完成的写入更多，写入窗口输出屏障的拒绝也更多。
-- recovery_required来自既有数据输出屏障：写入发布期间fenced或revision变化时拒绝交付。没有为了降低统计错误率放宽屏障；新的1次连接提前关闭仍按传输错误保留，客户端记录不足以单独证明其内部来源，不能宣称所有连接错误消失。
+- 精确响应：8177次HTTP503均为 `{"code":"recovery_required","message":"RecoveryRequired"}`，无403；其请求时间窗全部与成功写入HTTP时间窗重叠，没有窗外错误。普通MIRACL文档更新没有generation/system/关系引用，不满足`hides_evidence`，不会递增隐藏证据revision；所有写入仍会在append到publish期间临时设置`output.fenced`。因此证据支持临时数据fence解释，不能统称授权撤销或版本变化。
+- `query`捕获`output_permit`、`protected_data`和`delivery_gate`都可能返回同一个503；原日志没有逐请求服务端callsite，不能进一步给8177次分摊精确触发点。`AuthorizedBody::poll_frame`在更晚的交付检查失败时返回body错误，可能中断连接。实际唯一传输错误为`Remote end closed connection without response`，0字节，7.25ms，与第90次成功写入重叠；这是候选解释而非已证实来源，不能宣称所有连接错误消失。
+- 未修改输出屏障。时间重叠由同一客户端`perf_counter`起止记录计算，并不等同服务端链路跟踪。原始分类及复核结果见 `validation-final/output-memory-diagnosis.json` 与 `validation-final/output-write-overlap.json`。
 - 显式设 `ANYSEEK_FOREGROUND_PER_COLLECTION=1`，独立20条根、8客户端3秒强制超限：3429成功、8566次429、0传输错误，拒绝后下一次写入applied。证明“拒绝未读取body后明确close”路径的连接行为；不替代所有输出撤回场景。
 
 原始新证据：`artifacts/benchmark/comparison.json`、`raw/adjusted-*/`、`raw/adjusted-update-verification/verification.json`、`raw/adjusted-forced-busy-http/verification.json`。

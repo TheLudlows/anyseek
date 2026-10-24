@@ -303,6 +303,13 @@ Hybrid channel ranks are assigned before final fusion sorting/pagination. A pure
 
 ### 构建与准入预算调整
 
+**默认预算不是 RSS 上限，也不保证小内存部署安全。** 五个 Governor 通道的全局字节额度合计
+6944 MiB（6.78 GiB），另有全进程共享构建账目4096 MiB，算术和11040 MiB（10.78 GiB）。
+两个账目可能重复计算同一对象，但 State、运行时、分配器、mmap及OS缓存等又未全部计入；
+因此这个和既不是内存需求预测，也不是进程RSS硬上限。当前实验环境为16 GiB cgroup、
+4 CPU配额、无swap，只验证所列单集合负载，没有验证全部通道/集合同时满额。
+小内存部署必须按可用内存显式降低预算并验证负载；合法配置也可能超过机器可承受容量。
+
 构建逻辑内存单份默认1 GiB、全进程共享4 GiB；可通过启动环境
 `ANYSEEK_BUILD_MEMORY_BYTES` / `ANYSEEK_BUILD_SHARED_MEMORY_BYTES` 配置，要求
 64 MiB <= 单份 <= 共享 <= 8 GiB。按进程固定，不支持运行中热改。
