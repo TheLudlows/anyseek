@@ -23,7 +23,7 @@ for p in sorted((ART/'raw').glob('*/run.json')):
  if 'writes' in d:d['write_errors']=sum(not w['ok'] for w in d['writes'])
  results.append(d)
 dump(ART/'summary.json',results)
-lines=['# 本地 MIRACL 中文诊断：实测表','', '由 `analyze.py` 从原始 JSONL 重算；成功请求延迟不含错误请求，必须同时读错误率。QPS 为三轮中位数。','', '|实验|状态/已接受|构建至可搜索 s|Recall@10|nDCG@10|MRR@10|空查询|RSS峰值 MiB|最终分配磁盘 MiB|','|---|---|---:|---:|---:|---:|---:|---:|---:|']
+lines=['# 本地 MIRACL 中文诊断：实测表','', '**不是同语义引擎排名：默认anyseek的40个问句均为空；中文配置未完成1000条装载。** 默认分词长词项、中文分词AND/OR最小复核见REPORT.md；原测量数值未改。', '', '由 `analyze.py` 从原始 JSONL 重算；成功请求延迟不含错误请求，必须同时读错误率。QPS 为三轮中位数。','', '|实验|状态/已接受|构建至可搜索 s|Recall@10|nDCG@10|MRR@10|空查询|RSS峰值 MiB|最终分配磁盘 MiB|','|---|---|---:|---:|---:|---:|---:|---:|---:|']
 for d in results:
  q=d.get('quality',{});f=lambda x: f'{x:.3f}' if isinstance(x,(int,float)) else '—'
  lines.append('|'+ '|'.join([d['tag'],d['status']+'/'+str(d.get('count',d.get('accepted_count_on_failure','?'))),f(d.get('build_to_searchable_seconds')),f(q.get('recall10')),f(q.get('ndcg10')),f(q.get('mrr10')),str(q.get('empty','—')),f(d.get('peak_rss_kib',0)/1024),f(d.get('disk_final',{}).get('allocated_bytes',0)/2**20)])+'|')
