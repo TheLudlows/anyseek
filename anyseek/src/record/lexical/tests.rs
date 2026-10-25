@@ -1148,7 +1148,7 @@ async fn punctuation_adjacent_query_operators_match_legacy_boundaries() {
             let result=p.query(RecordQuery{text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Union,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
             let ids=result.hits.iter().map(|h|h.record.record_id.clone()).collect::<BTreeSet<_>>();
             assert_eq!(result.count_total,ids.len(),"{profile:?} state={state} query={text}");
-            println!("{profile:?} state={state} {text:?}: {ids:?} count={}",result.count_total);results.push(ids);
+            results.push(ids);
         }
         outcomes.push(results);
         }
@@ -1183,8 +1183,7 @@ async fn standard_punctuation_document_query_analysis_is_identical() {
             let indexed=analyzer.terms(text,false);let queried=analyzer.terms(text,true);
             let result=p.query(RecordQuery{text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Intersection,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
             let ids=result.hits.iter().map(|h|h.record.record_id.clone()).collect::<BTreeSet<_>>();
-            println!("{profile:?} {text:?}: index={indexed:?} query={queried:?} ids={ids:?}");
-            if indexed!=queried || ids!=BTreeSet::from([id.to_owned()]) || result.count_total!=1 {mismatches.push(format!("{profile:?} {text:?}"));}
+            if indexed!=queried || ids!=BTreeSet::from([id.to_owned()]) || result.count_total!=1 {mismatches.push(format!("{profile:?} state={state} {text:?}: index={indexed:?} query={queried:?} ids={ids:?} count={}",result.count_total));}
         }
     }
     }
