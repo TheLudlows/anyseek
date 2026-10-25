@@ -155,3 +155,22 @@ final no-default Record151/0/5, all exit0. Logs:
 include private-cache cleanup; the default Record run preceded that small cleanup
 addition. Full all-targets, HTTP, Windows and realS3/power-loss validation remain
 separate outstanding items for the final implementation.
+
+## Component residency versus transient input
+
+The vector/metadata component now retains admission for the selected vector and
+facet projection plus row/address metadata, rather than charging the entire
+canonical body for its lifetime. Full input JSON still has a separate transient
+lease across append awaits; State/Payload and native lexical ownership remain
+separate. Variable Record identities are explicitly charged (three component
+copies), without assuming a nonexistent 256-byte identity bound. No coefficient
+or configured limit was reduced. This addresses allocation lifetime, not an RSS
+limit or a claim of 100k support.
+
+Targeted validation: build budget 1, view 4, native runtime 14 passed; external
+vector and service metadata integration passed. Logs are
+`/tmp/anyseek-capacity-component-budget2.log`,
+`/tmp/anyseek-capacity-component-view.log`,
+`/tmp/anyseek-capacity-component-runtime.log`, and
+`/tmp/anyseek-capacity-component-integration.log`. These are focused results;
+the earlier 351-test all-targets result remains evidence for 43d789c only.

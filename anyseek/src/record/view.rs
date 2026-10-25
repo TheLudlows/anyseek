@@ -157,8 +157,14 @@ impl RetrievalView {
         revision: u64,
         document: Document,
     ) -> Result<usize, RecordError> {
-        let key_for_native = key.clone();
         let shard = self.tail.read().await.shard_vec[0].clone();
+        {
+            let mut shard=shard.write().await;
+            if let Some(memory)=&mut shard.build_reservation {
+                memory.grow(build_budget::identity_estimate(&key)?).map_err(storage)?;
+            }
+        }
+        let key_for_native = key.clone();
         let local = {
             let mut shard = shard.write().await;
             let active = shard
