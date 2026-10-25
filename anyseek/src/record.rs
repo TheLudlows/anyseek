@@ -41,6 +41,7 @@ mod publication;
 mod indexer;
 pub use indexer::IndexJob;
 mod segment_state;
+mod checkpoint_codec;
 mod segment;
 mod anchor;
 mod package_pins;
@@ -1368,11 +1369,7 @@ impl RecordPartition {
             }
         }
         validate_restored_state(&config,&state)?;
-        let snapshot_bytes = encode_entry(&Entry::Checkpoint {
-            config: config.clone(),
-            state: state.clone(),
-        })?
-        .len();
+        let snapshot_bytes = checkpoint_codec::length(&config, &state)?;
         let feed_cache = change_feed::Cache::rebuild(&state,&config.change_feed)?;
         let graph_cache=graph::Cache::rebuild(&state)?;
         let (mut index,mut ordinals,mut locations)=match prepared {

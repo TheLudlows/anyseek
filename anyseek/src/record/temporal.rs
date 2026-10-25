@@ -234,11 +234,7 @@ impl Inner {
         };
         let mut candidate = self.state.clone();
         apply(&mut candidate, &event)?;
-        let snapshot_bytes = encode_entry(&Entry::Checkpoint {
-            config: self.config.clone(),
-            state: candidate.clone(),
-        })?
-        .len();
+        let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
         let feed_point = change_feed::pending_expiry(&self.state,event.seq,event.evaluation_time_ms)?;
         self.feed_cache.validate(&self.config.change_feed,Some(&feed_point),change_feed::reserve(&candidate))?;
         let reserve = generation::reserve_bytes(&candidate);

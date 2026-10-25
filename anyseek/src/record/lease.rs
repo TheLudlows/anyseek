@@ -64,7 +64,7 @@ impl Inner {
         if targets.is_empty(){return Ok(());}
         let event=Expiration{seq:self.state.seq.checked_add(1).ok_or_else(||storage("sequence exhausted"))?,evaluation_time_ms:evaluation,targets};
         let mut candidate=self.state.clone();apply(&mut candidate,&event)?;
-        let snapshot_bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:candidate.clone()})?.len();
+        let snapshot_bytes=checkpoint_codec::length(&self.config, &candidate)?;
         let reserve=generation::reserve_bytes(&candidate);
         PartitionJournal::validate_initial(snapshot_bytes+reserve,self.config.max_journal_bytes).map_err(storage)?;
         let bytes=encode_entry(&Entry::LeaseExpired(event.clone()))?;

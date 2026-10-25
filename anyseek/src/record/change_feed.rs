@@ -359,11 +359,7 @@ impl Inner {
         let mut candidate = self.state.clone();
         candidate.feed.floor = floor;
         candidate.time_watermark_ms = at;
-        let snapshot_bytes = encode_entry(&Entry::Checkpoint {
-            config: self.config.clone(),
-            state: candidate,
-        })?
-        .len();
+        let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
         if PartitionJournal::validate_initial(
             snapshot_bytes + generation::reserve_bytes(&self.state),
             self.config.max_journal_bytes,

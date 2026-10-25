@@ -140,7 +140,7 @@ impl RecordPartition {
                 }).await?;
                 let mut candidate = Candidate {
                     graph:graph::Cache::rebuild(&loaded.state)?,
-                    snapshot_bytes:encode_entry(&Entry::Checkpoint{config:config.clone(),state:loaded.state.clone()})?.len(),
+                    snapshot_bytes:checkpoint_codec::length(&config, &loaded.state)?,
                     state:loaded.state,index,ordinals,locations,
                 };
                 crash_boundary("prepared");
@@ -172,7 +172,7 @@ impl RecordPartition {
                 candidate.swap(&mut inner);
                 let replay = async {
                     for entry in entries { inner.replay_anchor_tail(entry).await?; }
-                    if serde_json::to_vec(&inner.state).map_err(storage)? != serde_json::to_vec(&candidate.state).map_err(storage)? {
+                    if checkpoint_codec::json_digest(&inner.state)? != checkpoint_codec::json_digest(&candidate.state)? {
                         return Err(storage("index catch-up did not reproduce current authoritative state"));
                     }
                     Ok(())

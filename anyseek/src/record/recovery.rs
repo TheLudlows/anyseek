@@ -49,8 +49,7 @@ pub struct RecoveryIdentity {
     pub seal: Option<SealCertificate>,
 }
 fn digest(config: &RecordConfig, state: &State) -> Result<String, RecordError> {
-    let payload = encode_entry(&Entry::Checkpoint { config: config.clone(), state: state.clone() })?;
-    Ok(Sha256::digest(payload).iter().map(|b| format!("{b:02x}")).collect())
+    Ok(checkpoint_codec::digest(config, state)?.iter().map(|b| format!("{b:02x}")).collect())
 }
 fn content_digest(config: &RecordConfig, state: &State) -> Result<String, RecordError> {
     let mut content = state.clone();
@@ -110,8 +109,8 @@ impl RecordPartition {
             };
             let mut next = inner.state.clone();
             next.sealed_for = Some(certificate.clone());
-            let payload = encode_entry(&Entry::Checkpoint { config: inner.config.clone(), state: next.clone() })?;
-            PartitionJournal::validate_initial(payload.len(), inner.config.max_journal_bytes)
+            let length = checkpoint_codec::length(&inner.config, &next)?;
+            PartitionJournal::validate_initial(length, inner.config.max_journal_bytes)
                 .map_err(|e| RecordError::Rejected(e.to_string()))?;
             // Close output before any fallible/awaited publication. The same
             // anchor protocol handles local certificates and SQLite-selected
@@ -205,8 +204,8 @@ impl RecordPartition {
         next.sealed_for = Some(seal.clone());
         for target in [false, true] {
             if target { next.sealed_for = None; next.takeover_proof = Some(seal.clone()); }
-            let bytes = encode_entry(&Entry::Checkpoint { config: inner.config.clone(), state: next.clone() })?;
-            PartitionJournal::validate_initial(bytes.len(), inner.config.max_journal_bytes)
+            let length = checkpoint_codec::length(&inner.config, &next)?;
+            PartitionJournal::validate_initial(length, inner.config.max_journal_bytes)
                 .map_err(|e| RecordError::Rejected(e.to_string()))?;
         }
         Ok(())

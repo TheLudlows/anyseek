@@ -53,3 +53,24 @@ Both fixes at `4451c9c` reach the existing 10,000-record ceiling: checkpoint and
 reopen succeed, all 393 probes and original operation retries pass. Ordinal 10,001
 rejects at the unchanged record/operation hard limit. See
 `../benchmarks/capacity/REPAIR-02.md`. Steps 3–5 above remain unimplemented.
+
+## Streaming preflight checkpoint
+
+The first bounded-memory preparation replaces count-only checkpoint encoding and
+recovery digest buffers with borrowed streaming serialization. It preserves the
+existing RecordCheckpointV14 bytes, field ordering, skipped lookup cache and SHA256
+identity. Catch-up compares canonical streamed SHA256 digests rather than retaining
+two complete JSON buffers. No persistent format, capacity limit, history retention
+or publication authority changes in this step. Record regressions: 162 passed,
+0 failed, 5 existing ignored entries; log `/tmp/anyseek-capacity-stream-tests.log`.
+This is not a bounded persisted snapshot or a 100k-capacity result.
+
+The next persisted-codec change must remove the full `serde_json::Value` body
+expansion in ReferencedState on both write and hydrate, not merely split the final
+JSON bytes. Metadata entries must carry only authenticated Payload references;
+user JSON remains opaque. Generation staging can span many batches, so one entire
+generation cannot be assumed to fit a single operation-size chunk. Recovery must
+admit each framed entry before decoding, retain state ownership charges, and
+select all chunks only through the existing single publication certificate.
+Only then can the frame/population limits be revised together with graph traversal,
+physical segment counts and full-history state admission.

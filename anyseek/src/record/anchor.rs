@@ -165,7 +165,7 @@ impl Inner {
         match entry {
             Entry::Applied(applied)=>{
                 let mut next=self.state.clone();apply(&mut next,&applied)?;
-                let bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:next})?.len();
+                let bytes=checkpoint_codec::length(&self.config, &next)?;
                 self.publish(&applied,bytes).await?;
             },
             Entry::Expired(event)=>{
@@ -180,7 +180,7 @@ impl Inner {
             Entry::Checkpoint{..}|Entry::Anchor(_)=>return Err(storage("unexpected anchor in operation stream")),
         }
         self.graph_cache=graph::Cache::rebuild(&self.state)?;
-        self.snapshot_bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:self.state.clone()})?.len();
+        self.snapshot_bytes=checkpoint_codec::length(&self.config, &self.state)?;
         Ok(())
     }
 }
@@ -206,7 +206,7 @@ impl Inner {
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
-        let snapshot_bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:next.clone()})?.len();
+        let snapshot_bytes=checkpoint_codec::length(&self.config, &next)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
         let reference=Reference::prepare(&root,&self.config,&next,prior,self.anchor.as_ref(),Some(&self.index),!reuse).await?;
         #[cfg(test)]
