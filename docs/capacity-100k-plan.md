@@ -358,3 +358,41 @@ limits and first-pass error accounting; do not increase the service deadline.
 100k checkpoint/reopen/393-query completion, final all-targets and Windows remain
 unverified. State duplicate residency and full selected-population maintenance
 remain explicit review concerns, not silently waived acceptance items.
+
+
+## Optimized-build capacity validation (phase22, in progress)
+
+Code remains `b03ba586fd2619faa9d218ef1e7585c6c94c3243`; launch HEAD was
+`711c34c67b15c9cce04377fae05c485bd2d81244` (later changes only observer/docs).
+`cargo build --offline --locked --release -p anyseek --features server --bin
+anyseek_server` succeeded in3m34s with rustc1.99.1. Repository release settings:
+opt-level3, LTO, panic=abort, no debug assertions or overflow checks. Binary SHA256:
+`5c3e7602e37d78a510e71001246d34f0a4e90af06765d1b1b2f3f3cf4cb1b39b`.
+
+Existing owned release cache was copied into `/tmp/anyseek-capacity-target`;
+no old cache, corpus, database or experiment evidence was deleted. Build guard
+required2GiB free and at most14GiB anon+shmem+kernel; neither guard fired, OOM
+counters remained0. The benchmark starts only after successful compilation.
+
+Fresh root `/tmp/anyseek-capacity-phase22-release-100k` uses the same corpus SHA
+`2d00fa102eda7bc56e651f9b21eb9a639cf75799b259e41c070583425ff58d86`,
+100000 target, explicit bounded_100k profile, single3GiB/shared6GiB build budgets,
+25 sequential writes per batch, original30s service deadline/35s HTTP client,
+server CPU0–1/client CPU2–3. Default10k profile and query semantics are unchanged.
+
+| Completed milestone | Checkpoint | Reopen | Count and original operation |
+|---|---|---|---|
+|10000|HTTP200,2.773s|407.1ms|10000, same receipt|
+|20000|HTTP200,5.988s|811.1ms|20000, same receipt|
+
+Release crossed the debug11925 boundary without a failed response. This is
+partial evidence, not100k acceptance or a Meilisearch performance comparison.
+The single existing runner continues toward100k or its first real boundary;
+393-query/final checkpoint/reopen and final full test matrices remain pending.
+Original debug first-failure and resolved25-receipt evidence is retained unchanged.
+
+Live evidence: `/tmp/anyseek-capacity-phase22-state.json`,
+`/tmp/anyseek-capacity-phase22-run.log`, and the experiment root's `summary.json`,
+`events.jsonl`, `settings.json`. Build evidence:
+`/tmp/anyseek-capacity-release-build.json` and `.log`.
+Do not start another runner or overwrite the binary while this process is active.

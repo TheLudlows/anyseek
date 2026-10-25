@@ -40,8 +40,9 @@ reserves remain16MiB. Migration/old-format readers were not added.
   exit0; parent tests invoke those cancellation/process-exit workers.
 - Same code, unoptimized binary, default HTTP profile:10000 writes,393 query
   probes with zero HTTP errors, checkpoint200, reopen count10000 and identical
-  final operation retry.100k-target staircase remains running; see current
-  `/tmp/anyseek-capacity-phase20-results.json` and raw outputs.
+  final operation retry. The debug100k staircase stopped at a server deadline;
+  corrected read-only observation resolved all25 original operations at11925.
+  Release validation is separate; see the optimized-build section in the plan.
 
 ## Review focus / still unverified
 
@@ -52,8 +53,9 @@ reserves remain16MiB. Migration/old-format readers were not added.
 3. Confirm population admission does not silently broaden the external candidate
    window or relation completeness claims.
 4. Observe finite-memory refusals, checkpoint deadline and reopen behavior on the
-   real staircase. Existing experiment cleanup terminates its service on error:
-   that exit alone is not a spontaneous service crash. Read-only process/RSS/I/O
+   real staircase. The original harness terminated its service on error; the
+   corrected observer preserves unresolved owned work and never resubmits writes.
+   That original harness exit was not a spontaneous service crash. Process/RSS/I/O
    observations are retained in `/tmp/anyseek-capacity-phase20-observations.jsonl`.
    OS permission denied I/O-counter reads; CPU/RSS observations remain available,
    and the denied I/O read is not retried.
