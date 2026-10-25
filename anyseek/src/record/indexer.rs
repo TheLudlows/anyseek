@@ -127,6 +127,11 @@ impl RecordPartition {
             let result = async {
                 if started.elapsed() >= timeout { return Err(RecordError::Busy); }
                 let reference = anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true).await?;
+                // Preparation has sealed the immutable package. Release its input
+                // State before decoding a second complete State from that package.
+                // The live partition, package closure and subsequent candidate
+                // retain their own independent ownership throughout publication.
+                drop(snapshot);
                 let loaded = reference.load(&root,config.max_journal_bytes).await?;
                 let payloads = loaded.payloads;
                 let mut index = view::RetrievalView::single(loaded.index);
@@ -158,6 +163,13 @@ impl RecordPartition {
                 if started.elapsed() >= timeout || inner.background.as_ref().is_none_or(|t|t.id!=id || t.overflowed)
                     || serde_json::to_vec(&inner.anchor).map_err(storage)? != base { return Err(RecordError::Busy); }
                 let entries = &inner.background.as_ref().unwrap().entries;
+                // Raw tail buffers and their decoded Entry values coexist. The raw
+                // tail lease cannot stand in for the decoded allocation lifetime.
+                let decoded_bytes = entries.iter().try_fold(0u64, |sum, entry| {
+                    sum.checked_add(entry.len() as u64)
+                }).and_then(|n| n.checked_mul(32))
+                    .ok_or_else(||storage("index decoded tail estimate overflow"))?;
+                let _decoded_tail = crate::storage::build_budget::reserve_memory(decoded_bytes).map_err(storage)?;
                 let entries: Vec<Entry> = entries.iter().map(|b|serde_json::from_slice(b).map_err(storage)).collect::<Result<_,_>>()?;
                 // Candidate catch-up cannot publish or append WAL. Restore the
                 // current view even when replay fails; output is not yet fenced.

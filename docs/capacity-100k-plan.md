@@ -174,3 +174,25 @@ vector and service metadata integration passed. Logs are
 `/tmp/anyseek-capacity-component-runtime.log`, and
 `/tmp/anyseek-capacity-component-integration.log`. These are focused results;
 the earlier 351-test all-targets result remains evidence for 43d789c only.
+
+## Background index state lifetime
+
+After immutable package preparation, the background worker now drops the input
+State before loading the package's candidate State. The authoritative live State,
+package payload closure and candidate retain independent ownership; this avoids
+keeping an unused third full State through catch-up and publication. Decoded
+catch-up entries now also reserve their own JSON-expansion lease before decoding,
+while the bounded raw tail remains charged separately. The existing background
+scratch reservation remains: removing it requires a separate allocation audit.
+
+Indexer regression:5 passed,0failed,1existing subprocess-worker ignore, exit0;
+`/tmp/anyseek-capacity-indexer-ownership.log`. The process-crash parent invokes that
+worker and validates acknowledged suffix recovery. Concurrent writes, source
+revocation, cancellation ownership, rejected tail overflow and retry remain
+covered. These process exits are not system power-loss tests.
+
+Next capacity boundary remains explicit: Record/evidence/native package population
+limits still cap at10,000, and State JSON-expansion residency can reject larger
+histories before those limits. No100k support or new large-scale benchmark result
+is claimed. Next work must bound State-copy peaks and coordinate package population,
+segment closure and service admission while retaining the public candidate cap.
