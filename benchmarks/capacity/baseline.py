@@ -6,9 +6,9 @@ class Current(Engine):
   cfg={'index_name':'capacity-baseline','schema':[{'field':f,'field_type':'Text','index_lexical':f in ['title','text'],'store':True} for f in ['id','docid','title','text']]}
   self.seq+=1;self.request('POST','/api/v1/index',{'operation_id':op(self.seq),'collection_id':'bench','config':cfg});dump(self.out/'settings.json',self.request('GET','/api/v1/index/bench')[1])
 def main():
- p=argparse.ArgumentParser();p.add_argument('--binary',type=pathlib.Path,required=True);p.add_argument('--data',type=pathlib.Path,required=True);p.add_argument('--out',type=pathlib.Path,required=True);a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(parents=True,exist_ok=False)
+ p=argparse.ArgumentParser();p.add_argument('--revision',required=True);p.add_argument('--binary',type=pathlib.Path,required=True);p.add_argument('--data',type=pathlib.Path,required=True);p.add_argument('--out',type=pathlib.Path,required=True);a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(parents=True,exist_ok=False)
  assert not any(k.startswith('ANYSEEK_') for k in os.environ);os.sched_setaffinity(0,{2,3});os.environ['TOKENIZER_ANYSEEK_BINARY']=str(a.binary.resolve())
- rows=json.loads(a.data.read_text());e=Current('anyseek','restricted',a.out);accepted=[];last=None;failed=None;summary={'revision':'34dc46fd6b6603c96beead765915e4b4fa5c2919','binary_sha256':hashlib.sha256(a.binary.read_bytes()).hexdigest(),'corpus_sha256':hashlib.sha256(a.data.read_bytes()).hexdigest(),'attempt_target':len(rows),'accepted':0,'attempted':0,'status':'running','overrides':{},'cpu_max':pathlib.Path('/sys/fs/cgroup/cpu.max').read_text().strip(),'memory_max':pathlib.Path('/sys/fs/cgroup/memory.max').read_text().strip()}
+ rows=json.loads(a.data.read_text());e=Current('anyseek','restricted',a.out);accepted=[];last=None;failed=None;summary={'revision':a.revision,'binary_sha256':hashlib.sha256(a.binary.read_bytes()).hexdigest(),'corpus_sha256':hashlib.sha256(a.data.read_bytes()).hexdigest(),'attempt_target':len(rows),'accepted':0,'attempted':0,'status':'running','overrides':{},'cpu_max':pathlib.Path('/sys/fs/cgroup/cpu.max').read_text().strip(),'memory_max':pathlib.Path('/sys/fs/cgroup/memory.max').read_text().strip()}
  try:
   e.start();e.create();start=time.monotonic();e.phase='load'
   for i in range(0,len(rows),25):

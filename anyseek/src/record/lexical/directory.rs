@@ -33,6 +33,7 @@ struct WriterReservation {
 struct Budget {
     pin: Mutex<Option<Arc<crate::record::package_pins::Pin>>>,
     writer_memory: Mutex<Option<WriterReservation>>,
+    pending_analysis: Mutex<Vec<WriterReservation>>,
     ledger: Mutex<Ledger>,
     bytes: u64,
     files: usize,
@@ -132,6 +133,21 @@ impl BudgetDirectory {
         }
         Ok(())
     }
+    /// Queued pre-tokenized documents outlive add_document's caller. Workers
+    /// retain these leases through Directory clones, even if joining fails.
+    pub(super) fn retain_analysis(
+        &self,
+        memory: crate::storage::build_budget::MemoryLease,
+        buffer: Option<resources::Lease>,
+    ) -> Result<(), RecordError> {
+        self.budget.pending_analysis.lock().map_err(|_| storage("native analysis ownership poisoned"))?
+            .push(WriterReservation { _memory: memory, _buffer: buffer });
+        Ok(())
+    }
+    /// A successful commit has joined the workers consuming the previous queue.
+    pub(super) fn release_committed_analysis(&self) {
+        if let Ok(mut pending) = self.budget.pending_analysis.lock() { pending.clear(); }
+    }
     // Directory clones outlive Runtime on a failed worker join. They must retain
     // the same GC pin as the worker's bytes, until the last worker/reader drops.
     pub(super) fn retain_pin(&self,pin:Arc<crate::record::package_pins::Pin>)->Result<(),RecordError> {
@@ -141,6 +157,7 @@ impl BudgetDirectory {
     /// Called only after Tantivy has successfully joined indexing and merge
     /// workers. Fixed Searchers may retain this Directory, but no writer buffer.
     pub(super) fn release_joined_writer(&self) {
+        self.release_committed_analysis();
         if let Ok(mut reservation)=self.budget.writer_memory.lock() {
             reservation.take();
         }
@@ -167,7 +184,7 @@ impl BudgetDirectory {
         let inner=MmapDirectory::open(path).map_err(storage)?;
         drop(io);drop(gate);
         Ok(Self {inner,selected:true,budget:Arc::new(Budget {
-            pin:Mutex::new(None),writer_memory:Mutex::new(None),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
+            pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
             _memory:memory,_buffer:buffer,
         })})
     }
@@ -191,7 +208,7 @@ impl BudgetDirectory {
             inner: MmapDirectory::open(path).map_err(storage)?,
             selected: false,
             budget: Arc::new(Budget {
-                pin:Mutex::new(None),writer_memory:Mutex::new(None),
+                pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),
                 ledger: Mutex::new(Ledger {
                     written: 0,
                     paths: BTreeSet::new(),
@@ -304,8 +321,10 @@ mod tests {
         let directory=BudgetDirectory::persistent(&root.0,1024,8,0).unwrap();
         directory.retain_pin(crate::record::package_pins::Pin::acquire(&[root.0.clone()]).unwrap()).unwrap();
         directory.admit_writer(20_000_000).unwrap();
+        directory.retain_analysis(crate::storage::build_budget::reserve_memory(4096).unwrap(), None).unwrap();
         let worker=directory.clone();drop(directory);
         assert!(worker.budget.writer_memory.lock().unwrap().is_some());
+        assert_eq!(worker.budget.pending_analysis.lock().unwrap().len(), 1);
         assert!(!crate::record::package_pins::retire_if_unpinned(&root.0,||{panic!("worker owns package")}).unwrap());
         drop(worker);
         assert!(crate::record::package_pins::retire_if_unpinned(&root.0,||Ok(())).unwrap());

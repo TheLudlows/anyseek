@@ -5,6 +5,10 @@ use crate::record::{Document, RecordConfig};
 use tantivy::{IndexReader, IndexWriter};
 use tokio::sync::Mutex;
 
+// Bound only queued analysis, not the accepted document size or corpus size.
+const ANALYSIS_BATCH_BYTES: u64 = 32 * 1024 * 1024;
+const ANALYSIS_BATCH_DOCUMENTS: usize = 128;
+
 struct Charge {
     memory: crate::storage::build_budget::MemoryLease,
     buffer: Option<crate::resources::Lease>,
@@ -37,6 +41,8 @@ struct Data {
     identities: Vec<Identity>,
     identity_charge: Charge,
     published_updates: usize,
+    pending_analysis_bytes: u64,
+    pending_analysis_documents: usize,
     snapshot: Option<Arc<Snapshot>>,
     cut: Cut,
 }
@@ -89,6 +95,8 @@ impl Runtime {
                 reader,
                 writer: None,
                 published_updates: 0,
+                pending_analysis_bytes: 0,
+                pending_analysis_documents: 0,
                 identities: Vec::new(),
                 identity_charge: Charge::new(0)?,
                 snapshot: None,
@@ -142,6 +150,8 @@ impl Runtime {
                 reader,
                 writer: None,
                 published_updates: 0,
+                pending_analysis_bytes: 0,
+                pending_analysis_documents: 0,
                 identities: manifest.identities,
                 identity_charge,
                 snapshot: Some(Arc::new(snapshot)),
@@ -164,8 +174,17 @@ impl Runtime {
     ) -> Result<(), RecordError> {
         let estimate =
             crate::record::build_budget::document_estimate(document, &self.config.schema)?;
-        let _analysis = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
-        let _buffer = crate::resources::Scope::current()
+        let mut data = self.data.lock().await;
+        // Drain before admitting another document. One larger document remains
+        // subject to normal per-document admission and is drained immediately.
+        if data.pending_analysis_documents > 0
+            && (data.pending_analysis_documents >= ANALYSIS_BATCH_DOCUMENTS
+                || data.pending_analysis_bytes.saturating_add(estimate) > ANALYSIS_BATCH_BYTES)
+        {
+            self.drain_analysis(&mut data)?;
+        }
+        let analysis = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
+        let buffer = crate::resources::Scope::current()
             .map(|s| s.bytes(estimate))
             .transpose()
             .map_err(storage)?;
@@ -188,7 +207,6 @@ impl Runtime {
             };
             fields.push(analyzer.field(&text).await);
         }
-        let mut data = self.data.lock().await;
         if data.writer.is_none() {
             let directory=self.directory.as_ref().ok_or_else(||storage("immutable lexical package"))?;
             directory.admit_writer(WRITER_BYTES as u64)?;
@@ -224,6 +242,11 @@ impl Runtime {
                 field.length as u64,
             );
         }
+        self.directory.as_ref().ok_or_else(|| storage("immutable lexical package"))?
+            .retain_analysis(analysis, buffer)?;
+        data.pending_analysis_bytes = data.pending_analysis_bytes.checked_add(estimate)
+            .ok_or_else(|| storage("native pending analysis overflow"))?;
+        data.pending_analysis_documents += 1;
         data.writer
             .as_ref()
             .ok_or_else(|| storage("immutable lexical package"))?
@@ -234,14 +257,25 @@ impl Runtime {
         if publish {
             self.flush_locked(&mut data)?;
             data.published_updates += 1;
+        } else if data.pending_analysis_bytes >= ANALYSIS_BATCH_BYTES {
+            self.drain_analysis(&mut data)?;
         }
+        Ok(())
+    }
+    // Private native commits only drain the worker queue. They neither publish a
+    // Searcher nor select a business cut or write an authority certificate.
+    fn drain_analysis(&self, data: &mut Data) -> Result<(), RecordError> {
+        if let Some(writer) = data.writer.as_mut() {
+            writer.commit().map_err(storage)?;
+        }
+        if let Some(directory) = &self.directory { directory.release_committed_analysis(); }
+        data.pending_analysis_bytes = 0;
+        data.pending_analysis_documents = 0;
         Ok(())
     }
     fn flush_locked(&self, data: &mut Data) -> Result<(), RecordError> {
         if self.directory.is_none() {return Err(storage("immutable lexical package"));}
-        if let Some(writer)=data.writer.as_mut() {
-            writer.commit().map_err(storage)?;
-        }
+        self.drain_analysis(data)?;
         data.reader.reload().map_err(storage)?;
         // Manifest cloning and serialization coexist with the retained identities.
         let temporary_bytes = data.identities.iter().try_fold(65536u64, |n, id| {
@@ -362,6 +396,42 @@ mod tests {
     use crate::record::tests::{config, query, write};
     use crate::record::{ExpectedVersion, RecordPartition};
     use crate::search::{ResultType, SearchMode};
+    #[tokio::test]
+    async fn queued_analysis_is_bounded_charged_and_released_without_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let governor = Arc::new(crate::resources::Governor::default());
+        let scope = governor.admit("queued-analysis".into(), crate::resources::Lane::Foreground, 0).unwrap();
+        let settings = config();
+        let native = scope.clone().run(async { Runtime::create(&package.join("native"), &settings).unwrap() }).await;
+        let doc = serde_json::from_str(r#"{"body":"alpha beta"}"#).unwrap();
+        let estimate = crate::record::build_budget::document_estimate(&doc, &settings.schema).unwrap();
+        for i in 0..129 {
+            scope.clone().run(native.append(Identity { id: format!("r-{i}"), version: 1, revision: i+1 }, &doc, false)).await.unwrap();
+        }
+        // The 129th insertion drains the first 128, but never publishes a view.
+        assert!(native.snapshot().await.is_err());
+        assert_eq!(native.data.lock().await.pending_analysis_documents, 1);
+        let headroom = scope.bytes(512*1024*1024 - estimate).unwrap();
+        assert!(scope.bytes(1).is_err(), "queued tokens must retain foreground admission");
+        drop(headroom);
+        native.flush().await.unwrap();
+        assert_eq!(native.snapshot().await.unwrap().identities.len(), 129);
+        assert_eq!(native.data.lock().await.pending_analysis_documents, 0);
+        drop(scope.bytes(512*1024*1024).expect("commit drains analysis leases"));
+        // Low resource admission fails before enqueue; retry on the same runtime.
+        let blocker = scope.bytes(512*1024*1024).unwrap();
+        assert!(scope.clone().run(native.append(Identity { id: "retry".into(), version: 1, revision: 130 }, &doc, false)).await.is_err());
+        assert_eq!(native.data.lock().await.identities.len(), 129);
+        drop(blocker);
+        scope.clone().run(native.append(Identity { id: "retry".into(), version: 1, revision: 130 }, &doc, false)).await.unwrap();
+        assert!(scope.bytes(512*1024*1024).is_err());
+        // Dropping an unpublished candidate joins workers and refunds its queue.
+        drop(native);
+        drop(scope.bytes(512*1024*1024).expect("abandoned candidate refunds analysis"));
+    }
+
     #[tokio::test]
     async fn joined_writer_releases_buffer_while_fixed_searcher_retains_pin() {
         let root=tempfile::tempdir().unwrap();let package=root.path().join("package");

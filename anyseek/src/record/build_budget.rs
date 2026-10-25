@@ -58,7 +58,7 @@ pub(crate) fn document_estimate(
         .sum::<u64>();
     // Includes normalized text, transient JSON copies, vector/centroid
     // copies, and at most unigram/bigram/trigram logical term metadata.
-    // Unicode/OpenCC expansion and ZH matrices are overestimated here;
+    // Unicode/OpenCC expansion is conservatively included here;
     // HashMap buckets and allocator/realloc overhead remain excluded.
     let n = bytes
         .0
@@ -82,10 +82,13 @@ pub(super) fn admit<'a>(
     let mut estimate = config.schema.len() as u64 * 65536 * 32;
     // The mature Chinese dictionary has one process-owned admission, not a
     // per-component allocation. Document and component estimates remain local.
+    // Match component::append: this component owns no lexical postings or
+    // token buffers. Native analysis/queued documents have their own leases.
+    let component_schema = retrieval_schema(config);
     for record in records {
         if let Some(document) = &record.document {
             estimate = estimate
-                .checked_add(document_estimate(document, &config.schema)?)
+                .checked_add(document_estimate(document, &component_schema)?)
                 .ok_or_else(|| storage("build estimate overflow"))?;
         }
     }
