@@ -93,3 +93,17 @@ one Tantivy 0.27.0 and one tokenizer-api 0.7.0. The shared dictionary keeps its
 80 MiB logical reservation for process life; no capacity or lane cap is raised.
 The 256-document paired diagnostic has a small keyword-OR quality regression,
 explicitly retained in the results, so this is not a universal quality-upgrade claim.
+
+## Publication base
+
+The publication branch is rebased onto master `702c385` (merged budget PR #83).
+README conflict resolution retains both budget and tokenizer sections. The
+multi-collection ownership test discovers the actual default admission boundary
+instead of hardcoding the old 384 MiB value; its release assertions are unchanged.
+Historical 345/200 tests and quality measurements above were run before this base
+update, on `253df6e`; they are not relabeled as tests of the rebased HEAD. No
+experiment was rerun with the higher master budgets. Publication CI validates the
+combined current HEAD on Linux and Windows.
+
+After rebase, the full native lexical suite passed: 37 tests, 0 failures, exit 0
+(`server,fault-injection`, serial). Broader current-base checks run in publication CI.

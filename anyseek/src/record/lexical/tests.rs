@@ -1093,6 +1093,19 @@ async fn native_reader_reservation_follows_snapshot_lifetime() {
 async fn standard_shared_dictionary_does_not_pin_collection_admission() {
     use crate::resources::{Governor, Lane};
     let governor = Arc::new(Governor::default());
+    // Discover the current default boundary through admission, without allocating
+    // buffers or coupling this ownership test to a historical MiB default.
+    let probe = governor.admit("jieba-cap-probe".into(), Lane::Background, 0).unwrap();
+    let mut cap = 0u64;
+    for bit in (0..=33).rev() {
+        let candidate = cap + (1u64 << bit);
+        if let Ok(lease) = probe.bytes(candidate) {
+            cap = candidate;
+            drop(lease);
+        }
+    }
+    drop(probe);
+    assert!(cap >= 64 * 1024);
     let mut analyzers = Vec::new();
     for i in 0..20 {
         let scope = governor.admit(format!("jieba-owner-{i}"), Lane::Foreground, 0).unwrap();
@@ -1103,12 +1116,12 @@ async fn standard_shared_dictionary_does_not_pin_collection_admission() {
         assert!(!analyzer.field("中国 English 中文").await.tokens.is_empty());
         // Only the local 64 KiB analysis state belongs to this collection.
         let background = observer.retained_io();
-        assert!(background.bytes(384 * 1024 * 1024).is_err());
-        drop(background.bytes(384 * 1024 * 1024 - 64 * 1024).unwrap());
+        assert!(background.bytes(cap).is_err());
+        drop(background.bytes(cap - 64 * 1024).unwrap());
         analyzers.push((analyzer, background));
     }
     for (analyzer, background) in analyzers {
         drop(analyzer);
-        drop(background.bytes(384 * 1024 * 1024).unwrap());
+        drop(background.bytes(cap).unwrap());
     }
 }
