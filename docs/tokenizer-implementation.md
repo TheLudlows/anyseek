@@ -1,7 +1,8 @@
 # Tantivy standard analysis: implementation and acceptance
 
-Base: master `6d28798a300bb947b2eb1d3e48e928d193103e17`. Independent branch
-`feat/tantivy-standard-tokenizers`; no budget-branch changes or report PR edits.
+Published as draft [PR #84](https://github.com/TheLudlows/anyseek/pull/84), based on
+master `702c385` (merged budget PR #83). No merge is authorized. Historical local
+validation below predates this rebase; exact-head platform evidence is in PR CI.
 
 ## Decisions before implementation
 
@@ -21,7 +22,7 @@ Base: master `6d28798a300bb947b2eb1d3e48e928d193103e17`. Independent branch
   component/dictionary versions; reject incompatible packages, no migration path.
 - First verify exact `tantivy-jieba=0.21.0` against Tantivy `0.27.0` and shared
   tokenizer-api `0.7`, lock resolved dependencies, and reject a second Tantivy.
-  Compatibility probe passed: one Tantivy 0.27.0 and one tokenizer-api 0.7.0; jieba-rs is pinned exactly to 0.11.0. Both adapters are MIT licensed. Quality remains unverified.
+  Compatibility probe passed: one Tantivy 0.27.0 and one tokenizer-api 0.7.0; jieba-rs is pinned exactly to 0.11.0. Both adapters are MIT licensed. Quality diagnostics and limitations are recorded below.
 - Jieba uses accurate mode, ordinal positions and HMM disabled. No overlapping search-mode token graph is introduced into phrase/word-N-gram scoring.
 - Existing explicitly selected English profiles retain their punctuation/folding contracts; the new English path uses SimpleTokenizer + LowerCaser. They share the existing application query/scoring adapter, not a second engine.
 - Reuse the component's existing process-shared Jieba dictionary and decompressed default-dictionary blob, with one process-lifetime 80MiB shared-build reservation acquired before use. Analyzer-local working state remains admitted separately; do not duplicate the old per-collection dictionary charge. No collection lease is retained by this process cache and no budget limit is raised.
@@ -67,11 +68,11 @@ still has its own leases; a 20-owner test verifies local admission is released.
   do not merge/increase budgets or rank empty-result QPS.
 - [x] Run applicable full regressions and document exact evidence and limits.
 
-Tokenizer work remains local-only. Separate budget PR #83 is authorized and contains none of this work. No tokenizer push/PR, merge or issue edit.
+Publication does not change AND/OR or the ranking formula. Recall comparisons use fixed binary SHAs, separately from later equivalent cleanup commits.
 
 ## Local validation
 
-Production implementation: `253df6e6e8e10f6294af67a2158d55d12bfe2877` (not published).
+Production implementation: `253df6e6e8e10f6294af67a2158d55d12bfe2877` (historical pre-rebase code).
 `cargo test --locked -p anyseek --all-targets --features server,fault-injection
 --no-fail-fast -- --test-threads=1` completed with exit 0: **345 passed, 0 failed,
 13 ignored, 35 harnesses**. The 13 ignored entries are 11 subprocess workers
@@ -94,16 +95,23 @@ one Tantivy 0.27.0 and one tokenizer-api 0.7.0. The shared dictionary keeps its
 The 256-document paired diagnostic has a small keyword-OR quality regression,
 explicitly retained in the results, so this is not a universal quality-upgrade claim.
 
-## Publication base
+## Current-base validation and cleanup
 
-The publication branch is rebased onto master `702c385` (merged budget PR #83).
-README conflict resolution retains both budget and tokenizer sections. The
-multi-collection ownership test discovers the actual default admission boundary
-instead of hardcoding the old 384 MiB value; its release assertions are unchanged.
-Historical 345/200 tests and quality measurements above were run before this base
-update, on `253df6e`; they are not relabeled as tests of the rebased HEAD. No
-experiment was rerun with the higher master budgets. Publication CI validates the
-combined current HEAD on Linux and Windows.
+The publication branch is rebased onto master `702c385`. The ownership test
+probes the actual default admission boundary instead of hardcoding the old
+384 MiB value; release assertions are unchanged. Native lexical tests passed
+37/37 after rebase. Historical full-suite and quality results above remain tied
+to `253df6e`; exact-head Linux/Windows CI is tracked in PR #84.
 
-After rebase, the full native lexical suite passed: 37 tests, 0 failures, exit 0
-(`server,fault-injection`, serial). Broader current-base checks run in publication CI.
+The follow-up cleanup removes the private `commit.rs` re-export and the unused
+`create_index` bits/mute arguments. It retains public compression/longest tags
+and their serialized identity, correcting obsolete encoding descriptions.
+`index.rs` and `search.rs` retain necessary configuration/vector responsibilities.
+Query operators, scoring, word N-grams, safety checks and test scale are unchanged.
+Analysis/package documentation is consolidated in
+[analysis identity and package contract](analysis-package-contract.md); #80 status
+now distinguishes its merged evidence from this unmerged tokenizer candidate.
+
+The retired-dependency guard permits Zstd only through Jieba's embedded dictionary
+subtree, while continuing to prohibit direct or alternate storage-codec paths.
+This corrects the first publication CI failure without changing dependencies.

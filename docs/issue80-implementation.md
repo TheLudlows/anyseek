@@ -1,6 +1,6 @@
 # Issue #80：实现与验收
 
-生产全文使用 Tantivy 0.27.0，锁定版本与新格式；公开入口统一为 `RecordPartition`。仅面向新库，不提供升级迁移、旧格式读取、双写或多引擎切换。本分支尚未合入，issue 保持开放。架构取舍见[Tantivy 设计](tantivy-evaluation.md)，当前进度见 [STATUS](../STATUS.md)。
+生产全文使用 Tantivy 0.27.0，锁定版本与新格式；公开入口统一为 `RecordPartition`。仅面向新库，不提供升级迁移、旧格式读取、双写或多引擎切换。[PR #81](https://github.com/TheLudlows/anyseek/pull/81) 已合入 `6d28798`，issue 已关闭；合入主干 [CI 40080424776](https://github.com/TheLudlows/anyseek/actions/runs/40080424776) 九项通过。以下细项保留原验收 SHA，未验收边界不因关闭而改变。架构取舍见[Tantivy 设计](tantivy-evaluation.md)，当前进度见 [STATUS](../STATUS.md)。
 
 ## 实现与代码入口
 

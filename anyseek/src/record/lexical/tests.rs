@@ -64,7 +64,7 @@ async fn standard_analysis_implementation_identity_is_checked_on_native_open() {
 async fn field_restricted_phrase_keeps_first_position_after_skipping_earlier_field() {
     use crate::record::tests::{config, write};
     use crate::{
-        commit::Commit,
+        component::Commit,
         record::{ExpectedVersion, RecordPartition, RecordQuery},
         search::{QueryType, ResultType, SearchMode},
     };
@@ -659,7 +659,7 @@ async fn native_unigram_bm25f_matches_record_scores_at_the_vector_cut() {
 
 #[tokio::test]
 async fn native_query_contract_matches_before_and_after_commit() {
-    use crate::commit::Commit;
+    use crate::component::Commit;
     use crate::record::tests::{config, write};
     use crate::{
         index::{FieldLengthNormalization, FrequentwordType, LexicalSimilarity},
@@ -966,7 +966,7 @@ fn native_corpus_uses_one_selected_population_across_frozen_and_tail() {
 
 #[tokio::test]
 async fn field_or_matches_selected_field_before_and_after_commit() {
-    use crate::commit::Commit;
+    use crate::component::Commit;
     use crate::record::tests::{config, write};
     use crate::{
         record::{ExpectedVersion, RecordPartition, RecordQuery},

@@ -217,9 +217,8 @@ pub struct SchemaField {
     #[serde(default = "default_false")]
     pub facet: bool,
 
-    /// Indicate the longest field in schema.
-    /// Otherwise the longest field will be automatically detected in first index_document.
-    /// Setting/detecting the longest field ensures efficient index encoding.
+    /// Retained schema identity tag; does not select native Tantivy encoding.
+    /// Record creation marks the first lexical field when no lexical field is tagged.
     #[serde(skip_serializing_if = "is_default_bool")]
     #[serde(default = "default_false")]
     pub longest: bool,
@@ -243,9 +242,8 @@ pub struct SchemaField {
 /// - index_vector: index field into vector index, only indexed fields can be searched.
 /// - field_type: type of a field: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, text, strings, JSON
 /// - facet: enable metadata filtering and sorting by field values
-/// - `longest`: This allows to annotate (manually set) the longest field in schema.
-///   Otherwise the longest field will be automatically detected in first index_document.
-///   Setting/detecting the longest field ensures efficient index encoding.
+/// - `longest`: retained schema identity tag. Record creation marks the first lexical
+///   field when none is tagged; this does not select native Tantivy encoding.
 /// - boost: optional custom weight factor for Bm25 ranking
 /// # Returns
 /// - SchemaField
