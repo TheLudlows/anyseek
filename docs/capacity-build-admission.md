@@ -47,3 +47,20 @@ pre-WAL admission/retry regression passes (1/1). Logs are
 `/tmp/anyseek-capacity-native-tests.log` and
 `/tmp/anyseek-capacity-admission-test.log`. Full-target/HTTP capacity validation
 is still pending; Windows has not run on this repair.
+
+## Payload ceiling follow-up
+
+At 64 selected Payload objects, incremental reuse has no free slot for the next
+object. `4451c9c` rebuilds all referenced bodies/operation history into a private
+closure at exactly that ceiling. It retains the 64-object cap and byte/count/body
+budgets. Old files are not removed to make room; the existing DiskScope includes
+both generations. The authenticated anchor selects the new closure only after
+preparation/loading succeeds; the old anchor stays authoritative on pre-publication
+failure. This is compaction, not shortening idempotency history.
+
+Local production readers are protected by the owned partition guard; an active
+background build suppresses `reclaim_anchor_objects` entirely. The existing
+`retire_if_unpinned` gate additionally protects held package paths. No new deletion
+path or changed remote publication/backup protocol is introduced. Review and
+regressions must cover a reader/pin held across compaction, old authority after
+injected preparation failure, and old-object reclamation only after release.

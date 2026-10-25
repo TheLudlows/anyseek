@@ -48,3 +48,8 @@ compacts the complete referenced Payload set at that ceiling, retaining historic
 operation bodies/receipts and the existing atomic anchor selection. Native private
 batch draining also increases segment count: the authenticated package's 1,024-file
 cap must be included in the later 100k component/segment design, not blindly raised.
+
+Both fixes at `4451c9c` reach the existing 10,000-record ceiling: checkpoint and
+reopen succeed, all 393 probes and original operation retries pass. Ordinal 10,001
+rejects at the unchanged record/operation hard limit. See
+`../benchmarks/capacity/REPAIR-02.md`. Steps 3–5 above remain unimplemented.

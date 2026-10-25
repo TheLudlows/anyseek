@@ -379,6 +379,14 @@ mod tests {
             p.compact_journal().await.unwrap();
         }
         assert_eq!(p.inner.lock().await.payloads.objects.len(), 64);
+        let old_closure = p.inner.lock().await.payloads.clone();
+        let old_paths = old_closure.objects.keys().map(|id| path.join(format!("payload-{id}"))).collect::<Vec<_>>();
+        let old_pin = package_pins::Pin::acquire(&old_paths).unwrap();
+        let old_reader = PoolReader::open(&path, old_closure.clone(), budget(&settings).unwrap()).unwrap();
+        let old_reference = crate::storage::payload_pool::Reference {
+            object: old_closure.objects.keys().next().unwrap().clone(), position: 0,
+        };
+        let old_body = old_reader.read(&old_reference).unwrap();
         let before = serde_json::to_vec(&p.inner.lock().await.anchor).unwrap();
         let request = write("op-64", "r-64", "alpha unique64", ExpectedVersion::Absent);
         receipts.push((request.clone(), p.write(request).await.unwrap()));
@@ -390,6 +398,13 @@ mod tests {
         std::fs::remove_file(gate).unwrap();
         p.compact_journal().await.unwrap();
         assert_eq!(p.inner.lock().await.payloads.objects.len(), 1);
+        p.inner.lock().await.reclaim_anchor_objects().await.unwrap();
+        assert!(old_paths.iter().all(|path| path.exists()), "old pinned closure must survive successful publication and GC");
+        assert_eq!(old_reader.read(&old_reference).unwrap(), old_body);
+        drop(old_reader);
+        drop(old_pin);
+        p.inner.lock().await.reclaim_anchor_objects().await.unwrap();
+        assert!(old_paths.iter().all(|path| !path.exists()), "retired objects are reclaimed only after releasing readers/pins");
         drop(p);
         let p = RecordPartition::open(&path, settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.inner.lock().await.state.records.len(), 65);
