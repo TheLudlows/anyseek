@@ -321,3 +321,40 @@ HTTP waits and is not a first-pass success criterion. Two driver regression test
 verify GET-only observation and no rejection inference from missing receipts.
 A fresh-root same-binary/config/corpus reproduction follows; no production fix or
 100k success is inferred from this instrumentation correction.
+
+## Same-binary reproduction: owned batch completes after HTTP deadline
+
+Production code/binary stayed b03ba58 / SHA25690268c0909a73473933d927f9ee997e24ca153cb8633ef3cdc1524a046c429a4.
+The observer correction was33b041e, with the same first-pass30s server/35s client
+deadlines,25-write batches, corpus prefix and3072/6144MiB build configuration.
+The fresh-root reproduction again reached11900 first-response-confirmed writes;
+the11901..11925 batch returned503 `outcome_unknown` in30002.18ms.
+
+Without restarting the service or resubmitting any writes, GET operation lookup
+found all25 original receipts, with sequences11901..11925, in153.15ms total
+request time. GET index information returned200 with11925 active records,
+identities and retained operations. Only then did the corrected harness stop its
+owned service. Subsequent read-only reopen confirmed11925 records and exact
+matches for all25 previously unknown receipts. Startup observation was14326.23ms.
+The first-pass error remains recorded; this is not a zero-error or100k result.
+
+The selected anchor at11920 contains2 packages: this coincides with reaching the
+16-package incremental selection bound and rebuilding the selected population.
+The evidence identifies a request-duration/maintenance boundary in an unoptimized
+build, not a memory refusal,25 rejected writes, or permanent recovery fence. The
+original harness's immediate teardown prevented that distinction. No production
+query, output-barrier, timeout or memory-limit change was made to obtain the result.
+
+Raw evidence: `/tmp/anyseek-capacity-phase21-repro/summary.json`,
+`unknown-observation.json`, `events.jsonl`, `resources.json`,
+`readonly-diagnosis/result.json`. The full source and first failed root remain
+preserved. Observer unit tests passed2/2; a final fail-safe also retains the service
+if the observer itself raises before resolving outcomes. No benchmark process is
+left running after the successful observation and read-only reopen.
+
+Next validation should isolate optimized production build behavior before treating
+development-build latency as a production capacity ceiling. Keep the same data,
+limits and first-pass error accounting; do not increase the service deadline.
+100k checkpoint/reopen/393-query completion, final all-targets and Windows remain
+unverified. State duplicate residency and full selected-population maintenance
+remain explicit review concerns, not silently waived acceptance items.

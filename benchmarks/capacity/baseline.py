@@ -35,6 +35,7 @@ def main():
     # Preserve the original error and accepted-response count. The owned batch
     # may continue after the HTTP response deadline; never close it immediately.
     e.phase='observe_unknown';summary['load_seconds']=time.monotonic()-start
+    summary['leave_service_running']=True  # retain owned work even if observation itself fails
     observation=observe_batch(e,writes);dump(a.out/'unknown-observation.json',observation)
     summary['unknown_observation']={'submitted':observation['submitted'],'observed_receipts':len(observation['observed_receipts']),'all_receipts_observed':observation['all_receipts_observed'],'info':observation['info']}
     summary['leave_service_running']=not observation['all_receipts_observed']
