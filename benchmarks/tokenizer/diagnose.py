@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Sequential, bounded quality diagnostic; no capacity or budget overrides."""
-import argparse, hashlib, json, math, os, pathlib, time
+import argparse, hashlib, json, math, os, pathlib, subprocess, time
 from http_engine import Engine, doc, dump, disk
 
 
@@ -48,6 +48,8 @@ def run(name, documents, queries, keywords, out):
         result['reopened_count']=engine.count();assert result['reopened_count']==len(documents)
         engine.phase='quality'
         result['quality']=[quality(engine,queries,keywords,mode,variant) for variant in ['questions','keywords'] for mode in (['and','or'] if name=='anyseek' else ['all','last'])]
+        if any(group['errors'] for group in result['quality']):
+            raise RuntimeError('query HTTP failures retained in raw results; quality comparison invalid')
         # Verify raw source data for every persisted document, via an unambiguous
         # ID lookup (anyseek) or the Meili documents endpoint, not search recall.
         checked=0
@@ -68,7 +70,7 @@ def run(name, documents, queries, keywords, out):
         result['raw_verification']={'checks':checked,'scope':'every document by ID after reopen, plus returned question hits' }
         result['status']='complete'
     except Exception as exc:
-        result['status']='failed';result['error']=repr(exc)
+        result['status']='failed';result['error']=repr(exc);result['failure_phase']=engine.phase
         try:result['visible_count_after_failure']=engine.count()
         except Exception as inner:result['count_error']=repr(inner)
     finally:
@@ -80,10 +82,16 @@ def run(name, documents, queries, keywords, out):
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--data',type=pathlib.Path,required=True);p.add_argument('--anyseek',type=pathlib.Path,required=True);p.add_argument('--meili',type=pathlib.Path,required=True);p.add_argument('--out',type=pathlib.Path,required=True);a=p.parse_args()
+    if any(k.startswith('ANYSEEK_') for k in os.environ):
+        raise SystemExit('run without inherited ANYSEEK_* overrides; unchanged baseline limits required')
     a.out.mkdir(parents=True,exist_ok=False)
     os.environ['TOKENIZER_ANYSEEK_BINARY']=str(a.anyseek.resolve());os.environ['TOKENIZER_MEILI_BINARY']=str(a.meili.resolve())
     # Keep clients on different CPUs; same two service CPUs in the shared harness.
     os.sched_setaffinity(0,{2,3})
+    source_manifest=json.loads((a.data/'selection-manifest.json').read_text())
+    assert sha(a.data/'corpus-1000.json')==source_manifest['hashes']['1000']
+    assert sha(a.data/'queries.json')==source_manifest['hashes']['queries']
+    assert sha(a.meili)==(a.data/'meili-sha256.txt').read_text().strip()
     corpus=json.loads((a.data/'corpus-1000.json').read_text());queries=json.loads((a.data/'queries.json').read_text())
     keyword_path=pathlib.Path(__file__).with_name('keywords.json');keyword_rows=json.loads(keyword_path.read_text())
     keywords={r['qid']:r['keywords'] for r in keyword_rows}
@@ -92,10 +100,21 @@ def main():
     positives={d for q in queries for d,g in q['qrels'].items() if g>0}
     assert len(positives)==91 and positives<={r['docid'] for r in corpus}
     manifest={'source_hashes':{n:sha(a.data/n) for n in ['corpus-1000.json','queries.json','selection-manifest.json','qrels.miracl-v1.0-zh-dev.tsv','topics.miracl-v1.0-zh-dev.tsv']},'keywords_sha256':sha(keyword_path),'binary_sha256':{'anyseek':sha(a.anyseek),'meili':sha(a.meili)},'positive_documents':len(positives),'query_count':len(queries)}
+    root=pathlib.Path(__file__).resolve().parents[2]
+    manifest['code_revision']=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()
+    diff=subprocess.check_output(['git','diff','HEAD','--','Cargo.lock','anyseek'],cwd=root)
+    manifest['production_diff_sha256']=hashlib.sha256(diff).hexdigest()
+    manifest['production_diff_empty']=not bool(diff)
     dump(a.out/'manifest.json',manifest)
     documents=[doc(r) for r in corpus]
     first=run('anyseek',documents,queries,keywords,a.out/'anyseek-1000')
     if first['status']!='complete':
+        # Only an explicitly classified build/admission refusal permits a smaller
+        # pool. A functional, reopen or quality failure must remain a failure.
+        detail=first.get('error','').lower()
+        if first.get('failure_phase')!='build' or not any(word in detail for word in ['budget','busy','429']):
+            dump(a.out/'summary.json',{'anyseek':first,'status':'non-budget failure; comparison not run'})
+            raise SystemExit(1)
         seed='anyseek-tokenizer-20261025-v1'
         positives_rows=[r for r in corpus if r['docid'] in positives]
         distractors=sorted((r for r in corpus if r['docid'] not in positives),key=lambda r:hashlib.sha256((seed+r['docid']).encode()).hexdigest())
