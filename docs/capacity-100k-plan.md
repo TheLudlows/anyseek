@@ -39,3 +39,12 @@ Decisions requiring escalation: shortening idempotency history, changing query
 semantics/scoring, removing unique evidence/deployed data, adding resources/cost.
 A format change needs explicit versioning/rejection and review; no silent reader
 reinterpretation or migration chain. Implementation remains staged and reviewable.
+
+Measured repair checkpoint: `37c935b` removes duplicate component lexical charge
+and owns/drains queued native analysis. The unchanged sample now passes 5,249 and
+reaches 8,320; next refusal is the fixed 64-Payload-object closure, not yet the
+16 MiB frame. See `../benchmarks/capacity/REPAIR-01.md`. The immediate follow-up
+compacts the complete referenced Payload set at that ceiling, retaining historical
+operation bodies/receipts and the existing atomic anchor selection. Native private
+batch draining also increases segment count: the authenticated package's 1,024-file
+cap must be included in the later 100k component/segment design, not blindly raised.

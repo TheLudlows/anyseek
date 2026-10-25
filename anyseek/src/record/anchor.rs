@@ -80,7 +80,15 @@ impl Reference {
         let id=format!("{:032x}",rand::random::<u128>());
         let prepared=root.join(format!(".anchor-prepare-{id}"));
         std::fs::create_dir(&prepared).map_err(storage)?;
-        let mut pool=PoolBuilder::begin(root,prior,budget(config)?,format!("{:032x}",rand::random::<u128>())).map_err(storage)?;
+        let payload_budget = budget(config)?;
+        // Reuse is an optimization, not a lifetime limit on further writes.
+        // At the bounded object ceiling rebuild the complete referenced payload
+        // set privately. Old selected objects remain protected by the existing
+        // publication/GC protocol and DiskScope charges both generations.
+        let prior = if prior.objects.len() == payload_budget.objects {
+            Closure::default()
+        } else { prior };
+        let mut pool=PoolBuilder::begin(root,prior,payload_budget,format!("{:032x}",rand::random::<u128>())).map_err(storage)?;
         let referenced=segment_state::ReferencedState::write(config,state,&mut pool)?;
         let payloads=pool.finish().map_err(storage)?;
         write_json(&prepared.join("manifest"),&Manifest{format:3,seq:state.seq,state:referenced,payloads})?;
@@ -355,6 +363,40 @@ mod tests {
         assert_eq!(p.inner.lock().await.state.records.len(),3);
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn payload_object_ceiling_compacts_without_losing_receipts_or_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("partition");
+        let mut settings = config();
+        settings.max_records = 128;
+        settings.max_operations = 256;
+        settings.max_candidates = 128;
+        let p = RecordPartition::create(&path, settings.clone()).await.unwrap();
+        let mut receipts = Vec::new();
+        for i in 0..64 {
+            let request = write(&format!("op-{i}"), &format!("r-{i}"), &format!("alpha unique{i}"), ExpectedVersion::Absent);
+            receipts.push((request.clone(), p.write(request).await.unwrap()));
+            p.compact_journal().await.unwrap();
+        }
+        assert_eq!(p.inner.lock().await.payloads.objects.len(), 64);
+        let before = serde_json::to_vec(&p.inner.lock().await.anchor).unwrap();
+        let request = write("op-64", "r-64", "alpha unique64", ExpectedVersion::Absent);
+        receipts.push((request.clone(), p.write(request).await.unwrap()));
+        let gate = path.join(".test-anchor-reject-prepared");
+        std::fs::write(&gate, b"reject").unwrap();
+        assert!(p.compact_journal().await.is_err());
+        assert_eq!(serde_json::to_vec(&p.inner.lock().await.anchor).unwrap(), before);
+        assert_eq!(p.inner.lock().await.payloads.objects.len(), 64);
+        std::fs::remove_file(gate).unwrap();
+        p.compact_journal().await.unwrap();
+        assert_eq!(p.inner.lock().await.payloads.objects.len(), 1);
+        drop(p);
+        let p = RecordPartition::open(&path, settings.max_journal_bytes).await.unwrap();
+        assert_eq!(p.inner.lock().await.state.records.len(), 65);
+        for (request, receipt) in receipts { assert_eq!(p.write(request).await.unwrap(), receipt); }
+        assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 100).await.unwrap().count_total, 65);
+    }
+
     #[tokio::test]
     async fn successive_flush_reuses_segments_compacts_and_replays_tail() {
         async fn counted(p:&RecordPartition,mode:SearchMode)->RecordSearch {
