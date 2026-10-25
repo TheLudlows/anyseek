@@ -1321,7 +1321,7 @@ impl RecordPartition {
                 #[cfg(test)]
                 fail_publication_stage: 0,
             })),
-            admission: Arc::new(Semaphore::new(8)),
+            admission: Arc::new(Semaphore::new(16)),
         })
     }
     /// Recover complete authoritative state before serving any query. The budget
@@ -1418,7 +1418,7 @@ impl RecordPartition {
         inner.feed_cache=change_feed::Cache::rebuild(&inner.state,&inner.config.change_feed)?;
         inner.graph_cache=graph::Cache::rebuild(&inner.state)?;
         inner.reclaim_anchor_objects().await?;
-        Ok(Self {output,inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(8))})
+        Ok(Self {output,inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
     }
     /// A cancellation-safe accepted write: dropping this future does not cancel
     /// an already spawned operation. Query its original operation ID afterward.
@@ -2917,10 +2917,10 @@ mod tests {
                 let guard = p.inner.lock().await;
                 let owner = p.clone(); let request = binding.clone();
                 let task = tokio::spawn(async move { owner.seal_for_takeover(request).await });
-                while p.admission.available_permits() == 8 { tokio::task::yield_now().await; }
+                while p.admission.available_permits() == 16 { tokio::task::yield_now().await; }
                 task.abort(); let _ = task.await; drop(guard);
                 // The accepted owned task retains the permit until publication.
-                while p.admission.available_permits() != 8 { tokio::task::yield_now().await; }
+                while p.admission.available_permits() != 16 { tokio::task::yield_now().await; }
                 assert!(p.output_permit().is_err());
             } else {
                 p.inner.lock().await.fail_after_durable = true;
@@ -3233,7 +3233,7 @@ mod tests {
         let p = RecordPartition::create(&location, config()).await.unwrap();
         let request = write("retry", "r", "alpha", ExpectedVersion::Absent);
         let receipt = p.write(request.clone()).await.unwrap();
-        let occupied = p.admission.clone().acquire_many_owned(8).await.unwrap();
+        let occupied = p.admission.clone().acquire_many_owned(16).await.unwrap();
         assert_eq!(p.write(request.clone()).await.unwrap_err(), RecordError::Busy);
         drop(occupied);
         assert_eq!(p.write(request).await.unwrap(), receipt);

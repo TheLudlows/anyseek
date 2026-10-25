@@ -372,9 +372,9 @@ mod tests {
         let native=scope.run(async {Runtime::create(&package.join("native"),&config()).unwrap()}).await;
         native.append(Identity{id:"a".into(),version:1,revision:1},&serde_json::from_str(r#"{"body":"alpha"}"#).unwrap(),true).await.unwrap();
         let held=native.snapshot().await.unwrap();
-        assert!(accounting.bytes(375*1024*1024).is_err(),"live native writer retains its buffer");
+        assert!(accounting.bytes(2039*1024*1024).is_err(),"live native writer retains its buffer");
         drop(native);
-        let capacity=accounting.bytes(375*1024*1024).expect("joined writer must release buffer even with fixed reader");
+        let capacity=accounting.bytes(2039*1024*1024).expect("joined writer must release buffer even with fixed reader");
         assert_eq!(held.identities.len(),1);
         assert!(!crate::record::package_pins::retire_if_unpinned(&package,||{panic!("live Searcher must protect package")}).unwrap());
         drop(held);drop(capacity);
@@ -612,7 +612,7 @@ mod tests {
             .run(RecordPartition::create(&root.0, config()))
             .await
             .unwrap();
-        let slots = (0..4)
+        let slots = (0..16)
             .map(|_| {
                 governor
                     .admit(

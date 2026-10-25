@@ -297,8 +297,15 @@ mod tests {
     #[tokio::test]
     async fn resource_admission_rejects_before_wal_and_retries_after_space_returns() {
         let root=path();let mut settings=config();settings.max_record_bytes=1024*1024;settings.max_journal_bytes=8*1024*1024;
+        // Keep the document below the independent 1MiB record limit, while
+        // enough lexical fields make its conservative analysis exceed 1GiB.
+        for i in 0..12 {
+            let mut field=settings.schema.iter().find(|f| f.field=="body").unwrap().clone();
+            field.field=format!("budget-field-{i}");settings.schema.push(field);
+        }
         let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
         let request=write("oversized-analysis","a",&"a ".repeat(300_000),ExpectedVersion::Absent);
+        assert!(build_budget::document_estimate(request.document.as_ref().unwrap(), &settings.schema).unwrap() > crate::storage::build_budget::BUILD_MEMORY);
         assert!(matches!(p.write(request).await,Err(RecordError::Rejected(message)) if message.contains("build admission")));
         assert_eq!(p.inner.lock().await.state.seq,0);
         let accepted=write("oversized-analysis","a","alpha",ExpectedVersion::Absent);

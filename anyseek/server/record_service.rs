@@ -1679,18 +1679,30 @@ impl http_body::Body for AdmissionBody {
         }))))
     }
 }
+// Rejection occurs before reading the request body. HTTP/1 connections cannot
+// safely be reused with unread body bytes; declare closure instead of inducing
+// a later Broken pipe for an unrelated operation. HTTP/2 forbids this header.
+fn admission_refusal(error: Error, version: axum::http::Version) -> Response {
+    let mut response = error.into_response();
+    if matches!(version, axum::http::Version::HTTP_10 | axum::http::Version::HTTP_11) {
+        response.headers_mut().insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("close"));
+    }
+    response
+}
+
 async fn request_guard(
     State(service): State<Arc<Service>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    let version = request.version();
     let deadline = tokio::time::Instant::now() + service.request_timeout;
     let (request, scope) = match tokio::time::timeout_at(deadline, admission::request(&service, request)).await {
         Ok(Ok(value)) => value,
-        Ok(Err(error)) => return error.into_response(),
+        Ok(Err(error)) => return admission_refusal(error, version),
         // No handler or owned data task has started. A previous attempt can
         // still be running, so callers must keep the original operation ID.
-        Err(_) => return Error(StatusCode::TOO_MANY_REQUESTS, "busy", "admission deadline exceeded; retry the original operation identity".into()).into_response(),
+        Err(_) => return admission_refusal(Error(StatusCode::TOO_MANY_REQUESTS, "busy", "admission deadline exceeded; retry the original operation identity".into()), version),
     };
     if request.uri().path().ends_with("/query")
         && request.uri().query().is_some_and(|q| !q.is_empty())
@@ -2125,7 +2137,7 @@ mod tests {
         let app = router(service.clone());
         let key = STANDARD.encode([7;32]);
         let mut slow = Vec::new();
-        for id in ["c", "%63", "c", "%63"] {
+        for id in ["c", "%63"].into_iter().cycle().take(16) {
             let response = app.clone().oneshot(axum::http::Request::builder()
                 .uri(format!("/api/v1/index/{id}")).header("apikey", &key).body(Body::empty()).unwrap()).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK); slow.push(response);
@@ -2187,7 +2199,7 @@ mod tests {
         let scope = governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap();
         let response = scope.run(async { protected(Ok("pending output"), permit).unwrap() }).await;
         let mut others = Vec::new();
-        for _ in 0..3 { others.push(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap()); }
+        for _ in 0..15 { others.push(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap()); }
         assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_err());
         let mut body = response.into_body();
         let bytes = std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().unwrap().into_data().unwrap();
@@ -2561,4 +2573,15 @@ pub(crate) fn generate_openapi() {
     std::fs::write(parent.join("openapi.json"), &text).unwrap();
     // JSON is valid YAML 1.2; keep both existing output filenames consistent.
     std::fs::write(parent.join("openapi.yml"), text).unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn unread_admission_refusal_closes_only_http1_connections() {
+    for version in [axum::http::Version::HTTP_10, axum::http::Version::HTTP_11, axum::http::Version::HTTP_2] {
+        let response = admission_refusal(Error::from(CatalogError::Busy), version);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(axum::http::header::CONNECTION).map(|h| h.to_str().unwrap()),
+            if version == axum::http::Version::HTTP_2 { None } else { Some("close") });
+    }
 }

@@ -541,7 +541,7 @@ mod tests {
     async fn resource_refusal_precedes_put_and_verified_buffer_owns_charge() {
         let store = S3CompatibleStore::from_store(Arc::new(object_store::memory::InMemory::new()), 1024);
         let governor = Arc::new(resources::Governor::default());
-        let cap = 256 * 1024 * 1024;
+        let cap = 512 * 1024 * 1024;
         let scope = governor.admit("a".into(), Lane::Foreground, 0).unwrap();
         scope.clone().run(async {
             let full = scope.bytes(cap).unwrap();

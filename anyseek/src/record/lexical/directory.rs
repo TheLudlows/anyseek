@@ -385,7 +385,7 @@ mod tests {
         let mut writer = directory.open_write(Path::new("owned")).unwrap();
         drop(directory);
         drop(scope);
-        let other = (0..3)
+        let other = (0..15)
             .map(|_| governor.admit("collection".into(), lane, 0).unwrap())
             .collect::<Vec<_>>();
         assert!(governor.admit("collection".into(), lane, 0).is_err());

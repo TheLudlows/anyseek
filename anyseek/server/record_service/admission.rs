@@ -63,6 +63,6 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
         }
     }
     let scope = service.resources.admit(subject, lane, (MAX_BODY + MAX_RESPONSE) as u64)
-        .map_err(|_| Error::from(CatalogError::Busy))?;
+        .map_err(|error| Error(StatusCode::TOO_MANY_REQUESTS, "busy", error.to_string()))?;
     Ok((axum::extract::Request::from_parts(parts, body), scope))
 }

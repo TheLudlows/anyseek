@@ -11,9 +11,33 @@ use std::{
     },
 };
 const SHARED_MEMORY: u64 = 4 * 1024 * 1024 * 1024;
-pub(crate) const BUILD_MEMORY: u64 = 256 * 1024 * 1024;
+pub(crate) const BUILD_MEMORY: u64 = 1024 * 1024 * 1024;
 pub(crate) const EXPLICIT_BUFFERS: u64 = 64 * 1024 * 1024;
 static MEMORY: LazyLock<Arc<AtomicU64>> = LazyLock::new(|| Arc::new(AtomicU64::new(0)));
+#[derive(Debug, Clone, Copy)]
+struct MemoryLimits { single: u64, shared: u64 }
+impl MemoryLimits {
+    fn parse(single: Option<String>, shared: Option<String>) -> Result<Self, String> {
+        let read = |value: Option<String>, fallback, key| value.map_or(Ok(fallback), |s| s.parse::<u64>().map_err(|_| format!("invalid {key}")));
+        let single = read(single, BUILD_MEMORY, "ANYSEEK_BUILD_MEMORY_BYTES")?;
+        let shared = read(shared, SHARED_MEMORY, "ANYSEEK_BUILD_SHARED_MEMORY_BYTES")?;
+        if single < 64 * 1024 * 1024 || single > shared || shared > 8 * 1024 * 1024 * 1024 {
+            return Err("invalid build memory hierarchy: require 64MiB <= single <= shared <= 8GiB".into());
+        }
+        Ok(Self { single, shared })
+    }
+}
+static MEMORY_LIMITS: LazyLock<Result<MemoryLimits, String>> = LazyLock::new(|| {
+    let read = |key| match std::env::var(key) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err(format!("invalid {key}")),
+    };
+    MemoryLimits::parse(read("ANYSEEK_BUILD_MEMORY_BYTES")?, read("ANYSEEK_BUILD_SHARED_MEMORY_BYTES")?)
+});
+pub(crate) fn validate_configuration() -> Result<(), String> { MEMORY_LIMITS.as_ref().map(|_| ()).map_err(Clone::clone) }
+fn memory_limits() -> io::Result<MemoryLimits> { MEMORY_LIMITS.as_ref().copied().map_err(|e| io::Error::other(e.clone())) }
+
 fn exceeded() -> io::Error {
     io::Error::other("record build resource budget exceeded")
 }
@@ -25,30 +49,33 @@ pub(crate) fn reserve_memory(bytes: u64) -> io::Result<MemoryLease> {
     reserve_from(&MEMORY, bytes)
 }
 fn reserve_from(counter: &Arc<AtomicU64>, bytes: u64) -> io::Result<MemoryLease> {
-    if bytes > BUILD_MEMORY {
-        log::warn!("record build single reservation rejected: requested={bytes} limit={BUILD_MEMORY}");
-        return Err(exceeded());
+    let limits = memory_limits()?;
+    if bytes > limits.single {
+        log::warn!("record build single reservation rejected: requested={bytes} limit={}", limits.single);
+        return Err(io::Error::other(format!("record build resource budget exceeded: class=single requested={bytes} limit={}", limits.single)));
     }
     counter
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-            used.checked_add(bytes).filter(|n| *n <= SHARED_MEMORY)
+            used.checked_add(bytes).filter(|n| *n <= limits.shared)
         })
         .map_err(|used| {
-            log::warn!("record build shared reservation rejected: used={used} requested={bytes} limit={SHARED_MEMORY}");
-            exceeded()
+            log::warn!("record build shared reservation rejected: used={used} requested={bytes} limit={}", limits.shared);
+            io::Error::other(format!("record build resource budget exceeded: class=shared used={used} requested={bytes} limit={}", limits.shared))
         })?;
     Ok(MemoryLease(bytes, counter.clone()))
 }
 impl MemoryLease {
     pub(crate) fn can_grow(&self, bytes: u64) -> bool {
-        self.0.checked_add(bytes).is_some_and(|n| n <= BUILD_MEMORY)
+        memory_limits().is_ok_and(|limits| self.0.checked_add(bytes).is_some_and(|n| n <= limits.single))
     }
+    #[track_caller]
     pub(crate) fn grow(&mut self, bytes: u64) -> io::Result<()> {
+        let limits = memory_limits()?;
         let next = self
             .0
             .checked_add(bytes)
-            .filter(|n| *n <= BUILD_MEMORY)
-            .ok_or_else(exceeded)?;
+            .filter(|n| *n <= limits.single)
+            .ok_or_else(|| io::Error::other(format!("record build resource budget exceeded: class=single_growth used={} requested={bytes} limit={} caller={}", self.0, limits.single, std::panic::Location::caller())))?;
         let mut added = reserve_from(&self.1, bytes)?;
         self.0 = next;
         added.0 = 0;
@@ -426,6 +453,14 @@ mod tests {
         drop(file);
         drop(scope);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn memory_configuration_rejects_unbounded_or_inconsistent_limits() {
+        assert!(MemoryLimits::parse(None, None).is_ok());
+        assert!(MemoryLimits::parse(Some("536870912".into()), Some("1073741824".into())).is_ok());
+        for (single, shared) in [("0", "1073741824"), ("1073741824", "536870912"), ("bad", "1073741824"), ("1073741824", "18446744073709551615")] {
+            assert!(MemoryLimits::parse(Some(single.into()), Some(shared.into())).is_err());
+        }
     }
     #[test]
     fn memory_admission_rejects_overflow_and_releases() {
