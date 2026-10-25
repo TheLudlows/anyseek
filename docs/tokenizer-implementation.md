@@ -53,19 +53,19 @@ still has its own leases; a 20-owner test verifies local admission is released.
 ## Acceptance
 
 - [x] Default-feature dependency/API probe passed; no duplicate engine/API.
-- [ ] No-default and complete feature regression.
-- [ ] Index/query use the same basic analysis; mixed Chinese/English, punctuation,
+- [x] No-default and complete feature regression.
+- [x] Index/query use the same basic analysis; mixed Chinese/English, punctuation,
   long tokens, OpenCC, phrases, offsets/positions, N-grams and fields are covered.
-- [ ] New defaults and deliberate segmentation changes documented; no AND→OR
+- [x] New defaults and deliberate segmentation changes documented; no AND→OR
   change, no silent term truncation, no altered ranking formula or active corpus.
-- [ ] Immediate visibility, reopen/recovery, authenticated configuration identity,
+- [x] Immediate visibility, reopen/recovery, authenticated configuration identity,
   package pins and budget ownership remain covered.
 - [x] Removed unused WordSegmentationTM and its exclusive 349,045-line dictionary after the native Record Chinese write/reopen/phrase regression passed.
-- [ ] Reuse the fixed 40 query/qrels diagnostic with original questions and fixed
+- [x] Reuse the fixed 40 query/qrels diagnostic with original questions and fixed
   keyword queries reported separately. Disclose corpus coverage and AND/OR versus
   Meili all/last. Use equal smaller corpora if master budgets block 1000 documents;
   do not merge/increase budgets or rank empty-result QPS.
-- [ ] Run applicable full regressions and document exact evidence and limits.
+- [x] Run applicable full regressions and document exact evidence and limits.
 
 Tokenizer work remains local-only. Separate budget PR #83 is authorized and contains none of this work. No tokenizer push/PR, merge or issue edit.
 
@@ -78,5 +78,18 @@ Production implementation: `253df6e6e8e10f6294af67a2158d55d12bfe2877` (not publi
 exercised by passing parents, dedicated real S3, and manual opposite-AES testing.
 The three new production/ownership tests passed in this complete run.
 
-No-default/doc/service/quality steps are still pending. Windows, real S3,
+No-default core: **200 passed, 0 failed, 10 subprocess workers ignored**.
+Default/no-default doctests: **9 passed each**. Ordinary HTTP/restart, S3 fixture
+object contract, seven cold-cache semantics groups and storage/backup/GC matrix
+all completed with exit 0. The fixed 1,000-document quality diagnostic and
+separate 256-document old/new Chinese comparison completed with no query errors.
+See [results and limitations](../benchmarks/tokenizer/RESULTS.md). Windows, real S3,
 system power loss and manual opposite-AES are not validated by this local run.
+
+Maintenance cost: the old 191-line Chinese algorithm and exclusive 349,045-line
+frequency dictionary are removed; the Chinese dictionary is now supplied by the
+pinned MIT component, not eliminated. Cargo.lock adds 22 resolved packages, with
+one Tantivy 0.27.0 and one tokenizer-api 0.7.0. The shared dictionary keeps its
+80 MiB logical reservation for process life; no capacity or lane cap is raised.
+The 256-document paired diagnostic has a small keyword-OR quality regression,
+explicitly retained in the results, so this is not a universal quality-upgrade claim.

@@ -1,0 +1,435 @@
+{
+  "production_code_revision": "253df6e6e8e10f6294af67a2158d55d12bfe2877",
+  "current_and_meili_1000": {
+    "anyseek": {
+      "engine": "anyseek",
+      "requested": 1000,
+      "status": "complete",
+      "build_visible_seconds": 15.769446189000519,
+      "visible_count": 1000,
+      "checkpoint": {
+        "visible_seq": 1000,
+        "indexed_seq": 1000
+      },
+      "reopened_count": 1000,
+      "quality": [
+        {
+          "input": "questions",
+          "mode": "and",
+          "queries": 40,
+          "errors": 0,
+          "empty": 40,
+          "recall10": 0.0,
+          "ndcg10": 0.0,
+          "mrr10": 0.0
+        },
+        {
+          "input": "questions",
+          "mode": "or",
+          "queries": 40,
+          "errors": 0,
+          "empty": 0,
+          "recall10": 0.7754166666666666,
+          "ndcg10": 0.5027231728115718,
+          "mrr10": 0.45268849206349204
+        },
+        {
+          "input": "keywords",
+          "mode": "and",
+          "queries": 40,
+          "errors": 0,
+          "empty": 13,
+          "recall10": 0.24726190476190477,
+          "ndcg10": 0.25873289736678684,
+          "mrr10": 0.3458333333333333
+        },
+        {
+          "input": "keywords",
+          "mode": "or",
+          "queries": 40,
+          "errors": 0,
+          "empty": 0,
+          "recall10": 0.7941666666666667,
+          "ndcg10": 0.5328753782495406,
+          "mrr10": 0.48669642857142853
+        }
+      ],
+      "raw_verification": {
+        "checks": 1392,
+        "scope": "every document by ID after reopen, plus returned question hits"
+      },
+      "disk": {
+        "logical_bytes": 7288188,
+        "allocated_bytes": 2191360
+      },
+      "peak_rss_kib": 168576
+    },
+    "meili": {
+      "engine": "meili",
+      "requested": 1000,
+      "status": "complete",
+      "build_visible_seconds": 1.1266417090000687,
+      "visible_count": 1000,
+      "checkpoint": {
+        "note": "no equivalent per-index checkpoint requested; successful asynchronous task and process-reopen verification used"
+      },
+      "reopened_count": 1000,
+      "quality": [
+        {
+          "input": "questions",
+          "mode": "all",
+          "queries": 40,
+          "errors": 0,
+          "empty": 40,
+          "recall10": 0.0,
+          "ndcg10": 0.0,
+          "mrr10": 0.0
+        },
+        {
+          "input": "questions",
+          "mode": "last",
+          "queries": 40,
+          "errors": 0,
+          "empty": 1,
+          "recall10": 0.6925,
+          "ndcg10": 0.42788476948041587,
+          "mrr10": 0.3954761904761905
+        },
+        {
+          "input": "keywords",
+          "mode": "all",
+          "queries": 40,
+          "errors": 0,
+          "empty": 8,
+          "recall10": 0.42642857142857143,
+          "ndcg10": 0.3813841256895963,
+          "mrr10": 0.4325
+        },
+        {
+          "input": "keywords",
+          "mode": "last",
+          "queries": 40,
+          "errors": 0,
+          "empty": 0,
+          "recall10": 0.8425,
+          "ndcg10": 0.5976320148449141,
+          "mrr10": 0.5835019841269842
+        }
+      ],
+      "raw_verification": {
+        "checks": 1000,
+        "scope": "every document by ID after reopen, plus returned question hits"
+      },
+      "disk": {
+        "logical_bytes": 28520710,
+        "allocated_bytes": 28401664
+      },
+      "peak_rss_kib": 159628
+    },
+    "limitations": [
+      "relevance-enriched sampled corpus, not full MIRACL",
+      "keyword qrels are a proxy",
+      "AND/all tokenization differs; OR/last are not equivalent",
+      "quality diagnostic only; no QPS ranking"
+    ]
+  },
+  "previous_default_1000": {
+    "engine": "anyseek",
+    "requested": 1000,
+    "status": "complete",
+    "build_visible_seconds": 14.01812730599977,
+    "visible_count": 1000,
+    "checkpoint": {
+      "visible_seq": 1000,
+      "indexed_seq": 1000
+    },
+    "reopened_count": 1000,
+    "quality": [
+      {
+        "input": "questions",
+        "mode": "and",
+        "queries": 40,
+        "errors": 0,
+        "empty": 40,
+        "recall10": 0.0,
+        "ndcg10": 0.0,
+        "mrr10": 0.0
+      },
+      {
+        "input": "questions",
+        "mode": "or",
+        "queries": 40,
+        "errors": 0,
+        "empty": 38,
+        "recall10": 0.025,
+        "ndcg10": 0.008333333333333333,
+        "mrr10": 0.0035714285714285713
+      },
+      {
+        "input": "keywords",
+        "mode": "and",
+        "queries": 40,
+        "errors": 0,
+        "empty": 40,
+        "recall10": 0.0,
+        "ndcg10": 0.0,
+        "mrr10": 0.0
+      },
+      {
+        "input": "keywords",
+        "mode": "or",
+        "queries": 40,
+        "errors": 0,
+        "empty": 8,
+        "recall10": 0.2029166666666667,
+        "ndcg10": 0.15463564648910175,
+        "mrr10": 0.178125
+      }
+    ],
+    "raw_verification": {
+      "checks": 1012,
+      "scope": "every document by ID after reopen, plus returned question hits"
+    },
+    "disk": {
+      "logical_bytes": 7561881,
+      "allocated_bytes": 2465792
+    },
+    "peak_rss_kib": 131556
+  },
+  "paired_chinese_256": {
+    "previous": {
+      "engine": "anyseek",
+      "requested": 256,
+      "status": "complete",
+      "build_visible_seconds": 3.391266779000034,
+      "visible_count": 256,
+      "checkpoint": {
+        "visible_seq": 256,
+        "indexed_seq": 256
+      },
+      "reopened_count": 256,
+      "quality": [
+        {
+          "input": "questions",
+          "mode": "and",
+          "queries": 40,
+          "errors": 0,
+          "empty": 40,
+          "recall10": 0.0,
+          "ndcg10": 0.0,
+          "mrr10": 0.0
+        },
+        {
+          "input": "questions",
+          "mode": "or",
+          "queries": 40,
+          "errors": 0,
+          "empty": 1,
+          "recall10": 0.9241666666666667,
+          "ndcg10": 0.7630322446872608,
+          "mrr10": 0.744375
+        },
+        {
+          "input": "keywords",
+          "mode": "and",
+          "queries": 40,
+          "errors": 0,
+          "empty": 23,
+          "recall10": 0.24726190476190477,
+          "ndcg10": 0.2701854527613156,
+          "mrr10": 0.3625
+        },
+        {
+          "input": "keywords",
+          "mode": "or",
+          "queries": 40,
+          "errors": 0,
+          "empty": 1,
+          "recall10": 0.95,
+          "ndcg10": 0.8033451001479085,
+          "mrr10": 0.7991666666666666
+        }
+      ],
+      "raw_verification": {
+        "checks": 646,
+        "scope": "every document by ID after reopen, plus returned question hits"
+      },
+      "disk": {
+        "logical_bytes": 5822143,
+        "allocated_bytes": 684032
+      },
+      "peak_rss_kib": 196940
+    },
+    "current": {
+      "engine": "anyseek",
+      "requested": 256,
+      "status": "complete",
+      "build_visible_seconds": 3.1582875020003485,
+      "visible_count": 256,
+      "checkpoint": {
+        "visible_seq": 256,
+        "indexed_seq": 256
+      },
+      "reopened_count": 256,
+      "quality": [
+        {
+          "input": "questions",
+          "mode": "and",
+          "queries": 40,
+          "errors": 0,
+          "empty": 40,
+          "recall10": 0.0,
+          "ndcg10": 0.0,
+          "mrr10": 0.0
+        },
+        {
+          "input": "questions",
+          "mode": "or",
+          "queries": 40,
+          "errors": 0,
+          "empty": 1,
+          "recall10": 0.9241666666666667,
+          "ndcg10": 0.7661495230001754,
+          "mrr10": 0.7558333333333334
+        },
+        {
+          "input": "keywords",
+          "mode": "and",
+          "queries": 40,
+          "errors": 0,
+          "empty": 23,
+          "recall10": 0.24726190476190477,
+          "ndcg10": 0.2701854527613156,
+          "mrr10": 0.3625
+        },
+        {
+          "input": "keywords",
+          "mode": "or",
+          "queries": 40,
+          "errors": 0,
+          "empty": 1,
+          "recall10": 0.9416666666666667,
+          "ndcg10": 0.7949433108832769,
+          "mrr10": 0.7879166666666666
+        }
+      ],
+      "raw_verification": {
+        "checks": 646,
+        "scope": "every document by ID after reopen, plus returned question hits"
+      },
+      "disk": {
+        "logical_bytes": 5811731,
+        "allocated_bytes": 675840
+      },
+      "peak_rss_kib": 118160
+    }
+  },
+  "validation": {
+    "code_revision": "253df6e6e8e10f6294af67a2158d55d12bfe2877",
+    "alltargets": {
+      "code_revision": "253df6e6e8e10f6294af67a2158d55d12bfe2877",
+      "harnesses": 35,
+      "passed": 345,
+      "failed": 0,
+      "ignored": 13,
+      "exit": 0
+    },
+    "steps": [
+      {
+        "step": "alltargets",
+        "exit": 0,
+        "finished": 1792933890.491626
+      },
+      {
+        "step": "no-default",
+        "exit": 0,
+        "finished": 1792934017.052791
+      },
+      {
+        "step": "doc-default",
+        "exit": 0,
+        "finished": 1792934030.938181
+      },
+      {
+        "step": "doc-no-default",
+        "exit": 0,
+        "finished": 1792934044.5426412
+      },
+      {
+        "step": "release",
+        "exit": 0,
+        "finished": 1792934389.4905925
+      },
+      {
+        "step": "quality",
+        "exit": 0,
+        "finish": 1792934416.1728818
+      },
+      {
+        "step": "http",
+        "exit": 0,
+        "finish": 1792934422.5745416
+      },
+      {
+        "step": "fault-build",
+        "exit": 0,
+        "finish": 1792934462.3069026
+      },
+      {
+        "step": "s3-contract",
+        "exit": 0,
+        "finish": 1792934463.0674431
+      },
+      {
+        "step": "s3-semantic",
+        "exit": 0,
+        "finish": 1792935087.974663
+      },
+      {
+        "step": "s3-storage",
+        "exit": 0,
+        "finish": 1792935243.245134
+      }
+    ],
+    "no_default": {
+      "passed": 200,
+      "failed": 0,
+      "ignored_workers": 10
+    },
+    "doctests": {
+      "default": 9,
+      "no_default": 9
+    },
+    "binaries": {
+      "release": "0badaf4a1d270042330539943d71e3d89b69de7609304b21cc630dda57ce1893",
+      "fault_injection": "843baa11b3383f248fd1aead7ac874edf344f3cf9cbf97beafeae5648b47c066"
+    },
+    "unverified": [
+      "Windows",
+      "real S3",
+      "system power loss",
+      "manual opposite AES build"
+    ]
+  },
+  "input_hashes": {
+    "corpus-1000.json": "dcdeaa9f3136686a3e717d2324ea129036a1c240f29ed283e902ede4dca3201a",
+    "queries.json": "d0f5c9d6fa8fc4d16bdf1563af457dfb59f60e58c365b20c07209838a18d881a",
+    "selection-manifest.json": "4acfb195d05c8c1990d8cb4de15912d29302b868c73c1d746f9055ef0b1cb6c0",
+    "qrels.miracl-v1.0-zh-dev.tsv": "5546474d3dc8139014e6571e9f4041848bb0a314ca6d2d4bac708174d71c59eb",
+    "topics.miracl-v1.0-zh-dev.tsv": "5b284a9aabf08bb2d1c88ed7ea276025c9d23846457c5350dc8d391b5e0d0a13"
+  },
+  "paired_manifest": {
+    "code_revision": "6d28798a300bb947b2eb1d3e48e928d193103e17",
+    "binary_sha256": "f113cde6bd36384434977c222db75fbd27b3f5cf363266a976ce03221b36792e",
+    "tokenizer": "paired UnicodeAlphanumericZH / JiebaMixedV1",
+    "corpus_sha256": "dcdeaa9f3136686a3e717d2324ea129036a1c240f29ed283e902ede4dca3201a",
+    "queries_sha256": "d0f5c9d6fa8fc4d16bdf1563af457dfb59f60e58c365b20c07209838a18d881a",
+    "keywords_sha256": "d46949cabe5e48ece3a8364cca48f42e953c554af530aaa7dc95f90bd4535e3b",
+    "scope": "paired 256-doc Chinese analysis only; never mix with 1000-doc metrics",
+    "new_binary_sha256": "0badaf4a1d270042330539943d71e3d89b69de7609304b21cc630dda57ce1893",
+    "selected_count": 256,
+    "selected_sha256": "97255c6ff72cb84b9163548ce7ff74e113eca7179e17e0919e67442d9f26122c",
+    "seed": "anyseek-tokenizer-20261025-v1",
+    "all_91_positives_present": true
+  }
+}

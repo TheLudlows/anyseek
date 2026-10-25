@@ -29,4 +29,20 @@ quality evidence, and must not be extrapolated to 1000/5000/100000.
 - Services run separately; no concurrent compilation during measurements. No
   model, capacity increase, budget-branch merge or multi-collection workaround.
 
-Execution is pending; this protocol is not a result claim.
+Execution completed locally; see [results](RESULTS.md). The additional old-default
+1,000-document rerun and old/new Chinese 256-document paired run are separately
+labeled; neither overwrites or substitutes for the successful 1,000-document run.
+
+
+The current and Meili comparison used all 1,000 documents. For direct comparison
+with the retired Chinese algorithm, a separately named 256-document paired run
+kept all 91 positives and used the predeclared fallback seed for distractors.
+Both legacy/current Chinese profiles used the same new isolated roots and data;
+these numbers are never substituted into the 1,000-document result table.
+
+For the verified pre-change default, run `compare_previous.py --data ...
+--binary /path/to/verified-old-anyseek --out /new/path`. Adding `--new-binary
+/path/to/current-anyseek` runs the paired Chinese diagnostic instead. The script
+requires the recorded old release binary hash and refuses inherited ANYSEEK
+configuration overrides. [RESULTS.json](RESULTS.json) retains the numeric summaries;
+full request/response and source hashes remain in the separately named raw directories.

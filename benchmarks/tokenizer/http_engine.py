@@ -81,7 +81,7 @@ class Engine:
     def create(self):
         if self.name=='anyseek':
             cfg={'index_name':'benchmark','schema':[{'field':f,'field_type':'Text','index_lexical':f in ['title','text'],'store':True} for f in ['id','docid','title','text']]+[{'field':'date','field_type':'Timestamp','index_lexical':False,'filterable':True,'store':False}]}
-            if self.profile=='restricted':cfg['tokenizer']='JiebaMixedV1'
+            if self.profile=='restricted':cfg['tokenizer']=os.environ.get('TOKENIZER_PROFILE','JiebaMixedV1')
             self.seq+=1;self.request('POST','/api/v1/index',{'operation_id':op(self.seq),'collection_id':'bench','config':cfg})
             dump(self.out/'settings.json',self.request('GET','/api/v1/index/bench')[1])
         else:
