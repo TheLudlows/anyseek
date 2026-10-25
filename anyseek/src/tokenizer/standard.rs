@@ -78,13 +78,9 @@ impl StandardAnalyzer {
         let mut result: Vec<String> = Vec::new();
         let mut in_phrase = false;
         let mut pending_open = false;
-        // Preserve the legacy Unicode query span boundaries before the analyzer
-        // discards punctuation. Otherwise `alpha,-beta` loses NOT and
-        // `("alpha beta")` loses its phrase markers. Internal +/-/# remain
-        // within a span, as before; this does not introduce a new grammar.
-        for span in text.split(|c: char| {
-            !regex_syntax::is_word_character(c) && !matches!(c, '"' | '+' | '-' | '#')
-        }).filter(|span| !span.is_empty()) {
+        // Split only at syntax boundaries, not every punctuation character:
+        // Jieba can retain ordinary compounds such as AT&T as a single token.
+        for span in query_spans(text) {
             let (sign, body) = if span.starts_with(['+', '-']) {
                 (&span[..1], &span[1..])
             } else {
@@ -135,4 +131,35 @@ impl StandardAnalyzer {
         }
         result
     }
+}
+
+/// Preserve legacy operator placement without changing the analyzer's ordinary
+/// word boundaries. Punctuation is retained unless it borders actual syntax.
+fn query_spans(text: &str) -> Vec<&str> {
+    let separator = |c: char| {
+        !regex_syntax::is_word_character(c) && !matches!(c, '"' | '+' | '-' | '#')
+    };
+    let mut spans = Vec::new();
+    let mut start = 0;
+    let mut previous = None;
+    let mut chars = text.char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
+        let end = offset + c.len_utf8();
+        if c.is_whitespace() {
+            if start < offset { spans.push(&text[start..offset]); }
+            start = end;
+        } else {
+            if matches!(c, '+' | '-' | '"') && previous.is_some_and(separator) && start < offset {
+                spans.push(&text[start..offset]);
+                start = offset;
+            }
+            if c == '"' && chars.peek().is_some_and(|(_, next)| separator(*next)) {
+                if start < end { spans.push(&text[start..end]); }
+                start = end;
+            }
+        }
+        previous = Some(c);
+    }
+    if start < text.len() { spans.push(&text[start..]); }
+    spans
 }

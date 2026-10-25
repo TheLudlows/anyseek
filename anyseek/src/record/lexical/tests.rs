@@ -1136,17 +1136,22 @@ async fn punctuation_adjacent_query_operators_match_legacy_boundaries() {
     let mut outcomes=Vec::new();
     for profile in profiles {
         let root=Temp::new();let mut settings=config();settings.index.tokenizer=profile;settings.index.ngram_indexing=0;
-        let p=RecordPartition::create(&root.0,settings).await.unwrap();
+        let mut p=RecordPartition::create(&root.0,settings).await.unwrap();
         for (id,body) in [("a","alpha"),("b","alpha beta"),("c","alpha beta gamma"),("d","alpha beta gap gamma")] {
             p.write(write(id,id,body,ExpectedVersion::Absent)).await.unwrap();
         }
+        for state in 0..3 {
+        if state==1 {p.compact_journal().await.unwrap();}
+        if state==2 {drop(p);p=RecordPartition::open(&root.0,1024*1024).await.unwrap();}
         let mut results=Vec::new();
         for text in ["alpha -beta","alpha,-beta","\"alpha beta\" gamma","\"alpha beta\", gamma","\"alpha beta\"","(\"alpha beta\")",",\"alpha beta\","] {
             let result=p.query(RecordQuery{text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Union,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
             let ids=result.hits.iter().map(|h|h.record.record_id.clone()).collect::<BTreeSet<_>>();
-            println!("{profile:?} {text:?}: {ids:?} count={}",result.count_total);results.push(ids);
+            assert_eq!(result.count_total,ids.len(),"{profile:?} state={state} query={text}");
+            println!("{profile:?} state={state} {text:?}: {ids:?} count={}",result.count_total);results.push(ids);
         }
         outcomes.push(results);
+        }
     }
     // Pin the existing language, not merely agreement between implementations.
     assert_eq!(outcomes[0][0], BTreeSet::from(["a".to_owned()]));
@@ -1154,4 +1159,34 @@ async fn punctuation_adjacent_query_operators_match_legacy_boundaries() {
     assert_eq!(outcomes[0][4], ["b","c","d"].into_iter().map(str::to_owned).collect());
     for results in &outcomes {assert_eq!(results[0],results[1]);assert_eq!(results[2],results[3]);assert_eq!(results[4],results[5]);assert_eq!(results[4],results[6]);}
     for results in &outcomes[1..] {assert_eq!(results,&outcomes[0]);}
+}
+
+#[tokio::test]
+async fn standard_punctuation_document_query_analysis_is_identical() {
+    use crate::{index::TokenizerType, record::{RecordPartition, ExpectedVersion, RecordQuery}, search::{QueryType, ResultType, SearchMode}, tokenizer::standard::StandardAnalyzer};
+    use crate::record::tests::{config, write};
+    let profiles=vec![TokenizerType::TantivySimpleV1];
+    #[cfg(feature="zh")]
+    let profiles={let mut p=profiles;p.push(TokenizerType::JiebaMixedV1);p};
+    let mut mismatches=Vec::new();
+    for profile in profiles {
+        let analyzer=StandardAnalyzer::new(profile).unwrap();
+        let root=Temp::new();let mut settings=config();settings.index.tokenizer=profile;settings.index.ngram_indexing=0;
+        let mut p=RecordPartition::create(&root.0,settings).await.unwrap();
+        for (id,text) in [("decimal","3.14"),("domain","foo.bar"),("ampersand","AT&T"),("percent","100%"),("url","www.example.com")] {
+            p.write(write(id,id,text,ExpectedVersion::Absent)).await.unwrap();
+        }
+        for state in 0..3 {
+        if state==1 {p.compact_journal().await.unwrap();}
+        if state==2 {drop(p);p=RecordPartition::open(&root.0,1024*1024).await.unwrap();}
+        for (id,text) in [("decimal","3.14"),("domain","foo.bar"),("ampersand","AT&T"),("percent","100%"),("url","www.example.com")] {
+            let indexed=analyzer.terms(text,false);let queried=analyzer.terms(text,true);
+            let result=p.query(RecordQuery{text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Intersection,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
+            let ids=result.hits.iter().map(|h|h.record.record_id.clone()).collect::<BTreeSet<_>>();
+            println!("{profile:?} {text:?}: index={indexed:?} query={queried:?} ids={ids:?}");
+            if indexed!=queried || ids!=BTreeSet::from([id.to_owned()]) || result.count_total!=1 {mismatches.push(format!("{profile:?} {text:?}"));}
+        }
+    }
+    }
+    assert!(mismatches.is_empty(),"{mismatches:?}");
 }
