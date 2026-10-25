@@ -1,6 +1,7 @@
 """Current-master HTTP capacity boundary; no engine overrides or swallowed rejects."""
 import argparse,json,pathlib,os,time,hashlib
 from http_engine import Engine,doc,dump,op
+from observation import observe_batch
 class Current(Engine):
  def create(self):
   cfg={'index_name':'capacity-baseline','schema':[{'field':f,'field_type':'Text','index_lexical':f in ['title','text'],'store':True} for f in ['id','docid','title','text']]}
@@ -30,12 +31,21 @@ def main():
     elif failed is None:failed=(w,result);summary['first_failure']={'ordinal':i+j+1,'http_status':code,'result':result,'operation_id':w['operation_id']}
    summary['accepted']=len(accepted);dump(a.out/'summary.json',summary)
    if i%250==0:print('loaded',len(accepted),'attempted',summary['attempted'],flush=True)
-   if failed:break
+   if failed:
+    # Preserve the original error and accepted-response count. The owned batch
+    # may continue after the HTTP response deadline; never close it immediately.
+    e.phase='observe_unknown';summary['load_seconds']=time.monotonic()-start
+    observation=observe_batch(e,writes);dump(a.out/'unknown-observation.json',observation)
+    summary['unknown_observation']={'submitted':observation['submitted'],'observed_receipts':len(observation['observed_receipts']),'all_receipts_observed':observation['all_receipts_observed'],'info':observation['info']}
+    summary['leave_service_running']=not observation['all_receipts_observed']
+    summary['status']='boundary_observed';dump(a.out/'accepted-docids.json',accepted);return
    if len(accepted) in (10000,20000,50000) and len(accepted)<len(rows):
     e.phase='milestone';milestone={'accepted':len(accepted),'visible_before':e.count()};t=time.monotonic()
     milestone['checkpoint']=e.request('PATCH','/api/v1/index/bench',required=False)[:2];milestone['checkpoint_seconds']=time.monotonic()-t
     summary.setdefault('milestones',[]).append(milestone);dump(a.out/'summary.json',summary)
-    if milestone['checkpoint'][0]!=200:raise RuntimeError(('milestone checkpoint failed',milestone))
+    if milestone['checkpoint'][0]!=200:
+     summary['leave_service_running']=True
+     raise RuntimeError(('milestone checkpoint failed; service retained for observation',milestone))
     e.stop();milestone['reopen_ms']=e.start();milestone['visible_after']=e.count()
     milestone['retry']=e.request('POST','/api/v1/index/bench/batch',{'writes':[last[0]]},required=False)[:2]
     assert milestone['visible_after']==len(accepted),(len(accepted),milestone)
@@ -49,12 +59,18 @@ def main():
    probes.append({'qid':q['qid'],'group':q['group'],'status':status,'response':body,'ms':ms})
   dump(a.out/'query-probes.json',probes);summary['query_errors']=sum(r['status']!=200 for r in probes)
   e.phase='checkpoint';t=time.monotonic();summary['checkpoint']=e.request('PATCH','/api/v1/index/bench',required=False)[:2];summary['checkpoint_seconds']=time.monotonic()-t
+  if summary['checkpoint'][0]!=200:
+   summary['leave_service_running']=True
+   raise RuntimeError(('final checkpoint failed; service retained for observation',summary['checkpoint']))
   e.stop();e.phase='reopen';summary['reopen_ms']=e.start();summary['visible_after']=e.count()
   if last:
    summary['accepted_retry']=e.request('POST','/api/v1/index/bench/batch',{'writes':[last[0]]},required=False)[:2];summary['original_accepted_result']=last[1]
-  if failed:summary['failed_retry']=e.request('POST','/api/v1/index/bench/batch',{'writes':[failed[0]]},required=False)[:2]
   summary['visible_after_retries']=e.count();summary['status']='resource_stopped' if 'resource_stop' in summary else ('boundary_observed' if failed else 'target_loaded');dump(a.out/'accepted-docids.json',accepted)
  except Exception as exc:summary['status']='failed';summary['exception']=repr(exc)
  finally:
-  e.close();summary['peak_rss_kib']=max((x['rss_kib'] for x in e.resources),default=0);dump(a.out/'summary.json',summary);print(json.dumps(summary,ensure_ascii=False),flush=True)
+  if summary.get('leave_service_running'):
+   summary['live_service']={'pid':e.process.pid,'port':e.port,'data':str(e.data),'reason':'unknown work retained; inspect before stopping or retrying'}
+   e.stop_sample.set();e.sampler.join(timeout=2);dump(a.out/'resources.json',e.resources);e.writer.close()
+  else:e.close()
+  summary['peak_rss_kib']=max((x['rss_kib'] for x in e.resources),default=0);dump(a.out/'summary.json',summary);print(json.dumps(summary,ensure_ascii=False),flush=True)
 if __name__=='__main__':main()

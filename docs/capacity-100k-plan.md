@@ -291,3 +291,33 @@ Running orchestration: `/tmp/anyseek-capacity-phase20.py`, results
 `/tmp/anyseek-capacity-phase20-http-100k/`. Do not start duplicate runs or overwrite
 the measured binary. Publication remains blocked pending the specific approval;
 all new implementation and documentation commits are local only.
+
+## First real staircase boundary and observation correction
+
+The b03ba58 staircase stopped at11900 first-response-confirmed writes out of11925
+submitted. The next batch returned HTTP503 `outcome_unknown` after30002.62ms:
+`request deadline exceeded; retry the original operation identity`. The server
+request deadline is30s; this was NOT the client's35s checkpoint timeout and no
+memory-budget refusal was reported. The immediate count probe returned503
+`RecoveryRequired`, after which the old harness terminated its service.
+
+Read-only reopen of the retained root recovered11921 active identities and11921
+operations (checkpoint bytes19396910). Original operation `benchmark-00011902`
+has confirmed receipt sequence11901, proving the missing batch response did not
+mean all25 writes failed. Earlier sampled receipts also match. Subsequent
+observation used a120s client read timeout, recorded separately from the unchanged
+first-pass35s setting. No writes or checkpoints were resubmitted. Evidence:
+`/tmp/anyseek-capacity-phase20-http-100k/summary.json`, `events.jsonl`,
+`readonly-diagnosis/result.json`, and the retained database.
+
+This run does not establish a permanent engine fence: the harness shut down an
+accepted owned batch before observing its final outcome. Fix only the experimental
+observer first: after a missing/error batch response, poll GET operation receipts
+and index status; retain first-pass failure/counts; never retry writes. If receipts
+remain unresolved, leave the service alive for inspection. Failed maintenance
+requests likewise leave their service alive. The service30s and normal client35s
+deadlines are unchanged. The observer's120s polling budget has bounded per-request
+HTTP waits and is not a first-pass success criterion. Two driver regression tests
+verify GET-only observation and no rejection inference from missing receipts.
+A fresh-root same-binary/config/corpus reproduction follows; no production fix or
+100k success is inferred from this instrumentation correction.

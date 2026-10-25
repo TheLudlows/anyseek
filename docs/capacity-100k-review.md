@@ -55,6 +55,8 @@ reserves remain16MiB. Migration/old-format readers were not added.
    real staircase. Existing experiment cleanup terminates its service on error:
    that exit alone is not a spontaneous service crash. Read-only process/RSS/I/O
    observations are retained in `/tmp/anyseek-capacity-phase20-observations.jsonl`.
+   OS permission denied I/O-counter reads; CPU/RSS observations remain available,
+   and the denied I/O read is not retried.
 5. New all-targets/no-default/Windows/complete HTTP-S3 matrices remain outstanding
    for this cumulative capacity implementation. Real S3/system power-loss/manual
    cross-AES validation is not claimed. Process-exit fixtures are not power loss.
