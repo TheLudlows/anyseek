@@ -78,7 +78,13 @@ impl StandardAnalyzer {
         let mut result: Vec<String> = Vec::new();
         let mut in_phrase = false;
         let mut pending_open = false;
-        for span in text.split_whitespace() {
+        // Preserve the legacy Unicode query span boundaries before the analyzer
+        // discards punctuation. Otherwise `alpha,-beta` loses NOT and
+        // `("alpha beta")` loses its phrase markers. Internal +/-/# remain
+        // within a span, as before; this does not introduce a new grammar.
+        for span in text.split(|c: char| {
+            !regex_syntax::is_word_character(c) && !matches!(c, '"' | '+' | '-' | '#')
+        }).filter(|span| !span.is_empty()) {
             let (sign, body) = if span.starts_with(['+', '-']) {
                 (&span[..1], &span[1..])
             } else {
