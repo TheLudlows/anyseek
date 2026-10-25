@@ -397,6 +397,73 @@ mod tests {
     use crate::record::{ExpectedVersion, RecordPartition};
     use crate::search::{ResultType, SearchMode};
     #[tokio::test]
+    async fn analysis_byte_boundary_and_one_large_document_drain_without_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let mut settings = config(); settings.max_record_bytes = 256 * 1024;
+        let governor = Arc::new(crate::resources::Governor::default());
+        let scope = governor.admit("byte-boundary".into(), crate::resources::Lane::Foreground, 0).unwrap();
+        let native = scope.clone().run(async { Runtime::create(&package.join("native"), &settings).unwrap() }).await;
+        let doc: Document = serde_json::from_value(serde_json::json!({"body":"alpha ".repeat(10_000)})).unwrap();
+        let estimate = crate::record::build_budget::document_estimate(&doc, &settings.schema).unwrap();
+        assert!(estimate * 2 <= ANALYSIS_BATCH_BYTES && estimate * 3 > ANALYSIS_BATCH_BYTES);
+        for i in 0..3 {
+            scope.clone().run(native.append(Identity { id: format!("r-{i}"), version: 1, revision: i+1 }, &doc, false)).await.unwrap();
+        }
+        assert_eq!(native.data.lock().await.pending_analysis_documents, 1, "byte ceiling must drain before the third doc, independently of count128");
+        let remaining = scope.bytes(512*1024*1024-estimate).unwrap();
+        assert!(scope.bytes(1).is_err()); drop(remaining);
+        let large: Document = serde_json::from_value(serde_json::json!({"body":"alpha ".repeat(30_000)})).unwrap();
+        assert!(serde_json::to_vec(&large).unwrap().len() <= settings.max_record_bytes);
+        assert!(crate::record::build_budget::document_estimate(&large, &settings.schema).unwrap() > ANALYSIS_BATCH_BYTES);
+        scope.clone().run(native.append(Identity { id: "large".into(), version: 1, revision: 4 }, &large, false)).await.unwrap();
+        assert_eq!(native.data.lock().await.pending_analysis_documents, 0, "one legal larger doc drains immediately");
+        drop(scope.bytes(512*1024*1024).expect("all analysis admission returned after drain"));
+        assert!(native.snapshot().await.is_err(), "private drains must not publish a Searcher");
+        native.flush().await.unwrap();
+        assert_eq!(native.snapshot().await.unwrap().identities.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn real_worker_write_failure_retains_analysis_through_commit_and_failed_join() {
+        for commit_first in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let package = root.path().join("package");
+            std::fs::create_dir(&package).unwrap();
+            let governor = Arc::new(crate::resources::Governor::default());
+            let scope = governor.admit("failed-worker".into(), crate::resources::Lane::Foreground, 0).unwrap();
+            let native = scope.clone().run(async { Runtime::create(&package.join("native"), &config()).unwrap() }).await;
+            let doc = serde_json::from_value(serde_json::json!({"body":"alpha beta"})).unwrap();
+            scope.clone().run(native.append(Identity { id: "selected".into(), version: 1, revision: 1 }, &doc, true)).await.unwrap();
+            let selected = native.snapshot().await.unwrap();
+            let directory = native.directory.as_ref().unwrap().clone();
+            directory.reject_writes_for_test();
+            scope.clone().run(native.append(Identity { id: "candidate".into(), version: 1, revision: 2 }, &doc, false)).await.unwrap();
+            if commit_first {
+                assert!(native.flush().await.is_err(), "actual Tantivy commit must observe the injected Directory write error");
+                assert!(directory.failed_writes_for_test() > 0);
+                assert_eq!(native.data.lock().await.pending_analysis_documents, 1);
+                assert!(scope.bytes(512*1024*1024).is_err(), "failed commit cannot refund queued analysis");
+                assert_eq!(native.snapshot().await.unwrap().identities.len(), 1);
+            }
+            drop(native);
+            assert!(directory.failed_writes_for_test() > 0, "the real indexing worker must have attempted a write");
+            if !commit_first {
+                assert!(scope.bytes(512*1024*1024).is_err(), "failed worker join must retain admission with surviving Directory clones");
+            }
+            assert_eq!(selected.identities.len(), 1);
+            drop(selected); drop(directory);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Ok(lease) = scope.bytes(512*1024*1024) { drop(lease); break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("last worker/reader release must refund analysis");
+        }
+    }
+
+    #[tokio::test]
     async fn queued_analysis_is_bounded_charged_and_released_without_publication() {
         let root = tempfile::tempdir().unwrap();
         let package = root.path().join("package");

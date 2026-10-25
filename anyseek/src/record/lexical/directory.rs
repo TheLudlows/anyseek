@@ -31,6 +31,10 @@ struct WriterReservation {
     _buffer: Option<resources::Lease>,
 }
 struct Budget {
+    #[cfg(test)]
+    fail_writes: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    failed_writes: std::sync::atomic::AtomicUsize,
     pin: Mutex<Option<Arc<crate::record::package_pins::Pin>>>,
     writer_memory: Mutex<Option<WriterReservation>>,
     pending_analysis: Mutex<Vec<WriterReservation>>,
@@ -45,6 +49,11 @@ struct Budget {
 }
 impl Budget {
     fn charge(&self, path: &Path, bytes: u64) -> io::Result<()> {
+        #[cfg(test)]
+        if self.fail_writes.load(std::sync::atomic::Ordering::Acquire) {
+            self.failed_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(io::Error::other("injected native worker write failure"));
+        }
         let mut components = path.components();
         if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
             return Err(io::Error::other("native index path must be a single file"));
@@ -93,6 +102,14 @@ impl fmt::Debug for BudgetDirectory {
     }
 }
 impl BudgetDirectory {
+    #[cfg(test)]
+    pub(super) fn reject_writes_for_test(&self) {
+        self.budget.fail_writes.store(true, std::sync::atomic::Ordering::Release);
+    }
+    #[cfg(test)]
+    pub(super) fn failed_writes_for_test(&self) -> usize {
+        self.budget.failed_writes.load(std::sync::atomic::Ordering::Acquire)
+    }
     pub(super) fn new(
         path: &Path,
         bytes: u64,
@@ -184,6 +201,8 @@ impl BudgetDirectory {
         let inner=MmapDirectory::open(path).map_err(storage)?;
         drop(io);drop(gate);
         Ok(Self {inner,selected:true,budget:Arc::new(Budget {
+            #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
             pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
             _memory:memory,_buffer:buffer,
         })})
@@ -208,6 +227,8 @@ impl BudgetDirectory {
             inner: MmapDirectory::open(path).map_err(storage)?,
             selected: false,
             budget: Arc::new(Budget {
+                #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
                 pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),
                 ledger: Mutex::new(Ledger {
                     written: 0,

@@ -417,9 +417,19 @@ impl PartitionJournal {
             self.max_bytes,
             Some(payload),
         )?;
+        // Test-only unknown-outcome boundaries exercise both legal recovery
+        // selections. They do not simulate OS torn writes or power loss.
+        #[cfg(test)]
+        if self.path.join(".test-checkpoint-before-certificate").exists() {
+            return Err(CreateError::PublicationUnknown(io::Error::other("injected before checkpoint certificate")));
+        }
         candidate
             .append(PUBLISHED)
             .map_err(CreateError::PublicationUnknown)?;
+        #[cfg(test)]
+        if self.path.join(".test-checkpoint-after-certificate").exists() {
+            return Err(CreateError::PublicationUnknown(io::Error::other("injected after checkpoint certificate")));
+        }
         #[cfg(test)]
         crash_boundary("certified");
         // Candidate publication is durable before the old authority is closed.

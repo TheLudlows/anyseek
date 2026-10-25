@@ -371,7 +371,7 @@ mod tests {
         settings.max_records = 128;
         settings.max_operations = 256;
         settings.max_candidates = 128;
-        let p = RecordPartition::create(&path, settings.clone()).await.unwrap();
+        let mut p = RecordPartition::create(&path, settings.clone()).await.unwrap();
         let mut receipts = Vec::new();
         for i in 0..64 {
             let request = write(&format!("op-{i}"), &format!("r-{i}"), &format!("alpha unique{i}"), ExpectedVersion::Absent);
@@ -390,12 +390,38 @@ mod tests {
         let before = serde_json::to_vec(&p.inner.lock().await.anchor).unwrap();
         let request = write("op-64", "r-64", "alpha unique64", ExpectedVersion::Absent);
         receipts.push((request.clone(), p.write(request).await.unwrap()));
-        let gate = path.join(".test-anchor-reject-prepared");
-        std::fs::write(&gate, b"reject").unwrap();
-        assert!(p.compact_journal().await.is_err());
-        assert_eq!(serde_json::to_vec(&p.inner.lock().await.anchor).unwrap(), before);
-        assert_eq!(p.inner.lock().await.payloads.objects.len(), 64);
-        std::fs::remove_file(gate).unwrap();
+        for (gate, unknown, certified) in [
+            (".test-anchor-reject-prepared", false, false),
+            (".test-anchor-reject-loaded", false, false),
+            (".test-checkpoint-before-certificate", true, false),
+            (".test-checkpoint-after-certificate", true, true),
+        ] {
+            std::fs::write(path.join(gate), b"reject").unwrap();
+            let error = p.compact_journal().await.unwrap_err();
+            assert_eq!(matches!(error, RecordError::OutcomeUnknown(_)), unknown, "gate={gate} error={error:?}");
+            assert_eq!(serde_json::to_vec(&p.inner.lock().await.anchor).unwrap(), before);
+            assert_eq!(p.inner.lock().await.payloads.objects.len(), 64);
+            assert_eq!(p.inner.lock().await.healthy, !unknown);
+            assert!(old_paths.iter().all(|path| path.exists()));
+            std::fs::remove_file(path.join(gate)).unwrap();
+            if unknown {
+                assert!(matches!(p.write(receipts[0].0.clone()).await, Err(RecordError::RecoveryRequired)), "unknown publication must fence even an idempotent retry");
+                drop(p);
+                p = RecordPartition::open(&path, settings.max_journal_bytes).await.unwrap();
+            }
+            let inner = p.inner.lock().await;
+            assert_eq!(inner.payloads.objects.len(), if certified { 1 } else { 64 });
+            assert_eq!(inner.state.records.len(), 65);
+            if !certified { assert_eq!(serde_json::to_vec(&inner.anchor).unwrap(), before); }
+            else { assert_ne!(serde_json::to_vec(&inner.anchor).unwrap(), before, "durable certificate must select the new closure after reopen"); }
+            let names = std::fs::read_dir(&path).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
+            assert!(!names.iter().any(|name| name.starts_with(".anchor-prepare-") || name.starts_with(".segment-prepare-") || name.starts_with(".payload-prepare-")), "candidate orphans must be retired after definite rejection or recovery");
+            assert_eq!(names.iter().filter(|name| name.starts_with("anchor-")).count(), 1);
+            assert_eq!(names.iter().filter(|name| name.starts_with("payload-")).count(), if certified { 65 } else { 64 }, "retain only selected objects plus explicitly pinned old closure");
+            drop(inner);
+            for (request, receipt) in &receipts { assert_eq!(p.write(request.clone()).await.unwrap(), *receipt); }
+            assert_eq!(old_reader.read(&old_reference).unwrap(), old_body);
+        }
         p.compact_journal().await.unwrap();
         assert_eq!(p.inner.lock().await.payloads.objects.len(), 1);
         p.inner.lock().await.reclaim_anchor_objects().await.unwrap();

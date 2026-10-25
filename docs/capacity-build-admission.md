@@ -64,3 +64,45 @@ background build suppresses `reclaim_anchor_objects` entirely. The existing
 path or changed remote publication/backup protocol is introduced. Review and
 regressions must cover a reader/pin held across compaction, old authority after
 injected preparation failure, and old-object reclamation only after release.
+
+## Extended failure-boundary validation
+
+On `43d789c`, full local all-targets completed with **351 passed, 0 failed,
+13 ignored** (35 test groups). The first attempt failed during linking because
+workspace disk was exhausted; a second attempt reached integration fixtures but
+those relative paths still used the full workspace. Both infrastructure-failure
+logs remain preserved. The successful run used a separate `/tmp` target and
+fixture working directories, one compile job and disabled debug symbols; test
+selection, assertions and debug assertions were unchanged. Full log:
+`/tmp/anyseek-capacity-final-alltargets-isolated.log`.
+
+Subsequent changes in this validation stage are test-only:
+
+- Actual conservative estimates cross 32MiB with three documents while count is
+  below128; the third drains the preceding two. A legal single larger document
+  drains immediately. Exact Governor headroom is checked, with no Searcher
+  publication until explicit flush.
+- A per-Directory cfg(test) write-error gate is exercised by real Tantivy worker
+  writes. Failed commit retains analysis; a failed join retains it with surviving
+  Directory clones. Last worker/reader release refunds admission. This verifies
+  actual error returns, not real hardware failure or OS power loss.
+- The actual64-object closure is rejected after preparation and after candidate
+  loading. Test-only unknown-outcome injection immediately before and after the
+  journal certificate checks both recovery selections: old certificate plus
+  durable tail, or the newly durable certificate. Both fence live access, retain
+  all65 original receipts, and clean unselected orphans after recovery. Old
+  Payload readers/pins remain valid; reclamation happens only after release.
+
+Extended focused results: Runtime14/14 pass; anchor8/8 pass; partition5 pass,
+1 existing child-worker entry ignored (invoked by its parent test). Logs:
+`/tmp/anyseek-capacity-extended-runtime.log`,
+`/tmp/anyseek-capacity-extended-anchor.log`,
+`/tmp/anyseek-capacity-partition-tests.log`. These focused runs do not turn the
+previous full-target SHA into a full-target result for a later SHA. Windows and
+exact-head CI remain pending because draft-PR creation approval is outstanding.
+
+To restore source-write headroom without discarding data, one failed-link
+`.tmpf724695` artifact was preserved byte-for-byte under
+`/tmp/anyseek-capacity-preserved-build-artifacts/`, verified by SHA256 before
+removing its original cache path. Its manifest records both paths and the hash.
+No source, raw experiment evidence, database or other cache was removed.
