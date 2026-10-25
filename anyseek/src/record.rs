@@ -2,7 +2,7 @@
 //! engine. The default HTTP service uses this authoritative storage path. See
 //! docs/record-model.md for the bounded P1-A scope and validation evidence.
 use crate::{
-    commit::Commit,
+    component::Commit,
     index::{Document, IndexArc, IndexDocuments, IndexMetaObject, SchemaField, create_index},
     search::{FacetFilter, QueryType, ResultSort, ResultType, SearchMode},
     storage::{journal::CreateError, partition::PartitionJournal},
@@ -851,8 +851,6 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
         &cache,
         config.index.clone(),
         &retrieval_schema(config),
-        11,
-        true,
         Some(1),
     )
     .await
@@ -1270,8 +1268,8 @@ impl RecordPartition {
 
     async fn create_owned(path: &Path, mut config: RecordConfig) -> Result<Self, RecordError> {
         validate_config(&config)?;
-        // Pin an encoding choice in persisted configuration, independent of
-        // insertion order or which record survives compaction/recovery.
+        // Preserve deterministic legacy schema identity in persisted configuration;
+        // this tag no longer chooses the native lexical encoding.
         if !config
             .schema
             .iter()

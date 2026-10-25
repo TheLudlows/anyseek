@@ -1,6 +1,6 @@
 # anyseek 当前状态
 
-核验日期：2026-10-24。已验收代码 SHA 为 `94d0a60079ae7b8604223b130559bc14004816fe`（[CI 9/9 成功](https://github.com/TheLudlows/anyseek/actions/runs/40063214949)）；后续仅文档提交不改变该代码验收结论。本任务分支已将生产全文替换为 Tantivy 0.27.0，数据访问统一使用 `RecordPartition`，仅支持新库；尚未合入。主干文档已同步至 `31a4d059`。具体契约、验证版本与忽略项见 [#80 实施与验收](docs/issue80-implementation.md)。
+核验日期：2026-10-25。已验收代码 SHA 为 `94d0a60079ae7b8604223b130559bc14004816fe`（[CI 9/9 成功](https://github.com/TheLudlows/anyseek/actions/runs/40063214949)）；后续仅文档提交不改变该代码验收结论。[PR #81](https://github.com/TheLudlows/anyseek/pull/81) 已将生产全文替换为 Tantivy 0.27.0，数据访问统一使用 `RecordPartition`，仅支持新库；已合入 `6d28798`，主干 [CI 9/9](https://github.com/TheLudlows/anyseek/actions/runs/40080424776) 通过。预算调整已由 PR #83 合入 `702c385`；标准分词器见独立草稿 [PR #84](https://github.com/TheLudlows/anyseek/pull/84)，下表平台数字是 #80 历史验收，不代表 #84 最终 HEAD。具体契约、验证版本与忽略项见 [#80 实施与验收](docs/issue80-implementation.md)。
 
 | 范围 | 状态 |
 | --- | --- |

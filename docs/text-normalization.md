@@ -43,7 +43,7 @@ HTTP creation uses the existing schema, for example:
 ```json
 {
   "index_name": "normalized-zh",
-  "tokenizer": "UnicodeAlphanumericZH",
+  "tokenizer": "JiebaMixedV1",
   "text_normalization": "OpenCcT2s1_1_9",
   "schema": [{"field":"body","field_type":"Text","index_lexical":true,"store":true}]
 }

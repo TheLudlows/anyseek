@@ -322,3 +322,16 @@ Governor各通道的全局字节配置不得超过8 GiB，其他层级/控制余
 `Connection: close`，客户端须为下一请求新建连接，写入重试保持原operation_id；
 HTTP/2不发送该连接级头。错误详情区分Governor全局/集合预算与构建单份/共享预算，
 报告used/requested/limit，不改变Busy/outcome_unknown/durable_pending提交语义。
+### 分词器默认与身份
+
+启用默认 `zh` feature 时，新建集合默认 `JiebaMixedV1`：tantivy-jieba 0.21.0 /
+jieba-rs 0.11.0 的固定词典、精确模式、关闭 HMM 与重叠 search-mode，统一 Unicode
+小写。未启用 `zh` 时默认 `TantivySimpleV1`；英文应用也可显式选择该模式，使用
+Tantivy 0.27 SimpleTokenizer + LowerCaser。二者都不使用默认40字节过滤器，不新增停用词、
+隐式前缀扩展或语言识别。AND/OR仍由请求显式选择。
+
+旧 `UnicodeAlphanumericZH` 不再被接受，不能以旧名称静默替换切词。新的算法、词典版本
+及词典摘要进入 native 包认证配置；不提供旧索引迁移/读取兼容链。原文不变，OpenCC仍由
+独立不可变配置控制。切词变化会改变词频、字段长度、命中和分数，即使评分公式不变。
+既有显式英文/折叠/空白配置保留其标点与折叠契约；新简单英文模式与旧模式不保证等价。
+实现进度和未验收项见[分词改造清单](../../docs/tokenizer-implementation.md)。

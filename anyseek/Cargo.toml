@@ -17,7 +17,7 @@ publish = false
 # Optional features: zh=Chinese word segmentation, vb=result diagnostics.
 # You can also disable all default features and re-enable them case-wise in your toml with: anyseek = { path = "../anyseek", default-features = false, features = ["zh"] }
 default = ["zh","vb"]
-zh = []
+zh = ["dep:tantivy-jieba", "dep:jieba-rs"]
 vb = []
 # Explicit test binaries only; no remote activation endpoint.
 fault-injection = []
@@ -36,6 +36,9 @@ path = "src/lib.rs"
 
 [dependencies]
 tantivy = { version = "=0.27.0", default-features = false, features = ["mmap", "lz4-compression"] }
+tantivy-jieba = { version = "=0.21.0", optional = true }
+# Pin dictionary/algorithm identity, including the adapter's transitive dependency.
+jieba-rs = { version = "=0.11.0", optional = true }
 http-body = { version = "1", optional = true }
 env_logger = { version = "0.11", optional = true }
 axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "http2", "json", "query", "tokio", "matched-path"] }

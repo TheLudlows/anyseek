@@ -38,7 +38,6 @@ pub(crate) static INDEX_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
 
 pub(crate) mod clustering;
 // Private vector/metadata component checkpoint.
-mod commit;
 mod component;
 pub(crate) mod compatible;
 /// Schema, analysis, scoring and vector configuration for RecordPartition.
@@ -56,10 +55,6 @@ pub mod utils;
 pub mod vector;
 /// Vector quantization and similarity measure definitions for vector search.
 pub mod vector_similarity;
-#[cfg(feature = "zh")]
-pub(crate) mod word_segmentation;
-
-
 mod metadata_filter;
 
 

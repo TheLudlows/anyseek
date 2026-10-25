@@ -117,7 +117,7 @@ impl Runtime {
             serde_json::from_slice(&bytes).map_err(storage)?;
         if manifest.format != FORMAT
             || manifest.engine != ENGINE
-            || stored != serde_json::to_value((&config.index, &config.schema)).map_err(storage)?
+            || stored != serde_json::to_value((&config.index, &config.schema, crate::tokenizer::standard::identity(config.index.tokenizer))).map_err(storage)?
         {
             return Err(storage("native Record configuration/format mismatch"));
         }
@@ -266,7 +266,7 @@ impl Runtime {
         data.snapshot = Some(Arc::new(snapshot));
         let bytes = serde_json::to_vec(&(
             manifest,
-            serde_json::to_value((&self.config.index, &self.config.schema)).map_err(storage)?,
+            serde_json::to_value((&self.config.index, &self.config.schema, crate::tokenizer::standard::identity(self.config.index.tokenizer))).map_err(storage)?,
         ))
         .map_err(storage)?;
         if bytes.len() as u64 > self.config.max_journal_bytes {

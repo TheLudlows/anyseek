@@ -441,7 +441,7 @@ mod tests {
             let root=path();std::fs::create_dir(&root).unwrap();
             std::fs::write(root.join(filename),b"existing data").unwrap();
             let cfg=config();
-            assert!(create_index(&root,cfg.index,&retrieval_schema(&config()),11,true,Some(1)).await.is_err());
+            assert!(create_index(&root,cfg.index,&retrieval_schema(&config()),Some(1)).await.is_err());
             assert_eq!(std::fs::read(root.join(filename)).unwrap(),b"existing data");
             assert_eq!(std::fs::read_dir(&root).unwrap().count(),1);
             std::fs::remove_dir_all(root).unwrap();

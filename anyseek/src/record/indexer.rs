@@ -358,12 +358,17 @@ mod tests {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
         std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
-        let job=p.start_index_committed(Duration::from_secs(20)).unwrap();wait_started(&root).await;drop(job);
+        let job=p.start_index_committed(Duration::from_secs(20)).unwrap();wait_started(&root).await;
+        // Observe actual task completion without retaining its JoinHandle or
+        // cancelling accepted work. Clearing background precedes the final
+        // recovery-owner drop and therefore cannot prove the file lock is free.
+        let completion=job.handle.abort_handle();drop(job);
         p.write(write("second","b","alpha",ExpectedVersion::Absent)).await.unwrap();
         std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
         tokio::time::timeout(Duration::from_secs(20),async {
-            while p.inner.lock().await.background.is_some() { tokio::time::sleep(Duration::from_millis(5)).await; }
+            while !completion.is_finished() { tokio::time::sleep(Duration::from_millis(5)).await; }
         }).await.unwrap();
+        assert!(p.inner.lock().await.background.is_none());
         assert_eq!(p.inner.lock().await.state.seq,2);assert!(p.inner.lock().await.anchor.is_some());
         drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert!(p.get("b").await.unwrap().is_some());drop(p);std::fs::remove_dir_all(root).unwrap();

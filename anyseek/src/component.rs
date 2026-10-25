@@ -162,7 +162,7 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
         vector_dimensions_original:original,vector_similarity:similarity,is_simd:simd,is_vector_indexing:original>0,turbo_quant:turbo})))
 }
 
-pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&Vec<SchemaField>,_bits:usize,_mute:bool,shards:Option<usize>)->Result<IndexArc,String>{
+pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&Vec<SchemaField>,shards:Option<usize>)->Result<IndexArc,String>{
     if shards!=Some(1) {return Err("Record component requires one physical partition".into());}
     fs::create_dir(path).map_err(|e|e.to_string())?;
     // Keep the independently authenticated schema file for package validation.

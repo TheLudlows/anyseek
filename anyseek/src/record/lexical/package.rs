@@ -15,7 +15,7 @@ pub(crate) struct NativePackage {
 }
 fn fingerprint(config: &RecordConfig) -> Result<[u8; 32], RecordError> {
     Ok(
-        Sha256::digest(serde_json::to_vec(&(&config.index, &config.schema)).map_err(storage)?)
+        Sha256::digest(serde_json::to_vec(&(&config.index, &config.schema, crate::tokenizer::standard::identity(config.index.tokenizer))).map_err(storage)?)
             .into(),
     )
 }
@@ -38,13 +38,6 @@ impl NativePackage {
         schema(&names)?;
         let mut inputs = Vec::new();
         let analysis_base = 64 * 1024u64;
-        #[cfg(feature = "zh")]
-        let analysis_base = analysis_base
-            + if config.index.tokenizer == crate::index::TokenizerType::UnicodeAlphanumericZH {
-                64 * 1024 * 1024
-            } else {
-                0
-            };
         let estimate = records.iter().try_fold(analysis_base, |sum, (_, doc)| {
             sum.checked_add(crate::record::build_budget::document_estimate(
                 doc,
@@ -60,7 +53,7 @@ impl NativePackage {
             .transpose()
             .map_err(storage)?;
         // Dictionary construction and token buffers start only after admission.
-        let analyzer = super::query::Analyzer::new(config.index.clone());
+        let analyzer = super::query::Analyzer::new(config.index.clone())?;
         for (identity, document) in records {
             let mut analyzed = Vec::new();
             for field in &fields {
