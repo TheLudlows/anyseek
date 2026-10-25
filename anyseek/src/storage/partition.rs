@@ -74,6 +74,15 @@ fn publish(prepared: &Path, target: &Path) -> Result<(), CreateError> {
 }
 impl PartitionJournal {
     pub(crate) fn root(&self)->&Path {&self.path}
+    pub(crate) fn validate_checkpoint_budget(length: usize, max_bytes: u64) -> io::Result<()> {
+        let payload_budget=max_bytes.checked_sub(24+PUBLISHED.len() as u64).ok_or_else(||io::Error::other("checkpoint certificate budget exceeded"))?;
+        Journal::validate_checkpoint_budget(length,payload_budget)
+    }
+    /// Publish an already certified private root. Preserve uncertain rename status.
+    pub(crate) fn publish_prepared_root(prepared: &Path, target: &Path) -> Result<(), CreateError> {
+        if target.exists() { return Err(io::Error::new(io::ErrorKind::AlreadyExists,"snapshot target exists").into()); }
+        publish(prepared,target)
+    }
     pub(crate) fn validate_initial(length: usize, max_bytes: u64) -> io::Result<()> {
         let payload_budget = max_bytes
             .checked_sub(24 + PUBLISHED.len() as u64)

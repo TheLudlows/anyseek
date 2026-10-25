@@ -106,3 +106,13 @@ mod tests {
         );
     }
 }
+
+/// The logical state is chunked, but any reserved future business event must
+/// still fit one journal frame. Keep that conservative pre-WAL guarantee.
+pub(super) fn validate_size(bytes: usize, reserve: usize, budget: u64) -> std::io::Result<()> {
+    let total = bytes
+        .checked_add(reserve)
+        .ok_or_else(|| std::io::Error::other("state reserve overflow"))?;
+    PartitionJournal::validate_checkpoint_budget(total, budget)?;
+    PartitionJournal::validate_initial(reserve, budget)
+}

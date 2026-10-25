@@ -52,7 +52,7 @@ cap must be included in the later 100k component/segment design, not blindly rai
 Both fixes at `4451c9c` reach the existing 10,000-record ceiling: checkpoint and
 reopen succeed, all 393 probes and original operation retries pass. Ordinal 10,001
 rejects at the unchanged record/operation hard limit. See
-`../benchmarks/capacity/REPAIR-02.md`. Steps 3–5 above remain unimplemented.
+`../benchmarks/capacity/REPAIR-02.md`. At that historical checkpoint, steps 3–5 remained unimplemented; later implementation follows below.
 
 ## Streaming preflight checkpoint
 
@@ -75,7 +75,7 @@ select all chunks only through the existing single publication certificate.
 Only then can the frame/population limits be revised together with graph traversal,
 physical segment counts and full-history state admission.
 
-## Chunked state implementation in progress
+## Chunked state implementation
 
 The next anchor format is explicitly **4** (format3 is rejected, with no migration
 reader). Its state descriptor selects numbered metadata chunks through the same
@@ -95,12 +95,12 @@ before copying maps/history. These use the existing finite shared build governor
 32x logical JSON expansion estimate; neither is an allocator/RSS guarantee. Normal
 write state growth is admitted before WAL append. Retained history is not truncated.
 
-This step does **not** yet remove the16MiB complete-checkpoint preflight or10k record
-ceiling. Independent snapshot/takeover creation still needs the same chunked,
-privately prepared publication path before the complete-frame restriction can be
-removed safely. Native population, graph traversal and physical package count
-limits must also be coordinated before a100k profile is enabled. Current tests are
-being rerun against this change; the351-pass result remains specific to43d789c.
+The initial chunked commit retained the16MiB complete-checkpoint preflight. The
+following snapshot stage removes that restriction only for logical whole-state
+size; actual WAL frames and reserved future business events remain bounded. The
+10k record ceiling remains. Native population, graph traversal and package counts
+must be coordinated before a100k profile is enabled. The351-pass all-target result
+remains specific to43d789c.
 
 Workspace plan: reserve at least2GiB free on the separate `/tmp` filesystem and
 admit no more than3GiB additional temporary artifacts in this focused stage. Large
@@ -124,3 +124,34 @@ correctly took the shared-owner reservation branch, so the expected error class
 was wrong. The test now checks pointer identity without changing the ownership
 branch, then creates a Weak handle to verify final release. Production code and
 budget assertions were unchanged; the first failed test log is retained.
+
+## Independent snapshot and takeover publication
+
+Independent snapshots and takeover targets now build a complete format4 root in
+a fresh private sibling directory, close all writers/mappings, remove only their
+own derived caches, then publish the root directory. The owned task retains the
+admission permit after a waiting caller is cancelled. Pre-publication failure
+cleans only that uniquely owned private root; a rename-attempt/unknown outcome
+never deletes the target. Existing destinations remain untouched. Source records,
+versions, receipts, quarantine and takeover rules are unchanged.
+
+Complete-state size is checked against the configured journal authority budget
+without requiring one giant frame. Each actual WAL frame keeps its16MiB bound;
+future expiration/generation event reserves must still pass the existing frame
+check before a business write. No population, operation or governor limit is raised.
+
+A real300-write fixture produces **19,884,967 canonical checkpoint bytes**, exceeding
+16MiB, then publishes/reopens a snapshot and replays every original operation id
+without changing either sequence. It preserves the original32KiB opaque field.
+Tests also cover cancelled waiters, failure before publication, explicit simulated
+unknown return after successful durable publication, and existing-target protection.
+This is synthetic byte-boundary coverage, not a100k or MIRACL quality result.
+
+Validation: default Record171 passed/0failed/5existing ignored; Catalog21/0/1;
+final no-default Record151/0/5, all exit0. Logs:
+`/tmp/anyseek-capacity-snapshot-record.log`,
+`/tmp/anyseek-capacity-snapshot-catalog.log`,
+`/tmp/anyseek-capacity-snapshot-no-default.log`. Catalog and final no-default runs
+include private-cache cleanup; the default Record run preceded that small cleanup
+addition. Full all-targets, HTTP, Windows and realS3/power-loss validation remain
+separate outstanding items for the final implementation.

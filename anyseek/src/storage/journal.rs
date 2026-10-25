@@ -263,6 +263,14 @@ impl Journal {
         self.seq
     }
 
+    /// Logical complete-state budget for a separately framed authenticated anchor.
+    /// Callers still validate each actual journal frame with validate_initial.
+    pub(crate) fn validate_checkpoint_budget(length: usize, max_bytes: u64) -> io::Result<()> {
+        let extent = (MAGIC.len() as u64).checked_add(FRAME_HEADER as u64).and_then(|n|n.checked_add(length as u64));
+        if extent.is_none_or(|n|n>max_bytes) { return Err(io::Error::new(io::ErrorKind::InvalidInput,"complete checkpoint budget exceeded")); }
+        Ok(())
+    }
+
     pub(crate) fn validate_initial(length: usize, max_bytes: u64) -> io::Result<()> {
         let extent = (MAGIC.len() as u64)
             .checked_add(FRAME_HEADER as u64)

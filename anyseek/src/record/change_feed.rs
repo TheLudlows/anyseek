@@ -360,8 +360,8 @@ impl Inner {
         candidate.feed.floor = floor;
         candidate.time_watermark_ms = at;
         let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
-        if PartitionJournal::validate_initial(
-            snapshot_bytes + generation::reserve_bytes(&self.state),
+        if checkpoint_codec::validate_size(
+            snapshot_bytes, generation::reserve_bytes(&self.state),
             self.config.max_journal_bytes,
         )
         .is_err()

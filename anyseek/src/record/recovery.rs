@@ -110,7 +110,7 @@ impl RecordPartition {
             let mut next = inner.state.try_clone()?;
             next.sealed_for = Some(certificate.clone());
             let length = checkpoint_codec::length(&inner.config, &next)?;
-            PartitionJournal::validate_initial(length, inner.config.max_journal_bytes)
+            checkpoint_codec::validate_size(length,0,inner.config.max_journal_bytes)
                 .map_err(|e| RecordError::Rejected(e.to_string()))?;
             // Close output before any fallible/awaited publication. The same
             // anchor protocol handles local certificates and SQLite-selected
@@ -161,10 +161,9 @@ impl RecordPartition {
             state.sealed_for = None;
             state.takeover_proof = Some(seal.clone());
             state.feed.scope = successor_scope(&seal.source_feed_scope,&seal.request.intent_id);
-            let bytes = encode_entry(&Entry::Checkpoint { config: original.config.clone(), state })?;
-            PartitionJournal::validate_initial(bytes.len(), original.config.max_journal_bytes)
-                .map_err(|e| RecordError::Rejected(e.to_string()))?;
-            drop(PartitionJournal::create(&target, original.config.max_journal_bytes, &bytes).map_err(creation_error)?);
+            let config=original.config.clone();
+            drop(snapshot);drop(original);
+            super::snapshot::create(&target,config,state).await?;
             Ok(())
         }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
     }
@@ -205,7 +204,7 @@ impl RecordPartition {
         for target in [false, true] {
             if target { next.sealed_for = None; next.takeover_proof = Some(seal.clone()); }
             let length = checkpoint_codec::length(&inner.config, &next)?;
-            PartitionJournal::validate_initial(length, inner.config.max_journal_bytes)
+            checkpoint_codec::validate_size(length,0,inner.config.max_journal_bytes)
                 .map_err(|e| RecordError::Rejected(e.to_string()))?;
         }
         Ok(())

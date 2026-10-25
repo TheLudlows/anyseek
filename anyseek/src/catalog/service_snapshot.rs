@@ -334,7 +334,8 @@ impl Catalog {
                     ));
                 }
                 // Preflight bounded authoritative payload before creating the
-                // archive. Derived index caches are excluded from snapshots.
+                // archive. Private snapshots carry certified immutable packages;
+                // no live cache is copied. Per-partition closure budgets also apply.
                 let mut total = encode(&Entry::Snapshot(inner.state.clone()))?.len() as u64;
                 for entry in inner.state.collections.values() {
                     if entry.deleted

@@ -66,7 +66,7 @@ impl Inner {
         let mut candidate=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;apply(&mut candidate,&event)?;
         let snapshot_bytes=checkpoint_codec::length(&self.config, &candidate)?;
         let reserve=generation::reserve_bytes(&candidate);
-        PartitionJournal::validate_initial(snapshot_bytes+reserve,self.config.max_journal_bytes).map_err(storage)?;
+        checkpoint_codec::validate_size(snapshot_bytes,reserve,self.config.max_journal_bytes).map_err(storage)?;
         let bytes=encode_entry(&Entry::LeaseExpired(event.clone()))?;
         self.journal.validate_append_with_reserve(bytes.len(),reserve).map_err(storage)?;
         self.healthy=false;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;

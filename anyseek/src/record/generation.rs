@@ -224,7 +224,7 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
     if candidate.operations.len() + reserve_slots(&candidate) > config.max_operations { return Err(rejected("generation operation reserve exceeded")); }
     let feed_reserve = change_feed::reserve(&candidate);
     let snapshot_bytes = checkpoint_codec::length(config, &candidate)?;
-    PartitionJournal::validate_initial(snapshot_bytes + reserve_bytes, config.max_journal_bytes).map_err(|_| rejected("generation checkpoint reserve exceeded"))?;
+    checkpoint_codec::validate_size(snapshot_bytes, reserve_bytes, config.max_journal_bytes).map_err(|_| rejected("generation checkpoint reserve exceeded"))?;
     let bytes = encode_entry(&Entry::Applied(applied.clone()))?;
     Ok(mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve })
 }

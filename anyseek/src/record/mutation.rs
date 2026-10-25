@@ -213,7 +213,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         + epoch.to_string().len()
         - state.epoch_watermark.to_string().len()
         + evaluation_time_ms.max(state.time_watermark_ms).to_string().len() - state.time_watermark_ms.to_string().len();
-    if PartitionJournal::validate_initial(snapshot_bytes + reserve_bytes, config.max_journal_bytes)
+    if checkpoint_codec::validate_size(snapshot_bytes, reserve_bytes, config.max_journal_bytes)
         .is_err()
     {
         return Err(RecordError::Rejected(

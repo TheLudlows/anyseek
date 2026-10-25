@@ -43,6 +43,7 @@ pub use indexer::IndexJob;
 mod segment_state;
 mod state_chunks;
 mod state_memory;
+mod snapshot;
 mod checkpoint_codec;
 mod segment;
 mod anchor;
@@ -1757,32 +1758,21 @@ impl RecordPartition {
         // A sealed owner may still be archived without advancing its final cut.
         let advance = { let inner = self.inner.lock().await; inner.state.sealed_for.is_none() && !inner.state.independent_snapshot };
         if advance { self.advance_time().await?; }
-        let _permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
-        let inner = self.inner.lock().await;
-        if !inner.healthy {
-            return Err(RecordError::RecoveryRequired);
-        }
-        let mut snapshot_state = inner.state.try_clone()?;
-        // A snapshot cut cannot attest to deletions that occur after that cut.
-        // Preserve originals, but do not silently revive typed evidence when the
-        // snapshot is opened/restored under a different owner/root.
-        snapshot_state.independent_snapshot = true;
-        snapshot_state.feed.scope = scope.unwrap_or_else(|| format!("{:032x}",rand::random::<u128>()));
-        snapshot_state.evidence_quarantined |= snapshot_state.records.values().any(temporal::protected);
-        let payload = encode_entry(&Entry::Checkpoint {
-            config: inner.config.clone(),
-            state: snapshot_state,
-        })?;
-        PartitionJournal::validate_initial(payload.len(), inner.config.max_journal_bytes)
-            .map_err(|e| RecordError::Rejected(e.to_string()))?;
-        let _target =
-            PartitionJournal::create(destination, inner.config.max_journal_bytes, &payload)
-                .map_err(creation_error)?;
-        Ok(inner.state.seq)
+        let permit = self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
+        let owner=self.inner.clone();let destination=destination.to_owned();
+        crate::resources::spawn(async move {
+            let _permit=permit;
+            let inner=owner.lock().await;
+            if !inner.healthy { return Err(RecordError::RecoveryRequired); }
+            let mut state=inner.state.try_clone()?;
+            state.independent_snapshot=true;
+            state.feed.scope=scope.unwrap_or_else(||format!("{:032x}",rand::random::<u128>()));
+            state.evidence_quarantined|=state.records.values().any(temporal::protected);
+            let seq=state.seq;let config=inner.config.clone();
+            drop(inner);
+            snapshot::create(&destination,config,state).await?;
+            Ok(seq)
+        }).await.map_err(|e|RecordError::OutcomeUnknown(e.to_string()))?
     }
 }
 

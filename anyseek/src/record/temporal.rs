@@ -238,7 +238,7 @@ impl Inner {
         let feed_point = change_feed::pending_expiry(&self.state,event.seq,event.evaluation_time_ms)?;
         self.feed_cache.validate(&self.config.change_feed,Some(&feed_point),change_feed::reserve(&candidate))?;
         let reserve = generation::reserve_bytes(&candidate);
-        PartitionJournal::validate_initial(snapshot_bytes + reserve, self.config.max_journal_bytes)
+        checkpoint_codec::validate_size(snapshot_bytes, reserve, self.config.max_journal_bytes)
             .map_err(storage)?;
         let bytes = encode_entry(&Entry::Expired(event.clone()))?;
         self.journal
