@@ -77,14 +77,13 @@ impl fmt::Display for LexicalSimilarity {
 /// - Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. "s" in "someone's").
 /// - Tokenizing might be slower due to folding and apostroph processing.
 ///
-/// UnicodeAlphanumericZH
+/// JiebaMixedV1
 /// - Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
 /// - Supports mixed Latin and Chinese texts
 /// - Requires feature #[cfg(feature = "zh")]
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy)]
 pub enum TokenizerType {
     /// Only ASCII alphabetic chars are recognized as token.
-    #[default]
     AsciiAlphabetic = 0,
     /// All Unicode alphanumeric chars are recognized as token.
     /// Allow '+' '-' '#' in middle or end of a token: c++, c#, block-max.
@@ -99,11 +98,19 @@ pub enum TokenizerType {
     Whitespace = 3,
     /// Tokens are separated by whitespace. Token are converted to lowercase.
     WhitespaceLowercase = 4,
-    /// Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
-    /// Supports mixed Latin and Chinese texts
-    /// Requires feature #[cfg(feature = "zh")]
+    /// Versioned Jieba Chinese/Latin analysis: exact dictionary 0.11.0, accurate mode,
+    /// HMM disabled, Unicode lowercase, no long-token removal. Requires zh.
     #[cfg(feature = "zh")]
-    UnicodeAlphanumericZH = 5,
+    JiebaMixedV1 = 6,
+    /// Tantivy 0.27 SimpleTokenizer + Unicode lowercase; no length-removal filter.
+    TantivySimpleV1 = 7,
+}
+
+impl Default for TokenizerType {
+    fn default() -> Self {
+        #[cfg(feature = "zh")] { Self::JiebaMixedV1 }
+        #[cfg(not(feature = "zh"))] { Self::TantivySimpleV1 }
+    }
 }
 
 impl fmt::Display for TokenizerType {
@@ -112,10 +119,11 @@ impl fmt::Display for TokenizerType {
             TokenizerType::AsciiAlphabetic => write!(f, "AsciiAlphabetic"),
             TokenizerType::UnicodeAlphanumeric => write!(f, "UnicodeAlphanumeric"),
             TokenizerType::UnicodeAlphanumericFolded => write!(f, "UnicodeAlphanumericFolded"),
+            TokenizerType::TantivySimpleV1 => write!(f, "TantivySimpleV1"),
             TokenizerType::Whitespace => write!(f, "Whitespace"),
             TokenizerType::WhitespaceLowercase => write!(f, "WhitespaceLowercase"),
             #[cfg(feature = "zh")]
-            TokenizerType::UnicodeAlphanumericZH => write!(f, "UnicodeAlphanumericZH"),
+            TokenizerType::JiebaMixedV1 => write!(f, "JiebaMixedV1"),
         }
     }
 }
@@ -394,7 +402,7 @@ pub struct IndexMetaObject {
     pub name: String,
     /// LexicalSimilarity defines the scoring and ranking of the search results: Bm25f or Bm25fProximity
     pub lexical_similarity: LexicalSimilarity,
-    /// TokenizerType defines the tokenizer behavior: AsciiAlphabetic, UnicodeAlphanumeric, UnicodeAlphanumericFolded, UnicodeAlphanumericZH
+    /// TokenizerType defines the tokenizer behavior: AsciiAlphabetic, UnicodeAlphanumeric, UnicodeAlphanumericFolded, JiebaMixedV1
     pub tokenizer: TokenizerType,
     /// Pre-tokenization rule for this index and every query. Immutable after creation.
     #[serde(default)]

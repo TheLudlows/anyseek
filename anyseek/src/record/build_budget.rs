@@ -80,10 +80,8 @@ pub(super) fn admit<'a>(
     // analyzer tables and reader metadata own separate admission leases; charging
     // the removed scratch buffer for every idle collection exhausts shared memory.
     let mut estimate = config.schema.len() as u64 * 65536 * 32;
-    #[cfg(feature = "zh")]
-    if config.index.tokenizer == crate::index::TokenizerType::UnicodeAlphanumericZH {
-        estimate += 64 * 1024 * 1024;
-    }
+    // The mature Chinese dictionary has one process-owned admission, not a
+    // per-component allocation. Document and component estimates remain local.
     for record in records {
         if let Some(document) = &record.document {
             estimate = estimate

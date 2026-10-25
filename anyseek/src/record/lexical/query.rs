@@ -15,8 +15,7 @@ pub(super) struct Analyzer {
     _buffer: Option<crate::resources::Lease>,
     stop_words: AHashSet<String>,
     frequent: AHashSet<u64>,
-    #[cfg(feature = "zh")]
-    chinese: Option<crate::word_segmentation::WordSegmentationTM>,
+    standard: crate::tokenizer::standard::StandardAnalyzer,
 }
 pub(super) struct ScoreGroup {
     /// A component-scored ngram contributes only when this whole gram matches.
@@ -53,37 +52,25 @@ fn across(fields: &[Field], word: &str) -> Box<dyn Query> {
     ))
 }
 impl Analyzer {
-    pub(super) fn new(meta: IndexMetaObject) -> Self {
+    pub(super) fn new(meta: IndexMetaObject) -> Result<Self, RecordError> {
         let (stop_words, _, frequent) = crate::index::analysis_dictionaries(&meta);
-        #[cfg(feature = "zh")]
-        let chinese = if meta.tokenizer == TokenizerType::UnicodeAlphanumericZH {
-            let mut dictionary = crate::word_segmentation::WordSegmentationTM::new();
-            dictionary.load_dictionary(0, 1, true);
-            Some(dictionary)
-        } else {
-            None
-        };
-        Self {
+        let standard = crate::tokenizer::standard::StandardAnalyzer::new(meta.tokenizer).map_err(storage)?;
+        Ok(Self {
             meta,
             _memory: None,
             _buffer: None,
             stop_words,
             frequent,
-            #[cfg(feature = "zh")]
-            chinese,
-        }
+            standard,
+        })
     }
     /// Reserve dictionary storage before construction and retain it with its owner.
     pub(super) fn admitted(meta: IndexMetaObject) -> Result<Self, RecordError> {
         let estimate = 64 * 1024u64;
-        #[cfg(feature = "zh")]
-        let estimate = estimate + if meta.tokenizer == TokenizerType::UnicodeAlphanumericZH {
-            64 * 1024 * 1024
-        } else { 0 };
         let memory = crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?;
         let buffer = crate::resources::Scope::current().map(|scope| scope.retained_io().bytes(estimate))
             .transpose().map_err(storage)?;
-        let mut analyzer = Self::new(meta);
+        let mut analyzer = Self::new(meta)?;
         analyzer._memory = Some(memory);
         analyzer._buffer = buffer;
         Ok(analyzer)
@@ -93,8 +80,7 @@ impl Analyzer {
             text_normalization: self.meta.text_normalization,
             stop_words: &self.stop_words,
             frequent_hashset: &self.frequent,
-            #[cfg(feature = "zh")]
-            word_segmentation_option: self.chinese.as_ref(),
+            standard: Some(&self.standard),
         }
     }
     pub(super) async fn field(&self, input: &str) -> AnalyzedField {

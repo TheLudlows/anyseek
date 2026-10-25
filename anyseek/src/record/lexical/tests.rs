@@ -3,6 +3,64 @@ use tantivy::query::{AllQuery, BooleanQuery, BoostQuery, Occur, PhraseQuery, Ter
 use tantivy::schema::Document as _;
 
 #[tokio::test]
+async fn standard_profiles_preserve_operators_long_terms_originals_and_reopen() {
+    use crate::{index::{TextNormalization, TokenizerType}, record::{RecordPartition, ExpectedVersion, RecordQuery}, search::{QueryType, ResultType, SearchMode}};
+    use crate::record::tests::{config, write};
+    let profiles = vec![TokenizerType::TantivySimpleV1];
+    #[cfg(feature = "zh")]
+    let profiles = { let mut p = profiles; p.push(TokenizerType::JiebaMixedV1); p };
+    for profile in profiles {
+        let root = Temp::new();
+        let mut settings = config();
+        settings.index.tokenizer = profile;
+        settings.index.text_normalization = TextNormalization::OpenCcT2s1_1_9;
+        let long = "x".repeat(128);
+        let original = format!("alpha beta {long} 繁體中國");
+        let mut partition = RecordPartition::create(&root.0, settings).await.unwrap();
+        partition.write(write("a", "a", &original, ExpectedVersion::Absent)).await.unwrap();
+        partition.write(write("b", "b", "alpha gamma", ExpectedVersion::Absent)).await.unwrap();
+        for state in 0..3 {
+            if state == 1 { partition.compact_journal().await.unwrap(); }
+            if state == 2 { drop(partition); partition = RecordPartition::open(&root.0, 1024*1024).await.unwrap(); }
+            assert_eq!(partition.get("a").await.unwrap().unwrap().document.unwrap()["body"], original);
+            for (text, mode, expected) in [
+                ("alpha absent", QueryType::Union, vec!["a", "b"]),
+                ("alpha absent", QueryType::Intersection, vec![]),
+                ("+alpha +beta", QueryType::Union, vec!["a"]),
+                ("+ alpha beta", QueryType::Union, vec!["a"]),
+                ("\" alpha beta \"", QueryType::Union, vec!["a"]),
+                ("alpha -gamma", QueryType::Union, vec!["a"]),
+                ("\"alpha beta\"", QueryType::Union, vec!["a"]),
+                ("alph", QueryType::Union, vec![]),
+                (long.as_str(), QueryType::Union, vec!["a"]),
+                ("繁体中国", QueryType::Intersection, vec!["a"]),
+            ] {
+                let result = partition.query(RecordQuery {text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:mode,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
+                let ids = result.hits.iter().map(|h|h.record.record_id.as_str()).collect::<BTreeSet<_>>();
+                assert_eq!(ids, expected.iter().copied().collect(), "{profile:?} state={state} query={text}");
+                assert_eq!(result.count_total, expected.len());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn standard_analysis_implementation_identity_is_checked_on_native_open() {
+    let root = Temp::new();
+    let mut config = crate::record::tests::config();
+    config.index.tokenizer = crate::index::TokenizerType::TantivySimpleV1;
+    let native = runtime::Runtime::create(&root.0, &config).unwrap();
+    native.flush().await.unwrap();
+    drop(native);
+    drop(runtime::Runtime::open(&root.0, &config).unwrap());
+    let manifest = root.0.join("record-native.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    value[1][2] = "different-analysis-implementation".into();
+    std::fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(runtime::Runtime::open(&root.0, &config).is_err());
+}
+
+#[tokio::test]
 async fn field_restricted_phrase_keeps_first_position_after_skipping_earlier_field() {
     use crate::record::tests::{config, write};
     use crate::{
@@ -362,15 +420,14 @@ async fn existing_analysis_contract_feeds_native_positions_without_legacy_index(
     let stop_words = ahash::AHashSet::new();
     let frequent_hashset = ahash::AHashSet::new();
     #[cfg(feature = "zh")]
-    let mut chinese = crate::word_segmentation::WordSegmentationTM::new();
-    #[cfg(feature = "zh")]
-    chinese.load_dictionary(0, 1, true);
+    let chinese = crate::tokenizer::standard::StandardAnalyzer::new(TokenizerType::JiebaMixedV1).unwrap();
+    #[cfg(not(feature = "zh"))]
+    let chinese = crate::tokenizer::standard::StandardAnalyzer::new(TokenizerType::TantivySimpleV1).unwrap();
     let context = AnalysisContext {
         text_normalization: TextNormalization::OpenCcT2s1_1_9,
         stop_words: &stop_words,
         frequent_hashset: &frequent_hashset,
-        #[cfg(feature = "zh")]
-        word_segmentation_option: Some(&chinese),
+        standard: Some(&chinese),
     };
     let mut cases = vec![(
         TokenizerType::UnicodeAlphanumericFolded,
@@ -379,7 +436,7 @@ async fn existing_analysis_contract_feeds_native_positions_without_legacy_index(
     )];
     #[cfg(feature = "zh")]
     cases.push((
-        TokenizerType::UnicodeAlphanumericZH,
+        TokenizerType::JiebaMixedV1,
         "北京大學 歡迎學生",
         "北京大学 欢迎学生",
     ));
@@ -638,7 +695,7 @@ async fn native_query_contract_matches_before_and_after_commit() {
                 config.index.ngram_indexing = mask;
                 config.schema[0].boost = 2.0;
                 config.schema.push(serde_json::from_value(serde_json::json!({"field":"title","field_type":"Text","store":false,"index_lexical":true,"boost":0.5})).unwrap());
-                let analyzer = super::query::Analyzer::new(config.index.clone());
+                let analyzer = super::query::Analyzer::new(config.index.clone()).unwrap();
                 let partition = RecordPartition::create(&root.0, config).await.unwrap();
                 let mut inputs = Vec::new();
                 for (id, body, title) in documents {
@@ -1029,4 +1086,29 @@ async fn native_reader_reservation_follows_snapshot_lifetime() {
             .run(async { candidate.open(&root.0, CUT, LIMIT).unwrap() })
             .await,
     );
+}
+
+#[cfg(feature = "zh")]
+#[tokio::test]
+async fn standard_shared_dictionary_does_not_pin_collection_admission() {
+    use crate::resources::{Governor, Lane};
+    let governor = Arc::new(Governor::default());
+    let mut analyzers = Vec::new();
+    for i in 0..20 {
+        let scope = governor.admit(format!("jieba-owner-{i}"), Lane::Foreground, 0).unwrap();
+        let observer = scope.clone();
+        let mut meta = crate::record::tests::config().index;
+        meta.tokenizer = crate::index::TokenizerType::JiebaMixedV1;
+        let analyzer = scope.run(async { query::Analyzer::admitted(meta).unwrap() }).await;
+        assert!(!analyzer.field("中国 English 中文").await.tokens.is_empty());
+        // Only the local 64 KiB analysis state belongs to this collection.
+        let background = observer.retained_io();
+        assert!(background.bytes(384 * 1024 * 1024).is_err());
+        drop(background.bytes(384 * 1024 * 1024 - 64 * 1024).unwrap());
+        analyzers.push((analyzer, background));
+    }
+    for (analyzer, background) in analyzers {
+        drop(analyzer);
+        drop(background.bytes(384 * 1024 * 1024).unwrap());
+    }
 }

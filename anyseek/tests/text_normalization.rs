@@ -27,7 +27,7 @@ async fn fresh(label: &str, rule: TextNormalization, ngrams: u8) -> (RecordParti
         tokenizer: if label.starts_with("unicode-") {
             TokenizerType::UnicodeAlphanumeric
         } else {
-            TokenizerType::UnicodeAlphanumericZH
+            TokenizerType::JiebaMixedV1
         },
         text_normalization: rule,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,

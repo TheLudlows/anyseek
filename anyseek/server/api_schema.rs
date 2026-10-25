@@ -377,7 +377,7 @@ pub enum StopwordType {
 /// - Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. "s" in "someone's").
 /// - Tokenizing might be slower due to folding and apostroph processing.
 ///
-/// UnicodeAlphanumericZH
+/// JiebaMixedV1
 /// - Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
 /// - Supports mixed Latin and Chinese texts
 /// - Requires feature #[cfg(feature = "zh")]
@@ -399,11 +399,12 @@ pub enum TokenizerType {
     Whitespace = 3,
     /// Tokens are separated by whitespace. Token are converted to lowercase.
     WhitespaceLowercase = 4,
-    /// Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
-    /// Supports mixed Latin and Chinese texts
-    /// Requires feature #[cfg(feature = "zh")]
+    /// Versioned Jieba Chinese/Latin analysis: exact dictionary 0.11.0, accurate mode,
+    /// HMM disabled, Unicode lowercase, no long-token removal. Requires zh.
     #[cfg(feature = "zh")]
-    UnicodeAlphanumericZH = 5,
+    JiebaMixedV1 = 6,
+    /// Tantivy Unicode simple tokens, lowercased without a long-token filter.
+    TantivySimpleV1 = 7,
 }
 
 /// Similarity measure for comparing vector embeddings.

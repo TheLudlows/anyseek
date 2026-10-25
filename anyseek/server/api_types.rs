@@ -221,7 +221,7 @@ pub struct CreateIndexRequest {
     /// Explicit field definitions; names must be nonempty and unique.
     #[schema(min_items = 1)]
     pub schema: Vec<FieldRequest>,
-    /// Keep the existing Unicode tokenizer by default. Use UnicodeAlphanumericZH for Chinese segmentation.
+    /// Default is JiebaMixedV1 with zh, otherwise TantivySimpleV1; explicit English uses TantivySimpleV1.
     #[serde(default = "tokenizer_type_api")]
     #[schema(value_type = api_schema::TokenizerType)]
     pub tokenizer: TokenizerType,
@@ -338,7 +338,7 @@ fn default_boost() -> f32 {
     1.0
 }
 fn tokenizer_type_api() -> TokenizerType {
-    TokenizerType::UnicodeAlphanumeric
+    TokenizerType::default()
 }
 
 /// Iterate live document IDs; optionally include stored documents.

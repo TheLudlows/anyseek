@@ -116,21 +116,7 @@ pub fn fold_diacritics_accents_ligatures_zalgo_umlaut(string: &str) -> String {
         })
 }
 
-/// Tokenizer splits text to terms
-// WordSegmentationTM may emit a unary sign as its own token before CJK.
-// Keep it on the first term of the same lexical span. Lone signs, internal
-// C++/hyphens, and document analysis retain their existing behavior.
-#[cfg(feature = "zh")]
-fn segment_zh_span(index: &AnalysisContext<'_>, span: &str, is_query: bool) -> Vec<String> {
-    let unary = is_query && span.len() > 1
-        && matches!(span.as_bytes()[0], b'+' | b'-');
-    let body = if unary { &span[1..] } else { span };
-    let mut terms = index.word_segmentation_option.as_ref().unwrap().segment(body, true).0;
-    if unary {
-        if let Some(first) = terms.first_mut() { first.insert(0, span.as_bytes()[0] as char); }
-    }
-    terms
-}
+pub(crate) mod standard;
 
 /// Analysis configuration independent of the old posting codec and Shard.
 /// Native Tantivy indexing and query compilation can reuse the exact same
@@ -139,8 +125,7 @@ pub(crate) struct AnalysisContext<'a> {
     pub text_normalization: crate::index::TextNormalization,
     pub stop_words: &'a AHashSet<String>,
     pub frequent_hashset: &'a AHashSet<u64>,
-    #[cfg(feature = "zh")]
-    pub word_segmentation_option: Option<&'a crate::word_segmentation::WordSegmentationTM>,
+    pub standard: Option<&'a standard::StandardAnalyzer>,
 }
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::assigning_clones)]
@@ -169,11 +154,16 @@ pub(crate) async fn analyze(
     let text = normalized.as_ref();
     let token_per_field_max_capped = cmp::max(token_per_field_max, 65_536);
 
-    let text_normalized;
     let mut non_unique_terms_line: Vec<&str> = Vec::new();
+    let standard_terms;
+    let text_normalized;
+    let use_standard = tokenizer == TokenizerType::TantivySimpleV1;
     #[cfg(feature = "zh")]
-    let mut non_unique_terms_line_string: Vec<String> = Vec::new();
-
+    let use_standard = use_standard || tokenizer == TokenizerType::JiebaMixedV1;
+    if use_standard {
+        standard_terms = index.standard.expect("standard analyzer configured").terms(text, is_query);
+        non_unique_terms_line.extend(standard_terms.iter().map(String::as_str));
+    } else {
     let mut start = false;
     let mut start_pos = 0;
     let mut first_part = &text[0..0];
@@ -305,33 +295,7 @@ pub(crate) async fn analyze(
                 }
             }
 
-            #[cfg(feature = "zh")]
-            TokenizerType::UnicodeAlphanumericZH => {
-                text_normalized = text.to_lowercase();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if regex_syntax::is_word_character(token) => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        '"' | '+' | '-' | '#' => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        _ => {
-                            if start {
-                                let result = segment_zh_span(index, &text_normalized[start_pos..char.0], is_query);
-                                non_unique_terms_line_string.extend(result);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
+            _ => unreachable!("standard profiles are handled before legacy syntax"),
         }
     } else {
         match tokenizer {
@@ -456,52 +420,11 @@ pub(crate) async fn analyze(
                 }
             }
 
-            #[cfg(feature = "zh")]
-            TokenizerType::UnicodeAlphanumericZH => {
-                text_normalized = text.to_lowercase();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if regex_syntax::is_word_character(token) => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-
-                        '+' | '-' | '#' => start,
-
-                        _ => {
-                            if start {
-                                let result = segment_zh_span(index, &text_normalized[start_pos..char.0], is_query);
-                                non_unique_terms_line_string.extend(result);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
+            _ => unreachable!("standard profiles are handled before legacy syntax"),
         }
     }
 
-    #[cfg(feature = "zh")]
-    if tokenizer == TokenizerType::UnicodeAlphanumericZH {
-        if start {
-            if first_part.len() >= 2 {
-                let result = segment_zh_span(index, first_part, is_query);
-                non_unique_terms_line_string.extend(result);
-            } else {
-                let result = segment_zh_span(index, &text_normalized[start_pos..text_normalized.len()], is_query);
-                non_unique_terms_line_string.extend(result);
-            }
-        } else if !first_part.is_empty() {
-            let result = segment_zh_span(index, first_part, is_query);
-            non_unique_terms_line_string.extend(result);
-        }
-        non_unique_terms_line = non_unique_terms_line_string
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
-    }
+
 
     if tokenizer == TokenizerType::AsciiAlphabetic
         || tokenizer == TokenizerType::UnicodeAlphanumeric
@@ -518,6 +441,8 @@ pub(crate) async fn analyze(
         } else if !first_part.is_empty() {
             non_unique_terms_line.push(first_part)
         }
+    }
+
     }
 
     if is_query && non_unique_terms_line.len() > MAX_QUERY_TERM_NUMBER {
@@ -1345,7 +1270,7 @@ mod tests {
             id: 0,
             name: "zh-tail".into(),
             lexical_similarity: LexicalSimilarity::Bm25fProximity,
-            tokenizer: TokenizerType::UnicodeAlphanumericZH,
+            tokenizer: TokenizerType::JiebaMixedV1,
         text_normalization: crate::index::TextNormalization::None,
         field_length_normalization: crate::index::FieldLengthNormalization::Shared,
             stop_words: StopwordType::None,
@@ -1361,10 +1286,9 @@ mod tests {
         ]))
         .unwrap();
         let (stop_words,_,frequent_hashset)=crate::index::analysis_dictionaries(&meta);
-        let mut dictionary=crate::word_segmentation::WordSegmentationTM::new();
-        dictionary.load_dictionary(0,1,true);
+        let dictionary=standard::StandardAnalyzer::new(TokenizerType::JiebaMixedV1).unwrap();
         let context=AnalysisContext { text_normalization:meta.text_normalization,stop_words:&stop_words,
-            frequent_hashset:&frequent_hashset,word_segmentation_option:Some(&dictionary) };
+            frequent_hashset:&frequent_hashset,standard:Some(&dictionary) };
         let config=crate::record::RecordConfig {index:meta,schema,change_feed:Default::default(),embedding_space_id:None,
             max_records:32,max_record_bytes:4096,max_operations:100,max_journal_bytes:1024*1024,max_candidates:100};
         let index=crate::record::RecordPartition::create(&path,config).await.unwrap();
@@ -1388,7 +1312,7 @@ mod tests {
                             &input,
                             &mut terms,
                             &mut query_terms,
-                            TokenizerType::UnicodeAlphanumericZH,
+                            TokenizerType::JiebaMixedV1,
                             0,
                             &mut count,
                             65_536,
