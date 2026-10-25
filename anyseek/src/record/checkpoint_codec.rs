@@ -14,6 +14,10 @@ enum BorrowedEntry<'a> {
 }
 
 pub(super) fn length(config: &RecordConfig, state: &State) -> Result<usize, RecordError> {
+    json_length(&BorrowedEntry::Checkpoint { config, state })
+}
+
+pub(super) fn json_length(value: &impl Serialize) -> Result<usize, RecordError> {
     struct Counter(usize);
     impl Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -28,8 +32,7 @@ pub(super) fn length(config: &RecordConfig, state: &State) -> Result<usize, Reco
         }
     }
     let mut count = Counter(0);
-    serde_json::to_writer(&mut count, &BorrowedEntry::Checkpoint { config, state })
-        .map_err(storage)?;
+    serde_json::to_writer(&mut count, value).map_err(storage)?;
     Ok(count.0)
 }
 

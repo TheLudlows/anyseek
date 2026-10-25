@@ -63,7 +63,7 @@ impl Inner {
         let targets:Vec<_>=self.state.generations.iter().filter_map(|(id,g)|g.staged.as_ref().filter(|s|s.deadline_ms<=evaluation).map(|s|Target{record_id:id.clone(),generation_id:s.id.clone(),previous_version:g.version,deadline_ms:s.deadline_ms})).collect();
         if targets.is_empty(){return Ok(());}
         let event=Expiration{seq:self.state.seq.checked_add(1).ok_or_else(||storage("sequence exhausted"))?,evaluation_time_ms:evaluation,targets};
-        let mut candidate=self.state.clone();apply(&mut candidate,&event)?;
+        let mut candidate=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;apply(&mut candidate,&event)?;
         let snapshot_bytes=checkpoint_codec::length(&self.config, &candidate)?;
         let reserve=generation::reserve_bytes(&candidate);
         PartitionJournal::validate_initial(snapshot_bytes+reserve,self.config.max_journal_bytes).map_err(storage)?;
@@ -85,7 +85,7 @@ impl Inner {
     }
     pub(super) async fn cleanup_private(&mut self)->Result<(),RecordError>{
         if !self.state.private_cleanup_pending{return Ok(());}
-        let mut candidate=self.state.clone();candidate.private_cleanup_pending=false;
+        let mut candidate=self.state.try_clone()?;candidate.private_cleanup_pending=false;
         // Rewrite only for irreversible private erasure: a retained object may
         // contain both live and retired payloads and cannot be truncated in place.
         match self.publish_anchor_state(candidate,false).await {

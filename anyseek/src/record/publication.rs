@@ -60,7 +60,7 @@ impl Inner {
             snapshot_bytes,
             encode_entry(&Entry::Checkpoint {
                 config: self.config.clone(),
-                state: self.state.clone()
+                state: self.state.try_clone()?
             })
             .unwrap()
             .len()
@@ -71,7 +71,8 @@ impl Inner {
 
 impl Inner {
     async fn publish_generation(&mut self, applied: &Applied, snapshot_bytes: usize) -> Result<(), RecordError> {
-        let mut next = self.state.clone();
+        let growth=checkpoint_codec::json_length(applied)?.checked_mul(3).ok_or_else(|| storage("generation state growth overflow"))?;
+        let mut next = self.state.try_clone_with_growth(growth)?;
         apply(&mut next, applied).map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
         if matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) {
             let visible = evidence::visibility(&next.records).map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
@@ -92,7 +93,7 @@ impl Inner {
         }
         self.state = next; self.snapshot_bytes = snapshot_bytes;
         #[cfg(test)]
-        assert_eq!(snapshot_bytes, encode_entry(&Entry::Checkpoint { config:self.config.clone(), state:self.state.clone() }).unwrap().len());
+        assert_eq!(snapshot_bytes, encode_entry(&Entry::Checkpoint { config:self.config.clone(), state:self.state.try_clone()? }).unwrap().len());
         Ok(())
     }
 }

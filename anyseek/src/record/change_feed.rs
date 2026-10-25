@@ -326,7 +326,7 @@ impl Inner {
         };
         #[cfg(feature="s3-object-store")]
         if self.remote.is_some() {
-            let mut next=self.state.clone();
+            let mut next=self.state.try_clone()?;
             apply_trim(&mut next,&self.config.change_feed,&trim)?;
             // A complete same-sequence checkpoint atomically publishes the feed
             // floor and its replay state. It also advances the recovery log base.
@@ -356,7 +356,7 @@ impl Inner {
         {
             return Ok(());
         }
-        let mut candidate = self.state.clone();
+        let mut candidate = self.state.try_clone()?;
         candidate.feed.floor = floor;
         candidate.time_watermark_ms = at;
         let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;

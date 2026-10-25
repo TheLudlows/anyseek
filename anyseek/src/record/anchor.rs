@@ -10,7 +10,7 @@ pub(super) struct Reference {id:String,files:Vec<FileRef>,segments:Vec<Frozen>}
 type Frozen = segment::Package;
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {format:u32,seq:u64,state:segment_state::ReferencedState,payloads:Closure}
+struct Manifest {format:u32,seq:u64,state:state_chunks::Descriptor,payloads:Closure}
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Statistics {segments:Vec<crate::active::ActiveStatistics>}
@@ -89,9 +89,9 @@ impl Reference {
             Closure::default()
         } else { prior };
         let mut pool=PoolBuilder::begin(root,prior,payload_budget,format!("{:032x}",rand::random::<u128>())).map_err(storage)?;
-        let referenced=segment_state::ReferencedState::write(config,state,&mut pool)?;
+        let referenced=state_chunks::Descriptor::write(&prepared,config,state,&mut pool)?;
         let payloads=pool.finish().map_err(storage)?;
-        write_json(&prepared.join("manifest"),&Manifest{format:3,seq:state.seq,state:referenced,payloads})?;
+        write_json(&prepared.join("manifest"),&Manifest{format:4,seq:state.seq,state:referenced,payloads})?;
         let mut segments=Vec::new();let mut statistics=Vec::new();
         if !compact && previous.is_some_and(|p|p.segments.len()<8) {
             let previous=previous.unwrap();
@@ -125,11 +125,11 @@ impl Reference {
         let path=directory(root,&self.id)?;
         if serde_json::to_vec(&files(&path,closure_limit(authority_budget)?)?).map_err(storage)?!=serde_json::to_vec(&self.files).map_err(storage)?{return Err(storage("anchor closure checksum mismatch"));}
         let manifest:Manifest=serde_json::from_slice(&read_bounded(&path.join("manifest"),authority_budget)?).map_err(storage)?;
-        if manifest.format!=3{return Err(storage("unsupported anchor format"));}
+        if manifest.format!=4{return Err(storage("unsupported anchor format"));}
         validate_config(manifest.state.config())?;
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         let pool=PoolReader::open(root,manifest.payloads.clone(),limits).map_err(storage)?;
-        let (config,state)=manifest.state.read(&pool,authority_budget)?;
+        let state_chunks::Decoded{config,state}=manifest.state.read(&path,&pool,authority_budget)?;
         if state.seq!=manifest.seq{return Err(storage("anchor sequence mismatch"));}
         let statistics:Statistics=serde_json::from_slice(&read_bounded(&path.join("statistics"),closure_limit(authority_budget)?)?).map_err(storage)?;
         if statistics.segments.len()!=self.segments.len(){return Err(storage("segment statistics closure mismatch"));}
@@ -164,18 +164,24 @@ impl Inner {
     pub(super) async fn replay_anchor_tail(&mut self,entry:Entry)->Result<(),RecordError>{
         match entry {
             Entry::Applied(applied)=>{
-                let mut next=self.state.clone();apply(&mut next,&applied)?;
+                let growth=checkpoint_codec::json_length(&applied)?.checked_mul(3).ok_or_else(||storage("tail state growth overflow"))?;
+                let mut next=self.state.try_clone_with_growth(growth)?;apply(&mut next,&applied)?;
                 let bytes=checkpoint_codec::length(&self.config, &next)?;
+                self.state.admit_bytes(bytes)?;
                 self.publish(&applied,bytes).await?;
             },
             Entry::Expired(event)=>{
-                let mut next=self.state.clone();temporal::apply(&mut next,&event)?;
+                let mut next=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;temporal::apply(&mut next,&event)?;
                 let visible=evidence::visibility(&next.records)?;
                 let retired:Vec<_>=self.locations.keys().filter(|id|visible.get(*id)!=Some(&true)).cloned().collect();
                 for id in retired {let ordinal=self.locations.remove(&id).unwrap();self.index.retire(ordinal).await?;}
                 self.state=next;
             },
-            Entry::LeaseExpired(event)=>lease::apply(&mut self.state,&event)?,
+            Entry::LeaseExpired(event)=>{
+                let size=checkpoint_codec::json_length(&self.state)?.checked_add(checkpoint_codec::json_length(&event)?).ok_or_else(||storage("lease state growth overflow"))?;
+                self.state.admit_bytes(size)?;
+                lease::apply(&mut self.state,&event)?;
+            },
             Entry::FeedTrim(event)=>change_feed::apply_trim(&mut self.state,&self.config.change_feed,&event)?,
             Entry::Checkpoint{..}|Entry::Anchor(_)=>return Err(storage("unexpected anchor in operation stream")),
         }
@@ -187,7 +193,7 @@ impl Inner {
 
 impl Inner {
     pub(super) async fn publish_anchor(&mut self)->Result<u64,RecordError>{
-        self.publish_anchor_state(self.state.clone(),true).await
+        self.publish_anchor_state(self.state.try_clone()?,true).await
     }
     pub(super) async fn publish_anchor_state(&mut self,next:State,reuse:bool)->Result<u64,RecordError>{
         if self.background.is_some() { return Err(RecordError::Busy); }

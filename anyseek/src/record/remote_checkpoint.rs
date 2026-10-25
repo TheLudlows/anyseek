@@ -452,7 +452,7 @@ impl RecordPartition {
             // Drop the disposable source adapter BEFORE producing any maintenance.
             // All data/receipt identities survive; old deletion history is untrusted.
             inner.remote = None;
-            let mut next = inner.state.clone();
+            let mut next = inner.state.try_clone()?;
             next.independent_snapshot = true;
             next.evidence_quarantined |= next.records.values().any(temporal::protected);
             next.feed.scope = Sha256::digest(format!("restore:{}", target.partition_id))

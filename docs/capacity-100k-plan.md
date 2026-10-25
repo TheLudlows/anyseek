@@ -74,3 +74,53 @@ admit each framed entry before decoding, retain state ownership charges, and
 select all chunks only through the existing single publication certificate.
 Only then can the frame/population limits be revised together with graph traversal,
 physical segment counts and full-history state admission.
+
+## Chunked state implementation in progress
+
+The next anchor format is explicitly **4** (format3 is rejected, with no migration
+reader). Its state descriptor selects numbered metadata chunks through the same
+outer authenticated file inventory and business publication certificate. Frames
+carry encoded/expanded lengths; target chunk size is4MiB, individual frame bound
+16MiB and maximum chunk count256. A larger legal frame occupies its own chunk.
+Record bodies, original vectors, historical request bodies and private generation
+bodies remain exclusively in Payload objects. Generation metadata and each staged
+member are separate entries; no whole-State JSON Value is built or hydrated.
+
+Recovery reserves each frame's logical expanded residency before buffer allocation
+and decoding, bounds each Payload read by the remaining admitted expansion, verifies
+exact frame length/count and final canonical state SHA256, then runs existing full
+state validation. The reservation is transferred into the resulting State. Production
+State no longer implements infallible Clone: each deep copy acquires its own lease
+before copying maps/history. These use the existing finite shared build governor and
+32x logical JSON expansion estimate; neither is an allocator/RSS guarantee. Normal
+write state growth is admitted before WAL append. Retained history is not truncated.
+
+This step does **not** yet remove the16MiB complete-checkpoint preflight or10k record
+ceiling. Independent snapshot/takeover creation still needs the same chunked,
+privately prepared publication path before the complete-frame restriction can be
+removed safely. Native population, graph traversal and physical package count
+limits must also be coordinated before a100k profile is enabled. Current tests are
+being rerun against this change; the351-pass result remains specific to43d789c.
+
+Workspace plan: reserve at least2GiB free on the separate `/tmp` filesystem and
+admit no more than3GiB additional temporary artifacts in this focused stage. Large
+builds and fixture roots remain in `/tmp`; no corpus run, cache purge, source/data
+removal or resource purchase is part of this stage. Stop admitting new work below
+that free-space margin. `/tmp` is tmpfs and counts toward the16GiB cgroup limit;
+reclaimable disk cache is not confused with available persistent disk capacity.
+
+The production chunked path passed the complete local Record regression group:
+166 passed,0 failed,5 existing ignored entries, exit0, log
+`/tmp/anyseek-capacity-chunks-final-record.log`. This includes the existing
+certificate-before/after failure, pin/GC, SQLite/S3 fixture, and cancellation
+regressions, plus four new codec/ownership tests. A subsequent test-only addition
+checks actual finite-budget rejection retains the old owner and contents. Full
+all-targets and Windows have not yet been rerun for this new format.
+
+Final codec tests:5 passed,0 failed, exit0,
+`/tmp/anyseek-capacity-chunks-final-codec2.log`. The first version of the ownership
+rejection test held a Weak handle while requesting growth: Rust's Arc::get_mut
+correctly took the shared-owner reservation branch, so the expected error class
+was wrong. The test now checks pointer identity without changing the ownership
+branch, then creates a Weak handle to verify final release. Production code and
+budget assertions were unchanged; the first failed test log is retained.

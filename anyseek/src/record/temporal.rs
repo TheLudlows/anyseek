@@ -232,7 +232,7 @@ impl Inner {
             evaluation_time_ms: evaluation,
             targets,
         };
-        let mut candidate = self.state.clone();
+        let mut candidate = self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;
         apply(&mut candidate, &event)?;
         let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
         let feed_point = change_feed::pending_expiry(&self.state,event.seq,event.evaluation_time_ms)?;

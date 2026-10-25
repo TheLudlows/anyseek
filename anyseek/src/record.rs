@@ -41,6 +41,8 @@ mod publication;
 mod indexer;
 pub use indexer::IndexJob;
 mod segment_state;
+mod state_chunks;
+mod state_memory;
 mod checkpoint_codec;
 mod segment;
 mod anchor;
@@ -285,8 +287,11 @@ struct Applied {
     observed_epoch: u64,
     observed_time_ms: u64,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Clone))]
 struct State {
+    #[serde(skip)]
+    residency: Option<Arc<state_memory::Charge>>,
     lineage: String,
     feed: change_feed::FeedState,
     sealed_for: Option<SealCertificate>,
@@ -309,7 +314,8 @@ struct State {
     #[serde(skip)]
     operation_lookup: BTreeMap<OperationId, usize>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Clone))]
 enum Entry {
     #[serde(rename = "RecordAnchorV1")]
     Anchor(anchor::Reference),
@@ -1019,7 +1025,7 @@ impl RecordPartition {
                     let inner = partition.inner.lock().await;
                     (encode_entry(&Entry::Checkpoint {
                         config: inner.config.clone(),
-                        state: inner.state.clone(),
+                        state: inner.state.try_clone()?,
                     })?, inner.state.seq)
                 };
                 if seq != 0 {
@@ -1055,7 +1061,7 @@ impl RecordPartition {
                     let inner = partition.inner.lock().await;
                     encode_entry(&Entry::Checkpoint {
                         config: inner.config.clone(),
-                        state: inner.state.clone(),
+                        state: inner.state.try_clone()?,
                     })?
                 };
                 {
@@ -1280,10 +1286,11 @@ impl RecordPartition {
                 field.longest = true;
             }
         }
-        let state = State { feed: change_feed::FeedState {scope:format!("{:032x}",rand::random::<u128>()),floor:0}, lineage: format!("{:032x}", rand::random::<u128>()), ..State::default() };
+        let mut state = State { feed: change_feed::FeedState {scope:format!("{:032x}",rand::random::<u128>()),floor:0}, lineage: format!("{:032x}", rand::random::<u128>()), ..State::default() };
+        state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
         let entry = encode_entry(&Entry::Checkpoint {
             config: config.clone(),
-            state: state.clone(),
+            state: state.try_clone()?,
         })?;
         PartitionJournal::validate_initial(entry.len(), config.max_journal_bytes)
             .map_err(|e| RecordError::Rejected(e.to_string()))?;
@@ -1335,6 +1342,7 @@ impl RecordPartition {
     }
 
     async fn open_owned(path: &Path, max_journal_bytes: u64) -> Result<Self, RecordError> {
+        let _frames = crate::storage::build_budget::reserve_memory(max_journal_bytes).map_err(storage)?;
         let (mut journal, entries) =
             PartitionJournal::open(path, max_journal_bytes).map_err(storage)?;
         clean_recovery_caches(path)?;
@@ -1343,6 +1351,8 @@ impl RecordPartition {
             .next()
             .ok_or_else(|| storage("missing initial checkpoint"))?;
         let mut pending=Vec::new();
+        let mut pending_decode=Vec::new();
+        let first_decode = crate::storage::build_budget::reserve_memory((first.len() as u64).checked_mul(32).ok_or_else(||storage("initial frame estimate overflow"))?).map_err(storage)?;
         let (config,mut state,prepared,selected,payloads)=match serde_json::from_slice(&first).map_err(storage)? {
             Entry::Checkpoint{config,state}=>(config,state,None,None,Default::default()),
             Entry::Anchor(reference)=>{
@@ -1354,10 +1364,17 @@ impl RecordPartition {
         journal
             .restrict_budget(config.max_journal_bytes)
             .map_err(storage)?;
+        state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
+        drop(first_decode);
         restore_operation_lookup(&mut state)?;
         for bytes in entries {
+            let _entry_decode = crate::storage::build_budget::reserve_memory((bytes.len() as u64).checked_mul(32).ok_or_else(||storage("tail decode estimate overflow"))?).map_err(storage)?;
+            if selected.is_none() {
+                let size=checkpoint_codec::json_length(&state)?.checked_add(bytes.len().checked_mul(3).ok_or_else(||storage("tail growth overflow"))?).ok_or_else(||storage("tail growth overflow"))?;
+                state.admit_bytes(size)?;
+            }
             let entry=serde_json::from_slice(&bytes).map_err(storage)?;
-            if selected.is_some(){pending.push(entry);continue;}
+            if selected.is_some(){pending_decode.push(_entry_decode);pending.push(entry);continue;}
             match entry {
                 Entry::Applied(applied) => apply(&mut state, &applied)?,
                 Entry::Expired(event) => temporal::apply(&mut state, &event)?,
@@ -1445,6 +1462,7 @@ impl RecordPartition {
                     inner.publish_anchor().await?;
                     if !inner.index.can_admit(growth,native_updates).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
                 }
+                inner.state.admit_bytes(snapshot_bytes)?;
                 let feed_point = change_feed::pending(&inner.state,&applied)?;
                 inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;
                 inner.journal.validate_append_with_reserve(bytes.len(), reserve_bytes)
@@ -1748,7 +1766,7 @@ impl RecordPartition {
         if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
-        let mut snapshot_state = inner.state.clone();
+        let mut snapshot_state = inner.state.try_clone()?;
         // A snapshot cut cannot attest to deletions that occur after that cut.
         // Preserve originals, but do not silently revive typed evidence when the
         // snapshot is opened/restored under a different owner/root.

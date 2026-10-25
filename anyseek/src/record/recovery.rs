@@ -52,7 +52,7 @@ fn digest(config: &RecordConfig, state: &State) -> Result<String, RecordError> {
     Ok(checkpoint_codec::digest(config, state)?.iter().map(|b| format!("{b:02x}")).collect())
 }
 fn content_digest(config: &RecordConfig, state: &State) -> Result<String, RecordError> {
-    let mut content = state.clone();
+    let mut content = state.try_clone()?;
     content.sealed_for = None;
     content.takeover_proof = None;
     digest(config, &content)
@@ -107,7 +107,7 @@ impl RecordPartition {
                 lineage: inner.state.lineage.clone(), final_seq: inner.state.seq,
                 final_state_digest: content_digest(&inner.config, &inner.state)?, request,
             };
-            let mut next = inner.state.clone();
+            let mut next = inner.state.try_clone()?;
             next.sealed_for = Some(certificate.clone());
             let length = checkpoint_codec::length(&inner.config, &next)?;
             PartitionJournal::validate_initial(length, inner.config.max_journal_bytes)
@@ -157,7 +157,7 @@ impl RecordPartition {
                 || content_digest(&original.config, &original.state)? != seal.final_state_digest {
                 return Err(RecordError::Conflict("untrusted or mismatched takeover authority".into()));
             }
-            let mut state = original.state.clone();
+            let mut state = original.state.try_clone()?;
             state.sealed_for = None;
             state.takeover_proof = Some(seal.clone());
             state.feed.scope = successor_scope(&seal.source_feed_scope,&seal.request.intent_id);
@@ -174,7 +174,7 @@ impl RecordPartition {
     pub async fn certify_takeover_successor(&self, expected: &SealCertificate) -> Result<(), RecordError> {
         let inner = self.inner.lock().await;
         if !inner.healthy { return Err(RecordError::RecoveryRequired); }
-        let mut normalized = inner.state.clone();
+        let mut normalized = inner.state.try_clone()?;
         normalized.feed.scope = expected.source_feed_scope.clone();
         if inner.state.feed.scope != successor_scope(&expected.source_feed_scope,&expected.request.intent_id)
             || inner.state.sealed_for.is_some() || inner.state.independent_snapshot
@@ -200,7 +200,7 @@ impl RecordPartition {
         }
         let seal = SealCertificate { source_feed_scope: inner.state.feed.scope.clone(), lineage: lineage.into(), final_seq: inner.state.seq,
             final_state_digest: content_digest(&inner.config, &inner.state)?, request: request.clone() };
-        let mut next = inner.state.clone();
+        let mut next = inner.state.try_clone()?;
         next.sealed_for = Some(seal.clone());
         for target in [false, true] {
             if target { next.sealed_for = None; next.takeover_proof = Some(seal.clone()); }

@@ -113,7 +113,7 @@ impl RecordPartition {
                 if remote.as_ref().is_some_and(|r|r.build.cut_seq!=inner.state.seq) {
                     return Err(RecordError::RecoveryRequired);
                 }
-                let result = Plan {root,config:inner.config.clone(),snapshot:inner.state.clone(),prior:inner.payloads.clone(),
+                let result = Plan {root,config:inner.config.clone(),snapshot:inner.state.try_clone()?,prior:inner.payloads.clone(),
                     base:serde_json::to_vec(&inner.anchor).map_err(storage)?,disk,memory,resources,
                     #[cfg(feature="s3-object-store")] remote};
                 inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false});

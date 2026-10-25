@@ -5,7 +5,7 @@ use serde_json::Value;
 
 // Enumerate only engine-owned payload positions. Never recurse into user JSON:
 // a user field called document/generation/$payload has no special meaning.
-fn visit(state: &mut Value, mut body: impl FnMut(&mut Value)->Result<(),RecordError>)->Result<(),RecordError> {
+pub(super) fn visit(state: &mut Value, mut body: impl FnMut(&mut Value)->Result<(),RecordError>)->Result<(),RecordError> {
     fn record(value:&mut Value, body:&mut impl FnMut(&mut Value)->Result<(),RecordError>)->Result<(),RecordError>{
         if let Some(document)=value.get_mut("document") {if !document.is_null(){body(document)?;}}
         Ok(())
@@ -28,6 +28,7 @@ fn visit(state: &mut Value, mut body: impl FnMut(&mut Value)->Result<(),RecordEr
     Ok(())
 }
 // Count encoded metadata without allocating another full JSON buffer.
+#[cfg(test)]
 fn encoded_length(value:&Value,limit:u64)->Result<u64,RecordError> {
     struct Counter {bytes:u64,limit:u64}
     impl std::io::Write for Counter {
@@ -41,9 +42,11 @@ fn encoded_length(value:&Value,limit:u64)->Result<u64,RecordError> {
     let mut counter=Counter{bytes:0,limit};
     serde_json::to_writer(&mut counter,value).map_err(storage)?;Ok(counter.bytes)
 }
+#[cfg(test)]
 fn payload_limit(config:&RecordConfig)->Result<usize,RecordError>{
     config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(102)).ok_or_else(||storage("payload budget overflow"))
 }
+#[cfg(test)]
 fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(&Value)->Result<Vec<u8>,RecordError>)->Result<(RecordConfig,State),RecordError>{
     validate_config(&config)?;
     let max_bytes=max_bytes.min(config.max_journal_bytes);
@@ -67,9 +70,11 @@ fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(
 
 /// State anchor with stable cross-object references. The authenticated manifest
 /// supplies its payload closure; paths are never read from arbitrary user JSON.
+#[cfg(test)]
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReferencedState {config:RecordConfig,state:Value}
+#[cfg(test)]
 impl ReferencedState {
     pub(super) fn config(&self)->&RecordConfig {&self.config}
     pub(super) fn write(config:&RecordConfig,state:&State,pool:&mut crate::storage::payload_pool::PoolBuilder)->Result<Self,RecordError>{
