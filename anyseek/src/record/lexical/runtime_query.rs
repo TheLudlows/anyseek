@@ -183,7 +183,7 @@ pub(crate) async fn search(
         &plan.scores,
         &boosts,
         config.index.field_length_normalization.clone(),
-        MAX_DOCUMENTS,
+        MAX_POPULATION,
         |id| {
             if !allowed.contains(id) { return false; }
             lexical_counts.borrow_mut()[locations[id] % n] += 1;

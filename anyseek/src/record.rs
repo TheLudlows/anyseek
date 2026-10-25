@@ -43,6 +43,7 @@ pub use indexer::IndexJob;
 mod segment_state;
 mod state_chunks;
 mod state_memory;
+mod capacity;
 mod snapshot;
 mod checkpoint_codec;
 mod segment;
@@ -142,7 +143,7 @@ pub fn validate_config(config: &RecordConfig) -> Result<(), RecordError> {
         }
     }
     if config.max_records == 0
-        || config.max_records > 10_000
+        || config.max_records > capacity::MAX_RECORDS
         || config.max_operations == 0
         || config.max_candidates == 0
         || config.max_record_bytes == 0

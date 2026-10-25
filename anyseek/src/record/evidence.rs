@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_REFERENCES: usize = 32;
 const MAX_DEPTH: usize = 16;
-const MAX_VISITED: usize = 10_000;
+const MAX_VISITED: usize = super::capacity::MAX_RECORDS;
 
 /// Versioned original source or immutable derived content.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

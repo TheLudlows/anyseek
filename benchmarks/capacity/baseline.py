@@ -4,14 +4,21 @@ from http_engine import Engine,doc,dump,op
 class Current(Engine):
  def create(self):
   cfg={'index_name':'capacity-baseline','schema':[{'field':f,'field_type':'Text','index_lexical':f in ['title','text'],'store':True} for f in ['id','docid','title','text']]}
-  self.seq+=1;self.request('POST','/api/v1/index',{'operation_id':op(self.seq),'collection_id':'bench','config':cfg});dump(self.out/'settings.json',self.request('GET','/api/v1/index/bench')[1])
+  self.seq+=1;self.request('POST','/api/v1/index',{'operation_id':op(self.seq),'collection_id':'bench','config':cfg,**({'capacity_profile':self.capacity_profile} if getattr(self,'capacity_profile',None) else {})});dump(self.out/'settings.json',self.request('GET','/api/v1/index/bench')[1])
 def main():
- p=argparse.ArgumentParser();p.add_argument('--revision',required=True);p.add_argument('--binary',type=pathlib.Path,required=True);p.add_argument('--data',type=pathlib.Path,required=True);p.add_argument('--out',type=pathlib.Path,required=True);a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(parents=True,exist_ok=False)
+ p=argparse.ArgumentParser();p.add_argument('--revision',required=True);p.add_argument('--binary',type=pathlib.Path,required=True);p.add_argument('--data',type=pathlib.Path,required=True);p.add_argument('--out',type=pathlib.Path,required=True);p.add_argument('--capacity-profile',choices=['standard_10k','bounded_100k']);p.add_argument('--take',type=int);p.add_argument('--build-single-mib',type=int);p.add_argument('--build-shared-mib',type=int);a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(parents=True,exist_ok=False)
  assert not any(k.startswith('ANYSEEK_') for k in os.environ);os.sched_setaffinity(0,{2,3});os.environ['TOKENIZER_ANYSEEK_BINARY']=str(a.binary.resolve())
- rows=json.loads(a.data.read_text());e=Current('anyseek','restricted',a.out);accepted=[];last=None;failed=None;summary={'revision':a.revision,'binary_sha256':hashlib.sha256(a.binary.read_bytes()).hexdigest(),'corpus_sha256':hashlib.sha256(a.data.read_bytes()).hexdigest(),'attempt_target':len(rows),'accepted':0,'attempted':0,'status':'running','overrides':{},'cpu_max':pathlib.Path('/sys/fs/cgroup/cpu.max').read_text().strip(),'memory_max':pathlib.Path('/sys/fs/cgroup/memory.max').read_text().strip()}
+ overrides={}
+ for arg,key in [(a.build_single_mib,'ANYSEEK_BUILD_MEMORY_BYTES'),(a.build_shared_mib,'ANYSEEK_BUILD_SHARED_MEMORY_BYTES')]:
+  if arg is not None:overrides[key]=str(arg*1024*1024)
+ os.environ.update(overrides)
+ rows=json.loads(a.data.read_text());rows=rows[:a.take] if a.take else rows;e=Current('anyseek','restricted',a.out);e.capacity_profile=a.capacity_profile;accepted=[];last=None;failed=None;summary={'revision':a.revision,'binary_sha256':hashlib.sha256(a.binary.read_bytes()).hexdigest(),'corpus_sha256':hashlib.sha256(a.data.read_bytes()).hexdigest(),'attempt_target':len(rows),'accepted':0,'attempted':0,'status':'running','overrides':overrides,'capacity_profile':a.capacity_profile,'cpu_max':pathlib.Path('/sys/fs/cgroup/cpu.max').read_text().strip(),'memory_max':pathlib.Path('/sys/fs/cgroup/memory.max').read_text().strip()}
  try:
   e.start();e.create();start=time.monotonic();e.phase='load'
   for i in range(0,len(rows),25):
+   space=os.statvfs(a.out);available=space.f_bavail*space.f_frsize
+   if available<2*1024**3:
+    summary['resource_stop']={'reason':'preserved 2GiB free-space margin','available_bytes':available};break
    writes=[]
    for row in rows[i:i+25]:
     d=doc(row);d.pop('date');e.seq+=1;writes.append({'operation_id':op(e.seq),'record_id':d['id'],'routing_key':'benchmark','expected':'Any','document':d})
@@ -24,6 +31,15 @@ def main():
    summary['accepted']=len(accepted);dump(a.out/'summary.json',summary)
    if i%250==0:print('loaded',len(accepted),'attempted',summary['attempted'],flush=True)
    if failed:break
+   if len(accepted) in (10000,20000,50000) and len(accepted)<len(rows):
+    e.phase='milestone';milestone={'accepted':len(accepted),'visible_before':e.count()};t=time.monotonic()
+    milestone['checkpoint']=e.request('PATCH','/api/v1/index/bench',required=False)[:2];milestone['checkpoint_seconds']=time.monotonic()-t
+    summary.setdefault('milestones',[]).append(milestone);dump(a.out/'summary.json',summary)
+    if milestone['checkpoint'][0]!=200:raise RuntimeError(('milestone checkpoint failed',milestone))
+    e.stop();milestone['reopen_ms']=e.start();milestone['visible_after']=e.count()
+    milestone['retry']=e.request('POST','/api/v1/index/bench/batch',{'writes':[last[0]]},required=False)[:2]
+    assert milestone['visible_after']==len(accepted),(len(accepted),milestone)
+    e.phase='load';dump(a.out/'summary.json',summary);print('milestone',json.dumps(milestone),flush=True)
   summary['load_seconds']=time.monotonic()-start;e.phase='query';summary['visible_before']=e.count()
   queries=json.loads(pathlib.Path(__file__).with_name('queries-393.json').read_text());accepted_set=set(accepted)
   summary['qrels_coverage']={group:{'positive_pairs':sum(g>0 for q in queries if q['group']==group for g in q['qrels'].values()),'included_positive_pairs':sum(g>0 and d in accepted_set for q in queries if q['group']==group for d,g in q['qrels'].items())} for group in ['prior40_nonblind','heldout353']}
@@ -37,7 +53,7 @@ def main():
   if last:
    summary['accepted_retry']=e.request('POST','/api/v1/index/bench/batch',{'writes':[last[0]]},required=False)[:2];summary['original_accepted_result']=last[1]
   if failed:summary['failed_retry']=e.request('POST','/api/v1/index/bench/batch',{'writes':[failed[0]]},required=False)[:2]
-  summary['visible_after_retries']=e.count();summary['status']='boundary_observed' if failed else 'target_loaded';dump(a.out/'accepted-docids.json',accepted)
+  summary['visible_after_retries']=e.count();summary['status']='resource_stopped' if 'resource_stop' in summary else ('boundary_observed' if failed else 'target_loaded');dump(a.out/'accepted-docids.json',accepted)
  except Exception as exc:summary['status']='failed';summary['exception']=repr(exc)
  finally:
   e.close();summary['peak_rss_kib']=max((x['rss_kib'] for x in e.resources),default=0);dump(a.out/'summary.json',summary);print(json.dumps(summary,ensure_ascii=False),flush=True)

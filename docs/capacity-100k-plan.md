@@ -196,3 +196,57 @@ limits still cap at10,000, and State JSON-expansion residency can reject larger
 histories before those limits. No100k support or new large-scale benchmark result
 is claimed. Next work must bound State-copy peaks and coordinate package population,
 segment closure and service admission while retaining the public candidate cap.
+
+## Finite population path (local, awaiting capacity experiment)
+
+Ordinary foreground anchor preparation borrows the guard-pinned authoritative
+State instead of deep-copying all records and operation history. Explicit replacement
+candidates are dropped after package preparation, before authenticated candidate
+recovery. The recovered State replaces the old State only after certificate
+publication. Failure before publication retains the original State and receipts.
+The eight anchor regressions passed before the population changes below
+(`/tmp/anyseek-capacity-borrowed-anchor.log`).
+
+Copies still retained deliberately: background index and independent snapshot
+capture a separately admitted fixed State before releasing the live lock;
+generation, TTL and lease speculative candidates retain independent admission;
+recovery retains a decoded State alongside the live one until publication. State
+JSON expansion remains charged at32x, with no coefficient reduction. This can still
+reject large histories; the first measured refusal must be reported, not hidden.
+
+The HTTP create request accepts explicit `capacity_profile: "bounded_100k"`;
+omission or `"standard_10k"` preserves10k records/operations. The larger profile
+permits100k records and100k retained operations, but preserves256MiB authority,
+1MiB document,10k public candidate bounds, and all existing finite memory limits.
+GET index information reports these concrete persisted limits. No history is
+trimmed; at100k first writes this profile has no additional update allowance.
+The profile is an admission ceiling, not a guarantee that every workload fits.
+
+Record validation, evidence population traversal and native global population
+checks share the finite100k population bound. Evidence depth16/reference32 and
+native per-package10k limits stay unchanged. Authenticated builds batch at8192
+identities per package, with at most16 selected packages (8 for <=10k profiles).
+Global scores, field sorting, filtering and RRF still see the selected corpus;
+public candidate windows are unchanged. Background/foreground raw WAL frames
+remain individually bounded at16MiB, including future event reserves.
+
+The capacity harness accepts explicit profile and finite build-budget overrides,
+records them, and stops new writes while at least2GiB filesystem headroom remains.
+Corpus selection accepts a bounded target up to100001 with the same seed and
+all393-query judged documents first; smaller prefixes retain the old ordering.
+No new quality or100k capacity result is asserted here.
+
+Boundary validation for the local100k path:2 core tests passed, including a real
+10,001-identity/receipt authenticated package fixture split into2 packages plus
+live tail, complete query count, last identity match and reopen/idempotent retry.
+This fixture constructs canonical Applied records internally; it is not HTTP
+throughput evidence. The server profile test also passed, preserving other limits
+and rejecting unknown/unlimited profile names. Logs:
+`/tmp/anyseek-capacity-profile-boundary.log`,
+`/tmp/anyseek-capacity-service-profile.log`.
+
+Prepared100001-document corpus:38,481,920bytes,
+SHA256 `2d00fa102eda7bc56e651f9b21eb9a639cf75799b259e41c070583425ff58d86`.
+All10 source files were rehashed and record-count checked; its first10001 records
+match the previous corpus exactly. Data remains in the independent temporary
+experiment root; no source corpus or old evidence was deleted.

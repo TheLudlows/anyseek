@@ -39,6 +39,29 @@ impl Frozen {
         let reference=Self::seal(root,&prepared,id,closure_limit(config.max_journal_bytes)?)?;
         Ok((reference,active))
     }
+    async fn prepare_chunks(root:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>,segments:&mut Vec<Self>,statistics:&mut Vec<crate::active::ActiveStatistics>)->Result<(),RecordError>{
+        // At most one bounded identity batch is materialized; the full State is
+        // borrowed. Each package releases its writer before the next is built.
+        let max_id=state.records.keys().map(String::len).max().unwrap_or(0);
+        let bytes=(capacity::PACKAGE_RECORDS as u64).checked_mul(max_id as u64+256)
+            .ok_or_else(||storage("package identity estimate overflow"))?;
+        let _keys=crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
+        let mut keys=std::collections::BTreeSet::new();
+        for key in state.records.keys().filter(|key|selected.is_none_or(|s|s.contains(*key))) {
+            keys.insert(key.clone());
+            if keys.len()==capacity::PACKAGE_RECORDS {
+                if segments.len()>=capacity::segments(config){return Err(storage("selected package budget exceeded"));}
+                let (segment,active)=Self::prepare(root,config,state,Some(&keys)).await?;
+                segments.push(segment);statistics.push(active);keys.clear();
+            }
+        }
+        if !keys.is_empty() {
+            if segments.len()>=capacity::segments(config){return Err(storage("selected package budget exceeded"));}
+            let (segment,active)=Self::prepare(root,config,state,Some(&keys)).await?;
+            segments.push(segment);statistics.push(active);
+        }
+        Ok(())
+    }
     async fn load(&self,root:&Path,config:&RecordConfig,active:crate::active::ActiveStatistics)->Result<IndexArc,RecordError>{
         let path=self.verify(root,closure_limit(config.max_journal_bytes)?)?;
         active.validate_sparse(retrieval_schema(config).iter().filter(|f|f.index_lexical||f.index_vector).count()).map_err(storage)?;
@@ -93,7 +116,7 @@ impl Reference {
         let payloads=pool.finish().map_err(storage)?;
         write_json(&prepared.join("manifest"),&Manifest{format:4,seq:state.seq,state:referenced,payloads})?;
         let mut segments=Vec::new();let mut statistics=Vec::new();
-        if !compact && previous.is_some_and(|p|p.segments.len()<8) {
+        if !compact && previous.is_some_and(|p|p.segments.len()<capacity::segments(config)) {
             let previous=previous.unwrap();
             let local=view.ok_or_else(||storage("missing incremental input view"))?.local_statistics().await?;
             if local.len()!=previous.segments.len()+1{return Err(storage("selected segment/view mismatch"));}
@@ -103,12 +126,10 @@ impl Reference {
             }
             let keys=tail.keys.iter().enumerate().filter(|(id,_)|tail.is_live(*id)).map(|(_,key)|key.clone()).collect::<std::collections::BTreeSet<_>>();
             if !keys.is_empty() {
-                let (segment,active)=Frozen::prepare(root,config,state,Some(&keys)).await?;
-                segments.push(segment);statistics.push(active);
+                Frozen::prepare_chunks(root,config,state,Some(&keys),&mut segments,&mut statistics).await?;
             }
         } else {
-            let (segment,active)=Frozen::prepare(root,config,state,None).await?;
-            segments.push(segment);statistics.push(active);
+            Frozen::prepare_chunks(root,config,state,None,&mut segments,&mut statistics).await?;
         }
         // Keep one empty physical segment so the query engine retains schema.
         if segments.is_empty(){let (segment,active)=Frozen::prepare(root,config,state,None).await?;segments.push(segment);statistics.push(active);}
@@ -119,7 +140,7 @@ impl Reference {
         Ok(Self{id,files:members,segments})
     }
     pub(super) async fn load(&self,root:&Path,authority_budget:u64)->Result<Loaded,RecordError>{
-        if self.segments.is_empty()||self.segments.len()>8{return Err(storage("invalid selected segment count"));}
+        if self.segments.is_empty()||self.segments.len()>capacity::MAX_SEGMENTS{return Err(storage("invalid selected segment count"));}
         let mut ids=std::collections::BTreeSet::new();
         if self.segments.iter().any(|s|!ids.insert(&s.id)){return Err(storage("duplicate selected segment"));}
         let path=directory(root,&self.id)?;
@@ -127,6 +148,7 @@ impl Reference {
         let manifest:Manifest=serde_json::from_slice(&read_bounded(&path.join("manifest"),authority_budget)?).map_err(storage)?;
         if manifest.format!=4{return Err(storage("unsupported anchor format"));}
         validate_config(manifest.state.config())?;
+        if self.segments.len()>capacity::segments(manifest.state.config()){return Err(storage("configured selected segment count exceeded"));}
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         let pool=PoolReader::open(root,manifest.payloads.clone(),limits).map_err(storage)?;
         let state_chunks::Decoded{config,state}=manifest.state.read(&path,&pool,authority_budget)?;
@@ -193,9 +215,12 @@ impl Inner {
 
 impl Inner {
     pub(super) async fn publish_anchor(&mut self)->Result<u64,RecordError>{
-        self.publish_anchor_state(self.state.try_clone()?,true).await
+        self.publish_anchor_candidate(None,true).await
     }
     pub(super) async fn publish_anchor_state(&mut self,next:State,reuse:bool)->Result<u64,RecordError>{
+        self.publish_anchor_candidate(Some(next),reuse).await
+    }
+    async fn publish_anchor_candidate(&mut self,next:Option<State>,reuse:bool)->Result<u64,RecordError>{
         if self.background.is_some() { return Err(RecordError::Busy); }
         let result=self.prepare_and_publish_anchor(next,reuse).await;
         // The inner future has dropped every candidate view/handle before GC.
@@ -208,17 +233,25 @@ impl Inner {
         }
         result
     }
-    async fn prepare_and_publish_anchor(&mut self,next:State,reuse:bool)->Result<u64,RecordError>{
+    async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
-        let snapshot_bytes=checkpoint_codec::length(&self.config, &next)?;
+        // The partition guard pins the live State. Ordinary compaction borrows
+        // it instead of cloning all retained history. Explicit replacement
+        // candidates (snapshot/takeover) still own their independent State.
+        let next=candidate.as_ref().unwrap_or(&self.state);
+        let next_seq=next.seq;
+        let snapshot_bytes=checkpoint_codec::length(&self.config, next)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
-        let reference=Reference::prepare(&root,&self.config,&next,prior,self.anchor.as_ref(),Some(&self.index),!reuse).await?;
+        let reference=Reference::prepare(&root,&self.config,next,prior,self.anchor.as_ref(),Some(&self.index),!reuse).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));
         }
+        // Authenticated recovery below provides the replacement State. An
+        // explicit input candidate no longer needs to coexist with that copy.
+        drop(candidate);
         let loaded=reference.load(&root,self.config.max_journal_bytes).await?;
         let mut index=view::RetrievalView::single(loaded.index);
         let mut ordinals=loaded.ordinals;
@@ -236,13 +269,13 @@ impl Inner {
         self.healthy=false;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
         #[cfg(feature="s3-object-store")]
         if let Some(remote)=self.remote.as_mut() {
-            remote.publish_anchor(&root,&reference,&loaded.payloads,next.seq,self.config.max_journal_bytes,false).await?;
+            remote.publish_anchor(&root,&reference,&loaded.payloads,next_seq,self.config.max_journal_bytes,false).await?;
         }
         match self.journal.checkpoint(&payload){
             Ok(())=>{},
             Err(error@CreateError::NotPublished(_))=>{
                 #[cfg(feature="s3-object-store")]
-                if self.remote.is_some() {return Err(RecordError::DurablePending(next.seq));}
+                if self.remote.is_some() {return Err(RecordError::DurablePending(next_seq));}
                 self.healthy=true;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
                 return Err(creation_error(error));
             },
@@ -251,7 +284,7 @@ impl Inner {
         // All fallible preparation precedes the authority certificate. The
         // partition guard excludes readers until the complete view is installed.
         self.index=index;self.ordinals=ordinals;self.locations=locations;
-        self.anchor=Some(reference);self.payloads=loaded.payloads;self.state=next;self.snapshot_bytes=snapshot_bytes;
+        self.anchor=Some(reference);self.payloads=loaded.payloads;self.state=loaded.state;self.snapshot_bytes=snapshot_bytes;
         self.healthy=true;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
         #[cfg(test)]
         if root.join(".test-anchor-post-certificate-gc").exists() {
