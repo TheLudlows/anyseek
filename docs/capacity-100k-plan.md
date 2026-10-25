@@ -250,3 +250,44 @@ SHA256 `2d00fa102eda7bc56e651f9b21eb9a639cf75799b259e41c070583425ff58d86`.
 All10 source files were rehashed and record-count checked; its first10001 records
 match the previous corpus exactly. Data remains in the independent temporary
 experiment root; no source corpus or old evidence was deleted.
+
+## b03ba58 default10k HTTP checkpoint
+
+Code `b03ba586fd2619faa9d218ef1e7585c6c94c3243` passed the complete Record
+suite:174 passed,0failed,5 existing parent-invoked worker entries ignored,
+exit0 in359.14s (`/tmp/anyseek-capacity-phase20-record.log`). This is not a
+new all-targets/Windows claim. Server build exited0. The fixed unoptimized
+binary SHA256 is
+`90268c0909a73473933d927f9ee997e24ca153cb8633ef3cdc1524a046c429a4`.
+
+Default profile, no budget override, one real HTTP collection:
+
+-10000 accepted/10000 attempted, zero refusals; load883.5647s.
+-393 OR query probes returned HTTP200;91/91 prior40 and903/903 heldout353
+ positive qrel pairs were present. This establishes coverage/errors, not a new
+ quality comparison against Meilisearch.
+-Checkpoint HTTP200, visible/indexed sequence10000,26.7856s.
+-Reopen startup6032.65ms; visible records10000 before/after and after retry.
+-The final original operation receipt and retry result are identical, sequence10000.
+-Peak sampled RSS344524KiB. These development-build timings are not a fair
+ performance ranking against Meilisearch's optimized release binary.
+
+Raw evidence: `/tmp/anyseek-capacity-phase20-http-10k/summary.json`,
+`query-probes.json`, `events.jsonl`, `resources.json` (same directory).
+The original data root and logs are retained.
+
+The same code/binary is now running a separate single-collection100k-target
+staircase with explicit `bounded_100k`, single3072MiB/shared6144MiB build limits;
+no other default quota changes. Milestones10000/20000/50000 include checkpoint,
+reopen and counts. The first refusal/timeout or2GiB free-space guard stops further
+admission and is evidence, not a hidden retry. Since the default10k checkpoint
+already took26.8s, a35s client deadline may expose a development-build latency
+boundary; investigate accepted state/owned jobs before interpreting such a result.
+No100k success is claimed while this process is running.
+
+Running orchestration: `/tmp/anyseek-capacity-phase20.py`, results
+`/tmp/anyseek-capacity-phase20-results.json`, run log
+`/tmp/anyseek-capacity-phase20-run.log`, HTTP staircase output
+`/tmp/anyseek-capacity-phase20-http-100k/`. Do not start duplicate runs or overwrite
+the measured binary. Publication remains blocked pending the specific approval;
+all new implementation and documentation commits are local only.
