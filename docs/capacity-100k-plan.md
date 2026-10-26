@@ -31,7 +31,8 @@ Raw evidence is under `/tmp/anyseek-capacity-phase24-release-100k`:
 `summary.json`, `events.jsonl`, `unknown-observation.json`, `boundary-validation/`,
 `boundary-recovery/`. The old phase22 evidence remains unchanged.
 Current exact-head CI40257649788 has both S3 jobs successful but an HTTP/UI smoke
-step failure; final CI and same-size Meili remain outstanding. Two new local
+step failure; final CI remains outstanding. The same-size comparison is complete;
+see [64,464-document results](../benchmarks/capacity/RESULTS-64464.md). Two new local
 regressions pass: Anchor-tail vector/temporal replay (normal, durable-pending,
 publication-failure variants), and lower observed_epoch retaining the higher
 watermark. The new test initially compared pre-create config; its15-byte mismatch
