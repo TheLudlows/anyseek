@@ -1,4 +1,4 @@
-# Local 100k capacity-path review
+# 100k capacity-path review
 
 Review code: `b03ba586fd2619faa9d218ef1e7585c6c94c3243`, relative to
 `b561b65d971f2b7e51fcefbd0382e39ce1dfe0b2`. No new implementation was pushed.

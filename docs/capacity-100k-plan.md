@@ -1,5 +1,44 @@
 # Bounded 100k capacity: implementation checkpoint
 
+## Latest measured boundary (phase24, 2026-10-26)
+
+PR85 is draft; remote HEAD `2fc5b5c` contains production `af45faf` plus
+scripts/docs and test-only logging. Earlier local-only/publication-pending notes
+below are historical. The release binary SHA is
+`72bf6da6828bd6a73661b60584d5639711685f69c7c4cfb0aaaf2e9f09502ab1`.
+The unchanged explicit experiment uses bounded_100k, 3GiB single/6GiB shared;
+default capacity and budgets are unchanged. **100k has not passed.**
+
+- First boundary: 64464 accepted, 64475 attempted. Batch results:14 applied,
+  one storage_error (item503 inside HTTP200),10 not_attempted. Ordinal64465
+  requested3223414368 bytes against single3221225472. Original operations
+  were observed without resubmission; visible records and retained operations
+  both remained64464. The precise first-rejection allocation is not yet proven.
+- Explicit checkpoint failed before publication at `stage=index_snapshot_clone`:
+  shared used3707866712 + requested3163591360 > limit6442450944.
+  This identifies a retained full-State copy peak, not evidence of a leak.
+- Reopen of the existing authority+tail succeeded in4059.216ms, count64464;
+  18 original receipts and5 exact query ID/score/count probes matched.
+  Checkpoint refusal remains a failure despite successful recovery.
+- All393 original-question OR queries completed:0errors,0empty; all994 positive
+  qrel pairs present. Macro Recall@10=.537068, Recall@100=.805259,
+  nDCG@10=.377901, MRR@10=.385216. Prior40/nonblind and heldout353 are
+  stored separately. These are partial-corpus results, not100k or a Meili comparison.
+- Peak sampled service RSS760548KiB; logical leases are not RSS measurements.
+  Disk free remained above2GiB; no data was deleted or budget raised.
+
+Raw evidence is under `/tmp/anyseek-capacity-phase24-release-100k`:
+`summary.json`, `events.jsonl`, `unknown-observation.json`, `boundary-validation/`,
+`boundary-recovery/`. The old phase22 evidence remains unchanged.
+Current exact-head CI40257649788 has both S3 jobs successful but an HTTP/UI smoke
+step failure; final CI and same-size Meili remain outstanding. Two new local
+regressions pass: Anchor-tail vector/temporal replay (normal, durable-pending,
+publication-failure variants), and lower observed_epoch retaining the higher
+watermark. The new test initially compared pre-create config; its15-byte mismatch
+was the persisted longest schema tag, corrected to compare actual inner.config
+without changing production or weakening size equality. Running-job logs were unavailable (404), not diagnosed yet.
+
+
 Base: merged master `34dc46fd6b6603c96beead765915e4b4fa5c2919`.
 Branch: `fix/record-capacity-100k`. This is a plan, not a capacity claim.
 

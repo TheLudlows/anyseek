@@ -369,6 +369,46 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn anchor_tail_vector_patch_and_temporal_metadata_recover_exact_sizes_and_receipts() {
+        for failure in [0,1,2] {
+            let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let settings=config();
+            let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+            let mut initial=write("initial","source","alpha original",ExpectedVersion::Absent);
+            initial.document.as_mut().unwrap().remove("vector");
+            p.write(initial).await.unwrap();p.compact_journal().await.unwrap();
+            let anchor=serde_json::to_vec(&p.inner.lock().await.anchor).unwrap();
+            {let i=p.inner.lock().await;assert_eq!(i.snapshot_bytes,checkpoint_codec::length(&i.config,&i.state).unwrap(),"after compact");}
+            let mut patch=write("patch","source","unused",ExpectedVersion::Match(1));patch.document=None;
+            patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
+            let patch_receipt=p.write(patch.clone()).await.unwrap();assert_eq!(patch_receipt.version,1);
+            {let i=p.inner.lock().await;assert_eq!(i.snapshot_bytes,checkpoint_codec::length(&i.config,&i.state).unwrap(),"after patch");}
+            let mut timed=write("timed","timed","alpha temporal",ExpectedVersion::Absent);
+            let metadata=TemporalMetadata{event_time_ms:Some(-1),valid_from_ms:Some(0),valid_to_ms:Some(1),expire_at_ms:Some(253_402_300_799_998)};
+            timed.temporal=Some(metadata.clone());
+            if failure==1 {p.inner.lock().await.fail_after_durable=true;}
+            if failure==2 {p.inner.lock().await.fail_publication_stage=1;}
+            let timed_receipt=WriteReceipt{staged_only:false,seq:3,version:1,record_id:"timed".into()};
+            let result=p.write(timed.clone()).await;
+            if failure==0 {assert_eq!(result.unwrap(),timed_receipt);} else {assert!(matches!(result,Err(RecordError::DurablePending(3))));}
+            assert_eq!(serde_json::to_vec(&p.inner.lock().await.anchor).unwrap(),anchor,"suffix must not be absorbed by another compact");
+            drop(p);
+            let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+            {
+                let inner=p.inner.lock().await;
+                assert_eq!(inner.state.seq,3);assert_eq!(inner.state.operations.len(),3);
+                assert_eq!(inner.snapshot_bytes,checkpoint_codec::length(&inner.config,&inner.state).unwrap());
+                assert_eq!(inner.state.records["timed"].temporal,metadata);
+                assert_eq!(inner.state.records["source"].document.as_ref().unwrap()["body"],"alpha original");
+                assert_eq!(inner.state.records["source"].document.as_ref().unwrap()["vector"],serde_json::json!([2.0,0.0]));
+            }
+            assert_eq!(p.write(patch).await.unwrap(),patch_receipt);
+            assert_eq!(p.write(timed).await.unwrap(),timed_receipt);
+            assert_eq!(p.inner.lock().await.state.seq,3);
+            drop(p);
+        }
+    }
+
     use super::*;
     use super::super::tests::{path,config,write,query};
     #[tokio::test]

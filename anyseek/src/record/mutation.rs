@@ -234,6 +234,24 @@ pub(super) fn replay_checkpoint_size(state: &State, before: usize, applied: &App
 
 #[cfg(test)]
 mod replay_size_tests {
+    #[test]
+    fn durable_counter_retains_higher_epoch_watermark() {
+        let config=super::super::tests::config();let mut state=State::default();
+        let mut before=checkpoint_codec::length(&config,&state).unwrap();
+        for (i,epoch) in [100,99].into_iter().enumerate() {
+            let mut request=super::super::tests::write(&format!("epoch-{i}"),"r","alpha",ExpectedVersion::Any);
+            request.operation_id.epoch=epoch;
+            let applied=Applied{request_digest:None,graph_invalidation:false,
+                receipt:WriteReceipt{staged_only:false,seq:i as u64+1,version:i as u64+1,record_id:"r".into()},
+                request,observed_epoch:epoch,observed_time_ms:99+i as u64};
+            let bytes=replay_checkpoint_size(&state,before,&applied).unwrap();
+            apply(&mut state,&applied).unwrap();
+            assert_eq!(bytes,encode_entry(&Entry::Checkpoint{config:config.clone(),state:state.clone()}).unwrap().len());
+            assert_eq!(state.epoch_watermark,100);before=bytes;
+        }
+        assert_eq!(state.operations.len(),2);
+    }
+
     use super::*;
     #[test]
     fn durable_size_matches_full_wire_with_history_tombstones_and_digit_boundaries() {
