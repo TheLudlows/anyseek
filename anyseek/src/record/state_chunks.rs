@@ -368,7 +368,14 @@ impl Descriptor {
         pool: &mut PoolBuilder,
     ) -> Result<Self, RecordError> {
         validate_config(config)?;
-        if checkpoint_codec::json_length(state)? as u64 > config.max_journal_bytes {
+        Self::write_encoded(root, config, &checkpoint_codec::StateEncoding::new(state)?, pool)
+    }
+    pub(super) fn write_encoded(root: &Path, config: &RecordConfig,
+        encoded: &checkpoint_codec::StateEncoding<'_>, pool: &mut PoolBuilder,
+    ) -> Result<Self, RecordError> {
+        let state = encoded.state();
+        validate_config(config)?;
+        if encoded.length() as u64 > config.max_journal_bytes {
             return Err(invalid("complete state byte budget exceeded"));
         }
         let mut writer = Writer {
@@ -392,7 +399,7 @@ impl Descriptor {
             chunks: writer.chunks,
             entries: writer.entries,
             expanded: writer.expanded,
-            digest: checkpoint_codec::json_digest(state)?,
+            digest: encoded.digest(),
             _build_lease:Some(Arc::new(writer.metadata)),
         })
     }
@@ -508,9 +515,16 @@ impl Descriptor {
     // State, retaining only one decoded frame rather than a second full history.
     pub(super) fn verify_expected(&self,root:&Path,pool:&PoolReader,authority:u64,state:&State)->Result<(),RecordError> {
         if self.format != 1 { return Err(invalid("unsupported complete state format")); }
+        self.verify_encoded(root, pool, authority, &checkpoint_codec::StateEncoding::new(state)?)
+    }
+    pub(super) fn verify_encoded(&self, root: &Path, pool: &PoolReader, authority: u64,
+        encoded: &checkpoint_codec::StateEncoding<'_>,
+    ) -> Result<(), RecordError> {
+        let state = encoded.state();
+        if self.format != 1 { return Err(invalid("unsupported complete state format")); }
         // Recoverability is checked per bounded frame/value, with the complete
         // residency charged to the shared pool by its actual owners.
-        if checkpoint_codec::json_digest(state)? != self.digest || checkpoint_codec::json_length(state)? as u64 > authority.min(self.config.max_journal_bytes) {
+        if encoded.digest() != self.digest || encoded.length() as u64 > authority.min(self.config.max_journal_bytes) {
             return Err(invalid("expected state closure mismatch"));
         }
         validate_restored_state(&self.config,state)?;

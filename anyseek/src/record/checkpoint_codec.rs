@@ -5,16 +5,56 @@ use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 
 #[derive(Serialize)]
-enum BorrowedEntry<'a> {
+enum BorrowedEntry<'a, S: ?Sized> {
     #[serde(rename = "RecordCheckpointV14")]
     Checkpoint {
         config: &'a RecordConfig,
-        state: &'a State,
+        state: &'a S,
     },
 }
 
 pub(super) fn length(config: &RecordConfig, state: &State) -> Result<usize, RecordError> {
     json_length(&BorrowedEntry::Checkpoint { config, state })
+}
+
+/// Attempt-local encoding evidence. The borrow prevents changing this State
+/// while the evidence is reused; no seq-keyed or cross-publication cache exists.
+pub(super) struct StateEncoding<'a> {
+    state: &'a State,
+    length: usize,
+    digest: [u8; 32],
+}
+impl<'a> StateEncoding<'a> {
+    pub(super) fn new(state: &'a State) -> Result<Self, RecordError> {
+        let (length, digest) = json_measure(state)?;
+        Ok(Self { state, length, digest })
+    }
+    pub(super) fn state(&self) -> &'a State { self.state }
+    pub(super) fn length(&self) -> usize { self.length }
+    pub(super) fn digest(&self) -> [u8; 32] { self.digest }
+    pub(super) fn checkpoint_length(&self, config: &RecordConfig) -> Result<usize, RecordError> {
+        // Serialize the identical envelope with JSON null in the State position.
+        // Replacing its four bytes preserves exact config escaping and framing.
+        json_length(&BorrowedEntry::Checkpoint { config, state: &() })?
+            .checked_sub(4).and_then(|n| n.checked_add(self.length))
+            .ok_or_else(|| storage("checkpoint length overflow"))
+    }
+}
+struct DigestCounter { length: usize, digest: Sha256 }
+impl Write for DigestCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.length = self.length.checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("checkpoint length overflow"))?;
+        self.digest.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+}
+/// One canonical serialization, no complete encoded buffer or cloned State.
+fn json_measure(value: &impl Serialize) -> Result<(usize, [u8; 32]), RecordError> {
+    let mut output = DigestCounter { length: 0, digest: Sha256::new() };
+    serde_json::to_writer(&mut output, value).map_err(storage)?;
+    Ok((output.length, output.digest.finalize().into()))
 }
 
 pub(super) fn json_length(value: &impl Serialize) -> Result<usize, RecordError> {
@@ -84,6 +124,51 @@ pub(super) fn json_digest(value: &impl Serialize) -> Result<[u8; 32], RecordErro
 mod tests {
     use super::*;
     #[test]
+    fn measurement_uses_one_serialization_and_preserves_errors_and_overflow() {
+        struct Counted<'a>(&'a std::cell::Cell<usize>);
+        impl Serialize for Counted<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.0.set(self.0.get() + 1);
+                serializer.serialize_str("繁體 \\\"\n\0")
+            }
+        }
+        let calls = std::cell::Cell::new(0);
+        let value = Counted(&calls);
+        let (length, digest) = json_measure(&value).unwrap();
+        assert_eq!(calls.get(), 1, "length and SHA must share one serialization");
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(length, bytes.len());
+        assert_eq!(digest, <[u8; 32]>::from(Sha256::digest(&bytes)));
+        struct Invalid;
+        impl Serialize for Invalid {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("deliberate measurement error"))
+            }
+        }
+        assert!(json_measure(&Invalid).is_err());
+        let mut counter = DigestCounter { length: usize::MAX, digest: Sha256::new() };
+        assert!(counter.write(b"x").is_err());
+        assert_eq!(counter.length, usize::MAX);
+    }
+    #[test]
+    fn encoding_is_bound_to_full_state_not_business_sequence() {
+        let mut first = State::default();
+        first.time_watermark_ms = 1;
+        let mut second = State::default();
+        second.time_watermark_ms = 2;
+        let a = StateEncoding::new(&first).unwrap();
+        let b = StateEncoding::new(&second).unwrap();
+        assert_eq!(first.seq, second.seq);
+        assert_eq!(a.length(), b.length());
+        assert_ne!(a.digest(), b.digest(), "same-seq maintenance is a different cut");
+        assert!(std::ptr::eq(a.state(), &first));
+        assert!(std::ptr::eq(b.state(), &second));
+        let config = super::super::tests::config();
+        for encoded in [&a, &b] {
+            assert_eq!(encoded.checkpoint_length(&config).unwrap(), length(&config, encoded.state()).unwrap());
+        }
+    }
+    #[test]
     fn bounded_json_counts_exact_limit_escaped_references_and_errors() {
         for value in [
             serde_json::json!({"reference":"anchor-01234567890123456789012345678901/state-0000"}),
@@ -144,7 +229,11 @@ mod tests {
             digest(&inner.config, &inner.state).unwrap(),
             <[u8; 32]>::from(Sha256::digest(&owned))
         );
+        let encoding = StateEncoding::new(&inner.state).unwrap();
+        assert_eq!(encoding.checkpoint_length(&inner.config).unwrap(), owned.len());
         let state_bytes = serde_json::to_vec(&inner.state).unwrap();
+        assert_eq!(encoding.length(), state_bytes.len());
+        assert_eq!(encoding.digest(), <[u8; 32]>::from(Sha256::digest(&state_bytes)));
         assert_eq!(
             json_digest(&inner.state).unwrap(),
             <[u8; 32]>::from(Sha256::digest(&state_bytes))

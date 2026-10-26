@@ -34,10 +34,14 @@ impl Image {
         Ok(owners)
     }
     pub(super) fn validate_result(&self, state: &State, authority: u64) -> Result<(), RecordError> {
-        if checkpoint_codec::json_digest(state)? != self.digest {
+        self.validate_encoded(&checkpoint_codec::StateEncoding::new(state)?, authority)
+    }
+    pub(super) fn validate_encoded(&self, encoded: &checkpoint_codec::StateEncoding<'_>, authority: u64) -> Result<(), RecordError> {
+        let state = encoded.state();
+        if encoded.digest() != self.digest {
             return Err(storage("incremental state digest mismatch"));
         }
-        if checkpoint_codec::json_length(state)? as u64 > authority.min(self.config().max_journal_bytes) {
+        if encoded.length() as u64 > authority.min(self.config().max_journal_bytes) {
             return Err(storage("incremental state byte budget exceeded"));
         }
         validate_restored_state(self.config(), state)?;

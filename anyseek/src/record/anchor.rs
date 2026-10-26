@@ -172,6 +172,11 @@ impl Reference {
         Ok(result)
     }
     pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
+        let encoded=checkpoint_codec::StateEncoding::new(state)?;
+        Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal).await
+    }
+    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
+        let state=encoded.state();
         let id=format!("{:032x}",rand::random::<u128>());
         let prepared=root.join(format!(".anchor-prepare-{id}"));
         std::fs::create_dir(&prepared).map_err(storage)?;
@@ -207,7 +212,7 @@ impl Reference {
                             manifest_lease.grow(metadata_charge(growth)?).map_err(storage)?;
                             let mut image=manifest.state;
                             image.deltas.push(anchor_image::Block{owner:id.clone(),delta});
-                            image.digest=checkpoint_codec::json_digest(state)?;
+                            image.digest=encoded.digest();
                             image.owners()?;
                             state_blocks=previous.state_blocks.clone();
                             state_blocks.push(StateFiles{id:previous.id.clone(),files:previous.files.clone()});
@@ -223,8 +228,8 @@ impl Reference {
             Some(image)=>{pool.retain_prior_closure();image},
             None=>anchor_image::Image {
                 base_owner:id.clone(),
-                base:state_chunks::Descriptor::write(&prepared,config,state,&mut pool)?,
-                deltas:Vec::new(),digest:checkpoint_codec::json_digest(state)?,
+                base:state_chunks::Descriptor::write_encoded(&prepared,config,encoded,&mut pool)?,
+                deltas:Vec::new(),digest:encoded.digest(),
             },
         };
         let payloads=pool.finish().map_err(storage)?;
@@ -245,7 +250,7 @@ impl Reference {
                 drop(metadata_lease);
                 drop(state_blocks);
                 drop(previous_capture);
-                return Box::pin(Self::prepare(root,config,state,payloads,previous,view,compact,None)).await;
+                return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None)).await;
             }
             return Err(storage("complete anchor manifest byte budget exceeded"));
         }
@@ -338,12 +343,16 @@ impl Reference {
             locations: view.locations, payloads: view.payloads })
     }
     async fn load_verified(&self,root:&Path,config:&RecordConfig,state:&State)->Result<VerifiedView,RecordError>{
+        self.load_verified_encoded(root,config,&checkpoint_codec::StateEncoding::new(state)?).await
+    }
+    async fn load_verified_encoded(&self,root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>)->Result<VerifiedView,RecordError>{
+        let state=encoded.state();
         let (path,manifest,pool,_manifest_lease)=self.authenticated_manifest(root,config.max_journal_bytes)?;
         if manifest.seq!=state.seq || serde_json::to_vec(manifest.state.config()).map_err(storage)?!=serde_json::to_vec(config).map_err(storage)? {
             return Err(storage("expected anchor identity mismatch"));
         }
         if manifest.state.deltas.is_empty() {
-            manifest.state.base.verify_expected(&path,&pool,config.max_journal_bytes,state)?;
+            manifest.state.base.verify_encoded(&path,&pool,config.max_journal_bytes,encoded)?;
         } else if let Some(captured)=self.captured.get() {
             manifest.state.validate_result(captured,config.max_journal_bytes)?;
         } else {
@@ -354,7 +363,7 @@ impl Reference {
             anchor_image::Image::apply_block(&last.delta,&path,&pool,config.max_journal_bytes,config,&mut replayed)?;
             manifest.state.validate_result(&replayed,config.max_journal_bytes)?;
         }
-        manifest.state.validate_result(state,config.max_journal_bytes)?;
+        manifest.state.validate_encoded(encoded,config.max_journal_bytes)?;
         let view=self.load_components(root,&path,config.max_journal_bytes,config,state,manifest.payloads).await?;
         if self.captured.get().is_none() { let _=self.captured.set(state.try_clone()?); }
         Ok(view)
@@ -393,8 +402,9 @@ impl Reference {
 pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&State)
     ->Result<(Vec<u8>,crate::storage::build_budget::MemoryLease,crate::storage::build_budget::DiskScope),RecordError>{
     let disk=crate::storage::build_budget::DiskScope::begin(root,closure_limit(config.max_journal_bytes)?).map_err(storage)?;
-    let reference=Reference::prepare(root,config,state,Closure::default(),None,None,true,None).await?;
-    let verified=reference.load_verified(root,config,state).await?;
+    let encoded=checkpoint_codec::StateEncoding::new(state)?;
+    let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None).await?;
+    let verified=reference.load_verified_encoded(root,config,&encoded).await?;
     drop(verified); // Close all mappings before later Windows root publication.
     let estimate=checkpoint_codec::json_length(&reference)?.checked_add(64).ok_or_else(||storage("snapshot authority overflow"))?;
     let lease=crate::storage::build_budget::reserve_memory(metadata_charge(estimate)?).map_err(storage)?;
@@ -474,16 +484,17 @@ impl Inner {
         // candidates (snapshot/takeover) still own their independent State.
         let next=candidate.as_ref().unwrap_or(&self.state);
         let next_seq=next.seq;
-        let snapshot_bytes=checkpoint_codec::length(&self.config, next)?;
+        let encoded=checkpoint_codec::StateEncoding::new(next)?;
+        let snapshot_bytes=encoded.checkpoint_length(&self.config)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
-        let mut reference=Reference::prepare(&root,&self.config,next,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None}).await?;
+        let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None}).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));
         }
         // Verify every persisted frame against the pinned State without a
         // second full-history allocation; no authority changes before this succeeds.
-        let loaded=reference.load_verified(&root,&self.config,next).await?;
+        let loaded=reference.load_verified_encoded(&root,&self.config,&encoded).await?;
         // The newly verified shared cut replaces the predecessor proof owner;
         // do not retain an extra old State through subsequent publications.
         reference.previous_capture=None;
