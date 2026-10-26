@@ -2,15 +2,84 @@
 //! discovery is never a second head or a reason to adopt an unselected object.
 use super::*;
 use crate::storage::payload_pool::{Budget,Closure,PoolBuilder,PoolReader};
-use segment::{files,write_json,read_bounded,FileRef};
+use segment::{files,write_json,read_bounded,Inventory};
 
+/// Clones share immutable inventory and its residency lease. Runtime proof
+/// owners are not serialized and never replace on-disk authentication.
+#[derive(Debug,Clone)]
+pub(super) struct Reference {
+    metadata:Arc<ReferenceOwner>,
+    captured:Arc<std::sync::OnceLock<State>>,
+    previous_capture:Option<Arc<std::sync::OnceLock<State>>>,
+}
+#[derive(Debug,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReferenceData {
+    id:String, files:Inventory, segments:Vec<Frozen>, state_blocks:Vec<StateFiles>,
+}
+struct ReferenceOwner { data:ReferenceData, _lease:crate::storage::build_budget::MemoryLease }
+impl std::fmt::Debug for ReferenceOwner {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result { std::fmt::Debug::fmt(&self.data,f) }
+}
+impl std::ops::Deref for Reference {
+    type Target=ReferenceData;
+    fn deref(&self)->&Self::Target { &self.metadata.data }
+}
+impl Serialize for Reference {
+    fn serialize<S:serde::Serializer>(&self,s:S)->Result<S::Ok,S::Error> { self.metadata.data.serialize(s) }
+}
+impl<'de> Deserialize<'de> for Reference {
+    fn deserialize<D:serde::Deserializer<'de>>(d:D)->Result<Self,D::Error> {
+        // Persistent entries are decoded from bounded JSON slices. Borrow the
+        // raw representation first: no Vec/String inventory is materialized
+        // before its complete independent residency has been admitted.
+        let raw=<&serde_json::value::RawValue>::deserialize(d)?;
+        let charge=metadata_charge(raw.get().len()).and_then(|n|n.checked_add(65536).ok_or_else(||storage("reference scratch overflow"))).map_err(serde::de::Error::custom)?;
+        let mut lease=crate::storage::build_budget::reserve_memory(charge).map_err(serde::de::Error::custom)?;
+        let data:ReferenceData=serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+        if !valid(&data.id) || data.segments.iter().any(|s|!valid(&s.id)) || data.state_blocks.iter().any(|b|!valid(&b.id)) {
+            return Err(serde::de::Error::custom("invalid reference metadata identity"));
+        }
+        let needed=reference_shell_charge(data.segments.len(),data.state_blocks.len()).map_err(serde::de::Error::custom)?;
+        let owned=lease.split_off(needed).map_err(serde::de::Error::custom)?;
+        Ok(Self {metadata:Arc::new(ReferenceOwner{data,_lease:owned}),captured:Arc::default(),previous_capture:None})
+    }
+}
+fn reference_shell_charge(segments:usize,blocks:usize)->Result<u64,RecordError> {
+    if segments>capacity::MAX_SEGMENTS || blocks>anchor_image::MAX_DELTAS {return Err(storage("reference metadata count exceeded"));}
+    // IDs are validated as 32-byte hex before selected paths can be used.
+    // Include Vec slots, transient reallocations, Arc owner/header and IDs.
+    let bytes=segments.checked_add(blocks).and_then(|n|n.checked_mul(256)).and_then(|n|n.checked_add(512))
+        .ok_or_else(||storage("reference shell overflow"))?;
+    metadata_charge(bytes)
+}
+fn metadata_charge(bytes:usize)->Result<u64,RecordError> {
+    if bytes>16*1024*1024 {return Err(storage("anchor metadata frame budget exceeded"));}
+    (bytes as u64).checked_mul(32).ok_or_else(||storage("anchor metadata charge overflow"))
+}
 #[derive(Debug,Clone,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Reference {id:String,files:Vec<FileRef>,segments:Vec<Frozen>}
+struct StateFiles { id:String, files:Inventory }
 type Frozen = segment::Package;
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {format:u32,seq:u64,state:state_chunks::Descriptor,payloads:Closure}
+struct Manifest {format:u32,seq:u64,state:anchor_image::Image,payloads:Closure}
+/// Raw bytes and decoded metadata have separate owners. Both reservations
+/// precede their allocations; the decoded owner survives every use of Image.
+fn read_manifest(path:&Path,limit:u64)->Result<(Manifest,crate::storage::build_budget::MemoryLease),RecordError> {
+    use std::io::Read;
+    let mut file=crate::storage::build_budget::OpenOptions::new().read(true).open(path).map_err(storage)?;
+    let length=file.metadata().map_err(storage)?.len();
+    if length>limit {return Err(storage("anchor manifest byte budget exceeded"));}
+    let length=usize::try_from(length).map_err(storage)?;
+    let parsed=crate::storage::build_budget::reserve_memory(metadata_charge(length)?).map_err(storage)?;
+    let _raw=crate::storage::build_budget::reserve_memory(length as u64).map_err(storage)?;
+    let mut bytes=vec![0;length];
+    file.read_exact(&mut bytes).map_err(storage)?;
+    if file.read(&mut [0u8;1]).map_err(storage)?!=0 {return Err(storage("anchor manifest grew during read"));}
+    let manifest=serde_json::from_slice(&bytes).map_err(storage)?;
+    Ok((manifest,parsed))
+}
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Statistics {segments:Vec<crate::active::ActiveStatistics>}
@@ -87,12 +156,14 @@ impl Frozen {
     }
 }
 impl Reference {
-    #[cfg(feature="s3-object-store")]
     pub(super) fn identity(&self)->&str {&self.id}
     #[cfg(feature="s3-object-store")]
     pub(super) fn remote_files(&self,payloads:&Closure)->Result<Vec<(String,u64,[u8;32])>,RecordError>{
         let mut result=Vec::new();
         for file in &self.files {result.push((format!("anchor-{}/{}",self.id,file.path),file.bytes,file.sha256));}
+        for block in &self.state_blocks {for file in &block.files {
+            result.push((format!("anchor-{}/{}",block.id,file.path),file.bytes,file.sha256));
+        }}
         for segment in &self.segments {for file in &segment.files {
             result.push((format!("segment-{}/{}",segment.id,file.path),file.bytes,file.sha256));
         }}
@@ -100,7 +171,7 @@ impl Reference {
         if result.len()>10_000 {return Err(storage("checkpoint file count exceeded"));}
         Ok(result)
     }
-    pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool)->Result<Self,RecordError>{
+    pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&PartitionJournal>)->Result<Self,RecordError>{
         let id=format!("{:032x}",rand::random::<u128>());
         let prepared=root.join(format!(".anchor-prepare-{id}"));
         std::fs::create_dir(&prepared).map_err(storage)?;
@@ -109,13 +180,78 @@ impl Reference {
         // At the bounded object ceiling rebuild the complete referenced payload
         // set privately. Old selected objects remain protected by the existing
         // publication/GC protocol and DiskScope charges both generations.
-        let prior = if prior.objects.len() == payload_budget.objects {
+        let pool_compaction = prior.objects.len() == payload_budget.objects;
+        let prior = if pool_compaction {
             Closure::default()
         } else { prior };
         let mut pool=PoolBuilder::begin(root,prior,payload_budget,format!("{:032x}",rand::random::<u128>())).map_err(storage)?;
-        let referenced=state_chunks::Descriptor::write(&prepared,config,state,&mut pool)?;
+        // Inventory values have their own shared owners. Reserve the bounded
+        // shell arrays/id copies before preparing or cloning any of them.
+        let mut metadata_lease=crate::storage::build_budget::reserve_memory(
+            reference_shell_charge(capacity::segments(config),anchor_image::MAX_DELTAS)?
+        ).map_err(storage)?;
+        let mut state_blocks=Vec::new();
+        let mut previous_capture=None;
+        let mut incremental=None;
+        let mut image_lease=None;
+        if !compact && !pool_compaction && !state.private_cleanup_pending {
+            if let (Some(previous),Some(journal))=(previous,journal) {
+                if previous.captured.get().is_some() {
+                    let (_,manifest,_,mut manifest_lease)=previous.authenticated_manifest(root,config.max_journal_bytes)?;
+                    if manifest.state.deltas.len()<anchor_image::MAX_DELTAS {
+                        if let Some(delta)=state_chunks::Delta::write(&prepared,config,&mut pool,journal,previous,previous.id.clone())? {
+                            let growth=checkpoint_codec::json_length(&delta)?
+                                .checked_add(id.len()+128)
+                                .and_then(|n|n.checked_add((manifest.state.deltas.len()+1)*std::mem::size_of::<anchor_image::Block>()))
+                                .ok_or_else(||storage("delta metadata growth overflow"))?;
+                            manifest_lease.grow(metadata_charge(growth)?).map_err(storage)?;
+                            let mut image=manifest.state;
+                            image.deltas.push(anchor_image::Block{owner:id.clone(),delta});
+                            image.digest=checkpoint_codec::json_digest(state)?;
+                            image.owners()?;
+                            state_blocks=previous.state_blocks.clone();
+                            state_blocks.push(StateFiles{id:previous.id.clone(),files:previous.files.clone()});
+                            previous_capture=Some(previous.captured.clone());
+                            incremental=Some(image);
+                            image_lease=Some(manifest_lease);
+                        }
+                    }
+                }
+            }
+        }
+        let referenced=match incremental {
+            Some(image)=>{pool.retain_prior_closure();image},
+            None=>anchor_image::Image {
+                base_owner:id.clone(),
+                base:state_chunks::Descriptor::write(&prepared,config,state,&mut pool)?,
+                deltas:Vec::new(),digest:checkpoint_codec::json_digest(state)?,
+            },
+        };
         let payloads=pool.finish().map_err(storage)?;
-        write_json(&prepared.join("manifest"),&Manifest{format:4,seq:state.seq,state:referenced,payloads})?;
+        let manifest=Manifest{format:5,seq:state.seq,state:referenced,payloads};
+        // Chain count is not a byte bound: repeated descriptors/long references
+        // may exhaust a small configured authority before MAX_DELTAS. Measure
+        // without constructing an encoded Vec or writing an oversized manifest.
+        if !checkpoint_codec::json_fits(&manifest,config.max_journal_bytes.min(16*1024*1024))? {
+            if !manifest.state.deltas.is_empty() {
+                // The failed candidate is private. Reuse its bounded Payload
+                // closure (including all old dependencies), but write a new full
+                // base once. No journal/certificate/owner has changed. Existing
+                // post-attempt GC retires the abandoned preparation, never a
+                // selected or pinned object. None prevents recursive delta use.
+                let Manifest{payloads,state:old_image,..}=manifest;
+                drop(old_image);
+                drop(image_lease);
+                drop(metadata_lease);
+                drop(state_blocks);
+                drop(previous_capture);
+                return Box::pin(Self::prepare(root,config,state,payloads,previous,view,compact,None)).await;
+            }
+            return Err(storage("complete anchor manifest byte budget exceeded"));
+        }
+        write_json(&prepared.join("manifest"),&manifest)?;
+        drop(manifest);
+        drop(image_lease);
         let mut segments=Vec::new();let mut statistics=Vec::new();
         if !compact && previous.is_some_and(|p|p.segments.len()<capacity::segments(config)) {
             let previous=previous.unwrap();
@@ -138,27 +274,48 @@ impl Reference {
         let members=files(&prepared,closure_limit(config.max_journal_bytes)?)?;
         sync_tree(&prepared)?;
         crate::storage::partition::publish_bundle(&prepared,&directory(root,&id)?).map_err(storage)?;
-        Ok(Self{id,files:members,segments})
+        let data=ReferenceData{id,files:members,segments,state_blocks};
+        let needed=reference_shell_charge(data.segments.len(),data.state_blocks.len())?;
+        let owned=metadata_lease.split_off(needed).map_err(storage)?;
+        Ok(Self{metadata:Arc::new(ReferenceOwner{data,_lease:owned}),captured:Arc::default(),previous_capture})
     }
-    fn authenticated_manifest(&self,root:&Path,authority_budget:u64)->Result<(PathBuf,Manifest,PoolReader),RecordError>{
+    fn authenticated_manifest(&self,root:&Path,authority_budget:u64)->Result<(PathBuf,Manifest,PoolReader,crate::storage::build_budget::MemoryLease),RecordError>{
         if self.segments.is_empty()||self.segments.len()>capacity::MAX_SEGMENTS{return Err(storage("invalid selected segment count"));}
         let mut ids=std::collections::BTreeSet::new();
         if self.segments.iter().any(|s|!ids.insert(&s.id)){return Err(storage("duplicate selected segment"));}
         let path=directory(root,&self.id)?;
-        if serde_json::to_vec(&files(&path,closure_limit(authority_budget)?)?).map_err(storage)?!=serde_json::to_vec(&self.files).map_err(storage)?{return Err(storage("anchor closure checksum mismatch"));}
-        let manifest:Manifest=serde_json::from_slice(&read_bounded(&path.join("manifest"),authority_budget)?).map_err(storage)?;
-        if manifest.format!=4{return Err(storage("unsupported anchor format"));}
+        if files(&path,closure_limit(authority_budget)?)?.as_slice()!=self.files.as_slice(){return Err(storage("anchor closure checksum mismatch"));}
+        let (manifest,mut manifest_lease)=read_manifest(&path.join("manifest"),authority_budget)?;
+        if manifest.format!=5{return Err(storage("unsupported anchor format"));}
+        let owners=manifest.state.owners()?;
+        if owners.last()!=Some(&self.id.as_str()) || self.state_blocks.len()+1!=owners.len() {
+            return Err(storage("state block closure count or head mismatch"));
+        }
+        for (block,owner) in self.state_blocks.iter().zip(&owners) {
+            if block.id!=*owner || block.id==self.id {
+                return Err(storage("state block closure order mismatch"));
+            }
+            let path=directory(root,&block.id)?;
+            if files(&path,closure_limit(authority_budget)?)?.as_slice()!=block.files.as_slice() {
+                return Err(storage("state block closure checksum mismatch"));
+            }
+        }
         validate_config(manifest.state.config())?;
         if self.segments.len()>capacity::segments(manifest.state.config()){return Err(storage("configured selected segment count exceeded"));}
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
+        // PoolReader retains a separate copy of the closure while Manifest is
+        // still used. Admit that copy before clone, not under the State lease.
+        manifest_lease.grow(metadata_charge(checkpoint_codec::json_length(&manifest.payloads)?)?).map_err(storage)?;
         let pool=PoolReader::open(root,manifest.payloads.clone(),limits).map_err(storage)?;
-        Ok((path,manifest,pool))
+        Ok((path,manifest,pool,manifest_lease))
     }
     pub(super) async fn load(&self,root:&Path,authority_budget:u64)->Result<Loaded,RecordError>{
-        let (path,manifest,pool)=self.authenticated_manifest(root,authority_budget)?;
-        let state_chunks::Decoded{config,state}=manifest.state.read(&path,&pool,authority_budget)?;
+        let (path,manifest,pool,_manifest_lease)=self.authenticated_manifest(root,authority_budget)?;
+        let config=manifest.state.config().clone();
+        let state=manifest.state.read(&pool,authority_budget,|id|directory(root,id))?;
         if state.seq!=manifest.seq{return Err(storage("anchor sequence mismatch"));}
         let view=self.load_components(root,&path,authority_budget,&config,&state,manifest.payloads).await?;
+        if self.captured.get().is_none() { let _=self.captured.set(state.try_clone()?); }
         Ok(Loaded{config,state,index:view.index,ordinals:view.ordinals,locations:view.locations,payloads:view.payloads})
     }
     // Authenticate the sealed package against the owned captured cut. Its State
@@ -170,12 +327,26 @@ impl Reference {
             locations: view.locations, payloads: view.payloads })
     }
     async fn load_verified(&self,root:&Path,config:&RecordConfig,state:&State)->Result<VerifiedView,RecordError>{
-        let (path,manifest,pool)=self.authenticated_manifest(root,config.max_journal_bytes)?;
+        let (path,manifest,pool,_manifest_lease)=self.authenticated_manifest(root,config.max_journal_bytes)?;
         if manifest.seq!=state.seq || serde_json::to_vec(manifest.state.config()).map_err(storage)?!=serde_json::to_vec(config).map_err(storage)? {
             return Err(storage("expected anchor identity mismatch"));
         }
-        manifest.state.verify_expected(&path,&pool,config.max_journal_bytes,state)?;
-        self.load_components(root,&path,config.max_journal_bytes,config,state,manifest.payloads).await
+        if manifest.state.deltas.is_empty() {
+            manifest.state.base.verify_expected(&path,&pool,config.max_journal_bytes,state)?;
+        } else if let Some(captured)=self.captured.get() {
+            manifest.state.validate_result(captured,config.max_journal_bytes)?;
+        } else {
+            let previous=self.previous_capture.as_ref().and_then(|c|c.get())
+                .ok_or_else(||storage("missing certified predecessor owner"))?;
+            let mut replayed=previous.try_clone()?;
+            let last=manifest.state.deltas.last().unwrap();
+            anchor_image::Image::apply_block(&last.delta,&path,&pool,config.max_journal_bytes,config,&mut replayed)?;
+            manifest.state.validate_result(&replayed,config.max_journal_bytes)?;
+        }
+        manifest.state.validate_result(state,config.max_journal_bytes)?;
+        let view=self.load_components(root,&path,config.max_journal_bytes,config,state,manifest.payloads).await?;
+        if self.captured.get().is_none() { let _=self.captured.set(state.try_clone()?); }
+        Ok(view)
     }
     async fn load_components(&self,root:&Path,path:&Path,authority_budget:u64,config:&RecordConfig,state:&State,payloads:Closure)->Result<VerifiedView,RecordError>{
         let statistics:Statistics=serde_json::from_slice(&read_bounded(&path.join("statistics"),closure_limit(authority_budget)?)?).map_err(storage)?;
@@ -204,6 +375,7 @@ impl Reference {
         Ok(VerifiedView{index,ordinals,locations,payloads})
     }
 }
+
 
 impl Inner {
     /// Replay certified tail decisions into the selected index view. Never
@@ -278,7 +450,7 @@ impl Inner {
         let next_seq=next.seq;
         let snapshot_bytes=checkpoint_codec::length(&self.config, next)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
-        let reference=Reference::prepare(&root,&self.config,next,prior,self.anchor.as_ref(),Some(&self.index),!reuse).await?;
+        let mut reference=Reference::prepare(&root,&self.config,next,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&self.journal)}else{None}).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));
@@ -286,6 +458,9 @@ impl Inner {
         // Verify every persisted frame against the pinned State without a
         // second full-history allocation; no authority changes before this succeeds.
         let loaded=reference.load_verified(&root,&self.config,next).await?;
+        // The newly verified shared cut replaces the predecessor proof owner;
+        // do not retain an extra old State through subsequent publications.
+        reference.previous_capture=None;
         let mut index=view::RetrievalView::single(loaded.index);
         let mut ordinals=loaded.ordinals;
         let mut locations=loaded.locations;
@@ -346,7 +521,7 @@ impl Inner {
         for entry in std::fs::read_dir(root).map_err(storage)?{
             let entry=entry.map_err(storage)?;let name=entry.file_name();let Some(name)=name.to_str() else{continue;};
             let remove=if let Some(id)=name.strip_prefix("anchor-") {
-                valid(id)&&self.anchor.as_ref().is_none_or(|reference|reference.id!=id)
+                valid(id)&&self.anchor.as_ref().is_none_or(|reference|reference.id!=id&&!reference.state_blocks.iter().any(|b|b.id==id))
             }else if let Some(id)=name.strip_prefix("segment-") {
                 valid(id)&&self.anchor.as_ref().is_none_or(|a|!a.segments.iter().any(|s|s.id==id))
             }else if let Some(id)=name.strip_prefix(".segment-prepare-") {valid(id)
@@ -372,6 +547,145 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn manifest_writer_and_reader_agree_at_exact_byte_boundary() {
+        let root=tempfile::tempdir().unwrap();
+        let path=root.path().join("partition");
+        let p=RecordPartition::create(&path,config()).await.unwrap();
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let reference=p.inner.lock().await.anchor.clone().unwrap();
+        let file=directory(&path,&reference.id).unwrap().join("manifest");
+        let bytes=std::fs::metadata(&file).unwrap().len();
+        let (manifest,_owner)=read_manifest(&file,bytes).unwrap();
+        assert_eq!(checkpoint_codec::json_length(&manifest).unwrap() as u64,bytes);
+        assert!(checkpoint_codec::json_fits(&manifest,bytes).unwrap());
+        assert!(!checkpoint_codec::json_fits(&manifest,bytes-1).unwrap());
+        assert!(read_manifest(&file,bytes-1).is_err());
+    }
+    #[test]
+    fn reference_metadata_pre_admission_shared_owner_and_failure_release() {
+        const FLAG:&str="ANYSEEK_ANCHOR_METADATA_CHILD";
+        if std::env::var_os(FLAG).is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","record::anchor::tests::reference_metadata_pre_admission_shared_owner_and_failure_release","--nocapture"])
+                .env(FLAG,"1").env("ANYSEEK_BUILD_MEMORY_BYTES",(64u64*1024*1024).to_string())
+                .env("ANYSEEK_BUILD_SHARED_MEMORY_BYTES",(128u64*1024*1024).to_string()).output().unwrap();
+            assert!(output.status.success(),"{}\n{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));return;
+        }
+        let _fill=[crate::storage::build_budget::reserve_memory(64*1024*1024).unwrap(),
+            crate::storage::build_budget::reserve_memory(64*1024*1024-131072).unwrap()];
+        let before=crate::storage::build_budget::used_memory_for_test();
+        let raw=r#"{"id":"00000000000000000000000000000001","files":[],"segments":[],"state_blocks":[]}"#;
+        let reference:Reference=serde_json::from_str(raw).unwrap();
+        let charged=crate::storage::build_budget::used_memory_for_test();
+        assert_eq!(charged-before,reference.metadata._lease.bytes()+reference.files.charge_for_test());
+        let second=reference.clone();
+        assert!(Arc::ptr_eq(&reference.metadata,&second.metadata));
+        assert_eq!(crate::storage::build_budget::used_memory_for_test(),charged);
+        drop(reference);
+        assert_eq!(crate::storage::build_budget::used_memory_for_test(),charged);
+        drop(second);
+        assert_eq!(crate::storage::build_budget::used_memory_for_test(),before);
+        assert!(serde_json::from_str::<Reference>(r#"{"id":0}"#).is_err());
+        assert_eq!(crate::storage::build_budget::used_memory_for_test(),before);
+        let oversized=format!(r#"{{"unknown":"{}"}}"#,"x".repeat(8192));
+        let error=serde_json::from_str::<Reference>(&oversized).unwrap_err().to_string();
+        assert!(error.contains("class=shared"),"admission must precede field decoding: {error}");
+        assert_eq!(crate::storage::build_budget::used_memory_for_test(),before);
+        assert!(metadata_charge(usize::MAX).is_err());
+        let root=tempfile::tempdir().unwrap();
+        let path=root.path().join("manifest");
+        std::fs::write(&path," ".repeat(8192)).unwrap();
+        assert!(read_manifest(&path,16384).err().unwrap().to_string().contains("class=shared"));
+        assert_eq!(crate::storage::build_budget::used_memory_for_test(),before);
+    }
+    #[tokio::test]
+    async fn incremental_state_same_sequence_maintenance_and_independent_backup() {
+        struct FixedClock(u64);
+        impl temporal::Clock for FixedClock {
+            fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0)}
+        }
+        let root=tempfile::tempdir().unwrap();
+        let path=root.path().join("partition");
+        let backup=root.path().join("backup");
+        let settings=config();
+        let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+        p.write(write("first","a","base-body",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        p.write(write("second","b","delta-body",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let (sequence,floor,time)={
+            let mut inner=p.inner.lock().await;
+            let seq=inner.state.seq;
+            let future=inner.state.time_watermark_ms+inner.config.change_feed.retention_ms+1;
+            inner.clock=Arc::new(FixedClock(future));
+            inner.trim_feed(future).await.unwrap();
+            assert_eq!(inner.state.seq,seq);
+            assert!(inner.state.feed.floor>0);
+            (seq,inner.state.feed.floor,inner.state.time_watermark_ms)
+        };
+        p.compact_journal().await.unwrap();
+        assert_eq!(p.inner.lock().await.anchor.as_ref().unwrap().state_blocks.len(),2);
+        p.checkpoint(&backup).await.unwrap();
+        drop(p);
+        let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        {
+            let inner=p.inner.lock().await;
+            assert_eq!((inner.state.seq,inner.state.feed.floor,inner.state.time_watermark_ms),(sequence,floor,time));
+            assert_eq!(inner.state.operations.len(),2);
+        }
+        drop(p);
+        std::fs::remove_dir_all(&path).unwrap();
+        let copy=RecordPartition::open(&backup,settings.max_journal_bytes).await.unwrap();
+        let inner=copy.inner.lock().await;
+        assert!(inner.anchor.as_ref().unwrap().state_blocks.is_empty(),"independent backup must materialize its own full base");
+        assert_eq!(inner.state.seq,sequence);
+        assert_eq!(inner.state.operations.len(),2);
+        assert_eq!(inner.state.records["a"].document.as_ref().unwrap()["body"],serde_json::json!("base-body"));
+        assert_eq!(inner.state.records["b"].document.as_ref().unwrap()["body"],serde_json::json!("delta-body"));
+    }
+    #[tokio::test]
+    async fn incremental_state_closure_survives_rejection_gc_and_reopen() {
+        let root=tempfile::tempdir().unwrap();
+        let path=root.path().join("partition");
+        let settings=config();
+        let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+        let mut receipts=Vec::new();
+        for i in 0..2 {
+            let request=write(&format!("op-{i}"),&format!("id-{i}"),&format!("alpha distinct-body-{i}"),ExpectedVersion::Absent);
+            receipts.push((request.clone(),p.write(request).await.unwrap()));
+            p.compact_journal().await.unwrap();
+        }
+        let reference=p.inner.lock().await.anchor.clone().unwrap();
+        assert_eq!(reference.state_blocks.len(),1);
+        let base=directory(&path,&reference.state_blocks[0].id).unwrap();
+        assert!(base.exists(),"selected base cannot be collected with its old certificate");
+        let before=checkpoint_codec::json_digest(&reference).unwrap();
+        let request=write("op-2","id-2","beta",ExpectedVersion::Absent);
+        receipts.push((request.clone(),p.write(request).await.unwrap()));
+        std::fs::write(path.join(".test-anchor-reject-loaded"),b"reject").unwrap();
+        assert!(p.compact_journal().await.is_err());
+        assert_eq!(checkpoint_codec::json_digest(p.inner.lock().await.anchor.as_ref().unwrap()).unwrap(),before);
+        assert!(base.exists());
+        std::fs::remove_file(path.join(".test-anchor-reject-loaded")).unwrap();
+        p.compact_journal().await.unwrap();
+        let digest=checkpoint_codec::json_digest(&p.inner.lock().await.state).unwrap();
+        assert_eq!(p.inner.lock().await.anchor.as_ref().unwrap().state_blocks.len(),2);
+        drop(reference);drop(p);
+        let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        assert_eq!(checkpoint_codec::json_digest(&p.inner.lock().await.state).unwrap(),digest);
+        for (request,receipt) in receipts {assert_eq!(p.write(request).await.unwrap(),receipt);}
+        assert_eq!(p.inner.lock().await.state.operations.len(),3);
+        drop(p);
+        // The dependency inventory remains authenticated after its original
+        // anchor stopped being the current business head.
+        let file=base.join("state-0000");
+        let mut bytes=std::fs::read(&file).unwrap();
+        *bytes.last_mut().unwrap()^=1;
+        std::fs::write(file,bytes).unwrap();
+        assert!(RecordPartition::open(&path,settings.max_journal_bytes).await.is_err());
+    }
     #[tokio::test]
     async fn captured_cut_retains_owner_and_rejects_mismatch_without_install() {
         use super::*;
@@ -515,6 +829,7 @@ mod tests {
             let request = write(&format!("op-{i}"), &format!("r-{i}"), &format!("alpha unique{i}"), ExpectedVersion::Absent);
             receipts.push((request.clone(), p.write(request).await.unwrap()));
             p.compact_journal().await.unwrap();
+            assert_eq!(p.inner.lock().await.anchor.as_ref().unwrap().state_blocks.len(),i%(anchor_image::MAX_DELTAS+1),"finite delta chain must materialize a new base at its bound");
         }
         assert_eq!(p.inner.lock().await.payloads.objects.len(), 64);
         let old_closure = p.inner.lock().await.payloads.clone();
@@ -554,7 +869,13 @@ mod tests {
             else { assert_ne!(serde_json::to_vec(&inner.anchor).unwrap(), before, "durable certificate must select the new closure after reopen"); }
             let names = std::fs::read_dir(&path).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
             assert!(!names.iter().any(|name| name.starts_with(".anchor-prepare-") || name.starts_with(".segment-prepare-") || name.starts_with(".payload-prepare-")), "candidate orphans must be retired after definite rejection or recovery");
-            assert_eq!(names.iter().filter(|name| name.starts_with("anchor-")).count(), 1);
+            let selected=inner.anchor.as_ref().unwrap();
+            let expected=std::iter::once(format!("anchor-{}",selected.id))
+                .chain(selected.state_blocks.iter().map(|block|format!("anchor-{}",block.id)))
+                .collect::<std::collections::BTreeSet<_>>();
+            let actual=names.iter().filter(|name|name.starts_with("anchor-")).cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(actual,expected,"retain precisely the selected base/delta closure, never orphan anchors");
             assert_eq!(names.iter().filter(|name| name.starts_with("payload-")).count(), if certified { 65 } else { 64 }, "retain only selected objects plus explicitly pinned old closure");
             drop(inner);
             for (request, receipt) in &receipts { assert_eq!(p.write(request.clone()).await.unwrap(), *receipt); }

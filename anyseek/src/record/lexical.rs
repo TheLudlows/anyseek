@@ -87,7 +87,7 @@ struct Manifest {
 /// it. In particular, discovering a newer meta.json does not select a view.
 #[cfg(test)]
 pub(super) struct Candidate {
-    pub files: Vec<segment::FileRef>,
+    pub files: segment::Inventory,
 }
 
 fn schema(names: &[String]) -> Result<(Schema, Vec<Field>), RecordError> {
@@ -335,8 +335,7 @@ impl Candidate {
             .transpose()
             .map_err(storage)?;
         let actual = segment::files(path, byte_limit)?;
-        if serde_json::to_vec(&actual).map_err(storage)?
-            != serde_json::to_vec(&self.files).map_err(storage)?
+        if actual.as_slice() != self.files.as_slice()
         {
             return Err(storage("lexical package closure mismatch"));
         }

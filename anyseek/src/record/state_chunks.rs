@@ -21,11 +21,119 @@ pub(super) struct Descriptor {
     entries: u64,
     expanded: u64,
     digest: [u8; 32],
+    #[serde(skip)]
+    _build_lease: Option<Arc<crate::storage::build_budget::MemoryLease>>,
+}
+/// One ordered journal suffix. Its parent identity is part of the enclosing
+/// authenticated anchor, not a discoverable or independently selectable head.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Delta {
+    parent: String,
+    frames: Descriptor,
+}
+impl Delta {
+    pub(super) fn parent(&self) -> &str { &self.parent }
+    pub(super) fn config(&self) -> &RecordConfig { self.frames.config() }
+
+    /// Build only from the selected healthy WAL cut. Same-sequence maintenance
+    /// entries remain in physical order. The old certificate must match exactly;
+    /// successful callbacks are not a license to publish a partial suffix.
+    pub(super) fn write(
+        root: &Path, config: &RecordConfig, pool: &mut PoolBuilder,
+        journal: &PartitionJournal, parent: &anchor::Reference, identity: String,
+    ) -> Result<Option<Self>, RecordError> {
+        let mut writer = Writer { root, config, pool, file: None, chunks: Vec::new(), entries: 0, expanded: 0,
+            metadata:descriptor_admission(config)?, };
+        let mut digest = PieceDigest::new();
+        let mut first = true;
+        let mut failure = None;
+        let visited = journal.visit_committed(|bytes| {
+            let result = (|| -> Result<(), RecordError> {
+                let entry: Entry = serde_json::from_slice(bytes).map_err(storage)?;
+                if first {
+                    first = false;
+                    let Entry::Anchor(selected) = entry else { return Err(invalid("delta requires an anchor certificate")); };
+                    if checkpoint_codec::json_digest(&selected)? != checkpoint_codec::json_digest(parent)? {
+                        return Err(invalid("delta parent certificate mismatch"));
+                    }
+                    return Ok(());
+                }
+                // Wrap Applied in the exact engine-owned payload positions used
+                // by full State frames. User JSON remains opaque to the visitor.
+                match &entry {
+                    Entry::Applied(applied) => {
+                        let piece = BTreeMap::from([("operations", [applied])]);
+                        digest.push(&piece)?;
+                        writer.push(&piece)?;
+                    }
+                    Entry::Expired(_) | Entry::FeedTrim(_) | Entry::LeaseExpired(_) => {
+                        let piece = BTreeMap::from([("event", &entry)]);
+                        digest.push(&piece)?;
+                        writer.push(&piece)?;
+                    }
+                    Entry::Anchor(_) | Entry::Checkpoint { .. } => return Err(invalid("authority inside delta suffix")),
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                failure = Some(error);
+                return Err(std::io::Error::other("delta preparation rejected"));
+            }
+            Ok(())
+        });
+        if let Some(error) = failure { return Err(error); }
+        visited.map_err(storage)?;
+        if first { return Err(invalid("missing delta parent certificate")); }
+        if writer.entries == 0 { return Ok(None); }
+        if let Some(mut file) = writer.file.take() {
+            file.flush().map_err(storage)?;
+            file.sync_all().map_err(storage)?;
+        }
+        let (hash, entries, expanded) = digest.finish();
+        if entries != writer.entries || expanded != writer.expanded { return Err(invalid("delta preparation count mismatch")); }
+        Ok(Some(Self { parent: identity, frames: Descriptor {
+            format: 2, config: config.clone(), chunks: writer.chunks,
+            entries, expanded, digest: hash, _build_lease:Some(Arc::new(writer.metadata)),
+        }}))
+    }
+
+    /// Only a private recovery/candidate State may be mutated by accept. Check
+    /// the final digest before installing that State or publishing a certificate.
+    pub(super) fn visit(
+        &self, root: &Path, pool: &PoolReader, authority: u64,
+        mut accept: impl FnMut(Entry) -> Result<(), RecordError>,
+    ) -> Result<(), RecordError> {
+        if self.frames.format != 2 { return Err(invalid("unsupported delta format")); }
+        let mut actual = PieceDigest::new();
+        self.frames.visit_pieces(root, pool, authority, None, |wire, _, bytes| {
+            actual.value(&wire, bytes)?;
+            let Value::Object(mut object) = wire else { return Err(invalid("invalid delta entry")); };
+            if object.len() != 1 { return Err(invalid("invalid delta entry")); }
+            let entry = if let Some(mut operations) = object.remove("operations") {
+                let values = operations.as_array_mut().filter(|v| v.len() == 1)
+                    .ok_or_else(|| invalid("invalid delta operation count"))?;
+                Entry::Applied(serde_json::from_value(values.pop().unwrap()).map_err(storage)?)
+            } else {
+                let entry: Entry = serde_json::from_value(object.remove("event")
+                    .ok_or_else(|| invalid("missing delta event"))?).map_err(storage)?;
+                if !matches!(entry, Entry::Expired(_) | Entry::FeedTrim(_) | Entry::LeaseExpired(_)) {
+                    return Err(invalid("invalid delta maintenance entry"));
+                }
+                entry
+            };
+            accept(entry)?;
+            Ok(0)
+        })?;
+        if actual.finish() != (self.frames.digest, self.frames.entries, self.frames.expanded) {
+            return Err(invalid("delta content or order mismatch"));
+        }
+        Ok(())
+    }
 }
 // The reservation is returned with the state, rather than released at the end
 // of decoding. The caller must retain it for that state's complete lifetime.
 pub(super) struct Decoded {
-    pub config: RecordConfig,
     pub state: State,
 }
 
@@ -51,6 +159,12 @@ struct Writer<'a> {
     chunks: Vec<u64>,
     entries: u64,
     expanded: u64,
+    metadata: crate::storage::build_budget::MemoryLease,
+}
+fn descriptor_admission(config:&RecordConfig)->Result<crate::storage::build_budget::MemoryLease,RecordError> {
+    let bytes=checkpoint_codec::json_length(config)?.checked_add(MAX_CHUNKS*16+512)
+        .and_then(|n|(n as u64).checked_mul(32)).ok_or_else(||invalid("descriptor metadata overflow"))?;
+    reserve_memory(bytes).map_err(storage)
 }
 impl Writer<'_> {
     fn push(&mut self, raw: &impl Serialize) -> Result<(), RecordError> {
@@ -265,6 +379,7 @@ impl Descriptor {
             chunks: Vec::new(),
             entries: 0,
             expanded: 0,
+            metadata:descriptor_admission(config)?,
         };
         visit_state(state, &mut writer)?;
         if let Some(mut file) = writer.file.take() {
@@ -278,6 +393,7 @@ impl Descriptor {
             entries: writer.entries,
             expanded: writer.expanded,
             digest: checkpoint_codec::json_digest(state)?,
+            _build_lease:Some(Arc::new(writer.metadata)),
         })
     }
     fn visit_pieces(&self, root:&Path, pool:&PoolReader, authority:u64,
@@ -285,7 +401,7 @@ impl Descriptor {
         mut accept:impl FnMut(Value,u64,u64)->Result<u64,RecordError>) -> Result<(),RecordError> {
         validate_config(&self.config)?;
         let limit = authority.min(self.config.max_journal_bytes);
-        if self.format != 1
+        if !matches!(self.format, 1 | 2)
             || self.chunks.is_empty()
             || self.chunks.len() > MAX_CHUNKS
             || self.expanded > expanded_limit(limit)?
@@ -391,6 +507,7 @@ impl Descriptor {
     // Verify the complete authenticated wire stream against the guard-pinned
     // State, retaining only one decoded frame rather than a second full history.
     pub(super) fn verify_expected(&self,root:&Path,pool:&PoolReader,authority:u64,state:&State)->Result<(),RecordError> {
+        if self.format != 1 { return Err(invalid("unsupported complete state format")); }
         // Recoverability is checked per bounded frame/value, with the complete
         // residency charged to the shared pool by its actual owners.
         if checkpoint_codec::json_digest(state)? != self.digest || checkpoint_codec::json_length(state)? as u64 > authority.min(self.config.max_journal_bytes) {
@@ -407,11 +524,12 @@ impl Descriptor {
         Ok(())
     }
     pub(super) fn read(
-        self,
+        &self,
         root: &Path,
         pool: &PoolReader,
         authority: u64,
     ) -> Result<Decoded, RecordError> {
+        if self.format != 1 { return Err(invalid("unsupported complete state format")); }
         let mut state=None;
         let mut residency=reserve_memory(0).map_err(storage)?;
         self.visit_pieces(root,pool,authority,Some(&mut residency),|wire,ordinal,_| {
@@ -433,10 +551,7 @@ impl Descriptor {
         restore_operation_lookup(&mut state)?;
         validate_restored_state(&self.config, &state)?;
         state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
-        Ok(Decoded {
-            config: self.config,
-            state,
-        })
+        Ok(Decoded { state })
     }
 }
 fn apply_piece(
@@ -791,6 +906,7 @@ mod tests {
             chunks: Vec::new(),
             entries: 0,
             expanded: 0,
+            metadata:descriptor_admission(&config).unwrap(),
         };
         let data = "x".repeat(CHUNK / 2);
         writer.push(&BTreeMap::from([("padding", &data)])).unwrap();

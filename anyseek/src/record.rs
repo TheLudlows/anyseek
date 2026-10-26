@@ -49,6 +49,7 @@ mod snapshot;
 mod checkpoint_codec;
 mod segment;
 mod anchor;
+mod anchor_image;
 mod package_pins;
 #[cfg(feature="s3-object-store")]
 mod remote_checkpoint;

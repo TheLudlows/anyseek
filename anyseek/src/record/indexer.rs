@@ -129,7 +129,7 @@ impl RecordPartition {
             pause(&root,timeout).await;
             let result = async {
                 if started.elapsed() >= timeout { return Err(RecordError::Busy); }
-                let reference = anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true).await?;
+                let reference = anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true,None).await?;
                 // The pinned cut already owns complete history. Verify the
                 // authenticated package against it and transfer that same owner
                 // into the candidate instead of decoding a duplicate State.

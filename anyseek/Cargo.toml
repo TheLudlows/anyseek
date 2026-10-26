@@ -48,7 +48,7 @@ object_store = { version = "0.12", optional = true, default-features = false, fe
 xxhash-rust = { version = "=0.8.15", default-features = false, features = ["xxh64"] }
 log = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "raw_value"] }
 tokio = { version = "1.53.2", features = ["full"] }
 base64 = "0.23.1"
 ahash ={ version = "0.8.12", features = ["serde"]}

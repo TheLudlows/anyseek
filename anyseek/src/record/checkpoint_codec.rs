@@ -36,6 +36,30 @@ pub(super) fn json_length(value: &impl Serialize) -> Result<usize, RecordError> 
     Ok(count.0)
 }
 
+/// Count only up to the persisted bound. This allocates no encoded buffer and
+/// distinguishes exceeding the bound from an unrelated serialization failure.
+pub(super) fn json_fits(value: &impl Serialize, limit: u64) -> Result<bool, RecordError> {
+    struct Bounded { remaining:u64, exceeded:bool }
+    impl Write for Bounded {
+        fn write(&mut self, bytes:&[u8])->io::Result<usize> {
+            let length=u64::try_from(bytes.len()).map_err(io::Error::other)?;
+            if length>self.remaining {
+                self.exceeded=true;
+                return Err(io::Error::other("metadata byte limit reached"));
+            }
+            self.remaining-=length;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self)->io::Result<()> {Ok(())}
+    }
+    let mut counter=Bounded {remaining:limit,exceeded:false};
+    match serde_json::to_writer(&mut counter,value) {
+        Ok(())=>Ok(true),
+        Err(_) if counter.exceeded=>Ok(false),
+        Err(error)=>Err(storage(error)),
+    }
+}
+
 pub(super) fn digest(config: &RecordConfig, state: &State) -> Result<[u8; 32], RecordError> {
     json_digest(&BorrowedEntry::Checkpoint { config, state })
 }
@@ -59,6 +83,27 @@ pub(super) fn json_digest(value: &impl Serialize) -> Result<[u8; 32], RecordErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_json_counts_exact_limit_escaped_references_and_errors() {
+        for value in [
+            serde_json::json!({"reference":"anchor-01234567890123456789012345678901/state-0000"}),
+            serde_json::json!({"reference":"\u{1}\\\"繁體".repeat(4096)}),
+        ] {
+            let bytes=serde_json::to_vec(&value).unwrap().len() as u64;
+            assert!(json_fits(&value,bytes).unwrap());
+            assert!(!json_fits(&value,bytes-1).unwrap());
+            assert!(json_fits(&value,bytes+1).unwrap());
+            assert!(json_fits(&value,u64::MAX).unwrap());
+            assert!(!json_fits(&value,0).unwrap());
+        }
+        struct Invalid;
+        impl Serialize for Invalid {
+            fn serialize<S:serde::Serializer>(&self,_:S)->Result<S::Ok,S::Error>{
+                Err(serde::ser::Error::custom("deliberate serialization failure"))
+            }
+        }
+        assert!(json_fits(&Invalid,u64::MAX).is_err());
+    }
     #[tokio::test]
     async fn borrowed_checkpoint_matches_existing_wire_bytes_and_digest() {
         let root = tempfile::tempdir().unwrap();

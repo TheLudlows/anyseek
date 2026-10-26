@@ -115,6 +115,7 @@ pub(crate) struct PoolBuilder {
     root: PathBuf,
     prior: PoolReader,
     used: BTreeSet<String>,
+    retain_prior: bool,
     id: String,
     writer: Option<Writer>,
     remaining_bytes: u64,
@@ -139,6 +140,7 @@ impl PoolBuilder {
             root: root.into(),
             prior,
             used: BTreeSet::new(),
+            retain_prior: false,
             id,
             writer: None,
             remaining_bytes: budget.bytes - bytes,
@@ -146,6 +148,11 @@ impl PoolBuilder {
             poisoned: false,
         })
     }
+    /// An incremental metadata closure still references bodies in its immutable
+    /// base and older deltas, even when this delta does not intern them again.
+    /// begin already charged/validated the complete prior object set. Only a
+    /// complete metadata rewrite may use the default pruning behavior.
+    pub(crate) fn retain_prior_closure(&mut self) { self.retain_prior = true; }
     pub fn intern(&mut self, bytes: &[u8]) -> io::Result<Reference> {
         if self.poisoned {
             return Err(invalid("payload pool requires discard"));
@@ -221,7 +228,7 @@ impl PoolBuilder {
             .closure
             .objects
             .into_iter()
-            .filter(|(id, _)| self.used.contains(id))
+            .filter(|(id, _)| self.retain_prior || self.used.contains(id))
             .collect::<BTreeMap<_, _>>();
         if let Some(writer) = self.writer {
             let descriptor=writer.finish()?;
@@ -236,6 +243,26 @@ impl PoolBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incremental_closure_retains_untouched_prior_payloads() {
+        let root=root();
+        let mut first=PoolBuilder::begin(&root,Closure::default(),budget(),format!("{:032x}",1)).unwrap();
+        let original=first.intern(b"base-only").unwrap();
+        let closure=first.finish().unwrap();
+        let mut next=PoolBuilder::begin(&root,closure,budget(),format!("{:032x}",2)).unwrap();
+        next.retain_prior_closure();
+        let added=next.intern(b"delta-only").unwrap();
+        let closure=next.finish().unwrap();
+        assert_eq!(closure.objects.len(),2);
+        let reader=PoolReader::open(&root,closure.clone(),budget()).unwrap();
+        assert_eq!(reader.read(&original).unwrap(),b"base-only");
+        assert_eq!(reader.read(&added).unwrap(),b"delta-only");
+        drop(reader);
+        let mut compact=PoolBuilder::begin(&root,closure,budget(),format!("{:032x}",3)).unwrap();
+        compact.intern(b"delta-only").unwrap();
+        assert_eq!(compact.finish().unwrap().objects.len(),1,"full rewrite can prune unused prior objects");
+        std::fs::remove_dir_all(root).unwrap();
+    }
     fn root() -> PathBuf {
         let p = std::env::temp_dir().join(format!("anyseek-pool-{:032x}", rand::random::<u128>()));
         std::fs::create_dir(&p).unwrap();

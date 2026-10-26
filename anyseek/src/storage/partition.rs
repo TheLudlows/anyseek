@@ -396,6 +396,30 @@ impl PartitionJournal {
     pub(crate) fn append(&mut self, payload: &[u8]) -> io::Result<u64> {
         self.journal.append(payload)
     }
+    /// Stream the selected certificate and complete ordered suffix. The
+    /// publication marker is protocol metadata, not a Record Entry. In
+    /// particular, do not filter using business seq: maintenance entries can
+    /// change State without incrementing that sequence.
+    pub(crate) fn visit_committed(
+        &self,
+        mut accept: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut published = false;
+        self.journal.visit_committed(&generation_path(&self.path, self.generation), |ordinal, payload| {
+            if (ordinal == 2) != (payload == PUBLISHED) {
+                return Err(io::Error::other("invalid publication marker position"));
+            }
+            if payload == PUBLISHED {
+                if published { return Err(io::Error::other("duplicate publication marker")); }
+                published = true;
+                Ok(())
+            } else {
+                accept(payload)
+            }
+        })?;
+        if !published { return Err(io::Error::other(UncertifiedPartition)); }
+        Ok(())
+    }
     /// The new certificate and the complete concurrent suffix are staged together.
     /// No generation containing a certificate but missing suffix can be selected.
     pub(crate) fn checkpoint_with_tail(&mut self, payload: &[u8], tail: &[Vec<u8>]) -> Result<(), CreateError> {
@@ -480,6 +504,36 @@ fn crash_boundary(stage: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn committed_stream_preserves_checkpoint_suffix_order() {
+        let path = root();
+        let mut store = PartitionJournal::create(&path, 4096, b"base").unwrap();
+        store.append(b"same-seq-maintenance").unwrap();
+        let mut entries = Vec::new();
+        store.visit_committed(|v| { entries.push(v.to_vec()); Ok(()) }).unwrap();
+        assert_eq!(entries, vec![b"base".to_vec(), b"same-seq-maintenance".to_vec()]);
+        store.checkpoint_with_tail(b"new-base", &[b"tail-one".to_vec(), b"tail-two".to_vec()]).unwrap();
+        store.append(b"tail-three").unwrap();
+        entries.clear();
+        store.visit_committed(|v| { entries.push(v.to_vec()); Ok(()) }).unwrap();
+        assert_eq!(entries, vec![b"new-base".to_vec(), b"tail-one".to_vec(), b"tail-two".to_vec(), b"tail-three".to_vec()]);
+    }
+    #[test]
+    fn committed_stream_rejects_marker_after_uncertified_entry() {
+        let path = root();
+        let mut store = PartitionJournal::create(&path, 4096, b"base").unwrap();
+        let next = store.generation + 1;
+        let replacement = Journal::create_initialized_frames(
+            &generation_path(&path, next), 4096, &[b"base", b"wrong-second-frame", PUBLISHED],
+        ).unwrap();
+        store.journal = replacement;
+        store.generation = next;
+        let mut calls = 0;
+        assert!(store.visit_committed(|_| { calls += 1; Ok(()) }).is_err());
+        // A valid prefix can already have been visited: callers must retain
+        // private preparations until the complete visit succeeds.
+        assert_eq!(calls, 1);
+    }
     fn root() -> PathBuf {
         let base = std::env::var_os("ANYSEEK_TEST_ROOT")
             .map(PathBuf::from)

@@ -66,6 +66,74 @@ pub(crate) struct Journal {
 }
 
 impl Journal {
+    /// Visit the healthy writer's committed cut without reopening its owner or
+    /// changing its append cursor. The caller holds the partition owner and
+    /// supplies that owner's current generation directory. Callback results are
+    /// private preparations: they must not be published until this returns Ok.
+    /// A callback cannot retain the borrowed payload; any decoded retained value
+    /// needs its own residency lease, separate from this frame's scratch lease.
+    pub(crate) fn visit_committed(
+        &self,
+        path: &Path,
+        mut accept: impl FnMut(u64, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if self.needs_recovery {
+            return Err(io::Error::other("journal requires recovery"));
+        }
+        let path = path.join("wal");
+        if !fs::symlink_metadata(&path)?.file_type().is_file() {
+            return Err(corrupt("journal is not a regular file"));
+        }
+        // File::try_clone shares the OS seek offset on supported platforms.
+        // An independently opened handle is essential for a live writer.
+        let mut input = OpenOptions::new().read(true).open(path)?;
+        if self.end < MAGIC.len() as u64
+            || self.end > input.metadata()?.len()
+            || self.end > self.max_bytes
+        {
+            return Err(corrupt("invalid committed journal extent"));
+        }
+        let mut magic = [0; 8];
+        input.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(corrupt("unsupported journal format"));
+        }
+        let mut offset = MAGIC.len() as u64;
+        let mut sequence = 0u64;
+        while offset < self.end {
+            if self.end - offset < FRAME_HEADER as u64 {
+                return Err(corrupt("truncated committed frame"));
+            }
+            let mut header = [0; FRAME_HEADER];
+            input.read_exact(&mut header)?;
+            let length = number(&header[..8]);
+            sequence = sequence.checked_add(1).ok_or_else(|| corrupt("sequence overflow"))?;
+            if length > MAX_FRAME as u64
+                || length > self.end - offset - FRAME_HEADER as u64
+                || number(&header[8..16]) != sequence
+            {
+                return Err(corrupt("invalid committed frame length or sequence"));
+            }
+            let _scratch = super::build_budget::reserve_memory(
+                length.checked_mul(32).ok_or_else(|| corrupt("frame admission overflow"))?,
+            )?;
+            let mut payload = vec![0; length as usize];
+            input.read_exact(&mut payload)?;
+            let mut checksum = xxhash_rust::xxh64::Xxh64::new(0);
+            checksum.update(&header[..16]);
+            checksum.update(&payload);
+            if checksum.digest() != number(&header[16..]) {
+                return Err(corrupt("committed frame checksum mismatch"));
+            }
+            accept(sequence, &payload)?;
+            offset += FRAME_HEADER as u64 + length;
+        }
+        if sequence != self.seq {
+            return Err(corrupt("commit witness sequence mismatch"));
+        }
+        Ok(())
+    }
+
     /// Build in a unique sibling directory, sync all files, then publish. No
     /// legacy directory is overwritten or initialized in place.
     #[cfg(test)]
@@ -395,6 +463,58 @@ fn crash_boundary(stage: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn committed_stream_keeps_append_cursor_and_ignores_uncommitted_suffix() {
+        let root = path();
+        let mut journal = Journal::create(&root, 4096).unwrap();
+        journal.append(b"first").unwrap();
+        journal.append(b"second").unwrap();
+        let mut suffix = std::fs::OpenOptions::new().append(true).open(root.join("wal")).unwrap();
+        suffix.write_all(b"uncommitted").unwrap();
+        drop(suffix);
+        let mut seen = Vec::new();
+        journal.visit_committed(&root, |seq, bytes| { seen.push((seq, bytes.to_vec())); Ok(()) }).unwrap();
+        assert_eq!(seen, vec![(1, b"first".to_vec()), (2, b"second".to_vec())]);
+        // An interrupted consumer must not poison or seek the writer either.
+        assert!(journal.visit_committed(&root, |_, _| Err(io::Error::other("consumer failed"))).is_err());
+        journal.append(b"third").unwrap();
+        drop(journal);
+        let (_, entries) = Journal::open(&root, 4096).unwrap();
+        assert_eq!(entries, vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]);
+    }
+    #[test]
+    fn committed_stream_rejects_corruption_and_uncertain_writer() {
+        let root = path();
+        let mut journal = Journal::create(&root, 4096).unwrap();
+        journal.append(b"first").unwrap();
+        journal.needs_recovery = true;
+        let mut called = false;
+        assert!(journal.visit_committed(&root, |_, _| { called = true; Ok(()) }).is_err());
+        assert!(!called);
+        journal.needs_recovery = false;
+        let mut file = std::fs::OpenOptions::new().write(true).open(root.join("wal")).unwrap();
+        file.seek(SeekFrom::Start((MAGIC.len() + FRAME_HEADER) as u64)).unwrap();
+        file.write_all(b"X").unwrap();
+        assert!(journal.visit_committed(&root, |_, _| { called = true; Ok(()) }).is_err());
+        assert!(!called);
+    }
+    #[test]
+    fn committed_stream_late_corruption_does_not_certify_prefix() {
+        let root = path();
+        let mut journal = Journal::create(&root, 4096).unwrap();
+        journal.append(b"first").unwrap();
+        journal.append(b"second").unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(root.join("wal")).unwrap();
+        file.seek(SeekFrom::Start((MAGIC.len() + FRAME_HEADER + 5 + FRAME_HEADER) as u64)).unwrap();
+        file.write_all(b"X").unwrap();
+        let mut private = Vec::new();
+        let result = journal.visit_committed(&root, |_, bytes| { private.push(bytes.to_vec()); Ok(()) });
+        assert!(result.is_err());
+        assert_eq!(private, vec![b"first".to_vec()]);
+        // The complete visit, not each callback, gates candidate publication.
+        let published = result.is_ok().then_some(private);
+        assert!(published.is_none());
+    }
     fn path() -> std::path::PathBuf {
         let base = std::env::var_os("ANYSEEK_TEST_ROOT")
             .map(std::path::PathBuf::from)
