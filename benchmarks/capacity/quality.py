@@ -33,14 +33,15 @@ def evaluate(queries, rows, accepted):
                             **{k: v / len(pairs) for k, v in totals.items()}}
     return summaries
 
-def no_live_owner(path):
+def no_other_services():
     for entry in pathlib.Path('/proc').iterdir():
         if not entry.name.isdigit():
             continue
         try:
             args = (entry / 'cmdline').read_bytes().split(b'\0')
-            if ('index_path=' + str(path)).encode() in args:
-                raise RuntimeError(f'database still owned by PID {entry.name}; do not start a second server')
+            executable = pathlib.Path(os.fsdecode(args[0])).name
+            if ('anyseek' in executable or 'meilisearch' in executable) and any(x.startswith(b'index_path=') or x == b'--db-path' for x in args):
+                raise RuntimeError(f'service PID {entry.name} is still running; quality services must run separately')
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             pass
 
@@ -53,6 +54,7 @@ def main():
     p.add_argument('--out', type=pathlib.Path, required=True)
     a = p.parse_args()
     assert not any(k.startswith('ANYSEEK_') for k in os.environ)
+    no_other_services()
     source = json.loads((a.baseline / 'summary.json').read_text())
     accepted_ids = json.loads((a.baseline / 'accepted-docids.json').read_text())
     corpus = json.loads(a.corpus.read_text())
@@ -80,7 +82,6 @@ def main():
     e = Engine(a.engine, 'restricted', a.out)
     if a.engine == 'anyseek':
         e.data = (a.baseline / 'db').resolve()
-        no_live_owner(e.data)
     result = {'engine': a.engine, 'binary_sha256': sha(a.binary), 'source_revision': source['revision'],
               'corpus_sha256': source['corpus_sha256'], 'queries_sha256': sha(queries_path),
               'accepted_ids_sha256': sha(a.baseline / 'accepted-docids.json'), 'documents': len(selected),
