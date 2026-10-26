@@ -451,34 +451,27 @@ def main():
                     first=call('POST','/api/v1/index/after-source-delete/doc',w)['receipt']
                     assert first['version']==1 and call('POST','/api/v1/index/after-source-delete/doc',w)['receipt']==first
                     if stage!='before_append':call('GET','/api/v1/index/after-source-delete/doc/'+later['record_id'],status=404)
-                # Interrupt initial root publication, then interrupt its repair,
-                # proving durable staging can be resumed on both native platforms.
+                # Independent snapshots are fully certified in a private root.
+                # Exercise both sides of its final atomic publication. Initial
+                # root publication/repair crashes remain covered at startup.
                 for kind in ([] if args.cold_restarts else ['backup','restore']):
-                    body={'operation_id':operation()}
-                    endpoint='/api/v1/index/after-source-delete/backup'
-                    if kind=='restore':
-                        body.update({'collection_id':'interrupted-restore','backup_id':backup['backup_id']});endpoint='/api/v1/restore'
-                    process.kill();process.wait(timeout=20)
-                    start({'ANYSEEK_INITIAL_ROOT_PREFIX':kind if kind=='backup' else 'collection-','ANYSEEK_INITIAL_FAULT':'published'})
-                    try: call('POST',endpoint,body)
-                    except (OSError,http.client.HTTPException):pass
-                    else:raise AssertionError('expected initial publication exit')
-                    process.wait(timeout=20);assert process.returncode==87
-                    if kind=='backup':
-                        start({'ANYSEEK_INITIAL_ROOT_PREFIX':'backup-','ANYSEEK_INITIAL_FAULT':'retired'})
+                    for stage in ['prepared','published']:
+                        body={'operation_id':operation()}
+                        endpoint='/api/v1/index/after-source-delete/backup'
+                        restored_id=f'interrupted-restore-{stage}'
+                        if kind=='restore':
+                            body.update({'collection_id':restored_id,'backup_id':backup['backup_id']});endpoint='/api/v1/restore'
+                        process.kill();process.wait(timeout=20)
+                        start({'ANYSEEK_SNAPSHOT_ROOT_PREFIX':'backup-' if kind=='backup' else 'collection-','ANYSEEK_SNAPSHOT_FAULT':stage})
                         try: call('POST',endpoint,body)
                         except (OSError,http.client.HTTPException):pass
-                        else:raise AssertionError('expected interrupted repair')
-                        process.wait(timeout=20);assert process.returncode==87
-                    # Restore recovery runs before HTTP starts, so no readiness loop
-                    # is used for the intentional repair crash.
-                    else:
-                        process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','ANYSEEK_INITIAL_ROOT_PREFIX':'collection-','ANYSEEK_INITIAL_FAULT':'retired'},stdout=log,stderr=log)
-                        process.wait(timeout=20);assert process.returncode==87
-                    start();recovered=call('POST',endpoint,body)
-                    if kind=='restore':assert call('GET','/api/v1/index/interrupted-restore/doc/r0')['version']==5
-                    else:assert recovered['backup_id']
-                print('PASS real HTTP faults: rejection/unknown/durable pending, process exits before/after visibility and stopped batch tail'+('; local backup/restore publication and repair crashes' if not args.cold_restarts else '; remote backup faults run in the storage suite'))
+                        else:raise AssertionError(('expected snapshot publication exit',kind,stage))
+                        process.wait(timeout=20);assert process.returncode==87,(kind,stage,process.returncode)
+                        start();recovered=call('POST',endpoint,body)
+                        assert call('POST',endpoint,body)==recovered,(kind,stage,'idempotent retry')
+                        if kind=='restore':assert call('GET',f'/api/v1/index/{restored_id}/doc/r0')['version']==5
+                        else:assert recovered['backup_id']
+                print('PASS real HTTP faults: rejection/unknown/durable pending, process exits before/after visibility and stopped batch tail'+('; local backup/restore private and published snapshot crashes' if not args.cold_restarts else '; remote backup faults run in the storage suite'))
             if args.cold_restarts and args.faults:
                 while sum(p.name.startswith('backup-') for p in root.iterdir())<31:
                     call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()})

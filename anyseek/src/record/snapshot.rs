@@ -53,6 +53,8 @@ pub(super) async fn create(
                 }
             }
         }
+        #[cfg(feature = "fault-injection")]
+        publication_fault(destination, "prepared");
         Ok(())
     }
     .await;
@@ -69,6 +71,8 @@ pub(super) async fn create(
     }
     match PartitionJournal::publish_prepared_root(&prepared, destination) {
         Ok(()) => {
+            #[cfg(feature = "fault-injection")]
+            publication_fault(destination, "published");
             #[cfg(test)]
             if destination.with_extension("reject-after-publish").exists() {
                 return Err(RecordError::OutcomeUnknown(
@@ -89,6 +93,19 @@ pub(super) async fn create(
         // Do not remove either root after a rename attempt. Recovery/readback
         // must determine the outcome; absence of a return value is not rollback.
         Err(error) => Err(creation_error(error)),
+    }
+}
+
+// Faults target the actual independent-snapshot protocol: before and after
+// atomic publication of an already certified root, not initial-root repair.
+#[cfg(feature = "fault-injection")]
+fn publication_fault(destination: &Path, stage: &str) {
+    let prefix = std::env::var("ANYSEEK_SNAPSHOT_ROOT_PREFIX").unwrap_or_default();
+    if !prefix.is_empty()
+        && destination.file_name().is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        && std::env::var("ANYSEEK_SNAPSHOT_FAULT").as_deref() == Ok(stage)
+    {
+        std::process::exit(87);
     }
 }
 

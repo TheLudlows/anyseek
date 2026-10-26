@@ -1,8 +1,39 @@
 # Bounded 100k capacity: implementation checkpoint
 
+## Validation follow-up (2026-10-26)
+
+The `b6a39fe` production code passed local all-targets (372 passed, 0 failed,
+13 ignored), no-default library (225 passed, 0 failed, 10 ignored), both
+doctest variants (9 each), and browser HTTP acceptance. Ignored tests retain
+subprocess-worker, real-S3 and manual cross-AES requirements; they are not
+additional capacity passes.
+
+The explicit HTTP fault run exposed a stale test boundary: independent snapshots
+now certify a private `.record-snapshot-*` root before publishing it, so the old
+`backup-*` initial-root crash selector cannot fire. The fault-injection-only
+hooks now interrupt before/after final snapshot publication. Backup and restore
+both require exit 87, successful recovery, unchanged restored record version,
+and exact operation retry. Initial-root publication/repair coverage remains in
+the startup fixture. The corrected base HTTP fault matrix passed locally;
+no production default behavior, deadlines or assertions were relaxed.
+
+An initial S3 fixture run was interrupted at the 2 GiB free-space safety floor,
+not counted as a full pass. Only the approved regenerable debug build directory
+was subsequently removed, after its users exited; release binaries, source,
+data and raw results were preserved. Rebuilt fault-injection service passed the affected HTTP base matrix (391.7s)
+and complete S3 fixture fault matrix (181.7s), both exit 0. These are separate
+from the prior partial run. Real S3, hard power loss and
+manual cross-AES remain unverified.
+
+The first capacity rejection is now identified exactly: selected anchor expanded
+bytes 100535849 plus tail 195850 gives 100731699; its 32x recovery-state admission
+requests 3223414368 bytes, above the 3 GiB single limit. This is aggregate State
+ownership, not one document or demonstrated leakage. Shared immutable values
+and bounded ownership remain planned; **100k has still not passed**.
+
 ## Latest measured boundary (phase24, 2026-10-26)
 
-PR85 is draft; remote HEAD `2fc5b5c` contains production `af45faf` plus
+PR85 is draft; the phase24 checkpoint `2fc5b5c` contains production `af45faf` plus
 scripts/docs and test-only logging. Earlier local-only/publication-pending notes
 below are historical. The release binary SHA is
 `72bf6da6828bd6a73661b60584d5639711685f69c7c4cfb0aaaf2e9f09502ab1`.
@@ -13,7 +44,7 @@ default capacity and budgets are unchanged. **100k has not passed.**
   one storage_error (item503 inside HTTP200),10 not_attempted. Ordinal64465
   requested3223414368 bytes against single3221225472. Original operations
   were observed without resubmission; visible records and retained operations
-  both remained64464. The precise first-rejection allocation is not yet proven.
+  both remained64464. The aggregate recovery admission is identified above.
 - Explicit checkpoint failed before publication at `stage=index_snapshot_clone`:
   shared used3707866712 + requested3163591360 > limit6442450944.
   This identifies a retained full-State copy peak, not evidence of a leak.
