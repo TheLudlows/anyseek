@@ -589,6 +589,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successor_writer_rejection_leaves_predecessor_writable() {
+        let root=tempfile::tempdir().unwrap();
+        let governor=Arc::new(crate::resources::Governor::default());
+        let scope=governor.admit("successor-admission".into(),crate::resources::Lane::Foreground,0).unwrap();
+        let accounting=scope.clone().in_lane(crate::resources::Lane::Background);
+        let (old,next)=scope.clone().run(async {
+            std::fs::create_dir(root.path().join("old")).unwrap();std::fs::create_dir(root.path().join("next")).unwrap();
+            (Runtime::create(&root.path().join("old/native"),&config()).unwrap(),Runtime::create(&root.path().join("next/native"),&config()).unwrap())
+        }).await;
+        let doc=serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+        scope.clone().run(old.append(Identity{id:"a".into(),version:1,revision:1},&doc,true)).await.unwrap();
+        let pressure=accounting.bytes(2020*1024*1024).unwrap();
+        assert!(next.admit_writer().await.is_err());
+        assert!(matches!(old.data.lock().await.write_state,WriteState::Writable));
+        scope.clone().run(old.append(Identity{id:"b".into(),version:1,revision:2},&doc,true)).await.unwrap();
+        assert_eq!(old.snapshot().await.unwrap().identities.len(),2);
+        drop(pressure);next.admit_writer().await.unwrap();
+        assert!(next.data.lock().await.writer.is_some());
+    }
+
+    #[tokio::test]
     async fn failed_seal_fences_writer_without_releasing_worker_admission() {
         let root = tempfile::tempdir().unwrap();
         let package = root.path().join("package");

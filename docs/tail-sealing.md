@@ -54,7 +54,12 @@ package identity and identical inventory, rather than only successful queries:
 - `direct_tail_seal_unknown_certificate_fences_and_reopens`
 - `pending_seals_keep_retired_versions_out_of_vector_and_field_queries`
 
-Quick CI now includes these three and the first slice's two writer-owner cases.
+A further two-record admission regression passed: a full background quota rejects
+successor writer admission while the predecessor remains writable, then releasing
+the pressure permits admission. This reserves logical quota, not GiB allocations.
+
+Quick CI includes these four and the first slice's two writer-owner cases; the
+original 24-case core run passed, followed by this additional exact case.
 Windows validation for direct reuse remains pending. The largest targeted fixture
 is 129 records. No large experiment or original data writes were resumed.
 
@@ -66,3 +71,11 @@ path; it does not eliminate full-State/history traversal or demonstrate a measur
 throughput gain. Separate index-seal and checkpoint watermarks must retain one
 business authority, complete WAL recovery, unchanged corruption detection timing,
 owned pins and bounded pending packages. That subsequent slice is not implemented.
+
+The decoupling review confirmed a further distinction: full-file authentication
+and WAL checksums alone do not replace the existing delta replay/result-vs-State
+self-check. The first decoupled implementation must retain that proof, or supply
+an equivalent incremental proof. It must not silently defer the check merely to
+remove traversal cost. Payload whole-object SHA is checked on open, while each
+payload range SHA is also checked when read. Same-sequence maintenance events and
+remote journal bounds remain in scope.
