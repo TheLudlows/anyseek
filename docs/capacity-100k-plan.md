@@ -360,7 +360,7 @@ unverified. State duplicate residency and full selected-population maintenance
 remain explicit review concerns, not silently waived acceptance items.
 
 
-## Optimized-build capacity validation (phase22, in progress)
+## Optimized-build capacity validation (phase22, first boundary confirmed)
 
 Code remains `b03ba586fd2619faa9d218ef1e7585c6c94c3243`; launch HEAD was
 `711c34c67b15c9cce04377fae05c485bd2d81244` (later changes only observer/docs).
@@ -384,11 +384,12 @@ server CPU0–1/client CPU2–3. Default10k profile and query semantics are unch
 |---|---|---|---|
 |10000|HTTP200,2.773s|407.1ms|10000, same receipt|
 |20000|HTTP200,5.988s|811.1ms|20000, same receipt|
+|50000|HTTP200,16.611s|1876.0ms|50000, same receipt|
 
 Release crossed the debug11925 boundary without a failed response. This is
 partial evidence, not100k acceptance or a Meilisearch performance comparison.
-The single existing runner continues toward100k or its first real boundary;
-393-query/final checkpoint/reopen and final full test matrices remain pending.
+The runner reached its first real boundary at56273, detailed below. This does
+not complete100k acceptance; final full test matrices also remain pending.
 Original debug first-failure and resolved25-receipt evidence is retained unchanged.
 
 Live evidence: `/tmp/anyseek-capacity-phase22-state.json`,
@@ -396,3 +397,70 @@ Live evidence: `/tmp/anyseek-capacity-phase22-state.json`,
 `events.jsonl`, `settings.json`. Build evidence:
 `/tmp/anyseek-capacity-release-build.json` and `.log`.
 Do not start another runner or overwrite the binary while this process is active.
+
+
+### Terminal boundary, quality probes and recovery
+
+The two debug staircases and release run all explicitly used single3GiB/shared6GiB
+build memory, bounded_100k, identical corpus hash and production code. These are
+**not defaults**: default build memory remains1GiB/4GiB, default HTTP capacity10k.
+Raw comparison: `/tmp/anyseek-capacity-phase22-budget-comparison.json`.
+
+Release loaded56272 records successfully in3109.76s. The final25-item batch took
+11.847s:22 applied, the next item had `storage_error`/503 inside HTTP200, then2 were
+`not_attempted`. First failure ordinal56273:
+`class=shared used=6441531108 requested=8388608 limit=6442450944`.
+This was a finite shared-admission refusal, not an HTTP deadline or OOM. Peak
+sampled RSS1334200KiB. The observer found all22 successful receipts and no receipts
+for the other3; absence alone is not failure proof. The failed write's maintenance
+path precedes its WAL append; no failed/not-attempted operation was resubmitted.
+
+The8MiB request matches4 schema fields ×65536×32 in `build_budget::admit`.
+Both frozen-component loading and empty-tail preparation use that base reservation;
+the original error lacks call-site context, so the exact substage is unproven.
+Do not label it a leak or claim one of those callers was uniquely identified.
+
+A separate, single explicit checkpoint after the read-only probes failed in126.69ms:
+`class=shared used=3680574444 requested=2766117632 limit=6442450944`.
+That requested size is the complete State clone admission. GET info remained
+healthy at56272 records and56272 operations. The original service was stopped
+only after the request finished; it was not interrupted to resolve an unknown.
+
+Reopen with the same binary/budgets exceeded the unchanged60s startup check. The
+same retained process subsequently became ready (observed by89.017s; exact ready
+time was not captured). No restart or timeout widening converted that failure to
+success. Recovered count and retained operations were56272;26 sampled old receipts
+(including seq1/10k/20k/50k and the final22) matched exactly. Five fixed queries'
+top100 IDs, scores and counts also matched. Both services were then safely stopped.
+The original authority anchor was56144, leaving128 tail decisions to recover;
+`replay_anchor_tail` still clones the complete State per Applied decision, a
+concrete recovery-cost concern for the next implementation stage.
+
+393 original-question OR probes at length100/title+text completed before reopen,
+with no writes,0 HTTP errors,0 empty results. All994 positive query/document pairs
+were present. Metrics are macro averages across all queries (errors would count
+as zero); Recall divides by each query's full positive qrels, nDCG uses gains
+2^grade−1/log2(rank+1), MRR uses the first positive within10. Hit uniqueness,
+corpus membership and every metric were independently checked.
+
+|Query group|Recall@10|Recall@100|nDCG@10|MRR@10|
+|---|---:|---:|---:|---:|
+|All393|0.547840|0.808757|0.385394|0.391096|
+|Prior40, nonblind|0.509167|0.820417|0.371440|0.402113|
+|Held-out353|0.552222|0.807436|0.386975|0.389848|
+
+This is a56272-document boundary diagnostic, not100k or a new Meilisearch comparison.
+Raw results are under `phase22-release-100k/boundary-validation/` and
+`boundary-recovery/continued-observation/final/`; checkpoint and unchanged startup
+failure are retained separately in `boundary-recovery/result.json`. Root prefix is
+`/tmp/anyseek-capacity-`. Original summary and earlier11925 evidence were not changed.
+Harnesses: `boundary.py`, `boundary_recovery.py`, `observe_recovery.py` in
+`benchmarks/capacity/`; the latter continues the same retained process, never retries
+writes, and stops it only after successful consistency probes. The first successful
+readiness observation is kept in `continued-observation/initial.json`.
+
+Next: diagnose the exact component caller, reduce authenticated-publication and
+private-recovery full-State copy peaks while retaining validation and ownership,
+then reproduce the boundary before a fresh staircase. Do not lower accounting,
+raise timeouts, or call100k complete. A full-State single-lease limit may be the
+next independent bound even after duplicate residency is removed.

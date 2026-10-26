@@ -66,3 +66,21 @@ reserves remain16MiB. Migration/old-format readers were not added.
 Do not repeat writes or replace the measured binary while the staircase runs.
 Publication remains pending the specific approval following the prior automated
 review rejection; do not retry PR creation or push new local commits yet.
+
+
+## Latest measured limit (same code, optimized build)
+
+Same explicit3GiB/6GiB budgets as both debug staircases; defaults remain1GiB/4GiB
+and10k HTTP capacity. Release passed10k/20k/50k checkpoint/reopen/receipt checks,
+then stopped at56272 accepted: one shared-budget storage error and2 not-attempted
+items. A separate checkpoint failed complete-State clone admission. Recovery
+exceeded60s but the same process later recovered every accepted identity and
+sampled receipts/query results.393 OR probes completed with0 errors;100k and a
+new Meilisearch comparison remain unfinished. Full numbers and raw evidence are
+in the plan. No new production code or budget change was made during this run.
+
+The component8MiB error is not sufficient to distinguish frozen loading from
+empty-tail allocation; both call the same admitted base. The checkpoint's
+2766117632-byte clone and128-decision recovery tail provide concrete next-stage
+investigation targets. Retain complete history, certificate validation and owned
+leases when removing copies; do not simply suppress charges.
