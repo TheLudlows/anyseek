@@ -17,5 +17,10 @@
   "storage::journal::tests::committed_stream_rejects_corruption_and_uncertain_writer",
   "storage::journal::tests::committed_stream_late_corruption_does_not_certify_prefix",
   "storage::partition::tests::committed_stream_preserves_checkpoint_suffix_order",
-  "storage::partition::tests::committed_stream_rejects_marker_after_uncertified_entry"
+  "storage::partition::tests::committed_stream_rejects_marker_after_uncertified_entry",
+  "record::lexical::runtime::tests::sealed_writer_keeps_fixed_readers_and_rejects_future_writes",
+  "record::lexical::runtime::tests::failed_seal_fences_writer_without_releasing_worker_admission",
+  "record::anchor::tests::direct_tail_seal_reuses_bytes_and_rejection_keeps_successor_writable",
+  "record::anchor::tests::direct_tail_seal_unknown_certificate_fences_and_reopens",
+  "record::anchor::tests::pending_seals_keep_retired_versions_out_of_vector_and_field_queries"
 ]

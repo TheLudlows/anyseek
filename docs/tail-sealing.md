@@ -1,8 +1,9 @@
 # Tail sealing work
 
 The first slice introduces explicit native writer sealing and stable candidate
-package paths. It does **not** yet reuse the live tail or decouple checkpoint.
-Frozen candidates still rebuild from authoritative records.
+package paths. The second slice directly reuses stable live tails during ordinary
+anchor publication. Initial cache layouts, independent snapshots and bounded
+compaction retain authoritative rebuilds. Checkpoint is **not yet decoupled**.
 
 A candidate is built at its final segment identity, drains native commit/reload,
 joins writer workers, and only then computes the immutable inventory. Existing
@@ -28,18 +29,40 @@ The injected failure is a real directory write/commit failure, not a separately
 injected worker-join failure. Windows execution of this new slice is pending.
 No original capacity database or stopped load was resumed.
 
-## Next independently verifiable slice
+## Direct reuse and failed publication
 
-Admit and create a successor before sealing the only mutable tail. Retain the
-sealed predecessor and its complete pin in the live query view until authority
-installation succeeds. A definitely rejected certificate must leave that view
-queryable and the successor writable; uncertain publication must keep the
-existing recovery fence. Failed sealing requires authoritative reconstruction or
-an explicit recovery fence, never reuse of a failed writer. Candidate GC must
-exclude every still-owned predecessor, including unpublished ones.
+An empty successor is built and its native writer is actually admitted and
+initialized before sealing the predecessor. The predecessor flushes vectors and
+metadata, drains its native writer, and retains its fixed Searcher and pin under
+the live view. The candidate Reference selects its original package identity and
+file inventory instead of rereading bodies to build another index.
 
-Only independently complete packages can take the reuse path. Replacements,
-retired versions, generation changes and compaction need explicit membership and
-statistics checks before enabling it. Preserve full byte authentication and its
-current detection timing. Index-seal/checkpoint separation remains subsequent
-work; these changes alone make no throughput or 100k-capacity claim.
+A definitely rejected preparation leaves both predecessor and writable successor
+owned by the live query view. Repeated attempts carry ordered pending packages;
+retirement statistics exclude updated/deleted versions before Top-K. Inventory
+bytes are reauthenticated on selection. Failed sealing/handoff and uncertain
+certificate publication keep the recovery fence; reopen follows journal authority.
+Normal document admission still applies to future writes. Initial layouts without
+stable identity, independent snapshots and package-count compaction use rebuilds.
+
+Seven targeted Linux cases passed: the three new direct-reuse tests below plus
+prepared rejection/GC, incremental closure recovery, pinned vector quantization
+and the 129-record automatic rotation regression. The new cases verify actual
+package identity and identical inventory, rather than only successful queries:
+
+- `direct_tail_seal_reuses_bytes_and_rejection_keeps_successor_writable`
+- `direct_tail_seal_unknown_certificate_fences_and_reopens`
+- `pending_seals_keep_retired_versions_out_of_vector_and_field_queries`
+
+Quick CI now includes these three and the first slice's two writer-owner cases.
+Windows validation for direct reuse remains pending. The largest targeted fixture
+is 129 records. No large experiment or original data writes were resumed.
+
+## Remaining checkpoint separation
+
+Ordinary publication still computes a full State encoding and authenticates the
+recovery closure. Direct tail reuse removes index reconstruction on the eligible
+path; it does not eliminate full-State/history traversal or demonstrate a measured
+throughput gain. Separate index-seal and checkpoint watermarks must retain one
+business authority, complete WAL recovery, unchanged corruption detection timing,
+owned pins and bounded pending packages. That subsequent slice is not implemented.

@@ -213,17 +213,7 @@ impl Runtime {
             };
             fields.push(analyzer.field(&text).await);
         }
-        if data.writer.is_none() {
-            let directory=self.directory.as_ref().ok_or_else(||storage("immutable lexical package"))?;
-            directory.admit_writer(WRITER_BYTES as u64)?;
-            let writer=data.index.writer_with_options(
-                tantivy::indexer::IndexWriterOptions::builder().num_worker_threads(1)
-                    .num_merge_threads(1).memory_budget_per_thread(WRITER_BYTES).build()
-            ).map_err(storage)?;
-            // Record's owned compaction controls merge allocation and publication.
-            writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
-            data.writer=Some(writer);
-        }
+        self.ensure_writer_locked(&mut data)?;
         data.identity_charge.grow(256 + identity.id.len() as u64)?;
         let mut doc = TantivyDocument::new();
         let native_schema = data.index.schema();
@@ -317,6 +307,25 @@ impl Runtime {
         directory.atomic_write(Path::new("record-native.json"), &bytes).map_err(storage)?;
         directory.sync_directory().map_err(storage)?;
         Ok(())
+    }
+    fn ensure_writer_locked(&self, data: &mut Data) -> Result<(),RecordError> {
+        if data.write_state != WriteState::Writable {return Err(storage("native writer is sealed or failed"));}
+        if data.writer.is_none() {
+            let directory=self.directory.as_ref().ok_or_else(||storage("immutable lexical package"))?;
+            directory.admit_writer(WRITER_BYTES as u64)?;
+            let writer=data.index.writer_with_options(
+                tantivy::indexer::IndexWriterOptions::builder().num_worker_threads(1)
+                    .num_merge_threads(1).memory_budget_per_thread(WRITER_BYTES).build()
+            ).map_err(storage)?;
+            // Record's owned compaction controls merge allocation and publication.
+            writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+            data.writer=Some(writer);
+        }
+        Ok(())
+    }
+    /// Admit and initialize the successor before retiring the predecessor writer.
+    pub(crate) async fn admit_writer(&self) -> Result<(),RecordError> {
+        self.ensure_writer_locked(&mut *self.data.lock().await)
     }
     pub(crate) async fn flush(&self) -> Result<(), RecordError> {
         let mut data = self.data.lock().await;

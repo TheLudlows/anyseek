@@ -263,12 +263,13 @@ impl Reference {
         drop(manifest);
         drop(image_lease);
         let mut segments=Vec::new();let mut statistics=Vec::new();
-        if !compact && previous.is_some_and(|p|p.segments.len()<capacity::segments(config)) {
+        if !compact && previous.is_some_and(|p|p.segments.len()+view.map_or(0,|v|v.pending_seals.len())<capacity::segments(config)) {
             let previous=previous.unwrap();
             let local=view.ok_or_else(||storage("missing incremental input view"))?.local_statistics().await?;
-            if local.len()!=previous.segments.len()+1{return Err(storage("selected segment/view mismatch"));}
+            let pending=&view.unwrap().pending_seals;
+            if local.len()!=previous.segments.len()+pending.len()+1{return Err(storage("selected segment/view mismatch"));}
             let mut local=local.into_iter();let tail=local.next().unwrap();
-            for (segment,active) in previous.segments.iter().zip(local) {
+            for (segment,active) in pending.iter().chain(previous.segments.iter()).zip(local) {
                 if (0..active.keys.len()).any(|id|active.is_live(id)) {segments.push(segment.clone());statistics.push(active);}
             }
             let keys=tail.keys.iter().enumerate().filter(|(id,_)|tail.is_live(*id)).map(|(_,key)|key.clone()).collect::<std::collections::BTreeSet<_>>();
@@ -484,6 +485,26 @@ impl Inner {
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
+        // Pre-admit a separate writer before making the current tail immutable.
+        // Explicit replacement/compaction remains on the authoritative rebuild path.
+        if candidate.is_none() && reuse && self.anchor.as_ref().is_some_and(|a|
+            a.segments.len()+self.index.pending_seals.len()+1<capacity::segments(&self.config))
+            && self.index.stable_tail_path(&root).await.is_some()
+            && self.index.local_statistics().await?.first().is_some_and(|s|!s.keys.is_empty()) {
+            let target=root.join(format!("segment-{:032x}",rand::random::<u128>()));
+            let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
+            successor.read().await.record_lexical[0].admit_writer().await?;
+            let budget=view::RotationBudget{max_segments:64,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?};
+            // Fence before the first potentially destructive seal. A successful
+            // private handoff restores availability even if certificate preparation
+            // later rejects; an uncertain/failed handoff requires authoritative reopen.
+            let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
+            self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+            self.healthy=false;
+            self.index.seal_into_successor(&root,successor,&mut self.ordinals,&mut self.locations,budget,closure_limit(self.config.max_journal_bytes)?).await?;
+            self.healthy=true;
+            self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
+        }
         // The partition guard pins the live State. Ordinary compaction borrows
         // it instead of cloning all retained history. Explicit replacement
         // candidates (snapshot/takeover) still own their independent State.
@@ -506,7 +527,7 @@ impl Inner {
         let mut index=view::RetrievalView::single(loaded.index);
         let mut ordinals=loaded.ordinals;
         let mut locations=loaded.locations;
-        let cache=root.join(format!("cache-{:032x}",rand::random::<u128>()));
+        let cache=root.join(format!("segment-{:032x}",rand::random::<u128>()));
         let (tail,_)=build_at(&root,&cache,&self.config,&State::default()).await.map_err(|e|storage(format!("stage=anchor_empty_tail {e}")))?;
         index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{max_segments:64,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?}).await?;
         #[cfg(test)]
@@ -827,6 +848,77 @@ mod tests {
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
+    async fn direct_tail_seal_reuses_bytes_and_rejection_keeps_successor_writable() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");
+        let settings=config();let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+        p.write(write("a","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let tail=p.inner.lock().await.index.stable_tail_path(&path).await.unwrap();
+        let b=write("b","b","alpha beta",ExpectedVersion::Absent);
+        let receipt=p.write(b.clone()).await.unwrap();
+        let held=p.inner.lock().await.index.test_index().read().await.record_lexical[0].snapshot().await.unwrap();
+        std::fs::write(path.join(".test-anchor-reject-loaded"),b"reject").unwrap();
+        assert!(p.compact_journal().await.is_err());
+        let sealed={let inner=p.inner.lock().await;assert!(inner.healthy);
+            assert_eq!(inner.index.pending_seals.len(),1);
+            let package=inner.index.pending_seals[0].clone();assert_eq!(package.path(&path).unwrap(),tail);
+            package.verify(&path,closure_limit(settings.max_journal_bytes).unwrap()).unwrap();package};
+        assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),2);
+        p.write(write("c","c","alpha gamma",ExpectedVersion::Absent)).await.unwrap();
+        assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),3);
+        assert_eq!(held.cut.sequence,receipt.seq,"held snapshot keeps the pre-successor cut");
+        std::fs::remove_file(path.join(".test-anchor-reject-loaded")).unwrap();
+        p.compact_journal().await.unwrap();
+        {let inner=p.inner.lock().await;let chosen=inner.anchor.as_ref().unwrap().segments.iter().find(|s|s.id==sealed.id).expect("same native package identity, not rebuilt from bodies");assert_eq!(chosen.files.as_slice(),sealed.files.as_slice());assert!(inner.index.pending_seals.is_empty());}
+        drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(b).await.unwrap(),receipt);
+        assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),3);
+    }
+    #[tokio::test]
+    async fn pending_seals_keep_retired_versions_out_of_vector_and_field_queries() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let settings=config();
+        let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+        p.write(write("a1","a","alpha old",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
+        p.write(write("b1","b","alpha old",ExpectedVersion::Absent)).await.unwrap();
+        std::fs::write(path.join(".test-anchor-reject-prepared"),b"reject").unwrap();
+        assert!(p.compact_journal().await.is_err());
+        let updated=write("b2","b","alpha current",ExpectedVersion::Match(1));let receipt=p.write(updated.clone()).await.unwrap();
+        let mut deleted=write("a-delete","a","",ExpectedVersion::Match(1));deleted.document=None;p.write(deleted).await.unwrap();
+        assert!(p.compact_journal().await.is_err());
+        assert_eq!(p.inner.lock().await.index.pending_seals.len(),2);
+        let check=async |p:&RecordPartition| {
+            for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {
+                let result=query(p,mode).await;assert_eq!(result.hits.len(),1);
+                assert_eq!(result.hits[0].record.record_id,"b");assert_eq!(result.hits[0].record.version,2);
+            }
+            let field_query=|text:&str| RecordQuery {temporal:None,text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:QueryType::Union,offset:0,length:10,result_type:ResultType::Topk,fields:vec!["body".into()],filters:vec![],sort:vec![]};
+            let result=p.query(field_query("current")).await.unwrap();
+            assert_eq!(result.hits.len(),1);assert_eq!(result.hits[0].record.version,2);
+            assert!(p.query(field_query("old")).await.unwrap().hits.is_empty());
+        };
+        check(&p).await;
+        std::fs::remove_file(path.join(".test-anchor-reject-prepared")).unwrap();p.compact_journal().await.unwrap();
+        check(&p).await;drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        check(&p).await;assert_eq!(p.write(updated).await.unwrap(),receipt);
+    }
+    #[tokio::test]
+    async fn direct_tail_seal_unknown_certificate_fences_and_reopens() {
+        for gate in [".test-checkpoint-before-certificate",".test-checkpoint-after-certificate"] {
+            let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let settings=config();
+            let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+            p.write(write("a","a","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
+            let request=write("b","b","alpha beta",ExpectedVersion::Absent);let receipt=p.write(request.clone()).await.unwrap();
+            std::fs::write(path.join(gate),b"fail").unwrap();
+            assert!(matches!(p.compact_journal().await,Err(RecordError::OutcomeUnknown(_))));
+            assert!(!p.inner.lock().await.healthy);
+            assert!(matches!(p.write(request.clone()).await,Err(RecordError::RecoveryRequired)));
+            std::fs::remove_file(path.join(gate)).unwrap();drop(p);
+            let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+            assert_eq!(p.write(request).await.unwrap(),receipt);
+            assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),2);
+        }
+    }
+    #[tokio::test]
     async fn rejected_prepared_anchor_reclaims_only_unselected_objects() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         p.write(write("one","a","alpha",ExpectedVersion::Absent)).await.unwrap();
@@ -844,7 +936,10 @@ mod tests {
             let names=std::fs::read_dir(&root).unwrap().map(|e|e.unwrap().file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
             assert!(!names.iter().any(|n|n.starts_with(".anchor-prepare-")||n.starts_with(".segment-prepare-")||n.starts_with(".payload-prepare-")));
             assert_eq!(names.iter().filter(|n|n.starts_with("anchor-")).count(),1);
-            assert_eq!(names.iter().filter(|n|n.starts_with("segment-")).count(),selected.segments.len());
+            let mut owned=selected.segments.iter().chain(inner.index.pending_seals.iter())
+                .map(|s|format!("segment-{}",s.id)).collect::<std::collections::BTreeSet<_>>();
+            if let Some(tail)=inner.index.stable_tail_path(&root).await {owned.insert(tail.file_name().unwrap().to_str().unwrap().to_owned());}
+            assert_eq!(names.iter().filter(|n|n.starts_with("segment-")).cloned().collect::<std::collections::BTreeSet<_>>(),owned,"keep precisely selected or live-owned packages, never unowned candidates");
             assert_eq!(names.iter().filter(|n|n.starts_with("payload-")).count(),inner.payloads.objects.len());
         }
         std::fs::remove_file(root.join(gate)).unwrap();
