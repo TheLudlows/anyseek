@@ -23,5 +23,7 @@
   "record::anchor::tests::direct_tail_seal_reuses_bytes_and_rejection_keeps_successor_writable",
   "record::anchor::tests::direct_tail_seal_unknown_certificate_fences_and_reopens",
   "record::anchor::tests::pending_seals_keep_retired_versions_out_of_vector_and_field_queries",
-  "record::lexical::runtime::tests::successor_writer_rejection_leaves_predecessor_writable"
+  "record::lexical::runtime::tests::successor_writer_rejection_leaves_predecessor_writable",
+  "record::state_proof::tests::shared_proof_matches_wire_and_detects_independent_same_size_changes",
+  "record::state_proof::tests::proof_preserves_order_same_sequence_metadata_and_lookup"
 ]

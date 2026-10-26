@@ -360,14 +360,14 @@ impl Reference {
         if manifest.state.deltas.is_empty() {
             manifest.state.base.verify_encoded(&path,&pool,config.max_journal_bytes,encoded)?;
         } else if let Some(captured)=self.captured.get() {
-            manifest.state.validate_result(captured,config.max_journal_bytes)?;
+            state_proof::verify(config,state,captured)?;
         } else {
             let previous=self.previous_capture.as_ref().and_then(|c|c.get())
                 .ok_or_else(||storage("missing certified predecessor owner"))?;
             let mut replayed=previous.try_clone()?;
             let last=manifest.state.deltas.last().unwrap();
             anchor_image::Image::apply_block(&last.delta,&path,&pool,config.max_journal_bytes,config,&mut replayed)?;
-            manifest.state.validate_result(&replayed,config.max_journal_bytes)?;
+            state_proof::verify(config,state,&replayed)?;
         }
         manifest.state.validate_encoded(encoded,config.max_journal_bytes)?;
         let view=self.load_components(root,&path,config.max_journal_bytes,config,state,manifest.payloads).await?;

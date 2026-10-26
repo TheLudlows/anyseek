@@ -25,6 +25,10 @@ impl<T: Serialize> Serialize for Shared<T> {
         self.0.value.serialize(serializer)
     }
 }
+pub(super) trait ProofValue: Serialize {}
+impl ProofValue for Record {}
+impl ProofValue for Applied {}
+
 impl<T: Serialize> Shared<T> {
     fn take_parts(parts: &mut [MemoryLease], bytes: u64) -> Result<MemoryLease, RecordError> {
         crate::storage::build_budget::validate_single(bytes).map_err(storage)?;
@@ -41,6 +45,10 @@ impl<T: Serialize> Shared<T> {
     fn copy_from_parts(value:&T,parts:&mut [MemoryLease])->Result<Self,RecordError> where T:Clone {
         let bytes=(checkpoint_codec::json_length(value)? as u64).checked_mul(32).ok_or_else(||storage("shared value overflow"))?;
         let lease=Self::take_parts(parts,bytes)?;Ok(Self(Arc::new(ValueOwner{value:value.clone(),_lease:lease})))
+    }
+    pub(super) fn same_value(&self, other: &Self) -> Result<bool,RecordError> where T:ProofValue {
+        Ok(Arc::ptr_eq(&self.0,&other.0) || (self.charged_bytes()==other.charged_bytes()
+            && checkpoint_codec::json_digest(&**self)?==checkpoint_codec::json_digest(&**other)?))
     }
     pub(super) fn charged_bytes(&self) -> u64 { self.0._lease.bytes() }
     pub(super) fn from_admitted(value: T, admitted: &mut MemoryLease) -> Result<Self, RecordError> {
@@ -122,7 +130,7 @@ impl State {
         self.try_clone_with_growth(0)
     }
     pub(super) fn try_clone_with_growth(&self, growth: usize) -> Result<Self, RecordError> {
-        let bytes = self.container_bytes(checkpoint_codec::json_length(self)?)?
+        let bytes = self.container_bytes(state_proof::length(self)?)?
             .checked_add(growth)
             .and_then(|n| (n as u64).checked_mul(32))
             .ok_or_else(|| storage("state clone estimate overflow"))?;

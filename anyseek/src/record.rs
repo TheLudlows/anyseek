@@ -44,6 +44,7 @@ mod segment_state;
 mod state_chunks;
 mod state_memory;
 mod state_values;
+mod state_proof;
 mod capacity;
 mod snapshot;
 mod checkpoint_codec;

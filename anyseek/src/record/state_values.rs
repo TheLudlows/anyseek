@@ -33,6 +33,15 @@ impl<T> Default for Values<T> {
     }
 }
 impl<T: Serialize> Values<T> {
+    pub(super) fn wire_length(&self)->Result<usize,RecordError> {
+        self.bytes.checked_add(2).and_then(|n|n.checked_add(self.len().saturating_sub(1)))
+            .ok_or_else(||storage("history wire length overflow"))
+    }
+    pub(super) fn same_values(&self,other:&Self)->Result<bool,RecordError> where T:state_memory::ProofValue {
+        if self.len()!=other.len() || self.bytes!=other.bytes {return Ok(false);}
+        for (a,b) in self.values.iter().zip(&other.values) {if !a.same_value(b)? {return Ok(false);}}
+        Ok(true)
+    }
     pub(super) fn len(&self) -> usize {
         self.values.len()
     }
@@ -133,6 +142,22 @@ pub(super) struct Records {
     bytes: usize,
 }
 impl Records {
+    pub(super) fn wire_length(&self)->Result<usize,RecordError> {
+        let mut bytes=self.bytes.checked_add(2).and_then(|n|n.checked_add(self.len().saturating_sub(1)))
+            .ok_or_else(||storage("record wire length overflow"))?;
+        for key in self.values.keys() {
+            bytes=bytes.checked_add(checkpoint_codec::json_length(key)?).and_then(|n|n.checked_add(1))
+                .ok_or_else(||storage("record key length overflow"))?;
+        }
+        Ok(bytes)
+    }
+    pub(super) fn same_values(&self,other:&Self)->Result<bool,RecordError> {
+        if self.len()!=other.len() || self.bytes!=other.bytes {return Ok(false);}
+        for ((ka,a),(kb,b)) in self.values.iter().zip(&other.values) {
+            if ka!=kb || !a.same_value(b)? {return Ok(false);}
+        }
+        Ok(true)
+    }
     pub(super) fn len(&self) -> usize {
         self.values.len()
     }

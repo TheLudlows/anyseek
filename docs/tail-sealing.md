@@ -79,3 +79,25 @@ an equivalent incremental proof. It must not silently defer the check merely to
 remove traversal cost. Payload whole-object SHA is checked on open, while each
 payload range SHA is also checked when read. Same-sequence maintenance events and
 remote journal bounds remain in scope.
+
+## Equivalent replay proof foundation
+
+The local proof compares every State metadata field, complete ordered record keys,
+source revisions and operation history. Production Record/Applied values are
+immutable: identical shared owners prove identical content; different owners
+retain canonical per-value SHA comparison. Lookup associations and lookup byte
+accounting are independently checked. Metadata projection exhaustively destructures
+State and is tested against the original serde representation. This does not derive
+a full SHA by combining hashes, nor cache a proof by business sequence.
+
+Incremental anchor verification still replays its delta and authenticates all disk
+closures. It now proves replay-State equality without reserializing every unchanged
+body; the existing live State full SHA, byte bound and validators still authenticate
+the persistent manifest. Clone admission uses an exact length assembled from
+immutable value lengths plus escaped keys, delimiters and all metadata, preserving
+32× accounting. Format and corruption detection timing are unchanged.
+
+Two small proof fixtures plus the 25 existing exact core cases passed locally
+(27/27). They include independent decode, same-length content replacement, ordered
+history, nonempty revision values, low epoch, same-sequence metadata, lookup and
+full JSON length/projection oracles. Full checkpoint separation remains pending.
