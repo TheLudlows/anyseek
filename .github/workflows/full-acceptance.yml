@@ -3,6 +3,9 @@ name: Full acceptance (manual)
 on:
   workflow_dispatch:
 
+env:
+  ANYSEEK_TEST_SCALE: full
+
 permissions:
   contents: read
 
@@ -138,9 +141,11 @@ jobs:
       - name: Native vector and metadata component format
         run: |
           cargo test -p anyseek --lib component::
-      - name: Native retained public Record integration contracts
+      - name: Native fault-feature library and service contracts
         if: runner.os != 'Windows'
-        run: cargo test -p anyseek --tests --features server,fault-injection
+        # Linux integration targets run once in build-and-smoke (server, no faults).
+        # Keep fault-feature lib/bin coverage here; Windows still runs integration.
+        run: cargo test -p anyseek --lib --bins --features server,fault-injection
       - name: Verify Windows lexical partition
         if: runner.os == 'Windows'
         run: python scripts/check_lexical_partition.py

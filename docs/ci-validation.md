@@ -18,8 +18,8 @@ master), and choose **Run workflow**. Its file is
 `.github/workflows/full-acceptance.yml`. Verify the run's exact head SHA before
 using its result for review. A later commit requires a new explicit run.
 
-The complete original nine-job matrix is retained, with unchanged tests, fixture
-sizes, assertions and timeouts: workspace all-targets; Linux/Windows persistence,
+The nine-job matrix is retained, with full-size fixtures, assertions and
+timeouts. The target ownership table below records deliberate deduplication: workspace all-targets; Linux/Windows persistence,
 standalone features and doctests; the four independent full-size Windows lexical
 cases; browser/HTTP process recovery; and S3 fixture semantics and contracts.
 These long checks no longer run automatically on every PR or documentation push.
@@ -51,8 +51,8 @@ also rerun under different feature combinations. Four Windows lexical jobs are
 already excluded from the Windows remainder, so they are **not** four duplicate
 runs there, but each runner separately builds dependencies. Most cost in this
 run was execution, not compilation. The split reduces default work rather than
-claiming target caching alone solves the delay. Full-matrix deduplication is
-intentionally deferred to avoid accidentally losing feature-specific coverage.
+claiming target caching alone solves the delay. The subsequent P0 target ownership split below removes the duplicate Linux
+integration run while explicitly retaining feature-specific library/bin coverage.
 
 That run ended with **2 successful / 7 failed jobs**: Windows owner-lock errors
 and a browser restore request exceeding its unchanged 30-second limit. The WAL
@@ -61,3 +61,30 @@ encoding change, but needs Windows execution. The browser limit failure remains
 unresolved; moving the matrix to manual execution is not a fix or a green result.
 Original capacity writes remain stopped at 63,325 confirmed records; CI changes
 do not authorize resuming that experiment or claim 100k success.
+
+## Test-target ownership (P0)
+
+The full manual workflow sets `ANYSEEK_TEST_SCALE=full`; an absent variable means
+`small`, and any other value fails. Full-size inputs and repeated-query counts
+remain available without a second copy of the test logic.
+
+| Coverage | Owner in full acceptance |
+| --- | --- |
+| Linux all 33 integration targets, default zh/vb + server (no fault hooks) | build-and-smoke: workspace all-targets |
+| Linux library + service unit tests with server/fault-injection | Persistence: explicit --lib --bins |
+| Windows integration with server/fault-injection | Persistence remainder + four lexical matrix jobs |
+| Both OS no-default library and default/no-default doctests | Persistence, unchanged |
+| Browser normal service / HTTP fault service / S3 fixtures | Original jobs, unchanged |
+
+The removed Linux integration rerun had no integration test conditional on
+`fault-injection`; server and zh feature-specific tests still run in the Linux
+all-targets owner. Fault-feature library and binary tests remain on Linux, and
+fault-feature integrations remain on Windows. This is a deliberate coverage
+assignment, not a claim that different feature combinations are identical.
+
+The two dense deletion count tests now share one 2,048-record setup and one
+delete/checkpoint sequence, while retaining all four AND/OR Count/TopkCount
+assertions. The 760-record disjoint-union fixture keeps two repeated reads in
+small mode and twenty in full mode; its obsolete 65,536-boundary comments are
+corrected. Actual 65,536, 10,001, >16MiB, 64→65 and 128→129 boundary tests are
+unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests.

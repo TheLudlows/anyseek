@@ -1,3 +1,4 @@
+#[path = "common/scale.rs"] mod scale;
 // Exercises disjoint candidate groups; retired 65536-posting layout is not recreated.
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
@@ -71,19 +72,19 @@ async fn union_count_cross_block_consistent() {
     let index = fresh("tests/index_union_cross_block/").await;
     let mut docs = vec![];
 
-    // block 0: alpha (docid 0..600)
+    // alpha group (600 records)
     for i in 0..600 {
         docs.push(doc(&format!("alpha item{i}")));
     }
-    // padding crossing the 65536 block boundary
+    // padding separates candidate groups; this is not a physical block boundary
     for i in 0..60 {
         docs.push(doc(&format!("padding filler{i}")));
     }
-    // block 1: beta (docid 66000..71000)
+    // beta group (50 records)
     for i in 0..50 {
         docs.push(doc(&format!("beta item{i}")));
     }
-    // block 1: gamma (docid 71000..76000)
+    // gamma group (50 records)
     for i in 0..50 {
         docs.push(doc(&format!("gamma item{i}")));
     }
@@ -91,9 +92,9 @@ async fn union_count_cross_block_consistent() {
     records::insert(&index, docs).await.unwrap();
     index.compact_journal().await.unwrap();
 
-    // 60k alpha + 5k beta + 5k gamma = 700; padding must not match.
+    // 600 alpha + 50 beta + 50 gamma = 700; padding must not match.
     let mut prev_count = 0;
-    for rep in 0..20 {
+    for rep in 0..scale::choose(2, 20) {
         let count = search(&index, "alpha beta gamma", ResultType::Count).await;
         let topk_count = search(&index, "alpha beta gamma", ResultType::TopkCount).await;
 
