@@ -476,7 +476,11 @@ impl Catalog {
         current_master: String,
     ) -> Result<ServiceSnapshot, CatalogError> {
         crate::resources::spawn(async move {
+                #[cfg(feature = "fault-injection")]
+                let restore_started = std::time::Instant::now();
                 let input = validate(&archive).await?;
+                #[cfg(feature = "fault-injection")]
+                log::info!("service restore input validated elapsed_ms={} collections={} backups={}", restore_started.elapsed().as_millis(), input.record_seqs.len(), input.collection_backups.len());
                 if !archive.join(COMPLETE).exists() {
                     return Err(storage("archive is not certified complete"));
                 }
@@ -553,22 +557,23 @@ impl Catalog {
                     if input.absent_collections.contains(&entry.collection_id) {
                         continue;
                     }
-                    let p = RecordPartition::open(
-                        &archive.join(&entry.directory),
-                        entry.config.max_journal_bytes,
-                    )
-                    .await
-                    .map_err(storage)?;
-                    p.checkpoint(&stage.join(&entry.directory))
-                        .await
-                        .map_err(storage)?;
+                    RecordPartition::checkpoint_authenticated_archive(
+                        &archive.join(&entry.directory), &stage.join(&entry.directory), entry.config.max_journal_bytes,
+                        input.objects.get(&entry.directory).ok_or_else(||storage("missing authenticated child"))?,
+                        *input.record_seqs.get(&entry.collection_id).ok_or_else(||storage("missing authenticated cut"))?,
+                    ).await.map_err(storage)?;
+                    #[cfg(feature = "fault-injection")]
+                    log::info!("service restore child complete elapsed_ms={} child={}", restore_started.elapsed().as_millis(), entry.directory);
                 }
                 for id in input.collection_backups.keys() {
                     let name = format!("backup-{id}");
-                    let p = RecordPartition::open(&archive.join(&name), 256 * 1024 * 1024)
-                        .await
-                        .map_err(storage)?;
-                    p.checkpoint(&stage.join(name)).await.map_err(storage)?;
+                    RecordPartition::checkpoint_authenticated_archive(
+                        &archive.join(&name), &stage.join(&name), 256*1024*1024,
+                        input.objects.get(&name).ok_or_else(||storage("missing authenticated backup"))?,
+                        input.collection_backups[id],
+                    ).await.map_err(storage)?;
+                    #[cfg(feature = "fault-injection")]
+                    log::info!("service restore backup complete elapsed_ms={} child={}", restore_started.elapsed().as_millis(), name);
                 }
                 let mut objects = BTreeMap::new();
                 for name in input

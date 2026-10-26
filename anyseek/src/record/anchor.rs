@@ -309,6 +309,17 @@ impl Reference {
         let pool=PoolReader::open(root,manifest.payloads.clone(),limits).map_err(storage)?;
         Ok((path,manifest,pool,manifest_lease))
     }
+    // Only for a service archive whose exact journal/closure was already fully
+    // opened and validated. Recheck every bound byte without reopening readers.
+    pub(super) fn archive_state(&self,root:&Path,authority_budget:u64)->Result<(RecordConfig,State,crate::storage::build_budget::MemoryLease),RecordError>{
+        let (_path,manifest,pool,_lease)=self.authenticated_manifest(root,authority_budget)?;
+        for segment in &self.segments {segment.verify(root,closure_limit(authority_budget)?)?;}
+        let config_owner=crate::storage::build_budget::reserve_memory(metadata_charge(checkpoint_codec::json_length(manifest.state.config())?)?).map_err(storage)?;
+        let config=manifest.state.config().clone();
+        let state=manifest.state.read(&pool,authority_budget,|id|directory(root,id))?;
+        if state.seq!=manifest.seq{return Err(storage("archive anchor sequence mismatch"));}
+        Ok((config,state,config_owner))
+    }
     pub(super) async fn load(&self,root:&Path,authority_budget:u64)->Result<Loaded,RecordError>{
         let (path,manifest,pool,_manifest_lease)=self.authenticated_manifest(root,authority_budget)?;
         let config=manifest.state.config().clone();
@@ -376,6 +387,21 @@ impl Reference {
     }
 }
 
+// A private independent root has no live query view to rotate. Build and fully
+// authenticate its selected package, then return the bounded authority frame.
+// The caller owns its journal and performs the unchanged checkpoint/root publish.
+pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&State)
+    ->Result<(Vec<u8>,crate::storage::build_budget::MemoryLease,crate::storage::build_budget::DiskScope),RecordError>{
+    let disk=crate::storage::build_budget::DiskScope::begin(root,closure_limit(config.max_journal_bytes)?).map_err(storage)?;
+    let reference=Reference::prepare(root,config,state,Closure::default(),None,None,true,None).await?;
+    let verified=reference.load_verified(root,config,state).await?;
+    drop(verified); // Close all mappings before later Windows root publication.
+    let estimate=checkpoint_codec::json_length(&reference)?.checked_add(64).ok_or_else(||storage("snapshot authority overflow"))?;
+    let lease=crate::storage::build_budget::reserve_memory(metadata_charge(estimate)?).map_err(storage)?;
+    let payload=encode_entry(&Entry::Anchor(reference))?;
+    PartitionJournal::validate_initial(payload.len(),config.max_journal_bytes).map_err(storage)?;
+    Ok((payload,lease,disk))
+}
 
 impl Inner {
     /// Replay certified tail decisions into the selected index view. Never

@@ -1,5 +1,5 @@
 """Real Chromium checks for the retained UI, through the default service API."""
-import json
+import json, time, os, pathlib
 from playwright.sync_api import sync_playwright, expect
 
 def exercise(base,master,call):
@@ -264,11 +264,35 @@ def exercise(base,master,call):
         assert call('POST','/api/v1/index/browser-takeover/doc',final_write)['receipt']==final_receipt
         call('GET',f'/api/v1/index/{collection}',status=403)
         print('PASS Chromium: takeover final writes, original closed, exact retry after lost response and reload')
-        page.locator('#serviceRecovery summary').click()
-        page.locator('#backupService').click()
-        expect(page.locator('#serviceRecoveryStatus')).to_contain_text('Service backup created',timeout=30000)
-        page.locator('#restoreService').click()
-        expect(page.locator('#serviceRecoveryStatus')).to_contain_text('Restored to new stopped root',timeout=30000)
+        # Observe without intercepting/retrying requests or widening deadlines.
+        # Keep operation identities, never authorization headers or document bodies.
+        recovery_events=[];recovery_started=time.monotonic()
+        def recovery_event(kind, **fields):
+            if len(recovery_events)<64:
+                recovery_events.append({'seconds':round(time.monotonic()-recovery_started,3),'kind':kind,**fields})
+        def recovery_request(request):
+            if '/api/v1/service-' in request.url:
+                body=request.post_data_json or {}
+                recovery_event('request',path=request.url.split('/api/v1/',1)[-1],operation_id=body.get('operation_id'))
+        def recovery_response(response):
+            if '/api/v1/service-' in response.url:
+                recovery_event('response',path=response.url.split('/api/v1/',1)[-1],status=response.status)
+        def recovery_failed(request):
+            if '/api/v1/service-' in request.url:
+                recovery_event('requestfailed',failure=request.failure)
+        page.on('request',recovery_request);page.on('response',recovery_response);page.on('requestfailed',recovery_failed)
+        page.on('console',lambda message:recovery_event('console',level=message.type,text=message.text[:512]))
+        try:
+            page.locator('#serviceRecovery summary').click()
+            page.locator('#backupService').click()
+            expect(page.locator('#serviceRecoveryStatus')).to_contain_text('Service backup created',timeout=30000)
+            page.locator('#restoreService').click()
+            expect(page.locator('#serviceRecoveryStatus')).to_contain_text('Restored to new stopped root',timeout=30000)
+        finally:
+            recovery_event('final',state=page.evaluate("({status:document.querySelector('#serviceRecoveryStatus').textContent,disabled:document.querySelector('#restoreService').disabled,pending:JSON.parse(sessionStorage.getItem('seekpower.pendingServicerestore')||'null')})"),page_errors=errors)
+            print('SERVICE RECOVERY TRACE: '+json.dumps(recovery_events),flush=True)
+            if os.environ.get('ANYSEEK_RECOVERY_TRACE_FILE'):
+                pathlib.Path(os.environ['ANYSEEK_RECOVERY_TRACE_FILE']).write_text(json.dumps(recovery_events))
         assert not errors,errors
         context.close();browser.close()
     print('PASS Chromium: existing setup/editor/search, stable collection IDs, response-loss retry after reload without duplicate write, lexical/vector/hybrid creation')

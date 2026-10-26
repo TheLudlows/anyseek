@@ -44,7 +44,185 @@ Final server-feature Record regression passed 187 tests, 0 failed, 5 ignored
 avoid perturbing unrelated parallel CI tests; their original assertions remain.
 All six ownership tests passed with the default parallel runner after isolation,
 and all eight build-budget tests passed. Documentation and diff checks passed.
-New release capacity measurement is pending. **100k has not passed.** Earlier results below identify their own code.
+The release measurement reached 68,825 confirmed records before a 30s HTTP batch
+deadline; all 25 originally uncertain operations were subsequently confirmed.
+Checkpoint, reopen, receipt checks and same-population Meili comparison completed.
+See [the measured result](../benchmarks/capacity/RESULTS-68825.md).
+**100k has not passed.** Earlier results below identify their own code.
+
+## Incremental State blocks: local implementation, acceptance in progress
+
+The local working tree now connects ordinary live anchor preparation to a
+bounded committed-WAL visitor and a flat base/delta Image. New anchors use
+explicit format5, rejecting format4; there is no migration reader. Existing
+phase30 databases and evidence remain untouched and require their preserved
+format4 binary. The next capacity run must use a new isolated data root.
+No new production commit has been pushed. The local implementation now compiles;
+targeted validation below does not constitute 100k acceptance.
+
+Cold recovery authenticates all referenced files, hydrates the base and replays
+every delta privately. Hot validation replays the newest delta from a retained,
+previously verified immutable State cut, then verifies the complete result digest.
+Shared record/history values retain leases; snapshot metadata and replay copies
+are separately admitted. This introduces real additional residency and still
+hashes old files/full State. Its latency and peak memory are unmeasured.
+
+Independent static review found a payload-closure bug: the existing pool builder
+prunes untouched objects, which is invalid for incremental base/delta references.
+The incremental branch now explicitly retains the prior closure under existing
+object/byte bounds; complete rewrites retain the original pruning behavior. New
+different-body, GC/reopen and pool regressions passed in the targeted run below.
+
+Independent review closed the metadata-residency findings: file inventories and
+Reference shells have separate shared owners; enumeration/decoding/clone builders
+admit before allocation. Manifest raw buffers and parsed descriptors have separate
+leases across use, including the PoolReader closure copy. Descriptor builders own
+their configuration/chunk metadata, and reading borrows the base descriptor.
+Captured State leases do not stand in for these allocations. One conservative
+overlap remains: new delta build metadata and the manifest growth allowance coexist
+temporarily. Record it in measured peak costs; it is not evidence of another copy.
+
+Executed locally: five committed-stream tests; thirteen anchor tests including
+metadata pre-admission/final-owner release, same-seq maintenance, independent backup,
+failed-publication GC, cold reopen, corruption and finite-chain compaction; and the
+prior-Payload closure retention/pruning test. The earlier metadata probe used an
+illegal sub-64MiB governor setting; it now uses legal 64/128MiB settings and fills
+logical shared allowance. The same-seq test now advances its explicit test clock
+before backup. The old single-anchor GC assertion now compares the exact selected
+base/delta directory set, retaining the orphan-reclamation assertion. These test
+repairs do not relax production limits or time/GC semantics. The first complete Record run reported 189 passed, 1 failed and 5 ignored.
+The failure retained the original 8000-byte journal budget: an incremental
+manifest exceeded that bound instead of falling back to a complete base. A bounded,
+constant-memory JSON counter now detects this before manifest publication. The
+fallback retains the full Payload closure and releases the old Image before its
+lease and before entering the full-base attempt; a failed full-base attempt still
+leaves the old authority/owner intact. Exact-byte, one-byte-over, long escaped
+reference and serialization-error probes passed, as did the original 8000-byte
+regression. Independent review found no remaining confirmed blocker in this fix.
+Final Record/storage regressions (phase39) passed after the lifetime fixes
+and allocation-free, exact FileRef inventory comparisons: Record 192 passed,
+0 failed, 5 ignored; storage 59 passed, 0 failed, 6 ignored; both exit 0.
+These are local working-tree results, not remote HEAD or 100k acceptance.
+HTTP/fault, S3 and browser validation (phase40) is now running serially.
+
+The older remote f817578 CI completed with eight successful jobs and one failed
+build-and-smoke job; both platform Persistence jobs passed. Its only failed step
+was the browser service-restore 30s assertion. Phase40 independently passed the
+HTTP base/indexer/authorization fault paths and S3 fixture, but reproduced this
+browser failure. Network evidence proves the restore POST was sent and received
+503 at30.004s; no page error occurred and the original operation was retained.
+
+Phase42 preserved the failed assertion and observed its original owned task.
+The UI fixture contains27 collections and32 retained backups. Complete input
+validation took8.244s; serial child materialization finished at32.528s. The task
+continued after the HTTP deadline, completed about2.6s later, and two retries of
+the original identity after observing the completion marker returned identical
+receipts/target. This is a real service deadline failure, not a lost page event.
+The initial phase41 instrumentation was filtered by inherited RUST_LOG=error;
+phase42 explicitly enabled only the diagnostic module. Diagnostic roots/logs are
+retained under `/tmp/anyseek-capacity-phase42*`.
+
+A fixed-pair parallel materialization candidate passed static review and local
+catalog/drain and snapshot tests, but phase44 real HTTP correctly rejected the
+second concurrent I/O under unchanged Recovery per-subject IO=1. Its browser run
+failed before the UI phase (503 storage_error), peak server RSS148615168bytes.
+The candidate was withdrawn, not published; its diff and failed logs remain in
+`/tmp/anyseek-capacity-phase44/`. The diagnostic-only logging remains. Neither
+raising the I/O budget nor bypassing the service subject is an accepted fix.
+The replacement remains serial: after the original complete input validation,
+a crate-internal export binds the exact length-framed journal SHA and sequence,
+requires an independent single-anchor archive, rechecks every anchor/delta,
+Payload and segment file, then hydrates State without loading another source
+retrieval view/cache. Its journal owner remains held across the original target
+snapshot builder. Feed scope/quarantine conversion is unchanged; configuration
+copies have an explicit lease. This saves repeated source indexing, not validation.
+Independent review found no confirmed safety/ownership blocker. Two new archive
+binding/corruption/private-failure regressions and21 catalog tests passed (one
+ignored worker). Phase46 failed the unchanged30s browser deadline again: input
+validation8.296s, last observed backup29.977s cumulative, server RSS peak219508736
+bytes. Removing second source readers alone did not resolve the deadline.
+
+The final recovery change removes two unused empty query runtimes from private
+snapshot construction (initial empty owner and mutable tail after verification).
+Initial journal/root ownership, full Reference preparation/load_verified,
+journal checkpoint, handle release, sync and atomic root publication/fault points
+remain. DiskScope is returned with the bounded authority payload and held through
+checkpoint, journal close and private sync. Independent review confirmed this
+closes the identified scope-lifetime regression.
+
+Validation: phase47 snapshot6/6 and catalog21/0/1ignored; after the DiskScope
+lifetime correction, phase48 archive binding/corruption2/2 and private snapshot
+failure/unknown1/1. Phase49 fault-feature build, original browser, HTTP base faults
+and S3 fixture all exited0. Browser restore returned200 in29.664s under the
+unchanged30s assertion; pending intent cleared and no page errors occurred. Margin
+is only0.336s: this is one local pass, not a cross-platform stability guarantee.
+Observed server RSS peaks: browser211648512bytes, HTTP230055936bytes,
+S3146849792bytes. These are measurements, not the configured memory ceiling.
+Final-head CI and same-budget release100k remain pending. Earlier192/59 Record/
+storage sweeps validate the incremental implementation before the separate recovery
+optimization; they are not relabeled as final whole-suite runs.
+
+Incremental format5 changes are isolated in local commit05ce52c. Recovery changes
+are a separate commit. The old format4 release binary is preserved at
+`/tmp/anyseek-capacity-331a511-release-server` with SHA256
+`b34a3b901d96645fef37ed89d25c8e465a5e8451a2bc4c4a2402efb4da41c26b`;
+old experiment roots must not be opened with format5. The new run uses a fresh root.
+
+Independent review confirms the smallest safe scope is ordinary live anchor
+rotation. A versioned descriptor will select a complete immutable base plus a
+flat, bounded, ordered set of Entry delta blocks. It must not recursively retain
+parent-anchor chains or reference a WAL generation that journal GC can reclaim.
+Every delta binds its base identity, event order, counts, encoded/expanded sizes
+and digest. Recovery authenticates the complete closure and reconstructs State
+privately before existing final validation/publication. Sequence numbers alone
+are insufficient: FeedTrim can change State without increasing seq.
+
+Use the committed journal cut as the source, without reopening the live owner or
+moving its append cursor. Read one admitted frame at a time. Delta payload bodies
+must pass the existing enumerated `segment_state::visit` positions into Payload;
+do not duplicate raw documents/vectors in persistent delta metadata. Any retained
+delta buffer needs its own 32x lease; no uncharged capture after durable append.
+
+Replacement candidates, takeover/seal, independent snapshots, private generation
+cleanup and Payload-object compaction retain full-base preparation. These paths
+can change State outside ordinary appended operations or must retire private
+payloads. Background full builds remain full-base producers. Chain length and
+bytes need explicit finite admission and full-base fallback, without raising the
+128-update native rotation threshold or the 30s request deadline.
+
+The selected closure must enumerate base and delta files for certificate hashing,
+remote export/restore, backup, pins and GC. Reclaiming every anchor except the
+latest id is invalid once another selected block depends on an older directory.
+Failure before the certificate must leave the old authority and receipts intact;
+orphan preparations are reclaimed only when unpinned. A local independent backup
+continues to materialize a complete private root with no source-directory dependency.
+
+Authentication is a design constraint, not an optimization switch: cached file
+names or an old successful read cannot replace required disk integrity checks.
+Initially retain full closure hashes and final canonical State digest; remove
+repeated JSON materialization and full metadata writes first. Measure remaining
+hash/validation cost explicitly before proposing any different authentication
+scheme. No authentication weakening is authorized by this plan.
+
+Required regressions: mixed ordinary writes/vector patches/source revisions/TTL
+and same-seq maintenance; missing, duplicated, reordered or corrupted blocks;
+finite-chain compaction; pre-certificate failure and uncertain publication;
+old-reader/build pins across GC; private cleanup fallback; source-independent
+backup and remote restore with an empty cache. Compare recovered complete State,
+operation history and receipts, not just counts. Record bytes read/written per
+rotation, then repeat the fixed release 3/6 GiB experiment.
+
+Initial space preflight on 2026-10-26: `/tmp` had 3,129,044,992 bytes free, only
+981,561,344 bytes above the unchanged 2 GiB safety floor. The existing guarded
+release build requires more than 3 GiB free before starting; that condition is
+then false. The prior 68,825-document Meili root alone occupies about
+911 MiB and must be retained, so a fresh same-scale comparison plus build scratch
+could not safely fit in the remaining headroom. After explicit staged-cleanup
+authorization, the inactive `/tmp/anyseek-capacity-target/debug` alone was removed:
+1,781,993,472 bytes released, 4,911,038,464 bytes free afterwards. Source, release
+binaries, databases and evidence remained intact. Rebuild/targeted validation then
+ran with the same 2 GiB stop floor. Each subsequent cleanup must again wait for
+all users of that exact debug directory to finish; no other removal is authorized.
 
 ## Validation follow-up (2026-10-26)
 

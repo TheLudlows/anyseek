@@ -2,6 +2,45 @@
 //! publication makes it discoverable at the requested destination.
 use super::*;
 
+// The caller first fully validates an immutable service archive. The expected
+// digest is its manifest's length-framed journal hash, not a trusted boolean.
+// Hold the journal owner across export; verify all referenced files again, but
+// do not build a second source retrieval view or a source recovery cache.
+impl RecordPartition {
+    pub(crate) async fn checkpoint_authenticated_archive(
+        source:&Path, destination:&Path, budget:u64, expected_hash:&str, expected_seq:u64,
+    )->Result<(),RecordError>{
+        let source=source.to_owned();let destination=destination.to_owned();let expected_hash=expected_hash.to_owned();
+        crate::resources::spawn(async move {
+            use sha2::{Digest,Sha256};
+            let frames=crate::storage::build_budget::reserve_memory(budget).map_err(storage)?;
+            let (mut journal,entries)=PartitionJournal::open(&source,budget).map_err(storage)?;
+            let mut hash=Sha256::new();
+            for entry in &entries {hash.update((entry.len() as u64).to_le_bytes());hash.update(entry);}
+            let actual:String=hash.finalize().iter().map(|byte|format!("{byte:02x}")).collect();
+            if actual!=expected_hash || entries.len()!=1 {return Err(storage("certified archive journal changed"));}
+            let first=entries.into_iter().next().unwrap();
+            let decode=crate::storage::build_budget::reserve_memory((first.len() as u64).checked_mul(32).ok_or_else(||storage("archive decode overflow"))?).map_err(storage)?;
+            let reference=match serde_json::from_slice(&first).map_err(storage)? {
+                Entry::Anchor(reference)=>reference,
+                _=>return Err(storage("certified archive must select an independent anchor")),
+            };
+            drop(first);drop(decode);drop(frames);
+            let (config,mut state,_config_owner)=reference.archive_state(&source,budget)?;
+            drop(reference);
+            journal.restrict_budget(config.max_journal_bytes).map_err(storage)?;
+            restore_operation_lookup(&mut state)?;
+            validate_restored_state(&config,&state)?;
+            if !state.independent_snapshot || state.seq!=expected_seq {return Err(storage("certified archive cut mismatch"));}
+            state.feed.scope=format!("{:032x}",rand::random::<u128>());
+            state.evidence_quarantined|=state.records.values().any(temporal::protected);
+            create(&destination,config,state).await?;
+            drop(journal);
+            Ok(())
+        }).await.map_err(storage)?
+    }
+}
+
 pub(super) async fn create(
     destination: &Path,
     config: RecordConfig,
@@ -24,15 +63,19 @@ pub(super) async fn create(
     let prepared = parent.join(format!(".record-snapshot-{:032x}", rand::random::<u128>()));
     let mut owned = false;
     let built: Result<(), RecordError> = async {
-        let target = RecordPartition::create(&prepared, config).await?;
-        owned = true;
-        {
-            let mut inner = target.inner.lock().await;
-            inner.publish_anchor_state(state, false).await?;
-        }
-        // Windows directory publication requires all writer/mmap/owner handles
-        // to be released first. No async worker is detached from this owner.
-        drop(target);
+        validate_config(&config)?;
+        let empty=State {feed:change_feed::FeedState {scope:format!("{:032x}",rand::random::<u128>()),floor:0},lineage:format!("{:032x}",rand::random::<u128>()),..State::default()};
+        let initial_size=checkpoint_codec::length(&config,&empty)?;
+        let initial_memory=crate::storage::build_budget::reserve_memory((initial_size as u64).checked_mul(32).ok_or_else(||storage("snapshot initial overflow"))?).map_err(storage)?;
+        let initial=encode_entry(&Entry::Checkpoint {config:config.clone(),state:empty})?;
+        let mut journal=PartitionJournal::create(&prepared,config.max_journal_bytes,&initial).map_err(creation_error)?;
+        owned=true;
+        drop(initial);drop(initial_memory);
+        // Neither the initial empty runtime nor a mutable tail can be queried
+        // in this private snapshot; do not construct and immediately discard them.
+        let (payload,_payload_owner,_disk_owner)=anchor::snapshot_payload(&prepared,&config,&state).await?;
+        journal.checkpoint(&payload).map_err(creation_error)?;
+        drop(journal);
         clean_recovery_caches(&prepared)?;
         segment::sync_tree(&prepared)?;
         #[cfg(test)]
@@ -114,6 +157,53 @@ mod tests {
     use super::super::tests::{config, write};
     use super::*;
 
+    fn archive_hash(path:&Path,budget:u64)->String {
+        use sha2::{Digest,Sha256};
+        let (owner,entries)=PartitionJournal::open(path,budget).unwrap();
+        let mut hash=Sha256::new();for entry in entries {hash.update((entry.len() as u64).to_le_bytes());hash.update(entry);}
+        drop(owner);hash.finalize().iter().map(|byte|format!("{byte:02x}")).collect()
+    }
+    #[tokio::test]
+    async fn authenticated_archive_export_binds_cut_history_and_private_failure() {
+        let root=tempfile::tempdir().unwrap();let settings=config();let budget=settings.max_journal_bytes;
+        let source=RecordPartition::create(&root.path().join("source"),settings).await.unwrap();
+        let request=write("original","id","alpha",ExpectedVersion::Absent);
+        let receipt=source.write(request.clone()).await.unwrap();
+        let archive=root.path().join("archive");source.checkpoint(&archive).await.unwrap();
+        let validated=RecordPartition::open(&archive,budget).await.unwrap();
+        let old_scope=validated.inner.lock().await.state.feed.scope.clone();drop(validated);
+        let hash=archive_hash(&archive,budget);let target=root.path().join("target");
+        assert!(RecordPartition::checkpoint_authenticated_archive(&archive,&target,budget,&"0".repeat(64),1).await.is_err());
+        assert!(!target.exists());
+        assert!(RecordPartition::checkpoint_authenticated_archive(&archive,&target,budget,&hash,2).await.is_err());
+        assert!(!target.exists());
+        std::fs::write(target.with_extension("reject-before-publish"),b"fail").unwrap();
+        assert!(RecordPartition::checkpoint_authenticated_archive(&archive,&target,budget,&hash,1).await.is_err());
+        assert!(!target.exists());assert_eq!(archive_hash(&archive,budget),hash);
+        std::fs::remove_file(target.with_extension("reject-before-publish")).unwrap();
+        let caches=||std::fs::read_dir(&archive).unwrap().filter_map(Result::ok).filter(|e|e.file_name().to_string_lossy().starts_with("cache-")).count();
+        let before=caches();
+        RecordPartition::checkpoint_authenticated_archive(&archive,&target,budget,&hash,1).await.unwrap();
+        assert_eq!(caches(),before,"export must not construct a second source retrieval cache");
+        let recovered=RecordPartition::open(&target,budget).await.unwrap();
+        assert_eq!(recovered.write(request).await.unwrap(),receipt);
+        assert_ne!(recovered.inner.lock().await.state.feed.scope,old_scope);
+        assert_eq!(archive_hash(&archive,budget),hash);
+    }
+    #[tokio::test]
+    async fn authenticated_archive_export_rechecks_native_closure() {
+        let root=tempfile::tempdir().unwrap();let settings=config();let budget=settings.max_journal_bytes;
+        let source=RecordPartition::create(&root.path().join("source"),settings).await.unwrap();
+        source.write(write("op","id","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let archive=root.path().join("archive");source.checkpoint(&archive).await.unwrap();
+        let validated=RecordPartition::open(&archive,budget).await.unwrap();drop(validated);
+        let hash=archive_hash(&archive,budget);
+        let segment=std::fs::read_dir(&archive).unwrap().filter_map(Result::ok).find(|e|e.file_name().to_string_lossy().starts_with("segment-")).unwrap().path();
+        std::fs::write(segment.join("schema.json"),b"corrupt").unwrap();
+        let target=root.path().join("target");
+        assert!(RecordPartition::checkpoint_authenticated_archive(&archive,&target,budget,&hash,1).await.is_err());
+        assert!(!target.exists());
+    }
     #[tokio::test]
     async fn independent_snapshot_exceeds_one_frame_preserving_all_receipts() {
         let root = tempfile::tempdir().unwrap();
