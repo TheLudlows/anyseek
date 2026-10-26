@@ -84,3 +84,20 @@ empty-tail allocation; both call the same admitted base. The checkpoint's
 2766117632-byte clone and128-decision recovery tail provide concrete next-stage
 investigation targets. Retain complete history, certificate validation and owned
 leases when removing copies; do not simply suppress charges.
+
+## Phase 23: bounded verification and ordinary-tail replay (local, under validation)
+
+The phase22 failure is a shared build-memory rejection, not an observed RSS/OOM failure. Its 8MiB request equals the four-field base reservation; both frozen-component loading and empty-tail construction use that reservation. New `stage=frozen_component_base package=...`, `stage=anchor_empty_tail`, and `stage=index_snapshot_clone` context distinguishes those callers on a new failure. The historical log alone does not uniquely identify the caller.
+
+Changes being validated:
+
+- Ordinary durable tail replay reuses the exact per-record/checkpoint size arithmetic used by write preparation, instead of cloning and serializing the complete retained State for each decision. Projection is admitted before copying incoming/prior bodies; receipt, generation, sequence and publication rules stay in force. Generation/expiration replay still retains its separately charged copy path.
+- Background index planning removes the old additional 4x snapshot reservation, because the independently cloned State already owns a 32x residency lease and that plan no longer creates a full JSON buffer. Raw/decoded tail leases and the independent Scope quota remain.
+- Foreground anchor publication verifies every persisted metadata/Payload frame against deterministic pieces of the guard-pinned State. The existing file closure, config/sequence, State digest, complete identity checks, frame bounds, ordered piece digest and visible native identity checks remain mandatory before certification. Each decoded/expected piece has a lease; no second complete decoded State is allocated. Explicit replacement candidates remain owned until the certificate succeeds. Normal recovery still decodes an owned State.
+- Verification also checks the *complete decoded recovery footprint* against the single-reservation limit without pretending to allocate it. This prevents publication from bypassing a real recovery capacity limit. No memory coefficient, default budget, hard capacity profile or timeout changed.
+
+The new `benchmarks/capacity/recovery_probe.py` copies the preserved phase22 database, performs no writes, and checks all 26 sampled receipts plus five exact query result/count comparisons before one explicit checkpoint and reopen. Unknown outcomes retain their process. The previous 60-second recovery failure remains historical evidence; a successful new probe is a repair result, not a rewrite of that failure.
+
+Completed before the streaming-publication change: Record tests 157 passed / 0 failed / 5 ignored (`/tmp/anyseek-capacity-phase23-final-record.log`). Existing chunk tests after initial streaming change: 5 passed / 0 failed. Final combined regression, release probe and fresh capacity staircase are pending; these are not 100k acceptance results.
+
+Final combined default Record suite for the phase23 code: **158 passed, 0 failed, 5 ignored**, exit0,354.68s (`/tmp/anyseek-capacity-phase23-stream-record.log`). This includes the new ordered-frame/duplicate-identity/expected-state/recovery-budget checks and the existing loaded-candidate rejection, certificate rollback, GC/pins, independent snapshots and durable-tail recovery tests. Python observer unit tests:2 passed; recovery probe syntax checked. Full all-targets/no-default/platform matrix remains pending. Release recovery/capacity measurements are not yet included in this result.

@@ -48,6 +48,12 @@ pub(crate) struct MemoryLease(u64, Arc<AtomicU64>);
 pub(crate) fn reserve_memory(bytes: u64) -> io::Result<MemoryLease> {
     reserve_from(&MEMORY, bytes)
 }
+// Validate recoverability without charging for a second allocation that is not made.
+pub(crate) fn validate_single(bytes:u64)->io::Result<()> {
+    let limits=memory_limits()?;
+    if bytes > limits.single { return Err(io::Error::other(format!("record build resource budget exceeded: class=single requested={bytes} limit={}",limits.single))); }
+    Ok(())
+}
 fn reserve_from(counter: &Arc<AtomicU64>, bytes: u64) -> io::Result<MemoryLease> {
     let limits = memory_limits()?;
     if bytes > limits.single {

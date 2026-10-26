@@ -18,6 +18,7 @@ pub(super) struct Loaded {
     pub config:RecordConfig,pub state:State,pub index:IndexArc,
     pub ordinals:Vec<String>,pub locations:BTreeMap<String,usize>,pub payloads:Closure,
 }
+struct VerifiedView { index:IndexArc, ordinals:Vec<String>, locations:BTreeMap<String,usize>, payloads:Closure }
 fn valid(id:&str)->bool{id.len()==32&&id.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))}
 fn directory(root:&Path,id:&str)->Result<PathBuf,RecordError>{
     if !valid(id){return Err(storage("invalid anchor identity"));}
@@ -69,7 +70,7 @@ impl Frozen {
         if serde_json::to_vec(&schema).map_err(storage)?!=serde_json::to_vec(&retrieval_schema(config)).map_err(storage)?{return Err(storage("frozen segment schema mismatch"));}
         let mapped=self.files.iter().try_fold(0u64,|n,f|n.checked_add(f.bytes)).ok_or_else(||storage("loaded segment estimate overflow"))?;
         let estimate=mapped.checked_mul(2).ok_or_else(||storage("loaded segment estimate overflow"))?;
-        let mut reservation=build_budget::admit(config,std::iter::empty())?;
+        let mut reservation=build_budget::admit(config,std::iter::empty()).map_err(|e|storage(format!("stage=frozen_component_base package={} {e}",self.id)))?;
         reservation.grow(estimate).map_err(storage)?;
         let index=crate::index::open_index(&path).await.map_err(storage)?;
         index.write().await.record_lexical.push(lexical::runtime::Runtime::open(&path.join("native"),config)?);
@@ -139,7 +140,7 @@ impl Reference {
         crate::storage::partition::publish_bundle(&prepared,&directory(root,&id)?).map_err(storage)?;
         Ok(Self{id,files:members,segments})
     }
-    pub(super) async fn load(&self,root:&Path,authority_budget:u64)->Result<Loaded,RecordError>{
+    fn authenticated_manifest(&self,root:&Path,authority_budget:u64)->Result<(PathBuf,Manifest,PoolReader),RecordError>{
         if self.segments.is_empty()||self.segments.len()>capacity::MAX_SEGMENTS{return Err(storage("invalid selected segment count"));}
         let mut ids=std::collections::BTreeSet::new();
         if self.segments.iter().any(|s|!ids.insert(&s.id)){return Err(storage("duplicate selected segment"));}
@@ -151,8 +152,24 @@ impl Reference {
         if self.segments.len()>capacity::segments(manifest.state.config()){return Err(storage("configured selected segment count exceeded"));}
         let mut limits=budget(manifest.state.config())?;limits.bytes=limits.bytes.min(authority_budget);
         let pool=PoolReader::open(root,manifest.payloads.clone(),limits).map_err(storage)?;
+        Ok((path,manifest,pool))
+    }
+    pub(super) async fn load(&self,root:&Path,authority_budget:u64)->Result<Loaded,RecordError>{
+        let (path,manifest,pool)=self.authenticated_manifest(root,authority_budget)?;
         let state_chunks::Decoded{config,state}=manifest.state.read(&path,&pool,authority_budget)?;
         if state.seq!=manifest.seq{return Err(storage("anchor sequence mismatch"));}
+        let view=self.load_components(root,&path,authority_budget,&config,&state,manifest.payloads).await?;
+        Ok(Loaded{config,state,index:view.index,ordinals:view.ordinals,locations:view.locations,payloads:view.payloads})
+    }
+    async fn load_verified(&self,root:&Path,config:&RecordConfig,state:&State)->Result<VerifiedView,RecordError>{
+        let (path,manifest,pool)=self.authenticated_manifest(root,config.max_journal_bytes)?;
+        if manifest.seq!=state.seq || serde_json::to_vec(manifest.state.config()).map_err(storage)?!=serde_json::to_vec(config).map_err(storage)? {
+            return Err(storage("expected anchor identity mismatch"));
+        }
+        manifest.state.verify_expected(&path,&pool,config.max_journal_bytes,state)?;
+        self.load_components(root,&path,config.max_journal_bytes,config,state,manifest.payloads).await
+    }
+    async fn load_components(&self,root:&Path,path:&Path,authority_budget:u64,config:&RecordConfig,state:&State,payloads:Closure)->Result<VerifiedView,RecordError>{
         let statistics:Statistics=serde_json::from_slice(&read_bounded(&path.join("statistics"),closure_limit(authority_budget)?)?).map_err(storage)?;
         if statistics.segments.len()!=self.segments.len(){return Err(storage("segment statistics closure mismatch"));}
         let visible=evidence::visibility(&state.records)?;
@@ -176,7 +193,7 @@ impl Reference {
         let mut shards=Vec::new();for component in &indexes{shards.push(component.read().await.shard_vec[0].clone());}
         let mut native=Vec::new();for component in &indexes{native.extend(component.read().await.record_lexical.iter().cloned());}
         {let mut root=index.write().await;root.shard_vec=shards;root.shard_number=n;root.record_lexical=native;}
-        Ok(Loaded{config,state,index,ordinals,locations,payloads:manifest.payloads})
+        Ok(VerifiedView{index,ordinals,locations,payloads})
     }
 }
 
@@ -187,10 +204,24 @@ impl Inner {
         match entry {
             Entry::Applied(applied)=>{
                 let growth=checkpoint_codec::json_length(&applied)?.checked_mul(3).ok_or_else(||storage("tail state growth overflow"))?;
-                let mut next=self.state.try_clone_with_growth(growth)?;apply(&mut next,&applied)?;
-                let bytes=checkpoint_codec::length(&self.config, &next)?;
-                self.state.admit_bytes(bytes)?;
-                self.publish(&applied,bytes).await?;
+                if applied.request.generation.is_some() {
+                    let mut next=self.state.try_clone_with_growth(growth)?;apply(&mut next,&applied)?;
+                    let bytes=checkpoint_codec::length(&self.config, &next)?;
+                    self.state.admit_bytes(bytes)?;
+                    self.publish(&applied,bytes).await?;
+                } else {
+                    // Reserve transient copies of both the incoming decision and
+                    // prior body (source revisions/vector patches) before projection.
+                    let prior=self.state.records.get(&applied.request.record_id).map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
+                    let growth=prior.checked_mul(3).and_then(|n|n.checked_add(growth)).ok_or_else(||storage("replay state growth overflow"))?;
+                    let admitted=self.snapshot_bytes.checked_add(growth).ok_or_else(||storage("replay state growth overflow"))?;
+                    self.state.admit_bytes(admitted)?;
+                    let bytes=mutation::replay_checkpoint_size(&self.state,self.snapshot_bytes,&applied)?;
+                    self.state.admit_bytes(bytes)?;
+                    self.publish(&applied,bytes).await?;
+                }
+                self.graph_cache=graph::Cache::rebuild(&self.state)?;
+                return Ok(());
             },
             Entry::Expired(event)=>{
                 let mut next=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;temporal::apply(&mut next,&event)?;
@@ -249,15 +280,14 @@ impl Inner {
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));
         }
-        // Authenticated recovery below provides the replacement State. An
-        // explicit input candidate no longer needs to coexist with that copy.
-        drop(candidate);
-        let loaded=reference.load(&root,self.config.max_journal_bytes).await?;
+        // Verify every persisted frame against the pinned State without a
+        // second full-history allocation; no authority changes before this succeeds.
+        let loaded=reference.load_verified(&root,&self.config,next).await?;
         let mut index=view::RetrievalView::single(loaded.index);
         let mut ordinals=loaded.ordinals;
         let mut locations=loaded.locations;
         let cache=root.join(format!("cache-{:032x}",rand::random::<u128>()));
-        let (tail,_)=build_at(&root,&cache,&self.config,&State::default()).await?;
+        let (tail,_)=build_at(&root,&cache,&self.config,&State::default()).await.map_err(|e|storage(format!("stage=anchor_empty_tail {e}")))?;
         index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{max_segments:64,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?}).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-loaded").exists() {
@@ -284,7 +314,7 @@ impl Inner {
         // All fallible preparation precedes the authority certificate. The
         // partition guard excludes readers until the complete view is installed.
         self.index=index;self.ordinals=ordinals;self.locations=locations;
-        self.anchor=Some(reference);self.payloads=loaded.payloads;self.state=loaded.state;self.snapshot_bytes=snapshot_bytes;
+        self.anchor=Some(reference);self.payloads=loaded.payloads;if let Some(candidate)=candidate {self.state=candidate;}self.snapshot_bytes=snapshot_bytes;
         self.healthy=true;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
         #[cfg(test)]
         if root.join(".test-anchor-post-certificate-gc").exists() {

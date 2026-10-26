@@ -169,50 +169,8 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         observed_epoch: epoch,
         observed_time_ms: evaluation_time_ms,
     };
-    let next_record = Record {
-        record_id: applied.request.record_id.clone(),
-        routing_key: applied.request.routing_key.clone(),
-        version: receipt.version,
-        document: next_document,
-        temporal, ingested_at_ms: if applied.request.document.is_none() { previous.map_or(evaluation_time_ms, |r| r.ingested_at_ms) } else { evaluation_time_ms }, expired_at_ms: None,
-        retired_generation: previous.is_some_and(|r| r.retired_generation),
-        generation_member: previous.and_then(|r| r.generation_member.clone()),
-        system: applied
-            .request
-            .system
-            .clone()
-            .or_else(|| previous.and_then(|p| p.system.clone())),
-    };
-    // Exact serialized checkpoint accounting, touching only this
-    // operation and record. No complete state clone/serialization.
-    let old_record = state.records.get(&next_record.record_id);
-    let old_size = old_record
-        .map(serde_json::to_vec)
-        .transpose()
-        .map_err(storage)?
-        .map_or(0, |bytes| bytes.len());
-    let map_overhead = if old_record.is_none() {
-        serde_json::to_vec(&next_record.record_id)
-            .map_err(storage)?
-            .len()
-            + 1
-            + usize::from(!state.records.is_empty())
-    } else {
-        0
-    };
-    let history_bytes = if adding_history {
-        old_size + usize::from(!state.source_revisions.is_empty())
-    } else { 0 };
-    let snapshot_bytes = current_snapshot_bytes + history_bytes - old_size
-        + serde_json::to_vec(&next_record).map_err(storage)?.len()
-        + map_overhead
-        + serde_json::to_vec(&applied).map_err(storage)?.len()
-        + usize::from(!state.operations.is_empty())
-        + receipt.seq.to_string().len()
-        - state.seq.to_string().len()
-        + epoch.to_string().len()
-        - state.epoch_watermark.to_string().len()
-        + evaluation_time_ms.max(state.time_watermark_ms).to_string().len() - state.time_watermark_ms.to_string().len();
+    let next_record = projected_record(state, &applied, next_document, temporal);
+    let snapshot_bytes = snapshot_after(state, current_snapshot_bytes, &applied, &next_record)?;
     if checkpoint_codec::validate_size(snapshot_bytes, reserve_bytes, config.max_journal_bytes)
         .is_err()
     {
@@ -228,4 +186,81 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         reserve_bytes,
         feed_reserve,
     })
+}
+
+// Shared arithmetic only: recovery never re-runs admission, wall-clock policy,
+// expected-version planning or operation-ID generation for a durable decision.
+fn projected_record(state: &State, applied: &Applied, document: Option<Document>, temporal: TemporalMetadata) -> Record {
+    let previous = state.records.get(&applied.request.record_id);
+    Record {
+        record_id: applied.request.record_id.clone(),
+        routing_key: applied.request.routing_key.clone(),
+        version: applied.receipt.version,
+        document,
+        temporal, ingested_at_ms: if applied.request.document.is_none() { previous.map_or(applied.observed_time_ms, |r| r.ingested_at_ms) } else { applied.observed_time_ms }, expired_at_ms: None,
+        retired_generation: previous.is_some_and(|r| r.retired_generation),
+        generation_member: previous.and_then(|r| r.generation_member.clone()),
+        system: applied
+            .request
+            .system
+            .clone()
+            .or_else(|| previous.and_then(|p| p.system.clone())),
+    }
+}
+
+fn snapshot_after(state: &State, before: usize, applied: &Applied, next: &Record) -> Result<usize, RecordError> {
+    let old = state.records.get(&next.record_id);
+    let old_bytes = old.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
+    let history = if applied.request.vector_patch.is_none() && old.is_some_and(evidence::retained_revision) {
+        old_bytes.checked_add(usize::from(!state.source_revisions.is_empty())).ok_or_else(||storage("snapshot history size overflow"))?
+    } else { 0 };
+    let key = if old.is_none() { checkpoint_codec::json_length(&next.record_id)?.checked_add(1+usize::from(!state.records.is_empty())).ok_or_else(||storage("snapshot key size overflow"))? } else { 0 };
+    let delta = |new:u64, old:u64| new.to_string().len().checked_sub(old.to_string().len()).ok_or_else(||storage("snapshot scalar regressed"));
+    let additions = [history,key,checkpoint_codec::json_length(next)?,checkpoint_codec::json_length(applied)?,usize::from(!state.operations.is_empty()),
+        delta(applied.receipt.seq,state.seq)?,delta(applied.observed_epoch.max(state.epoch_watermark),state.epoch_watermark)?,delta(applied.observed_time_ms.max(state.time_watermark_ms),state.time_watermark_ms)?];
+    additions.into_iter().try_fold(before.checked_sub(old_bytes).ok_or_else(||storage("snapshot size underflow"))?, |sum,n|sum.checked_add(n).ok_or_else(||storage("snapshot size overflow")))
+}
+
+pub(super) fn replay_checkpoint_size(state: &State, before: usize, applied: &Applied) -> Result<usize, RecordError> {
+    if applied.request.generation.is_some() || state.seq.checked_add(1)!=Some(applied.receipt.seq) || applied.receipt.record_id!=applied.request.record_id || applied.observed_time_ms<state.time_watermark_ms {
+        return Err(storage("invalid ordinary replay size transition"));
+    }
+    let previous=state.records.get(&applied.request.record_id);
+    let document=enrichment::document(previous,&applied.request)?;
+    let temporal=temporal::retained(previous,&applied.request,applied.observed_time_ms)?;
+    snapshot_after(state,before,applied,&projected_record(state,applied,document,temporal))
+}
+
+
+#[cfg(test)]
+mod replay_size_tests {
+    use super::*;
+    #[test]
+    fn durable_size_matches_full_wire_with_history_tombstones_and_digit_boundaries() {
+        let mut config=super::super::tests::config();config.max_records=512;config.max_operations=512;config.max_record_bytes=1024*1024;config.max_journal_bytes=16*1024*1024;
+        let mut state=State::default();let mut before=checkpoint_codec::length(&config,&state).unwrap();
+        for i in 0..104 {
+            let id=if i<100{format!("id-\"{i}繁")}else{"id-\"0繁".into()};
+            let mut request=super::super::tests::write(&format!("op-{i}"),&id,"alpha",ExpectedVersion::Any);
+            request.operation_id.epoch=9+i/10;
+            request.system=Some(EvidenceMetadata{kind:EvidenceKind::Source,relation:None,evidence_refs:vec![]});
+            if i==0 {request.document.as_mut().unwrap().insert("opaque".into(),serde_json::json!("large\n繁體".repeat(8192)));}
+            if i==102 {request.document=None;}
+            let previous=state.records.get(&id);
+            let applied=Applied{request_digest:None,graph_invalidation:false,receipt:WriteReceipt{staged_only:false,seq:state.seq+1,version:previous.map_or(1,|r|r.version+1),record_id:id},request,observed_epoch:9+i/10,observed_time_ms:99+i};
+            let bytes=replay_checkpoint_size(&state,before,&applied).unwrap();
+            apply(&mut state,&applied).unwrap();
+            let wire=encode_entry(&Entry::Checkpoint{config:config.clone(),state:state.clone()}).unwrap();
+            assert_eq!(bytes,wire.len(),"operation {i}");before=bytes;
+        }
+        assert_eq!(state.operations.len(),104);assert_eq!(state.source_revisions.len(),3);
+        assert_eq!(state.source_revisions[0].document.as_ref().unwrap()["opaque"].as_str().unwrap().len(),"large\n繁體".repeat(8192).len());
+    }
+    #[test]
+    fn malformed_replay_sequence_and_size_fail_closed() {
+        let mut state=State::default();let request=super::super::tests::write("op","id","alpha",ExpectedVersion::Any);
+        let mut applied=Applied{request_digest:None,graph_invalidation:false,receipt:WriteReceipt{staged_only:false,seq:1,version:1,record_id:"id".into()},request,observed_epoch:1,observed_time_ms:1};
+        apply(&mut state,&applied).unwrap();assert!(replay_checkpoint_size(&state,0,&applied).is_err());
+        applied.receipt.seq=2;applied.receipt.version=2;applied.request.operation_id=OperationId::new("next".into());assert!(replay_checkpoint_size(&state,0,&applied).is_err());
+    }
 }

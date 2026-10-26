@@ -27,7 +27,7 @@ struct Plan {
     root: PathBuf, config:RecordConfig, snapshot:State,
     prior:crate::storage::payload_pool::Closure, base:Vec<u8>,
     disk:crate::storage::build_budget::DiskScope,
-    memory:(crate::storage::build_budget::MemoryLease,crate::storage::build_budget::MemoryLease),
+    memory:crate::storage::build_budget::MemoryLease,
     resources: crate::resources::Lease,
     #[cfg(feature="s3-object-store")]
     remote:Option<remote_checkpoint::RemoteBuild>,
@@ -98,8 +98,11 @@ impl RecordPartition {
                 let resources = crate::resources::io_scope(crate::resources::Lane::Background)
                     .bytes(estimate.checked_add(tail_bytes).ok_or(RecordError::Busy)?)
                     .map_err(|_|RecordError::Busy)?;
-                let memory = (crate::storage::build_budget::reserve_memory(estimate).map_err(storage)?,
-                    crate::storage::build_budget::reserve_memory(tail_bytes).map_err(storage)?);
+                // State::try_clone owns the complete snapshot's 32x residency.
+                // The former generic 4x snapshot reservation covered that same
+                // allocation before State had ownership; no whole JSON buffer is
+                // built here. Keep the distinct raw-tail lease and Scope quota.
+                let memory = crate::storage::build_budget::reserve_memory(tail_bytes).map_err(storage)?;
                 let root = inner.journal.root().to_path_buf();
                 let limit = inner.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
                     .ok_or_else(||storage("index disk budget overflow"))?;
@@ -113,7 +116,7 @@ impl RecordPartition {
                 if remote.as_ref().is_some_and(|r|r.build.cut_seq!=inner.state.seq) {
                     return Err(RecordError::RecoveryRequired);
                 }
-                let result = Plan {root,config:inner.config.clone(),snapshot:inner.state.try_clone()?,prior:inner.payloads.clone(),
+                let result = Plan {root,config:inner.config.clone(),snapshot:inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?,prior:inner.payloads.clone(),
                     base:serde_json::to_vec(&inner.anchor).map_err(storage)?,disk,memory,resources,
                     #[cfg(feature="s3-object-store")] remote};
                 inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false});
