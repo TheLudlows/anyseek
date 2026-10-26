@@ -5,13 +5,19 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run complete manual acceptance on the selected ref
+        type: boolean
+        default: false
+
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr-feedback-${{ github.ref }}
-  cancel-in-progress: true
+  group: pr-feedback-${{ github.ref }}-${{ inputs.full && 'full' || 'quick' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   static:
@@ -140,3 +146,7 @@ jobs:
           else
             target/debug/anyseek_server generate_openapi=true
           fi
+
+  full-acceptance:
+    if: github.event_name == 'workflow_dispatch' && inputs.full
+    uses: ./.github/workflows/full-acceptance.yml

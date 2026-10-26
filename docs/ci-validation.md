@@ -13,9 +13,17 @@ retains the existing native-CPU configuration and source-only cache policy.
 
 ## Run full acceptance
 
-In GitHub Actions select **Full acceptance (manual)**, select the PR branch (or
-master), and choose **Run workflow**. Its file is
-`.github/workflows/full-acceptance.yml`. Verify the run's exact head SHA before
+Before merge, use the existing `ci.yml` workflow entry (the default-branch UI
+may still label it **Retained workspace**) with the PR ref and `full=true`:
+
+```sh
+gh workflow run ci.yml --ref fix/record-capacity-100k -F full=true
+```
+
+This explicit command runs the reusable `.github/workflows/full-acceptance.yml`
+from the selected commit, as well as quick checks. Do not run it merely to
+inspect configuration. After the new file exists on master, **Full acceptance
+(manual)** also has its own Run workflow entry. Verify the run's exact head SHA before
 using its result for review. A later commit requires a new explicit run.
 
 The nine-job matrix is retained, with full-size fixtures, assertions and

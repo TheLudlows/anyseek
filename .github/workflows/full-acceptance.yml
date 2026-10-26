@@ -2,6 +2,7 @@ name: Full acceptance (manual)
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 env:
   ANYSEEK_TEST_SCALE: full
