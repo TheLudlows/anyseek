@@ -34,5 +34,8 @@
   "record::remote_checkpoint::tests::remote_seal_keeps_checkpoint_and_cold_replays_pending_packages",
   "record::remote_checkpoint::tests::remote_tail_budget_checkpoints_before_commit_and_rejects_oversize",
   "record::remote_checkpoint::tests::remote_seal_resource_refusal_keeps_writer_and_corruption_fences",
-  "record::remote_checkpoint::tests::remote_tail_count_pressure_preserves_all_receipts"
+  "record::remote_checkpoint::tests::remote_tail_count_pressure_preserves_all_receipts",
+  "record::remote_checkpoint::tests::joint_closure_admits_once_and_rejects_duplicate_or_over_budget",
+  "record::remote_checkpoint::tests::index_only_cas_faults_preserve_selected_cut_and_receipts",
+  "record::remote_checkpoint::tests::index_only_backup_gc_and_same_sequence_checkpoint_preserve_history"
 ]

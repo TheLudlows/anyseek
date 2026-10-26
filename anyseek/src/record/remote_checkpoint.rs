@@ -15,13 +15,26 @@ struct Checkpoint {
     anchor: anchor::Reference,
     files: Vec<File>,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct File {
     path: String,
     length: u64,
     sha256: [u8; 32],
     chunks: Vec<ObjectRef>,
+}
+/// Index-only roots bind a complete recovery checkpoint and a certified WAL cut.
+/// They never contain a second copy of State or truncate the recovery log.
+#[derive(Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexOnly {
+    format:u32,partition_id:String,checkpoint:ObjectRef,checkpoint_seq:u64,
+    indexed_seq:u64,wal_tip:Option<ObjectRef>,state_sha:[u8;32],config_sha:[u8;32],
+    packages:Vec<segment::Package>,statistics:Vec<crate::active::ActiveStatistics>,files:Vec<File>,
+}
+struct Selected {
+    checkpoint:Checkpoint,checkpoint_ref:ObjectRef,index:Option<IndexOnly>,
+    _metadata:Vec<crate::storage::build_budget::MemoryLease>,
 }
 fn safe_path(root: &Path, relative: &str) -> Result<PathBuf, RecordError> {
     let parts = relative.split('/').collect::<Vec<_>>();
@@ -65,7 +78,113 @@ fn admit_checkpoint_chunks(files: &[(String, u64, [u8; 32])], object_bytes: usiz
     Ok(())
 }
 
+// One admission rule for publication, fresh verification and cold recovery.
+// The lease owns the temporary inventory; descriptors retain their own leases.
+fn combined_files<'a>(root:&Path,base:&'a [File],index:&'a [File],budget:u64,chunk_limit:usize)
+    ->Result<(BTreeMap<&'a str,&'a File>,crate::storage::build_budget::MemoryLease),RecordError> {
+    if base.len()>10000 || index.len()>10000 {return Err(storage("file count exceeded"));}
+    let count=base.len().checked_add(index.len()).ok_or_else(||storage("file count overflow"))?;
+    let lease=crate::storage::build_budget::reserve_memory((count as u64).checked_mul(256).ok_or_else(||storage("inventory budget overflow"))?).map_err(|_|RecordError::Busy)?;
+    let mut files=BTreeMap::new();
+    for list in [base,index] {
+        let mut seen=std::collections::BTreeSet::new();
+        for file in list {
+            if !seen.insert(file.path.as_str()) {return Err(storage("duplicate descriptor file"));}
+            if let Some(old)=files.insert(file.path.as_str(),file) {
+                if old!=file {return Err(storage("conflicting index/checkpoint file"));}
+            }
+        }
+    }
+    let max=budget.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("closure byte budget overflow"))?;
+    let mut bytes=0u64;let mut chunks=0usize;
+    for file in files.values() {
+        safe_path(root,&file.path)?;
+        bytes=bytes.checked_add(file.length).ok_or_else(||storage("closure bytes overflow"))?;
+        chunks=chunks.checked_add(file.chunks.len()).ok_or_else(||storage("closure chunks overflow"))?;
+        if bytes>max || chunks>chunk_limit {return Err(RecordError::Rejected("combined checkpoint/index closure exceeds recovery budget".into()));}
+        if file.chunks.iter().try_fold(0u64,|n,r|n.checked_add(r.length))!=Some(file.length) {
+            return Err(storage("checkpoint file/chunk length mismatch"));
+        }
+    }
+    Ok((files,lease))
+}
+
 impl RemotePersistence {
+    async fn selected(&self,head:&crate::storage::sqlite_authority::PartitionHead,fresh:bool)->Result<Selected,RecordError> {
+        #[derive(Deserialize)] struct Header{format:u32}
+        let store=if fresh {self.store.uncached()}else{self.store.clone()};
+        let selected=head.manifest.as_ref().ok_or(RecordError::RecoveryRequired)?;
+        let bytes=store.get_verified(selected).await.map_err(remote_read_error)?;
+        let charge=|n:usize|->Result<crate::storage::build_budget::MemoryLease,RecordError>{
+            crate::storage::build_budget::reserve_memory((n as u64).checked_mul(32).ok_or_else(||storage("descriptor metadata overflow"))?).map_err(|_|RecordError::Busy)
+        };
+        let mut leases=vec![charge(bytes.len())?];
+        let format:Header=serde_json::from_slice(&bytes).map_err(storage)?;
+        let (checkpoint,checkpoint_ref,index)=match format.format {
+            1=>(serde_json::from_slice::<Checkpoint>(&bytes).map_err(storage)?,selected.clone(),None),
+            2=>{
+                let index:IndexOnly=serde_json::from_slice(&bytes).map_err(storage)?;
+                if index.partition_id!=self.partition_id || index.checkpoint_seq!=head.log_base_seq
+                    || index.indexed_seq!=head.indexed_seq || index.indexed_seq<index.checkpoint_seq
+                    || index.indexed_seq>head.committed_seq || index.packages.is_empty()
+                    || index.packages.len()>capacity::MAX_SEGMENTS || index.statistics.len()!=index.packages.len()
+                    || index.files.len()>10000 {return Err(storage("invalid index-only identity or watermarks"));}
+                let base=store.get_verified(&index.checkpoint).await.map_err(remote_read_error)?;
+                leases.push(charge(base.len())?);
+                let checkpoint:Checkpoint=serde_json::from_slice(&base).map_err(storage)?;
+                let reference=index.checkpoint.clone();
+                (checkpoint,reference,Some(index))
+            },
+            _=>return Err(storage("unsupported remote descriptor format")),
+        };
+        if checkpoint.format!=1 || checkpoint.partition_id!=self.partition_id
+            || checkpoint.seq!=head.log_base_seq || (index.is_none() && checkpoint.seq!=head.indexed_seq) {
+            return Err(storage("invalid selected recovery checkpoint"));
+        }
+        Ok(Selected{checkpoint,checkpoint_ref,index,_metadata:leases})
+    }
+    async fn verify_index_cut(&self,root:&Path,index:&mut IndexOnly,
+        head:&crate::storage::sqlite_authority::PartitionHead,committed_tip:Option<ObjectRef>,
+        config:&RecordConfig,base:&State)->Result<(),RecordError> {
+        if index.config_sha!=checkpoint_codec::json_digest(config)? || base.seq!=index.checkpoint_seq
+            || committed_tip!=index.wal_tip {
+            return Err(storage("index-only cut/config binding mismatch"));
+        }
+        let mut expected=BTreeMap::new();let mut ids=std::collections::BTreeSet::new();
+        for package in &index.packages {
+            if !ids.insert(&package.id) {return Err(storage("duplicate index package"));}
+            for file in &package.files {
+                if expected.insert(format!("segment-{}/{}",package.id,file.path),(file.bytes,file.sha256)).is_some() {
+                    return Err(storage("duplicate index package file"));
+                }
+            }
+        }
+        let mut paths=std::collections::BTreeSet::new();
+        if expected.len()!=index.files.len() || index.files.iter().any(|f|!paths.insert(&f.path) || expected.get(&f.path)!=Some(&(f.length,f.sha256))) {
+            return Err(storage("index-only file closure mismatch"));
+        }
+        let mut cut=head.clone();cut.committed_seq=index.indexed_seq;cut.indexed_seq=index.checkpoint_seq;cut.wal_tip=index.wal_tip.clone();
+        let tail=crate::storage::object_log::load_committed_entries_after(&self.store.uncached(),&cut,index.checkpoint_seq,self.max_tail_blocks,self.max_tail_bytes).await.map_err(storage)?;
+        let mut state=base.try_clone()?;let mut admitted=state_proof::length(&state)?;
+        for entry in tail {
+            if <[u8;32]>::from(Sha256::digest(&entry.payload))!=entry.request_sha256 {return Err(storage("index-only WAL digest mismatch"));}
+            let _decode=crate::storage::build_budget::reserve_memory((entry.payload.len() as u64).checked_mul(32).ok_or_else(||storage("index replay decode overflow"))?).map_err(storage)?;
+            admitted=admitted.checked_add(entry.payload.len().checked_mul(3).ok_or_else(||storage("index replay size overflow"))?).ok_or_else(||storage("index replay size overflow"))?;
+            state.admit_bytes(admitted)?;
+            match serde_json::from_slice::<Entry>(&entry.payload).map_err(storage)? {
+                Entry::Applied(op)=>apply(&mut state,&op)?,
+                Entry::Expired(event)=>temporal::apply(&mut state,&event)?,
+                Entry::LeaseExpired(event)=>lease::apply(&mut state,&event)?,
+                _=>return Err(storage("unexpected authority or same-sequence event in index suffix")),
+            }
+        }
+        validate_restored_state(config,&state)?;
+        if state.seq!=index.indexed_seq || checkpoint_codec::json_digest(&state)?!=index.state_sha {
+            return Err(storage("index-only replay State mismatch"));
+        }
+        anchor::Reference::verify_derived_parts(root,config,&state,&index.packages,std::mem::take(&mut index.statistics)).await
+    }
+
     pub(super) async fn tail_needs_checkpoint(&self,seq:u64,operation_id:&str,payload:&[u8])->Result<bool,RecordError> {
         #[derive(Serialize)]
         struct Entry<'a>{seq:u64,operation_id:&'a str,request_sha256:[u8;32],payload:&'a [u8]}
@@ -96,21 +215,18 @@ impl RemotePersistence {
             return Err(RecordError::RecoveryRequired);
         }
         let store=self.store.uncached();
-        let object=head.manifest.as_ref().ok_or(RecordError::RecoveryRequired)?;
-        let bytes=store.get_verified(object).await.map_err(remote_read_error)?;
-        let _decode=crate::storage::build_budget::reserve_memory((bytes.len() as u64).checked_mul(32).ok_or_else(||storage("remote seal metadata overflow"))?).map_err(|_|RecordError::Busy)?;
-        let checkpoint:Checkpoint=serde_json::from_slice(&bytes).map_err(storage)?;
-        if checkpoint.format!=1 || checkpoint.partition_id!=self.partition_id
-            || checkpoint.seq!=head.indexed_seq || checkpoint.seq!=head.log_base_seq
-            || checkpoint_codec::json_digest(&checkpoint.anchor)?!=checkpoint_codec::json_digest(reference)? {
+        let selected=self.selected(&head,true).await?;
+        let checkpoint=&selected.checkpoint;
+        if checkpoint_codec::json_digest(&checkpoint.anchor)?!=checkpoint_codec::json_digest(reference)? {
             return Err(storage("remote seal authority mismatch"));
         }
         // Fresh backend reads preserve the publication-time corruption check.
         // No mtime, cached bytes or registered digest substitutes for this check.
+        let (files,_inventory)=combined_files(journal.root(),&checkpoint.files,selected.index.as_ref().map_or(&[],|i|i.files.as_slice()),authority_budget,self.max_tail_blocks)?;
         let mut chunks=0usize;let mut total=0usize;
         let max_total=authority_budget.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("remote seal budget overflow"))?;
         if checkpoint.files.len()>10_000 {return Err(storage("remote seal file count"));}
-        for file in &checkpoint.files {
+        for file in files.values() {
             let mut hash=Sha256::new();let mut length=0u64;
             for chunk in &file.chunks {
                 chunks=chunks.checked_add(1).filter(|n|*n<=self.max_tail_blocks).ok_or_else(||storage("remote seal chunk budget"))?;
@@ -122,7 +238,7 @@ impl RemotePersistence {
             let digest:[u8;32]=hash.finalize().into();
             if length!=file.length || digest!=file.sha256 {return Err(storage("remote seal file checksum"));}
         }
-        let entries=crate::storage::object_log::load_committed_tail(&store,&head,self.max_tail_blocks,self.max_tail_bytes).await.map_err(|e|match e {crate::storage::object_log::TailError::ObjectStore(e)=>remote_read_error(e),other=>storage(other)})?;
+        let entries=crate::storage::object_log::load_committed_entries_after(&store,&head,head.log_base_seq,self.max_tail_blocks,self.max_tail_bytes).await.map_err(|e|match e {crate::storage::object_log::TailError::ObjectStore(e)=>remote_read_error(e),other=>storage(other)})?;
         let mut index=0usize;let mut first=true;
         journal.visit_committed(|bytes| {
             if first {first=false;return Ok(());}
@@ -139,27 +255,21 @@ impl RemotePersistence {
         if after!=head {return Err(RecordError::RecoveryRequired);}
         Ok(())
     }
-    pub(super) async fn publish_anchor(
-        &mut self,
-        root: &Path,
-        reference: &anchor::Reference,
-        payloads: &crate::storage::payload_pool::Closure,
-        seq: u64,
-        authority_budget: u64,
-        restoring: bool,
-    ) -> Result<(), RecordError> {
-        let mut authority = self.authority.lock().await;
-        let head = authority
-            .read_head(&self.partition_id)
-            .map_err(storage)?
-            .ok_or(RecordError::RecoveryRequired)?;
-        if head.owner_epoch != self.owner_epoch || (!restoring && head.committed_seq != seq) {
-            return Err(RecordError::RecoveryRequired);
-        }
+    async fn upload_files(&self,authority:&mut crate::storage::sqlite_authority::SqliteAuthority,
+        root:&Path,closure:Vec<(String,u64,[u8;32])>,authority_budget:u64,prior:&[&File])
+        ->Result<(Vec<File>,crate::storage::build_budget::MemoryLease),RecordError> {
+        admit_checkpoint_chunks(&closure,self.max_object_bytes,self.max_tail_blocks)?;
+        let metadata=closure.iter().try_fold(0u64,|sum,(path,length,_)| {
+            let chunks=length.div_ceil(self.max_object_bytes as u64);
+            sum.checked_add(path.len() as u64).and_then(|n|n.checked_add(256))
+                .and_then(|n|chunks.checked_mul(512).and_then(|c|n.checked_add(c)))
+                .ok_or_else(||storage("upload inventory size overflow"))
+        })?.checked_mul(32).ok_or_else(||storage("upload inventory charge overflow"))?;
+        let lease=crate::storage::build_budget::reserve_memory(metadata).map_err(|_|RecordError::Busy)?;
+        let attempt=rand::random::<u128>();
         let mut files = Vec::new();
         let mut total = 0u64;
         let mut chunk_count = 0usize;
-        let closure = reference.remote_files(payloads)?;
         admit_checkpoint_chunks(&closure, self.max_object_bytes, self.max_tail_blocks)?;
         for (path, length, sha256) in closure {
             total = total
@@ -201,18 +311,22 @@ impl RemotePersistence {
                     .iter()
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>();
-                let key = format!(
-                    "partitions/{}/files/{}/{:08}-{digest}",
-                    self.partition_id,
-                    path,
-                    chunks.len()
-                );
-                chunks.push(
-                    self.store
-                        .put_and_register(&mut authority, &key, &bytes, unix_time_ms_i64())
-                        .await
-                        .map_err(storage)?,
-                );
+                let reference=prior.iter().find(|f|f.path==path && f.length==length && f.sha256==sha256)
+                    .and_then(|f|f.chunks.get(chunks.len()));
+                let object=if let Some(reference)=reference {
+                    if reference.length!=bytes.len() as u64 || reference.sha256!=<[u8;32]>::from(Sha256::digest(&bytes)) {
+                        return Err(storage("reused chunk boundary mismatch"));
+                    }
+                    let verified=self.store.uncached().get_verified(reference).await.map_err(remote_read_error)?;
+                    if verified!=bytes {return Err(storage("reused chunk content mismatch"));}
+                    reference.clone()
+                } else {
+                    // Unselected failed attempts may be retired by GC. A fresh
+                    // attempt never tries to resurrect their immutable keys.
+                    let key=format!("partitions/{}/files/{attempt:032x}/{}/{:08}-{digest}",self.partition_id,path,chunks.len());
+                    self.store.put_and_register(authority,&key,&bytes,unix_time_ms_i64()).await.map_err(storage)?
+                };
+                chunks.push(object);
                 chunk_count=chunk_count.checked_add(1).ok_or_else(||storage("checkpoint chunk count overflow"))?;
                 if chunk_count > self.max_tail_blocks {
                     return Err(storage("checkpoint chunk budget exceeded"));
@@ -229,6 +343,66 @@ impl RemotePersistence {
                 chunks,
             });
         }
+        Ok((files,lease))
+    }
+
+    pub(super) async fn publish_derived_index(&mut self,root:&Path,config:&RecordConfig,state:&State,
+        packages:Vec<segment::Package>,statistics:Vec<crate::active::ActiveStatistics>)->Result<(),RecordError> {
+        let mut authority=self.authority.lock().await;
+        let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch!=self.owner_epoch || head.committed_seq!=state.seq {return Err(RecordError::RecoveryRequired);}
+        let selected=self.selected(&head,true).await?;
+        anchor::Reference::verify_derived_parts(root,config,state,&packages,statistics.clone()).await?;
+        let count=packages.iter().try_fold(0usize,|n,p|n.checked_add(p.files.len()).ok_or_else(||storage("index file count overflow")))?;
+        let _paths=crate::storage::build_budget::reserve_memory((count as u64).checked_mul(512*32).ok_or_else(||storage("index path budget overflow"))?).map_err(|_|RecordError::Busy)?;
+        let closure=packages.iter().flat_map(|p|p.files.iter().map(move|f|(format!("segment-{}/{}",p.id,f.path),f.bytes,f.sha256))).collect();
+        let prior=selected.index.iter().flat_map(|i|i.files.iter()).chain(selected.checkpoint.files.iter()).collect::<Vec<_>>();
+        let (files,_export)=self.upload_files(&mut authority,root,closure,config.max_journal_bytes,&prior).await?;
+        let (_joint,_joint_lease)=combined_files(root,&selected.checkpoint.files,&files,config.max_journal_bytes,self.max_tail_blocks)?;
+        drop(_joint);
+        let index=IndexOnly{format:2,partition_id:self.partition_id.clone(),checkpoint:selected.checkpoint_ref,
+            checkpoint_seq:head.log_base_seq,indexed_seq:state.seq,wal_tip:head.wal_tip.clone(),
+            state_sha:checkpoint_codec::json_digest(state)?,config_sha:checkpoint_codec::json_digest(config)?,packages,statistics,files};
+        let length=checkpoint_codec::json_length(&index)?;
+        if length>self.max_object_bytes {return Err(RecordError::Rejected("index-only descriptor exceeds object budget".into()));}
+        let _encoded=crate::storage::build_budget::reserve_memory((length as u64).checked_mul(2).ok_or_else(||storage("index descriptor overflow"))?).map_err(|_|RecordError::Busy)?;
+        let bytes=serde_json::to_vec(&index).map_err(storage)?;
+        let key=format!("partitions/{}/indexes/{:032x}",self.partition_id,rand::random::<u128>());
+        let object=self.store.put_and_register(&mut authority,&key,&bytes,unix_time_ms_i64()).await.map_err(storage)?;
+        authority.register_object_edge(&object,&index.checkpoint).map_err(storage)?;
+        if let Some(tip)=&index.wal_tip {authority.register_object_edge(&object,tip).map_err(storage)?;}
+        for file in &index.files {for child in &file.chunks {authority.register_object_edge(&object,child).map_err(storage)?;}}
+        #[cfg(test)] if root.join(".test-index-only-before-cas").exists(){return Err(storage("injected index-only rejection before CAS"));}
+        let selected=authority.publish_index(&self.partition_id,head.head_version,self.owner_epoch,state.seq,object)
+            .map_err(|e|RecordError::OutcomeUnknown(e.to_string()))?.ok_or(RecordError::RecoveryRequired)?;
+        if selected.log_base_seq!=head.log_base_seq || selected.wal_tip!=head.wal_tip || selected.log_anchor!=head.log_anchor {
+            return Err(RecordError::RecoveryRequired);
+        }
+        #[cfg(test)] if root.join(".test-index-only-after-cas").exists(){return Err(RecordError::OutcomeUnknown("injected index-only response loss".into()));}
+        Ok(())
+    }
+
+    pub(super) async fn publish_anchor(
+        &mut self,
+        root: &Path,
+        reference: &anchor::Reference,
+        payloads: &crate::storage::payload_pool::Closure,
+        seq: u64,
+        authority_budget: u64,
+        restoring: bool,
+    ) -> Result<(), RecordError> {
+        let mut authority = self.authority.lock().await;
+        let head = authority
+            .read_head(&self.partition_id)
+            .map_err(storage)?
+            .ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch != self.owner_epoch || (!restoring && head.committed_seq != seq) {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let closure=reference.remote_files(payloads)?;
+        let selected=if head.manifest.is_some(){Some(self.selected(&head,true).await?)}else{None};
+        let prior=selected.iter().flat_map(|s|s.index.iter().flat_map(|i|i.files.iter()).chain(s.checkpoint.files.iter())).collect::<Vec<_>>();
+        let (files,_export_metadata)=self.upload_files(&mut authority,root,closure,authority_budget,&prior).await?;
         let checkpoint = Checkpoint {
             format: 1,
             partition_id: self.partition_id.clone(),
@@ -314,46 +488,11 @@ impl RemotePersistence {
         if head.owner_epoch != self.owner_epoch {
             return Err(RecordError::RecoveryRequired);
         }
-        let Some(manifest) = &head.manifest else {
-            return Ok(None);
-        };
-        let bytes = self.store.get_verified(manifest).await.map_err(storage)?;
-        let checkpoint: Checkpoint = serde_json::from_slice(&bytes).map_err(storage)?;
-        if checkpoint.format != 1
-            || checkpoint.partition_id != self.partition_id
-            || checkpoint.seq != head.indexed_seq
-            || checkpoint.seq != head.log_base_seq
-            || checkpoint.files.len() > 10_000
-        {
-            return Err(storage("invalid remote checkpoint identity or watermarks"));
-        }
-        let mut names = std::collections::BTreeSet::new();
-        let mut total = 0u64;
-        let mut chunks = 0usize;
-        // Validate budgets and paths before downloading any file.
-        for file in &checkpoint.files {
-            safe_path(root, &file.path)?;
-            if !names.insert(file.path.clone()) {
-                return Err(storage("duplicate checkpoint file"));
-            }
-            total = total
-                .checked_add(file.length)
-                .filter(|n| *n <= budget.saturating_mul(64).saturating_add(32 * 1024 * 1024))
-                .ok_or_else(|| storage("checkpoint download budget exceeded"))?;
-            chunks = chunks
-                .checked_add(file.chunks.len())
-                .filter(|n| *n <= self.max_tail_blocks)
-                .ok_or_else(|| storage("checkpoint chunk count exceeded"))?;
-            if file
-                .chunks
-                .iter()
-                .try_fold(0u64, |n, r| n.checked_add(r.length))
-                != Some(file.length)
-            {
-                return Err(storage("checkpoint file/chunk length mismatch"));
-            }
-        }
-        for file in &checkpoint.files {
+        if head.manifest.is_none(){return Ok(None);}
+        let mut selected=self.selected(&head,false).await?;
+        let checkpoint=&selected.checkpoint;
+        let (files,_inventory)=combined_files(root,&checkpoint.files,selected.index.as_ref().map_or(&[],|i|i.files.as_slice()),budget,self.max_tail_blocks)?;
+        for file in files.values() {
             let target = safe_path(root, &file.path)?;
             std::fs::create_dir_all(
                 target
@@ -398,8 +537,16 @@ impl RemotePersistence {
         if loaded.state.seq != checkpoint.seq {
             return Err(storage("checkpoint state sequence mismatch"));
         }
+        drop(files);
+        if let Some(index)=selected.index.as_mut() {
+            let committed_tip=authority.committed_wal_at(&self.partition_id,index.indexed_seq).map_err(storage)?;
+            self.verify_index_cut(root,index,&head,committed_tip,&loaded.config,&loaded.state).await?;
+        }
+        let payload=encode_entry(&Entry::Anchor(checkpoint.anchor.clone()))?;
         drop(loaded);
-        Ok(Some(encode_entry(&Entry::Anchor(checkpoint.anchor))?))
+        let after=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if after!=head {return Err(RecordError::RecoveryRequired);}
+        Ok(Some(payload))
     }
 
     /// Only this single owner invokes GC under the partition guard, after all
@@ -664,6 +811,89 @@ mod tests {
         drop(inner);
         (p, store, root, db, clock)
     }
+    #[test]
+    fn joint_closure_admits_once_and_rejects_duplicate_or_over_budget() {
+        let root=path();
+        let file=|name:&str,n:u64|File{path:format!("segment-{:032x}/{name}",1),length:n,sha256:[0;32],chunks:vec![ObjectRef{key:name.into(),sha256:[0;32],length:n}]};
+        let base=vec![file("a",1)];let index=vec![file("a",1),file("b",1)];
+        assert_eq!(combined_files(&root,&base,&index,1,2).unwrap().0.len(),2);
+        assert!(matches!(combined_files(&root,&base,&index,1,1),Err(RecordError::Rejected(_))));
+        assert!(combined_files(&root,&base,&[file("a",1),file("a",1)],1,3).is_err());
+        assert!(combined_files(&root,&base,&[file("a",2)],1,3).is_err());
+        let limit=32*1024*1024+64;
+        assert!(combined_files(&root,&[],&[file("large",limit)],1,1).is_ok());
+        assert!(matches!(combined_files(&root,&[],&[file("large",limit+1)],1,1),Err(RecordError::Rejected(_))));
+    }
+    #[tokio::test]
+    async fn index_only_cas_faults_preserve_selected_cut_and_receipts() {
+        for after in [false,true] {
+            let (p,_,root,_,clock)=source().await;
+            p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();
+            p.compact_journal().await.unwrap();
+            let request=write("tail","tail","alpha tail",ExpectedVersion::Absent);
+            let receipt=p.write(request.clone()).await.unwrap();
+            let fault=if after {".test-index-only-after-cas"}else{".test-index-only-before-cas"};
+            std::fs::write(root.join(fault),b"fail").unwrap();
+            {
+                let mut inner=p.inner.lock().await;
+                assert!(inner.maintain_index_tail().await.is_err());
+                assert_eq!(inner.healthy,!after);
+                let remote=inner.remote.as_ref().unwrap();
+                let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
+                assert_eq!(head.log_base_seq,1);assert_eq!(head.committed_seq,2);
+                assert_eq!(head.indexed_seq,if after {2}else{1});
+            }
+            std::fs::remove_file(root.join(fault)).unwrap();
+            if !after {
+                p.collect_s3_garbage().await.unwrap();
+                p.inner.lock().await.publish_remote_index_tail().await.unwrap();
+                assert_eq!(p.write(request.clone()).await.unwrap(),receipt);
+            }
+            let p=cold(p,&root,clock).await;
+            assert_eq!(p.write(request).await.unwrap(),receipt);
+            assert_eq!(p.statistics().await.unwrap().visible_seq,2);
+        }
+    }
+    #[tokio::test]
+    async fn index_only_backup_gc_and_same_sequence_checkpoint_preserve_history() {
+        let (p,store,root,_,clock)=source().await;
+        p.write(write("seed","seed","alpha seed",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let request=write("tail","tail","alpha tail",ExpectedVersion::Absent);
+        let receipt=p.write(request.clone()).await.unwrap();
+        p.inner.lock().await.maintain_index_tail().await.unwrap();
+        {
+            let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
+            let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
+            assert_eq!((head.log_base_seq,head.indexed_seq,head.committed_seq),(1,2,2));
+        }
+        let expected=scores(&p).await;
+        let (bundle,seq,_)=p.create_s3_backup("index-cut",100,1024*1024).await.unwrap();
+        assert_eq!(seq,2);
+        {
+            let mut inner=p.inner.lock().await;
+            let future=clock.0.load(Ordering::SeqCst)+inner.config.change_feed.retention_ms+1;
+            clock.0.store(future,Ordering::SeqCst);inner.trim_feed(future).await.unwrap();
+            assert!(inner.state.feed.floor>0);
+            let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
+            assert_eq!((head.log_base_seq,head.indexed_seq,head.committed_seq),(2,2,2));
+            assert!(head.wal_tip.is_none());
+        }
+        p.write(write("later","later","alpha later",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        p.collect_s3_garbage().await.unwrap();
+        let target=path();let db=path();
+        let restored=RecordPartition::restore_s3_with_remote(&target,config(),remote(store,&db,"restored"),&bundle,1024*1024,10000,16*1024*1024).await.unwrap();
+        restored.inner.lock().await.clock=clock.clone();
+        assert_eq!(scores(&restored).await,expected);
+        assert_eq!(restored.write(request).await.unwrap(),receipt);
+        p.release_s3_backup_pins("index-cut").await.unwrap();
+        p.collect_s3_garbage().await.unwrap();
+        let restored=cold(restored,&target,clock.clone()).await;
+        assert_eq!(scores(&restored).await,expected);
+        let p=cold(p,&root,clock).await;
+        assert_eq!(p.statistics().await.unwrap().visible_seq,3);
+    }
     #[tokio::test]
     async fn resource_refused_write_keeps_head_receipt_and_retry_classification() {
         use crate::resources::{Governor, Lane};
@@ -695,8 +925,9 @@ mod tests {
         let mut receipts=Vec::new();
         for i in 0..129 {let request=write(&format!("op{i}"),&format!("r{i}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(request.clone()).await.unwrap();receipts.push((request,receipt));}
         {let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
-            assert_eq!(head.indexed_seq,before.indexed_seq);assert_eq!(head.log_base_seq,before.log_base_seq);assert_eq!(head.manifest,before.manifest);
-            assert_eq!(head.committed_seq,130);assert!(!inner.index.pending_seals.is_empty());}
+            assert_eq!(head.indexed_seq,129);assert_eq!(head.log_base_seq,before.log_base_seq);assert_ne!(head.manifest,before.manifest);
+            assert_eq!(head.committed_seq,130);assert!(!inner.index.pending_seals.is_empty());
+            let selected=remote.selected(&head,true).await.unwrap();assert_eq!(selected.checkpoint_ref,before.manifest.clone().unwrap());assert!(selected.index.is_some());}
         let expected=scores(&p).await;
         let p=cold(p,&root,clock).await;
         assert_eq!(scores(&p).await,expected);
@@ -1584,8 +1815,9 @@ impl RemoteBuild {
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>();
                 let key = format!(
-                    "partitions/{}/files/{}/{:08}-{digest}",
+                    "partitions/{}/files/build-{}/{}/{:08}-{digest}",
                     self.partition_id,
+                    self.build.build_epoch,
                     path,
                     chunks.len()
                 );
@@ -1655,4 +1887,24 @@ impl Inner {
 
 fn remote_read_error(error:object_store::Error)->RecordError {
     if crate::storage::s3_compatible::is_resource_error(&error) {RecordError::Busy}else{storage(error)}
+}
+
+impl Inner {
+    pub(super) async fn publish_remote_index_tail(&mut self)->Result<(),RecordError> {
+        if self.remote.is_none(){return Ok(());}
+        let bytes=self.index.statistics_wire_length().await?;
+        let _metadata=crate::storage::build_budget::reserve_memory((bytes as u64).checked_mul(64).and_then(|n|n.checked_add(1024*1024)).ok_or_else(||storage("index statistics budget overflow"))?).map_err(|_|RecordError::Busy)?;
+        let mut statistics=self.index.local_statistics().await?;
+        if statistics.first().is_none_or(|s|!s.keys.is_empty()){return Err(storage("index seal successor is not empty"));}
+        statistics.remove(0);
+        let anchor=self.anchor.as_ref().ok_or(RecordError::RecoveryRequired)?;
+        let packages=self.index.pending_seals.iter().chain(anchor.retained_packages()).cloned().collect();
+        let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
+        self.healthy=false;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+        let result=self.remote.as_mut().unwrap().publish_derived_index(self.journal.root(),&self.config,&self.state,packages,statistics).await;
+        if !matches!(&result,Err(RecordError::OutcomeUnknown(_)|RecordError::RecoveryRequired)) {
+            self.healthy=true;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
+        }
+        result
+    }
 }

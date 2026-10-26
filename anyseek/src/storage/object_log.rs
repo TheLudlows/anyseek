@@ -232,7 +232,9 @@ pub(crate) async fn load_committed_entries_after(
     let mut reverse_blocks: Vec<Vec<ObjectLogEntry>> = Vec::new();
     let mut leases = Vec::new();
 
-    while expected_last > head.indexed_seq {
+    // A recovery baseline may lag the separately published index watermark.
+    // Honor the caller's authenticated starting cut, not an index-only hint.
+    while expected_last > after_seq {
         if blocks_read >= max_blocks {
             return Err(TailError::Invalid("committed tail exceeds block-count budget"));
         }
@@ -249,6 +251,16 @@ pub(crate) async fn load_committed_entries_after(
         validate_block(&block)?;
         if block.partition_id != head.partition_id || block.last_seq != expected_last {
             return Err(TailError::Invalid("partition or log chain sequence mismatch"));
+        }
+        let reaches_cut = block.first_seq <= after_seq.checked_add(1)
+            .ok_or(TailError::Invalid("sequence overflow"))?;
+        if reaches_cut && after_seq == head.log_base_seq {
+            let bound = if block.first_seq == after_seq + 1 {
+                block.previous.as_ref() == head.log_anchor.as_ref()
+            } else {
+                Some(&current) == head.log_anchor.as_ref()
+            };
+            if !bound { return Err(TailError::Invalid("recovery log anchor mismatch")); }
         }
         let filtered: Vec<_> = block.entries.into_iter()
             .filter(|entry| entry.seq > after_seq)
@@ -395,6 +407,14 @@ mod tests {
         let manifest_ref=upload_log_block(&store,&mut authority,"p0/manifest/1",&manifest,3,2048).await.unwrap();
         head=authority.publish_index("p0",head.head_version,4,1,manifest_ref).unwrap().unwrap();
         assert_eq!(load_committed_tail(&store,&head,4,4096).await.unwrap(),vec![entry(2)]);
+        assert_eq!(head.log_base_seq,0);
+        assert_eq!(load_committed_entries_after(&store,&head,0,4,4096).await.unwrap(),vec![entry(1),entry(2)],
+            "State recovery must cover C-to-I as well as I-to-D");
+        assert!(load_committed_entries_after(&store,&head,0,1,4096).await.is_err(),
+            "advancing I cannot bypass the retained C-to-D block budget");
+        let mut wrong_anchor=head.clone();wrong_anchor.log_anchor=head.wal_tip.clone();
+        assert!(load_committed_entries_after(&store,&wrong_anchor,0,4,4096).await.is_err(),
+            "the complete recovery suffix must bind its selected base anchor");
         assert!(load_committed_tail(&store,&head,1,1).await.is_err());
         drop(authority);
         let _=std::fs::remove_file(&path);

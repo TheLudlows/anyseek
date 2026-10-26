@@ -128,7 +128,7 @@ Two small proof fixtures plus the 25 existing exact core cases passed locally
 (27/27). They include independent decode, same-length content replacement, ordered
 history, nonempty revision values, low epoch, same-sequence metadata, lookup and
 full JSON length/projection oracles. The local separation above uses this proof;
-remote index-only manifest publication remains unimplemented.
+remote index-only publication is described in the second slice below.
 
 ## Remaining cost and measurement scope
 
@@ -149,8 +149,7 @@ State checkpoint on each local index rotation. It does not make rotation O(1):
 
 Next measurement should use fresh isolated roots, fixed builds, identical budgets
 and corpus, and separate ordinary batches, index seals, checkpoints and reopen
-latencies. Check correctness/errors alongside timings. Restarting large workloads
-requires renewed authorization; the original 63,325-record experiment remains
+latencies. Check correctness/errors alongside timings. A new latest-version benchmark is authorized in fresh isolated roots; the original 63,325-record experiment remains
 stopped and untouched. Full recovery/browser stability, real S3, hard power loss
 and cross-AES acceptance are not established by the small regressions.
 
@@ -179,6 +178,33 @@ Thirteen exact Linux SQLite/in-memory object-store regressions passed (largest
 fixture 130 records), including cold reopen with 129 original receipts, 64-to-65
 WAL count pressure, byte pressure, Busy/retry, remote corruption, same-sequence
 feed maintenance, publication failure, backups, GC and cache loss. These are not
-real S3 acceptance or performance results. This first slice keeps the remotely
-persisted index watermark tied to the recovery checkpoint; a separately published
-index-only manifest is still pending.
+real S3 acceptance or performance results. At this first-slice checkpoint the remotely persisted index watermark was tied
+to the recovery checkpoint. The second slice separates those watermarks.
+
+
+## S3 independent index publication
+
+An index-only descriptor (format 2) directly references the complete format-1
+recovery checkpoint C and binds native packages, statistics, configuration and
+State digest at I to its immutable WAL receipt. Objects and dependency edges are
+registered before the owner/head-version CAS advances I; C and D are unchanged.
+Recovery admission counts WAL from C, never from I. This permits C < I < D without
+losing history. Feed trimming still uses a full same-sequence checkpoint.
+
+Publication, fresh online verification and cold recovery share a deduplicated
+C-union-I file inventory. Duplicate entries, conflicting descriptions, missing
+members and repeated package identities fail closed. Joint byte/chunk refusal
+occurs before authority CAS (uploads may already exist as collectible orphans).
+Fresh attempt keys prevent retry from resurrecting retired orphan objects.
+
+Cold open validates C, replays and authenticates the index cut I, checks its native
+packages and statistics, then still rebuilds the current view from C through D.
+Thus the separate persisted index cut is implemented, but faster cold recovery
+from I is not. Fresh backend verification and full State/suffix traversal remain;
+this change does not claim constant-time rotation or measured throughput gains.
+
+Local Linux SQLite/in-memory tests validate C=1/I=129/D=130, all 129 original
+receipts, pre/post-CAS failure, quota boundaries and duplicate inventory rejection.
+The final 24-test remote matrix passed with no failures or ignored tests (50.59 seconds), including independent index-cut backup/restore/GC and same-sequence feed maintenance.
+These results are fixture evidence, not real S3, Windows or system-power-loss
+acceptance. Latest-head benchmark and platform CI remain separate validation.

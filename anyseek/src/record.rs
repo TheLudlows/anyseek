@@ -529,7 +529,7 @@ impl RemotePersistence {
             .ok_or_else(|| storage("remote partition authority is missing"))?;
         if head.owner_epoch != self.owner_epoch
             || inner.state.seq > head.committed_seq
-            || inner.state.seq < head.indexed_seq {
+            || inner.state.seq < head.log_base_seq {
             return Err(RecordError::RecoveryRequired);
         }
         let bootstrap_ref = head.bootstrap.as_ref().ok_or(RecordError::RecoveryRequired)?;

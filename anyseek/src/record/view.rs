@@ -285,6 +285,15 @@ impl RetrievalView {
         }
         Ok(result)
     }
+    pub(super) async fn statistics_wire_length(&self)->Result<usize,RecordError>{
+        let root=self.query.read().await;let mut bytes=2usize;
+        for shard in &root.shard_vec {
+            let shard=shard.read().await;
+            let active=shard.active.as_ref().ok_or_else(||storage("missing view statistics"))?;
+            bytes=bytes.checked_add(checkpoint_codec::json_length(active)?).and_then(|n|n.checked_add(1)).ok_or_else(||storage("statistics size overflow"))?;
+        }
+        Ok(bytes)
+    }
     pub(super) async fn storage_paths(&self)->Vec<PathBuf>{
         vec![PathBuf::from(&self.query.read().await.index_path_string),PathBuf::from(&self.tail.read().await.index_path_string)]
     }

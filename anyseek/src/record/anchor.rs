@@ -162,6 +162,7 @@ impl Frozen {
 }
 impl Reference {
     pub(super) fn identity(&self)->&str {&self.id}
+    pub(super) fn retained_packages(&self)->&[segment::Package] {&self.segments}
     #[cfg(feature="s3-object-store")]
     pub(super) fn remote_files(&self,payloads:&Closure)->Result<Vec<(String,u64,[u8;32])>,RecordError>{
         let mut result=Vec::new();
@@ -430,12 +431,21 @@ impl Reference {
     }
     async fn load_components(&self,root:&Path,path:&Path,authority_budget:u64,config:&RecordConfig,state:&State,payloads:Closure)->Result<VerifiedView,RecordError>{
         let statistics:Statistics=serde_json::from_slice(&read_bounded(&path.join("statistics"),closure_limit(authority_budget)?)?).map_err(storage)?;
-        if statistics.segments.len()!=self.segments.len(){return Err(storage("segment statistics closure mismatch"));}
+        Self::load_parts(root,config,state,payloads,&self.segments,statistics.segments).await
+    }
+    pub(super) async fn verify_derived_parts(root:&Path,config:&RecordConfig,state:&State,
+        segments:&[segment::Package],statistics:Vec<crate::active::ActiveStatistics>)->Result<(),RecordError> {
+        let verified=Self::load_parts(root,config,state,Closure::default(),segments,statistics).await?;
+        drop(verified);Ok(())
+    }
+    async fn load_parts(root:&Path,config:&RecordConfig,state:&State,payloads:Closure,
+        segments:&[segment::Package],statistics:Vec<crate::active::ActiveStatistics>)->Result<VerifiedView,RecordError>{
+        if statistics.len()!=segments.len(){return Err(storage("segment statistics closure mismatch"));}
         let visible=evidence::visibility(&state.records)?;
         let expected:std::collections::BTreeSet<_>=state.records.values().filter(|r|visible.get(&r.record_id)==Some(&true)&&!(state.evidence_quarantined&&temporal::protected(r))).map(|r|r.record_id.clone()).collect();
-        let n=self.segments.len();let mut locations=BTreeMap::new();let mut ordinals=Vec::new();let mut live=std::collections::BTreeSet::new();let mut indexes=Vec::new();
+        let n=segments.len();let mut locations=BTreeMap::new();let mut ordinals=Vec::new();let mut live=std::collections::BTreeSet::new();let mut indexes=Vec::new();
         let address_budget=config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("address budget overflow"))?;
-        for (slot,(segment,active)) in self.segments.iter().zip(statistics.segments).enumerate(){
+        for (slot,(segment,active)) in segments.iter().zip(statistics).enumerate(){
             for (id,key) in active.keys.iter().enumerate(){
                 let address=id.checked_mul(n).and_then(|v|v.checked_add(slot)).filter(|v|*v<address_budget).ok_or_else(||storage("segment address budget exceeded"))?;
                 if ordinals.len()<=address{ordinals.try_reserve(address+1-ordinals.len()).map_err(storage)?;ordinals.resize(address+1,String::new());}
@@ -578,7 +588,10 @@ impl Inner {
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
         self.anchor.as_ref().unwrap().verify_live_suffix(&root,&self.config,&self.state,&mut self.journal,&self.index.pending_seals)?;
         if self.index.local_statistics().await?.first().is_none_or(|s|s.keys.is_empty()){return Ok(());}
-        self.stage_stable_tail().await
+        self.stage_stable_tail().await?;
+        #[cfg(feature="s3-object-store")]
+        self.publish_remote_index_tail().await?;
+        Ok(())
     }
     pub(super) async fn ensure_journal_room(&mut self,bytes:usize,reserve:usize)->Result<(),RecordError> {
         if self.journal.checkpoint_can_make_room(bytes,reserve){self.publish_anchor().await?;}
