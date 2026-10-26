@@ -111,6 +111,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
+      ANYSEEK_TEST_SCALE: small
       ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/anyseek-ci-core
     steps:
       - uses: actions/checkout@v4
@@ -123,6 +124,12 @@ jobs:
         run: mkdir -p "$ANYSEEK_TEST_ROOT"
       - name: Exact bounded core regressions (including WAL owner lock)
         run: python scripts/ci_core_cases.py
+      - name: Small lexical, deletion and ranking oracles
+        run: >-
+          cargo test -p anyseek --locked --features server
+          --test bitmap_delete_consistency --test union_count_cross_block
+          --test lexical_correctness --test frequent_topk_consistency
+          --test union_topk_fill_ranking --test union_topk_many_terms
       - name: Build service with the same feature set
         run: cargo build -p anyseek --locked --features server
       - name: Service configuration and OpenAPI smoke

@@ -1,3 +1,4 @@
+#[path = "common/scale.rs"] mod scale;
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
 // `union_scan_32` bitmask holds at most 32 terms; >32-term TopkCount must
@@ -57,10 +58,13 @@ async fn union_topk_forty_terms() {
     let index = Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
         .unwrap();
 
-    // 40 disjoint terms x 25 docs each = 1000 docs, all in one block.
+    let per_term = scale::choose(3, 25);
+    let population = 40 * per_term;
+    assert!(population > 100);
+    // Full scale: 40 disjoint terms x 25 docs each = 1000 docs, all in one block.
     let mut docs = vec![];
     for t in 0..40 {
-        for i in 0..25 {
+        for i in 0..per_term {
             docs.push(doc(&format!("w{t:02} z{i}")));
         }
     }
@@ -73,11 +77,12 @@ async fn union_topk_forty_terms() {
         .join(" ");
 
     let count = search(&index, &query, ResultType::Count).await;
-    assert_eq!(count.count_total, 1000);
+    assert_eq!(count.count_total, population);
 
     let topk_count = search(&index, &query, ResultType::TopkCount).await;
-    assert_eq!(topk_count.count_total, 1000);
+    assert_eq!(topk_count.count_total, population);
     assert_eq!(topk_count.count_total, count.count_total);
+    assert_eq!(topk_count.hits.len(), 100);
 
 
 }

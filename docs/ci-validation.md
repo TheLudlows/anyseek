@@ -2,11 +2,11 @@
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
 repository documentation, dependency/core boundaries and the lexical partition;
-on code changes it builds and runs 19 exact bounded core regressions on Linux
-and Windows, then builds the service with the same features and generates its
+on code changes it builds and runs 19 exact bounded core regressions plus the
+small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
 cases fail rather than silently matching zero tests. The largest rotation fixture
-in this set contains 129 records. This is fast feedback, **not full acceptance**.
+in the 19-case core set contains 129 records; integration scales are listed below. This is fast feedback, **not full acceptance**.
 Documentation-only changes keep static checks but skip the compiled core matrix.
 Generic x86-64 CPU flags permit target caching within each OS; full acceptance
 retains the existing native-CPU configuration and source-only cache policy.
@@ -88,3 +88,41 @@ assertions. The 760-record disjoint-union fixture keeps two repeated reads in
 small mode and twenty in full mode; its obsolete 65,536-boundary comments are
 corrected. Actual 65,536, 10,001, >16MiB, 64→65 and 128→129 boundary tests are
 unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests.
+
+## Small and full query fixtures (P1)
+
+Default PR core jobs explicitly select `small` and run six integration targets
+in addition to the 19 exact core cases. The manual matrix explicitly selects
+`full`, including its four independent Windows lexical jobs. No production
+capacity, scoring, timeout or fault boundary changes.
+
+| Fixture | Small | Full | Retained invariant |
+| --- | ---: | ---: | --- |
+| mixed and five-term lexical, both field-length policies | 514 each | 8194 each | literal member sets and score oracle, >100 candidates, Top1/10/100; mixed immediate/checkpoint/reopen and order variants |
+| frequent terms | 256 | 3000 | frequencies 100%/50%, intersection >10, both Top10 modes and exact count |
+| high/low-tier union ranking | 160 | 1000 | 40 high-score records, 12 low-score groups, full oracle versus Top100 |
+| sparse uniform union | 200 | 2000 | 20 distinct groups, >100 candidates, full heap and score boundary |
+| forty-term union | 120 | 1000 | all 40 terms, exact total, Top100 filled |
+| repeated disjoint union | 760 / 2 repeats | 760 / 20 repeats | same members, first/repeated Count vs TopkCount |
+| dense deletion AND/OR | 2048, one shared setup | same | all four independent count assertions |
+
+The lexical 576/522 append/winner fixtures and ranking 400/160/250 score-gap,
+mode-agreement and pagination fixtures remain unchanged. Full scale restores
+original population values; small scale does not claim to exercise their larger
+layout boundaries. Dedicated 8192-package/10001-identity and other physical,
+byte-budget and publication boundaries remain in full acceptance.
+
+Local P0 paired measurement on the same debug profile (excluding compilation):
+bitmap 203.19s → 102.89s (all four assertions retained; about 49.4% shorter);
+union 34.41s → 34.10s (the data build dominates, so fewer repetitions have little
+measured benefit). These are one-run local observations, not a throughput claim.
+P1 historical full-size CI timings use a different runner and are not a paired
+speedup baseline for the local small-fixture run.
+
+P1 local small runs passed 13/13: frequent 6.65s, lexical six cases 134.11s,
+union ranking five cases 55.07s, forty-term union 4.75s. Selected full branches
+were also executed with the same binary/profile: frequent (3000) 108.58s and
+forty-term (1000) 47.10s, both passed. These compare fixture work at different
+scales, not engine throughput or identical large-layout coverage. Full 8194
+lexical and full union-ranking populations were preserved by parameter review
+but not rerun locally in this bounded validation.
