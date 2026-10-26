@@ -101,13 +101,14 @@ jobs:
           PYCODE
 
   core:
-    name: Core feedback (${{ matrix.os }})
+    name: Core feedback (${{ matrix.os }}, ${{ matrix.lane }})
     needs: static
     if: needs.static.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        lane: [core, lexical]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -129,16 +130,25 @@ jobs:
         shell: bash
         run: mkdir -p "$ANYSEEK_TEST_ROOT"
       - name: Exact bounded core regressions (including WAL owner lock)
+        if: matrix.lane == 'core'
         run: python scripts/ci_core_cases.py
-      - name: Small lexical, deletion and ranking oracles
+      - name: Small deletion and ranking oracles
+        if: matrix.lane == 'core'
         run: >-
           cargo test -p anyseek --locked --features server
           --test bitmap_delete_consistency --test union_count_cross_block
-          --test lexical_correctness --test frequent_topk_consistency
+          --test frequent_topk_consistency
           --test union_topk_fill_ranking --test union_topk_many_terms
+      # Preserve every lexical case and its data scale, but give this independent
+      # target its own 30-minute job instead of sharing the core job deadline.
+      - name: Small lexical membership and scoring oracles
+        if: matrix.lane == 'lexical'
+        run: cargo test -p anyseek --locked --features server --test lexical_correctness
       - name: Build service with the same feature set
+        if: matrix.lane == 'core'
         run: cargo build -p anyseek --locked --features server
       - name: Service configuration and OpenAPI smoke
+        if: matrix.lane == 'core'
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
