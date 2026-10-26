@@ -161,6 +161,14 @@ impl Reference {
         let view=self.load_components(root,&path,authority_budget,&config,&state,manifest.payloads).await?;
         Ok(Loaded{config,state,index:view.index,ordinals:view.ordinals,locations:view.locations,payloads:view.payloads})
     }
+    // Authenticate the sealed package against the owned captured cut. Its State
+    // stays alive throughout verification and becomes the candidate; do not
+    // deserialize a second complete history from the same package.
+    pub(super) async fn load_captured(&self, root: &Path, config: RecordConfig, state: State) -> Result<Loaded, RecordError> {
+        let view = self.load_verified(root, &config, &state).await?;
+        Ok(Loaded { config, state, index: view.index, ordinals: view.ordinals,
+            locations: view.locations, payloads: view.payloads })
+    }
     async fn load_verified(&self,root:&Path,config:&RecordConfig,state:&State)->Result<VerifiedView,RecordError>{
         let (path,manifest,pool)=self.authenticated_manifest(root,config.max_journal_bytes)?;
         if manifest.seq!=state.seq || serde_json::to_vec(manifest.state.config()).map_err(storage)?!=serde_json::to_vec(config).map_err(storage)? {
@@ -369,6 +377,32 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn captured_cut_retains_owner_and_rejects_mismatch_without_install() {
+        use super::*;
+        use super::super::tests::{config, write};
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("partition");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(write("first", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let (reference, settings, snapshot) = {
+            let inner = p.inner.lock().await;
+            (inner.anchor.clone().unwrap(), inner.config.clone(), inner.state.try_clone().unwrap())
+        };
+        let owner = Arc::as_ptr(snapshot.residency.as_ref().unwrap());
+        let original = checkpoint_codec::json_digest(&snapshot).unwrap();
+        let loaded = reference.load_captured(&root, settings.clone(), snapshot).await.unwrap();
+        assert_eq!(owner, Arc::as_ptr(loaded.state.residency.as_ref().unwrap()));
+        assert_eq!(original, checkpoint_codec::json_digest(&loaded.state).unwrap());
+        let mut invalid = loaded.state.try_clone().unwrap();
+        invalid.time_watermark_ms += 1;
+        let released = Arc::downgrade(invalid.residency.as_ref().unwrap());
+        assert!(reference.load_captured(&root, settings, invalid).await.is_err());
+        assert!(released.upgrade().is_none(), "failed candidate releases its State owner");
+        assert_eq!(original, checkpoint_codec::json_digest(&p.inner.lock().await.state).unwrap());
+        assert_eq!(p.statistics().await.unwrap().visible_seq, 1);
+    }
     #[tokio::test]
     async fn anchor_tail_vector_patch_and_temporal_metadata_recover_exact_sizes_and_receipts() {
         for failure in [0,1,2] {

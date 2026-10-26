@@ -71,6 +71,15 @@ fn reserve_from(counter: &Arc<AtomicU64>, bytes: u64) -> io::Result<MemoryLease>
     Ok(MemoryLease(bytes, counter.clone()))
 }
 impl MemoryLease {
+    /// Transfer already admitted ownership. No counter change or second admission.
+    pub(crate) fn split_off(&mut self, bytes: u64) -> io::Result<Self> {
+        if bytes > self.0 {
+            return Err(io::Error::other("memory lease transfer exceeds admitted bytes"));
+        }
+        self.0 -= bytes;
+        Ok(Self(bytes, self.1.clone()))
+    }
+    pub(crate) fn bytes(&self) -> u64 { self.0 }
     pub(crate) fn can_grow(&self, bytes: u64) -> bool {
         memory_limits().is_ok_and(|limits| self.0.checked_add(bytes).is_some_and(|n| n <= limits.single))
     }
@@ -365,6 +374,33 @@ impl Read for &File {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn admitted_transfer_is_conserved_across_shared_owner_and_rejection() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut prepared = reserve_from(&counter, 1024).unwrap();
+        let value = Arc::new(prepared.split_off(768).unwrap());
+        let snapshot = value.clone();
+        assert_eq!(counter.load(Ordering::Acquire), 1024);
+        assert!(prepared.split_off(257).is_err());
+        assert_eq!(prepared.bytes(), 256);
+        drop(prepared);
+        assert_eq!(counter.load(Ordering::Acquire), 768);
+        drop(value);
+        assert_eq!(counter.load(Ordering::Acquire), 768, "old snapshot owns its value");
+        drop(snapshot);
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn frame_transfer_failure_releases_partial_recovery_owners() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut admitted = reserve_from(&counter, 4096).unwrap();
+        let partial = vec![admitted.split_off(1024).unwrap(), admitted.split_off(2048).unwrap()];
+        assert!(admitted.split_off(1025).is_err());
+        drop(partial);
+        assert_eq!(counter.load(Ordering::Acquire), 1024);
+        drop(admitted);
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+    }
     fn root() -> PathBuf {
         let p =
             std::env::temp_dir().join(format!("anyseek-budget-{:032x}", rand::random::<u128>()));

@@ -1,5 +1,29 @@
 # Bounded 100k capacity: implementation checkpoint
 
+## Ownership implementation in progress
+
+Background indexing now keeps its captured State through authenticated package
+verification and moves that same owner into the candidate. It no longer discards
+the captured history merely to deserialize a second complete copy. Configuration,
+sequence, ordered frame/digest, visible identities, publication and cancellation
+checks remain in place. The original captured-State clone still exists: this
+change alone does not solve the capacity peak.
+
+Local regressions: captured owner/authentication failure 1 passed; background
+indexer 5 passed/1 subprocess helper ignored; budget tests 8 passed; immutable
+value/lease transfer tests 3 passed. Independent review found no blocker in the
+captured-State transfer. The initial new test's existing-directory fixture error
+was fixed by selecting a new child root, without changing production behavior.
+
+A private immutable value owner and lease split primitive are being prepared for
+State container integration. The latter moves already admitted bytes without a
+second global reservation. Tests cover last-reference release, failed transfer,
+pre-clone rejection and wire identity. These primitives are **not yet the live
+State representation**. Remaining work: per-value/frame ownership, gross write
+pre-admission with old snapshots retained, separately charged container copies,
+complete-history recovery and same-budget 100k measurement. The full-State single
+admission remains until those real allocation ownership changes are complete.
+
 ## Validation follow-up (2026-10-26)
 
 The `b6a39fe` production code passed local all-targets (372 passed, 0 failed,

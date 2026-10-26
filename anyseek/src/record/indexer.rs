@@ -130,12 +130,10 @@ impl RecordPartition {
             let result = async {
                 if started.elapsed() >= timeout { return Err(RecordError::Busy); }
                 let reference = anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true).await?;
-                // Preparation has sealed the immutable package. Release its input
-                // State before decoding a second complete State from that package.
-                // The live partition, package closure and subsequent candidate
-                // retain their own independent ownership throughout publication.
-                drop(snapshot);
-                let loaded = reference.load(&root,config.max_journal_bytes).await?;
+                // The pinned cut already owns complete history. Verify the
+                // authenticated package against it and transfer that same owner
+                // into the candidate instead of decoding a duplicate State.
+                let loaded = reference.load_captured(&root, config.clone(), snapshot).await?;
                 let payloads = loaded.payloads;
                 let mut index = view::RetrievalView::single(loaded.index);
                 let mut ordinals = loaded.ordinals;
