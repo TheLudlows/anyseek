@@ -4,7 +4,8 @@ The first slice introduces explicit native writer sealing and stable candidate
 package paths. The second slice directly reuses stable live tails during ordinary
 anchor publication. Initial cache layouts, independent snapshots and bounded
 compaction retain authoritative rebuilds. Local index sealing is now separate
-from State checkpoint publication; remote/S3 keeps the original full path.
+from State checkpoint publication. Remote/S3 still performs full checkpoint
+publication, but shares eligible direct-tail package reuse in that common path.
 
 A candidate is built at its final segment identity, drains native commit/reload,
 joins writer workers, and only then computes the immutable inventory. Existing
@@ -15,7 +16,7 @@ the existing authenticated Reference and Record certificate still select it.
 Partition ownership excludes concurrent retirement during preparation; subsequent
 anchor bundle publication supplies parent-directory durability.
 
-## Validation of this slice
+## Historical foundation validation
 
 Linux compilation and five isolated regressions passed, with no ignored cases.
 The largest fixture contains 129 records:
@@ -27,7 +28,8 @@ The largest fixture contains 129 records:
 - `default_anchor_loads_index_and_replays_only_tail_with_pinned_quantization`
 
 The injected failure is a real directory write/commit failure, not a separately
-injected worker-join failure. Windows execution of this new slice is pending.
+injected worker-join failure. These are the initial local results; subsequent
+dual-platform validation is tracked by exact commit in PR #85.
 No original capacity database or stopped load was resumed.
 
 ## Direct reuse and failed publication
@@ -61,7 +63,8 @@ the pressure permits admission. This reserves logical quota, not GiB allocations
 
 Quick CI includes these four and the first slice's two writer-owner cases; the
 original 24-case core run passed, followed by this additional exact case.
-Windows validation for direct reuse remains pending. The largest targeted fixture
+The successor-admission and direct-reuse cases subsequently passed on Linux and
+Windows at `5505926` (Actions run `40334585300`). The largest targeted fixture
 is 129 records. No large experiment or original data writes were resumed.
 
 ## Local index seal versus checkpoint
@@ -76,7 +79,9 @@ journal certificate, truncate history or make an unselected package authoritativ
 
 Explicit checkpoint, recoverable WAL space pressure and the package-count bound
 still use full publication. Initial/nonstable layouts, private cleanup and S3
-fall back to the original full path. TTL/lease appends also preserve reserved WAL
+fall back to the full publication path. S3 can reuse an eligible stable tail through
+`prepare_and_publish_anchor`, then still performs State authentication, remote
+authority publication and local journal checkpoint; it is not seal-only. TTL/lease appends also preserve reserved WAL
 capacity; invalid frames/recovery-required errors do not request checkpointing,
 and OutcomeUnknown propagates unchanged. Subsequent admission is checked again.
 
@@ -93,8 +98,11 @@ records and identical retries for the 129 appended operations. Other cases cover
 old Payload/State/pending-package corruption, semantically invalid WAL maintenance,
 same-sequence FeedTrim, space-triggered checkpoint and uncertain certificate
 recovery. The package-bound case verifies nine records and nine history entries,
-not individual receipt retries. Server/S3 feature compilation passed; the remote
-runtime matrix and this new HEAD's Windows execution remain separate validation.
+not individual receipt retries. Server/S3 feature compilation and four bounded
+Linux SQLite/in-memory object-store regressions passed: refused admission/receipts,
+checkpoint/GC/cold-tail queries, interrupted publication, and cache corruption/loss.
+These are fixtures, not real S3 or the full remote matrix. Exact-commit platform
+results are maintained in [PR #85](https://github.com/TheLudlows/anyseek/pull/85).
 
 This is not a throughput result. WAL suffix traversal and State metadata/history
 validation remain. The WAL visitor's frame scratch and decoder residency overlap
@@ -122,3 +130,27 @@ Two small proof fixtures plus the 25 existing exact core cases passed locally
 history, nonempty revision values, low epoch, same-sequence metadata, lookup and
 full JSON length/projection oracles. The local separation above uses this proof;
 remote checkpoint separation remains unimplemented.
+
+## Remaining cost and measurement scope
+
+Direct sealing removes rebuilding an eligible native tail and avoids publishing a
+State checkpoint on each local index rotation. It does not make rotation O(1):
+
+- `Reference::verify_live_suffix` reauthenticates the selected disk closure,
+  Payload objects and selected/pending packages, then parses/replays the entire
+  committed suffix since the checkpoint.
+- `state_proof::verify` walks complete ordered records/history and validates
+  metadata and lookup associations. Shared immutable values avoid re-encoding
+  unchanged bodies, but container traversal and independently decoded value hashes
+  remain. State clones retain key/pointer and metadata allocation charges.
+- Explicit, WAL-pressure and package-bound checkpoints still encode full State
+  and authenticate the complete closure. S3 still uses full publication.
+- Ordinary writes still pay their existing durable journal and native
+  commit/reload costs. No fsync-only cost or new throughput gain has been measured.
+
+Next measurement should use fresh isolated roots, fixed builds, identical budgets
+and corpus, and separate ordinary batches, index seals, checkpoints and reopen
+latencies. Check correctness/errors alongside timings. Restarting large workloads
+requires renewed authorization; the original 63,325-record experiment remains
+stopped and untouched. Full recovery/browser stability, real S3, hard power loss
+and cross-AES acceptance are not established by the small regressions.
