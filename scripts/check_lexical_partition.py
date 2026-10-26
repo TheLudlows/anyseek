@@ -21,18 +21,24 @@ COMMAND = ['cargo', 'test', '-p', 'anyseek', '--test', 'lexical_correctness',
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--case', choices=sorted(LARGE))
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--case', choices=sorted(LARGE))
+    group.add_argument('--source-only', action='store_true', help='validate source/matrix without compiling or running tests')
     args = parser.parse_args()
-    workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+    workflow = (ROOT / '.github/workflows/full-acceptance.yml').read_text()
     section = workflow.split('  windows-lexical:\n', 1)[1].split('  s3-native-acceptance:', 1)[0]
     matrix = re.findall(r'^          - (\w+)$', section, re.MULTILINE)
     assert len(matrix) == len(LARGE) and set(matrix) == LARGE, matrix
     remainder = workflow.split('      - name: Native retained public Record integration contracts (Windows remainder)', 1)[1].split('      - name:', 1)[0]
     skips = re.findall(r'--skip (\S+)', remainder)
     assert set(skips) == set(PREFIXES), skips
-    result = subprocess.run(COMMAND + ['--', '--list'], cwd=ROOT, check=True,
-                            stdout=subprocess.PIPE, text=True)
-    inventory = set(re.findall(r'^(\w+): test$', result.stdout, re.MULTILINE))
+    if args.source_only:
+        source = (ROOT / 'anyseek/tests/lexical_correctness.rs').read_text()
+        inventory = set(re.findall(r'#\[tokio::test\]\s*async fn (\w+)\(', source))
+    else:
+        result = subprocess.run(COMMAND + ['--', '--list'], cwd=ROOT, check=True,
+                                stdout=subprocess.PIPE, text=True)
+        inventory = set(re.findall(r'^(\w+): test$', result.stdout, re.MULTILINE))
     assert inventory == LARGE | SMALL, inventory
     excluded = {name for name in inventory if any(skip in name for skip in skips)}
     assert excluded == LARGE and inventory - excluded == SMALL

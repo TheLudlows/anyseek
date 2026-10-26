@@ -1,0 +1,21 @@
+[
+  "record::checkpoint_codec::tests::measurement_uses_one_serialization_and_preserves_errors_and_overflow",
+  "record::checkpoint_codec::tests::encoding_is_bound_to_full_state_not_business_sequence",
+  "record::checkpoint_codec::tests::bounded_json_counts_exact_limit_escaped_references_and_errors",
+  "record::checkpoint_codec::tests::borrowed_checkpoint_matches_existing_wire_bytes_and_digest",
+  "record::state_chunks::tests::chunks_preserve_full_history_staging_opaque_json_and_owned_residency",
+  "record::state_chunks::tests::chunks_reject_truncation_forged_expansion_and_frame_length_before_decode",
+  "record::state_chunks::tests::verified_stream_rejects_reordering_duplicate_identity_and_changed_expected_state",
+  "record::anchor::tests::manifest_writer_and_reader_agree_at_exact_byte_boundary",
+  "record::anchor::tests::incremental_state_same_sequence_maintenance_and_independent_backup",
+  "record::anchor::tests::incremental_state_closure_survives_rejection_gc_and_reopen",
+  "record::anchor::tests::captured_cut_retains_owner_and_rejects_mismatch_without_install",
+  "record::lexical::runtime::tests::automatic_tail_rotation_preserves_durable_retry_and_fixed_searcher",
+  "storage::journal::tests::committed_stream_preserves_lock_and_cursor_on_unwind",
+  "storage::journal::tests::committed_stream_restore_failure_fences_owner",
+  "storage::journal::tests::committed_stream_keeps_append_cursor_and_ignores_uncommitted_suffix",
+  "storage::journal::tests::committed_stream_rejects_corruption_and_uncertain_writer",
+  "storage::journal::tests::committed_stream_late_corruption_does_not_certify_prefix",
+  "storage::partition::tests::committed_stream_preserves_checkpoint_suffix_order",
+  "storage::partition::tests::committed_stream_rejects_marker_after_uncertified_entry"
+]
