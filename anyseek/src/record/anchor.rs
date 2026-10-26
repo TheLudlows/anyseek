@@ -560,14 +560,21 @@ impl Inner {
     /// Recovery reconstructs pending packages from the complete committed suffix.
     pub(super) async fn maintain_index_tail(&mut self)->Result<(),RecordError> {
         if self.background.is_some(){return Err(RecordError::Busy);}
-        #[cfg(feature="s3-object-store")]
-        if self.remote.is_some(){self.publish_anchor().await?;return Ok(());}
         let root=self.journal.root().to_path_buf();
         let eligible=!self.state.private_cleanup_pending
             && self.anchor.as_ref().is_some_and(|a|a.captured.get().is_some()
                 && a.segments.len()+self.index.pending_seals.len()+1<capacity::segments(&self.config))
             && self.index.stable_tail_path(&root).await.is_some();
         if !eligible {self.publish_anchor().await?;return Ok(());}
+        #[cfg(feature="s3-object-store")]
+        if let Some(remote)=self.remote.as_ref() {
+            if let Err(error)=remote.verify_seal_inputs(self.anchor.as_ref().unwrap(),self.state.seq,&mut self.journal,self.config.max_journal_bytes).await {
+                if matches!(error,RecordError::Busy) {return Err(error);}
+                self.healthy=false;
+                self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+                return Err(error);
+            }
+        }
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
         self.anchor.as_ref().unwrap().verify_live_suffix(&root,&self.config,&self.state,&mut self.journal,&self.index.pending_seals)?;
         if self.index.local_statistics().await?.first().is_none_or(|s|s.keys.is_empty()){return Ok(());}
@@ -575,6 +582,9 @@ impl Inner {
     }
     pub(super) async fn ensure_journal_room(&mut self,bytes:usize,reserve:usize)->Result<(),RecordError> {
         if self.journal.checkpoint_can_make_room(bytes,reserve){self.publish_anchor().await?;}
+        self.validate_journal_room(bytes,reserve)
+    }
+    pub(super) fn validate_journal_room(&self,bytes:usize,reserve:usize)->Result<(),RecordError> {
         self.journal.validate_append_with_reserve(bytes,reserve).map_err(|e|{
             if e.kind()==std::io::ErrorKind::InvalidInput {RecordError::Rejected(e.to_string())}else{storage(e)}
         })

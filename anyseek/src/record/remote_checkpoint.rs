@@ -66,6 +66,79 @@ fn admit_checkpoint_chunks(files: &[(String, u64, [u8; 32])], object_bytes: usiz
 }
 
 impl RemotePersistence {
+    pub(super) async fn tail_needs_checkpoint(&self,seq:u64,operation_id:&str,payload:&[u8])->Result<bool,RecordError> {
+        #[derive(Serialize)]
+        struct Entry<'a>{seq:u64,operation_id:&'a str,request_sha256:[u8;32],payload:&'a [u8]}
+        #[derive(Serialize)]
+        struct Block<'a>{partition_id:&'a str,first_seq:u64,last_seq:u64,previous:Option<&'a ObjectRef>,entries:[Entry<'a>;1]}
+        let authority=self.authority.lock().await;
+        let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch!=self.owner_epoch || head.committed_seq.checked_add(1)!=Some(seq) {return Err(RecordError::RecoveryRequired);}
+        let mut block=Block{partition_id:&self.partition_id,first_seq:seq,last_seq:seq,previous:head.wal_tip.as_ref(),entries:[Entry{seq,operation_id,request_sha256:Sha256::digest(payload).into(),payload}]};
+        let bytes=checkpoint_codec::json_length(&block)? as u64;
+        let (count,total)=authority.retained_tail_size(&head).map_err(storage)?;
+        if bytes<=self.max_object_bytes as u64 && count<self.max_tail_blocks as u64
+            && total.checked_add(bytes).is_some_and(|n|n<=self.max_tail_bytes as u64) {return Ok(false);}
+        block.previous=None;
+        let fresh=checkpoint_codec::json_length(&block)?;
+        if self.max_tail_blocks==0 || fresh>self.max_object_bytes || fresh>self.max_tail_bytes {
+            return Err(RecordError::Rejected("remote WAL entry exceeds recovery budget".into()));
+        }
+        Ok(true)
+    }
+    /// Authenticate the existing remote authority without advancing its recovery
+    /// baseline. Local pending packages are derived caches, never remote authority.
+    pub(super) async fn verify_seal_inputs(&self, reference:&anchor::Reference, seq:u64,
+        journal:&mut PartitionJournal, authority_budget:u64)->Result<(),RecordError> {
+        let authority=self.authority.lock().await;
+        let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch!=self.owner_epoch || head.committed_seq!=seq {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let store=self.store.uncached();
+        let object=head.manifest.as_ref().ok_or(RecordError::RecoveryRequired)?;
+        let bytes=store.get_verified(object).await.map_err(remote_read_error)?;
+        let _decode=crate::storage::build_budget::reserve_memory((bytes.len() as u64).checked_mul(32).ok_or_else(||storage("remote seal metadata overflow"))?).map_err(|_|RecordError::Busy)?;
+        let checkpoint:Checkpoint=serde_json::from_slice(&bytes).map_err(storage)?;
+        if checkpoint.format!=1 || checkpoint.partition_id!=self.partition_id
+            || checkpoint.seq!=head.indexed_seq || checkpoint.seq!=head.log_base_seq
+            || checkpoint_codec::json_digest(&checkpoint.anchor)?!=checkpoint_codec::json_digest(reference)? {
+            return Err(storage("remote seal authority mismatch"));
+        }
+        // Fresh backend reads preserve the publication-time corruption check.
+        // No mtime, cached bytes or registered digest substitutes for this check.
+        let mut chunks=0usize;let mut total=0usize;
+        let max_total=authority_budget.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("remote seal budget overflow"))?;
+        if checkpoint.files.len()>10_000 {return Err(storage("remote seal file count"));}
+        for file in &checkpoint.files {
+            let mut hash=Sha256::new();let mut length=0u64;
+            for chunk in &file.chunks {
+                chunks=chunks.checked_add(1).filter(|n|*n<=self.max_tail_blocks).ok_or_else(||storage("remote seal chunk budget"))?;
+                let bytes=store.get_verified(chunk).await.map_err(remote_read_error)?;
+                total=total.checked_add(bytes.len()).filter(|n|*n as u64<=max_total).ok_or_else(||storage("remote seal bytes overflow"))?;
+                length=length.checked_add(bytes.len() as u64).ok_or_else(||storage("remote seal file overflow"))?;
+                hash.update(&bytes);
+            }
+            let digest:[u8;32]=hash.finalize().into();
+            if length!=file.length || digest!=file.sha256 {return Err(storage("remote seal file checksum"));}
+        }
+        let entries=crate::storage::object_log::load_committed_tail(&store,&head,self.max_tail_blocks,self.max_tail_bytes).await.map_err(|e|match e {crate::storage::object_log::TailError::ObjectStore(e)=>remote_read_error(e),other=>storage(other)})?;
+        let mut index=0usize;let mut first=true;
+        journal.visit_committed(|bytes| {
+            if first {first=false;return Ok(());}
+            let Some(entry)=entries.get(index) else{return Err(std::io::Error::other("local suffix exceeds remote authority"));};
+            if entry.payload!=bytes || entry.request_sha256!=<[u8;32]>::from(Sha256::digest(bytes)) {
+                return Err(std::io::Error::other("remote/local suffix differs"));
+            }
+            index+=1;Ok(())
+        }).map_err(storage)?;
+        if first || index!=entries.len(){return Err(storage("local suffix omits remote commits"));}
+        // Other SQLite connections may race while object reads await. Bind the
+        // exact head version, including same-sequence maintenance and owner epoch.
+        let after=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if after!=head {return Err(RecordError::RecoveryRequired);}
+        Ok(())
+    }
     pub(super) async fn publish_anchor(
         &mut self,
         root: &Path,
@@ -563,10 +636,13 @@ mod tests {
         }
     }
     async fn source() -> (RecordPartition, Arc<InMemory>, PathBuf, PathBuf, Arc<Clock>) {
+        source_config(config()).await
+    }
+    async fn source_config(settings:RecordConfig) -> (RecordPartition, Arc<InMemory>, PathBuf, PathBuf, Arc<Clock>) {
         let root = path();
         let db = path();
         let store = Arc::new(InMemory::new());
-        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let p = RecordPartition::create(&root, settings).await.unwrap();
         let remote = remote(store.clone(), &db, "source");
         let mut inner = p.inner.lock().await;
         let initial = encode_entry(&Entry::Checkpoint {
@@ -609,6 +685,78 @@ mod tests {
         assert_eq!(receipt.seq, 1);
         assert_eq!(scope.run(p.write(request)).await.unwrap(), receipt);
     }
+    #[tokio::test]
+    async fn remote_seal_keeps_checkpoint_and_cold_replays_pending_packages() {
+        let mut settings=config();settings.max_records=256;settings.max_operations=256;
+        let (p,_store,root,_db,clock)=source_config(settings).await;
+        p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let before={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head};
+        let mut receipts=Vec::new();
+        for i in 0..129 {let request=write(&format!("op{i}"),&format!("r{i}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(request.clone()).await.unwrap();receipts.push((request,receipt));}
+        {let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
+            assert_eq!(head.indexed_seq,before.indexed_seq);assert_eq!(head.log_base_seq,before.log_base_seq);assert_eq!(head.manifest,before.manifest);
+            assert_eq!(head.committed_seq,130);assert!(!inner.index.pending_seals.is_empty());}
+        let expected=scores(&p).await;
+        let p=cold(p,&root,clock).await;
+        assert_eq!(scores(&p).await,expected);
+        for (request,receipt) in receipts {assert_eq!(p.write(request).await.unwrap(),receipt);}
+    }
+
+    #[tokio::test]
+    async fn remote_tail_budget_checkpoints_before_commit_and_rejects_oversize() {
+        let (p,_store,root,_db,clock)=source().await;
+        p.inner.lock().await.remote.as_mut().unwrap().max_tail_blocks=64;
+        p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        // Keep checkpoint chunk budget viable while reducing the independent
+        // WAL byte budget to less than two ordinary operation envelopes.
+        let request=write("first","a","alpha",ExpectedVersion::Absent);
+        let receipt=p.write(request.clone()).await.unwrap();
+        let first_bytes={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let authority=remote.authority.lock().await;let head=authority.read_head("source").unwrap().unwrap();authority.retained_tail_size(&head).unwrap().1};
+        p.inner.lock().await.remote.as_mut().unwrap().max_tail_bytes=first_bytes as usize+200;
+        p.write(write("second","b","alpha",ExpectedVersion::Absent)).await.unwrap();
+        {let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let authority=remote.authority.lock().await;let head=authority.read_head("source").unwrap().unwrap();assert_eq!(head.log_base_seq,2);assert_eq!(head.committed_seq,3);assert_eq!(authority.retained_tail_size(&head).unwrap().0,1);}
+        let p=cold(p,&root,clock).await;
+        assert_eq!(p.write(request).await.unwrap(),receipt);
+        let before=p.statistics().await.unwrap().visible_seq;
+        p.inner.lock().await.remote.as_mut().unwrap().max_tail_bytes=1;
+        assert!(matches!(p.write(write("too-big","c","alpha",ExpectedVersion::Absent)).await,Err(RecordError::Rejected(_))));
+        assert_eq!(p.statistics().await.unwrap().visible_seq,before);
+        assert!(p.inner.lock().await.healthy);
+    }
+
+    #[tokio::test]
+    async fn remote_seal_resource_refusal_keeps_writer_and_corruption_fences() {
+        use crate::resources::{Governor,Lane};
+        let (p,backend,_root,_db,_clock)=source().await;
+        p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        p.write(write("tail","tail","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let governor=Arc::new(Governor::default());let scope=governor.admit("seal".into(),Lane::Foreground,0).unwrap();
+        let one=scope.io().unwrap();let two=scope.io().unwrap();
+        let result=scope.run(async {p.inner.lock().await.maintain_index_tail().await}).await;
+        assert!(matches!(result,Err(RecordError::Busy)));assert!(p.inner.lock().await.healthy);
+        drop(one);drop(two);
+        p.write(write("after-busy","third","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let tip={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head.wal_tip.unwrap()};
+        use object_store::ObjectStore;
+        backend.put(&object_store::path::Path::from(tip.key),object_store::PutPayload::from_static(b"corrupt")).await.unwrap();
+        assert!(p.inner.lock().await.maintain_index_tail().await.is_err());
+        assert!(!p.inner.lock().await.healthy);
+    }
+
+    #[tokio::test]
+    async fn remote_tail_count_pressure_preserves_all_receipts() {
+        let (p,_store,root,_db,clock)=source().await;
+        p.inner.lock().await.remote.as_mut().unwrap().max_tail_blocks=64;
+        let mut receipts=Vec::new();
+        for i in 0..65 {let request=write(&format!("op{i}"),"same","alpha",if i==0 {ExpectedVersion::Absent}else{ExpectedVersion::Match(i)});let receipt=p.write(request.clone()).await.unwrap();receipts.push((request,receipt));}
+        {let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let authority=remote.authority.lock().await;let head=authority.read_head("source").unwrap().unwrap();assert_eq!(head.committed_seq,65);assert_eq!(head.log_base_seq,64);assert_eq!(authority.retained_tail_size(&head).unwrap().0,1);}
+        let p=cold(p,&root,clock).await;
+        for (request,receipt) in receipts {assert_eq!(p.write(request).await.unwrap(),receipt);}
+    }
+
     async fn cold(p: RecordPartition, root: &Path, clock: Arc<Clock>) -> RecordPartition {
         let remote = p.inner.lock().await.remote.take().unwrap();
         drop(p);
@@ -1491,4 +1639,20 @@ impl RemoteBuild {
 
         Ok(manifest)
     }
+}
+
+impl Inner {
+    pub(super) async fn ensure_remote_tail_room(&mut self,seq:u64,operation_id:&str,payload:&[u8])->Result<(),RecordError> {
+        let Some(remote)=self.remote.as_ref() else{return Ok(())};
+        if !remote.tail_needs_checkpoint(seq,operation_id,payload).await? {return Ok(());}
+        self.publish_anchor().await?;
+        if self.remote.as_ref().ok_or(RecordError::RecoveryRequired)?.tail_needs_checkpoint(seq,operation_id,payload).await? {
+            return Err(RecordError::Rejected("remote WAL recovery budget unavailable after checkpoint".into()));
+        }
+        Ok(())
+    }
+}
+
+fn remote_read_error(error:object_store::Error)->RecordError {
+    if crate::storage::s3_compatible::is_resource_error(&error) {RecordError::Busy}else{storage(error)}
 }

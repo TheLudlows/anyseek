@@ -1480,6 +1480,9 @@ impl RecordPartition {
                 let feed_point = change_feed::pending(&inner.state,&applied)?;
                 inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;
                 inner.ensure_journal_room(bytes.len(),reserve_bytes).await?;
+                #[cfg(feature="s3-object-store")]
+                inner.ensure_remote_tail_room(applied.receipt.seq,&format!("{}:{}",applied.request.operation_id.epoch,applied.request.operation_id.nonce),&bytes).await?;
+                inner.validate_journal_room(bytes.len(),reserve_bytes)?;
                 let receipt = applied.receipt.clone();
                 #[cfg(feature = "fault-injection")]
                 let injected = std::env::var("ANYSEEK_RECORD_FAULT_NONCE")

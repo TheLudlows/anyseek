@@ -4,8 +4,8 @@ The first slice introduces explicit native writer sealing and stable candidate
 package paths. The second slice directly reuses stable live tails during ordinary
 anchor publication. Initial cache layouts, independent snapshots and bounded
 compaction retain authoritative rebuilds. Local index sealing is now separate
-from State checkpoint publication. Remote/S3 still performs full checkpoint
-publication, but shares eligible direct-tail package reuse in that common path.
+from State checkpoint publication, including the S3 seal-only path described below.
+Remote index-only manifest publication remains a separate pending step.
 
 A candidate is built at its final segment identity, drains native commit/reload,
 joins writer workers, and only then computes the immutable inventory. Existing
@@ -78,10 +78,9 @@ then does it seal the index into an admitted successor. It does not replace the
 journal certificate, truncate history or make an unselected package authoritative.
 
 Explicit checkpoint, recoverable WAL space pressure and the package-count bound
-still use full publication. Initial/nonstable layouts, private cleanup and S3
-fall back to the full publication path. S3 can reuse an eligible stable tail through
-`prepare_and_publish_anchor`, then still performs State authentication, remote
-authority publication and local journal checkpoint; it is not seal-only. TTL/lease appends also preserve reserved WAL
+still use full publication. Initial/nonstable layouts and private cleanup fall
+back to that path. S3 explicit checkpoint uses the common publication path and
+remote authority CAS; its ordinary seal now uses the additional proof below. TTL/lease appends also preserve reserved WAL
 capacity; invalid frames/recovery-required errors do not request checkpointing,
 and OutcomeUnknown propagates unchanged. Subsequent admission is checked again.
 
@@ -129,7 +128,7 @@ Two small proof fixtures plus the 25 existing exact core cases passed locally
 (27/27). They include independent decode, same-length content replacement, ordered
 history, nonempty revision values, low epoch, same-sequence metadata, lookup and
 full JSON length/projection oracles. The local separation above uses this proof;
-remote checkpoint separation remains unimplemented.
+remote index-only manifest publication remains unimplemented.
 
 ## Remaining cost and measurement scope
 
@@ -144,7 +143,7 @@ State checkpoint on each local index rotation. It does not make rotation O(1):
   unchanged bodies, but container traversal and independently decoded value hashes
   remain. State clones retain key/pointer and metadata allocation charges.
 - Explicit, WAL-pressure and package-bound checkpoints still encode full State
-  and authenticate the complete closure. S3 still uses full publication.
+  and authenticate the complete closure, including S3 checkpoint publication.
 - Ordinary writes still pay their existing durable journal and native
   commit/reload costs. No fsync-only cost or new throughput gain has been measured.
 
@@ -154,3 +153,32 @@ latencies. Check correctness/errors alongside timings. Restarting large workload
 requires renewed authorization; the original 63,325-record experiment remains
 stopped and untouched. Full recovery/browser stability, real S3, hard power loss
 and cross-AES acceptance are not established by the small regressions.
+
+## S3 seal-only first slice
+
+S3 now admits the same derived tail handoff without publishing a recovery
+checkpoint on every rotation. Before handoff it freshly authenticates the remote
+checkpoint closure, validates owner/head identity, and compares the complete
+remote committed suffix byte-for-byte with the local WAL. A final head check
+includes same-sequence maintenance. Remote FeedTrim still publishes a complete
+same-sequence checkpoint; it is never omitted from the proof.
+
+Remote append admission counts the retained single-entry WAL blocks and their
+exact serialized sizes from immutable SQLite receipts, including the incoming
+block's previous reference. Count/byte pressure first publishes a checkpoint;
+an oversized standalone entry is rejected before commit. Write, TTL and lease
+paths recheck local WAL space after that checkpoint. Read quota refusal returns
+Busy without sealing/fencing; corruption and authority mismatch remain fenced.
+
+Registered durable objects reuse their existing reference without repeating PUT,
+but still perform fresh backend length/SHA/content verification. This also applies
+to WAL/backup retries. Missing or corrupt registered objects fail rather than
+being silently recreated. Retired keys cannot be reactivated.
+
+Thirteen exact Linux SQLite/in-memory object-store regressions passed (largest
+fixture 130 records), including cold reopen with 129 original receipts, 64-to-65
+WAL count pressure, byte pressure, Busy/retry, remote corruption, same-sequence
+feed maintenance, publication failure, backups, GC and cache loss. These are not
+real S3 acceptance or performance results. This first slice keeps the remotely
+persisted index watermark tied to the recovery checkpoint; a separately published
+index-only manifest is still pending.

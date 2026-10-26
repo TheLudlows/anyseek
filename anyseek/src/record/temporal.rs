@@ -240,6 +240,9 @@ impl Inner {
             .map_err(storage)?;
         let bytes = encode_entry(&Entry::Expired(event.clone()))?;
         self.ensure_journal_room(bytes.len(),reserve).await?;
+        #[cfg(feature="s3-object-store")]
+        self.ensure_remote_tail_room(event.seq,&format!("system:expired:{}",event.seq),&bytes).await?;
+        self.validate_journal_room(bytes.len(),reserve)?;
         self.healthy = false;
         self.output
             .write()
