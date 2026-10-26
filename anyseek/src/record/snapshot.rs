@@ -125,11 +125,11 @@ mod tests {
             let receipt = source.write(request.clone()).await.unwrap();
             accepted.push((request, receipt));
             if (n + 1) % 50 == 0 {
-                eprintln!("large-snapshot accepted={}/300", n + 1);
+                log::info!("large-snapshot accepted={}/300", n + 1);
             }
         }
         let bytes = source.inner.lock().await.snapshot_bytes;
-        eprintln!("large-snapshot canonical_bytes={bytes}");
+        log::info!("large-snapshot canonical_bytes={bytes}");
         assert!(bytes > 16 * 1024 * 1024);
         assert!(PartitionJournal::validate_initial(bytes, settings.max_journal_bytes).is_err());
         let target = root.path().join("snapshot");
