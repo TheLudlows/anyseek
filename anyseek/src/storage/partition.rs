@@ -401,7 +401,7 @@ impl PartitionJournal {
     /// particular, do not filter using business seq: maintenance entries can
     /// change State without incrementing that sequence.
     pub(crate) fn visit_committed(
-        &self,
+        &mut self,
         mut accept: impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
         let mut published = false;

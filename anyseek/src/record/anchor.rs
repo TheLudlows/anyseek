@@ -171,7 +171,7 @@ impl Reference {
         if result.len()>10_000 {return Err(storage("checkpoint file count exceeded"));}
         Ok(result)
     }
-    pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&PartitionJournal>)->Result<Self,RecordError>{
+    pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
         let id=format!("{:032x}",rand::random::<u128>());
         let prepared=root.join(format!(".anchor-prepare-{id}"));
         std::fs::create_dir(&prepared).map_err(storage)?;
@@ -476,7 +476,7 @@ impl Inner {
         let next_seq=next.seq;
         let snapshot_bytes=checkpoint_codec::length(&self.config, next)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
-        let mut reference=Reference::prepare(&root,&self.config,next,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&self.journal)}else{None}).await?;
+        let mut reference=Reference::prepare(&root,&self.config,next,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None}).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));

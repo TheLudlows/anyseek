@@ -41,7 +41,7 @@ impl Delta {
     /// successful callbacks are not a license to publish a partial suffix.
     pub(super) fn write(
         root: &Path, config: &RecordConfig, pool: &mut PoolBuilder,
-        journal: &PartitionJournal, parent: &anchor::Reference, identity: String,
+        journal: &mut PartitionJournal, parent: &anchor::Reference, identity: String,
     ) -> Result<Option<Self>, RecordError> {
         let mut writer = Writer { root, config, pool, file: None, chunks: Vec::new(), entries: 0, expanded: 0,
             metadata:descriptor_admission(config)?, };
