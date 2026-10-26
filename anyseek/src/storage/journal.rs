@@ -389,6 +389,14 @@ impl Journal {
         Ok(())
     }
 
+    /// Only recoverable physical space pressure may request checkpointing.
+    /// Recovery-required, oversized frames and exhausted sequence are not space.
+    pub(crate) fn checkpoint_can_make_room(&self,length:usize,reserve:usize)->bool {
+        !self.needs_recovery && length<=MAX_FRAME && self.seq<u64::MAX
+            && (FRAME_HEADER as u64).checked_add(length as u64).and_then(|n|n.checked_add(reserve as u64)).is_some_and(|n|n<=self.max_bytes)
+            && self.end.checked_add(FRAME_HEADER as u64).and_then(|n|n.checked_add(length as u64))
+                .and_then(|n|n.checked_add(reserve as u64)).is_some_and(|n|n>self.max_bytes)
+    }
     pub(crate) fn validate_append(&self, length: usize) -> io::Result<()> {
         self.validate_append_with_reserve(length, 0)
     }

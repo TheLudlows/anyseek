@@ -3,7 +3,8 @@
 The first slice introduces explicit native writer sealing and stable candidate
 package paths. The second slice directly reuses stable live tails during ordinary
 anchor publication. Initial cache layouts, independent snapshots and bounded
-compaction retain authoritative rebuilds. Checkpoint is **not yet decoupled**.
+compaction retain authoritative rebuilds. Local index sealing is now separate
+from State checkpoint publication; remote/S3 keeps the original full path.
 
 A candidate is built at its final segment identity, drains native commit/reload,
 joins writer workers, and only then computes the immutable inventory. Existing
@@ -63,22 +64,41 @@ original 24-case core run passed, followed by this additional exact case.
 Windows validation for direct reuse remains pending. The largest targeted fixture
 is 129 records. No large experiment or original data writes were resumed.
 
-## Remaining checkpoint separation
+## Local index seal versus checkpoint
 
-Ordinary publication still computes a full State encoding and authenticates the
-recovery closure. Direct tail reuse removes index reconstruction on the eligible
-path; it does not eliminate full-State/history traversal or demonstrate a measured
-throughput gain. Separate index-seal and checkpoint watermarks must retain one
-business authority, complete WAL recovery, unchanged corruption detection timing,
-owned pins and bounded pending packages. That subsequent slice is not implemented.
+A normal local native-tail rotation first reauthenticates the selected State
+closure, all Payload objects and selected/pending packages. It parses and replays
+the entire committed WAL suffix, including same-sequence maintenance events, from
+the immutable captured State previously validated against the full manifest SHA.
+The replay/live-State equivalence proof below is required before handoff. Only
+then does it seal the index into an admitted successor. It does not replace the
+journal certificate, truncate history or make an unselected package authoritative.
 
-The decoupling review confirmed a further distinction: full-file authentication
-and WAL checksums alone do not replace the existing delta replay/result-vs-State
-self-check. The first decoupled implementation must retain that proof, or supply
-an equivalent incremental proof. It must not silently defer the check merely to
-remove traversal cost. Payload whole-object SHA is checked on open, while each
-payload range SHA is also checked when read. Same-sequence maintenance events and
-remote journal bounds remain in scope.
+Explicit checkpoint, recoverable WAL space pressure and the package-count bound
+still use full publication. Initial/nonstable layouts, private cleanup and S3
+fall back to the original full path. TTL/lease appends also preserve reserved WAL
+capacity; invalid frames/recovery-required errors do not request checkpointing,
+and OutcomeUnknown propagates unchanged. Subsequent admission is checked again.
+
+Recovery authenticates the selected closure, retires only unselected/unpinned
+derived segments before allocating another tail, then replays the complete WAL.
+Replay can seal derived components without publishing a new certificate. Failed
+recovery cannot accumulate an unbounded sequence of derived directories.
+
+Local verification: 30 exact cases passed on the production change, followed by
+a ninth-record package-bound case (31 total, no ignored cases). Largest fixture:
+130 records; the test confirms unchanged checkpoint identity across automatic
+sealing, three interrupted recoveries with stable leftover counts, final 130
+records and identical retries for the 129 appended operations. Other cases cover
+old Payload/State/pending-package corruption, semantically invalid WAL maintenance,
+same-sequence FeedTrim, space-triggered checkpoint and uncertain certificate
+recovery. The package-bound case verifies nine records and nine history entries,
+not individual receipt retries. Server/S3 feature compilation passed; the remote
+runtime matrix and this new HEAD's Windows execution remain separate validation.
+
+This is not a throughput result. WAL suffix traversal and State metadata/history
+validation remain. The WAL visitor's frame scratch and decoder residency overlap
+and are both charged; neither 32x owner was removed. No original load was resumed.
 
 ## Equivalent replay proof foundation
 
@@ -100,4 +120,5 @@ immutable value lengths plus escaped keys, delimiters and all metadata, preservi
 Two small proof fixtures plus the 25 existing exact core cases passed locally
 (27/27). They include independent decode, same-length content replacement, ordered
 history, nonempty revision values, low epoch, same-sequence metadata, lookup and
-full JSON length/projection oracles. Full checkpoint separation remains pending.
+full JSON length/projection oracles. The local separation above uses this proof;
+remote checkpoint separation remains unimplemented.

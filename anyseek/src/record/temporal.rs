@@ -239,9 +239,7 @@ impl Inner {
         checkpoint_codec::validate_size(snapshot_bytes, reserve, self.config.max_journal_bytes)
             .map_err(storage)?;
         let bytes = encode_entry(&Entry::Expired(event.clone()))?;
-        self.journal
-            .validate_append_with_reserve(bytes.len(), reserve)
-            .map_err(storage)?;
+        self.ensure_journal_room(bytes.len(),reserve).await?;
         self.healthy = false;
         self.output
             .write()

@@ -1400,8 +1400,9 @@ impl RecordPartition {
                 let locations=ordinals.iter().enumerate().map(|(i,key)|(key.clone(),i)).collect();
                 (index,ordinals,locations)},
         };
-        if selected.is_some(){
-            let target=path.join(format!("cache-{:032x}",rand::random::<u128>()));
+        if let Some(reference)=selected.as_ref(){
+            reference.reclaim_unselected_segments(path)?;
+            let target=path.join(format!("segment-{:032x}",rand::random::<u128>()));
             let (tail,_)=build_at(path,&target,&config,&State::default()).await?;
             index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{max_segments:64,max_address_slots:config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?}).await?;
         }
@@ -1430,7 +1431,13 @@ impl RecordPartition {
                 #[cfg(test)]
                 fail_publication_stage: 0,
             };
-        for entry in pending {inner.replay_anchor_tail(entry).await?;}
+        for entry in pending {
+            inner.replay_anchor_tail(entry).await?;
+            #[cfg(test)]
+            if path.join(".test-recovery-after-derived-seal").exists() && !inner.index.pending_seals.is_empty(){
+                return Err(storage("injected recovery interruption after derived seal"));
+            }
+        }
         validate_restored_state(&inner.config,&inner.state)?;
         inner.feed_cache=change_feed::Cache::rebuild(&inner.state,&inner.config.change_feed)?;
         inner.graph_cache=graph::Cache::rebuild(&inner.state)?;
@@ -1464,7 +1471,7 @@ impl RecordPartition {
                 if growth>0 && !inner.index.can_admit(growth,native_updates).await {
                     // One bounded flush attempt before rejecting, never discard
                     // selected history to manufacture admission space.
-                    inner.publish_anchor().await?;
+                    inner.maintain_index_tail().await?;
                     if !inner.index.can_admit(growth,native_updates).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
                 }
                 let prepared=if applied.request.generation.is_none(){Some(state_memory::Prepared::new(&inner.state,&applied)?)}else{None};
@@ -1472,8 +1479,7 @@ impl RecordPartition {
                 else if let Some(candidate)=candidate.as_mut(){candidate.admit_bytes(snapshot_bytes)?;}
                 let feed_point = change_feed::pending(&inner.state,&applied)?;
                 inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;
-                inner.journal.validate_append_with_reserve(bytes.len(), reserve_bytes)
-                    .map_err(|e| RecordError::Rejected(e.to_string()))?;
+                inner.ensure_journal_room(bytes.len(),reserve_bytes).await?;
                 let receipt = applied.receipt.clone();
                 #[cfg(feature = "fault-injection")]
                 let injected = std::env::var("ANYSEEK_RECORD_FAULT_NONCE")

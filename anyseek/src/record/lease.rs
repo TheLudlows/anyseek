@@ -71,7 +71,7 @@ impl Inner {
         let reserve=generation::reserve_bytes(&candidate);
         checkpoint_codec::validate_size(snapshot_bytes,reserve,self.config.max_journal_bytes).map_err(storage)?;
         let bytes=encode_entry(&Entry::LeaseExpired(event.clone()))?;
-        self.journal.validate_append_with_reserve(bytes.len(),reserve).map_err(storage)?;
+        self.ensure_journal_room(bytes.len(),reserve).await?;
         self.healthy=false;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
         #[cfg(feature = "s3-object-store")]
         if let Some(remote) = self.remote.as_mut() {

@@ -25,5 +25,9 @@
   "record::anchor::tests::pending_seals_keep_retired_versions_out_of_vector_and_field_queries",
   "record::lexical::runtime::tests::successor_writer_rejection_leaves_predecessor_writable",
   "record::state_proof::tests::shared_proof_matches_wire_and_detects_independent_same_size_changes",
-  "record::state_proof::tests::proof_preserves_order_same_sequence_metadata_and_lookup"
+  "record::state_proof::tests::proof_preserves_order_same_sequence_metadata_and_lookup",
+  "record::anchor::tests::automatic_seal_leaves_checkpoint_unchanged_and_replays_complete_suffix",
+  "record::anchor::tests::seal_proof_rejects_old_closure_or_semantic_wal_damage_before_handoff",
+  "record::anchor::tests::journal_pressure_checkpoints_before_append_and_preserves_unknown_outcome",
+  "record::anchor::tests::derived_package_bound_falls_back_to_checkpoint_without_dropping_records"
 ]

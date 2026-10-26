@@ -290,6 +290,60 @@ impl Reference {
         let owned=metadata_lease.split_off(needed).map_err(storage)?;
         Ok(Self{metadata:Arc::new(ReferenceOwner{data,_lease:owned}),captured:Arc::default(),previous_capture})
     }
+    /// Call only after this selected closure and the journal have authenticated,
+    /// under the exclusive journal owner. Reclaim crash-left derived packages
+    /// before creating another recovery tail, without touching selected/pinned data.
+    pub(super) fn reclaim_unselected_segments(&self,root:&Path)->Result<(),RecordError>{
+        for entry in std::fs::read_dir(root).map_err(storage)? {
+            let entry=entry.map_err(storage)?;let name=entry.file_name();let Some(name)=name.to_str() else{continue;};
+            let Some(id)=name.strip_prefix("segment-") else{continue;};
+            if !valid(id) || self.segments.iter().any(|s|s.id==id){continue;}
+            package_pins::retire_if_unpinned(&entry.path(),||{
+                if !entry.file_type().map_err(storage)?.is_dir(){return Err(storage("derived segment is not a directory"));}
+                std::fs::remove_dir_all(entry.path()).map_err(storage)
+            })?;
+        }
+        Ok(())
+    }
+    fn verify_live_suffix(&self,root:&Path,config:&RecordConfig,live:&State,journal:&mut PartitionJournal,pending:&[Frozen])->Result<(),RecordError>{
+        let captured=self.captured.get().ok_or_else(||storage("missing certified State proof owner"))?;
+        // captured is set only after full load/manifest validation and cannot
+        // mutate. Reauthenticated inventory binds the exact originally validated
+        // manifest/base/deltas, not a sequence-keyed mutable cache.
+        let (_path,manifest,_pool,_metadata)=self.authenticated_manifest(root,config.max_journal_bytes)?;
+        if manifest.seq!=captured.seq || checkpoint_codec::json_digest(manifest.state.config())?!=checkpoint_codec::json_digest(config)? {
+            return Err(storage("selected recovery proof identity mismatch"));
+        }
+        for package in self.segments.iter().chain(pending) {package.verify(root,closure_limit(config.max_journal_bytes)?)?;}
+        if state_proof::length(live)? as u64>config.max_journal_bytes {return Err(storage("live State proof exceeds authority budget"));}
+        let mut replayed=captured.try_clone()?;
+        let mut admitted=state_proof::length(&replayed)?;
+        let expected=checkpoint_codec::json_digest(self)?;
+        let mut first=true;
+        journal.visit_committed(|bytes| {
+            let result=(||->Result<(),RecordError>{
+                let size=(bytes.len() as u64).checked_mul(32).ok_or_else(||storage("WAL proof decode overflow"))?;
+                let _decode=crate::storage::build_budget::reserve_memory(size).map_err(storage)?;
+                let entry:Entry=serde_json::from_slice(bytes).map_err(storage)?;
+                if first {
+                    first=false;
+                    return match entry {Entry::Anchor(reference) if checkpoint_codec::json_digest(&reference)?==expected=>Ok(()),_=>Err(storage("WAL proof authority mismatch"))};
+                }
+                let growth=checkpoint_codec::json_length(&entry)?.checked_mul(3).ok_or_else(||storage("WAL proof growth overflow"))?;
+                admitted=admitted.checked_add(growth).ok_or_else(||storage("WAL proof size overflow"))?;
+                replayed.admit_bytes(admitted)?;
+                match entry {
+                    Entry::Applied(op)=>apply(&mut replayed,&op),
+                    Entry::Expired(event)=>temporal::apply(&mut replayed,&event),
+                    Entry::LeaseExpired(event)=>lease::apply(&mut replayed,&event),
+                    Entry::FeedTrim(event)=>change_feed::apply_trim(&mut replayed,&config.change_feed,&event),
+                    Entry::Anchor(_)|Entry::Checkpoint{..}=>Err(storage("authority in WAL suffix")),
+                }
+            })();result.map_err(|e|std::io::Error::other(e.to_string()))
+        }).map_err(storage)?;
+        if first{return Err(storage("missing WAL proof authority"));}
+        state_proof::verify(config,live,&replayed)
+    }
     fn authenticated_manifest(&self,root:&Path,authority_budget:u64)->Result<(PathBuf,Manifest,PoolReader,crate::storage::build_budget::MemoryLease),RecordError>{
         if self.segments.is_empty()||self.segments.len()>capacity::MAX_SEGMENTS{return Err(storage("invalid selected segment count"));}
         let mut ids=std::collections::BTreeSet::new();
@@ -425,6 +479,10 @@ impl Inner {
     pub(super) async fn replay_anchor_tail(&mut self,entry:Entry)->Result<(),RecordError>{
         match entry {
             Entry::Applied(applied)=>{
+                let (index_bytes,updates)=build_budget::write_estimate(&self.state,&self.config,&applied)?;
+                if index_bytes>0 && !self.index.can_admit(index_bytes,updates).await {
+                    self.stage_stable_tail().await?;
+                }
                 let growth=checkpoint_codec::json_length(&applied)?.checked_mul(3).ok_or_else(||storage("tail state growth overflow"))?;
                 if applied.request.generation.is_some() {
                     let mut next=self.state.try_clone_with_growth(growth)?;apply(&mut next,&applied)?;
@@ -481,6 +539,46 @@ impl Inner {
         }
         result
     }
+    async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
+        let root=self.journal.root().to_path_buf();
+        let target=root.join(format!("segment-{:032x}",rand::random::<u128>()));
+        let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
+        successor.read().await.record_lexical[0].admit_writer().await?;
+        let budget=view::RotationBudget{max_segments:capacity::segments(&self.config).checked_add(1).ok_or_else(||storage("recovery segment limit overflow"))?,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?};
+        // Fence before the first potentially destructive seal. A successful
+        // private handoff restores availability even if certificate preparation
+        // later rejects; an uncertain/failed handoff requires authoritative reopen.
+        let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
+        self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+        self.healthy=false;
+        self.index.seal_into_successor(&root,successor,&mut self.ordinals,&mut self.locations,budget,closure_limit(self.config.max_journal_bytes)?).await?;
+        self.healthy=true;
+        self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
+        Ok(())
+    }
+    /// Local derived index sealing does not advance or replace journal authority.
+    /// Recovery reconstructs pending packages from the complete committed suffix.
+    pub(super) async fn maintain_index_tail(&mut self)->Result<(),RecordError> {
+        if self.background.is_some(){return Err(RecordError::Busy);}
+        #[cfg(feature="s3-object-store")]
+        if self.remote.is_some(){self.publish_anchor().await?;return Ok(());}
+        let root=self.journal.root().to_path_buf();
+        let eligible=!self.state.private_cleanup_pending
+            && self.anchor.as_ref().is_some_and(|a|a.captured.get().is_some()
+                && a.segments.len()+self.index.pending_seals.len()+1<capacity::segments(&self.config))
+            && self.index.stable_tail_path(&root).await.is_some();
+        if !eligible {self.publish_anchor().await?;return Ok(());}
+        let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
+        self.anchor.as_ref().unwrap().verify_live_suffix(&root,&self.config,&self.state,&mut self.journal,&self.index.pending_seals)?;
+        if self.index.local_statistics().await?.first().is_none_or(|s|s.keys.is_empty()){return Ok(());}
+        self.stage_stable_tail().await
+    }
+    pub(super) async fn ensure_journal_room(&mut self,bytes:usize,reserve:usize)->Result<(),RecordError> {
+        if self.journal.checkpoint_can_make_room(bytes,reserve){self.publish_anchor().await?;}
+        self.journal.validate_append_with_reserve(bytes,reserve).map_err(|e|{
+            if e.kind()==std::io::ErrorKind::InvalidInput {RecordError::Rejected(e.to_string())}else{storage(e)}
+        })
+    }
     async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();
@@ -491,19 +589,7 @@ impl Inner {
             a.segments.len()+self.index.pending_seals.len()+1<capacity::segments(&self.config))
             && self.index.stable_tail_path(&root).await.is_some()
             && self.index.local_statistics().await?.first().is_some_and(|s|!s.keys.is_empty()) {
-            let target=root.join(format!("segment-{:032x}",rand::random::<u128>()));
-            let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
-            successor.read().await.record_lexical[0].admit_writer().await?;
-            let budget=view::RotationBudget{max_segments:64,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?};
-            // Fence before the first potentially destructive seal. A successful
-            // private handoff restores availability even if certificate preparation
-            // later rejects; an uncertain/failed handoff requires authoritative reopen.
-            let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
-            self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
-            self.healthy=false;
-            self.index.seal_into_successor(&root,successor,&mut self.ordinals,&mut self.locations,budget,closure_limit(self.config.max_journal_bytes)?).await?;
-            self.healthy=true;
-            self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
+            self.stage_stable_tail().await?;
         }
         // The partition guard pins the live State. Ordinary compaction borrows
         // it instead of cloning all retained history. Explicit replacement
@@ -684,6 +770,7 @@ mod tests {
             let future=inner.state.time_watermark_ms+inner.config.change_feed.retention_ms+1;
             inner.clock=Arc::new(FixedClock(future));
             inner.trim_feed(future).await.unwrap();
+            inner.maintain_index_tail().await.unwrap();
             assert_eq!(inner.state.seq,seq);
             assert!(inner.state.feed.floor>0);
             (seq,inner.state.feed.floor,inner.state.time_watermark_ms)
@@ -846,6 +933,101 @@ mod tests {
         assert_eq!(p.write(accepted).await.unwrap().seq,1);
         assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),1);
         drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn automatic_seal_leaves_checkpoint_unchanged_and_replays_complete_suffix() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let mut settings=config();
+        settings.max_records=256;settings.max_operations=512;settings.max_candidates=256;
+        settings.max_journal_bytes=16*1024*1024;
+        let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+        p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
+        let selected=p.inner.lock().await.anchor.as_ref().unwrap().id.clone();
+        let mut receipts=Vec::new();
+        for n in 0..129 {let req=write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(req.clone()).await.unwrap();receipts.push((req,receipt));}
+        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().id,selected,"native rotation must not replace the State checkpoint");assert_eq!(inner.index.pending_seals.len(),1);}
+        assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],200).await.unwrap().count_total,130);
+        drop(p);
+        std::fs::write(path.join(".test-recovery-after-derived-seal"),b"fail").unwrap();
+        let mut leftovers=None;
+        for _ in 0..3 {
+            assert!(RecordPartition::open(&path,settings.max_journal_bytes).await.is_err());
+            let count=std::fs::read_dir(&path).unwrap().filter_map(Result::ok).filter(|e|e.file_name().to_string_lossy().starts_with("segment-")).count();
+            if let Some(expected)=leftovers {assert_eq!(count,expected,"interrupted recovery cannot accumulate derived packages");} else {leftovers=Some(count);}
+        }
+        std::fs::remove_file(path.join(".test-recovery-after-derived-seal")).unwrap();
+        let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        assert_eq!(p.inner.lock().await.anchor.as_ref().unwrap().id,selected);
+        assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],200).await.unwrap().count_total,130);
+        for (req,receipt) in receipts {assert_eq!(p.write(req).await.unwrap(),receipt);}
+        p.compact_journal().await.unwrap();assert_ne!(p.inner.lock().await.anchor.as_ref().unwrap().id,selected);
+    }
+    #[tokio::test]
+    async fn derived_package_bound_falls_back_to_checkpoint_without_dropping_records() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let settings=config();
+        let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+        p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
+        let original=p.inner.lock().await.anchor.as_ref().unwrap().id.clone();
+        let bound=capacity::segments(&settings);
+        for n in 0..bound {
+            p.write(write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
+            let mut inner=p.inner.lock().await;inner.maintain_index_tail().await.unwrap();
+            assert!(inner.index.local_statistics().await.unwrap().len()<=bound+1);
+            assert!(inner.anchor.as_ref().unwrap().segments.len()<=bound);
+        }
+        assert_ne!(p.inner.lock().await.anchor.as_ref().unwrap().id,original);
+        drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),bound+1);
+        assert_eq!(p.inner.lock().await.state.operations.len(),bound+1);
+    }
+    #[tokio::test]
+    async fn journal_pressure_checkpoints_before_append_and_preserves_unknown_outcome() {
+        for unknown in [false,true] {
+            let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let settings=config();
+            let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+            p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
+            let before=p.inner.lock().await.anchor.as_ref().unwrap().id.clone();
+            {let mut inner=p.inner.lock().await;
+                assert!(matches!(inner.ensure_journal_room(usize::MAX,0).await,Err(RecordError::Rejected(_))));
+                assert_eq!(inner.anchor.as_ref().unwrap().id,before);assert!(inner.healthy);
+            }
+            for n in 0..6 {p.write(write(&format!("op-{n}"),&format!("r-{n}"),&format!("alpha {}","x".repeat(3000)),ExpectedVersion::Absent)).await.unwrap();}
+            if unknown {std::fs::write(path.join(".test-checkpoint-after-certificate"),b"fail").unwrap();}
+            {let mut inner=p.inner.lock().await;
+                let base=encode_entry(&Entry::Anchor(inner.anchor.clone().unwrap())).unwrap().len();
+                let size=settings.max_journal_bytes as usize-base-16384;
+                assert!(inner.journal.checkpoint_can_make_room(size,0));
+                let result=inner.ensure_journal_room(size,0).await;
+                if unknown {assert!(matches!(result,Err(RecordError::OutcomeUnknown(_))));assert!(!inner.healthy);}
+                else {result.unwrap();assert_ne!(inner.anchor.as_ref().unwrap().id,before);assert!(inner.journal.validate_append(size).is_ok());}
+            }
+            if unknown {std::fs::remove_file(path.join(".test-checkpoint-after-certificate")).unwrap();}
+            drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+            assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),7);
+        }
+    }
+    #[tokio::test]
+    async fn seal_proof_rejects_old_closure_or_semantic_wal_damage_before_handoff() {
+        for target in ["payload","state","pending","wal"] {
+            let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let settings=config();
+            let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+            for id in ["a","b"] {p.write(write(id,id,"alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();}
+            p.write(write("c","c","alpha",ExpectedVersion::Absent)).await.unwrap();
+            let mut inner=p.inner.lock().await;inner.maintain_index_tail().await.unwrap();
+            let tail=inner.index.stable_tail_path(&path).await.unwrap();let pending=inner.index.pending_seals.len();
+            if target=="wal" {inner.journal.append(br#"{"RecordFeedTrimV12":{"previous":0,"floor":999999,"at":0}}"#).unwrap();}
+            else {
+                let file=match target {
+                    "payload"=>path.join(format!("payload-{}",inner.payloads.objects.keys().next().unwrap())),
+                    "state"=>{let block=&inner.anchor.as_ref().unwrap().state_blocks[0];directory(&path,&block.id).unwrap().join(&block.files[0].path)},
+                    _=>{let package=&inner.index.pending_seals[0];package.path(&path).unwrap().join(&package.files[0].path)},
+                };
+                use std::io::{Seek,Write};let mut file=std::fs::OpenOptions::new().write(true).open(file).unwrap();
+                file.seek(std::io::SeekFrom::End(0)).unwrap();file.write_all(b"corrupt").unwrap();file.sync_all().unwrap();
+            }
+            assert!(inner.maintain_index_tail().await.is_err(),"{target}");
+            assert_eq!(inner.index.stable_tail_path(&path).await.unwrap(),tail,"verify before handoff");
+            assert_eq!(inner.index.pending_seals.len(),pending);
+        }
     }
     #[tokio::test]
     async fn direct_tail_seal_reuses_bytes_and_rejection_keeps_successor_writable() {

@@ -2,11 +2,11 @@
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
 repository documentation, dependency/core boundaries and the lexical partition;
-on code changes it builds and runs 27 exact bounded core regressions plus the
+on code changes it builds and runs 31 exact bounded core regressions plus the
 small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
 cases fail rather than silently matching zero tests. The largest rotation fixture
-in the 27-case core set contains 129 records; integration scales are listed below. This is fast feedback, **not full acceptance**.
+in the 31-case core set contains 130 records; integration scales are listed below. This is fast feedback, **not full acceptance**.
 Documentation-only changes keep static checks but skip the compiled core matrix.
 Generic x86-64 CPU flags permit target caching within each OS; full acceptance
 retains the existing native-CPU configuration and source-only cache policy.
@@ -100,7 +100,7 @@ unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests
 ## Small and full query fixtures (P1)
 
 Default PR core jobs explicitly select `small` and run six integration targets
-in addition to the 27 exact core cases. The manual matrix explicitly selects
+in addition to the 31 exact core cases. The manual matrix explicitly selects
 `full`, including its four independent Windows lexical jobs. No production
 capacity, scoring, timeout or fault boundary changes.
 
