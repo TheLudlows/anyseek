@@ -226,12 +226,15 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
     let snapshot_bytes = checkpoint_codec::length(config, &candidate)?;
     checkpoint_codec::validate_size(snapshot_bytes, reserve_bytes, config.max_journal_bytes).map_err(|_| rejected("generation checkpoint reserve exceeded"))?;
     let bytes = encode_entry(&Entry::Applied(applied.clone()))?;
-    Ok(mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve })
+    Ok(mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, candidate: Some(candidate), planning: Vec::new() })
 }
 pub(super) fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
     let request = &applied.request;
     let old = state.generations.get(&request.record_id);
     if applied.receipt.version != old.map_or(1, |g| g.version.saturating_add(1)) { return Err(storage("inconsistent generation version")); }
+    let _manifest_copy=crate::storage::build_budget::reserve_memory(
+        (old.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0) as u64).checked_mul(32).ok_or_else(||storage("generation metadata copy overflow"))?
+    ).map_err(storage)?;
     let mut manifest = old.cloned().unwrap_or(Manifest { routing_key:request.routing_key.clone(), version:0, used:BTreeSet::new(), active:None, active_members:vec![], staged:None });
     match request.generation.as_ref().unwrap() {
         GenerationCommand::Stage { generation_id, source, chunks, members } => {
@@ -243,11 +246,11 @@ pub(super) fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordEr
         }
         GenerationCommand::Publish { generation_id } => {
             let stage = manifest.staged.take().filter(|s| &s.id == generation_id).ok_or_else(|| storage("missing published stage"))?;
-            for id in &manifest.active_members { state.records.get_mut(id).ok_or_else(|| storage("missing active member"))?.retired_generation = true; }
+            for id in &manifest.active_members { state.records.edit(id, 0, |record| {record.retired_generation=true;Ok(())})?; }
             manifest.active_members.clear();
             for chunk in &stage.chunks {
                 if state.records.contains_key(&chunk.record_id) { return Err(storage("published member identity reused")); }
-                state.records.insert(chunk.record_id.clone(), member(&stage, chunk, &manifest.routing_key, &request.record_id, applied.observed_time_ms));
+                state.records.insert(chunk.record_id.clone(), member(&stage, chunk, &manifest.routing_key, &request.record_id, applied.observed_time_ms))?;
                 manifest.active_members.push(chunk.record_id.clone());
             }
             manifest.active = Some(stage.id);

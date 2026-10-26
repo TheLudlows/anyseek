@@ -215,18 +215,13 @@ impl Inner {
                 if applied.request.generation.is_some() {
                     let mut next=self.state.try_clone_with_growth(growth)?;apply(&mut next,&applied)?;
                     let bytes=checkpoint_codec::length(&self.config, &next)?;
-                    self.state.admit_bytes(bytes)?;
-                    self.publish(&applied,bytes).await?;
+                    next.admit_bytes(bytes)?;
+                    self.publish_prepared(&applied,bytes,None,Some(next)).await?;
                 } else {
-                    // Reserve transient copies of both the incoming decision and
-                    // prior body (source revisions/vector patches) before projection.
-                    let prior=self.state.records.get(&applied.request.record_id).map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
-                    let growth=prior.checked_mul(3).and_then(|n|n.checked_add(growth)).ok_or_else(||storage("replay state growth overflow"))?;
-                    let admitted=self.snapshot_bytes.checked_add(growth).ok_or_else(||storage("replay state growth overflow"))?;
-                    self.state.admit_bytes(admitted)?;
-                    let bytes=mutation::replay_checkpoint_size(&self.state,self.snapshot_bytes,&applied)?;
-                    self.state.admit_bytes(bytes)?;
-                    self.publish(&applied,bytes).await?;
+                    let prepared=state_memory::Prepared::new(&self.state,&applied)?;
+                    let bytes=mutation::snapshot_after(&self.state,self.snapshot_bytes,&applied,&prepared.record)?;
+                    prepared.admit_containers(&mut self.state,bytes)?;
+                    self.publish_prepared(&applied,bytes,Some(prepared),None).await?;
                 }
                 self.graph_cache=graph::Cache::rebuild(&self.state)?;
                 return Ok(());

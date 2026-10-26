@@ -80,6 +80,14 @@ impl MemoryLease {
         Ok(Self(bytes, self.1.clone()))
     }
     pub(crate) fn bytes(&self) -> u64 { self.0 }
+    /// Coalesce already admitted metadata ownership, without reserving again.
+    pub(crate) fn merge(&mut self, mut other: Self) -> io::Result<()> {
+        if !Arc::ptr_eq(&self.1, &other.1) {return Err(io::Error::other("memory lease counter mismatch"));}
+        let total=self.0.checked_add(other.0).ok_or_else(||io::Error::other("memory lease merge overflow"))?;
+        validate_single(total)?;
+        self.0=total;other.0=0;Ok(())
+    }
+
     pub(crate) fn can_grow(&self, bytes: u64) -> bool {
         memory_limits().is_ok_and(|limits| self.0.checked_add(bytes).is_some_and(|n| n <= limits.single))
     }
@@ -368,6 +376,20 @@ impl Read for &File {
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
         let _io = io_admission()?;
         (&self.inner).read(b)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn used_memory_for_test() -> u64 { MEMORY.load(Ordering::Acquire) }
+#[cfg(test)]
+pub(crate) fn fill_memory_for_test() -> Vec<MemoryLease> {fill_memory_except_for_test(0)}
+#[cfg(test)]
+pub(crate) fn fill_memory_except_for_test(leave:u64) -> Vec<MemoryLease> {
+    let limits=memory_limits().unwrap();let mut held=Vec::new();
+    loop {
+        let free=limits.shared.saturating_sub(MEMORY.load(Ordering::Acquire));
+        if free<=leave {return held;}
+        held.push(reserve_memory((free-leave).min(limits.single)).unwrap());
     }
 }
 

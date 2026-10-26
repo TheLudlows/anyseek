@@ -11,7 +11,11 @@ impl Inner {
         applied: &Applied,
         snapshot_bytes: usize,
     ) -> Result<(), RecordError> {
-        if applied.request.generation.is_some() { return self.publish_generation(applied, snapshot_bytes).await; }
+        let prepared=if applied.request.generation.is_none(){Some(state_memory::Prepared::new(&self.state,applied)?)}else{None};
+        self.publish_prepared(applied,snapshot_bytes,prepared,None).await
+    }
+    pub(super) async fn publish_prepared(&mut self,applied:&Applied,snapshot_bytes:usize,prepared:Option<state_memory::Prepared>,candidate:Option<State>)->Result<(),RecordError>{
+        if applied.request.generation.is_some() { return self.publish_generation(applied, snapshot_bytes,candidate).await; }
         let receipt = &applied.receipt;
         let document = enrichment::document(self.state.records.get(&receipt.record_id), &applied.request)?;
         let hiding = applied.request.vector_patch.is_none() && (self
@@ -52,7 +56,7 @@ impl Inner {
         if self.fail_publication_stage == 2 {
             return Err(RecordError::DurablePending(receipt.seq));
         }
-        apply(&mut self.state, applied).map_err(|_| RecordError::DurablePending(receipt.seq))?;
+        apply_prepared(&mut self.state, applied, prepared).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         self.graph_cache.insert(&self.state.records[&receipt.record_id]).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         self.snapshot_bytes = snapshot_bytes;
         #[cfg(test)]
@@ -70,10 +74,12 @@ impl Inner {
 }
 
 impl Inner {
-    async fn publish_generation(&mut self, applied: &Applied, snapshot_bytes: usize) -> Result<(), RecordError> {
+    async fn publish_generation(&mut self, applied: &Applied, snapshot_bytes: usize, candidate: Option<State>) -> Result<(), RecordError> {
         let growth=checkpoint_codec::json_length(applied)?.checked_mul(3).ok_or_else(|| storage("generation state growth overflow"))?;
-        let mut next = self.state.try_clone_with_growth(growth)?;
-        apply(&mut next, applied).map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
+        let next = if let Some(candidate)=candidate { candidate } else {
+            let mut next=self.state.try_clone_with_growth(growth)?;
+            apply(&mut next,applied).map_err(|_|RecordError::DurablePending(applied.receipt.seq))?;next
+        };
         if matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) {
             let visible = evidence::visibility(&next.records).map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
             let retired: Vec<_> = self.locations.keys().filter(|id| visible.get(*id) != Some(&true)).cloned().collect();

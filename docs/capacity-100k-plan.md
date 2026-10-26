@@ -1,28 +1,50 @@
 # Bounded 100k capacity: implementation checkpoint
 
-## Ownership implementation in progress
+## Shared State ownership implementation (phase29)
 
-Background indexing now keeps its captured State through authenticated package
-verification and moves that same owner into the candidate. It no longer discards
-the captured history merely to deserialize a second complete copy. Configuration,
-sequence, ordered frame/digest, visible identities, publication and cancellation
-checks remain in place. The original captured-State clone still exists: this
-change alone does not solve the capacity peak.
+Live records, retained source revisions and the complete operation history now
+use immutable shared values. Each value owns its full 32x logical residency lease
+until its last reader is dropped. Captured States clone admitted container keys,
+pointers, lookup and metadata; they no longer deep-copy all bodies and history.
+Background indexing verifies the captured State against the certified package and
+moves that same owner into the candidate. Serialization, identity/order/digest,
+authorization and publication barriers are unchanged.
 
-Local regressions: captured owner/authentication failure 1 passed; background
-indexer 5 passed/1 subprocess helper ignored; budget tests 8 passed; immutable
-value/lease transfer tests 3 passed. Independent review found no blocker in the
-captured-State transfer. The initial new test's existing-directory fixture error
-was fixed by selecting a new child root, without changing production behavior.
+Writes reserve complete new record and operation values before the durable
+append, even for a same-sized replacement while an older snapshot is retained.
+Request comparison/projection scratch remains charged across the owned write.
+Historical retries reserve their actual incoming/historical requests, not the
+unrelated current record. Generation candidates are prepared once and transferred
+through publication. Copy-on-write edits reserve before cloning, and rejected
+admission does not publish a partial replacement.
 
-A private immutable value owner and lease split primitive are being prepared for
-State container integration. The latter moves already admitted bytes without a
-second global reservation. Tests cover last-reference release, failed transfer,
-pre-clone rejection and wire identity. These primitives are **not yet the live
-State representation**. Remaining work: per-value/frame ownership, gross write
-pre-admission with old snapshots retained, separately charged container copies,
-complete-history recovery and same-budget 100k measurement. The full-State single
-admission remains until those real allocation ownership changes are complete.
+Recovery admits each bounded frame before decoding, retains independent value
+leases and frame metadata, and admits lookup keys before allocating them. An
+aggregate State larger than the per-allocation limit is permitted only through
+these independently owned allocations; each allocation and the shared total are
+still bounded. The 32x coefficient, defaults, complete history and authenticated
+wire format have not been reduced or changed. This remains conservative logical
+accounting, not an RSS hard limit; candidate/container copies and recovery values
+still consume additional admitted memory.
+
+Independent review closed two findings before final validation: lookup keys must
+be charged before cloning, and an old receipt retry must not reserve the larger
+current body. Generation replay now admits and publishes its already-prepared
+candidate, avoiding a second copy or applying post-shrink size to the old State.
+
+Targeted regressions cover retained-snapshot same-size replacement, rejection
+without mutation, last-owner release, checkpoint/reopen and exact retry, lookup
+pre-admission, and historical retry with only 64 KiB free. A subprocess test with
+64 MiB single/512 MiB shared recovers a multi-frame State whose aggregate 32x size
+exceeds the single limit, and proves final-digest failure returns all acquired
+leases. The prior integrated Record sweep passed 164/0/5 ignored before the final
+review fixes; six ownership tests and the bounded recovery test passed separately.
+Final server-feature Record regression passed 187 tests, 0 failed, 5 ignored
+(523.43s). The three pool-exhaustion tests then received subprocess isolation to
+avoid perturbing unrelated parallel CI tests; their original assertions remain.
+All six ownership tests passed with the default parallel runner after isolation,
+and all eight build-budget tests passed. Documentation and diff checks passed.
+New release capacity measurement is pending. **100k has not passed.** Earlier results below identify their own code.
 
 ## Validation follow-up (2026-10-26)
 
@@ -53,7 +75,7 @@ The first capacity rejection is now identified exactly: selected anchor expanded
 bytes 100535849 plus tail 195850 gives 100731699; its 32x recovery-state admission
 requests 3223414368 bytes, above the 3 GiB single limit. This is aggregate State
 ownership, not one document or demonstrated leakage. Shared immutable values
-and bounded ownership remain planned; **100k has still not passed**.
+and bounded ownership are now implemented above; **100k has still not passed**.
 
 ## Latest measured boundary (phase24, 2026-10-26)
 
@@ -85,8 +107,8 @@ default capacity and budgets are unchanged. **100k has not passed.**
 Raw evidence is under `/tmp/anyseek-capacity-phase24-release-100k`:
 `summary.json`, `events.jsonl`, `unknown-observation.json`, `boundary-validation/`,
 `boundary-recovery/`. The old phase22 evidence remains unchanged.
-Current exact-head CI40257649788 has both S3 jobs successful but an HTTP/UI smoke
-step failure; final CI remains outstanding. The same-size comparison is complete;
+Historical CI40257649788 had both S3 jobs successful and an HTTP/UI smoke
+step failure; it is not final ownership validation. The same-size comparison is complete;
 see [64,464-document results](../benchmarks/capacity/RESULTS-64464.md). Two new local
 regressions pass: Anchor-tail vector/temporal replay (normal, durable-pending,
 publication-failure variants), and lower observed_epoch retaining the higher

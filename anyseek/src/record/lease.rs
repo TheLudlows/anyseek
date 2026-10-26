@@ -14,10 +14,13 @@ pub(super) fn same_request(old:&Applied,request:&RecordWrite)->Result<bool,Recor
     if let Some(hash)=&old.request_digest {Ok(hash==&digest(request)?)}else{Ok(serde_json::to_value(&old.request).map_err(storage)?==serde_json::to_value(request).map_err(storage)?)}
 }
 pub(super) fn redact(state:&mut State,id:&str,generation:&str)->Result<(),RecordError>{
-    for op in &mut state.operations {
+    for index in 0..state.operations.len() {
+        let op=&state.operations[index];
         if op.request.record_id!=id || !matches!(&op.request.generation,Some(GenerationCommand::Stage{generation_id,..}|GenerationCommand::StageBatch{generation_id,..}) if generation_id==generation){continue;}
+        state.operations.edit(index,256,|op| {
         if op.request_digest.is_none(){op.request_digest=Some(digest(&op.request)?);}
         match &mut op.request.generation{Some(GenerationCommand::Stage{chunks,members,..})=>{chunks.clear();members.clear();},Some(GenerationCommand::StageBatch{chunks,..})=>chunks.clear(),_=>{}}
+        Ok(())})?;
         state.private_cleanup_pending=true;
     }Ok(())
 }

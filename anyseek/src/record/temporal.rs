@@ -163,7 +163,7 @@ pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordE
     for target in &event.targets {
         let record = state
             .records
-            .get_mut(&target.record_id)
+            .get(&target.record_id)
             .ok_or_else(|| storage("expired identity absent"))?;
         if !seen.insert(&target.record_id)
             || record.version != target.previous_version
@@ -174,14 +174,12 @@ pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordE
             return Err(storage("inconsistent expiration target"));
         }
         if evidence::retained_revision(record) {
-            state.source_revisions.push(record.clone());
+            state.source_revisions.push_shared(state.records.shared(&target.record_id).ok_or_else(||storage("missing source owner"))?)?;
         }
-        record.version = record
-            .version
-            .checked_add(1)
-            .ok_or_else(|| storage("version exhausted"))?;
-        record.document = None;
-        record.expired_at_ms = Some(event.evaluation_time_ms);
+        state.records.edit(&target.record_id,128,|record| {
+            record.version=record.version.checked_add(1).ok_or_else(||storage("version exhausted"))?;
+            record.document=None;record.expired_at_ms=Some(event.evaluation_time_ms);Ok(())
+        })?;
     }
     state.seq = event.seq;
     state.time_watermark_ms = event.evaluation_time_ms;

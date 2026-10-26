@@ -36,7 +36,7 @@ pub(super) fn validate_metadata(system:&EvidenceMetadata)->Result<(),RecordError
     }
     Ok(())
 }
-pub(super) fn validate_new(records:&BTreeMap<String,Record>,system:&EvidenceMetadata)->Result<(),RecordError> {
+pub(super) fn validate_new(records:&state_values::Records,system:&EvidenceMetadata)->Result<(),RecordError> {
     validate_metadata(system)?;
     if system.relation.is_none(){return Ok(());}
     for endpoint in endpoints(system) {

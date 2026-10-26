@@ -43,6 +43,7 @@ pub use indexer::IndexJob;
 mod segment_state;
 mod state_chunks;
 mod state_memory;
+mod state_values;
 mod capacity;
 mod snapshot;
 mod checkpoint_codec;
@@ -308,13 +309,15 @@ struct State {
     // Independent snapshots cannot prove the absence of later source deletes.
     // This persistent restore gate is deliberately not cleared by ordinary writes.
     evidence_quarantined: bool,
-    records: BTreeMap<String, Record>,
-    source_revisions: Vec<Record>,
+    records: state_values::Records,
+    source_revisions: state_values::Values<Record>,
     generations: BTreeMap<String, generation::Manifest>,
     // Vec avoids JSON's restriction on structured map keys. Bounded by config.
-    operations: Vec<Applied>,
+    operations: state_values::Values<Applied>,
     #[serde(skip)]
     operation_lookup: BTreeMap<OperationId, usize>,
+    #[serde(skip)]
+    lookup_bytes: usize,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(Clone))]
@@ -929,6 +932,10 @@ fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordE
     Ok(())
 }
 fn restore_operation_lookup(state:&mut State)->Result<(),RecordError>{
+    let bytes=state.operations.iter().try_fold(0usize,|n,operation| {
+        n.checked_add(checkpoint_codec::json_length(&operation.request.operation_id)?).ok_or_else(||storage("lookup byte overflow"))
+    })?;
+    state.admit_lookup(bytes)?;
     state.operation_lookup.clear();
         for (position, operation) in state.operations.iter().enumerate() {
             if state
@@ -942,6 +949,10 @@ fn restore_operation_lookup(state:&mut State)->Result<(),RecordError>{
     Ok(())
 }
 fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
+    let prepared=if applied.request.generation.is_none(){Some(state_memory::Prepared::new(state,applied)?)}else{None};
+    apply_prepared(state,applied,prepared)
+}
+fn apply_prepared(state: &mut State, applied: &Applied, prepared: Option<state_memory::Prepared>) -> Result<(), RecordError> {
     if applied.receipt.seq != state.seq + 1 || applied.observed_time_ms < state.time_watermark_ms {
         return Err(storage("non-contiguous record sequence"));
     }
@@ -960,32 +971,21 @@ fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
     {
         return Err(storage("inconsistent committed record operation"));
     }
-    let document = enrichment::document(previous, r)?;
-    let temporal = temporal::retained(previous,r,applied.observed_time_ms)?;
-    if let Some(record) = previous.filter(|r| evidence::retained_revision(r) && applied.request.vector_patch.is_none()) {
-        state.source_revisions.push(record.clone());
+    if previous.is_some_and(|record| evidence::retained_revision(record) && applied.request.vector_patch.is_none()) {
+        state.source_revisions.push_shared(state.records.shared(&r.record_id).ok_or_else(||storage("missing source owner"))?)?;
     }
-    state.records.insert(
-        r.record_id.clone(),
-        Record {
-            record_id: r.record_id.clone(),
-            routing_key: r.routing_key.clone(),
-            version: applied.receipt.version,
-            document,
-            temporal, ingested_at_ms: if r.document.is_none() { previous.map_or(applied.observed_time_ms, |r| r.ingested_at_ms) } else { applied.observed_time_ms }, expired_at_ms: None,
-            retired_generation: previous.is_some_and(|r| r.retired_generation),
-            generation_member: previous.and_then(|r| r.generation_member.clone()),
-            system: r.system.clone().or_else(|| previous.and_then(|p| p.system.clone())),
-        },
-    );
+    let prepared=prepared.ok_or_else(||storage("missing prepared value ownership"))?;
+    state.records.insert_shared(r.record_id.clone(),prepared.record)?;
+    state.operations.push_shared(prepared.operation)?;
     }
     state.seq = applied.receipt.seq;
     state.epoch_watermark = state.epoch_watermark.max(applied.observed_epoch);
     state.time_watermark_ms = state.time_watermark_ms.max(applied.observed_time_ms);
     state
         .operation_lookup
-        .insert(r.operation_id.clone(), state.operations.len());
-    state.operations.push(applied.clone());
+        .insert(r.operation_id.clone(), if r.generation.is_none(){state.operations.len()-1}else{state.operations.len()});
+    state.lookup_bytes=state.lookup_bytes.checked_add(checkpoint_codec::json_length(&r.operation_id)?).ok_or_else(||storage("lookup byte overflow"))?;
+    if r.generation.is_some() {state.operations.push(applied.clone())?;}
     Ok(())
 }
 impl RecordPartition {
@@ -1369,6 +1369,7 @@ impl RecordPartition {
         state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
         drop(first_decode);
         restore_operation_lookup(&mut state)?;
+        state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
         for bytes in entries {
             let _entry_decode = crate::storage::build_budget::reserve_memory((bytes.len() as u64).checked_mul(32).ok_or_else(||storage("tail decode estimate overflow"))?).map_err(storage)?;
             if selected.is_none() {
@@ -1450,12 +1451,12 @@ impl RecordPartition {
                     return Err(RecordError::RecoveryRequired);
                 }
                 inner.advance_time().await?;
-                let (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve) = match mutation::prepare_at(
+                let (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, mut candidate, _planning) = match mutation::prepare_at(
                     &inner.state, &inner.config, inner.snapshot_bytes, request, current_epoch(), inner.evaluation_time_ms,
                 )? {
                     mutation::PreparedWrite::Replay(receipt) => return Ok(receipt),
-                    mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve } =>
-                        (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve),
+                    mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, candidate, planning } =>
+                        (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, candidate, planning),
                 };
                 let (growth,native_updates)=build_budget::write_estimate(&inner.state,&inner.config,&applied)?;
                 if growth>0 && !inner.index.can_admit(growth,native_updates).await {
@@ -1464,7 +1465,9 @@ impl RecordPartition {
                     inner.publish_anchor().await?;
                     if !inner.index.can_admit(growth,native_updates).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
                 }
-                inner.state.admit_bytes(snapshot_bytes)?;
+                let prepared=if applied.request.generation.is_none(){Some(state_memory::Prepared::new(&inner.state,&applied)?)}else{None};
+                if let Some(prepared)=&prepared {prepared.admit_containers(&mut inner.state,snapshot_bytes)?;}
+                else if let Some(candidate)=candidate.as_mut(){candidate.admit_bytes(snapshot_bytes)?;}
                 let feed_point = change_feed::pending(&inner.state,&applied)?;
                 inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;
                 inner.journal.validate_append_with_reserve(bytes.len(), reserve_bytes)
@@ -1518,7 +1521,7 @@ impl RecordPartition {
                 if inner.fail_after_durable {
                     return Err(RecordError::DurablePending(receipt.seq));
                 }
-                inner.publish(&applied, snapshot_bytes).await?;
+                inner.publish_prepared(&applied, snapshot_bytes, prepared, candidate).await?;
                 inner.feed_cache.push(feed_point);
                 inner.healthy = true;
                 inner.output.write().map_err(|_| RecordError::RecoveryRequired)?.fenced = false;
@@ -2030,7 +2033,7 @@ mod tests {
         assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().content_sha256,original.content_sha256);
         p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"中é");
-        let mut corrupt=p.inner.lock().await.state.clone();corrupt.records.get_mut("d").unwrap().system.as_mut().unwrap().evidence_refs[0].locator=Some(EvidenceLocator::Utf8{field:"body".into(),start:1,end:2});
+        let mut corrupt=p.inner.lock().await.state.clone();corrupt.records.edit("d",256,|record|{record.system.as_mut().unwrap().evidence_refs[0].locator=Some(EvidenceLocator::Utf8{field:"body".into(),start:1,end:2});Ok(())}).unwrap();
         assert!(locator::validate_history(&corrupt).is_err());
         let permit=p.output_permit().unwrap();let mut deletion=write("delete-source","s","",ExpectedVersion::Match(2));deletion.document=None;p.write(deletion).await.unwrap();
         assert!(permit.deliver(||()).is_err());assert!(p.evidence_excerpt(reference.clone()).await.is_err());
@@ -2190,7 +2193,7 @@ mod tests {
         let mut order=state;order.generations.get_mut("doc").unwrap().staged.as_mut().unwrap().chunks.reverse();
         let hash=p.generation_status("doc").await.unwrap().unwrap().manifest_sha256.unwrap();
         p.write(generation_write("seal",ExpectedVersion::Match(2),GenerationCommand::Seal{generation_id:"g".into(),manifest_sha256:hash})).await.unwrap();
-        let mut wrong=p.inner.lock().await.state.clone();if let Some(GenerationCommand::Seal{manifest_sha256,..})=&mut wrong.operations.last_mut().unwrap().request.generation{*manifest_sha256="0".repeat(64);}
+        let mut wrong=p.inner.lock().await.state.clone();wrong.operations.edit(wrong.operations.len()-1,0,|op|{if let Some(GenerationCommand::Seal{manifest_sha256,..})=&mut op.request.generation{*manifest_sha256="0".repeat(64);}Ok(())}).unwrap();
         for state in [bad,order,wrong]{let damaged=path();let bytes=encode_entry(&Entry::Checkpoint{config:cfg.clone(),state}).unwrap();drop(PartitionJournal::create(&damaged,cfg.max_journal_bytes,&bytes).unwrap());assert!(RecordPartition::open(&damaged,cfg.max_journal_bytes).await.is_err());std::fs::remove_dir_all(damaged).unwrap();}
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }

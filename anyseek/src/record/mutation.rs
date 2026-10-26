@@ -14,6 +14,8 @@ pub(super) enum PreparedWrite {
         snapshot_bytes: usize,
         reserve_bytes: usize,
         feed_reserve: usize,
+        candidate: Option<State>,
+        planning: Vec<crate::storage::build_budget::MemoryLease>,
     },
 }
 
@@ -41,6 +43,10 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     if let Some(document) = &request.document {
         validate_document_depth(document)?;
     }
+    // Own temporary planner copies before cloning request/prior document data.
+    // The caller's incoming request and the retained old value are separate owners.
+    let request_bytes=checkpoint_codec::json_length(&request)? as u64;
+    let _request_plan=crate::storage::build_budget::reserve_memory(request_bytes.checked_mul(32).ok_or_else(||storage("planner request estimate overflow"))?).map_err(storage)?;
     // serde_json::Value equality ignores object insertion order; the
     // whole semantic request is compared, not a collision-prone digest.
     if let Some(old) = state
@@ -48,6 +54,8 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         .get(&request.operation_id)
         .map(|&position| &state.operations[position])
     {
+        let comparison=(checkpoint_codec::json_length(&old.request)? as u64).checked_mul(32).ok_or_else(||storage("retry comparison estimate overflow"))?;
+        let _comparison=crate::storage::build_budget::reserve_memory(comparison).map_err(storage)?;
         return if lease::same_request(old,&request)?
         {
             Ok(PreparedWrite::Replay(old.receipt.clone()))
@@ -57,7 +65,15 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
             ))
         };
     }
-    if request.generation.is_some() { return generation::prepare(state, config, request, epoch, evaluation_time_ms); }
+    // Replay compares the retained request; it must not reserve the current
+    // record body, which may have grown since that operation was committed.
+    let prior_bytes=state.records.get(&request.record_id).map(checkpoint_codec::json_length).transpose()?.unwrap_or(0) as u64;
+    let _prior_plan=crate::storage::build_budget::reserve_memory(prior_bytes.checked_mul(32).ok_or_else(||storage("planner prior estimate overflow"))?).map_err(storage)?;
+    if request.generation.is_some() {
+        let mut prepared=generation::prepare(state,config,request,epoch,evaluation_time_ms)?;
+        if let PreparedWrite::Append{planning,..}=&mut prepared {planning.extend([_request_plan,_prior_plan]);}
+        return Ok(prepared);
+    }
     if state.generations.contains_key(&request.record_id)
         || (!state.records.contains_key(&request.record_id) && generation::occupied(state, &request.record_id)) {
         return Err(RecordError::Conflict("identity reserved by generation".into()));
@@ -185,12 +201,14 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         snapshot_bytes,
         reserve_bytes,
         feed_reserve,
+        candidate: None,
+        planning: vec![_request_plan,_prior_plan],
     })
 }
 
 // Shared arithmetic only: recovery never re-runs admission, wall-clock policy,
 // expected-version planning or operation-ID generation for a durable decision.
-fn projected_record(state: &State, applied: &Applied, document: Option<Document>, temporal: TemporalMetadata) -> Record {
+pub(super) fn projected_record(state: &State, applied: &Applied, document: Option<Document>, temporal: TemporalMetadata) -> Record {
     let previous = state.records.get(&applied.request.record_id);
     Record {
         record_id: applied.request.record_id.clone(),
@@ -208,7 +226,7 @@ fn projected_record(state: &State, applied: &Applied, document: Option<Document>
     }
 }
 
-fn snapshot_after(state: &State, before: usize, applied: &Applied, next: &Record) -> Result<usize, RecordError> {
+pub(super) fn snapshot_after(state: &State, before: usize, applied: &Applied, next: &Record) -> Result<usize, RecordError> {
     let old = state.records.get(&next.record_id);
     let old_bytes = old.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
     let history = if applied.request.vector_patch.is_none() && old.is_some_and(evidence::retained_revision) {
