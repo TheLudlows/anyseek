@@ -34,7 +34,10 @@ pub(crate) struct Runtime {
     directory: Option<super::directory::BudgetDirectory>,
     pin: Arc<crate::record::package_pins::Pin>,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WriteState { Writable, Sealed, Failed }
 struct Data {
+    write_state: WriteState,
     index: Index,
     reader: IndexReader,
     writer: Option<IndexWriter<TantivyDocument>>,
@@ -91,6 +94,7 @@ impl Runtime {
             analyzer,
             directory: Some(directory),
             data: Mutex::new(Data {
+                write_state: WriteState::Writable,
                 index,
                 reader,
                 writer: None,
@@ -146,6 +150,7 @@ impl Runtime {
             analyzer,
             directory: None,
             data: Mutex::new(Data {
+                write_state: WriteState::Sealed,
                 index,
                 reader,
                 writer: None,
@@ -175,6 +180,7 @@ impl Runtime {
         let estimate =
             crate::record::build_budget::document_estimate(document, &self.config.schema)?;
         let mut data = self.data.lock().await;
+        if data.write_state != WriteState::Writable { return Err(storage("native writer is sealed or failed")); }
         // Drain before admitting another document. One larger document remains
         // subject to normal per-document admission and is drained immediately.
         if data.pending_analysis_documents > 0
@@ -313,7 +319,28 @@ impl Runtime {
         Ok(())
     }
     pub(crate) async fn flush(&self) -> Result<(), RecordError> {
-        self.flush_locked(&mut *self.data.lock().await)
+        let mut data = self.data.lock().await;
+        if data.write_state != WriteState::Writable { return Err(storage("native writer is sealed or failed")); }
+        self.flush_locked(&mut data)
+    }
+    /// Finish a private candidate before its immutable inventory is certified.
+    /// Readers keep their fixed Searcher/pin. No directory rename or authority
+    /// publication occurs here, and a failed join never permits another writer.
+    pub(crate) async fn seal(&self) -> Result<(), RecordError> {
+        let mut data = self.data.lock().await;
+        match data.write_state {
+            WriteState::Sealed => return Ok(()),
+            WriteState::Failed => return Err(storage("native seal previously failed")),
+            WriteState::Writable => {},
+        }
+        data.write_state = WriteState::Failed;
+        self.flush_locked(&mut data)?;
+        if let Some(writer) = data.writer.take() {
+            writer.wait_merging_threads().map_err(storage)?;
+            if let Some(directory) = &self.directory { directory.release_joined_writer(); }
+        }
+        data.write_state = WriteState::Sealed;
+        Ok(())
     }
     pub(crate) async fn snapshot(&self) -> Result<Arc<Snapshot>, RecordError> {
         self.data
@@ -516,6 +543,70 @@ mod tests {
         assert!(!crate::record::package_pins::retire_if_unpinned(&package,||{panic!("live Searcher must protect package")}).unwrap());
         drop(held);drop(capacity);
         assert!(crate::record::package_pins::retire_if_unpinned(&package,||Ok(())).unwrap());
+    }
+
+    #[tokio::test]
+    async fn sealed_writer_keeps_fixed_readers_and_rejects_future_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let governor = Arc::new(crate::resources::Governor::default());
+        let scope = governor.admit("sealed-writer".into(), crate::resources::Lane::Foreground, 0).unwrap();
+        let accounting = scope.clone().in_lane(crate::resources::Lane::Background);
+        let native = scope.run(async { Runtime::create(&package.join("native"), &config()).unwrap() }).await;
+        let doc = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+        let identity = |id: &str, revision| Identity { id: id.into(), version: 1, revision };
+        native.append(identity("a", 1), &doc, true).await.unwrap();
+        let held = native.snapshot().await.unwrap();
+        native.append(identity("b", 2), &doc, false).await.unwrap();
+        assert!(accounting.bytes(2039*1024*1024).is_err());
+        native.seal().await.unwrap();
+        assert!(native.data.lock().await.writer.is_none());
+        let capacity = accounting.bytes(2039*1024*1024).expect("seal joins and refunds the writer buffer");
+        assert_eq!(held.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 1);
+        assert_eq!(native.snapshot().await.unwrap().searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 2);
+        let manifest = std::fs::read(package.join("native/record-native.json")).unwrap();
+        native.seal().await.unwrap();
+        assert_eq!(std::fs::read(package.join("native/record-native.json")).unwrap(), manifest);
+        assert!(native.append(identity("c", 3), &doc, true).await.is_err());
+        assert!(native.flush().await.is_err());
+        drop(capacity);
+        let reopened = Runtime::open(&package.join("native"), &config()).unwrap();
+        assert_eq!(reopened.snapshot().await.unwrap().identities.len(), 2);
+        drop(reopened); drop(native);
+        assert!(!crate::record::package_pins::retire_if_unpinned(&package, || panic!("fixed reader protects the stable package")).unwrap());
+        drop(held);
+        assert!(crate::record::package_pins::retire_if_unpinned(&package, || Ok(())).unwrap());
+    }
+
+    #[tokio::test]
+    async fn failed_seal_fences_writer_without_releasing_worker_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let governor = Arc::new(crate::resources::Governor::default());
+        let scope = governor.admit("failed-seal".into(), crate::resources::Lane::Foreground, 0).unwrap();
+        let native = scope.clone().run(async { Runtime::create(&package.join("native"), &config()).unwrap() }).await;
+        let doc = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+        scope.clone().run(native.append(Identity { id:"a".into(), version:1, revision:1 }, &doc, true)).await.unwrap();
+        let held = native.snapshot().await.unwrap();
+        let directory = native.directory.as_ref().unwrap().clone();
+        directory.reject_writes_for_test();
+        scope.clone().run(native.append(Identity { id:"b".into(), version:1, revision:2 }, &doc, false)).await.unwrap();
+        assert!(native.seal().await.is_err());
+        assert!(directory.failed_writes_for_test() > 0);
+        assert!(matches!(native.data.lock().await.write_state, WriteState::Failed));
+        assert!(scope.bytes(512*1024*1024).is_err(), "failed commit cannot release queued input ownership");
+        assert!(native.seal().await.is_err());
+        assert!(native.append(Identity { id:"c".into(), version:1, revision:3 }, &doc, false).await.is_err());
+        assert_eq!(held.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 1);
+        drop(native); drop(held); drop(directory);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(lease) = scope.bytes(512*1024*1024) { drop(lease); break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("last owner refunds failed worker admission");
     }
 
     #[tokio::test]

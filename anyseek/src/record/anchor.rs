@@ -102,9 +102,14 @@ use segment::sync_tree;
 impl Frozen {
     async fn prepare(root:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(Self,crate::active::ActiveStatistics),RecordError>{
         let id=format!("{:032x}",rand::random::<u128>());
-        let prepared=root.join(format!(".segment-prepare-{id}"));
+        // Stable identity from creation: no live mapped directory is renamed.
+        // Until the Record certificate selects it, this remains a private orphan.
+        let prepared=root.join(format!("segment-{id}"));
         let (index,_)=build_at_selected(root,&prepared,config,state,selected).await?;
         let active=index.read().await.shard_vec[0].read().await.active.as_ref().ok_or_else(||storage("missing frozen statistics"))?.clone_local();
+        let native=index.read().await.record_lexical[0].clone();
+        native.seal().await?;
+        drop(native);
         drop(index);
         let reference=Self::seal(root,&prepared,id,closure_limit(config.max_journal_bytes)?)?;
         Ok((reference,active))

@@ -23,8 +23,8 @@ impl Package {
         }
         Ok(root.join(format!("segment-{}", self.id)))
     }
-    /// Seal after all writers have drained. Rename makes the closure available,
-    /// not authoritative; callers must still publish the business certificate.
+    /// Seal after all writers have drained. An identity-stable directory needs
+    /// no rename. Neither path makes it authoritative; the Record certificate does.
     pub(super) fn seal(
         root: &Path,
         prepared: &Path,
@@ -37,7 +37,11 @@ impl Package {
         };
         let target = package.path(root)?;
         sync_tree(prepared)?;
-        crate::storage::partition::publish_bundle(prepared, &target).map_err(storage)?;
+        if prepared != target {
+            crate::storage::partition::publish_bundle(prepared, &target).map_err(storage)?;
+        }
+        // Directory presence is never authority, including in-place sealing.
+        // The caller still authenticates and publishes the Record certificate.
         Ok(package)
     }
     pub(super) fn verify(&self, root: &Path, limit: u64) -> Result<PathBuf, RecordError> {
