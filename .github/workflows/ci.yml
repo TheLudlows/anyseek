@@ -111,7 +111,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
-      ANYSEEK_TEST_ROOT: ${{ runner.temp }}/anyseek-ci-core
+      ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/anyseek-ci-core
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
