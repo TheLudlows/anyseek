@@ -51,7 +51,15 @@ mod tests {
     impl log::Log for Timings {
         fn enabled(&self,metadata:&log::Metadata<'_>)->bool {metadata.level()<=log::Level::Info}
         fn log(&self,record:&log::Record<'_>) {
-            if self.enabled(record.metadata()) && record.args().to_string().starts_with("record_maintenance") {eprintln!("{}",record.args());}
+            if self.enabled(record.metadata()) && record.args().to_string().starts_with("record_maintenance") {
+                // Test evidence is an opt-in file, never library terminal output.
+                use std::io::Write;
+                if let Some(path)=std::env::var_os("ANYSEEK_TEST_PHASE_TIMINGS") {
+                    if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                        let _=writeln!(file,"{}",record.args());
+                    }
+                }
+            }
         }
         fn flush(&self) {}
     }
