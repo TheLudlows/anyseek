@@ -198,7 +198,14 @@ mod tests {
         let archive=root.path().join("archive");source.checkpoint(&archive).await.unwrap();
         let validated=RecordPartition::open(&archive,budget).await.unwrap();drop(validated);
         let hash=archive_hash(&archive,budget);
-        let segment=std::fs::read_dir(&archive).unwrap().filter_map(Result::ok).find(|e|e.file_name().to_string_lossy().starts_with("segment-")).unwrap().path();
+        // Reopening also creates an unselected empty tail. Corrupt the package
+        // selected by the certificate, rather than an arbitrary directory whose
+        // enumeration order varies across filesystems and random segment IDs.
+        let (owner, entries)=PartitionJournal::open(&archive,budget).unwrap();
+        let Entry::Anchor(reference)=serde_json::from_slice(&entries[0]).unwrap() else {panic!("archive has no anchor")};
+        let selected=serde_json::to_value(reference).unwrap();
+        let segment=archive.join(format!("segment-{}",selected["segments"][0]["id"].as_str().unwrap()));
+        drop(owner);
         std::fs::write(segment.join("schema.json"),b"corrupt").unwrap();
         let target=root.path().join("target");
         assert!(RecordPartition::checkpoint_authenticated_archive(&archive,&target,budget,&hash,1).await.is_err());

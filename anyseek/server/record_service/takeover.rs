@@ -62,6 +62,7 @@ impl Service {
             || source_entry.takeover_target.as_ref() != Some(&entry.collection_id) {
             return Err(storage("takeover source is not exclusively reserved"));
         }
+        self.intake.write().await.remove(&source_entry.collection_id);
         let cached = self.records.write().await.remove(&source_entry.collection_id);
         let source = match cached {
             Some(p) => p,
@@ -112,6 +113,8 @@ pub(super) async fn takeover(
     owned(async move {
         let _admission = admission;
         let _control = s.control.lock().await;
+        let _intake = s.intake_gate.write().await;
+        s.require_intake_drained().await?;
         let key = s.admin(&headers).await?;
         let existing = s.catalog.collections().await?.into_iter().find(|c| c.collection_id == request.collection_id);
         let entry = if let Some(entry) = existing {
