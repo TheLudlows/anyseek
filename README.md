@@ -6,6 +6,8 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 
 [服务指南](anyseek/server/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
 
+新增[异步接收入口](docs/async-ingestion.md)：`POST /api/v1/index/{id}/ingest` 批量持久化后返回 202，后台更新检索数据，状态接口区分待处理、物化成功和确定拒绝。它不承诺立即可搜索，现有 `/doc` 同步接口保留。本地与 S3 接收日志已接通，独立索引和合并的完整改造继续分批推进。
+
 ## 当前能力
 
 当前是 **有界单机实现**，P1-A 与已界定 P2 功能批次已经合入：

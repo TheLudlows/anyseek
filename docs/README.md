@@ -3,6 +3,7 @@
 | 目的 | 文档 |
 | --- | --- |
 | 启动与 API | [README](../README.md)、[服务指南](../anyseek/server/README.md)、[请求示例](../anyseek/server/test_api.rest) |
+| 轻量写入新目标 | [异步接收实施、接口与后续顺序](async-ingestion.md) |
 | 当前能力 | [状态](../STATUS.md)、[功能与边界](../FEATURES.md)、[架构](../ARCHITECTURE.md) |
 | 全貌与决策 | [项目全貌与下一步建议](project-overview.md)、[Tantivy 已落地设计](tantivy-evaluation.md) |
 | 一致性与持久化 | [Record 语义](record-model.md)、[存储协议](storage.md) |

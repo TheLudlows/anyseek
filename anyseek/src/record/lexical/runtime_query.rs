@@ -1,5 +1,5 @@
 //! Record-only query execution: native lexical postings, existing vector/metadata
-//! component, one selected cut, and one global rank fusion.
+//! component, possibly lagging native prefixes, and one global rank fusion.
 use super::*;
 use crate::{
     index::IndexArc,
@@ -121,7 +121,10 @@ pub(crate) async fn search(
             .active
             .as_ref()
             .ok_or_else(|| storage("native metadata statistics absent"))?;
-        if active.keys.len() != snapshot.identities.len() {
+        // Native intake consumption may lag vector/metadata. Its published
+        // prefix contributes lexical hits; retired revisions stay masked.
+        if active.keys.len() < snapshot.identities.len()
+            || (active.keys.len() != snapshot.identities.len() && !root.record_lexical[slot].allows_lag()) {
             return Err(storage("native/vector identity count mismatch"));
         }
         let compiled = crate::metadata_filter::compile_filters(shard, &filters)

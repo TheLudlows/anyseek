@@ -78,6 +78,21 @@ class anyseekClient:
         """{writes:[RecordWrite,...]}; inspect each result, not an atomic transaction."""
         return self.api('POST', self.collection_path(collection_id) + '/batch', request, key)
 
+    def ingest(self, collection_id, requests, key=_DEFAULT):
+        """Durably accept saved commands; 202 does not confirm conditional success."""
+        return json.loads(self.request('POST', self.collection_path(collection_id) + '/ingest',
+                                       {'records': requests}, key, expected=202))
+
+    def ingest_status(self, collection_id, operation, key=_DEFAULT):
+        """Inspect pending/materialized/rejected using the original identity."""
+        path = self.collection_path(collection_id) + '/ingest/operation/'
+        path += str(operation['epoch']) + '/' + quote(operation['nonce'], safe='')
+        return self.api('GET', path, key=key)
+
+    def ingest_progress(self, collection_id, key=_DEFAULT):
+        """Read separate durable/completed/materialized watermarks."""
+        return self.api('GET', self.collection_path(collection_id) + '/ingest', key=key)
+
     def checkpoint(self, collection_id, key=_DEFAULT):
         """Confirmed writes are already durable and visible."""
         return self.api('PATCH', self.collection_path(collection_id), key=key)

@@ -564,6 +564,7 @@ impl Inner {
     /// Local derived index sealing does not advance or replace journal authority.
     /// Recovery reconstructs pending packages from the complete committed suffix.
     pub(super) async fn maintain_index_tail(&mut self)->Result<(),RecordError> {
+        self.index.drain_batch_prefix(self.state.seq).await?;
         if self.background.is_some(){return Err(RecordError::Busy);}
         let root=self.journal.root().to_path_buf();
         let selected=self.anchor.as_ref().map_or(0,|a|a.segments.len());
@@ -612,6 +613,7 @@ impl Inner {
         })
     }
     async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
+        self.index.drain_batch_prefix(self.state.seq).await?;
         let _phase=maintenance::Phase::new("full_checkpoint",self.state.seq);
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();

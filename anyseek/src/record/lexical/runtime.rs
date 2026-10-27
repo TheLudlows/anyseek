@@ -31,6 +31,9 @@ pub(crate) struct Runtime {
     pub(crate) config: RecordConfig,
     pub(super) analyzer: super::query::Analyzer,
     data: Mutex<Data>,
+    published: std::sync::RwLock<Option<Arc<Snapshot>>>,
+    updates: std::sync::atomic::AtomicUsize,
+    asynchronous: std::sync::atomic::AtomicBool,
     directory: Option<super::directory::BudgetDirectory>,
     pin: Arc<crate::record::package_pins::Pin>,
 }
@@ -43,10 +46,8 @@ struct Data {
     writer: Option<IndexWriter<TantivyDocument>>,
     identities: Vec<Identity>,
     identity_charge: Charge,
-    published_updates: usize,
     pending_analysis_bytes: u64,
     pending_analysis_documents: usize,
-    snapshot: Option<Arc<Snapshot>>,
     cut: Cut,
 }
 impl Drop for Runtime {
@@ -93,17 +94,18 @@ impl Runtime {
             config: config.clone(),
             analyzer,
             directory: Some(directory),
+            published: std::sync::RwLock::new(None),
+            updates: std::sync::atomic::AtomicUsize::new(0),
+            asynchronous: std::sync::atomic::AtomicBool::new(false),
             data: Mutex::new(Data {
                 write_state: WriteState::Writable,
                 index,
                 reader,
                 writer: None,
-                published_updates: 0,
                 pending_analysis_bytes: 0,
                 pending_analysis_documents: 0,
                 identities: Vec::new(),
                 identity_charge: Charge::new(0)?,
-                snapshot: None,
                 cut: Cut {
                     sequence: 0,
                     evaluation_time_ms: 0,
@@ -149,17 +151,18 @@ impl Runtime {
             config: config.clone(),
             analyzer,
             directory: None,
+            published: std::sync::RwLock::new(Some(Arc::new(snapshot))),
+            updates: std::sync::atomic::AtomicUsize::new(0),
+            asynchronous: std::sync::atomic::AtomicBool::new(false),
             data: Mutex::new(Data {
                 write_state: WriteState::Sealed,
                 index,
                 reader,
                 writer: None,
-                published_updates: 0,
                 pending_analysis_bytes: 0,
                 pending_analysis_documents: 0,
                 identities: manifest.identities,
                 identity_charge,
-                snapshot: Some(Arc::new(snapshot)),
                 cut: manifest.cut,
             }),
             pin,
@@ -169,13 +172,32 @@ impl Runtime {
     /// Record certifies a replacement before accepting another durable operation.
     /// Bulk rebuilds publish once and do not consume this mutable-tail allowance.
     pub(crate) async fn needs_rotation(&self, incoming: usize) -> bool {
-        self.data.lock().await.published_updates.saturating_add(incoming) > 128
+        self.updates.load(std::sync::atomic::Ordering::Acquire).saturating_add(incoming) > 128
     }
     pub(crate) async fn append(
         &self,
         identity: Identity,
         document: &Document,
         publish: bool,
+    ) -> Result<(), RecordError> {
+        self.append_inner(identity, document, publish, publish).await
+    }
+    /// Intake queues documents on the retained writer and publishes once at the
+    /// batch boundary. Count them before publication so rotation cannot overrun
+    /// the mutable-tail admission bound.
+    pub(crate) async fn append_queued(
+        &self,
+        identity: Identity,
+        document: &Document,
+    ) -> Result<(), RecordError> {
+        self.append_inner(identity, document, false, false).await
+    }
+    async fn append_inner(
+        &self,
+        identity: Identity,
+        document: &Document,
+        publish: bool,
+        count_update: bool,
     ) -> Result<(), RecordError> {
         let estimate =
             crate::record::build_budget::document_estimate(document, &self.config.schema)?;
@@ -250,9 +272,9 @@ impl Runtime {
             .map_err(storage)?;
         data.cut.sequence = data.cut.sequence.max(identity.revision);
         data.identities.push(identity);
+        if count_update { self.reserve_update(); }
         if publish {
             self.flush_locked(&mut data)?;
-            data.published_updates += 1;
         } else if data.pending_analysis_bytes >= ANALYSIS_BATCH_BYTES {
             self.drain_analysis(&mut data)?;
         }
@@ -293,7 +315,6 @@ impl Runtime {
         };
         let mut snapshot = capture(data.reader.searcher(), &manifest)?;
         snapshot._pin = Some(self.pin.clone());
-        data.snapshot = Some(Arc::new(snapshot));
         let bytes = serde_json::to_vec(&(
             manifest,
             serde_json::to_value((&self.config.index, &self.config.schema, crate::tokenizer::standard::identity(self.config.index.tokenizer))).map_err(storage)?,
@@ -306,6 +327,7 @@ impl Runtime {
         let directory = self.directory.as_ref().ok_or_else(|| storage("immutable lexical package"))?;
         directory.atomic_write(Path::new("record-native.json"), &bytes).map_err(storage)?;
         directory.sync_directory().map_err(storage)?;
+        *self.published.write().map_err(|_| RecordError::RecoveryRequired)? = Some(Arc::new(snapshot));
         Ok(())
     }
     fn ensure_writer_locked(&self, data: &mut Data) -> Result<(),RecordError> {
@@ -351,14 +373,29 @@ impl Runtime {
         data.write_state = WriteState::Sealed;
         Ok(())
     }
-    pub(crate) async fn snapshot(&self) -> Result<Arc<Snapshot>, RecordError> {
-        self.data
-            .lock()
-            .await
-            .snapshot
-            .clone()
-            .ok_or_else(|| storage("unpublished native tail"))
+    pub(crate) fn reserve_update(&self) {
+        self.updates.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
+    pub(crate) fn reserve_queued_update(&self) {
+        self.asynchronous.store(true, std::sync::atomic::Ordering::Release);
+        self.reserve_update();
+    }
+    pub(crate) fn allows_lag(&self) -> bool {
+        self.asynchronous.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(crate) fn finish_consumption(&self) {
+        self.asynchronous.store(false, std::sync::atomic::Ordering::Release);
+    }
+    #[cfg(test)]
+    pub(crate) async fn published_shape(&self) -> (usize, usize) {
+        let snapshot = self.snapshot().await.unwrap();
+        (snapshot.identities.len(), snapshot.searcher.segment_readers().len())
+    }
+    pub(crate) async fn snapshot(&self) -> Result<Arc<Snapshot>, RecordError> {
+        self.published.read().map_err(|_| RecordError::RecoveryRequired)?
+            .clone().ok_or_else(|| storage("unpublished native tail"))
+    }
+
 }
 fn capture(searcher: Searcher, manifest: &Manifest) -> Result<Snapshot, RecordError> {
     let (expected, fields) = schema(&manifest.fields)?;
