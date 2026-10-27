@@ -877,7 +877,11 @@ mod tests {
         {
             let mut inner=p.inner.lock().await;
             let future=clock.0.load(Ordering::SeqCst)+inner.config.change_feed.retention_ms+1;
-            clock.0.store(future,Ordering::SeqCst);inner.trim_feed(future).await.unwrap();
+            clock.0.store(future,Ordering::SeqCst);assert!(matches!(inner.trim_feed(future).await,Err(RecordError::Busy)));
+        }
+        p.kick_maintenance().await;super::super::tests::wait_maintenance_idle(&p).await;
+        {
+            let inner=p.inner.lock().await;
             assert!(inner.state.feed.floor>0);
             let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
             assert_eq!((head.log_base_seq,head.indexed_seq,head.committed_seq),(2,2,2));
@@ -1000,7 +1004,7 @@ mod tests {
         let receipt=p.write(request.clone()).await.unwrap();
         let first_bytes={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let authority=remote.authority.lock().await;let head=authority.read_head("source").unwrap().unwrap();authority.retained_tail_size(&head).unwrap().1};
         p.inner.lock().await.remote.as_mut().unwrap().max_tail_bytes=first_bytes as usize+200;
-        p.write(write("second","b","alpha",ExpectedVersion::Absent)).await.unwrap();
+        super::super::tests::write_after_maintenance(&p,write("second","b","alpha",ExpectedVersion::Absent)).await.unwrap();
         {let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let authority=remote.authority.lock().await;let head=authority.read_head("source").unwrap().unwrap();assert_eq!(head.log_base_seq,2);assert_eq!(head.committed_seq,3);assert_eq!(authority.retained_tail_size(&head).unwrap().0,1);}
         let p=cold(p,&root,clock).await;
         assert_eq!(p.write(request).await.unwrap(),receipt);
@@ -1036,7 +1040,7 @@ mod tests {
         let (p,_store,root,_db,clock)=source().await;
         p.inner.lock().await.remote.as_mut().unwrap().max_tail_blocks=64;
         let mut receipts=Vec::new();
-        for i in 0..65 {let request=write(&format!("op{i}"),"same","alpha",if i==0 {ExpectedVersion::Absent}else{ExpectedVersion::Match(i)});let receipt=p.write(request.clone()).await.unwrap();receipts.push((request,receipt));}
+        for i in 0..65 {let request=write(&format!("op{i}"),"same","alpha",if i==0 {ExpectedVersion::Absent}else{ExpectedVersion::Match(i)});let receipt=super::super::tests::write_after_maintenance(&p,request.clone()).await.unwrap();receipts.push((request,receipt));}
         {let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let authority=remote.authority.lock().await;let head=authority.read_head("source").unwrap().unwrap();assert_eq!(head.committed_seq,65);assert_eq!(head.log_base_seq,64);assert_eq!(authority.retained_tail_size(&head).unwrap().0,1);}
         let p=cold(p,&root,clock).await;
         for (request,receipt) in receipts {assert_eq!(p.write(request).await.unwrap(),receipt);}
@@ -1053,6 +1057,7 @@ mod tests {
         p
     }
     async fn scores(p: &RecordPartition) -> Vec<serde_json::Value> {
+        super::super::tests::settle_maintenance(p).await;
         let mut results = Vec::new();
         for mode in [
             SearchMode::Lexical,

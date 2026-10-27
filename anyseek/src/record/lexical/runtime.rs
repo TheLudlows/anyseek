@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(held.identities.len(),128);
         partition.inner.lock().await.fail_publication_stage=1;
         let request=write("rotate-and-retry","r-new","alpha",ExpectedVersion::Absent);
-        assert_eq!(partition.write(request.clone()).await.unwrap_err(),crate::record::RecordError::DurablePending(129));
+        assert_eq!(crate::record::tests::write_after_maintenance(&partition,request.clone()).await.unwrap_err(),crate::record::RecordError::DurablePending(129));
         assert!(partition.inner.lock().await.anchor.is_some(),"rotation must certify before WAL append");
         assert_eq!(held.identities.len(),128,"captured Searcher remains at its original cut");
         drop(partition);

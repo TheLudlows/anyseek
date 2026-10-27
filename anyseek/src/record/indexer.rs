@@ -280,6 +280,10 @@ impl RecordPartition {
                     return Err(creation_error(error));
                 }
                 crash_boundary("cache");
+                #[cfg(test)]
+                if root.join(".test-anchor-post-certificate-gc").exists() {
+                    std::fs::write(root.join(".test-anchor-gc-failure"),b"injected retirement failure").map_err(storage)?;
+                }
                 candidate.swap(&mut inner);
                 inner.feed_cache=installed_feed;
                 inner.anchor = Some(reference);

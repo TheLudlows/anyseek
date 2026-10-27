@@ -110,3 +110,22 @@ preflight after correctness verification.
 - These are local Linux results. Windows and the complete regression matrix have
   not validated this slice. Existing callers/tests that assume maintenance never
   returns Busy require bounded retry handling, without weakening their assertions.
+
+Follow-up compatibility checks retain existing assertions with bounded retries of
+unaccepted Busy using the same operation ID: all six staging/lease tests passed;
+WAL unknown-publication, fixed Searcher at update 129, remote byte pressure,
+64-to-65 remote tail pressure and backup/GC/same-sequence preservation all passed.
+The 256-record frequent-term integration fixture passed. Test-only certificate and
+post-certificate GC fault points now cover the background publication route too.
+The quick CI list includes seven new background/Intent/authentication regressions;
+no previous case was removed. Busy retry is never used for OutcomeUnknown or
+DurablePending. These results do not substitute for Windows or full service tests.
+
+The low-level journal regression explicitly asserts `PublicationUnknown` after
+writing the new certificate with its suffix, then verifies the complete selected
+suffix after reopening. This complements the worker-level unhealthy/output-fence
+assertions. `server,fault-injection` type checking passed before the final early
+Busy fast path; the final S3-feature library build and seven focused tests passed
+after that path was added. Early Busy can precede validation of an unknown invalid
+or expired operation during pressure; known IDs still receive normal replay and
+time checks. No command is accepted by that fast path.

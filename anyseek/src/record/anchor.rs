@@ -1039,13 +1039,17 @@ mod tests {
             }
             for n in 0..6 {p.write(write(&format!("op-{n}"),&format!("r-{n}"),&format!("alpha {}","x".repeat(3000)),ExpectedVersion::Absent)).await.unwrap();}
             if unknown {std::fs::write(path.join(".test-checkpoint-after-certificate"),b"fail").unwrap();}
-            {let mut inner=p.inner.lock().await;
+            let size={let mut inner=p.inner.lock().await;
                 let base=encode_entry(&Entry::Anchor(inner.anchor.clone().unwrap())).unwrap().len();
                 let size=settings.max_journal_bytes as usize-base-16384;
                 assert!(inner.journal.checkpoint_can_make_room(size,0));
-                let result=inner.ensure_journal_room(size,0).await;
-                if unknown {assert!(matches!(result,Err(RecordError::OutcomeUnknown(_))));assert!(!inner.healthy);}
-                else {result.unwrap();assert_ne!(inner.anchor.as_ref().unwrap().id,before);assert!(inner.journal.validate_append(size).is_ok());}
+                assert!(matches!(inner.ensure_journal_room(size,0).await,Err(RecordError::Busy)));
+                assert!(inner.healthy);assert_eq!(inner.anchor.as_ref().unwrap().id,before);size
+            };
+            p.kick_maintenance().await;super::super::tests::wait_maintenance_idle(&p).await;
+            {let inner=p.inner.lock().await;
+                if unknown {assert!(!inner.healthy);assert!(inner.output.read().unwrap().fenced);}
+                else {assert_ne!(inner.anchor.as_ref().unwrap().id,before);assert!(inner.journal.validate_append(size).is_ok());}
             }
             if unknown {std::fs::remove_file(path.join(".test-checkpoint-after-certificate")).unwrap();}
             drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();

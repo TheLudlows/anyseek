@@ -433,6 +433,10 @@ impl PartitionJournal {
         let mut frames: Vec<&[u8]> = vec![payload, PUBLISHED];
         frames.extend(tail.iter().map(Vec::as_slice));
         let candidate = Journal::create_initialized_frames(&generation_path(&self.path,next),self.max_bytes,&frames)?;
+        #[cfg(test)]
+        if self.path.join(".test-checkpoint-after-certificate").exists() {
+            return Err(CreateError::PublicationUnknown(io::Error::other("injected after checkpoint certificate with suffix")));
+        }
         let previous = std::mem::replace(&mut self.journal,candidate);
         self.generation = next;
         drop(previous);
@@ -521,6 +525,16 @@ mod tests {
         entries.clear();
         store.visit_committed(|v| { entries.push(v.to_vec()); Ok(()) }).unwrap();
         assert_eq!(entries, vec![b"new-base".to_vec(), b"tail-one".to_vec(), b"tail-two".to_vec(), b"tail-three".to_vec()]);
+    }
+    #[test]
+    fn checkpoint_with_tail_reports_publication_unknown_and_reopens_complete_suffix() {
+        let path=root();let mut store=PartitionJournal::create(&path,4096,b"base").unwrap();
+        std::fs::write(path.join(".test-checkpoint-after-certificate"),b"fault").unwrap();
+        assert!(matches!(store.checkpoint_with_tail(b"new-base",&[b"same-seq-tail".to_vec()]),Err(CreateError::PublicationUnknown(_))));
+        drop(store);std::fs::remove_file(path.join(".test-checkpoint-after-certificate")).unwrap();
+        let (mut store,_)=PartitionJournal::open(&path,4096).unwrap();let mut entries=Vec::new();
+        store.visit_committed(|bytes|{entries.push(bytes.to_vec());Ok(())}).unwrap();
+        assert_eq!(entries,vec![b"new-base".to_vec(),b"same-seq-tail".to_vec()]);
     }
     #[test]
     fn committed_stream_rejects_marker_after_uncertified_entry() {

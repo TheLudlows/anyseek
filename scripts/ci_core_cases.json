@@ -37,5 +37,12 @@
   "record::remote_checkpoint::tests::remote_tail_count_pressure_preserves_all_receipts",
   "record::remote_checkpoint::tests::joint_closure_admits_once_and_rejects_duplicate_or_over_budget",
   "record::remote_checkpoint::tests::index_only_cas_faults_preserve_selected_cut_and_receipts",
-  "record::remote_checkpoint::tests::index_only_backup_gc_and_same_sequence_checkpoint_preserve_history"
+  "record::remote_checkpoint::tests::index_only_backup_gc_and_same_sequence_checkpoint_preserve_history",
+  "record::maintenance::tests::native_hard_pressure_returns_busy_before_accepting_and_worker_makes_progress",
+  "record::maintenance::tests::private_erasure_intent_is_not_installed_before_background_certificate",
+  "record::indexer::tests::catchup_proof_releases_live_lock_and_rechecks_new_suffix",
+  "record::indexer::tests::catchup_install_rechecks_same_sequence_feed_trim",
+  "record::remote_checkpoint::tests::background_same_sequence_feed_trim_installs_and_cold_recovers",
+  "record::remote_checkpoint::tests::background_maintenance_rejects_corrupt_selected_remote_inputs",
+  "storage::partition::tests::checkpoint_with_tail_reports_publication_unknown_and_reopens_complete_suffix"
 ]
