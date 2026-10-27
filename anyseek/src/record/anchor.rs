@@ -207,7 +207,7 @@ impl Reference {
         let mut previous_capture=None;
         let mut incremental=None;
         let mut image_lease=None;
-        let mut base_reason=if compact {"explicit_rewrite"} else if pool_compaction {"payload_pool_bound"}
+        let mut base_reason=if compact {"forced_full_base"} else if pool_compaction {"payload_pool_bound"}
             else if state.private_cleanup_pending {"private_cleanup"} else {"missing_predecessor_or_journal"};
         if !compact && !pool_compaction && !state.private_cleanup_pending {
             if let (Some(previous),Some(journal))=(previous,journal) {
@@ -503,48 +503,8 @@ pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&Stat
 }
 
 impl Inner {
-    /// Replay certified tail decisions into the selected index view. Never
-    /// append WAL or generate another operation/feed identity during recovery.
     pub(super) async fn replay_anchor_tail(&mut self,entry:Entry)->Result<(),RecordError>{
-        match entry {
-            Entry::Applied(applied)=>{
-                let (index_bytes,updates)=build_budget::write_estimate(&self.state,&self.config,&applied)?;
-                if index_bytes>0 && !self.index.can_admit(index_bytes,updates).await {
-                    self.stage_stable_tail().await?;
-                }
-                let growth=checkpoint_codec::json_length(&applied)?.checked_mul(3).ok_or_else(||storage("tail state growth overflow"))?;
-                if applied.request.generation.is_some() {
-                    let mut next=self.state.try_clone_with_growth(growth)?;apply(&mut next,&applied)?;
-                    let bytes=checkpoint_codec::length(&self.config, &next)?;
-                    next.admit_bytes(bytes)?;
-                    self.publish_prepared(&applied,bytes,None,Some(next)).await?;
-                } else {
-                    let prepared=state_memory::Prepared::new(&self.state,&applied)?;
-                    let bytes=mutation::snapshot_after(&self.state,self.snapshot_bytes,&applied,&prepared.record)?;
-                    prepared.admit_containers(&mut self.state,bytes)?;
-                    self.publish_prepared(&applied,bytes,Some(prepared),None).await?;
-                }
-                self.graph_cache=graph::Cache::rebuild(&self.state)?;
-                return Ok(());
-            },
-            Entry::Expired(event)=>{
-                let mut next=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;temporal::apply(&mut next,&event)?;
-                let visible=evidence::visibility(&next.records)?;
-                let retired:Vec<_>=self.locations.keys().filter(|id|visible.get(*id)!=Some(&true)).cloned().collect();
-                for id in retired {let ordinal=self.locations.remove(&id).unwrap();self.index.retire(ordinal).await?;}
-                self.state=next;
-            },
-            Entry::LeaseExpired(event)=>{
-                let size=checkpoint_codec::json_length(&self.state)?.checked_add(checkpoint_codec::json_length(&event)?).ok_or_else(||storage("lease state growth overflow"))?;
-                self.state.admit_bytes(size)?;
-                lease::apply(&mut self.state,&event)?;
-            },
-            Entry::FeedTrim(event)=>change_feed::apply_trim(&mut self.state,&self.config.change_feed,&event)?,
-            Entry::Checkpoint{..}|Entry::Anchor(_)=>return Err(storage("unexpected anchor in operation stream")),
-        }
-        self.graph_cache=graph::Cache::rebuild(&self.state)?;
-        self.snapshot_bytes=checkpoint_codec::length(&self.config, &self.state)?;
-        Ok(())
+        self.replay_context().replay(entry).await
     }
 }
 
@@ -592,9 +552,11 @@ impl Inner {
         let root=self.journal.root().to_path_buf();
         let selected=self.anchor.as_ref().map_or(0,|a|a.segments.len());
         let captured=self.anchor.as_ref().is_some_and(|a|a.captured.get().is_some());
-        let fallback=maintenance::seal_fallback(self.state.private_cleanup_pending,captured,
-            selected,self.index.pending_seals.len(),capacity::segments(&self.config),
-            self.index.stable_tail_path(&root).await.is_some());
+        let mut fallback=maintenance::seal_fallback(self.state.private_cleanup_pending,captured,
+            selected,self.index.pending_seals.len(),capacity::segments(&self.config),true);
+        if fallback.is_none() && self.index.stable_tail_path(&root).await.is_none() {
+            fallback=Some(maintenance::SealFallback::UnstableTail);
+        }
         log::info!("record_maintenance cause=tail_admission seq={} fallback={:?} selected={} pending={} package_limit={}",
             self.state.seq,fallback,selected,self.index.pending_seals.len(),capacity::segments(&self.config));
         let _phase=maintenance::Phase::new("tail_maintenance",self.state.seq);

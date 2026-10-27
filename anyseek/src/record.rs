@@ -38,6 +38,7 @@ mod locator;
 pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
 mod publication;
+mod replay;
 mod indexer;
 mod maintenance;
 pub use indexer::IndexJob;
