@@ -18,6 +18,7 @@ const FACETS: &str = "metadata.bin";
 pub(crate) type IndexArc = Arc<RwLock<Index>>;
 pub(crate) type ShardArc = Arc<RwLock<Shard>>;
 
+#[derive(Clone)]
 pub(crate) struct Index {
     pub index_path_string: String,
     pub record_lexical: Vec<Arc<crate::record::lexical::runtime::Runtime>>,
@@ -37,6 +38,7 @@ pub(crate) struct Index {
 }
 
 pub(crate) struct Shard {
+    pub failed: bool,
     pub indexed_doc_count: usize,
     pub indexed_vector_count: usize,
     pub indexed_cluster_count: usize,
@@ -137,7 +139,7 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
     }
     let vector_map=unsafe{Mmap::map(&vector_file)}.map_err(|e|e.to_string())?;
     let facet_map=if width==0 {MmapOptions::new().len(1).map_anon()}else{unsafe{MmapMut::map_mut(&facets_file)}}.map_err(|e|e.to_string())?;
-    let mut shard=Shard {indexed_doc_count:0,indexed_vector_count:0,indexed_cluster_count:0,committed_doc_count:0,uncommitted:false,
+    let mut shard=Shard {failed:false,indexed_doc_count:0,indexed_vector_count:0,indexed_cluster_count:0,committed_doc_count:0,uncommitted:false,
         schema_map:schema_map.clone(),indexed_schema_vec:indexed,stored_field_names:Vec::new(),meta:meta.clone(),is_last_level_incomplete:false,
         last_level_vector_file_start_pos:0,vector_levels:0,delete_hashset:AHashSet::new(),active:None,build_reservation:None,build_input_covered:false,
         path:path.to_owned(),facets,facets_map,facets_size_sum:width,facets_file,facets_file_mmap:facet_map,string_set_to_single_term_id_vec:Vec::new(),
@@ -190,6 +192,9 @@ pub(crate) async fn open_index(path:&Path)->Result<IndexArc,String>{
 }
 
 impl Shard {
+    pub(crate) fn is_deleted(&self, id: usize) -> bool {
+        self.delete_hashset.contains(&id) || self.active.as_ref().is_some_and(|active| !active.is_live(id))
+    }
     pub(crate) fn rank(&self,a:f32,a_id:usize,b:f32,b_id:usize)->std::cmp::Ordering {
         crate::active::rank_with_keys(self.active.as_ref().map(|s|s.keys.as_slice()),a,a_id,b,b_id)
     }
@@ -258,7 +263,7 @@ impl Shard {
         }
         Ok(())
     }
-    async fn append(&mut self, document:Document)->Result<(),String>{
+    pub(crate) async fn append(&mut self, document:Document)->Result<(),String>{
         let ordinal=self.indexed_doc_count;
         if ordinal>0 && ordinal.is_multiple_of(ROARING_BLOCK_SIZE) && self.uncommitted {self.commit_component().await.map_err(|e|e.to_string())?;}
         // The full input is consumed by this call, never stored in the component.

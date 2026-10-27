@@ -38,7 +38,7 @@ impl RecordPartition {
                 if !inner.healthy || inner.state.sealed_for.is_some() {
                     return Err(RecordError::RecoveryRequired);
                 }
-                inner.index.begin_batch(partition.indexes.clone()).await?;
+                inner.index.begin_batch(partition.indexes.clone(),Arc::downgrade(&partition.inner)).await?;
                 let mut batch = BatchResult {
                     results: Vec::new(),
                     stop: None,
@@ -46,8 +46,8 @@ impl RecordPartition {
                 for request in requests {
                     let result = inner.write_one(request).await;
                     if !inner.healthy {
-                        // An incomplete native append cannot be flushed into a
-                        // publishable view. Recovery resolves all original IDs.
+                        // Incomplete publication cannot certify an index view.
+                        // Recovery resolves all original operation identities.
                         inner.index.abort_batch();
                         return Err(result.err().unwrap_or(RecordError::RecoveryRequired));
                     }
@@ -65,18 +65,14 @@ impl RecordPartition {
                         }
                     }
                 }
-                // Native consumption proceeds independently after the Record and
-                // vector/metadata materializer releases its guard.
+                // Both index consumers proceed independently after canonical
+                // Record materialization releases its guard.
                 inner
                     .output
                     .write()
                     .map_err(|_| RecordError::RecoveryRequired)?
                     .fenced = true;
                 let sequence = inner.state.seq;
-                partition
-                    .indexes
-                    .vector
-                    .fetch_max(sequence, std::sync::atomic::Ordering::Release);
                 if let Err(error) = inner
                     .index
                     .finish_batch(sequence, partition.indexes.clone())

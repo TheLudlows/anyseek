@@ -1,5 +1,5 @@
-//! Durable asynchronous intake. Acceptance and searchable completion are
-//! separate receipts; the materializer never owns the intake journal lock.
+//! Durable intake, canonical Record outcomes and index progress are separate.
+//! Record and index materializers never own the intake journal lock.
 use super::*;
 use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,7 +31,7 @@ pub struct IngestFailure {
 pub struct IngestStatus {
     /// Durable intake receipt.
     pub accepted: IngestReceipt,
-    /// Present after successful materialization.
+    /// Present after canonical Record materialization; indexes may still lag.
     pub receipt: Option<WriteReceipt>,
     /// Present after a definite rejection; acceptance itself is not rolled back.
     pub error: Option<IngestFailure>,
@@ -489,7 +489,10 @@ impl IngestPipeline {
         let progress = self.progress().await;
         if progress.blocked.is_some() || progress.index_error.is_some() {
             Err(RecordError::RecoveryRequired)
-        } else if progress.pending != 0 || progress.lexical_seq < progress.vector_seq {
+        } else if progress.pending != 0
+            || progress.lexical_seq < progress.materialized_seq
+            || progress.vector_seq < progress.materialized_seq
+        {
             Err(RecordError::Busy)
         } else {
             // A published cursor can precede the final task-owner drop. Join
@@ -708,6 +711,13 @@ mod tests {
         })
         .await
         .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pipeline.progress().await.vector_seq != 64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let progress = pipeline.progress().await;
         assert_eq!((progress.lexical_seq, progress.vector_seq), (0, 64));
         assert!(matches!(
@@ -790,6 +800,221 @@ mod tests {
             64
         );
         assert_eq!(p.write(requests[63].clone()).await.unwrap().seq, 64);
+    }
+    #[tokio::test]
+    async fn vector_lag_allows_record_and_lexical_progress_and_masks_queued_old_versions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let pipeline = paused(p.clone()).await;
+        std::fs::write(root.join(".test-vector-consumer-pause"), b"pause").unwrap();
+        let first = write("first", "a", "alpha", ExpectedVersion::Absent);
+        pipeline.submit(vec![first.clone()]).await.unwrap();
+        pipeline.paused.store(false, Ordering::Release);
+        pipeline.kick();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pipeline.progress().await.lexical_seq != 1
+                || pipeline.progress().await.completed_seq != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(pipeline.progress().await.vector_seq, 0);
+        assert!(p.get("a").await.unwrap().is_some());
+        assert!(matches!(
+            pipeline.require_drained().await,
+            Err(RecordError::Busy)
+        ));
+        // The lexical cache is ahead; shared metadata has not arrived, so its
+        // available prefix may be empty without producing a topology error.
+        assert_eq!(
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            0
+        );
+        let update = write("second", "a", "beta", ExpectedVersion::Match(1));
+        let mut delete = write("third", "a", "", ExpectedVersion::Match(2));
+        delete.document = None;
+        let survivor = write("fourth", "b", "gamma", ExpectedVersion::Absent);
+        pipeline
+            .submit(vec![update, delete, survivor])
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pipeline.progress().await.completed_seq != 4
+                || pipeline.progress().await.lexical_seq != 4
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(pipeline.progress().await.vector_seq, 0);
+        assert!(p.get("a").await.unwrap().is_none());
+        std::fs::remove_file(root.join(".test-vector-consumer-pause")).unwrap();
+        drained(&pipeline).await;
+        let result = super::super::tests::query(
+            &p,
+            SearchMode::Vector {
+                similarity_threshold: None,
+                ann_mode: crate::vector_similarity::AnnMode::All,
+            },
+        )
+        .await;
+        assert_eq!(result.count_total, 1);
+        assert_eq!(result.hits[0].record.record_id, "b");
+        assert_eq!(
+            p.search("alpha beta".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            0
+        );
+        p.compact_journal().await.unwrap();
+        drop(pipeline);
+        drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::tests::query(
+                &p,
+                SearchMode::Vector {
+                    similarity_threshold: None,
+                    ann_mode: crate::vector_similarity::AnnMode::All
+                }
+            )
+            .await
+            .count_total,
+            1
+        );
+    }
+    #[tokio::test]
+    async fn vector_failure_keeps_record_receipts_and_both_consumers_recover_from_log() {
+        for failure in [
+            ".test-vector-consumer-fail",
+            ".test-vector-consumer-fail-after-append",
+            ".test-vector-consumer-panic-after-append",
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("records");
+            let p = RecordPartition::create(&root, config()).await.unwrap();
+            let pipeline = paused(p.clone()).await;
+            std::fs::write(root.join(failure), b"fail").unwrap();
+            let request = write("failed-vector", "a", "alpha", ExpectedVersion::Absent);
+            pipeline.submit(vec![request.clone()]).await.unwrap();
+            pipeline.paused.store(false, Ordering::Release);
+            pipeline.kick();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while pipeline.progress().await.index_error.is_none()
+                    || pipeline.progress().await.completed_seq != 1
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(pipeline.finish().await.is_err());
+            assert!(
+                pipeline
+                    .operation(&request.operation_id)
+                    .await
+                    .unwrap()
+                    .receipt
+                    .is_some()
+            );
+            assert!(p.get("a").await.unwrap().is_some());
+            assert!(
+                p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                    .await
+                    .is_err()
+            );
+            if failure.ends_with("after-append") {
+                assert!(
+                    p.inner
+                        .lock()
+                        .await
+                        .index
+                        .test_index()
+                        .read()
+                        .await
+                        .shard_vec[0]
+                        .read()
+                        .await
+                        .failed
+                );
+            }
+            std::fs::remove_file(root.join(failure)).unwrap();
+            drop(pipeline);
+            drop(p);
+            let p = RecordPartition::open(&root, config().max_journal_bytes)
+                .await
+                .unwrap();
+            let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+            drained(&pipeline).await;
+            assert_eq!(
+                (
+                    pipeline.progress().await.vector_seq,
+                    pipeline.progress().await.lexical_seq
+                ),
+                (1, 1)
+            );
+            assert_eq!(p.write(request).await.unwrap().seq, 1);
+        }
+    }
+    #[tokio::test]
+    async fn dropping_public_handles_keeps_owner_until_each_index_consumer_exits() {
+        for lane in ["lexical", "vector"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("records");
+            let p = RecordPartition::create(&root, config()).await.unwrap();
+            let pipeline = paused(p.clone()).await;
+            let gate = root.join(format!(".test-{lane}-consumer-pause"));
+            std::fs::write(&gate, b"pause").unwrap();
+            pipeline
+                .submit(vec![write("one", "a", "alpha", ExpectedVersion::Absent)])
+                .await
+                .unwrap();
+            pipeline.paused.store(false, Ordering::Release);
+            pipeline.kick();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while pipeline.progress().await.completed_seq != 1
+                    || !root.join(format!(".test-{lane}-consumer-started")).exists()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(pipeline);
+            drop(p);
+            assert!(
+                PartitionJournal::open(&root, config().max_journal_bytes).is_err(),
+                "active {lane} work must retain the journal owner"
+            );
+            std::fs::remove_file(&gate).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Ok((journal, _)) =
+                        PartitionJournal::open(&root, config().max_journal_bytes)
+                    {
+                        drop(journal);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let p = RecordPartition::open(&root, config().max_journal_bytes)
+                .await
+                .unwrap();
+            assert!(p.get("a").await.unwrap().is_some());
+        }
     }
     #[tokio::test]
     async fn lexical_failure_keeps_durable_record_outcomes_and_reopen_rebuilds_indexes() {

@@ -16,14 +16,34 @@ pub(super) struct RetrievalView {
     // the partition guard; publication then runs in an independent consumer.
     batch: bool,
     batch_inputs: Vec<index_consumers::Input>,
-    lexical: Option<index_consumers::Lexical>,
+    batch_vectors: Vec<index_consumers::Input>,
+    vector: Option<index_consumers::Consumer>,
+    reserved_rows: Option<usize>,
+    component_bytes: u64,
+    retired: Vec<Arc<crate::active::Retired>>,
+    lexical: Option<index_consumers::Consumer>,
     cursors: Option<Arc<index_consumers::Cursors>>,
+    owner: std::sync::Weak<Mutex<Inner>>,
 }
 impl RetrievalView {
+    pub(super) async fn capture_query(&self,length:usize)->Result<super::query::Handle,RecordError> {
+        super::query::Handle::capture(&self.query,length).await
+    }
+    pub(super) async fn components(&self)->Vec<crate::component::ShardArc> {
+        self.query.read().await.shard_vec.clone()
+    }
+    pub(super) async fn matches(&self,ordinal:usize,component:&crate::component::ShardArc,local:usize)->bool {
+        let root=self.query.read().await;
+        let n=root.shard_number;
+        ordinal/n==local && Arc::ptr_eq(&root.shard_vec[ordinal%n],component)
+    }
     pub(super) async fn can_admit(&self,bytes:u64,native_updates:usize)->bool {
         let root=self.tail.read().await;
         for native in &root.record_lexical {
             if native.needs_rotation(native_updates).await {return false;}
+        }
+        if self.reserved_rows.is_some() {
+            return self.component_bytes.checked_add(bytes).is_some_and(|n|crate::storage::build_budget::validate_single(n).is_ok());
         }
         let shard=root.shard_vec[0].read().await;
         shard.build_reservation.as_ref().is_some_and(|r|r.can_grow(bytes))
@@ -36,8 +56,10 @@ impl RetrievalView {
             pending_seals: Vec::new(),
             batch: false,
             batch_inputs: Vec::new(),
+            batch_vectors:Vec::new(), vector:None, reserved_rows:None, component_bytes:0, retired:Vec::new(),
             lexical: None,
             cursors: None,
+            owner:Default::default(),
         }
     }
     /// Install a new empty tail under the exclusive partition publication guard.
@@ -161,6 +183,7 @@ impl RetrievalView {
         *locations = next_locations;
         self.tail = new_tail;
         self.lexical = None; // predecessor was drained before seal
+        self.vector=None; self.reserved_rows=None; self.retired.clear();
         Ok(())
     }
 
@@ -202,6 +225,21 @@ impl RetrievalView {
         revision: u64,
         document: Document,
     ) -> Result<usize, RecordError> {
+        if self.batch {
+            self.initialize_async().await?;
+            let local=self.reserved_rows.ok_or(RecordError::RecoveryRequired)?;
+            let native=self.tail.read().await.record_lexical[0].clone();
+            let identity=lexical::Identity { id:key.clone(),version,revision };
+            let vector=index_consumers::Input::vector(&native.config,identity.clone(),local,&document)?;
+            let lexical=index_consumers::Input::admitted(&native,identity,&document)?;
+            let schema=retrieval_schema(&native.config);
+            let growth=build_budget::component_estimate(&document,schema.iter().filter(|f|f.index_vector||f.facet).map(|f|f.field.as_str()))?
+                .checked_add(build_budget::identity_estimate(&key)?).ok_or_else(||storage("queued component growth overflow"))?;
+            self.component_bytes=self.component_bytes.checked_add(growth).ok_or_else(||storage("component admission overflow"))?;
+            self.reserved_rows=Some(local.checked_add(1).ok_or_else(||storage("component ordinal overflow"))?);
+            self.batch_inputs.push(lexical); self.batch_vectors.push(vector);
+            return local.checked_mul(self.query.read().await.shard_number).ok_or_else(||storage("candidate address overflow"));
+        }
         let shard = self.tail.read().await.shard_vec[0].clone();
         {
             let mut shard=shard.write().await;
@@ -222,72 +260,84 @@ impl RetrievalView {
         };
         let native = self.tail.read().await.record_lexical[0].clone();
         let identity = lexical::Identity { id:key_for_native, version, revision };
-        if self.batch {
-            self.batch_inputs.push(index_consumers::Input::admitted(&native, identity, &document)?);
-        } else {
-            native.append(identity, &document, true).await?;
-        }
+        native.append(identity, &document, true).await?;
         self.tail
             .index_documents(vec![document])
             .await
             .map_err(storage)?;
+        if self.reserved_rows.is_some() {
+            self.reserved_rows=Some(local+1);
+            self.component_bytes=shard.read().await.build_reservation.as_ref().map_or(0, |r|r.bytes());
+        }
         local
             .checked_mul(self.query.read().await.shard_number)
             .ok_or_else(|| storage("candidate address overflow"))
     }
-    pub(super) async fn begin_batch(&mut self, cursors: Arc<index_consumers::Cursors>) -> Result<(), RecordError> {
-        debug_assert!(!self.batch);
-        if cursors.error().is_some() { return Err(RecordError::RecoveryRequired); }
-        self.cursors = Some(cursors.clone());
-        if self.lexical.is_none() {
-            let root = self.tail.read().await;
-            self.lexical = Some(index_consumers::Lexical::new(root.record_lexical[0].clone(), cursors,
-                Path::new(&root.index_path_string).parent().unwrap().to_owned()));
+    async fn initialize_async(&mut self) -> Result<(),RecordError> {
+        if self.reserved_rows.is_some() {return Ok(());}
+        let cursors=self.cursors.clone().ok_or(RecordError::RecoveryRequired)?;
+        let root=self.query.read().await;
+        self.retired.clear();
+        for component in &root.shard_vec {
+            let mut shard=component.write().await;
+            let active=shard.active.as_mut().ok_or_else(||storage("component statistics missing"))?;
+            let mask=active.retired.get_or_insert_with(Default::default).clone();
+            self.retired.push(mask);
         }
-        self.batch = true;
-        self.batch_inputs.clear();
+        drop(root);
+        let root=self.tail.read().await;
+        let shard=root.shard_vec[0].read().await;
+        self.reserved_rows=Some(shard.indexed_doc_count);
+        self.component_bytes=shard.build_reservation.as_ref().map_or(0,|r|r.bytes());
+        let path=Path::new(&root.index_path_string).parent().ok_or_else(||storage("component parent missing"))?.to_owned();
+        self.lexical=Some(index_consumers::Consumer::new_lexical(root.record_lexical[0].clone(),cursors.clone(),path.clone(),self.owner.clone()));
+        self.vector=Some(index_consumers::Consumer::new_vector(self.tail.clone(),root.record_lexical[0].clone(),cursors,path,self.owner.clone()));
+        Ok(())
+    }
+    pub(super) async fn begin_batch(&mut self,cursors:Arc<index_consumers::Cursors>,owner:std::sync::Weak<Mutex<Inner>>) -> Result<(),RecordError> {
+        debug_assert!(!self.batch);
+        if cursors.error().is_some() {return Err(RecordError::RecoveryRequired);}
+        self.cursors=Some(cursors);
+        self.owner=owner;
+        self.initialize_async().await?;
+        self.batch=true; self.batch_inputs.clear(); self.batch_vectors.clear();
         Ok(())
     }
     pub(super) fn abort_batch(&mut self) {
-        self.batch = false;
-        self.batch_inputs.clear();
+        self.batch=false; self.batch_inputs.clear(); self.batch_vectors.clear();
     }
-    pub(super) async fn finish_batch(&mut self, sequence: u64, cursors: Arc<index_consumers::Cursors>) -> Result<(), RecordError> {
-        self.batch = false;
-        self.publish_batch_prefix(sequence, cursors).await
+    pub(super) async fn finish_batch(&mut self,sequence:u64,_cursors:Arc<index_consumers::Cursors>) -> Result<(),RecordError> {
+        self.batch=false;
+        self.publish_batch_prefix(sequence).await
     }
-    pub(super) async fn publish_batch_prefix(&mut self, sequence: u64, cursors: Arc<index_consumers::Cursors>) -> Result<(), RecordError> {
-        cursors.vector.fetch_max(sequence, std::sync::atomic::Ordering::Release);
-        if self.lexical.is_none() {
-            let root = self.tail.read().await;
-            self.lexical = Some(index_consumers::Lexical::new(root.record_lexical[0].clone(), cursors,
-                Path::new(&root.index_path_string).parent().unwrap().to_owned()));
-        }
-        self.lexical.as_ref().unwrap().submit(std::mem::take(&mut self.batch_inputs), sequence)
+    pub(super) async fn publish_batch_prefix(&mut self,sequence:u64) -> Result<(),RecordError> {
+        self.initialize_async().await?;
+        self.lexical.as_ref().ok_or(RecordError::RecoveryRequired)?.submit(std::mem::take(&mut self.batch_inputs),sequence)?;
+        self.vector.as_ref().ok_or(RecordError::RecoveryRequired)?.submit(std::mem::take(&mut self.batch_vectors),sequence)
     }
-    pub(super) async fn drain_indexes(&self) -> Result<(), RecordError> {
-        if let Some(lexical) = &self.lexical { lexical.drain().await?; }
-        Ok(())
+    pub(super) async fn drain_indexes(&self) -> Result<(),RecordError> {
+        // Metadata catches up before native lag checks become strict again.
+        let vector=if let Some(vector)=&self.vector {vector.drain().await}else{Ok(())};
+        let lexical=if let Some(lexical)=&self.lexical {lexical.drain().await}else{Ok(())};
+        vector.and(lexical)
     }
-    pub(super) async fn drain_batch_prefix(&mut self, sequence: u64) -> Result<(), RecordError> {
-        if self.batch && !self.batch_inputs.is_empty() {
-            self.publish_batch_prefix(sequence, self.cursors.clone().ok_or(RecordError::RecoveryRequired)?).await?;
-        }
+    pub(super) async fn drain_batch_prefix(&mut self,sequence:u64) -> Result<(),RecordError> {
+        if self.batch && (!self.batch_inputs.is_empty() || !self.batch_vectors.is_empty()) {self.publish_batch_prefix(sequence).await?;}
         self.drain_indexes().await
     }
-    pub(super) async fn retire(&self, ordinal: usize) -> Result<(), RecordError> {
-        let root = self.query.read().await;
-        let n = root.shard_number;
-        let mut shard = root.shard_vec[ordinal % n].write().await;
-        let local = ordinal / n;
+    pub(super) async fn retire(&self,ordinal:usize) -> Result<(),RecordError> {
+        if !self.retired.is_empty() {
+            return self.retired[ordinal%self.retired.len()].insert(ordinal/self.retired.len()).map_err(storage);
+        }
+        let root=self.query.read().await;
+        let n=root.shard_number;
+        let mut shard=root.shard_vec[ordinal%n].write().await;
+        let local=ordinal/n;
         shard.delete_hashset.insert(local);
-        shard
-            .active
-            .as_mut()
-            .ok_or_else(|| storage("missing view statistics"))?
-            .retire(local);
+        shard.active.as_mut().ok_or_else(||storage("missing view statistics"))?.retire(local);
         Ok(())
     }
+    #[cfg(test)]
     pub(super) async fn search(
         &self,
         text: String,
@@ -306,33 +356,6 @@ impl RetrievalView {
             Ok(result)=>result,
             Err(error)=>crate::search::ResultObject{error:Some(error.to_string()),..Default::default()},
         }
-    }
-    pub(super) async fn with_filter<T>(
-        &self,
-        locations: &BTreeMap<String, usize>,
-        filters: &[FacetFilter],
-        action: impl FnOnce(&dyn Fn(&str) -> bool) -> Result<T, RecordError>,
-    ) -> Result<T, RecordError> {
-        let root = self.query.read().await;
-        let shards =
-            futures::future::join_all(root.shard_vec.iter().map(|shard| shard.read())).await;
-        let compiled = shards
-            .iter()
-            .map(|shard| {
-                crate::metadata_filter::compile_filters(shard, filters)
-                    .map_err(RecordError::Rejected)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let n = shards.len();
-        action(&|id| {
-            locations.get(id).is_some_and(|ordinal| {
-                !crate::metadata_filter::is_facet_filter(
-                    &shards[*ordinal % n],
-                    &compiled[*ordinal % n],
-                    *ordinal / n,
-                )
-            })
-        })
     }
     pub(super) async fn local_statistics(&self)->Result<Vec<crate::active::ActiveStatistics>,RecordError>{
         let root=self.query.read().await;

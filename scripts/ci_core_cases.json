@@ -56,5 +56,12 @@
   "record::ingestion::tests::lexical_lag_does_not_block_vector_materialization_or_intake_and_commits_one_batch",
   "record::ingestion::tests::lexical_failure_keeps_durable_record_outcomes_and_reopen_rebuilds_indexes",
   "record::ingestion::tests::batched_updates_deletes_and_rejections_preserve_order_and_synchronous_visibility",
-  "record::ingestion::tests::batch_crossing_native_rotation_drains_its_prefix_before_sealing_and_reopens"
+  "record::ingestion::tests::batch_crossing_native_rotation_drains_its_prefix_before_sealing_and_reopens",
+  "record::ingestion::tests::vector_lag_allows_record_and_lexical_progress_and_masks_queued_old_versions",
+  "record::ingestion::tests::vector_failure_keeps_record_receipts_and_both_consumers_recover_from_log",
+  "record::ingestion::tests::dropping_public_handles_keeps_owner_until_each_index_consumer_exits",
+  "record::query::tests::scoring_releases_record_guard_and_accepts_newer_cache_publication",
+  "record::query::tests::candidate_revalidation_drops_updated_and_deleted_rows_without_full_state_clone",
+  "record::query::tests::source_deletion_still_fences_a_query_scored_outside_the_record_guard",
+  "record::tests::record_cancelled_query_retains_lock_until_shard_task_releases_mmaps"
 ]

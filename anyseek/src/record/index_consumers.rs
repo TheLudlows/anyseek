@@ -1,4 +1,4 @@
-//! Independent native consumption behind Record's vector/metadata materializer.
+//! Independent lexical and vector/metadata consumption behind Record decisions.
 //! Only immutable, bounded input batches cross the publication guard. The WAL
 //! remains the recovery source; these cursors describe disposable index caches.
 use super::*;
@@ -39,6 +39,7 @@ impl Cursors {
 
 pub(super) struct Input {
     identity: lexical::Identity,
+    ordinal: usize,
     document: Document,
     _memory: crate::storage::build_budget::MemoryLease,
     _scope: Option<crate::resources::Lease>,
@@ -71,10 +72,133 @@ impl Input {
         native.reserve_queued_update();
         Ok(Self {
             identity,
+            ordinal: 0,
             document,
             _memory: memory,
             _scope: scope,
         })
+    }
+    pub fn vector(
+        config: &RecordConfig,
+        identity: lexical::Identity,
+        ordinal: usize,
+        document: &Document,
+    ) -> Result<Self, RecordError> {
+        let bytes = build_budget::document_estimate(document, &[])?;
+        let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
+        let scope = crate::resources::Scope::current()
+            .map(|scope| scope.retained_io().bytes(bytes))
+            .transpose()
+            .map_err(storage)?;
+        let document = retrieval_schema(config)
+            .into_iter()
+            .filter(|f| f.index_vector || f.facet)
+            .filter_map(|field| {
+                document
+                    .get(&field.field)
+                    .map(|value| (field.field, value.clone()))
+            })
+            .collect();
+        Ok(Self {
+            identity,
+            ordinal,
+            document,
+            _memory: memory,
+            _scope: scope,
+        })
+    }
+}
+#[derive(Clone)]
+enum Engine {
+    Lexical(Arc<lexical::runtime::Runtime>),
+    Vector {
+        index: IndexArc,
+        _native: Arc<lexical::runtime::Runtime>,
+    },
+}
+impl Engine {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Lexical(_) => "lexical",
+            Self::Vector { .. } => "vector",
+        }
+    }
+    async fn append(&self, input: Input, cursors: &Cursors) -> Result<(), RecordError> {
+        match self {
+            Self::Lexical(native) => native.append_queued(input.identity, &input.document).await,
+            Self::Vector { index, .. } => {
+                let component = index.read().await.shard_vec[0].clone();
+                #[cfg(test)]
+                let fail_after = Path::new(&index.read().await.index_path_string)
+                    .parent()
+                    .unwrap()
+                    .join(".test-vector-consumer-fail-after-append")
+                    .exists();
+                #[cfg(test)]
+                let panic_after = Path::new(&index.read().await.index_path_string)
+                    .parent()
+                    .unwrap()
+                    .join(".test-vector-consumer-panic-after-append")
+                    .exists();
+                let mut shard = component.write().await;
+                let outcome = std::panic::AssertUnwindSafe(async {
+                    if shard.failed {
+                        return Err(RecordError::RecoveryRequired);
+                    }
+                    let active = shard
+                        .active
+                        .as_ref()
+                        .ok_or_else(|| storage("vector statistics missing"))?;
+                    if active.keys.len() != input.ordinal
+                        || shard.indexed_doc_count != input.ordinal
+                    {
+                        return Err(storage("vector consumer input order mismatch"));
+                    }
+                    if let Some(memory) = &mut shard.build_reservation {
+                        memory
+                            .grow(build_budget::identity_estimate(&input.identity.id)?)
+                            .map_err(storage)?;
+                    }
+                    shard.active.as_mut().unwrap().keys.push(input.identity.id);
+                    shard.append(input.document).await.map_err(storage)?;
+                    #[cfg(test)]
+                    if panic_after {
+                        panic!("injected vector panic after append");
+                    }
+                    #[cfg(test)]
+                    if fail_after {
+                        return Err(storage("injected vector failure after append"));
+                    }
+                    Ok(())
+                })
+                .catch_unwind()
+                .await;
+                let result = match outcome {
+                    Ok(result) => result,
+                    Err(_) => Err(RecordError::RecoveryRequired),
+                };
+                if let Err(error) = &result {
+                    // Readers inspect this flag under this same component guard;
+                    // no failed mmap/metadata mutation escapes before fencing.
+                    shard.failed = true;
+                    cursors.fail(error);
+                }
+                result
+            }
+        }
+    }
+    async fn flush(&self) -> Result<(), RecordError> {
+        match self {
+            Self::Lexical(native) => native.flush().await,
+            Self::Vector { .. } => Ok(()),
+        }
+    }
+    fn advance(&self, cursors: &Cursors, sequence: u64) {
+        match self {
+            Self::Lexical(_) => &cursors.lexical,
+            Self::Vector { .. } => &cursors.vector,
+        }
+        .fetch_max(sequence, Ordering::Release);
     }
 }
 struct Batch {
@@ -88,21 +212,43 @@ struct Queue {
     worker: Option<tokio::task::JoinHandle<()>>,
 }
 #[derive(Clone)]
-pub(super) struct Lexical {
-    native: Arc<lexical::runtime::Runtime>,
+pub(super) struct Consumer {
+    engine: Engine,
+    owner: std::sync::Weak<Mutex<Inner>>,
     cursors: Arc<Cursors>,
     queue: Arc<std::sync::Mutex<Queue>>,
     #[cfg(test)]
     root: PathBuf,
 }
-impl Lexical {
-    pub fn new(
+impl Consumer {
+    pub fn new_lexical(
         native: Arc<lexical::runtime::Runtime>,
         cursors: Arc<Cursors>,
         _root: PathBuf,
+        owner: std::sync::Weak<Mutex<Inner>>,
     ) -> Self {
         Self {
-            native,
+            engine: Engine::Lexical(native),
+            owner,
+            cursors,
+            queue: Default::default(),
+            #[cfg(test)]
+            root: _root,
+        }
+    }
+    pub fn new_vector(
+        index: IndexArc,
+        native: Arc<lexical::runtime::Runtime>,
+        cursors: Arc<Cursors>,
+        _root: PathBuf,
+        owner: std::sync::Weak<Mutex<Inner>>,
+    ) -> Self {
+        Self {
+            engine: Engine::Vector {
+                index,
+                _native: native,
+            },
+            owner,
             cursors,
             queue: Default::default(),
             #[cfg(test)]
@@ -126,18 +272,24 @@ impl Lexical {
         if !queue.running {
             queue.running = true;
             let lane = self.clone();
+            let owner = self.owner.upgrade().ok_or(RecordError::RecoveryRequired)?;
             queue.worker = Some(crate::resources::spawn_background(async move {
                 let result = std::panic::AssertUnwindSafe(lane.consume())
                     .catch_unwind()
                     .await;
                 if result.is_err() {
-                    lane.cursors
-                        .fail("lexical consumer panicked; reopen required");
+                    lane.cursors.fail(format!(
+                        "{} consumer panicked; reopen required",
+                        lane.engine.name()
+                    ));
                     if let Ok(mut queue) = lane.queue.lock() {
                         queue.running = false;
                         queue.batches.clear();
                     }
                 }
+                // Release cache/writer handles before the last journal owner.
+                drop(lane);
+                drop(owner);
             }));
         }
         Ok(())
@@ -148,7 +300,8 @@ impl Lexical {
                 let mut queue = match self.queue.lock() {
                     Ok(queue) => queue,
                     Err(_) => {
-                        self.cursors.fail("lexical queue poisoned");
+                        self.cursors
+                            .fail(format!("{} queue poisoned", self.engine.name()));
                         return;
                     }
                 };
@@ -163,31 +316,45 @@ impl Lexical {
             let result = async {
                 #[cfg(test)]
                 {
-                    let pause = self.root.join(".test-lexical-consumer-pause");
+                    let pause = self
+                        .root
+                        .join(format!(".test-{}-consumer-pause", self.engine.name()));
                     if pause.exists() {
-                        std::fs::write(self.root.join(".test-lexical-consumer-started"), b"ready")
-                            .map_err(storage)?;
+                        std::fs::write(
+                            self.root
+                                .join(format!(".test-{}-consumer-started", self.engine.name())),
+                            b"ready",
+                        )
+                        .map_err(storage)?;
                         let deadline =
                             std::time::Instant::now() + std::time::Duration::from_secs(20);
                         while pause.exists() {
                             if std::time::Instant::now() > deadline {
-                                return Err(storage("lexical test pause timed out"));
+                                return Err(storage(format!(
+                                    "{} test pause timed out",
+                                    self.engine.name()
+                                )));
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                         }
                     }
-                    if self.root.join(".test-lexical-consumer-fail").exists() {
-                        return Err(storage("injected lexical consumer failure"));
+                    if self
+                        .root
+                        .join(format!(".test-{}-consumer-fail", self.engine.name()))
+                        .exists()
+                    {
+                        return Err(storage(format!(
+                            "injected {} consumer failure",
+                            self.engine.name()
+                        )));
                     }
                 }
                 let changed = !batch.inputs.is_empty();
                 for input in batch.inputs {
-                    self.native
-                        .append_queued(input.identity, &input.document)
-                        .await?;
+                    self.engine.append(input, &self.cursors).await?;
                 }
                 if changed {
-                    self.native.flush().await?;
+                    self.engine.flush().await?;
                 }
                 Ok::<_, RecordError>(())
             }
@@ -200,9 +367,7 @@ impl Lexical {
                 }
                 return;
             }
-            self.cursors
-                .lexical
-                .fetch_max(batch.sequence, Ordering::Release);
+            self.engine.advance(&self.cursors, batch.sequence);
         }
     }
     /// Administrative/synchronous paths join owned work before sealing a tail
@@ -220,7 +385,9 @@ impl Lexical {
         if self.cursors.error().is_some() {
             Err(RecordError::RecoveryRequired)
         } else {
-            self.native.finish_consumption();
+            if let Engine::Lexical(native) = &self.engine {
+                native.finish_consumption();
+            }
             Ok(())
         }
     }

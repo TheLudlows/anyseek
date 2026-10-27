@@ -40,6 +40,7 @@ mod mutation;
 mod write;
 mod index_consumers;
 mod publication;
+mod query;
 mod replay;
 mod indexer;
 mod maintenance;
@@ -598,8 +599,8 @@ fn unix_time_ms_i64() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0)
 }
 
-/// Serial single-partition implementation. Queries and writes share
-/// one guard through candidate retrieval and authoritative record lookup.
+/// Single-partition Record decisions are serialized. Index consumption and
+/// retrieval run independently; results briefly reenter the Record guard for validation.
 #[derive(Clone)]
 pub struct RecordPartition {
     inner: Arc<Mutex<Inner>>,
@@ -631,17 +632,17 @@ pub struct RecordPage {
     /// Active statistics captured under the same guard.
     pub statistics: RecordStatistics,
 }
-/// A record hit from one complete visible position.
+/// A retrieved candidate reconciled with the current visible canonical record.
 #[derive(Clone, Debug, Serialize)]
 pub struct RecordHit {
-    /// Per-channel ranking evidence from this same view, with unmodified raw scores.
+    /// Per-channel observed ranking evidence, with unmodified raw scores.
     pub channels: Vec<crate::search::ChannelExplanation>,
     /// The exact original record corresponding to the ranked candidate.
     pub record: Record,
     /// Existing engine score (BM25, vector, or RRF according to query mode).
     pub score: f32,
 }
-/// Retrieval options evaluated against one authoritative view.
+/// Retrieval options for independently published caches and current Record validation.
 pub struct RecordQuery {
     /// Optional system temporal predicates, applied before candidate selection.
     pub temporal: Option<TemporalFilter>,
@@ -841,7 +842,7 @@ fn clean_recovery_caches(path: &Path) -> Result<(), RecordError> {
             if !entry.file_type().map_err(storage)?.is_dir() {
                 return Err(storage("derived cache path is not a directory"));
             }
-            std::fs::remove_dir_all(entry.path()).map_err(storage)?;
+            package_pins::retire_if_unpinned(&entry.path(),||std::fs::remove_dir_all(entry.path()).map_err(storage))?;
         }
     }
     Ok(())
@@ -1542,8 +1543,8 @@ impl RecordPartition {
             && record.document.as_ref().is_some_and(|d| !d.contains_key(&f.field))).map(|f| f.field.clone()).collect();
         Ok(Some(RecordStatus { evaluation_time_ms: inner.evaluation_time_ms, record_id: id.into(), version: record.version, visibility, pending_vector_fields, visible_seq: inner.state.seq }))
     }
-    /// Search published lexical/vector caches and read canonical records under
-    /// the partition guard. Caches may lag intake; retired candidates are masked before TopK.
+    /// Search published caches outside the Record guard and reconcile bounded
+    /// candidates with canonical records. Index progress may lag durable intake.
     pub async fn search(
         &self,
         text: String,
@@ -1567,19 +1568,13 @@ impl RecordPartition {
         })
         .await
     }
-    /// Full retrieval contract for service callers, using one published view.
+    /// Retrieve independent cache observations, then revalidate current records.
     pub async fn query(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
-        let permit = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
-        let owner = self.inner.clone();
+        let permit=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let partition=self.clone();
         crate::resources::spawn(async move {
-            let result=async move {
-            let _permit = permit;
-            let mut inner = owner.lock().await;
-            inner.advance_time().await?;
-            if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
-            inner.query_view(query).await
-            }.await;
+            let _permit=permit;
+            let result=partition.query_independent(query).await;
             partition.kick_maintenance().await;
             result
         }).await.map_err(storage)?
@@ -4715,6 +4710,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
 impl Inner {
     async fn query_view(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
         let RecordQuery {
