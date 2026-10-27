@@ -93,6 +93,7 @@ impl RecordPartition {
         let admission = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
         let recovery = owner.clone();
+        let cursors = self.indexes.clone();
         let handle = crate::resources::spawn_background(async move {
           let outcome = std::panic::AssertUnwindSafe(async move {
             let _worker = worker;
@@ -104,6 +105,7 @@ impl RecordPartition {
                 let _capture_phase=maintenance::Phase::new("background_capture_locked",inner.state.seq);
                 if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
+                inner.index.drain_indexes().await?;
                 if !automatic {inner.advance_time().await?;}
                 inner.reclaim_anchor_objects().await?;
                 let estimate = (inner.snapshot_bytes as u64).checked_mul(4)
@@ -252,6 +254,7 @@ impl RecordPartition {
                 let bytes = suffix.iter().try_fold(certificate.len() as u64 + 128,|n,b|
                     n.checked_add(b.len() as u64 + 24).ok_or_else(||storage("index tail size overflow")))?;
                 if bytes > config.max_journal_bytes { return Err(RecordError::Busy); }
+                inner.index.drain_indexes().await?;
                 inner.healthy = false;
                 let fenced = {
                     let mut output = inner.output.write().map_err(|_|RecordError::RecoveryRequired)?;
@@ -292,6 +295,7 @@ impl RecordPartition {
                     std::fs::write(root.join(".test-anchor-gc-failure"),b"injected retirement failure").map_err(storage)?;
                 }
                 candidate.swap(&mut inner);
+                cursors.immediate(inner.state.seq);
                 inner.feed_cache=installed_feed;
                 inner.anchor = Some(reference);
                 inner.payloads = payloads;

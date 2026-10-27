@@ -37,6 +37,8 @@ mod lease;
 mod locator;
 pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
+mod write;
+mod index_consumers;
 mod publication;
 mod replay;
 mod indexer;
@@ -603,6 +605,7 @@ pub struct RecordPartition {
     inner: Arc<Mutex<Inner>>,
     admission: Arc<Semaphore>,
     output: Arc<std::sync::RwLock<output::OutputState>>,
+    indexes: Arc<index_consumers::Cursors>,
 }
 /// Stateless continuation at one logical position. A changed position conflicts;
 /// a cursor never silently combines pages from different views.
@@ -665,7 +668,7 @@ pub struct RecordSearch {
     pub count_total: usize,
     /// Analyzed query terms from this same search.
     pub query_terms: Vec<String>,
-    /// Common visible position for candidates and records.
+    /// Authoritative record position; asynchronous index consumers may lag.
     pub visible_seq: u64,
     /// Ranked effective records.
     pub hits: Vec<RecordHit>,
@@ -1146,6 +1149,7 @@ impl RecordPartition {
         {
             let mut inner = partition.inner.lock().await;
             remote.reconcile_journal(&mut inner).await?;
+            partition.indexes.immediate(inner.state.seq);
         }
         drop(partition);
         let partition = Self::open(path, max_journal_bytes).await?;
@@ -1315,6 +1319,7 @@ impl RecordPartition {
         let (index, ordinals) = build(path, &config, &state).await?;
         let output = Arc::new(std::sync::RwLock::new(output::OutputState::default()));
         Ok(Self {
+            indexes: index_consumers::Cursors::recovered(0),
             output: output.clone(),
             inner: Arc::new(Mutex::new(Inner {
                 background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_compacted_bytes:None,maintenance_trim:None,maintenance_gc_pending:false,anchor:None,payloads:Default::default(),
@@ -1454,7 +1459,8 @@ impl RecordPartition {
         inner.feed_cache=change_feed::Cache::rebuild(&inner.state,&inner.config.change_feed)?;
         inner.graph_cache=graph::Cache::rebuild(&inner.state)?;
         inner.reclaim_anchor_objects().await?;
-        Ok(Self {output,inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
+        let indexes = index_consumers::Cursors::recovered(inner.state.seq);
+        Ok(Self {output,indexes,inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
     }
     /// A cancellation-safe accepted write: dropping this future does not cancel
     /// an already spawned operation. Query its original operation ID afterward.
@@ -1466,115 +1472,15 @@ impl RecordPartition {
             .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.clone();
         let partition=self.clone();
+        let indexes=self.indexes.clone();
         crate::resources::spawn(async move {
             let result=async move {
                 let _permit = permit;
                 let mut inner = inner.lock().await;
-                if !inner.healthy || inner.state.sealed_for.is_some() {
-                    return Err(RecordError::RecoveryRequired);
-                }
-                // Known hard pressure must not repeatedly plan/copy a new
-                // request's State while the owned rebuild is already pending.
-                // Known identities still use the original epoch/fingerprint
-                // replay checks below (and required time maintenance).
-                if inner.maintenance_requested.is_some()
-                    && !inner.state.operation_lookup.contains_key(&request.operation_id) {
-                    return Err(RecordError::Busy);
-                }
-                inner.advance_time().await?;
-                let (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, mut candidate, _planning) = match mutation::prepare_at(
-                    &inner.state, &inner.config, inner.snapshot_bytes, request, current_epoch(), inner.evaluation_time_ms,
-                )? {
-                    mutation::PreparedWrite::Replay(receipt) => return Ok(receipt),
-                    mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, candidate, planning } =>
-                        (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, candidate, planning),
-                };
-                if inner.maintenance_requested.is_some(){return Err(RecordError::Busy);}
-                let (growth,native_updates)=build_budget::write_estimate(&inner.state,&inner.config,&applied)?;
-                if growth>0 {
-                    let fresh_component=(inner.config.schema.len() as u64).checked_mul(65536*32)
-                        .and_then(|n|n.checked_add(growth)).ok_or_else(||storage("fresh component admission overflow"))?;
-                    crate::storage::build_budget::validate_single(fresh_component)
-                        .map_err(|e|RecordError::Rejected(e.to_string()))?;
-                    if native_updates>128 {return Err(RecordError::Rejected("operation exceeds mutable native update bound".into()));}
-                }
-                if growth>0 && !inner.index.can_admit(growth,native_updates).await {
-                    // One bounded flush attempt before rejecting, never discard
-                    // selected history to manufacture admission space.
-                    inner.maintain_index_tail().await?;
-                    if !inner.index.can_admit(growth,native_updates).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
-                }
-                let prepared=if applied.request.generation.is_none(){Some(state_memory::Prepared::new(&inner.state,&applied)?)}else{None};
-                if let Some(prepared)=&prepared {prepared.admit_containers(&mut inner.state,snapshot_bytes)?;}
-                else if let Some(candidate)=candidate.as_mut(){candidate.admit_bytes(snapshot_bytes)?;}
-                let feed_point = change_feed::pending(&inner.state,&applied)?;
-                inner.feed_cache.validate(&inner.config.change_feed,feed_point.as_ref(),feed_reserve)?;
-                inner.ensure_journal_room(bytes.len(),reserve_bytes).await?;
-                #[cfg(feature="s3-object-store")]
-                inner.ensure_remote_tail_room(applied.receipt.seq,&format!("{}:{}",applied.request.operation_id.epoch,applied.request.operation_id.nonce),&bytes).await?;
-                inner.validate_journal_room(bytes.len(),reserve_bytes)?;
-                let receipt = applied.receipt.clone();
-                #[cfg(feature = "fault-injection")]
-                let injected = std::env::var("ANYSEEK_RECORD_FAULT_NONCE")
-                    .ok()
-                    .filter(|nonce| nonce == &applied.request.operation_id.nonce)
-                    .and_then(|_| std::env::var("ANYSEEK_RECORD_FAULT").ok());
-                #[cfg(feature = "fault-injection")]
-                if injected.as_deref() == Some("before_append") {
-                    return Err(RecordError::Rejected("injected before append".into()));
-                }
-                let hides_evidence = matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) || (inner.state.records.get(&applied.request.record_id).is_some_and(|r| r.system.is_some()) || (applied.request.vector_patch.is_none() && inner.graph_cache.references(&applied.request.record_id)));
-                inner.healthy = false;
-                {
-                    let mut output = inner.output.write().map_err(|_| RecordError::RecoveryRequired)?;
-                    output.fenced = true;
-                    if hides_evidence { output.revision = output.revision.checked_add(1)
-                        .ok_or_else(|| storage("data barrier revision exhausted"))?; }
-                }
-                #[cfg(feature = "s3-object-store")]
-                if let Some(remote) = inner.remote.as_mut() {
-                    match remote.commit(&applied, &bytes).await {
-                        Ok(()) => {},
-                        Err(RemoteCommitError::Busy) => {
-                            // Only the upload stage can produce this typed refusal;
-                            // SQLite publication has not been attempted. Orphan
-                            // objects remain registered for ordinary dependency GC.
-                            inner.healthy = true;
-                            inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced = false;
-                            return Err(RecordError::Busy);
-                        },
-                        Err(RemoteCommitError::Unknown(error)) => return Err(RecordError::OutcomeUnknown(error)),
-                    }
-                }
-                inner.append_operation(&bytes,receipt.seq)?;
-                #[cfg(feature = "fault-injection")]
-                match injected.as_deref() {
-                    Some("after_append_unknown") => {
-                        return Err(RecordError::OutcomeUnknown(
-                            "injected uncertain append outcome".into(),
-                        ));
-                    }
-                    Some("after_durable") => return Err(RecordError::DurablePending(receipt.seq)),
-                    Some("crash_after_durable") => std::process::exit(86),
-                    _ => {}
-                }
-                #[cfg(test)]
-                if inner.fail_after_durable {
-                    return Err(RecordError::DurablePending(receipt.seq));
-                }
-                inner.publish_prepared(&applied, snapshot_bytes, prepared, candidate).await?;
-                inner.feed_cache.push(feed_point);
-                inner.healthy = true;
-                inner.output.write().map_err(|_| RecordError::RecoveryRequired)?.fenced = false;
-                #[cfg(feature = "fault-injection")]
-                if injected.as_deref() == Some("crash_after_visible") {
-                    std::process::exit(86);
-                }
-                #[cfg(test)]
-                if std::env::var("ANYSEEK_RECORD_CRASH").as_deref() == Ok("published") {
-                    std::process::exit(74);
-                }
-                Ok(receipt)
+                inner.index.drain_indexes().await?;
+                let result = inner.write_one(request).await;
+                if inner.healthy { indexes.immediate(inner.state.seq); }
+                result
             }.await;
             partition.kick_maintenance().await;
             result
@@ -1636,8 +1542,8 @@ impl RecordPartition {
             && record.document.as_ref().is_some_and(|d| !d.contains_key(&f.field))).map(|f| f.field.clone()).collect();
         Ok(Some(RecordStatus { evaluation_time_ms: inner.evaluation_time_ms, record_id: id.into(), version: record.version, visibility, pending_vector_fields, visible_seq: inner.state.seq }))
     }
-    /// Search the existing lexical/vector/hybrid engine and read original records
-    /// under the same partition guard. Retired candidates are filtered before TopK.
+    /// Search published lexical/vector caches and read canonical records under
+    /// the partition guard. Caches may lag intake; retired candidates are masked before TopK.
     pub async fn search(
         &self,
         text: String,

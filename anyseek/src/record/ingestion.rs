@@ -50,6 +50,12 @@ pub struct IngestProgress {
     pub completed_seq: u64,
     /// Last successful Record receipt sequence (a different sequence space).
     pub materialized_seq: u64,
+    /// Record sequence applied by the independently published lexical cache.
+    pub lexical_seq: u64,
+    /// Record sequence applied by vector/metadata (not an intake sequence).
+    pub vector_seq: u64,
+    /// A derived-index failure; reopen rebuilds from the durable Record log.
+    pub index_error: Option<String>,
     /// Accepted commands without a terminal outcome.
     pub pending: usize,
     /// Bytes retained in the intake WAL, including control metadata.
@@ -469,6 +475,9 @@ impl IngestPipeline {
             durable_seq: spool.rows.len() as u64,
             completed_seq: spool.completed as u64,
             materialized_seq: spool.materialized_seq,
+            lexical_seq: self.partition.indexes.lexical.load(Ordering::Acquire),
+            vector_seq: self.partition.indexes.vector.load(Ordering::Acquire),
+            index_error: self.partition.indexes.error(),
             pending: spool.rows.len() - spool.completed,
             retained_bytes: spool.log.bytes(),
             blocked: spool.blocked.clone(),
@@ -478,12 +487,14 @@ impl IngestPipeline {
     /// intake before exporting or replacing the materialized partition.
     pub async fn require_drained(&self) -> Result<(), RecordError> {
         let progress = self.progress().await;
-        if progress.blocked.is_some() {
+        if progress.blocked.is_some() || progress.index_error.is_some() {
             Err(RecordError::RecoveryRequired)
-        } else if progress.pending != 0 {
+        } else if progress.pending != 0 || progress.lexical_seq < progress.vector_seq {
             Err(RecordError::Busy)
         } else {
-            Ok(())
+            // A published cursor can precede the final task-owner drop. Join
+            // before management releases the source owner or removes mmap files.
+            self.finish().await.map(|_| ())
         }
     }
     /// Explicitly wait for pending work and its owned task to finish. Normal
@@ -503,7 +514,14 @@ impl IngestPipeline {
                 return Err(RecordError::RecoveryRequired);
             }
             if progress.pending == 0 && !self.running.load(Ordering::Acquire) {
-                return Ok(progress);
+                self.partition
+                    .inner
+                    .lock()
+                    .await
+                    .index
+                    .drain_indexes()
+                    .await?;
+                return Ok(self.progress().await);
             }
             self.kick();
             tokio::task::yield_now().await;
@@ -553,55 +571,75 @@ impl IngestPipeline {
                 return;
             }
             let next = {
-                let spool = self.spool.lock().await;
-                if spool.blocked.is_some() {
+                let mut spool = self.spool.lock().await;
+                if spool.blocked.is_some() || spool.completed == spool.rows.len() {
                     return;
                 }
-                spool
-                    .rows
-                    .get(spool.completed)
-                    .map(|row| (row.status.accepted.durable_seq, row.request.clone()))
-            };
-            let Some((seq, request)) = next else {
-                return;
-            };
-            let started = std::time::Instant::now();
-            let result = loop {
-                match self.partition.write(request.clone()).await {
-                    Err(RecordError::Busy)
-                        if started.elapsed() < std::time::Duration::from_secs(300) =>
-                    {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await
-                    }
-                    value => break value,
-                }
-            };
-            let result = match result {
-                Ok(receipt) => Ok(receipt),
-                Err(
-                    error @ (RecordError::Rejected(_)
-                    | RecordError::Conflict(_)
-                    | RecordError::OperationExpired),
-                ) => {
-                    let code = match error {
-                        RecordError::Rejected(_) => "rejected",
-                        RecordError::Conflict(_) => "conflict",
-                        _ => "operation_expired",
+                let mut requests = Vec::new();
+                let mut bytes = 0usize;
+                for row in spool.rows[spool.completed..].iter().take(BATCH_RECORDS) {
+                    let length = match checkpoint_codec::json_length(&row.request) {
+                        Ok(length) => length,
+                        Err(error) => {
+                            spool.blocked = Some(error.to_string());
+                            return;
+                        }
                     };
-                    Err(IngestFailure {
-                        code: code.into(),
-                        message: error.to_string().chars().take(1024).collect(),
-                    })
+                    if bytes.saturating_add(length) > BATCH_BYTES {
+                        break;
+                    }
+                    bytes += length;
+                    requests.push(row.request.clone());
                 }
-                Err(error) => {
-                    self.spool.lock().await.blocked = Some(error.to_string());
-                    return;
+                (spool.completed as u64 + 1, requests)
+            };
+            let (seq, requests) = next;
+            let started = std::time::Instant::now();
+            let batch = loop {
+                let result = self.partition.write_ingest_batch(requests.clone()).await;
+                let busy = matches!(&result, Err(RecordError::Busy))
+                    || matches!(&result, Ok(batch) if batch.results.is_empty()
+                        && matches!(batch.stop, Some(RecordError::Busy)));
+                if busy && started.elapsed() < std::time::Duration::from_secs(300) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    continue;
+                }
+                match result {
+                    Ok(batch) => break batch,
+                    Err(error) => {
+                        self.spool.lock().await.blocked = Some(error.to_string());
+                        return;
+                    }
                 }
             };
+            let stop = batch.stop;
+            let results = batch
+                .results
+                .into_iter()
+                .map(|result| {
+                    result.map_err(|error| {
+                        let code = match error {
+                            RecordError::Rejected(_) => "rejected",
+                            RecordError::Conflict(_) => "conflict",
+                            RecordError::OperationExpired => "operation_expired",
+                            _ => unreachable!("only definite errors enter the completed prefix"),
+                        };
+                        IngestFailure {
+                            code: code.into(),
+                            message: error.to_string().chars().take(1024).collect(),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            if results.is_empty() {
+                self.spool.lock().await.blocked =
+                    Some(stop.unwrap_or(RecordError::RecoveryRequired).to_string());
+                return;
+            }
             let mut spool = self.spool.lock().await;
             let event = Event::Complete {
                 first: seq,
-                results: vec![result],
+                results,
             };
             if let Err(error) = spool.log.append(&event).await {
                 spool.blocked = Some(error.to_string());
@@ -610,6 +648,12 @@ impl IngestPipeline {
             if let Err(error) = spool.apply(event) {
                 spool.blocked = Some(error.to_string());
                 return;
+            }
+            if let Some(error) = stop {
+                if error != RecordError::Busy {
+                    spool.blocked = Some(error.to_string());
+                    return;
+                }
             }
         }
     }
@@ -630,6 +674,323 @@ mod tests {
         pipeline.paused.store(true, Ordering::Release);
         pipeline.finish().await.unwrap();
         pipeline
+    }
+    #[tokio::test]
+    async fn lexical_lag_does_not_block_vector_materialization_or_intake_and_commits_one_batch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let mut settings = config();
+        settings.max_records = 256;
+        settings.max_operations = 512;
+        settings.max_journal_bytes = 16 * 1024 * 1024;
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        let pipeline = paused(p.clone()).await;
+        std::fs::write(root.join(".test-lexical-consumer-pause"), b"pause").unwrap();
+        let requests = (0..64)
+            .map(|i| {
+                write(
+                    &format!("op-{i}"),
+                    &format!("id-{i}"),
+                    "alpha",
+                    ExpectedVersion::Absent,
+                )
+            })
+            .collect::<Vec<_>>();
+        pipeline.submit(requests.clone()).await.unwrap();
+        pipeline.paused.store(false, Ordering::Release);
+        pipeline.kick();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while pipeline.progress().await.completed_seq != 64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let progress = pipeline.progress().await;
+        assert_eq!((progress.lexical_seq, progress.vector_seq), (0, 64));
+        assert!(matches!(
+            pipeline.require_drained().await,
+            Err(RecordError::Busy)
+        ));
+        assert!(p.get("id-63").await.unwrap().is_some());
+        assert_eq!(
+            super::super::tests::query(
+                &p,
+                SearchMode::Vector {
+                    similarity_threshold: None,
+                    ann_mode: crate::vector_similarity::AnnMode::All
+                }
+            )
+            .await
+            .count_total,
+            64
+        );
+        assert_eq!(
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            0
+        );
+        // Reception also remains independent of the paused lexical task.
+        let next = write("next", "next", "beta", ExpectedVersion::Absent);
+        let guard = p.inner.lock().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            pipeline.submit(vec![next]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::remove_file(root.join(".test-lexical-consumer-pause")).unwrap();
+        // Conversely, lexical publication needs no Record/vector guard. The
+        // second batch cannot materialize while this guard is held.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pipeline.progress().await.lexical_seq != 64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let first_native = guard.index.test_index().read().await.record_lexical[0].clone();
+        assert_eq!(first_native.published_shape().await, (64, 1));
+        drop(first_native);
+        drop(guard);
+        drained(&pipeline).await;
+        let native = p
+            .inner
+            .lock()
+            .await
+            .index
+            .test_index()
+            .read()
+            .await
+            .record_lexical[0]
+            .clone();
+        let (documents, segments) = native.published_shape().await;
+        assert!(
+            segments <= 2,
+            "64 documents share one native commit, followed by the next batch"
+        );
+        assert_eq!(documents, 65);
+        assert_eq!(pipeline.progress().await.lexical_seq, 65);
+        drop(native);
+        drop(pipeline);
+        drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes)
+            .await
+            .unwrap();
+        assert_eq!(
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            64
+        );
+        assert_eq!(p.write(requests[63].clone()).await.unwrap().seq, 64);
+    }
+    #[tokio::test]
+    async fn lexical_failure_keeps_durable_record_outcomes_and_reopen_rebuilds_indexes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let settings = config();
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        let pipeline = paused(p.clone()).await;
+        std::fs::write(root.join(".test-lexical-consumer-fail"), b"fail").unwrap();
+        let request = write(
+            "durable-index-failure",
+            "a",
+            "alpha",
+            ExpectedVersion::Absent,
+        );
+        pipeline.submit(vec![request.clone()]).await.unwrap();
+        pipeline.paused.store(false, Ordering::Release);
+        pipeline.kick();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pipeline.progress().await.index_error.is_none()
+                || pipeline.progress().await.completed_seq != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            pipeline
+                .operation(&request.operation_id)
+                .await
+                .unwrap()
+                .receipt
+                .is_some()
+        );
+        assert!(pipeline.finish().await.is_err());
+        assert!(p.get("a").await.unwrap().is_some());
+        std::fs::remove_file(root.join(".test-lexical-consumer-fail")).unwrap();
+        drop(pipeline);
+        drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes)
+            .await
+            .unwrap();
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        drained(&pipeline).await;
+        assert!(pipeline.progress().await.index_error.is_none());
+        assert_eq!(
+            (
+                pipeline.progress().await.lexical_seq,
+                pipeline.progress().await.vector_seq
+            ),
+            (1, 1)
+        );
+        assert_eq!(
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            1
+        );
+        assert_eq!(p.write(request).await.unwrap().seq, 1);
+    }
+    #[tokio::test]
+    async fn batched_updates_deletes_and_rejections_preserve_order_and_synchronous_visibility() {
+        let temporary = tempfile::tempdir().unwrap();
+        let p = RecordPartition::create(&temporary.path().join("records"), config())
+            .await
+            .unwrap();
+        let pipeline = paused(p.clone()).await;
+        let mut delete = write("delete", "a", "", ExpectedVersion::Match(2));
+        delete.document = None;
+        let requests = vec![
+            write("first", "a", "alpha", ExpectedVersion::Absent),
+            write("update", "a", "beta", ExpectedVersion::Match(1)),
+            write("rejected", "a", "wrong", ExpectedVersion::Absent),
+            delete,
+            write("survivor", "b", "alpha", ExpectedVersion::Absent),
+        ];
+        pipeline.submit(requests.clone()).await.unwrap();
+        pipeline.paused.store(false, Ordering::Release);
+        pipeline.kick();
+        drained(&pipeline).await;
+        assert_eq!(pipeline.progress().await.completed_seq, 5);
+        assert_eq!(
+            pipeline
+                .operation(&requests[2].operation_id)
+                .await
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            "conflict"
+        );
+        assert_eq!(
+            pipeline
+                .operation(&requests[3].operation_id)
+                .await
+                .unwrap()
+                .receipt
+                .unwrap()
+                .seq,
+            3
+        );
+        assert!(p.get("a").await.unwrap().is_none());
+        assert_eq!(
+            p.search("beta".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            0
+        );
+        assert_eq!(
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            1
+        );
+        let request = write("sync", "b", "gamma", ExpectedVersion::Match(1));
+        p.write(request).await.unwrap();
+        assert_eq!(
+            p.search("gamma".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            1
+        );
+        assert_eq!(
+            (
+                pipeline.progress().await.lexical_seq,
+                pipeline.progress().await.vector_seq
+            ),
+            (5, 5)
+        );
+    }
+    #[tokio::test]
+    async fn batch_crossing_native_rotation_drains_its_prefix_before_sealing_and_reopens() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let mut settings = config();
+        settings.max_records = 256;
+        settings.max_operations = 512;
+        settings.max_journal_bytes = 16 * 1024 * 1024;
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        p.write(write("seed", "seed", "alpha", ExpectedVersion::Absent))
+            .await
+            .unwrap();
+        p.compact_journal().await.unwrap();
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        let mut offset = 0;
+        for count in [64, 62, 4] {
+            pipeline
+                .submit(
+                    (offset..offset + count)
+                        .map(|i| {
+                            write(
+                                &format!("o-{i}"),
+                                &format!("r-{i}"),
+                                "alpha",
+                                ExpectedVersion::Absent,
+                            )
+                        })
+                        .collect(),
+                )
+                .await
+                .unwrap();
+            drained(&pipeline).await;
+            offset += count;
+        }
+        assert!(!p.inner.lock().await.index.pending_seals.is_empty());
+        assert_eq!(pipeline.progress().await.lexical_seq, 131);
+        assert_eq!(
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            131
+        );
+        drop(pipeline);
+        drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes)
+            .await
+            .unwrap();
+        assert_eq!(
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                .await
+                .unwrap()
+                .count_total,
+            131
+        );
+        assert_eq!(
+            p.write(write("o-129", "r-129", "alpha", ExpectedVersion::Absent))
+                .await
+                .unwrap()
+                .seq,
+            131
+        );
     }
     #[tokio::test]
     async fn intake_acknowledges_while_materializer_lock_is_held_and_retries_once() {

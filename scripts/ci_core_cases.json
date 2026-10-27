@@ -52,5 +52,9 @@
   "record::ingestion::tests::pending_batch_survives_reopen_and_conditional_rejections_are_terminal",
   "record::ingestion::tests::uncertain_materialization_stays_pending_and_reopen_resolves_original_receipt",
   "record::ingestion::tests::intake_pending_budget_refuses_before_commit",
-  "record::ingestion::tests::remote_intake_recovers_pending_commands_and_receipts_after_cache_loss"
+  "record::ingestion::tests::remote_intake_recovers_pending_commands_and_receipts_after_cache_loss",
+  "record::ingestion::tests::lexical_lag_does_not_block_vector_materialization_or_intake_and_commits_one_batch",
+  "record::ingestion::tests::lexical_failure_keeps_durable_record_outcomes_and_reopen_rebuilds_indexes",
+  "record::ingestion::tests::batched_updates_deletes_and_rejections_preserve_order_and_synchronous_visibility",
+  "record::ingestion::tests::batch_crossing_native_rotation_drains_its_prefix_before_sealing_and_reopens"
 ]

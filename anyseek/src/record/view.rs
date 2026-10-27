@@ -12,6 +12,12 @@ pub(super) struct RetrievalView {
     tail: IndexArc,
     // Ordered like query components after the mutable tail, before certified packages.
     pub(super) pending_seals: Vec<segment::Package>,
+    // Intake buffers native inputs while Record/vector materialization owns
+    // the partition guard; publication then runs in an independent consumer.
+    batch: bool,
+    batch_inputs: Vec<index_consumers::Input>,
+    lexical: Option<index_consumers::Lexical>,
+    cursors: Option<Arc<index_consumers::Cursors>>,
 }
 impl RetrievalView {
     pub(super) async fn can_admit(&self,bytes:u64,native_updates:usize)->bool {
@@ -28,6 +34,10 @@ impl RetrievalView {
             query: index.clone(),
             tail: index,
             pending_seals: Vec::new(),
+            batch: false,
+            batch_inputs: Vec::new(),
+            lexical: None,
+            cursors: None,
         }
     }
     /// Install a new empty tail under the exclusive partition publication guard.
@@ -150,6 +160,7 @@ impl RetrievalView {
         *ordinals = mapped;
         *locations = next_locations;
         self.tail = new_tail;
+        self.lexical = None; // predecessor was drained before seal
         Ok(())
     }
 
@@ -169,6 +180,7 @@ impl RetrievalView {
         &mut self, root: &Path, new_tail: IndexArc, ordinals: &mut Vec<String>,
         locations: &mut BTreeMap<String,usize>, budget: RotationBudget, limit: u64,
     ) -> Result<(),RecordError> {
+        self.drain_indexes().await?;
         let path=self.stable_tail_path(root).await.ok_or_else(||storage("tail lacks stable package identity"))?;
         let id=path.file_name().unwrap().to_str().unwrap().strip_prefix("segment-").unwrap().to_owned();
         self.pending_seals.try_reserve(1).map_err(storage)?;
@@ -184,7 +196,7 @@ impl RetrievalView {
     }
 
     pub(super) async fn append(
-        &self,
+        &mut self,
         key: String,
         version: u64,
         revision: u64,
@@ -209,7 +221,12 @@ impl RetrievalView {
             local
         };
         let native = self.tail.read().await.record_lexical[0].clone();
-        native.append(lexical::Identity { id:key_for_native, version, revision }, &document, true).await?;
+        let identity = lexical::Identity { id:key_for_native, version, revision };
+        if self.batch {
+            self.batch_inputs.push(index_consumers::Input::admitted(&native, identity, &document)?);
+        } else {
+            native.append(identity, &document, true).await?;
+        }
         self.tail
             .index_documents(vec![document])
             .await
@@ -217,6 +234,46 @@ impl RetrievalView {
         local
             .checked_mul(self.query.read().await.shard_number)
             .ok_or_else(|| storage("candidate address overflow"))
+    }
+    pub(super) async fn begin_batch(&mut self, cursors: Arc<index_consumers::Cursors>) -> Result<(), RecordError> {
+        debug_assert!(!self.batch);
+        if cursors.error().is_some() { return Err(RecordError::RecoveryRequired); }
+        self.cursors = Some(cursors.clone());
+        if self.lexical.is_none() {
+            let root = self.tail.read().await;
+            self.lexical = Some(index_consumers::Lexical::new(root.record_lexical[0].clone(), cursors,
+                Path::new(&root.index_path_string).parent().unwrap().to_owned()));
+        }
+        self.batch = true;
+        self.batch_inputs.clear();
+        Ok(())
+    }
+    pub(super) fn abort_batch(&mut self) {
+        self.batch = false;
+        self.batch_inputs.clear();
+    }
+    pub(super) async fn finish_batch(&mut self, sequence: u64, cursors: Arc<index_consumers::Cursors>) -> Result<(), RecordError> {
+        self.batch = false;
+        self.publish_batch_prefix(sequence, cursors).await
+    }
+    pub(super) async fn publish_batch_prefix(&mut self, sequence: u64, cursors: Arc<index_consumers::Cursors>) -> Result<(), RecordError> {
+        cursors.vector.fetch_max(sequence, std::sync::atomic::Ordering::Release);
+        if self.lexical.is_none() {
+            let root = self.tail.read().await;
+            self.lexical = Some(index_consumers::Lexical::new(root.record_lexical[0].clone(), cursors,
+                Path::new(&root.index_path_string).parent().unwrap().to_owned()));
+        }
+        self.lexical.as_ref().unwrap().submit(std::mem::take(&mut self.batch_inputs), sequence)
+    }
+    pub(super) async fn drain_indexes(&self) -> Result<(), RecordError> {
+        if let Some(lexical) = &self.lexical { lexical.drain().await?; }
+        Ok(())
+    }
+    pub(super) async fn drain_batch_prefix(&mut self, sequence: u64) -> Result<(), RecordError> {
+        if self.batch && !self.batch_inputs.is_empty() {
+            self.publish_batch_prefix(sequence, self.cursors.clone().ok_or(RecordError::RecoveryRequired)?).await?;
+        }
+        self.drain_indexes().await
     }
     pub(super) async fn retire(&self, ordinal: usize) -> Result<(), RecordError> {
         let root = self.query.read().await;

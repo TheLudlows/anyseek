@@ -1,6 +1,6 @@
 # anyseek 当前状态
 
-2026-10-27 新目标：轻量追加写入、最终一致的异步索引与独立合并。首批新增 `IngestPipeline` 和 `/ingest`、本地分段 WAL / S3 持久接收、后台物化、回执/进度及管理排空保护。202 只表示命令持久接收；条件结果需查询终态。现有同步 Record 路径暂作为物化器，独立消费、共同视图移除、持续回收和轻量合并尚未完成。见[异步写入实施](docs/async-ingestion.md)。下方是已有架构的历史验收，不代表新增代码的最终验收。
+2026-10-27 新目标：轻量追加写入、最终一致的异步索引与独立合并。首批新增 `IngestPipeline` 和 `/ingest`、本地分段 WAL / S3 持久接收、后台物化、回执/进度及管理排空保护。202 只表示命令持久接收；条件结果需查询终态。后台已按批物化，全文任务与 Record/向量物化独立推进，新增 lexical_seq/vector_seq/index_error；长期 writer 按批提交、刷新，允许全文滞后。向量进一步拆离、物理行号与共同视图协议移除、持续回收和轻量合并尚未完成。见[异步写入实施](docs/async-ingestion.md)。下方是已有架构的历史验收，不代表新增代码的最终验收。
 
 核验日期：2026-10-25。已验收代码 SHA 为 `94d0a60079ae7b8604223b130559bc14004816fe`（[CI 9/9 成功](https://github.com/TheLudlows/anyseek/actions/runs/40063214949)）；后续仅文档提交不改变该代码验收结论。[PR #81](https://github.com/TheLudlows/anyseek/pull/81) 已将生产全文替换为 Tantivy 0.27.0，数据访问统一使用 `RecordPartition`，仅支持新库；已合入 `6d28798`，主干 [CI 9/9](https://github.com/TheLudlows/anyseek/actions/runs/40080424776) 通过。预算调整已由 PR #83 合入 `702c385`；标准分词器见独立草稿 [PR #84](https://github.com/TheLudlows/anyseek/pull/84)，下表平台数字是 #80 历史验收，不代表 #84 最终 HEAD。具体契约、验证版本与忽略项见 [#80 实施与验收](docs/issue80-implementation.md)。
 
