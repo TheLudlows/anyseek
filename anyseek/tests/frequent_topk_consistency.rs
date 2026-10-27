@@ -1,3 +1,4 @@
+#[path = "common/scale.rs"] mod scale;
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
 // Repro: multi-term Topk/TopkCount over all-frequent terms must return results,
@@ -43,13 +44,16 @@ async fn frequent_terms_topk_returns_results() {
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    // NOTE: keep on the single-shard fast path; multi-shard covered by suite.
+    // Independent public Record fixture.
     let index_arc = Ok::<_, String>(records::create(&index_path, meta, (&schema).to_vec()).await)
         .unwrap();
 
-    // 3000 docs: "common" in all (100%), "half" in evens (50%) -> every query
-    // term covers >=50% (all_terms_frequent); top_k=10 < 3000/256.
-    for i in 0..3000 {
+    let population = scale::choose(256, 3000);
+    assert!(population % 2 == 0 && population / 2 > 10);
+    // Both scales retain 100%/50% document frequencies and >10 matches.
+    // Full scale retains the original 3000 records; legacy frequent-word
+    // fast-path thresholds are not a current engine contract.
+    for i in 0..population {
         let mut t = String::from("common ");
         if i % 2 == 0 {
             t.push_str("half ");
@@ -59,7 +63,7 @@ async fn frequent_terms_topk_returns_results() {
     }
     index_arc.compact_journal().await.unwrap();
 
-    // Intersection Topk must not come back empty with 1500 matches.
+    // Intersection Topk must not come back empty despite many matches.
     let rlo = search(
         &index_arc,
         "common half",
@@ -89,7 +93,7 @@ async fn frequent_terms_topk_returns_results() {
         "BUG: intersection TopkCount results empty"
     );
     assert_eq!(
-        rtc.count_total, 1500,
+        rtc.count_total, population / 2,
         "intersection total must count all matches"
     );
 
@@ -102,7 +106,7 @@ async fn frequent_terms_topk_returns_results() {
         10,
     )
     .await;
-    assert_eq!(c.count_total, 1500);
+    assert_eq!(c.count_total, population / 2);
 
 
     drop(index_arc);

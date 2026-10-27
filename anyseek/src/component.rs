@@ -261,7 +261,14 @@ impl Shard {
     async fn append(&mut self, document:Document)->Result<(),String>{
         let ordinal=self.indexed_doc_count;
         if ordinal>0 && ordinal.is_multiple_of(ROARING_BLOCK_SIZE) && self.uncommitted {self.commit_component().await.map_err(|e|e.to_string())?;}
-        let estimate=crate::record::build_budget::document_estimate(&document,&self.indexed_schema_vec).map_err(|e|e.to_string())?;
+        // The full input is consumed by this call, never stored in the component.
+        // Keep its transient lease across vector/indexing awaits, and retain only
+        // actual vector/facet projection plus identity/row metadata afterwards.
+        let input=crate::record::build_budget::document_estimate(&document,&[]).map_err(|e|e.to_string())?;
+        let _input=crate::storage::build_budget::reserve_memory(input).map_err(|e|e.to_string())?;
+        let estimate=crate::record::build_budget::component_estimate(&document,
+            self.indexed_schema_vec.iter().map(|f|f.field.as_str()).chain(self.facets.iter().map(|f|f.name.as_str())))
+            .map_err(|e|e.to_string())?;
         if !self.build_input_covered {if let Some(memory)=&mut self.build_reservation {memory.grow(estimate).map_err(|e|e.to_string())?;}}
         self.ensure_metadata_capacity(ordinal+1)?;
         if self.is_vector_indexing {self.index_vector_shard(ordinal,&document).await;}

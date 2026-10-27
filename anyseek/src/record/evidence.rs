@@ -1,12 +1,13 @@
 //! Bounded, same-partition evidence semantics. Authority is the metadata on each
 //! Record, never a second journal or an independently committed dependency graph.
+use super::state_values;
 use super::{ExpectedVersion, Record, RecordError, RecordWrite};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_REFERENCES: usize = 32;
 const MAX_DEPTH: usize = 16;
-const MAX_VISITED: usize = 10_000;
+const MAX_VISITED: usize = super::capacity::MAX_RECORDS;
 
 /// Versioned original source or immutable derived content.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,7 +61,7 @@ fn rejected(message: &str) -> RecordError {
 /// references hide content; cycles/structural budget violations fail closed.
 fn visit(
     id: &str,
-    records: &BTreeMap<String, Record>,
+    records: &state_values::Records,
     depth: usize,
     path: &mut BTreeSet<String>,
     memo: &mut BTreeMap<String, (bool, usize)>,
@@ -112,7 +113,7 @@ fn visit(
 }
 
 pub(super) fn visibility(
-    records: &BTreeMap<String, Record>,
+    records: &state_values::Records,
 ) -> Result<BTreeMap<String, bool>, RecordError> {
     let mut memo = BTreeMap::new();
     for id in records.keys() {
@@ -125,7 +126,7 @@ pub(super) fn visibility(
 }
 
 pub(super) fn validate(
-    records: &BTreeMap<String, Record>,
+    records: &state_values::Records,
     request: &RecordWrite,
 ) -> Result<(), RecordError> {
     if let Some(system)=&request.system {super::graph::validate_metadata(system)?;}
@@ -219,7 +220,7 @@ pub(super) fn validate(
 
 /// Build only a bounded ID dependency view; no text/index rebuild on deletion.
 pub(super) fn descendants(
-    records: &BTreeMap<String, Record>,
+    records: &state_values::Records,
     root: &str,
 ) -> Result<BTreeSet<String>, RecordError> {
     let mut reverse: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -272,7 +273,7 @@ pub enum EvidenceVisibility {
     /// Independent restored evidence lacks current deletion authority.
     Quarantined,
 }
-pub(super) fn status(records: &BTreeMap<String, Record>, id: &str) -> Result<EvidenceVisibility, RecordError> {
+pub(super) fn status(records: &state_values::Records, id: &str) -> Result<EvidenceVisibility, RecordError> {
     use EvidenceVisibility::*;
     if visit(id, records, 0, &mut BTreeSet::new(), &mut BTreeMap::new())? { return Ok(Visible); }
     let mut seen = BTreeSet::new(); let mut queue = vec![id];
@@ -297,7 +298,7 @@ pub(super) fn status(records: &BTreeMap<String, Record>, id: &str) -> Result<Evi
     Ok(if deleted { Deleted } else if expired { Expired } else if unavailable { Unavailable } else if stale { Stale } else { Unavailable })
 }
 
-pub(super) fn validate_history(records: &BTreeMap<String, Record>, history: &[Record]) -> Result<(), RecordError> {
+pub(super) fn validate_history(records: &state_values::Records, history: &state_values::Values<Record>) -> Result<(), RecordError> {
     let mut seen = BTreeSet::new();
     let mut counts = BTreeMap::<&str, u64>::new();
     for revision in history {
@@ -318,6 +319,6 @@ pub(super) fn validate_history(records: &BTreeMap<String, Record>, history: &[Re
 }
 
 /// An edge adds a visibility dependency level beyond its endpoint's own graph.
-pub(super) fn endpoint_visible(records:&BTreeMap<String,Record>,id:&str)->Result<bool,RecordError> {
+pub(super) fn endpoint_visible(records:&state_values::Records,id:&str)->Result<bool,RecordError> {
     visit(id,records,1,&mut BTreeSet::new(),&mut BTreeMap::new())
 }

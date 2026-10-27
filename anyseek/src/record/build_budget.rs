@@ -58,7 +58,7 @@ pub(crate) fn document_estimate(
         .sum::<u64>();
     // Includes normalized text, transient JSON copies, vector/centroid
     // copies, and at most unigram/bigram/trigram logical term metadata.
-    // Unicode/OpenCC expansion and ZH matrices are overestimated here;
+    // Unicode/OpenCC expansion is conservatively included here;
     // HashMap buckets and allocator/realloc overhead remain excluded.
     let n = bytes
         .0
@@ -71,6 +71,21 @@ pub(crate) fn document_estimate(
         .ok_or_else(|| storage("build estimate overflow"))?;
     Ok(n)
 }
+/// Retained vector/facet projection only. Canonical bodies belong to State/Payload;
+/// the full input Document has a distinct short-lived lease in component::append.
+/// 1024 bytes per row cover row metadata (<=64 x8 bytes), active-mask/address
+/// bookkeeping and conservative container overhead. Variable identity bytes
+/// are admitted separately; ordinary Record identities have no256-byte cap.
+pub(crate) fn identity_estimate(id: &str) -> Result<u64,RecordError> {
+    (id.len() as u64).checked_mul(3).ok_or_else(||storage("component identity estimate overflow"))
+}
+
+pub(crate) fn component_estimate<'a>(document: &Document, fields: impl Iterator<Item=&'a str>) -> Result<u64,RecordError> {
+    let selected=fields.filter_map(|name|document.get(name).map(|value|(name,value))).collect::<BTreeMap<_,_>>();
+    (checkpoint_codec::json_length(&selected)? as u64).checked_mul(32).and_then(|n|n.checked_add(1024))
+        .ok_or_else(||storage("component retained estimate overflow"))
+}
+
 pub(super) fn admit<'a>(
     config: &RecordConfig,
     records: impl Iterator<Item = &'a Record>,
@@ -82,10 +97,14 @@ pub(super) fn admit<'a>(
     let mut estimate = config.schema.len() as u64 * 65536 * 32;
     // The mature Chinese dictionary has one process-owned admission, not a
     // per-component allocation. Document and component estimates remain local.
+    // Match component::append: this component owns no lexical postings or
+    // token buffers. Native analysis/queued documents have their own leases.
+    let component_schema = retrieval_schema(config);
     for record in records {
         if let Some(document) = &record.document {
             estimate = estimate
-                .checked_add(document_estimate(document, &config.schema)?)
+                .checked_add(component_estimate(document, component_schema.iter().filter(|f|f.index_vector||f.facet).map(|f|f.field.as_str()))?)
+                .and_then(|n|n.checked_add(identity_estimate(&record.record_id).ok()?))
                 .ok_or_else(|| storage("build estimate overflow"))?;
         }
     }
@@ -99,9 +118,10 @@ pub(super) fn write_estimate(
     config: &RecordConfig,
     applied: &Applied,
 ) -> Result<(u64, usize), RecordError> {
-    let estimate = |doc: &Document| {
+    let estimate = |doc: &Document, id: &str| {
         document_estimate(doc, &config.schema)?
             .checked_add(65536)
+            .and_then(|n|n.checked_add(identity_estimate(id).ok()?))
             .ok_or_else(|| storage("write estimate overflow"))
     };
     match &applied.request.generation {
@@ -109,7 +129,7 @@ pub(super) fn write_estimate(
             let chunks=&state.generations[&applied.request.record_id]
                 .staged.as_ref().ok_or_else(|| storage("missing staged generation"))?.chunks;
             let bytes=chunks.iter().try_fold(0u64, |sum, c| {
-                sum.checked_add(estimate(&c.document)?)
+                sum.checked_add(estimate(&c.document,&c.record_id)?)
                     .ok_or_else(|| storage("generation estimate overflow"))
             })?;
             Ok((bytes,chunks.len()))
@@ -118,8 +138,23 @@ pub(super) fn write_estimate(
         None => match enrichment::document(
             state.records.get(&applied.request.record_id), &applied.request,
         )? {
-            Some(document) => Ok((estimate(&document)?,1)),
+            Some(document) => Ok((estimate(&document,&applied.request.record_id)?,1)),
             None => Ok((0,0)),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nonindexed_body_is_transient_while_vectors_and_facets_stay_charged() {
+        let small:Document=serde_json::from_value(serde_json::json!({"body":"a","vector":[1.0,2.0],"tag":["one","two"]})).unwrap();
+        let mut large=small.clone();large.insert("body".into(),serde_json::json!("x".repeat(256*1024)));
+        let fields=["vector","tag"];
+        assert_eq!(component_estimate(&small,fields.into_iter()).unwrap(),component_estimate(&large,fields.into_iter()).unwrap());
+        assert!(document_estimate(&large,&[]).unwrap()>document_estimate(&small,&[]).unwrap()+8*1024*1024-1024);
+        assert!(component_estimate(&large,["vector","tag","body"].into_iter()).unwrap()>component_estimate(&large,fields.into_iter()).unwrap()+8*1024*1024-1024);
+        assert_eq!(component_estimate(&small,["tag","tag"].into_iter()).unwrap(),component_estimate(&small,["tag"].into_iter()).unwrap());
     }
 }

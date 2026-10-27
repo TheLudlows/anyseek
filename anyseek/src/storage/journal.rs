@@ -65,7 +65,104 @@ pub(crate) struct Journal {
     needs_recovery: bool,
 }
 
+// Restore the writer's cursor on success, ordinary errors and unwind. Never
+// unlock or reopen the WAL: Windows byte-range locks belong to this handle.
+struct RestoreCursor<'a, S: Seek> {
+    input: &'a mut S,
+    saved: u64,
+    needs_recovery: &'a mut bool,
+    attempted: bool,
+}
+impl<S: Seek> RestoreCursor<'_, S> {
+    fn restore(&mut self) -> io::Result<()> {
+        if self.attempted { return Ok(()); }
+        self.attempted=true;
+        match self.input.seek(SeekFrom::Start(self.saved)) {
+            Ok(_) => Ok(()),
+            Err(error) => { *self.needs_recovery=true; Err(error) }
+        }
+    }
+}
+impl<S: Seek> Drop for RestoreCursor<'_, S> {
+    fn drop(&mut self) { let _=self.restore(); }
+}
+
 impl Journal {
+    /// Visit the healthy writer's committed cut without reopening its owner or
+    /// changing its append cursor. The caller holds the partition owner and
+    /// supplies that owner's current generation directory. Callback results are
+    /// private preparations: they must not be published until this returns Ok.
+    /// A callback cannot retain the borrowed payload; any decoded retained value
+    /// needs its own residency lease, separate from this frame's scratch lease.
+    pub(crate) fn visit_committed(
+        &mut self,
+        path: &Path,
+        mut accept: impl FnMut(u64, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if self.needs_recovery {
+            return Err(io::Error::other("journal requires recovery"));
+        }
+        let path = path.join("wal");
+        if !fs::symlink_metadata(&path)?.file_type().is_file() {
+            return Err(corrupt("journal is not a regular file"));
+        }
+        // A second handle cannot read this exclusive range on Windows. A clone
+        // can share cursor state, and Windows seek_read also changes the cursor.
+        // Exclusive &mut access plus restoration keeps both ownership and append
+        // position intact across all callback outcomes.
+        let (end,seq)=(self.end,self.seq);
+        if end < MAGIC.len() as u64 || end > self.log.metadata()?.len() || end > self.max_bytes {
+            return Err(corrupt("invalid committed journal extent"));
+        }
+        let saved=self.log.stream_position()?;
+        let mut guard=RestoreCursor {input:&mut self.log,saved,needs_recovery:&mut self.needs_recovery,attempted:false};
+        let result=(|| {
+        let input=&mut *guard.input;
+        input.seek(SeekFrom::Start(0))?;
+        let mut magic = [0; 8];
+        input.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(corrupt("unsupported journal format"));
+        }
+        let mut offset = MAGIC.len() as u64;
+        let mut sequence = 0u64;
+        while offset < end {
+            if end - offset < FRAME_HEADER as u64 {
+                return Err(corrupt("truncated committed frame"));
+            }
+            let mut header = [0; FRAME_HEADER];
+            input.read_exact(&mut header)?;
+            let length = number(&header[..8]);
+            sequence = sequence.checked_add(1).ok_or_else(|| corrupt("sequence overflow"))?;
+            if length > MAX_FRAME as u64
+                || length > end - offset - FRAME_HEADER as u64
+                || number(&header[8..16]) != sequence
+            {
+                return Err(corrupt("invalid committed frame length or sequence"));
+            }
+            let _scratch = super::build_budget::reserve_memory(
+                length.checked_mul(32).ok_or_else(|| corrupt("frame admission overflow"))?,
+            )?;
+            let mut payload = vec![0; length as usize];
+            input.read_exact(&mut payload)?;
+            let mut checksum = xxhash_rust::xxh64::Xxh64::new(0);
+            checksum.update(&header[..16]);
+            checksum.update(&payload);
+            if checksum.digest() != number(&header[16..]) {
+                return Err(corrupt("committed frame checksum mismatch"));
+            }
+            accept(sequence, &payload)?;
+            offset += FRAME_HEADER as u64 + length;
+        }
+        if sequence != seq {
+            return Err(corrupt("commit witness sequence mismatch"));
+        }
+        Ok(())
+        })();
+        guard.restore().map_err(|error|io::Error::other(format!("committed WAL cursor restoration failed: {error}")))?;
+        result
+    }
+
     /// Build in a unique sibling directory, sync all files, then publish. No
     /// legacy directory is overwritten or initialized in place.
     #[cfg(test)]
@@ -263,6 +360,14 @@ impl Journal {
         self.seq
     }
 
+    /// Logical complete-state budget for a separately framed authenticated anchor.
+    /// Callers still validate each actual journal frame with validate_initial.
+    pub(crate) fn validate_checkpoint_budget(length: usize, max_bytes: u64) -> io::Result<()> {
+        let extent = (MAGIC.len() as u64).checked_add(FRAME_HEADER as u64).and_then(|n|n.checked_add(length as u64));
+        if extent.is_none_or(|n|n>max_bytes) { return Err(io::Error::new(io::ErrorKind::InvalidInput,"complete checkpoint budget exceeded")); }
+        Ok(())
+    }
+
     pub(crate) fn validate_initial(length: usize, max_bytes: u64) -> io::Result<()> {
         let extent = (MAGIC.len() as u64)
             .checked_add(FRAME_HEADER as u64)
@@ -284,6 +389,15 @@ impl Journal {
         Ok(())
     }
 
+    /// Only recoverable physical space pressure may request checkpointing.
+    /// Recovery-required, oversized frames and exhausted sequence are not space.
+    pub(crate) fn physical_bytes(&self)->u64 {self.end}
+    pub(crate) fn checkpoint_can_make_room(&self,length:usize,reserve:usize)->bool {
+        !self.needs_recovery && length<=MAX_FRAME && self.seq<u64::MAX
+            && (FRAME_HEADER as u64).checked_add(length as u64).and_then(|n|n.checked_add(reserve as u64)).is_some_and(|n|n<=self.max_bytes)
+            && self.end.checked_add(FRAME_HEADER as u64).and_then(|n|n.checked_add(length as u64))
+                .and_then(|n|n.checked_add(reserve as u64)).is_some_and(|n|n>self.max_bytes)
+    }
     pub(crate) fn validate_append(&self, length: usize) -> io::Result<()> {
         self.validate_append_with_reserve(length, 0)
     }
@@ -387,6 +501,84 @@ fn crash_boundary(stage: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn committed_stream_preserves_lock_and_cursor_on_unwind() {
+        let root=path();let mut journal=Journal::create(&root,4096).unwrap();
+        journal.append(b"first").unwrap();let cursor=journal.log.stream_position().unwrap();
+        let panic=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            journal.visit_committed(&root,|_,_| {
+                assert!(Journal::open(&root,4096).is_err(),"stream must retain exclusive ownership");
+                panic!("injected consumer unwind");
+            }).unwrap();
+        }));
+        assert!(panic.is_err());assert_eq!(journal.log.stream_position().unwrap(),cursor);
+        assert!(!journal.needs_recovery);
+        journal.append(b"second").unwrap();drop(journal);
+        assert_eq!(Journal::open(&root,4096).unwrap().1,vec![b"first".to_vec(),b"second".to_vec()]);
+    }
+    #[test]
+    fn committed_stream_restore_failure_fences_owner() {
+        struct FailedSeek;
+        impl Seek for FailedSeek {fn seek(&mut self,_:SeekFrom)->io::Result<u64>{Err(io::Error::other("injected restore failure"))}}
+        let mut input=FailedSeek;let mut recovery=false;
+        {let mut guard=RestoreCursor {input:&mut input,saved:19,needs_recovery:&mut recovery,attempted:false};assert!(guard.restore().is_err());}
+        assert!(recovery);
+    }
+    #[test]
+    fn committed_stream_keeps_append_cursor_and_ignores_uncommitted_suffix() {
+        let root = path();
+        let mut journal = Journal::create(&root, 4096).unwrap();
+        journal.append(b"first").unwrap();
+        journal.append(b"second").unwrap();
+        let saved = journal.log.stream_position().unwrap();
+        journal.log.seek(SeekFrom::End(0)).unwrap();
+        journal.log.write_all(b"uncommitted").unwrap();
+        journal.log.seek(SeekFrom::Start(saved)).unwrap();
+        let mut seen = Vec::new();
+        journal.visit_committed(&root, |seq, bytes| { seen.push((seq, bytes.to_vec())); Ok(()) }).unwrap();
+        assert_eq!(seen, vec![(1, b"first".to_vec()), (2, b"second".to_vec())]);
+        assert_eq!(journal.log.stream_position().unwrap(), saved);
+        // An interrupted consumer must not poison or seek the writer either.
+        assert!(journal.visit_committed(&root, |_, _| Err(io::Error::other("consumer failed"))).is_err());
+        assert_eq!(journal.log.stream_position().unwrap(), saved);
+        assert!(!journal.needs_recovery);
+        journal.append(b"third").unwrap();
+        drop(journal);
+        let (_, entries) = Journal::open(&root, 4096).unwrap();
+        assert_eq!(entries, vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]);
+    }
+    #[test]
+    fn committed_stream_rejects_corruption_and_uncertain_writer() {
+        let root = path();
+        let mut journal = Journal::create(&root, 4096).unwrap();
+        journal.append(b"first").unwrap();
+        journal.needs_recovery = true;
+        assert!(journal.append(b"must not append while fenced").is_err());
+        let mut called = false;
+        assert!(journal.visit_committed(&root, |_, _| { called = true; Ok(()) }).is_err());
+        assert!(!called);
+        journal.needs_recovery = false;
+        journal.log.seek(SeekFrom::Start((MAGIC.len() + FRAME_HEADER) as u64)).unwrap();
+        journal.log.write_all(b"X").unwrap();
+        assert!(journal.visit_committed(&root, |_, _| { called = true; Ok(()) }).is_err());
+        assert!(!called);
+    }
+    #[test]
+    fn committed_stream_late_corruption_does_not_certify_prefix() {
+        let root = path();
+        let mut journal = Journal::create(&root, 4096).unwrap();
+        journal.append(b"first").unwrap();
+        journal.append(b"second").unwrap();
+        journal.log.seek(SeekFrom::Start((MAGIC.len() + FRAME_HEADER + 5 + FRAME_HEADER) as u64)).unwrap();
+        journal.log.write_all(b"X").unwrap();
+        let mut private = Vec::new();
+        let result = journal.visit_committed(&root, |_, bytes| { private.push(bytes.to_vec()); Ok(()) });
+        assert!(result.is_err());
+        assert_eq!(private, vec![b"first".to_vec()]);
+        // The complete visit, not each callback, gates candidate publication.
+        let published = result.is_ok().then_some(private);
+        assert!(published.is_none());
+    }
     fn path() -> std::path::PathBuf {
         let base = std::env::var_os("ANYSEEK_TEST_ROOT")
             .map(std::path::PathBuf::from)

@@ -155,6 +155,7 @@ impl SqliteAuthority {
                  result_json TEXT NOT NULL,
                  PRIMARY KEY(partition_id,operation_id)
              );
+             CREATE INDEX IF NOT EXISTS receipts_partition_seq ON operation_receipts(partition_id,committed_seq);
              CREATE TABLE IF NOT EXISTS object_uploads (
                  object_key TEXT PRIMARY KEY,
                  sha256 BLOB NOT NULL CHECK(length(sha256)=32),
@@ -291,6 +292,39 @@ impl SqliteAuthority {
 
     // object_uploads states: 0 inventory, 1 verified, 2 retired verified,
     // 3 deleted verified, 4 retired unknown PUT, 5 deleted unknown PUT (retry DELETE).
+    /// Resolve the immutable receipt binding for a selected index cut.
+    pub(crate) fn committed_wal_at(&self,partition:&str,seq:u64)->rusqlite::Result<Option<ObjectRef>> {
+        let mut statement=self.connection.prepare("SELECT result_json FROM operation_receipts WHERE partition_id=?1 AND committed_seq=?2 LIMIT 2")?;
+        let values=statement.query_map(params![partition,to_i64(seq)?],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if values.len()!=1{return Err(rusqlite::Error::InvalidQuery);}
+        let head:PartitionHead=serde_json::from_str(&values[0]).map_err(|_|rusqlite::Error::InvalidQuery)?;
+        Ok(head.wal_tip)
+    }
+
+    /// Exact retained WAL sizes from the immutable commit receipts. No payload
+    /// copies or remote GET are needed for pre-append recovery admission.
+    /// Record commits exactly one Entry per block; generic multi-entry blocks
+    /// must not use this receipt-based count as their recovery admission.
+    pub(crate) fn retained_tail_size(&self, head:&PartitionHead)->rusqlite::Result<(u64,u64)> {
+        let (count,bytes):(i64,i64)=self.connection.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(json_extract(result_json,'$.wal_tip.length')),0) FROM operation_receipts WHERE partition_id=?1 AND committed_seq>?2 AND committed_seq<=?3",
+            params![head.partition_id,to_i64(head.log_base_seq)?,to_i64(head.committed_seq)?],
+            |row|Ok((row.get(0)?,row.get(1)?)))?;
+        if count<0 || bytes<0 || count as u64!=head.committed_seq.checked_sub(head.log_base_seq).ok_or(rusqlite::Error::InvalidQuery)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok((count as u64,bytes as u64))
+    }
+
+    pub(crate) fn is_durable_object(&self, object: &ObjectRef) -> rusqlite::Result<bool> {
+        let row: Option<(Vec<u8>, i64, i64)> = self.connection.query_row(
+            "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
+            [&object.key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        Ok(matches!(row, Some((digest, length, 1))
+            if digest.as_slice() == object.sha256 && length >= 0 && length as u64 == object.length))
+    }
+
     /// Register an object only after the object-store adapter has completed the durable
     /// upload and independently verified its byte length and SHA-256. A key is immutable:
     /// registering different bytes under an existing key is rejected.

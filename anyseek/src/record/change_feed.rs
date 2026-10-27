@@ -326,25 +326,8 @@ impl Inner {
         };
         #[cfg(feature="s3-object-store")]
         if self.remote.is_some() {
-            let mut next=self.state.clone();
-            apply_trim(&mut next,&self.config.change_feed,&trim)?;
-            // A complete same-sequence checkpoint atomically publishes the feed
-            // floor and its replay state. It also advances the recovery log base.
-            self.publish_anchor_state(next,true).await?;
-            #[cfg(feature="fault-injection")]
-            match std::env::var("ANYSEEK_FEED_TRIM_FAULT").ok().as_deref() {
-                Some("after_append_unknown"|"after_durable")=>{
-                    // SQLite already confirmed this checkpoint. Keep the known
-                    // durable cut fenced until recovery rebuilds the feed cache.
-                    self.healthy=false;
-                    self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
-                    return Err(RecordError::DurablePending(self.state.seq));
-                },
-                Some("crash_after_durable")=>std::process::exit(90),
-                _=>{},
-            }
-            self.feed_cache.trim(floor);
-            return Ok(());
+            self.maintenance_trim.get_or_insert(trim);
+            return Err(self.request_checkpoint("remote_feed_trim"));
         }
         let bytes = encode_entry(&Entry::FeedTrim(trim.clone()))?;
         // Maintenance never consumes deletion/TTL emergency capacity. A full
@@ -356,16 +339,12 @@ impl Inner {
         {
             return Ok(());
         }
-        let mut candidate = self.state.clone();
+        let mut candidate = self.state.try_clone()?;
         candidate.feed.floor = floor;
         candidate.time_watermark_ms = at;
-        let snapshot_bytes = encode_entry(&Entry::Checkpoint {
-            config: self.config.clone(),
-            state: candidate,
-        })?
-        .len();
-        if PartitionJournal::validate_initial(
-            snapshot_bytes + generation::reserve_bytes(&self.state),
+        let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
+        if checkpoint_codec::validate_size(
+            snapshot_bytes, generation::reserve_bytes(&self.state),
             self.config.max_journal_bytes,
         )
         .is_err()

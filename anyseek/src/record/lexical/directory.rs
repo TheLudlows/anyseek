@@ -31,8 +31,13 @@ struct WriterReservation {
     _buffer: Option<resources::Lease>,
 }
 struct Budget {
+    #[cfg(test)]
+    fail_writes: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    failed_writes: std::sync::atomic::AtomicUsize,
     pin: Mutex<Option<Arc<crate::record::package_pins::Pin>>>,
     writer_memory: Mutex<Option<WriterReservation>>,
+    pending_analysis: Mutex<Vec<WriterReservation>>,
     ledger: Mutex<Ledger>,
     bytes: u64,
     files: usize,
@@ -44,6 +49,11 @@ struct Budget {
 }
 impl Budget {
     fn charge(&self, path: &Path, bytes: u64) -> io::Result<()> {
+        #[cfg(test)]
+        if self.fail_writes.load(std::sync::atomic::Ordering::Acquire) {
+            self.failed_writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(io::Error::other("injected native worker write failure"));
+        }
         let mut components = path.components();
         if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
             return Err(io::Error::other("native index path must be a single file"));
@@ -92,6 +102,14 @@ impl fmt::Debug for BudgetDirectory {
     }
 }
 impl BudgetDirectory {
+    #[cfg(test)]
+    pub(super) fn reject_writes_for_test(&self) {
+        self.budget.fail_writes.store(true, std::sync::atomic::Ordering::Release);
+    }
+    #[cfg(test)]
+    pub(super) fn failed_writes_for_test(&self) -> usize {
+        self.budget.failed_writes.load(std::sync::atomic::Ordering::Acquire)
+    }
     pub(super) fn new(
         path: &Path,
         bytes: u64,
@@ -132,6 +150,21 @@ impl BudgetDirectory {
         }
         Ok(())
     }
+    /// Queued pre-tokenized documents outlive add_document's caller. Workers
+    /// retain these leases through Directory clones, even if joining fails.
+    pub(super) fn retain_analysis(
+        &self,
+        memory: crate::storage::build_budget::MemoryLease,
+        buffer: Option<resources::Lease>,
+    ) -> Result<(), RecordError> {
+        self.budget.pending_analysis.lock().map_err(|_| storage("native analysis ownership poisoned"))?
+            .push(WriterReservation { _memory: memory, _buffer: buffer });
+        Ok(())
+    }
+    /// A successful commit has joined the workers consuming the previous queue.
+    pub(super) fn release_committed_analysis(&self) {
+        if let Ok(mut pending) = self.budget.pending_analysis.lock() { pending.clear(); }
+    }
     // Directory clones outlive Runtime on a failed worker join. They must retain
     // the same GC pin as the worker's bytes, until the last worker/reader drops.
     pub(super) fn retain_pin(&self,pin:Arc<crate::record::package_pins::Pin>)->Result<(),RecordError> {
@@ -141,6 +174,7 @@ impl BudgetDirectory {
     /// Called only after Tantivy has successfully joined indexing and merge
     /// workers. Fixed Searchers may retain this Directory, but no writer buffer.
     pub(super) fn release_joined_writer(&self) {
+        self.release_committed_analysis();
         if let Ok(mut reservation)=self.budget.writer_memory.lock() {
             reservation.take();
         }
@@ -167,7 +201,9 @@ impl BudgetDirectory {
         let inner=MmapDirectory::open(path).map_err(storage)?;
         drop(io);drop(gate);
         Ok(Self {inner,selected:true,budget:Arc::new(Budget {
-            pin:Mutex::new(None),writer_memory:Mutex::new(None),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
+            #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
+            pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
             _memory:memory,_buffer:buffer,
         })})
     }
@@ -191,7 +227,9 @@ impl BudgetDirectory {
             inner: MmapDirectory::open(path).map_err(storage)?,
             selected: false,
             budget: Arc::new(Budget {
-                pin:Mutex::new(None),writer_memory:Mutex::new(None),
+                #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
+                pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),
                 ledger: Mutex::new(Ledger {
                     written: 0,
                     paths: BTreeSet::new(),
@@ -304,8 +342,10 @@ mod tests {
         let directory=BudgetDirectory::persistent(&root.0,1024,8,0).unwrap();
         directory.retain_pin(crate::record::package_pins::Pin::acquire(&[root.0.clone()]).unwrap()).unwrap();
         directory.admit_writer(20_000_000).unwrap();
+        directory.retain_analysis(crate::storage::build_budget::reserve_memory(4096).unwrap(), None).unwrap();
         let worker=directory.clone();drop(directory);
         assert!(worker.budget.writer_memory.lock().unwrap().is_some());
+        assert_eq!(worker.budget.pending_analysis.lock().unwrap().len(), 1);
         assert!(!crate::record::package_pins::retire_if_unpinned(&root.0,||{panic!("worker owns package")}).unwrap());
         drop(worker);
         assert!(crate::record::package_pins::retire_if_unpinned(&root.0,||Ok(())).unwrap());

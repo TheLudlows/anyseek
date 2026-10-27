@@ -49,11 +49,10 @@ pub struct RecoveryIdentity {
     pub seal: Option<SealCertificate>,
 }
 fn digest(config: &RecordConfig, state: &State) -> Result<String, RecordError> {
-    let payload = encode_entry(&Entry::Checkpoint { config: config.clone(), state: state.clone() })?;
-    Ok(Sha256::digest(payload).iter().map(|b| format!("{b:02x}")).collect())
+    Ok(checkpoint_codec::digest(config, state)?.iter().map(|b| format!("{b:02x}")).collect())
 }
 fn content_digest(config: &RecordConfig, state: &State) -> Result<String, RecordError> {
-    let mut content = state.clone();
+    let mut content = state.try_clone()?;
     content.sealed_for = None;
     content.takeover_proof = None;
     digest(config, &content)
@@ -86,7 +85,9 @@ impl RecordPartition {
     pub async fn seal_for_takeover(&self, request: SealRequest) -> Result<SealCertificate, RecordError> {
         let admission = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
+        let partition=self.clone();
         crate::resources::spawn(async move {
+            let result=async move {
             let _admission = admission;
             let mut inner = owner.lock().await;
             if !inner.healthy { return Err(RecordError::RecoveryRequired); }
@@ -108,10 +109,10 @@ impl RecordPartition {
                 lineage: inner.state.lineage.clone(), final_seq: inner.state.seq,
                 final_state_digest: content_digest(&inner.config, &inner.state)?, request,
             };
-            let mut next = inner.state.clone();
+            let mut next = inner.state.try_clone()?;
             next.sealed_for = Some(certificate.clone());
-            let payload = encode_entry(&Entry::Checkpoint { config: inner.config.clone(), state: next.clone() })?;
-            PartitionJournal::validate_initial(payload.len(), inner.config.max_journal_bytes)
+            let length = checkpoint_codec::length(&inner.config, &next)?;
+            checkpoint_codec::validate_size(length,0,inner.config.max_journal_bytes)
                 .map_err(|e| RecordError::Rejected(e.to_string()))?;
             // Close output before any fallible/awaited publication. The same
             // anchor protocol handles local certificates and SQLite-selected
@@ -126,6 +127,9 @@ impl RecordPartition {
             }
             // Output stays fenced permanently, including after future compaction.
             Ok(certificate)
+            }.await;
+            partition.kick_maintenance().await;
+            result
         }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
     }
 }
@@ -158,14 +162,13 @@ impl RecordPartition {
                 || content_digest(&original.config, &original.state)? != seal.final_state_digest {
                 return Err(RecordError::Conflict("untrusted or mismatched takeover authority".into()));
             }
-            let mut state = original.state.clone();
+            let mut state = original.state.try_clone()?;
             state.sealed_for = None;
             state.takeover_proof = Some(seal.clone());
             state.feed.scope = successor_scope(&seal.source_feed_scope,&seal.request.intent_id);
-            let bytes = encode_entry(&Entry::Checkpoint { config: original.config.clone(), state })?;
-            PartitionJournal::validate_initial(bytes.len(), original.config.max_journal_bytes)
-                .map_err(|e| RecordError::Rejected(e.to_string()))?;
-            drop(PartitionJournal::create(&target, original.config.max_journal_bytes, &bytes).map_err(creation_error)?);
+            let config=original.config.clone();
+            drop(snapshot);drop(original);
+            super::snapshot::create(&target,config,state).await?;
             Ok(())
         }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
     }
@@ -175,7 +178,7 @@ impl RecordPartition {
     pub async fn certify_takeover_successor(&self, expected: &SealCertificate) -> Result<(), RecordError> {
         let inner = self.inner.lock().await;
         if !inner.healthy { return Err(RecordError::RecoveryRequired); }
-        let mut normalized = inner.state.clone();
+        let mut normalized = inner.state.try_clone()?;
         normalized.feed.scope = expected.source_feed_scope.clone();
         if inner.state.feed.scope != successor_scope(&expected.source_feed_scope,&expected.request.intent_id)
             || inner.state.sealed_for.is_some() || inner.state.independent_snapshot
@@ -201,12 +204,12 @@ impl RecordPartition {
         }
         let seal = SealCertificate { source_feed_scope: inner.state.feed.scope.clone(), lineage: lineage.into(), final_seq: inner.state.seq,
             final_state_digest: content_digest(&inner.config, &inner.state)?, request: request.clone() };
-        let mut next = inner.state.clone();
+        let mut next = inner.state.try_clone()?;
         next.sealed_for = Some(seal.clone());
         for target in [false, true] {
             if target { next.sealed_for = None; next.takeover_proof = Some(seal.clone()); }
-            let bytes = encode_entry(&Entry::Checkpoint { config: inner.config.clone(), state: next.clone() })?;
-            PartitionJournal::validate_initial(bytes.len(), inner.config.max_journal_bytes)
+            let length = checkpoint_codec::length(&inner.config, &next)?;
+            checkpoint_codec::validate_size(length,0,inner.config.max_journal_bytes)
                 .map_err(|e| RecordError::Rejected(e.to_string()))?;
         }
         Ok(())

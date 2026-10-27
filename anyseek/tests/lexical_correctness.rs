@@ -1,3 +1,4 @@
+#[path = "common/scale.rs"] mod scale;
 // Retained literal membership/score corpora; both length policies run in full.
 #[path = "common/records.rs"]
 mod records;
@@ -191,15 +192,17 @@ fn close_score(actual: f32, expected: f64) {
     );
 }
 async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLengthNormalization) {
+    let population = scale::choose(514, 8194);
+    assert!(population > 400 && population / 2 > 100);
     let progress = Progress::new("mixed", policy);
     let (mut index, path) = fresh("mixed", policy).await;
     let sets = [
         (100..104).collect::<BTreeSet<_>>(),
         [100, 103, 200, 300, 400].into_iter().collect(),
-        (1..8194).step_by(2).collect(),
+        (1..population).step_by(2).collect(),
     ];
     let terms = ["alpha", "beta", "gamma"];
-    add(&index, 0, 8194, &progress, |i| {
+    add(&index, 0, population, &progress, |i| {
         let words: Vec<_> = terms
             .iter()
             .zip(&sets)
@@ -210,10 +213,10 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLe
     })
     .await;
     let union: BTreeSet<_> = sets.iter().flat_map(|s| s.iter().copied()).collect();
-    let avg = (0..8194)
+    let avg = (0..population)
         .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
         .sum::<usize>() as f64
-        / 8194.0;
+        / population as f64;
     for stage in 0..3 {
         if stage == 1 {
             checkpoint(&index).await;
@@ -227,7 +230,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLe
                 &index,
                 "alpha beta gamma",
                 false,
-                8195,
+                population + 1,
                 explicit,
                 stage == 0,
             )
@@ -238,12 +241,12 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLe
                 let expected = sets
                     .iter()
                     .filter(|s| s.contains(id))
-                    .map(|s| contribution(8194, s.len(), dl, avg))
+                    .map(|s| contribution(population, s.len(), dl, avg))
                     .sum();
                 close_score(*score, expected);
             }
             assert_eq!(
-                search(&index, "alpha beta gamma", true, 8195, explicit, stage == 0)
+                search(&index, "alpha beta gamma", true, population + 1, explicit, stage == 0)
                     .await
                     .iter()
                     .map(|r| r.0)
@@ -253,7 +256,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLe
             for q in ["gamma alpha beta", "beta gamma alpha"] {
                 assert_eq!(
                     rows,
-                    search(&index, q, false, 8195, explicit, stage == 0).await,
+                    search(&index, q, false, population + 1, explicit, stage == 0).await,
                     "stage {stage}, query {q}"
                 );
             }
@@ -395,17 +398,19 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
 /// Five terms force recursive OR subsets; literal posting sets and scores are
 /// independent of both the subset enumerator and the explicit-sort reference.
 async fn five_term_or_subsets_keep_all_pair_contributions_case(policy: FieldLengthNormalization) {
+    let population = scale::choose(514, 8194);
+    assert!(population > 400 && population / 2 > 100);
     let progress = Progress::new("subsets", policy);
     let (index, path) = fresh("subsets", policy).await;
     let terms = ["alpha", "beta", "gamma", "delta", "epsilon"];
     let sets: Vec<BTreeSet<usize>> = vec![
         (100..104).collect(),
         [100, 103, 200, 300, 400].into_iter().collect(),
-        (1..8194).step_by(2).collect(),
-        (0..8194).step_by(3).collect(),
-        (0..8194).step_by(7).collect(),
+        (1..population).step_by(2).collect(),
+        (0..population).step_by(3).collect(),
+        (0..population).step_by(7).collect(),
     ];
-    add(&index, 0, 8194, &progress, |i| {
+    add(&index, 0, population, &progress, |i| {
         let words: Vec<_> = terms
             .iter()
             .zip(&sets)
@@ -416,13 +421,13 @@ async fn five_term_or_subsets_keep_all_pair_contributions_case(policy: FieldLeng
     })
     .await;
     checkpoint(&index).await;
-    let avg = (0..8194)
+    let avg = (0..population)
         .map(|i| sets.iter().filter(|s| s.contains(&i)).count().max(1))
         .sum::<usize>() as f64
-        / 8194.0;
+        / population as f64;
     let union: BTreeSet<_> = sets.iter().flat_map(|s| s.iter().copied()).collect();
     for explicit in [false, true] {
-        let all = search(&index, &terms.join(" "), false, 8195, explicit, false).await;
+        let all = search(&index, &terms.join(" "), false, population + 1, explicit, false).await;
         assert_eq!(all.iter().map(|r| r.0).collect::<BTreeSet<_>>(), union);
         for &(id, score) in &all {
             let dl = sets.iter().filter(|s| s.contains(&id)).count();
@@ -430,7 +435,7 @@ async fn five_term_or_subsets_keep_all_pair_contributions_case(policy: FieldLeng
                 score,
                 sets.iter()
                     .filter(|s| s.contains(&id))
-                    .map(|s| contribution(8194, s.len(), dl, avg))
+                    .map(|s| contribution(population, s.len(), dl, avg))
                     .sum(),
             );
         }

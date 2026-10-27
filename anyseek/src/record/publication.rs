@@ -1,17 +1,22 @@
 //! Incrementally apply a durable decision to all components of the read view.
 //!
-//! Called only by the owned executor with the exclusive partition guard and
-//! healthy=false. A failed component leaves the partition fenced. The executor
-//! alone may reopen visibility after every component and authority agree.
+//! The context contains only a mutable read view, never publication authority.
+//! Live callers hold the partition guard and fence output; private background
+//! replay callers discard their candidate on error. Neither context can append
+//! WAL, publish a certificate, or reopen output by itself.
 use super::*;
 
-impl Inner {
+impl replay::Context<'_> {
     pub(super) async fn publish(
         &mut self,
         applied: &Applied,
         snapshot_bytes: usize,
     ) -> Result<(), RecordError> {
-        if applied.request.generation.is_some() { return self.publish_generation(applied, snapshot_bytes).await; }
+        let prepared=if applied.request.generation.is_none(){Some(state_memory::Prepared::new(&*self.state,applied)?)}else{None};
+        self.publish_prepared(applied,snapshot_bytes,prepared,None).await
+    }
+    pub(super) async fn publish_prepared(&mut self,applied:&Applied,snapshot_bytes:usize,prepared:Option<state_memory::Prepared>,candidate:Option<State>)->Result<(),RecordError>{
+        if applied.request.generation.is_some() { return self.publish_generation(applied, snapshot_bytes,candidate).await; }
         let receipt = &applied.receipt;
         let document = enrichment::document(self.state.records.get(&receipt.record_id), &applied.request)?;
         let hiding = applied.request.vector_patch.is_none() && (self
@@ -52,15 +57,15 @@ impl Inner {
         if self.fail_publication_stage == 2 {
             return Err(RecordError::DurablePending(receipt.seq));
         }
-        apply(&mut self.state, applied).map_err(|_| RecordError::DurablePending(receipt.seq))?;
+        apply_prepared(&mut *self.state, applied, prepared).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         self.graph_cache.insert(&self.state.records[&receipt.record_id]).map_err(|_| RecordError::DurablePending(receipt.seq))?;
-        self.snapshot_bytes = snapshot_bytes;
+        *self.snapshot_bytes = snapshot_bytes;
         #[cfg(test)]
         assert_eq!(
             snapshot_bytes,
             encode_entry(&Entry::Checkpoint {
                 config: self.config.clone(),
-                state: self.state.clone()
+                state: self.state.try_clone()?
             })
             .unwrap()
             .len()
@@ -69,10 +74,13 @@ impl Inner {
     }
 }
 
-impl Inner {
-    async fn publish_generation(&mut self, applied: &Applied, snapshot_bytes: usize) -> Result<(), RecordError> {
-        let mut next = self.state.clone();
-        apply(&mut next, applied).map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
+impl replay::Context<'_> {
+    async fn publish_generation(&mut self, applied: &Applied, snapshot_bytes: usize, candidate: Option<State>) -> Result<(), RecordError> {
+        let growth=checkpoint_codec::json_length(applied)?.checked_mul(3).ok_or_else(|| storage("generation state growth overflow"))?;
+        let next = if let Some(candidate)=candidate { candidate } else {
+            let mut next=self.state.try_clone_with_growth(growth)?;
+            apply(&mut next,applied).map_err(|_|RecordError::DurablePending(applied.receipt.seq))?;next
+        };
         if matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) {
             let visible = evidence::visibility(&next.records).map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
             let retired: Vec<_> = self.locations.keys().filter(|id| visible.get(*id) != Some(&true)).cloned().collect();
@@ -90,9 +98,18 @@ impl Inner {
                 if self.fail_publication_stage == 1 { return Err(RecordError::DurablePending(applied.receipt.seq)); }
             }
         }
-        self.state = next; self.snapshot_bytes = snapshot_bytes;
+        *self.state = next; *self.snapshot_bytes = snapshot_bytes;
         #[cfg(test)]
-        assert_eq!(snapshot_bytes, encode_entry(&Entry::Checkpoint { config:self.config.clone(), state:self.state.clone() }).unwrap().len());
+        assert_eq!(snapshot_bytes, encode_entry(&Entry::Checkpoint { config:self.config.clone(), state:self.state.try_clone()? }).unwrap().len());
         Ok(())
+    }
+}
+
+impl Inner {
+    pub(super) async fn publish(&mut self,applied:&Applied,bytes:usize)->Result<(),RecordError>{
+        self.replay_context().publish(applied,bytes).await
+    }
+    pub(super) async fn publish_prepared(&mut self,applied:&Applied,bytes:usize,prepared:Option<state_memory::Prepared>,candidate:Option<State>)->Result<(),RecordError>{
+        self.replay_context().publish_prepared(applied,bytes,prepared,candidate).await
     }
 }

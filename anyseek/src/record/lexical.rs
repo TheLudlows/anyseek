@@ -25,7 +25,9 @@ use super::{RecordError, segment, storage};
 const ENGINE: &str = "tantivy-0.27.0";
 const FORMAT: u32 = 1;
 const WRITER_BYTES: usize = 20_000_000;
+// A package stays small; a selected corpus may span multiple packages.
 const MAX_DOCUMENTS: usize = 10_000;
+const MAX_POPULATION: usize = super::capacity::MAX_RECORDS;
 const MAX_FIELDS: usize = 64;
 const MAX_TOKENS: usize = 65_536;
 
@@ -85,7 +87,7 @@ struct Manifest {
 /// it. In particular, discovering a newer meta.json does not select a view.
 #[cfg(test)]
 pub(super) struct Candidate {
-    pub files: Vec<segment::FileRef>,
+    pub files: segment::Inventory,
 }
 
 fn schema(names: &[String]) -> Result<(Schema, Vec<Field>), RecordError> {
@@ -333,8 +335,7 @@ impl Candidate {
             .transpose()
             .map_err(storage)?;
         let actual = segment::files(path, byte_limit)?;
-        if serde_json::to_vec(&actual).map_err(storage)?
-            != serde_json::to_vec(&self.files).map_err(storage)?
+        if actual.as_slice() != self.files.as_slice()
         {
             return Err(storage("lexical package closure mismatch"));
         }

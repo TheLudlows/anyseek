@@ -48,6 +48,12 @@ pub(crate) struct MemoryLease(u64, Arc<AtomicU64>);
 pub(crate) fn reserve_memory(bytes: u64) -> io::Result<MemoryLease> {
     reserve_from(&MEMORY, bytes)
 }
+// Validate recoverability without charging for a second allocation that is not made.
+pub(crate) fn validate_single(bytes:u64)->io::Result<()> {
+    let limits=memory_limits()?;
+    if bytes > limits.single { return Err(io::Error::other(format!("record build resource budget exceeded: class=single requested={bytes} limit={}",limits.single))); }
+    Ok(())
+}
 fn reserve_from(counter: &Arc<AtomicU64>, bytes: u64) -> io::Result<MemoryLease> {
     let limits = memory_limits()?;
     if bytes > limits.single {
@@ -65,6 +71,23 @@ fn reserve_from(counter: &Arc<AtomicU64>, bytes: u64) -> io::Result<MemoryLease>
     Ok(MemoryLease(bytes, counter.clone()))
 }
 impl MemoryLease {
+    /// Transfer already admitted ownership. No counter change or second admission.
+    pub(crate) fn split_off(&mut self, bytes: u64) -> io::Result<Self> {
+        if bytes > self.0 {
+            return Err(io::Error::other("memory lease transfer exceeds admitted bytes"));
+        }
+        self.0 -= bytes;
+        Ok(Self(bytes, self.1.clone()))
+    }
+    pub(crate) fn bytes(&self) -> u64 { self.0 }
+    /// Coalesce already admitted metadata ownership, without reserving again.
+    pub(crate) fn merge(&mut self, mut other: Self) -> io::Result<()> {
+        if !Arc::ptr_eq(&self.1, &other.1) {return Err(io::Error::other("memory lease counter mismatch"));}
+        let total=self.0.checked_add(other.0).ok_or_else(||io::Error::other("memory lease merge overflow"))?;
+        validate_single(total)?;
+        self.0=total;other.0=0;Ok(())
+    }
+
     pub(crate) fn can_grow(&self, bytes: u64) -> bool {
         memory_limits().is_ok_and(|limits| self.0.checked_add(bytes).is_some_and(|n| n <= limits.single))
     }
@@ -357,8 +380,49 @@ impl Read for &File {
 }
 
 #[cfg(test)]
+pub(crate) fn used_memory_for_test() -> u64 { MEMORY.load(Ordering::Acquire) }
+#[cfg(test)]
+pub(crate) fn fill_memory_for_test() -> Vec<MemoryLease> {fill_memory_except_for_test(0)}
+#[cfg(test)]
+pub(crate) fn fill_memory_except_for_test(leave:u64) -> Vec<MemoryLease> {
+    let limits=memory_limits().unwrap();let mut held=Vec::new();
+    loop {
+        let free=limits.shared.saturating_sub(MEMORY.load(Ordering::Acquire));
+        if free<=leave {return held;}
+        held.push(reserve_memory((free-leave).min(limits.single)).unwrap());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn admitted_transfer_is_conserved_across_shared_owner_and_rejection() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut prepared = reserve_from(&counter, 1024).unwrap();
+        let value = Arc::new(prepared.split_off(768).unwrap());
+        let snapshot = value.clone();
+        assert_eq!(counter.load(Ordering::Acquire), 1024);
+        assert!(prepared.split_off(257).is_err());
+        assert_eq!(prepared.bytes(), 256);
+        drop(prepared);
+        assert_eq!(counter.load(Ordering::Acquire), 768);
+        drop(value);
+        assert_eq!(counter.load(Ordering::Acquire), 768, "old snapshot owns its value");
+        drop(snapshot);
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn frame_transfer_failure_releases_partial_recovery_owners() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut admitted = reserve_from(&counter, 4096).unwrap();
+        let partial = vec![admitted.split_off(1024).unwrap(), admitted.split_off(2048).unwrap()];
+        assert!(admitted.split_off(1025).is_err());
+        drop(partial);
+        assert_eq!(counter.load(Ordering::Acquire), 1024);
+        drop(admitted);
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+    }
     fn root() -> PathBuf {
         let p =
             std::env::temp_dir().join(format!("anyseek-budget-{:032x}", rand::random::<u128>()));

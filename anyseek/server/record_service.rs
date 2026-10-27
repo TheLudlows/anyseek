@@ -608,12 +608,23 @@ struct GrantChange {
     key_id: String,
     allow: bool,
 }
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all="snake_case")]
+enum CapacityProfile {
+    #[default]
+    #[serde(rename="standard_10k")]
+    Standard10k,
+    #[serde(rename="bounded_100k")]
+    Bounded100k,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CollectionCreate {
     operation_id: OperationId,
     collection_id: String,
     config: CreateIndexRequest,
+    #[serde(default)]
+    capacity_profile: CapacityProfile,
     #[serde(default)]
     embedding_space_id: Option<String>,
 }
@@ -626,10 +637,12 @@ struct ReadParams {
 fn record_config(
     request: CreateIndexRequest,
     embedding_space_id: Option<String>,
+    capacity: CapacityProfile,
 ) -> Result<RecordConfig, Error> {
     if request.index_name.trim().is_empty() {
         return Err(bad("index_name must not be empty"));
     }
+    let population=match capacity {CapacityProfile::Standard10k=>10_000,CapacityProfile::Bounded100k=>100_000};
     let schema = request.schema.into_iter().map(Into::into).collect();
     let inference = request.vector.map(Inference::from).unwrap_or_default();
     Ok(RecordConfig {
@@ -651,9 +664,9 @@ fn record_config(
         },
         schema,
         embedding_space_id,
-        max_records: 10_000,
+        max_records: population,
         max_record_bytes: 1024 * 1024,
-        max_operations: 10_000,
+        max_operations: population,
         max_journal_bytes: 256 * 1024 * 1024,
         max_candidates: 10_000,
     })
@@ -663,6 +676,7 @@ fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics)
     json!({"id":entry.collection_id,"name":entry.config.index.name,"schema":schema,
         "text_normalization":entry.config.index.text_normalization,"field_length_normalization":entry.config.index.field_length_normalization,
         "indexed_doc_count":stats.active_records,"committed_doc_count":stats.active_records,"version":crate::VERSION,"statistics":stats,
+        "limits":{"max_records":entry.config.max_records,"max_operations":entry.config.max_operations,"max_journal_bytes":entry.config.max_journal_bytes,"max_candidates":entry.config.max_candidates},
         "embedding_space_id":entry.config.embedding_space_id,"evidence_quarantined":stats.evidence_quarantined})
 }
 async fn create_key(
@@ -771,7 +785,7 @@ async fn create_collection(
         // can be changed exclusively through the master control plane.
         let operation_id = request.operation_id.clone();
         let id = request.collection_id.clone();
-        let config = record_config(request.config, request.embedding_space_id)
+        let config = record_config(request.config, request.embedding_space_id, request.capacity_profile)
             .map_err(|e| Error(e.0, "creation_rejected", e.2))?;
         anyseek::record::validate_config(&config)
             .map_err(|e| Error(StatusCode::BAD_REQUEST, "creation_rejected", e.to_string()))?;
@@ -1835,6 +1849,17 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[test]
+    fn capacity_profiles_are_explicit_finite_and_preserve_other_limits() {
+        let request=||serde_json::from_value::<CreateIndexRequest>(json!({"index_name":"capacity","schema":[]})).unwrap();
+        let standard=record_config(request(),None,CapacityProfile::default()).unwrap();
+        let larger=record_config(request(),None,serde_json::from_value(json!("bounded_100k")).unwrap()).unwrap();
+        assert_eq!((standard.max_records,standard.max_operations),(10_000,10_000));
+        assert_eq!((larger.max_records,larger.max_operations),(100_000,100_000));
+        assert_eq!(larger.max_journal_bytes,standard.max_journal_bytes);
+        assert_eq!(larger.max_candidates,standard.max_candidates);
+        assert!(serde_json::from_value::<CapacityProfile>(json!("unlimited")).is_err());
+    }
     #[test]
     fn admission_errors_do_not_claim_a_definitive_write_rejection() {
         for error in [Error::from(RecordError::Busy), Error::from(CatalogError::Busy)] {

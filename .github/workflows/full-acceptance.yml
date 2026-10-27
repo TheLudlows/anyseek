@@ -1,0 +1,297 @@
+name: Full acceptance (manual)
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  ANYSEEK_TEST_SCALE: full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # target-cpu=native artifacts cannot be shared across heterogeneous runners.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: s12-native-source-only
+          cache-targets: false
+      - name: Record toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+          lscpu
+      - name: Verify standalone core boundary
+        run: python3 scripts/check_core_boundary.py
+      - name: Verify documentation links and product identifiers
+        run: python3 scripts/check_docs_brand.py
+      - name: Build retained workspace
+        id: build
+        run: cargo build --workspace --features server
+      - name: Verify retired dependencies removed
+        run: |
+          cargo metadata --format-version 1 > /tmp/anyseek-metadata.json
+          python3 - <<'PYCODE'
+          import json
+          with open('/tmp/anyseek-metadata.json') as source:
+              metadata = json.load(source)
+              packages = metadata['packages']
+              names = {package['name'] for package in packages}
+          forbidden = names & {'pdfium-render', 'csv', 'walkdir', 'symspell_complete_rs', 'model2vec-rs', 'rkyv', 'tabled', 'colored', 'num-format', 'ctrlc', 'half', 'snowball_stemmers_rs', 'gxhash'}
+          assert not forbidden, f'retired dependencies remain: {forbidden}'
+          core = next(package for package in packages if package['name'] == 'anyseek')
+          # Native Tantivy uses channels and LZ4 internally. Permit those only
+          # behind its dependency edge; do not restore old direct code paths.
+          native_only = {'crossbeam-channel', 'lz4_flex'}
+          assert not native_only & {d['name'] for d in core['dependencies']}
+          by_id = {p['id']: p for p in packages}
+          nodes = {n['id']: n for n in metadata['resolve']['nodes']}
+          seen, pending = set(), [core['id']]
+          while pending:
+              current = pending.pop()
+              if current in seen or by_id[current]['name'] == 'tantivy':
+                  continue
+              seen.add(current)
+              pending.extend(d['pkg'] for d in nodes[current]['deps'])
+          assert not native_only & {by_id[p]['name'] for p in seen}, 'native-only dependency escaped Tantivy'
+          # Jieba's embedded dictionary uses include-flate/Zstd. Permit it only
+          # beneath jieba-rs, never as a direct/alternative storage codec.
+          dictionary_only = {'zstd', 'zstd-safe', 'zstd-sys'}
+          seen, pending = set(), [core['id']]
+          while pending:
+              current = pending.pop()
+              if current in seen or by_id[current]['name'] == 'jieba-rs':
+                  continue
+              seen.add(current)
+              pending.extend(d['pkg'] for d in nodes[current]['deps'])
+          assert not dictionary_only & {by_id[p]['name'] for p in seen}, 'dictionary codec escaped Jieba'
+          assert not any(dependency['name'] == 'aho-corasick' for dependency in core['dependencies']), 'direct highlighter dependency remains'
+          # The tokenizer retains regex-syntax; optional API dependencies are checked separately.
+          print('PASS no direct highlighter dependency')
+          print('PASS no PDF/CSV/directory parser or query rewriting dependencies in resolved graph')
+          PYCODE
+      - name: Install browser test runtime
+        run: |
+          python3 -m pip install playwright
+          python3 -m playwright install --with-deps chromium
+      - name: HTTP API and embedded UI smoke (no SDK)
+        env:
+          ANYSEEK_BROWSER_TEST: "1"
+        run: python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
+      - name: Existing core and server tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo test --workspace --features server --all-targets
+      - name: Generate API reference
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          target/debug/anyseek_server generate_openapi=true > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: |
+            target/debug/openapi.json
+            target/debug/openapi.yml
+
+  persistence-native:
+    name: Persistence primitives (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # Includes cold-cache S3 takeover and joint-archive process fault matrices.
+    timeout-minutes: 120
+    env:
+      ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/p1-native-data
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native toolchain
+        run: rustc --version --verbose
+      - name: Native Windows filesystem evidence
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testDrive = (Split-Path -Qualifier $env:GITHUB_WORKSPACE).TrimEnd(':')
+          Get-Volume -DriveLetter $testDrive | Format-List DriveLetter,FileSystem,HealthStatus
+          Get-ComputerInfo -Property WindowsProductName,OsVersion
+      - name: Native Linux filesystem evidence
+        if: runner.os == 'Linux'
+        run: |
+          uname -a
+          findmnt -T "$GITHUB_WORKSPACE" -o SOURCE,FSTYPE,TARGET
+      - name: Native journal and child-process crash tests
+        run: cargo test -p anyseek --lib journal_
+      - name: Native partition publication and owner-lock tests
+        run: cargo test -p anyseek --lib partition_
+      - name: Native Tantivy admission, fixed readers, cancellation and package pins
+        run: |
+          cargo test -p anyseek --lib record::lexical::
+      - name: Native vector and metadata component format
+        run: |
+          cargo test -p anyseek --lib component::
+      - name: Native fault-feature library and service contracts
+        if: runner.os != 'Windows'
+        # Linux integration targets run once in build-and-smoke (server, no faults).
+        # Keep fault-feature lib/bin coverage here; Windows still runs integration.
+        run: cargo test -p anyseek --lib --bins --features server,fault-injection
+      - name: Verify Windows lexical partition
+        if: runner.os == 'Windows'
+        run: python scripts/check_lexical_partition.py
+      - name: Native retained public Record integration contracts (Windows remainder)
+        if: runner.os == 'Windows'
+        # The four exact large cases run below on independent Windows runners.
+        run: cargo test -p anyseek --tests --features server,fault-injection -- --skip five_term_or_subsets_keep_all_pair_contributions_ --skip mixed_rle_array_bitmap_membership_scores_and_order_
+      - name: Native standalone core
+        run: cargo test -p anyseek --no-default-features --lib
+      - name: Native standalone documentation
+        run: cargo test -p anyseek --no-default-features --doc
+      - name: Native default documentation
+        run: cargo test -p anyseek --doc
+      - name: Native record replay, snapshot and response-loss tests
+        run: cargo test -p anyseek --lib record::tests
+      - name: Native bounded background index and fenced cut publication
+        shell: bash
+        run: |
+          cargo test -p anyseek --features s3-object-store --lib record::indexer::tests
+          cargo test -p anyseek --features s3-object-store --lib sqlite_authority::index_build::tests
+          cargo test -p anyseek --features s3-object-store --lib background_index
+          cargo test -p anyseek --features s3-object-store --lib expired_remote_index
+      - name: Native catalog authorization and revocation recovery tests
+        run: cargo test -p anyseek --lib catalog_
+      - name: Native verified object cache corruption, eviction and cold recovery
+        shell: bash
+        run: |
+          cargo test -p anyseek --features s3-object-store --lib verified_cache
+          cargo test -p anyseek --features s3-object-store --lib cache_corruption
+      - name: Native service output and admission barriers
+        run: cargo test -p anyseek --features server record_service::tests
+      - name: Native collection budgets, cancellation ownership and object buffer leases
+        shell: bash
+        run: |
+          cargo test -p anyseek --features server --lib resources::tests
+          cargo test -p anyseek --features s3-object-store --lib resource_
+      - name: Build native service
+        run: cargo build -p anyseek --features server
+      - name: Native service HTTP and restart acceptance
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe
+          else
+            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
+          fi
+      - name: Build explicit fault-injection service (not release binary)
+        run: cargo build -p anyseek --features server,fault-injection
+      - name: Native real HTTP process fault and recovery matrix
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --faults
+          else
+            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults
+          fi
+      - name: Native concurrent Indexer HTTP authorization and restart
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --faults --section indexer
+          else
+            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults --section indexer
+          fi
+      - name: Native S3 checkpoint retention and joint backup fault matrix
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/s3_storage_smoke.py --server target/debug/anyseek_server.exe --faults
+          else
+            python3 scripts/s3_storage_smoke.py --server target/debug/anyseek_server --faults
+          fi
+      - name: Native independent collection execution and scoped revocation HTTP
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe --faults --section authorization
+          else
+            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults --section authorization
+          fi
+
+  windows-lexical:
+    name: Windows lexical (${{ matrix.test }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - five_term_or_subsets_keep_all_pair_contributions_shared
+          - five_term_or_subsets_keep_all_pair_contributions_per_field
+          - mixed_rle_array_bitmap_membership_scores_and_order_shared
+          - mixed_rle_array_bitmap_membership_scores_and_order_per_field
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native toolchain
+        run: rustc --version --verbose
+      - name: Verify complete partition and run exact full-size case
+        run: python scripts/check_lexical_partition.py --case ${{ matrix.test }}
+
+  s3-native-acceptance:
+    name: S3 semantics and contracts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/s3-native-data
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: s3-source-only
+          cache-targets: false
+      - name: Prepare isolated test roots
+        shell: bash
+        run: mkdir -p target/s3-native-data
+      - name: Build explicit fault-injection service
+        run: cargo build -p anyseek --features server,fault-injection
+      - name: Authority, cache-failure, checkpoint and restore regressions
+        run: cargo test -p anyseek --lib --features server,fault-injection record::remote_checkpoint::tests
+      - name: Immutable object and joint-backup contract (HTTP fixture)
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/s3_acceptance.py --backend fixture --suite contract --report target/s3-contract.json
+          else
+            python3 scripts/s3_acceptance.py --backend fixture --suite contract --report target/s3-contract.json
+          fi
+      - name: Shared Record semantics after S3 cache loss
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python scripts/s3_acceptance.py --backend fixture --suite semantic --server target/debug/anyseek_server.exe --faults --report target/s3-semantics.json
+          else
+            python3 scripts/s3_acceptance.py --backend fixture --suite semantic --server target/debug/anyseek_server --faults --report target/s3-semantics.json
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s3-acceptance-${{ matrix.os }}
+          path: |
+            target/s3-contract.json
+            target/s3-semantics.json

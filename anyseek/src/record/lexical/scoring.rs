@@ -63,7 +63,7 @@ impl ActiveView<'_> {
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
         if groups.len() > 100
-            || limit > MAX_DOCUMENTS
+            || limit > MAX_POPULATION
             || boosts.len() != self.snapshot.fields.len()
             || boosts.iter().any(|b| !b.is_finite() || *b < 0.0)
         {
@@ -256,7 +256,7 @@ impl<'a> CorpusView<'a> {
         cut: Cut,
         identities: &BTreeSet<Identity>,
     ) -> Result<Self, RecordError> {
-        if snapshots.is_empty() || snapshots.len() > 64 || identities.len() > MAX_DOCUMENTS {
+        if snapshots.is_empty() || snapshots.len() > 64 || identities.len() > MAX_POPULATION {
             return Err(storage("native corpus topology budget exceeded"));
         }
         if identities
@@ -304,7 +304,7 @@ impl<'a> CorpusView<'a> {
         limit: usize,
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
-        if limit > MAX_DOCUMENTS {
+        if limit > MAX_POPULATION {
             return Err(storage("native corpus candidate budget exceeded"));
         }
         let references: Vec<_> = self.views.iter().collect();

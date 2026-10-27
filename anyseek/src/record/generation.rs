@@ -211,7 +211,8 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
     let receipt = WriteReceipt { staged_only: matches!(request.generation, Some(GenerationCommand::Stage { .. }|GenerationCommand::Begin{..}|GenerationCommand::StageBatch{..}|GenerationCommand::Seal{..}|GenerationCommand::Renew { .. })), seq: state.seq.checked_add(1).ok_or_else(|| storage("sequence exhausted"))?,
         version: old.map_or(Some(1), |g| g.version.checked_add(1)).ok_or_else(|| storage("generation version exhausted"))?, record_id:request.record_id.clone() };
     let applied = Applied { request_digest:None, graph_invalidation:false, request, receipt, observed_epoch:epoch, observed_time_ms:evaluation };
-    let mut candidate = state.clone(); super::apply(&mut candidate, &applied)?;
+    let growth=checkpoint_codec::json_length(&applied)?.checked_mul(3).ok_or_else(|| storage("generation state growth overflow"))?;
+    let mut candidate = state.try_clone_with_growth(growth)?; super::apply(&mut candidate, &applied)?;
     validate_state(&candidate, config)?;
     if matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) {
         let visible = evidence::visibility(&candidate.records)?;
@@ -222,15 +223,18 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
     let reserve_bytes = reserve_bytes(&candidate);
     if candidate.operations.len() + reserve_slots(&candidate) > config.max_operations { return Err(rejected("generation operation reserve exceeded")); }
     let feed_reserve = change_feed::reserve(&candidate);
-    let snapshot_bytes = encode_entry(&Entry::Checkpoint { config:config.clone(), state:candidate })?.len();
-    PartitionJournal::validate_initial(snapshot_bytes + reserve_bytes, config.max_journal_bytes).map_err(|_| rejected("generation checkpoint reserve exceeded"))?;
+    let snapshot_bytes = checkpoint_codec::length(config, &candidate)?;
+    checkpoint_codec::validate_size(snapshot_bytes, reserve_bytes, config.max_journal_bytes).map_err(|_| rejected("generation checkpoint reserve exceeded"))?;
     let bytes = encode_entry(&Entry::Applied(applied.clone()))?;
-    Ok(mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve })
+    Ok(mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, candidate: Some(candidate), planning: Vec::new() })
 }
 pub(super) fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
     let request = &applied.request;
     let old = state.generations.get(&request.record_id);
     if applied.receipt.version != old.map_or(1, |g| g.version.saturating_add(1)) { return Err(storage("inconsistent generation version")); }
+    let _manifest_copy=crate::storage::build_budget::reserve_memory(
+        (old.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0) as u64).checked_mul(32).ok_or_else(||storage("generation metadata copy overflow"))?
+    ).map_err(storage)?;
     let mut manifest = old.cloned().unwrap_or(Manifest { routing_key:request.routing_key.clone(), version:0, used:BTreeSet::new(), active:None, active_members:vec![], staged:None });
     match request.generation.as_ref().unwrap() {
         GenerationCommand::Stage { generation_id, source, chunks, members } => {
@@ -242,11 +246,11 @@ pub(super) fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordEr
         }
         GenerationCommand::Publish { generation_id } => {
             let stage = manifest.staged.take().filter(|s| &s.id == generation_id).ok_or_else(|| storage("missing published stage"))?;
-            for id in &manifest.active_members { state.records.get_mut(id).ok_or_else(|| storage("missing active member"))?.retired_generation = true; }
+            for id in &manifest.active_members { state.records.edit(id, 0, |record| {record.retired_generation=true;Ok(())})?; }
             manifest.active_members.clear();
             for chunk in &stage.chunks {
                 if state.records.contains_key(&chunk.record_id) { return Err(storage("published member identity reused")); }
-                state.records.insert(chunk.record_id.clone(), member(&stage, chunk, &manifest.routing_key, &request.record_id, applied.observed_time_ms));
+                state.records.insert(chunk.record_id.clone(), member(&stage, chunk, &manifest.routing_key, &request.record_id, applied.observed_time_ms))?;
                 manifest.active_members.push(chunk.record_id.clone());
             }
             manifest.active = Some(stage.id);
@@ -312,7 +316,7 @@ impl RecordPartition {
         let Some(g) = inner.state.generations.get(id) else { return Ok(None); };
         Ok(Some(GenerationStatus { record_id:id.into(), version:g.version, active_generation:g.active.clone(),
             visible_members:g.active_members.iter().filter(|id| inner.locations.contains_key(*id)).count(),
-            lease_expires_at_ms:g.staged.as_ref().map(|s|s.deadline_ms), lease_fence:g.staged.as_ref().map(|_|g.version), lease_requires_renewal:g.staged.as_ref().is_some_and(|s|s.scope!=inner.state.feed.scope), private_cleanup_pending:inner.state.private_cleanup_pending,
+            lease_expires_at_ms:g.staged.as_ref().map(|s|s.deadline_ms), lease_fence:g.staged.as_ref().map(|_|g.version), lease_requires_renewal:g.staged.as_ref().is_some_and(|s|s.scope!=inner.state.feed.scope), private_cleanup_pending:inner.state.private_cleanup_pending || inner.maintenance_gc_pending,
             expected_members:g.staged.as_ref().map_or(0,|s|s.members.len()),sealed:g.staged.as_ref().is_some_and(|s|s.sealed),manifest_sha256:g.staged.as_ref().map(upload::manifest_digest).transpose()?,
             staged_generation:g.staged.as_ref().map(|s| s.id.clone()), staged_members:g.staged.as_ref().map_or(0, |s| s.chunks.len()), visible_seq:inner.state.seq }))
     }

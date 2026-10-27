@@ -74,6 +74,15 @@ fn publish(prepared: &Path, target: &Path) -> Result<(), CreateError> {
 }
 impl PartitionJournal {
     pub(crate) fn root(&self)->&Path {&self.path}
+    pub(crate) fn validate_checkpoint_budget(length: usize, max_bytes: u64) -> io::Result<()> {
+        let payload_budget=max_bytes.checked_sub(24+PUBLISHED.len() as u64).ok_or_else(||io::Error::other("checkpoint certificate budget exceeded"))?;
+        Journal::validate_checkpoint_budget(length,payload_budget)
+    }
+    /// Publish an already certified private root. Preserve uncertain rename status.
+    pub(crate) fn publish_prepared_root(prepared: &Path, target: &Path) -> Result<(), CreateError> {
+        if target.exists() { return Err(io::Error::new(io::ErrorKind::AlreadyExists,"snapshot target exists").into()); }
+        publish(prepared,target)
+    }
     pub(crate) fn validate_initial(length: usize, max_bytes: u64) -> io::Result<()> {
         let payload_budget = max_bytes
             .checked_sub(24 + PUBLISHED.len() as u64)
@@ -378,6 +387,10 @@ impl PartitionJournal {
         self.max_bytes = self.max_bytes.min(max_bytes);
         Ok(())
     }
+    pub(crate) fn physical_bytes(&self)->u64 {self.journal.physical_bytes()}
+    pub(crate) fn checkpoint_can_make_room(&self,length:usize,reserve:usize)->bool {
+        self.journal.checkpoint_can_make_room(length,reserve)
+    }
     pub(crate) fn validate_append(&self, length: usize) -> io::Result<()> {
         self.journal.validate_append(length)
     }
@@ -386,6 +399,30 @@ impl PartitionJournal {
     }
     pub(crate) fn append(&mut self, payload: &[u8]) -> io::Result<u64> {
         self.journal.append(payload)
+    }
+    /// Stream the selected certificate and complete ordered suffix. The
+    /// publication marker is protocol metadata, not a Record Entry. In
+    /// particular, do not filter using business seq: maintenance entries can
+    /// change State without incrementing that sequence.
+    pub(crate) fn visit_committed(
+        &mut self,
+        mut accept: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut published = false;
+        self.journal.visit_committed(&generation_path(&self.path, self.generation), |ordinal, payload| {
+            if (ordinal == 2) != (payload == PUBLISHED) {
+                return Err(io::Error::other("invalid publication marker position"));
+            }
+            if payload == PUBLISHED {
+                if published { return Err(io::Error::other("duplicate publication marker")); }
+                published = true;
+                Ok(())
+            } else {
+                accept(payload)
+            }
+        })?;
+        if !published { return Err(io::Error::other(UncertifiedPartition)); }
+        Ok(())
     }
     /// The new certificate and the complete concurrent suffix are staged together.
     /// No generation containing a certificate but missing suffix can be selected.
@@ -396,6 +433,10 @@ impl PartitionJournal {
         let mut frames: Vec<&[u8]> = vec![payload, PUBLISHED];
         frames.extend(tail.iter().map(Vec::as_slice));
         let candidate = Journal::create_initialized_frames(&generation_path(&self.path,next),self.max_bytes,&frames)?;
+        #[cfg(test)]
+        if self.path.join(".test-checkpoint-after-certificate").exists() {
+            return Err(CreateError::PublicationUnknown(io::Error::other("injected after checkpoint certificate with suffix")));
+        }
         let previous = std::mem::replace(&mut self.journal,candidate);
         self.generation = next;
         drop(previous);
@@ -417,9 +458,19 @@ impl PartitionJournal {
             self.max_bytes,
             Some(payload),
         )?;
+        // Test-only unknown-outcome boundaries exercise both legal recovery
+        // selections. They do not simulate OS torn writes or power loss.
+        #[cfg(test)]
+        if self.path.join(".test-checkpoint-before-certificate").exists() {
+            return Err(CreateError::PublicationUnknown(io::Error::other("injected before checkpoint certificate")));
+        }
         candidate
             .append(PUBLISHED)
             .map_err(CreateError::PublicationUnknown)?;
+        #[cfg(test)]
+        if self.path.join(".test-checkpoint-after-certificate").exists() {
+            return Err(CreateError::PublicationUnknown(io::Error::other("injected after checkpoint certificate")));
+        }
         #[cfg(test)]
         crash_boundary("certified");
         // Candidate publication is durable before the old authority is closed.
@@ -461,6 +512,46 @@ fn crash_boundary(stage: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn committed_stream_preserves_checkpoint_suffix_order() {
+        let path = root();
+        let mut store = PartitionJournal::create(&path, 4096, b"base").unwrap();
+        store.append(b"same-seq-maintenance").unwrap();
+        let mut entries = Vec::new();
+        store.visit_committed(|v| { entries.push(v.to_vec()); Ok(()) }).unwrap();
+        assert_eq!(entries, vec![b"base".to_vec(), b"same-seq-maintenance".to_vec()]);
+        store.checkpoint_with_tail(b"new-base", &[b"tail-one".to_vec(), b"tail-two".to_vec()]).unwrap();
+        store.append(b"tail-three").unwrap();
+        entries.clear();
+        store.visit_committed(|v| { entries.push(v.to_vec()); Ok(()) }).unwrap();
+        assert_eq!(entries, vec![b"new-base".to_vec(), b"tail-one".to_vec(), b"tail-two".to_vec(), b"tail-three".to_vec()]);
+    }
+    #[test]
+    fn checkpoint_with_tail_reports_publication_unknown_and_reopens_complete_suffix() {
+        let path=root();let mut store=PartitionJournal::create(&path,4096,b"base").unwrap();
+        std::fs::write(path.join(".test-checkpoint-after-certificate"),b"fault").unwrap();
+        assert!(matches!(store.checkpoint_with_tail(b"new-base",&[b"same-seq-tail".to_vec()]),Err(CreateError::PublicationUnknown(_))));
+        drop(store);std::fs::remove_file(path.join(".test-checkpoint-after-certificate")).unwrap();
+        let (mut store,_)=PartitionJournal::open(&path,4096).unwrap();let mut entries=Vec::new();
+        store.visit_committed(|bytes|{entries.push(bytes.to_vec());Ok(())}).unwrap();
+        assert_eq!(entries,vec![b"new-base".to_vec(),b"same-seq-tail".to_vec()]);
+    }
+    #[test]
+    fn committed_stream_rejects_marker_after_uncertified_entry() {
+        let path = root();
+        let mut store = PartitionJournal::create(&path, 4096, b"base").unwrap();
+        let next = store.generation + 1;
+        let replacement = Journal::create_initialized_frames(
+            &generation_path(&path, next), 4096, &[b"base", b"wrong-second-frame", PUBLISHED],
+        ).unwrap();
+        store.journal = replacement;
+        store.generation = next;
+        let mut calls = 0;
+        assert!(store.visit_committed(|_| { calls += 1; Ok(()) }).is_err());
+        // A valid prefix can already have been visited: callers must retain
+        // private preparations until the complete visit succeeds.
+        assert_eq!(calls, 1);
+    }
     fn root() -> PathBuf {
         let base = std::env::var_os("ANYSEEK_TEST_ROOT")
             .map(PathBuf::from)

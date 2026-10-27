@@ -14,10 +14,13 @@ pub(super) fn same_request(old:&Applied,request:&RecordWrite)->Result<bool,Recor
     if let Some(hash)=&old.request_digest {Ok(hash==&digest(request)?)}else{Ok(serde_json::to_value(&old.request).map_err(storage)?==serde_json::to_value(request).map_err(storage)?)}
 }
 pub(super) fn redact(state:&mut State,id:&str,generation:&str)->Result<(),RecordError>{
-    for op in &mut state.operations {
+    for index in 0..state.operations.len() {
+        let op=&state.operations[index];
         if op.request.record_id!=id || !matches!(&op.request.generation,Some(GenerationCommand::Stage{generation_id,..}|GenerationCommand::StageBatch{generation_id,..}) if generation_id==generation){continue;}
+        state.operations.edit(index,256,|op| {
         if op.request_digest.is_none(){op.request_digest=Some(digest(&op.request)?);}
         match &mut op.request.generation{Some(GenerationCommand::Stage{chunks,members,..})=>{chunks.clear();members.clear();},Some(GenerationCommand::StageBatch{chunks,..})=>chunks.clear(),_=>{}}
+        Ok(())})?;
         state.private_cleanup_pending=true;
     }Ok(())
 }
@@ -63,12 +66,15 @@ impl Inner {
         let targets:Vec<_>=self.state.generations.iter().filter_map(|(id,g)|g.staged.as_ref().filter(|s|s.deadline_ms<=evaluation).map(|s|Target{record_id:id.clone(),generation_id:s.id.clone(),previous_version:g.version,deadline_ms:s.deadline_ms})).collect();
         if targets.is_empty(){return Ok(());}
         let event=Expiration{seq:self.state.seq.checked_add(1).ok_or_else(||storage("sequence exhausted"))?,evaluation_time_ms:evaluation,targets};
-        let mut candidate=self.state.clone();apply(&mut candidate,&event)?;
-        let snapshot_bytes=encode_entry(&Entry::Checkpoint{config:self.config.clone(),state:candidate.clone()})?.len();
+        let mut candidate=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;apply(&mut candidate,&event)?;
+        let snapshot_bytes=checkpoint_codec::length(&self.config, &candidate)?;
         let reserve=generation::reserve_bytes(&candidate);
-        PartitionJournal::validate_initial(snapshot_bytes+reserve,self.config.max_journal_bytes).map_err(storage)?;
+        checkpoint_codec::validate_size(snapshot_bytes,reserve,self.config.max_journal_bytes).map_err(storage)?;
         let bytes=encode_entry(&Entry::LeaseExpired(event.clone()))?;
-        self.journal.validate_append_with_reserve(bytes.len(),reserve).map_err(storage)?;
+        self.ensure_journal_room(bytes.len(),reserve).await?;
+        #[cfg(feature="s3-object-store")]
+        self.ensure_remote_tail_room(event.seq,&format!("system:lease-expired:{}",event.seq),&bytes).await?;
+        self.validate_journal_room(bytes.len(),reserve)?;
         self.healthy=false;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
         #[cfg(feature = "s3-object-store")]
         if let Some(remote) = self.remote.as_mut() {
@@ -84,17 +90,9 @@ impl Inner {
         Ok(())
     }
     pub(super) async fn cleanup_private(&mut self)->Result<(),RecordError>{
-        if !self.state.private_cleanup_pending{return Ok(());}
-        let mut candidate=self.state.clone();candidate.private_cleanup_pending=false;
-        // Rewrite only for irreversible private erasure: a retained object may
-        // contain both live and retired payloads and cannot be truncated in place.
-        match self.publish_anchor_state(candidate,false).await {
-            Ok(_)=>{self.state.private_cleanup_pending=self.reclaim_anchor_objects().await.is_err();Ok(())},
-            Err(error) if self.healthy=>{
-                log::warn!("private cleanup remains pending after healthy publication rejection: {error}");
-                Ok(())
-            },
-            Err(error)=>Err(error),
-        }
+        if !self.state.private_cleanup_pending && !self.maintenance_gc_pending{return Ok(());}
+        // Keep the erasure obligation until a fully authenticated replacement
+        // is installed. The owned worker rewrites payloads outside the live lock.
+        Err(self.request_checkpoint("private_cleanup"))
     }
 }

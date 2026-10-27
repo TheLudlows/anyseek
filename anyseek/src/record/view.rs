@@ -10,6 +10,8 @@ pub(super) struct RotationBudget {
 pub(super) struct RetrievalView {
     query: IndexArc,
     tail: IndexArc,
+    // Ordered like query components after the mutable tail, before certified packages.
+    pub(super) pending_seals: Vec<segment::Package>,
 }
 impl RetrievalView {
     pub(super) async fn can_admit(&self,bytes:u64,native_updates:usize)->bool {
@@ -25,6 +27,7 @@ impl RetrievalView {
         Self {
             query: index.clone(),
             tail: index,
+            pending_seals: Vec::new(),
         }
     }
     /// Install a new empty tail under the exclusive partition publication guard.
@@ -150,6 +153,36 @@ impl RetrievalView {
         Ok(())
     }
 
+    pub(super) async fn stable_tail_path(&self, root: &Path) -> Option<PathBuf> {
+        let path = PathBuf::from(&self.tail.read().await.index_path_string);
+        let name = path.file_name()?.to_str()?;
+        let id = name.strip_prefix("segment-")?;
+        (path.parent() == Some(root) && id.len() == 32
+            && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            .then_some(path)
+    }
+    /// Caller owns the partition and has already admitted the successor. Any
+    /// failure after entry requires recovery fencing; it must not reuse a
+    /// possibly sealed sole writer. Successful handoff remains private until
+    /// the Record certificate selects these packages.
+    pub(super) async fn seal_into_successor(
+        &mut self, root: &Path, new_tail: IndexArc, ordinals: &mut Vec<String>,
+        locations: &mut BTreeMap<String,usize>, budget: RotationBudget, limit: u64,
+    ) -> Result<(),RecordError> {
+        let path=self.stable_tail_path(root).await.ok_or_else(||storage("tail lacks stable package identity"))?;
+        let id=path.file_name().unwrap().to_str().unwrap().strip_prefix("segment-").unwrap().to_owned();
+        self.pending_seals.try_reserve(1).map_err(storage)?;
+        self.tail.commit().await.map_err(storage)?;
+        let native=self.tail.read().await.record_lexical[0].clone();
+        native.seal().await?;
+        let package=segment::Package::seal(root,&path,id,limit)?;
+        self.rotate_tail(new_tail,ordinals,locations,budget).await?;
+        // No fallible step after handoff. Native runtime pins in the query view
+        // retain every private predecessor until replacement or recovery.
+        self.pending_seals.insert(0,package);
+        Ok(())
+    }
+
     pub(super) async fn append(
         &self,
         key: String,
@@ -157,8 +190,14 @@ impl RetrievalView {
         revision: u64,
         document: Document,
     ) -> Result<usize, RecordError> {
-        let key_for_native = key.clone();
         let shard = self.tail.read().await.shard_vec[0].clone();
+        {
+            let mut shard=shard.write().await;
+            if let Some(memory)=&mut shard.build_reservation {
+                memory.grow(build_budget::identity_estimate(&key)?).map_err(storage)?;
+            }
+        }
+        let key_for_native = key.clone();
         let local = {
             let mut shard = shard.write().await;
             let active = shard
@@ -245,6 +284,15 @@ impl RetrievalView {
             result.push(shard.read().await.active.as_ref().ok_or_else(||storage("missing view statistics"))?.clone_local());
         }
         Ok(result)
+    }
+    pub(super) async fn statistics_wire_length(&self)->Result<usize,RecordError>{
+        let root=self.query.read().await;let mut bytes=2usize;
+        for shard in &root.shard_vec {
+            let shard=shard.read().await;
+            let active=shard.active.as_ref().ok_or_else(||storage("missing view statistics"))?;
+            bytes=bytes.checked_add(checkpoint_codec::json_length(active)?).and_then(|n|n.checked_add(1)).ok_or_else(||storage("statistics size overflow"))?;
+        }
+        Ok(bytes)
     }
     pub(super) async fn storage_paths(&self)->Vec<PathBuf>{
         vec![PathBuf::from(&self.query.read().await.index_path_string),PathBuf::from(&self.tail.read().await.index_path_string)]

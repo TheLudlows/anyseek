@@ -163,7 +163,7 @@ pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordE
     for target in &event.targets {
         let record = state
             .records
-            .get_mut(&target.record_id)
+            .get(&target.record_id)
             .ok_or_else(|| storage("expired identity absent"))?;
         if !seen.insert(&target.record_id)
             || record.version != target.previous_version
@@ -174,14 +174,12 @@ pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordE
             return Err(storage("inconsistent expiration target"));
         }
         if evidence::retained_revision(record) {
-            state.source_revisions.push(record.clone());
+            state.source_revisions.push_shared(state.records.shared(&target.record_id).ok_or_else(||storage("missing source owner"))?)?;
         }
-        record.version = record
-            .version
-            .checked_add(1)
-            .ok_or_else(|| storage("version exhausted"))?;
-        record.document = None;
-        record.expired_at_ms = Some(event.evaluation_time_ms);
+        state.records.edit(&target.record_id,128,|record| {
+            record.version=record.version.checked_add(1).ok_or_else(||storage("version exhausted"))?;
+            record.document=None;record.expired_at_ms=Some(event.evaluation_time_ms);Ok(())
+        })?;
     }
     state.seq = event.seq;
     state.time_watermark_ms = event.evaluation_time_ms;
@@ -192,6 +190,12 @@ impl Inner {
     pub(super) async fn advance_time(&mut self) -> Result<(), RecordError> {
         if !self.healthy || self.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
+        }
+        // A same-sequence maintenance intent pins its time/floor transition.
+        // Do not advance another time event ahead of its authoritative install.
+        if self.maintenance_requested.is_some()
+            && (self.maintenance_trim.is_some() || self.state.private_cleanup_pending) {
+            return Err(RecordError::Busy);
         }
         let now = self.clock.now_ms()?;
         if now > MAX_TIME || now.saturating_add(CLOCK_TOLERANCE) < self.state.time_watermark_ms {
@@ -232,22 +236,19 @@ impl Inner {
             evaluation_time_ms: evaluation,
             targets,
         };
-        let mut candidate = self.state.clone();
+        let mut candidate = self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;
         apply(&mut candidate, &event)?;
-        let snapshot_bytes = encode_entry(&Entry::Checkpoint {
-            config: self.config.clone(),
-            state: candidate.clone(),
-        })?
-        .len();
+        let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
         let feed_point = change_feed::pending_expiry(&self.state,event.seq,event.evaluation_time_ms)?;
         self.feed_cache.validate(&self.config.change_feed,Some(&feed_point),change_feed::reserve(&candidate))?;
         let reserve = generation::reserve_bytes(&candidate);
-        PartitionJournal::validate_initial(snapshot_bytes + reserve, self.config.max_journal_bytes)
+        checkpoint_codec::validate_size(snapshot_bytes, reserve, self.config.max_journal_bytes)
             .map_err(storage)?;
         let bytes = encode_entry(&Entry::Expired(event.clone()))?;
-        self.journal
-            .validate_append_with_reserve(bytes.len(), reserve)
-            .map_err(storage)?;
+        self.ensure_journal_room(bytes.len(),reserve).await?;
+        #[cfg(feature="s3-object-store")]
+        self.ensure_remote_tail_room(event.seq,&format!("system:expired:{}",event.seq),&bytes).await?;
+        self.validate_journal_room(bytes.len(),reserve)?;
         self.healthy = false;
         self.output
             .write()
@@ -313,9 +314,11 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
+        let partition=self.clone();
         crate::resources::spawn(async move {
-                let _permit = admission;
-                owner.lock().await.advance_time().await
+                let result={let _permit=admission;owner.lock().await.advance_time().await};
+                partition.kick_maintenance().await;
+                result
             })
             .await
             .map_err(storage)?

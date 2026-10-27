@@ -1,3 +1,4 @@
+#[path = "common/scale.rs"] mod scale;
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
 // Strict regression tests for the `Union` scan fill-exemption fix (B2).
@@ -136,9 +137,12 @@ async fn scan32_topk_matches_global_ranking() {
         let title = words.join(" ") + &format!(" hi{i}");
         docs.push(doc(&title));
     }
+    let per_term = scale::choose(10, 80);
+    let population = 40 + 12 * per_term;
+    assert!(population > 100);
     // Low-score tier: each doc carries exactly one term (uniform, low idf).
     for (w, n) in words.iter().zip(0..12) {
-        for i in (n * 80)..(n * 80 + 80) {
+        for i in (n * per_term)..(n * per_term + per_term) {
             docs.push(doc(&format!("{w} lo{i}")));
         }
     }
@@ -147,11 +151,11 @@ async fn scan32_topk_matches_global_ranking() {
 
     let query = words.join(" ");
     let total = search(&index, &query, 0, 1, ResultType::Count).await;
-    assert_eq!(total.count_total, 1000);
+    assert_eq!(total.count_total, population);
 
     // Oracle: length == total hits => heap never full => exact global ranking.
-    let oracle = search(&index, &query, 0, 1000, ResultType::TopkCount).await;
-    assert_eq!(oracle.hits.len(), 1000);
+    let oracle = search(&index, &query, 0, population, ResultType::TopkCount).await;
+    assert_eq!(oracle.hits.len(), population);
 
     let topk = search(&index, &query, 0, 100, ResultType::TopkCount).await;
     assert_eq!(topk.hits.len(), 100);
@@ -166,10 +170,13 @@ async fn scan32_topk_matches_global_ranking() {
 async fn scan32_sparse_uniform_fills_heap() {
     let index = fresh("tests/index_scan32_sparse/").await;
 
+    let per_term = scale::choose(10, 100);
+    let population = 20 * per_term;
+    assert!(population > 100);
     let mut titles = vec![];
-    // 20 disjoint terms, 100 docs each (2000 total under the 65536 block size).
+    // Twenty disjoint term groups; full scale retains 100 docs per term.
     for w in 1..=20 {
-        for i in 0..100 {
+        for i in 0..per_term {
             titles.push(format!("spar{w:02} uniq{}{w:02}", i));
         }
     }
@@ -183,10 +190,10 @@ async fn scan32_sparse_uniform_fills_heap() {
         .join(" ");
 
     let total = search(&index, &query, 0, 1, ResultType::Count).await;
-    assert_eq!(total.count_total, 2000);
+    assert_eq!(total.count_total, population);
 
-    let oracle = search(&index, &query, 0, 2000, ResultType::Topk).await;
-    assert_eq!(oracle.hits.len(), 2000);
+    let oracle = search(&index, &query, 0, population, ResultType::Topk).await;
+    assert_eq!(oracle.hits.len(), population);
 
     let topk = search(&index, &query, 0, 100, ResultType::Topk).await;
     assert_eq!(topk.hits.len(), 100, "scan_32 under-filled the heap");

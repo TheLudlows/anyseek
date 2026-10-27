@@ -222,6 +222,21 @@ impl S3CompatibleStore {
     async fn register_budgeted(&self, authority: &mut SqliteAuthority, key: &str, bytes: &[u8], created_at_ms: i64, budget: UploadBudget) -> Result<ObjectRef, UploadRegisterError> {
         let planned=ObjectRef{key:key.to_owned(),sha256:Sha256::digest(bytes).into(),length:bytes.len() as u64};
         authority.reserve_upload(&planned,created_at_ms).map_err(UploadRegisterError::Metadata)?;
+        // Reuse registered immutable bytes without issuing another PUT. Read the
+        // backend, never the cache: publication retains its corruption detection
+        // point and a missing object must not be silently repaired here.
+        if authority.is_durable_object(&planned).map_err(UploadRegisterError::Metadata)? {
+            let UploadBudget { _io, _payload, readback } = budget;
+            let existing = self.download_verified(&planned, readback).await
+                .map_err(UploadRegisterError::ObjectStore)?;
+            if existing != bytes {
+                return Err(UploadRegisterError::ObjectStore(object_error("immutable object content mismatch")));
+            }
+            // Recheck registry state after I/O: a concurrent authority connection
+            // may have retired the key. Retirement can never be reversed.
+            authority.register_durable_object(&planned,created_at_ms).map_err(UploadRegisterError::Metadata)?;
+            return Ok(planned);
+        }
         let reference = self.put_budgeted(key, bytes, budget).await.map_err(UploadRegisterError::ObjectStore)?;
         authority.register_durable_object(&reference, created_at_ms)
             .map_err(UploadRegisterError::Metadata)?;
@@ -239,6 +254,12 @@ impl S3CompatibleStore {
     }
 
     /// Fetch and verify an object against an authority-published reference.
+    pub(crate) fn uncached(&self) -> Self {
+        let mut store = self.clone();
+        store.cache = None;
+        store
+    }
+
     pub(crate) async fn get_verified(
         &self,
         reference: &ObjectRef,
@@ -770,6 +791,26 @@ mod tests {
         let _=std::fs::remove_file(&path);
         let _=std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _=std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn durable_reuse_reads_backend_and_never_recreates_missing_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let mut authority = SqliteAuthority::open(&root.path().join("authority.sqlite"), std::time::Duration::from_secs(1)).unwrap();
+        authority.create_partition("p0", 1).unwrap();
+        let backend = Arc::new(InMemory::new());
+        let store = S3CompatibleStore::from_store(backend.clone(), 1024);
+        let key = "p0/immutable";
+        let reference = store.put_and_register(&mut authority,key,b"original",1).await.unwrap();
+        assert_eq!(store.put_and_register(&mut authority,key,b"original",2).await.unwrap(),reference);
+        let path = S3CompatibleStore::object_path(key).unwrap();
+        backend.put(&path, PutPayload::from_static(b"tampered")).await.unwrap();
+        assert!(store.put_and_register(&mut authority,key,b"original",3).await.is_err());
+        backend.delete(&path).await.unwrap();
+        assert!(store.put_and_register(&mut authority,key,b"original",4).await.is_err());
+        assert!(backend.get(&path).await.is_err(),"reuse must not repair externally removed evidence");
+        assert_eq!(authority.read_head("p0").unwrap().unwrap().committed_seq,0);
+        assert!(store.put_and_register(&mut authority,key,b"different",5).await.is_err());
     }
 
     #[tokio::test]

@@ -1,16 +1,7 @@
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
-// Regression tests: Bitmap-encoded AND/OR `Count` must exclude deleted
-// documents, matching `TopkCount`.
-//
-// Root cause was `intersection_docid` (anyseek/src/intersection.rs)
-// computing `filtered` without `delete_hashset`, so Bitmap blocks took the
-// raw-popcount fast path (and the overlap subtracted by the OR path was raw too).
-// Small posting lists use Array/RLE paths (already correct); Bitmap needs
-// >=4096 scattered postings per shard, hence the single shard + volume here.
-//
-// Self-contained (own index directory), deterministic (xorshift), no sleeps.
-
+// Dense AND/OR count regression with one shared deleted-record fixture.
+// The retired custom Bitmap codec is not a current public contract.
 
 use anyseek::index::{
     AccessType, Clustering, DocumentCompression, FrequentwordType,
@@ -116,12 +107,12 @@ async fn setup() -> (RecordPartition, HashSet<u64>, HashSet<u64>) {
     (index, set_x, set_y)
 }
 
-/// Bitmap AND total must drop deleted documents.
+/// AND and OR totals must exclude deleted documents for both result modes.
 #[tokio::test]
-async fn bitmap_and_count_excludes_deleted() {
+async fn dense_and_or_counts_exclude_deleted() {
     let (index, set_x, set_y) = setup().await;
     // Recompute ground truth with the same seeds as setup.
-    let (live_and, _) = ground_truth(&set_x, &set_y);
+    let (live_and, live_or) = ground_truth(&set_x, &set_y);
     let count = search(
         &index,
         "termx termy",
@@ -139,13 +130,7 @@ async fn bitmap_and_count_excludes_deleted() {
     assert_eq!(count.count_total, live_and.len());
     assert_eq!(topk.count_total, live_and.len());
 
-}
-
-/// Bitmap OR total must drop deleted documents.
-#[tokio::test]
-async fn bitmap_or_count_excludes_deleted() {
-    let (index, set_x, set_y) = setup().await;
-    let (_, live_or) = ground_truth(&set_x, &set_y);
+    // Same immutable post-delete cut: retain the independent OR oracle.
     let count = search(&index, "termx termy", QueryType::Union, ResultType::Count).await;
     let topk = search(
         &index,
