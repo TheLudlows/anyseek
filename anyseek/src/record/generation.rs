@@ -316,7 +316,7 @@ impl RecordPartition {
         let Some(g) = inner.state.generations.get(id) else { return Ok(None); };
         Ok(Some(GenerationStatus { record_id:id.into(), version:g.version, active_generation:g.active.clone(),
             visible_members:g.active_members.iter().filter(|id| inner.locations.contains_key(*id)).count(),
-            lease_expires_at_ms:g.staged.as_ref().map(|s|s.deadline_ms), lease_fence:g.staged.as_ref().map(|_|g.version), lease_requires_renewal:g.staged.as_ref().is_some_and(|s|s.scope!=inner.state.feed.scope), private_cleanup_pending:inner.state.private_cleanup_pending,
+            lease_expires_at_ms:g.staged.as_ref().map(|s|s.deadline_ms), lease_fence:g.staged.as_ref().map(|_|g.version), lease_requires_renewal:g.staged.as_ref().is_some_and(|s|s.scope!=inner.state.feed.scope), private_cleanup_pending:inner.state.private_cleanup_pending || inner.maintenance_gc_pending,
             expected_members:g.staged.as_ref().map_or(0,|s|s.members.len()),sealed:g.staged.as_ref().is_some_and(|s|s.sealed),manifest_sha256:g.staged.as_ref().map(upload::manifest_digest).transpose()?,
             staged_generation:g.staged.as_ref().map(|s| s.id.clone()), staged_members:g.staged.as_ref().map_or(0, |s| s.chunks.len()), visible_seq:inner.state.seq }))
     }

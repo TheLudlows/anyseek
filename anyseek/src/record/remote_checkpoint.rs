@@ -111,8 +111,12 @@ fn combined_files<'a>(root:&Path,base:&'a [File],index:&'a [File],budget:u64,chu
 
 impl RemotePersistence {
     async fn selected(&self,head:&crate::storage::sqlite_authority::PartitionHead,fresh:bool)->Result<Selected,RecordError> {
+        Self::selected_from(&self.store,&self.partition_id,head,fresh).await
+    }
+    async fn selected_from(source:&crate::storage::s3_compatible::S3CompatibleStore,partition_id:&str,
+        head:&crate::storage::sqlite_authority::PartitionHead,fresh:bool)->Result<Selected,RecordError> {
         #[derive(Deserialize)] struct Header{format:u32}
-        let store=if fresh {self.store.uncached()}else{self.store.clone()};
+        let store=if fresh {source.uncached()}else{source.clone()};
         let selected=head.manifest.as_ref().ok_or(RecordError::RecoveryRequired)?;
         let bytes=store.get_verified(selected).await.map_err(remote_read_error)?;
         let charge=|n:usize|->Result<crate::storage::build_budget::MemoryLease,RecordError>{
@@ -124,7 +128,7 @@ impl RemotePersistence {
             1=>(serde_json::from_slice::<Checkpoint>(&bytes).map_err(storage)?,selected.clone(),None),
             2=>{
                 let index:IndexOnly=serde_json::from_slice(&bytes).map_err(storage)?;
-                if index.partition_id!=self.partition_id || index.checkpoint_seq!=head.log_base_seq
+                if index.partition_id!=partition_id || index.checkpoint_seq!=head.log_base_seq
                     || index.indexed_seq!=head.indexed_seq || index.indexed_seq<index.checkpoint_seq
                     || index.indexed_seq>head.committed_seq || index.packages.is_empty()
                     || index.packages.len()>capacity::MAX_SEGMENTS || index.statistics.len()!=index.packages.len()
@@ -137,7 +141,7 @@ impl RemotePersistence {
             },
             _=>return Err(storage("unsupported remote descriptor format")),
         };
-        if checkpoint.format!=1 || checkpoint.partition_id!=self.partition_id
+        if checkpoint.format!=1 || checkpoint.partition_id!=partition_id
             || checkpoint.seq!=head.log_base_seq || (index.is_none() && checkpoint.seq!=head.indexed_seq) {
             return Err(storage("invalid selected recovery checkpoint"));
         }
@@ -893,6 +897,56 @@ mod tests {
         assert_eq!(scores(&restored).await,expected);
         let p=cold(p,&root,clock).await;
         assert_eq!(p.statistics().await.unwrap().visible_seq,3);
+    }
+    #[tokio::test]
+    async fn background_maintenance_rejects_corrupt_selected_remote_inputs() {
+        use object_store::ObjectStore;
+        for damaged in ["manifest","payload","wal"] {
+            let (p,backend,_root,_db,_clock)=source().await;
+            p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();
+            p.compact_journal().await.unwrap();
+            p.write(write("tail","tail","beta",ExpectedVersion::Absent)).await.unwrap();
+            let (before,target)={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
+                let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
+                let target=match damaged {
+                    "manifest"=>head.manifest.as_ref().unwrap().clone(),
+                    "wal"=>head.wal_tip.as_ref().unwrap().clone(),
+                    _=>remote.selected(&head,true).await.unwrap().checkpoint.files.iter()
+                        .find(|file|file.path.starts_with("payload-")).unwrap().chunks[0].clone(),
+                };(head,target)
+            };
+            backend.put(&object_store::path::Path::from(target.key),object_store::PutPayload::from_static(b"corrupt")).await.unwrap();
+            p.inner.lock().await.request_checkpoint("test_remote_source");p.kick_maintenance().await;
+            tokio::time::timeout(std::time::Duration::from_secs(20),async {
+                while p.inner.lock().await.maintenance_scheduled {tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
+            }).await.unwrap();
+            let inner=p.inner.lock().await;assert!(!inner.healthy,"{damaged}");assert!(inner.output.read().unwrap().fenced);
+            assert_eq!(inner.state.seq,2);assert!(inner.maintenance_requested.is_some());
+            let remote=inner.remote.as_ref().unwrap();
+            let after=remote.authority.lock().await.read_head("source").unwrap().unwrap();
+            assert_eq!(after,before,"{damaged}");
+        }
+    }
+    #[tokio::test]
+    async fn background_same_sequence_feed_trim_installs_and_cold_recovers() {
+        let (p,_,root,_,clock)=source().await;
+        let request=write("seed","seed","alpha",ExpectedVersion::Absent);
+        let receipt=p.write(request.clone()).await.unwrap();
+        let future=clock.0.load(Ordering::SeqCst)+p.inner.lock().await.config.change_feed.retention_ms+1;
+        clock.0.store(future,Ordering::SeqCst);
+        assert!(matches!(p.advance_time().await,Err(RecordError::Busy)));
+        tokio::time::timeout(std::time::Duration::from_secs(20),async {
+            while p.inner.lock().await.maintenance_scheduled {tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        {let inner=p.inner.lock().await;
+            assert_eq!(inner.state.seq,receipt.seq);assert_eq!(inner.state.feed.floor,receipt.seq);
+            assert!(inner.maintenance_trim.is_none());assert!(inner.maintenance_requested.is_none());
+            let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
+            assert_eq!((head.log_base_seq,head.indexed_seq,head.committed_seq),(1,1,1));assert!(head.wal_tip.is_none());
+        }
+        let p=cold(p,&root,clock).await;
+        assert_eq!(p.inner.lock().await.state.feed.floor,receipt.seq);
+        assert_eq!(p.write(request).await.unwrap(),receipt);
     }
     #[tokio::test]
     async fn resource_refused_write_keeps_head_receipt_and_retry_classification() {
@@ -1719,6 +1773,8 @@ impl RecordPartition {
 /// Independent SQLite connection keeps long object I/O outside both the Record
 /// guard and its foreground authority mutex. All connections use the same DB.
 pub(super) struct RemoteBuild {
+    source_head:crate::storage::sqlite_authority::PartitionHead,
+    max_tail_bytes:usize,
     pub build: crate::storage::sqlite_authority::IndexBuild,
     store: crate::storage::s3_compatible::S3CompatibleStore,
     authority_path: PathBuf,
@@ -1736,11 +1792,54 @@ impl RemotePersistence {
             .ok_or_else(||storage("build deadline overflow"))?;
         let build = authority.begin_index_build(&self.partition_id,self.owner_epoch,now,deadline).map_err(storage)?
             .ok_or(RecordError::Busy)?;
-        Ok(RemoteBuild{build,store:self.store.clone().background(),authority_path:authority.database_path().to_path_buf(),
+        Ok(RemoteBuild{source_head:head,max_tail_bytes:self.max_tail_bytes,build,store:self.store.clone().background(),authority_path:authority.database_path().to_path_buf(),
             partition_id:self.partition_id.clone(),max_object_bytes:self.max_object_bytes,max_tail_blocks:self.max_tail_blocks})
     }
 }
 impl RemoteBuild {
+    pub(super) async fn verify_source(&self,root:&Path,reference:Option<&anchor::Reference>,
+        frames:&[Vec<u8>],authority_budget:u64)->Result<(),RecordError> {
+        let head=&self.source_head;
+        if head.owner_epoch!=self.build.owner_epoch || head.committed_seq!=self.build.cut_seq {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let store=self.store.uncached();
+        if head.manifest.is_some() {
+            let selected=RemotePersistence::selected_from(&store,&self.partition_id,head,true).await?;
+            let reference=reference.ok_or_else(||storage("remote source lacks local anchor"))?;
+            if checkpoint_codec::json_digest(&selected.checkpoint.anchor)?!=checkpoint_codec::json_digest(reference)? {
+                return Err(storage("remote source authority mismatch"));
+            }
+            let (files,_inventory)=combined_files(root,&selected.checkpoint.files,selected.index.as_ref().map_or(&[],|i|i.files.as_slice()),authority_budget,self.max_tail_blocks)?;
+            let max_total=authority_budget.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("remote source budget overflow"))?;
+            let mut count=0usize;let mut total=0u64;
+            for file in files.values() {
+                let mut hash=Sha256::new();let mut length=0u64;
+                for chunk in &file.chunks {
+                    count=count.checked_add(1).filter(|n|*n<=self.max_tail_blocks).ok_or_else(||storage("remote source chunk budget"))?;
+                    let bytes=store.get_verified(chunk).await.map_err(remote_read_error)?;
+                    total=total.checked_add(bytes.len() as u64).filter(|n|*n<=max_total).ok_or_else(||storage("remote source byte budget"))?;
+                    length=length.checked_add(bytes.len() as u64).ok_or_else(||storage("remote source file overflow"))?;
+                    hash.update(&bytes);
+                }
+                if length!=file.length || <[u8;32]>::from(hash.finalize())!=file.sha256 {return Err(storage("remote source file checksum"));}
+            }
+        } else if reference.is_some() {return Err(storage("local anchor absent from remote authority"));}
+        let entries=crate::storage::object_log::load_committed_entries_after(&store,head,head.log_base_seq,self.max_tail_blocks,self.max_tail_bytes).await
+            .map_err(|e|match e {crate::storage::object_log::TailError::ObjectStore(e)=>remote_read_error(e),other=>storage(other)})?;
+        if frames.is_empty() || entries.len()!=frames.len()-1 {return Err(storage("remote/local source suffix length mismatch"));}
+        for (entry,bytes) in entries.iter().zip(frames.iter().skip(1)) {
+            if entry.payload!=*bytes || entry.request_sha256!=<[u8;32]>::from(Sha256::digest(bytes)) {return Err(storage("remote/local source suffix differs"));}
+        }
+        // Appends after the pinned cut are legal and proved by catch-up. A
+        // different owner or selected authority is not a permissible suffix.
+        let authority=crate::storage::sqlite_authority::SqliteAuthority::open(&self.authority_path,std::time::Duration::from_secs(5)).map_err(storage)?;
+        let current=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if current.owner_epoch!=head.owner_epoch || current.manifest!=head.manifest || current.indexed_seq!=head.indexed_seq || current.committed_seq<head.committed_seq {
+            return Err(RecordError::RecoveryRequired);
+        }
+        Ok(())
+    }
     pub(super) async fn publish(&self,active:&mut RemotePersistence,manifest:ObjectRef,root:&Path,expected_seq:u64) -> Result<bool,RecordError> {
         #[cfg(test)]
         if root.join(".test-remote-before-checkpoint").exists() { return Err(storage("injected before remote checkpoint publication")); }
@@ -1878,11 +1977,7 @@ impl Inner {
         let Some(remote)=self.remote.as_ref() else{return Ok(())};
         if !remote.tail_needs_checkpoint(seq,operation_id,payload).await? {return Ok(());}
         log::info!("record_maintenance cause=remote_tail_room seq={} incoming_bytes={}",self.state.seq,payload.len());
-        self.publish_anchor().await?;
-        if self.remote.as_ref().ok_or(RecordError::RecoveryRequired)?.tail_needs_checkpoint(seq,operation_id,payload).await? {
-            return Err(RecordError::Rejected("remote WAL recovery budget unavailable after checkpoint".into()));
-        }
-        Ok(())
+        Err(self.request_checkpoint("remote_tail_room"))
     }
 }
 

@@ -42,7 +42,9 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
+        let partition=self.clone();
         crate::resources::spawn(async move {
+            let result=async move {
                 let _permit = permit;
                 let mut inner = owner.lock().await;
                 inner.advance_time().await?;
@@ -50,6 +52,9 @@ impl RecordPartition {
                     return Err(RecordError::RecoveryRequired);
                 }
                 inner.fuse_view(query, options).await
+            }.await;
+            partition.kick_maintenance().await;
+            result
             })
             .await
             .map_err(storage)?

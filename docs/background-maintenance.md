@@ -54,11 +54,38 @@ summable. Logging is observability only, not a performance fix.
    readers through failures/cancellation. Reopen selects certified authority and
    replays all committed suffix entries. No history truncation or limit increase.
 
-Known work: existing `indexer` prepares off-lock, but final replay/full digest is
-inside the live partition guard and must be replaced. Its snapshot clone still
-copies keys/container pointers O(N); capture/GC/anchor encoding must be measured
-and bounded separately. Moving an async function while retaining the lock does
-not satisfy this change.
+Implemented locally: a private replay context excludes publication authority.
+Candidate replay, full State comparison and feed-cache construction now run
+outside the partition guard; installation rechecks the anchor and a suffix
+revision that also counts same-sequence events. Catch-up is bounded to eight
+rounds. Automatic pressure coalesces one owned job per partition, with two workers
+process-wide and no queued tasks. Hard-pressure maintenance pauses **new accepted
+writes** with Busy; it does not promise concurrent writes into a successor tail.
+Normal reads continue through the old view. A test barrier inside native package
+construction (after building the private index, before sealing) proves that old
+searches and a Busy write return within two seconds while construction is paused.
+
+Private erasure and remote FeedTrim use an authenticated same-sequence Intent:
+verify the original cut, transform only the private candidate, prove the expected
+transition, then install the certificate and feed cache together. Time advancement
+is blocked while such an Intent is pending, so reads or original-operation retries
+requiring time maintenance can also return Busy. No TTL/authorization check is
+skipped to keep a read available. GC failure retains a separate cleanup obligation;
+it does not mutate the already certified State. On reopen, old generation and
+object retirement inventories remain available to normal GC.
+
+Automatic S3 maintenance authenticates the captured old descriptor, C/I file
+closure and ordered C-to-D WAL using uncached reads on an independent connection.
+The final owner/CAS check remains mandatory. Resource Busy does not fence the
+partition; detected remote corruption fences it and never advances authority.
+This is protocol-fixture coverage, not a real cloud S3 validation.
+
+Remaining lock work: snapshot capture still copies keys/container pointers O(N);
+capturing committed raw frames, initial/final GC and anchor encoding remain under
+the guard. Direct tail sealing still authenticates its source synchronously.
+Durable certificate I/O and remote CAS also remain guarded. Therefore this slice
+removes full rebuild/replay from the guard but does not claim every foreground
+maintenance interval is short or that the previous 30-second issue is solved.
 
 ## Verification plan
 
@@ -70,3 +97,16 @@ CAS rejection/unknown; certificate failure; cold reopen and complete receipts.
 Linux and Windows quick CI follow the code review. No stopped benchmark is
 resumed. Larger measurement requires a fresh directory and a separate safe-space
 preflight after correctness verification.
+
+## Current isolated evidence
+
+- Trigger/admission, actual-build barrier, pre-acceptance Busy, receipt retry,
+  no-progress WAL rejection, private erasure and injected GC retry: four tests
+  passed; largest fixture 129 records. No large load was restarted.
+- Same-sequence S3 FeedTrim and cold reopen: one test passed.
+- Corrupted remote selected manifest, payload chunk and WAL: one test with three
+  independent two-record fixtures passed; authority remained unchanged and output
+  was fenced.
+- These are local Linux results. Windows and the complete regression matrix have
+  not validated this slice. Existing callers/tests that assume maintenance never
+  returns Busy require bounded retry handling, without weakening their assertions.

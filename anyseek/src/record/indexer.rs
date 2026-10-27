@@ -31,6 +31,8 @@ struct Plan {
     disk:crate::storage::build_budget::DiskScope,
     memory:crate::storage::build_budget::MemoryLease,
     resources: crate::resources::Lease,
+    source:Option<maintenance::SourceProof>,
+    intent:maintenance::Intent,
     #[cfg(feature="s3-object-store")]
     remote:Option<remote_checkpoint::RemoteBuild>,
 }
@@ -75,6 +77,15 @@ impl RecordPartition {
     /// Admit and start a job without holding a service authorization lock during
     /// construction. The caller checks authorization for admission and for output.
     pub fn start_index_committed(&self, timeout: Duration) -> Result<IndexJob, RecordError> {
+        let job=self.start_index_job(timeout,false)?;
+        let partition=self.clone();
+        Ok(IndexJob{handle:crate::resources::spawn_background(async move {
+            let result=job.finish().await;
+            partition.kick_maintenance().await;
+            result
+        })})
+    }
+    pub(super) fn start_index_job(&self,timeout:Duration,automatic:bool)->Result<IndexJob,RecordError> {
         if timeout.is_zero() || timeout > MAX_DEADLINE {
             return Err(RecordError::Rejected("index build deadline must be within 1ns..=300s".into()));
         }
@@ -92,7 +103,7 @@ impl RecordPartition {
                 let mut inner = owner.lock().await;
                 if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
-                inner.advance_time().await?;
+                if !automatic {inner.advance_time().await?;}
                 inner.reclaim_anchor_objects().await?;
                 let estimate = (inner.snapshot_bytes as u64).checked_mul(4)
                     .ok_or_else(||storage("index snapshot estimate overflow"))?;
@@ -109,6 +120,10 @@ impl RecordPartition {
                 let limit = inner.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
                     .ok_or_else(||storage("index disk budget overflow"))?;
                 let disk = crate::storage::build_budget::DiskScope::begin(&root,limit).map_err(storage)?;
+                let source=if automatic {Some(maintenance::SourceProof::capture(&mut inner)?)}else{None};
+                // Complete fallible local capture before acquiring the remote pin.
+                let snapshot=inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?;
+                let base=serde_json::to_vec(&inner.anchor).map_err(storage)?;
                 #[cfg(feature="s3-object-store")]
                 let remote = match inner.remote.as_mut() {
                     Some(remote) => Some(remote.begin_background_build(timeout).await?),
@@ -116,21 +131,43 @@ impl RecordPartition {
                 };
                 #[cfg(feature="s3-object-store")]
                 if remote.as_ref().is_some_and(|r|r.build.cut_seq!=inner.state.seq) {
+                    if let (Some(active),Some(captured))=(inner.remote.as_mut(),remote.as_ref()) {
+                        if let Err(error)=active.authority.lock().await.cancel_index_build(&captured.build) {
+                            log::warn!("index build pin cleanup pending: {error}");
+                        }
+                    }
+                    inner.healthy=false;
+                    inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
                     return Err(RecordError::RecoveryRequired);
                 }
-                let result = Plan {root,config:inner.config.clone(),snapshot:inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?,prior:inner.payloads.clone(),
-                    base:serde_json::to_vec(&inner.anchor).map_err(storage)?,disk,memory,resources,
+                let intent=maintenance::Intent::capture(&inner,automatic);
+                let result = Plan {source,intent,root,config:inner.config.clone(),snapshot,prior:inner.payloads.clone(),
+                    base,disk,memory,resources,
                     #[cfg(feature="s3-object-store")] remote};
                 inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false,revision:0});
                 result
             };
-            let Plan{root,config,snapshot,prior,base,disk,memory,resources:_resources,
+            let Plan{source,intent,root,config,mut snapshot,prior,base,disk,memory,resources:_resources,
                 #[cfg(feature="s3-object-store")] remote} = plan;
             let cut = snapshot.seq;
             #[cfg(any(test,feature="fault-injection"))]
             pause(&root,timeout).await;
             let result = async {
                 if started.elapsed() >= timeout { return Err(RecordError::Busy); }
+                if let Some(source)=source {
+                    source.verify(&root,&config,&snapshot)?;
+                    #[cfg(feature="s3-object-store")]
+                    if let Some(remote)=&remote {
+                        source.verify_remote(remote,&root,&config).await.map_err(|error| {
+                            if matches!(error,RecordError::Busy){error}else{
+                                log::warn!("background remote source authentication failed: {error}");
+                                RecordError::RecoveryRequired
+                            }
+                        })?;
+                    }
+                }
+                intent.apply(&mut snapshot,&config)?;
+                let prior=if intent.rewrites_payloads(){Default::default()}else{prior};
                 let reference = anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true,None).await?;
                 // The pinned cut already owns complete history. Verify the
                 // authenticated package against it and transfer that same owner
@@ -166,10 +203,10 @@ impl RecordPartition {
                 // without the foreground lock. A versioned recheck closes the gap.
                 let mut consumed=0usize;
                 let mut rounds=0usize;
-                let mut inner=loop {
+                let (mut inner,installed_feed)=loop {
                     rounds+=1;
                     if rounds>8 || started.elapsed()>=timeout {return Err(RecordError::Busy);}
-                    let (raw,expected,revision,entry_count,entry_bytes,_raw,_decoded)={
+                    let (raw,mut expected,revision,entry_count,entry_bytes,_raw,_decoded)={
                         let inner=owner.lock().await;
                         if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
                         let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
@@ -190,8 +227,10 @@ impl RecordPartition {
                             snapshot_bytes:&mut candidate.snapshot_bytes,graph_cache:&mut candidate.graph,
                             #[cfg(test)] fail_publication_stage:0};
                         for bytes in raw {context.replay(serde_json::from_slice(&bytes).map_err(storage)?).await?;}
+                        intent.apply(&mut expected,&config)?;
                         state_proof::verify(&config,&expected,&candidate.state)?;
                     }
+                    let installed_feed=change_feed::Cache::rebuild(&candidate.state,&config.change_feed)?;
                     consumed=entry_count;
                     #[cfg(test)]
                     pause_catchup(&root,timeout).await;
@@ -200,7 +239,7 @@ impl RecordPartition {
                     if started.elapsed()>=timeout || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
                     let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
                     if tail.revision!=revision || tail.entries.len()!=entry_count || tail.bytes!=entry_bytes {continue;}
-                    break inner;
+                    break (inner,installed_feed);
                 };
                 let certificate = encode_entry(&Entry::Anchor(reference.clone()))?;
                 let suffix = &inner.background.as_ref().unwrap().entries;
@@ -242,10 +281,23 @@ impl RecordPartition {
                 }
                 crash_boundary("cache");
                 candidate.swap(&mut inner);
+                inner.feed_cache=installed_feed;
                 inner.anchor = Some(reference);
                 inner.payloads = payloads;
                 inner.healthy = true;
                 inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced = fenced;
+                #[cfg(feature="fault-injection")]
+                if intent.trims_feed() {
+                    match std::env::var("ANYSEEK_FEED_TRIM_FAULT").ok().as_deref() {
+                        Some("after_append_unknown"|"after_durable")=>{
+                            inner.healthy=false;
+                            inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+                            return Err(RecordError::DurablePending(inner.state.seq));
+                        },
+                        Some("crash_after_durable")=>std::process::exit(90),
+                        _=>{},
+                    }
+                }
                 Ok(cut)
             }.await;
             // Drop construction accounting before rescanning/removing orphans.
@@ -273,11 +325,20 @@ impl RecordPartition {
                 }
             }
             if inner.healthy {
-                if let Err(error) = inner.reclaim_anchor_objects().await { log::warn!("index build cleanup pending: {error}"); }
+                match inner.reclaim_anchor_objects().await {
+                    Ok(())=>inner.maintenance_gc_pending=false,
+                    Err(error)=>{
+                        if intent.rewrites_payloads() || inner.maintenance_gc_pending {
+                            inner.maintenance_gc_pending=true;
+                            inner.maintenance_requested=Some("private_cleanup_gc");
+                        }
+                        log::warn!("index build cleanup pending: {error}");
+                    },
+                }
             }
             result
           }).catch_unwind().await;
-          match outcome {
+          let result=match outcome {
             Ok(result) if !matches!(&result,Err(RecordError::RecoveryRequired)) => result,
             // This also covers ownership rejection during initial admission,
             // before a Plan/background pin exists and normal cleanup is reached.
@@ -287,7 +348,13 @@ impl RecordPartition {
                 if let Ok(mut output) = inner.output.write() { output.fenced = true; }
                 Err(RecordError::RecoveryRequired)
             }
+          };
+          if automatic {
+              let mut inner=recovery.lock().await;
+              inner.maintenance_scheduled=false;
+              if result.is_ok(){if !inner.maintenance_gc_pending {inner.maintenance_requested=None;}inner.maintenance_trim=None;inner.maintenance_compacted_bytes=Some(inner.journal.physical_bytes());}
           }
+          result
         });
         Ok(IndexJob{handle})
     }

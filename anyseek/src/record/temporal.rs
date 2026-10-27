@@ -191,6 +191,12 @@ impl Inner {
         if !self.healthy || self.state.sealed_for.is_some() {
             return Err(RecordError::RecoveryRequired);
         }
+        // A same-sequence maintenance intent pins its time/floor transition.
+        // Do not advance another time event ahead of its authoritative install.
+        if self.maintenance_requested.is_some()
+            && (self.maintenance_trim.is_some() || self.state.private_cleanup_pending) {
+            return Err(RecordError::Busy);
+        }
         let now = self.clock.now_ms()?;
         if now > MAX_TIME || now.saturating_add(CLOCK_TOLERANCE) < self.state.time_watermark_ms {
             return Err(RecordError::ClockUncertain);
@@ -308,9 +314,11 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
+        let partition=self.clone();
         crate::resources::spawn(async move {
-                let _permit = admission;
-                owner.lock().await.advance_time().await
+                let result={let _permit=admission;owner.lock().await.advance_time().await};
+                partition.kick_maintenance().await;
+                result
             })
             .await
             .map_err(storage)?

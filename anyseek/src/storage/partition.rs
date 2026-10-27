@@ -387,6 +387,7 @@ impl PartitionJournal {
         self.max_bytes = self.max_bytes.min(max_bytes);
         Ok(())
     }
+    pub(crate) fn physical_bytes(&self)->u64 {self.journal.physical_bytes()}
     pub(crate) fn checkpoint_can_make_room(&self,length:usize,reserve:usize)->bool {
         self.journal.checkpoint_can_make_room(length,reserve)
     }

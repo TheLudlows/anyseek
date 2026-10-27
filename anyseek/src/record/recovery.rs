@@ -85,7 +85,9 @@ impl RecordPartition {
     pub async fn seal_for_takeover(&self, request: SealRequest) -> Result<SealCertificate, RecordError> {
         let admission = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
+        let partition=self.clone();
         crate::resources::spawn(async move {
+            let result=async move {
             let _admission = admission;
             let mut inner = owner.lock().await;
             if !inner.healthy { return Err(RecordError::RecoveryRequired); }
@@ -125,6 +127,9 @@ impl RecordPartition {
             }
             // Output stays fenced permanently, including after future compaction.
             Ok(certificate)
+            }.await;
+            partition.kick_maintenance().await;
+            result
         }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
     }
 }

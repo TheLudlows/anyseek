@@ -341,6 +341,11 @@ enum Entry {
 }
 struct Inner {
     background: Option<indexer::Tail>,
+    maintenance_requested:Option<&'static str>,
+    maintenance_scheduled:bool,
+    maintenance_compacted_bytes:Option<u64>,
+    maintenance_trim:Option<change_feed::Trim>,
+    maintenance_gc_pending:bool,
     anchor:Option<anchor::Reference>,
     payloads:crate::storage::payload_pool::Closure,
     config: RecordConfig,
@@ -1309,7 +1314,7 @@ impl RecordPartition {
         Ok(Self {
             output: output.clone(),
             inner: Arc::new(Mutex::new(Inner {
-                background:None,anchor:None,payloads:Default::default(),
+                background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_compacted_bytes:None,maintenance_trim:None,maintenance_gc_pending:false,anchor:None,payloads:Default::default(),
                 journal,
                 config,
                 state,
@@ -1414,7 +1419,7 @@ impl RecordPartition {
             revision: 0, fenced: state.sealed_for.is_some(),
         }));
         let mut inner=Inner {
-                background:None,anchor:selected,payloads,
+                background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_compacted_bytes:None,maintenance_trim:None,maintenance_gc_pending:false,anchor:selected,payloads,
                 journal,
                 config,
                 state,
@@ -1457,7 +1462,9 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.clone();
+        let partition=self.clone();
         crate::resources::spawn(async move {
+            let result=async move {
                 let _permit = permit;
                 let mut inner = inner.lock().await;
                 if !inner.healthy || inner.state.sealed_for.is_some() {
@@ -1471,11 +1478,19 @@ impl RecordPartition {
                     mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, candidate, planning } =>
                         (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, candidate, planning),
                 };
+                if inner.maintenance_requested.is_some(){return Err(RecordError::Busy);}
                 let (growth,native_updates)=build_budget::write_estimate(&inner.state,&inner.config,&applied)?;
+                if growth>0 {
+                    let fresh_component=(inner.config.schema.len() as u64).checked_mul(65536*32)
+                        .and_then(|n|n.checked_add(growth)).ok_or_else(||storage("fresh component admission overflow"))?;
+                    crate::storage::build_budget::validate_single(fresh_component)
+                        .map_err(|e|RecordError::Rejected(e.to_string()))?;
+                    if native_updates>128 {return Err(RecordError::Rejected("operation exceeds mutable native update bound".into()));}
+                }
                 if growth>0 && !inner.index.can_admit(growth,native_updates).await {
                     // One bounded flush attempt before rejecting, never discard
                     // selected history to manufacture admission space.
-                    inner.maintain_index_tail().await?;
+                    inner.maintain_for_write().await?;
                     if !inner.index.can_admit(growth,native_updates).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
                 }
                 let prepared=if applied.request.generation.is_none(){Some(state_memory::Prepared::new(&inner.state,&applied)?)}else{None};
@@ -1549,6 +1564,9 @@ impl RecordPartition {
                     std::process::exit(74);
                 }
                 Ok(receipt)
+            }.await;
+            partition.kick_maintenance().await;
+            result
             })
             .await
             .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
@@ -1636,12 +1654,17 @@ impl RecordPartition {
     pub async fn query(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
         let permit = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
+        let partition=self.clone();
         crate::resources::spawn(async move {
+            let result=async move {
             let _permit = permit;
             let mut inner = owner.lock().await;
             inner.advance_time().await?;
             if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
             inner.query_view(query).await
+            }.await;
+            partition.kick_maintenance().await;
+            result
         }).await.map_err(storage)?
     }
     /// Iterate active records by stable identity. Changing the logical position

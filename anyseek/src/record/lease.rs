@@ -90,17 +90,9 @@ impl Inner {
         Ok(())
     }
     pub(super) async fn cleanup_private(&mut self)->Result<(),RecordError>{
-        if !self.state.private_cleanup_pending{return Ok(());}
-        let mut candidate=self.state.try_clone()?;candidate.private_cleanup_pending=false;
-        // Rewrite only for irreversible private erasure: a retained object may
-        // contain both live and retired payloads and cannot be truncated in place.
-        match self.publish_anchor_state(candidate,false).await {
-            Ok(_)=>{self.state.private_cleanup_pending=self.reclaim_anchor_objects().await.is_err();Ok(())},
-            Err(error) if self.healthy=>{
-                log::warn!("private cleanup remains pending after healthy publication rejection: {error}");
-                Ok(())
-            },
-            Err(error)=>Err(error),
-        }
+        if !self.state.private_cleanup_pending && !self.maintenance_gc_pending{return Ok(());}
+        // Keep the erasure obligation until a fully authenticated replacement
+        // is installed. The owned worker rewrites payloads outside the live lock.
+        Err(self.request_checkpoint("private_cleanup"))
     }
 }

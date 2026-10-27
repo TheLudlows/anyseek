@@ -106,6 +106,15 @@ impl Frozen {
         // Until the Record certificate selects it, this remains a private orphan.
         let prepared=root.join(format!("segment-{id}"));
         let (index,_)=build_at_selected(root,&prepared,config,state,selected).await?;
+        #[cfg(test)]
+        if root.join(".test-native-rebuild-pause").exists() {
+            std::fs::write(root.join(".test-native-rebuild-started"),b"built-private-native").map_err(storage)?;
+            tokio::time::timeout(std::time::Duration::from_secs(20),async {
+                while root.join(".test-native-rebuild-pause").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }).await.map_err(|_|RecordError::Busy)?;
+        }
         let active=index.read().await.shard_vec[0].read().await.active.as_ref().ok_or_else(||storage("missing frozen statistics"))?.clone_local();
         let native=index.read().await.record_lexical[0].clone();
         native.seal().await?;
@@ -324,6 +333,13 @@ impl Reference {
         Ok(())
     }
     fn verify_live_suffix(&self,root:&Path,config:&RecordConfig,live:&State,journal:&mut PartitionJournal,pending:&[Frozen])->Result<(),RecordError>{
+        self.verify_suffix_with(root,config,live,pending,|accept|journal.visit_committed(accept))
+    }
+    pub(super) fn verify_captured_suffix(&self,root:&Path,config:&RecordConfig,live:&State,frames:&[Vec<u8>],pending:&[Frozen])->Result<(),RecordError>{
+        self.verify_suffix_with(root,config,live,pending,|accept|{for frame in frames {accept(frame)?;}Ok(())})
+    }
+    fn verify_suffix_with(&self,root:&Path,config:&RecordConfig,live:&State,pending:&[Frozen],
+        visit:impl FnOnce(&mut dyn FnMut(&[u8])->std::io::Result<()>)->std::io::Result<()>)->Result<(),RecordError>{
         let _phase=maintenance::Phase::new("live_suffix_authentication_and_proof",live.seq);
         let captured=self.captured.get().ok_or_else(||storage("missing certified State proof owner"))?;
         // captured is set only after full load/manifest validation and cannot
@@ -339,7 +355,7 @@ impl Reference {
         let mut admitted=state_proof::length(&replayed)?;
         let expected=checkpoint_codec::json_digest(self)?;
         let mut first=true;
-        journal.visit_committed(|bytes| {
+        visit(&mut |bytes| {
             let result=(||->Result<(),RecordError>{
                 let size=(bytes.len() as u64).checked_mul(32).ok_or_else(||storage("WAL proof decode overflow"))?;
                 let _decode=crate::storage::build_budget::reserve_memory(size).map_err(storage)?;
@@ -545,6 +561,17 @@ impl Inner {
         self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
         Ok(())
     }
+    pub(super) async fn maintain_for_write(&mut self)->Result<(),RecordError> {
+        let root=self.journal.root().to_path_buf();
+        let selected=self.anchor.as_ref().map_or(0,|a|a.segments.len());
+        let captured=self.anchor.as_ref().is_some_and(|a|a.captured.get().is_some());
+        let fallback=maintenance::seal_fallback(self.state.private_cleanup_pending,captured,selected,
+            self.index.pending_seals.len(),capacity::segments(&self.config),true);
+        if fallback.is_some() || self.index.stable_tail_path(&root).await.is_none() {
+            return Err(self.request_checkpoint("tail_requires_checkpoint"));
+        }
+        self.maintain_index_tail().await
+    }
     /// Local derived index sealing does not advance or replace journal authority.
     /// Recovery reconstructs pending packages from the complete committed suffix.
     pub(super) async fn maintain_index_tail(&mut self)->Result<(),RecordError> {
@@ -580,8 +607,13 @@ impl Inner {
     }
     pub(super) async fn ensure_journal_room(&mut self,bytes:usize,reserve:usize)->Result<(),RecordError> {
         if self.journal.checkpoint_can_make_room(bytes,reserve){
+            // The last background checkpoint already compacted this physical
+            // cut. With no intervening append another rebuild cannot help.
+            if self.maintenance_compacted_bytes==Some(self.journal.physical_bytes()) {
+                return self.validate_journal_room(bytes,reserve);
+            }
             log::info!("record_maintenance cause=journal_room seq={} incoming_bytes={} reserved_bytes={}",self.state.seq,bytes,reserve);
-            self.publish_anchor().await?;
+            return Err(self.request_checkpoint("journal_room"));
         }
         self.validate_journal_room(bytes,reserve)
     }
