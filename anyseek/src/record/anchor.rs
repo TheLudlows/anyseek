@@ -187,7 +187,7 @@ impl Reference {
         Ok(result)
     }
     pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
-        let encoded=checkpoint_codec::StateEncoding::new(state)?;
+        let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",state.seq);checkpoint_codec::StateEncoding::new(state)?};
         Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal).await
     }
     async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
@@ -561,17 +561,6 @@ impl Inner {
         self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
         Ok(())
     }
-    pub(super) async fn maintain_for_write(&mut self)->Result<(),RecordError> {
-        let root=self.journal.root().to_path_buf();
-        let selected=self.anchor.as_ref().map_or(0,|a|a.segments.len());
-        let captured=self.anchor.as_ref().is_some_and(|a|a.captured.get().is_some());
-        let fallback=maintenance::seal_fallback(self.state.private_cleanup_pending,captured,selected,
-            self.index.pending_seals.len(),capacity::segments(&self.config),true);
-        if fallback.is_some() || self.index.stable_tail_path(&root).await.is_none() {
-            return Err(self.request_checkpoint("tail_requires_checkpoint"));
-        }
-        self.maintain_index_tail().await
-    }
     /// Local derived index sealing does not advance or replace journal authority.
     /// Recovery reconstructs pending packages from the complete committed suffix.
     pub(super) async fn maintain_index_tail(&mut self)->Result<(),RecordError> {
@@ -587,7 +576,7 @@ impl Inner {
         log::info!("record_maintenance cause=tail_admission seq={} fallback={:?} selected={} pending={} package_limit={}",
             self.state.seq,fallback,selected,self.index.pending_seals.len(),capacity::segments(&self.config));
         let _phase=maintenance::Phase::new("tail_maintenance",self.state.seq);
-        if fallback.is_some() {self.publish_anchor().await?;return Ok(());}
+        if fallback.is_some() {return Err(self.request_checkpoint("tail_requires_checkpoint"));}
         #[cfg(feature="s3-object-store")]
         if let Some(remote)=self.remote.as_ref() {
             if let Err(error)=remote.verify_seal_inputs(self.anchor.as_ref().unwrap(),self.state.seq,&mut self.journal,self.config.max_journal_bytes).await {
@@ -704,6 +693,7 @@ impl Inner {
     /// The owned partition guard is the local reader/build pin. Backups export
     /// independent inline authority under that same guard, never borrowed paths.
     pub(super) async fn reclaim_anchor_objects(&self)->Result<(),RecordError>{
+        let _phase=maintenance::Phase::new("gc_reclaim",self.state.seq);
         // The owned worker is a local build pin. Its candidate and mmap files
         // cannot be retired until it completes or is explicitly cancelled.
         if self.background.is_some() { return Ok(()); }
@@ -1017,7 +1007,11 @@ mod tests {
         let bound=capacity::segments(&settings);
         for n in 0..bound {
             p.write(write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
-            let mut inner=p.inner.lock().await;inner.maintain_index_tail().await.unwrap();
+            let result=p.inner.lock().await.maintain_index_tail().await;
+            if matches!(result,Err(RecordError::Busy)) {
+                p.kick_maintenance().await;super::super::tests::wait_maintenance_idle(&p).await;
+            } else {result.unwrap();}
+            let inner=p.inner.lock().await;
             assert!(inner.index.local_statistics().await.unwrap().len()<=bound+1);
             assert!(inner.anchor.as_ref().unwrap().segments.len()<=bound);
         }

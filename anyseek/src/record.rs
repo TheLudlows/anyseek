@@ -1498,7 +1498,7 @@ impl RecordPartition {
                 if growth>0 && !inner.index.can_admit(growth,native_updates).await {
                     // One bounded flush attempt before rejecting, never discard
                     // selected history to manufacture admission space.
-                    inner.maintain_for_write().await?;
+                    inner.maintain_index_tail().await?;
                     if !inner.index.can_admit(growth,native_updates).await {return Err(RecordError::Rejected("record build admission budget exceeded".into()));}
                 }
                 let prepared=if applied.request.generation.is_none(){Some(state_memory::Prepared::new(&inner.state,&applied)?)}else{None};

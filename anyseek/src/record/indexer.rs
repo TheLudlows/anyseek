@@ -101,6 +101,7 @@ impl RecordPartition {
             let id = rand::random::<u128>();
             let plan = {
                 let mut inner = owner.lock().await;
+                let _capture_phase=maintenance::Phase::new("background_capture_locked",inner.state.seq);
                 if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
                 if !automatic {inner.advance_time().await?;}
@@ -122,7 +123,8 @@ impl RecordPartition {
                 let disk = crate::storage::build_budget::DiskScope::begin(&root,limit).map_err(storage)?;
                 let source=if automatic {Some(maintenance::SourceProof::capture(&mut inner)?)}else{None};
                 // Complete fallible local capture before acquiring the remote pin.
-                let snapshot=inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?;
+                let snapshot={let _phase=maintenance::Phase::new("snapshot_clone_locked",inner.state.seq);
+                    inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?};
                 let base=serde_json::to_vec(&inner.anchor).map_err(storage)?;
                 #[cfg(feature="s3-object-store")]
                 let remote = match inner.remote.as_mut() {
@@ -208,6 +210,7 @@ impl RecordPartition {
                     if rounds>8 || started.elapsed()>=timeout {return Err(RecordError::Busy);}
                     let (raw,mut expected,revision,entry_count,entry_bytes,_raw,_decoded)={
                         let inner=owner.lock().await;
+                        let _capture_phase=maintenance::Phase::new("catchup_capture_locked",inner.state.seq);
                         if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
                         let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
                         if serde_json::to_vec(&inner.anchor).map_err(storage)?!=base || consumed>tail.entries.len(){return Err(RecordError::Busy);}
@@ -235,12 +238,14 @@ impl RecordPartition {
                     #[cfg(test)]
                     pause_catchup(&root,timeout).await;
                     let inner=owner.lock().await;
+                    let _check_phase=maintenance::Phase::new("candidate_recheck_locked",inner.state.seq);
                     if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
                     if started.elapsed()>=timeout || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
                     let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
                     if tail.revision!=revision || tail.entries.len()!=entry_count || tail.bytes!=entry_bytes {continue;}
                     break (inner,installed_feed);
                 };
+                let _install_phase=maintenance::Phase::new("candidate_install_locked",inner.state.seq);
                 let certificate = encode_entry(&Entry::Anchor(reference.clone()))?;
                 let suffix = &inner.background.as_ref().unwrap().entries;
                 // Bound the entire certificate+suffix before any authority publication.
@@ -256,7 +261,8 @@ impl RecordPartition {
                 if let (Some(remote),Some(manifest)) = (&remote,manifest) {
                     let expected_seq=inner.state.seq;
                     let active = inner.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
-                    let published = remote.publish(active,manifest,&root,expected_seq).await?;
+                    let published = {let _phase=maintenance::Phase::new("background_remote_cas_locked",expected_seq);
+                        remote.publish(active,manifest,&root,expected_seq).await?};
                     if !published {
                         inner.healthy = true;
                         inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced = fenced;
@@ -267,6 +273,7 @@ impl RecordPartition {
                 // Borrow fields separately: the complete suffix is durably staged
                 // before the new local generation acquires its certificate.
                 let journal_result = {
+                    let _phase=maintenance::Phase::new("background_journal_install_locked",inner.state.seq);
                     let Inner{journal,background,..} = &mut *inner;
                     journal.checkpoint_with_tail(&certificate,&background.as_ref().unwrap().entries)
                 };
@@ -355,6 +362,8 @@ impl RecordPartition {
           };
           if automatic {
               let mut inner=recovery.lock().await;
+              let outcome=match &result {Ok(_)=>"installed",Err(RecordError::Busy)=>"busy",Err(RecordError::RecoveryRequired)=>"recovery_required",Err(RecordError::DurablePending(_))=>"durable_pending",Err(RecordError::OutcomeUnknown(_))=>"outcome_unknown",Err(_)=>"failed"};
+              log::info!("record_maintenance event=worker_finished outcome={} seq={}",outcome,inner.state.seq);
               inner.maintenance_scheduled=false;
               if result.is_ok(){if !inner.maintenance_gc_pending {inner.maintenance_requested=None;}inner.maintenance_trim=None;inner.maintenance_compacted_bytes=Some(inner.journal.physical_bytes());}
           }

@@ -32,6 +32,7 @@ pub(super) struct Phase {
 }
 impl Phase {
     pub(super) fn new(name: &'static str, seq: u64) -> Self {
+        #[cfg(test)] tests::trace_timings();
         log::debug!("record_maintenance phase={name} seq={seq} event=enter");
         Self {name,seq,started:Instant::now()}
     }
@@ -46,6 +47,18 @@ impl Drop for Phase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct Timings;
+    impl log::Log for Timings {
+        fn enabled(&self,metadata:&log::Metadata<'_>)->bool {metadata.level()<=log::Level::Info}
+        fn log(&self,record:&log::Record<'_>) {
+            if self.enabled(record.metadata()) && record.args().to_string().starts_with("record_maintenance") {eprintln!("{}",record.args());}
+        }
+        fn flush(&self) {}
+    }
+    pub(super) fn trace_timings() {
+        static LOGGER:Timings=Timings;
+        if std::env::var_os("ANYSEEK_TEST_PHASE_TIMINGS").is_some() && log::set_logger(&LOGGER).is_ok() {log::set_max_level(log::LevelFilter::Info);}
+    }
     #[test]
     fn seal_bound_counts_successor_and_rejects_overflow() {
         assert_eq!(seal_fallback(false,true,9,5,16,true),None);
@@ -54,6 +67,7 @@ mod tests {
     }
     #[tokio::test]
     async fn native_hard_pressure_returns_busy_before_accepting_and_worker_makes_progress() {
+        trace_timings();
         use super::super::tests::{config,path,write};
         let root=path();let mut settings=config();settings.max_records=256;settings.max_operations=512;
         let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
@@ -147,6 +161,7 @@ pub(super) struct SourceProof {
 }
 impl SourceProof {
     pub(super) fn capture(inner:&mut Inner)->Result<Self,RecordError> {
+        let _phase=Phase::new("source_frames_capture_locked",inner.state.seq);
         let mut memory=crate::storage::build_budget::reserve_memory(0).map_err(storage)?;
         let mut frames=Vec::new();
         inner.journal.visit_committed(|bytes|{
@@ -162,6 +177,7 @@ impl SourceProof {
         remote.verify_source(root,self.anchor.as_ref(),&self.frames,config.max_journal_bytes).await
     }
     pub(super) fn verify(&self,root:&Path,config:&RecordConfig,expected:&State)->Result<(),RecordError> {
+        let _phase=Phase::new("background_source_proof",expected.seq);
         if let Some(anchor)=&self.anchor {return anchor.verify_captured_suffix(root,config,expected,&self.frames,&self.pending);}
         let mut replayed=None;
         let mut admitted=0usize;

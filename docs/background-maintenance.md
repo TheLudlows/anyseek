@@ -129,3 +129,67 @@ Busy fast path; the final S3-feature library build and seven focused tests passe
 after that path was added. Early Busy can precede validation of an unknown invalid
 or expired operation during pressure; known IDs still receive normal replay and
 time checks. No command is accepted by that fast path.
+
+## Entry audit and remaining work
+
+The bottom-level `maintain_index_tail` fallback itself now requests background
+maintenance and returns Busy; correctness does not depend on a second precheck in
+a write-only wrapper. Implicit native/package, local WAL and remote WAL pressure,
+private erasure and S3 same-sequence FeedTrim are covered. Explicit
+`compact_journal`, snapshot/takeover and S3 restore/activation still use complete
+publication as management operations; they are not ordinary write fallbacks.
+
+New timing names separate `background_capture_locked`,
+`source_frames_capture_locked`, `snapshot_clone_locked`,
+`catchup_capture_locked`, `candidate_recheck_locked`,
+`candidate_install_locked`, `background_journal_install_locked` and
+`background_remote_cas_locked`. They start **after acquiring** the guard and do
+not measure queueing. `background_source_proof` and
+`background_remote_source_authentication` run off-lock. `gc_reclaim` can run during
+open or skip work under a build pin; the name alone does not prove a locked scan.
+Nested phases overlap; errors also emit exit timings. The fixed worker-finished
+outcome distinguishes installed, busy, recovery_required and other failures.
+
+Small Linux debug probes (not production performance):
+
+| Phase | Local 128→129 fixture (ms) | One-write S3 memory fixture (ms) |
+| --- | ---: | ---: |
+| Initial locked capture | 2.828 | 0.585 |
+| WAL frame capture (nested) | 0.264 | 0.019 |
+| State clone (nested) | 0.091 | 0.020 |
+| Source proof off-lock | 22.943 | — |
+| Remote source authentication off-lock | — | 0.779 |
+| Candidate authentication/load off-lock | 122.967 | 79.202 |
+| Catch-up locked capture | 0.103 | 0.060 |
+| Final locked recheck | not separately instrumented in this probe | 0.001 |
+| Locked installation | 1.010 | 1.275 |
+| Journal install (nested) | 0.531 | 0.381 |
+| Remote CAS (nested) | — | 0.404 |
+
+The local native construction phase includes an intentional concurrency barrier;
+it cannot be used as a throughput benchmark. S3 here is an in-memory protocol
+fixture with SQLite, not a network/cloud latency measurement. Neither probe
+restarts the retained experiments or establishes large-scale throughput.
+
+Minimal follow-up order, not implemented promises:
+
+1. **Capture:** immutable container roots and an owned sealed WAL extent could
+   eliminate O(N) key copying under the guard. They must retain per-value and
+   container leases, a full same-sequence revision and Windows cursor ownership;
+   a second handle reading a live owner-locked WAL is not an acceptable shortcut.
+2. **GC:** prepare an authenticated retirement inventory, retain reader/build and
+   backup pins, and delete only admitted retired identities off-lock. Keep a
+   durable cleanup obligation across failure/reopen. Never delete a path merely
+   because it was absent from a stale snapshot or trust filenames/mtime.
+3. **Direct-seal authentication:** authenticate a pinned cut off-lock, then
+   recheck cut/revision/owner before handoff. Every publication must still perform
+   the required fresh local/remote checks; this is not permission to defer damage
+   detection until a later read or replace it with cached hashes.
+4. **Install I/O:** prepare and fsync an undiscoverable generation outside the
+   guard, then validate the exact suffix and perform the authority transition.
+   Do not expose a PUBLISHED marker before the current cut is certified. Local
+   publication sync and SQLite CAS remain durability costs; preserve unknown
+   outcome fences instead of acknowledging early or increasing timeouts.
+
+Each step needs its own bounded fault/concurrency checks before measuring a new
+large fixture. This staged PR does not claim those remaining steps are complete.

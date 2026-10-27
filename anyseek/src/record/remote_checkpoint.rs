@@ -1805,6 +1805,7 @@ impl RemoteBuild {
     pub(super) async fn verify_source(&self,root:&Path,reference:Option<&anchor::Reference>,
         frames:&[Vec<u8>],authority_budget:u64)->Result<(),RecordError> {
         let head=&self.source_head;
+        let _phase=maintenance::Phase::new("background_remote_source_authentication",head.committed_seq);
         if head.owner_epoch!=self.build.owner_epoch || head.committed_seq!=self.build.cut_seq {
             return Err(RecordError::RecoveryRequired);
         }
