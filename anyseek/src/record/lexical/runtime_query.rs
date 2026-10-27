@@ -88,6 +88,7 @@ pub(crate) async fn search(
     }
     let root = index.read().await;
     let shards = futures::future::join_all(root.shard_vec.iter().map(|s| s.read())).await;
+    if shards.iter().any(|shard|shard.failed) {return Err(RecordError::RecoveryRequired);}
     if root.record_lexical.len() != shards.len() {
         return Err(storage("native/vector view topology mismatch"));
     }
@@ -123,13 +124,12 @@ pub(crate) async fn search(
             .ok_or_else(|| storage("native metadata statistics absent"))?;
         // Native intake consumption may lag vector/metadata. Its published
         // prefix contributes lexical hits; retired revisions stay masked.
-        if active.keys.len() < snapshot.identities.len()
-            || (active.keys.len() != snapshot.identities.len() && !root.record_lexical[slot].allows_lag()) {
+        if active.keys.len() != snapshot.identities.len() && !root.record_lexical[slot].allows_lag() {
             return Err(storage("native/vector identity count mismatch"));
         }
         let compiled = crate::metadata_filter::compile_filters(shard, &filters)
             .map_err(RecordError::Rejected)?;
-        for (local, identity) in snapshot.identities.iter().enumerate() {
+        for (local, identity) in snapshot.identities.iter().take(active.keys.len()).enumerate() {
             if active.keys[local] != identity.id {
                 return Err(storage("native/vector identity mismatch"));
             }

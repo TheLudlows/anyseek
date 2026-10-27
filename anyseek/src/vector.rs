@@ -1128,7 +1128,7 @@ impl Shard {
 
         for record in self.block_vector_buffer.iter() {
             let doc_id = (level_id << 16) | (record.doc_id as usize);
-            if self.delete_hashset.contains(&doc_id) || is_facet_filter(self, facet_filter, doc_id) {
+            if self.is_deleted(doc_id) || is_facet_filter(self, facet_filter, doc_id) {
                 continue;
             }
             if field_filter_set.is_empty() || field_filter_set.contains(&(record.field_id as u16)) {
@@ -1196,6 +1196,7 @@ impl SearchVectorShard for ShardArc {
         let mut result_object: ResultObject = Default::default();
 
         let shard_ref = self.read().await;
+        if shard_ref.failed {return ResultObject {error:Some("vector component requires recovery".into()),..Default::default()};}
         let facet_filter = match compile_filters(&shard_ref, &facet_filter) {
             Ok(filters) => filters,
             Err(error) => return ResultObject { error: Some(error), ..Default::default() },
@@ -1406,7 +1407,7 @@ impl SearchVectorShard for ShardArc {
                         );
 
                         let doc_id = (level_id << 16) | (record.header.doc_id as usize);
-                        if shard_ref.delete_hashset.contains(&doc_id)
+                        if shard_ref.is_deleted(doc_id)
                             || is_facet_filter(&shard_ref, &facet_filter, doc_id)
                         {
                             continue;
@@ -1451,8 +1452,7 @@ impl SearchVectorShard for ShardArc {
 
                             let doc_id = (level_id << 16) | (record.header.doc_id as usize);
 
-                            if shard_ref.delete_hashset.is_empty()
-                                || !shard_ref.delete_hashset.contains(&doc_id)
+                            if !shard_ref.is_deleted(doc_id)
                             {
                                 top_k.push(
                                     doc_id,

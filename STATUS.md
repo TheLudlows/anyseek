@@ -1,8 +1,8 @@
 # anyseek 当前状态
 
-2026-10-27 新目标：轻量追加写入、最终一致的异步索引与独立合并。首批新增 `IngestPipeline` 和 `/ingest`、本地分段 WAL / S3 持久接收、后台物化、回执/进度及管理排空保护。202 只表示命令持久接收；条件结果需查询终态。后台已按批物化，全文任务与 Record/向量物化独立推进，新增 lexical_seq/vector_seq/index_error；长期 writer 按批提交、刷新，允许全文滞后。向量进一步拆离、物理行号与共同视图协议移除、持续回收和轻量合并尚未完成。见[异步写入实施](docs/async-ingestion.md)。下方是已有架构的历史验收，不代表新增代码的最终验收。
+2026-10-27 新目标：轻量追加写入、最终一致的异步索引与独立合并。接收层与独立全文消费已由 [PR #86](https://github.com/TheLudlows/anyseek/pull/86) 合入 `f072eb6`。[PR #87](https://github.com/TheLudlows/anyseek/pull/87) 已完成 Record 决策、全文、向量/元数据三个独立推进任务，随本批合入；普通及关系融合查询在检索期间释放 Record 锁，返回前校验当前原文，保留删除和撤权屏障。202 只表示命令持久接收；Record 成功回执不代表任一索引已追上。物理行号彻底解绑、State/checkpoint 简化、持续回收和轻量合并尚未完成。见[异步写入实施](docs/async-ingestion.md)。代码 `bfd81fa` 的 [quick CI](https://github.com/TheLudlows/anyseek/actions/runs/40474609077) 已完成：静态检查、Linux/Windows core 与 lexical 四个任务全部通过，full-acceptance 跳过。本地 65 项核心回归、19 项服务端测试通过；本批状态更新只改文档。下方是历史完整验收，不代表本批完整验收；真实 S3、断电和性能仍未验收。
 
-核验日期：2026-10-25。已验收代码 SHA 为 `94d0a60079ae7b8604223b130559bc14004816fe`（[CI 9/9 成功](https://github.com/TheLudlows/anyseek/actions/runs/40063214949)）；后续仅文档提交不改变该代码验收结论。[PR #81](https://github.com/TheLudlows/anyseek/pull/81) 已将生产全文替换为 Tantivy 0.27.0，数据访问统一使用 `RecordPartition`，仅支持新库；已合入 `6d28798`，主干 [CI 9/9](https://github.com/TheLudlows/anyseek/actions/runs/40080424776) 通过。预算调整已由 PR #83 合入 `702c385`；标准分词器见独立草稿 [PR #84](https://github.com/TheLudlows/anyseek/pull/84)，下表平台数字是 #80 历史验收，不代表 #84 最终 HEAD。具体契约、验证版本与忽略项见 [#80 实施与验收](docs/issue80-implementation.md)。
+核验日期：2026-10-25。已验收代码 SHA 为 `94d0a60079ae7b8604223b130559bc14004816fe`（[CI 9/9 成功](https://github.com/TheLudlows/anyseek/actions/runs/40063214949)）；后续仅文档提交不改变该代码验收结论。[PR #81](https://github.com/TheLudlows/anyseek/pull/81) 已将生产全文替换为 Tantivy 0.27.0，数据访问统一使用 `RecordPartition`，仅支持新库；已合入 `6d28798`，主干 [CI 9/9](https://github.com/TheLudlows/anyseek/actions/runs/40080424776) 通过。预算调整已由 PR #83 合入 `702c385`；标准分词器已由 [PR #84](https://github.com/TheLudlows/anyseek/pull/84) 合入 `34dc46f`；下表平台数字仍是 #80 历史验收。具体契约、验证版本与忽略项见 [#80 实施与验收](docs/issue80-implementation.md)。
 
 | 范围 | 状态 |
 | --- | --- |

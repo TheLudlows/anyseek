@@ -1,5 +1,5 @@
-//! Opt-in three-channel rank fusion. No persistent state: all channels execute
-//! under the owning partition guard, and adjacency remains a rebuildable index.
+//! Opt-in three-channel fusion over independently observed retrieval caches.
+//! Logical adjacency and final records use short Record guards; scoring does not.
 use super::*;
 use crate::search::{RrfOptions, rrf_contribution};
 use std::collections::BTreeSet;
@@ -29,8 +29,8 @@ pub struct FusionWindow {
     pub relation_reason: Option<String>,
 }
 impl RecordPartition {
-    /// Fuse lexical/vector/one-hop ranks at one time and authoritative position.
-    /// Cancellation drops the response, not a half-completed visibility update.
+    /// Fuse lexical/vector/one-hop observations and revalidate current records.
+    /// Cancellation retains owned retrieval tasks and their file/owner pins.
     pub async fn query_with_relations(
         &self,
         query: RecordQuery,
@@ -41,31 +41,32 @@ impl RecordPartition {
             .clone()
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
-        let owner = self.inner.clone();
-        let partition=self.clone();
+        let partition = self.clone();
         crate::resources::spawn(async move {
-            let result=async move {
-                let _permit = permit;
-                let mut inner = owner.lock().await;
-                inner.advance_time().await?;
-                if !inner.healthy || inner.state.sealed_for.is_some() {
-                    return Err(RecordError::RecoveryRequired);
-                }
-                inner.fuse_view(query, options).await
-            }.await;
+            let _permit = permit;
+            let result = partition.fuse_independent(query, options).await;
             partition.kick_maintenance().await;
             result
-            })
-            .await
-            .map_err(storage)?
+        })
+        .await
+        .map_err(storage)?
     }
 }
-impl Inner {
-    async fn fuse_view(
+impl RecordPartition {
+    async fn fuse_independent(
         &self,
         query: RecordQuery,
         options: RelationFusion,
     ) -> Result<RecordSearch, RecordError> {
+        let (limit, barrier) = {
+            let mut inner = self.inner.lock().await;
+            inner.advance_time().await?;
+            if !inner.healthy || inner.state.sealed_for.is_some() || self.indexes.error().is_some()
+            {
+                return Err(RecordError::RecoveryRequired);
+            }
+            (inner.config.max_candidates, self.output_permit()?)
+        };
         let reject = |s: &str| RecordError::Rejected(s.into());
         let rrf = options.rrf;
         rrf.validate().map_err(RecordError::Rejected)?;
@@ -84,7 +85,7 @@ impl Inner {
             || query
                 .offset
                 .checked_add(query.length)
-                .is_none_or(|n| n > self.config.max_candidates)
+                .is_none_or(|n| n > limit)
         {
             return Err(reject(
                 "relation fusion requires positive bounded relevance window without field sort",
@@ -107,18 +108,16 @@ impl Inner {
             if !enabled {
                 return Ok(0);
             }
-            value
-                .filter(|v| *v > 0 && *v <= self.config.max_candidates)
-                .ok_or_else(|| {
-                    reject("enabled fusion channels require explicit bounded candidate limits")
-                })
+            value.filter(|v| *v > 0 && *v <= limit).ok_or_else(|| {
+                reject("enabled fusion channels require explicit bounded candidate limits")
+            })
         };
         let lex_limit = budget(lexical, rrf.keyword_candidates)?;
         let vec_limit = budget(vector, rrf.vector_candidates)?;
         if lex_limit
             .checked_add(vec_limit)
             .and_then(|v| v.checked_add(options.neighbors.max_candidates))
-            .is_none_or(|v| v > self.config.max_candidates)
+            .is_none_or(|v| v > limit)
         {
             return Err(reject("combined fusion candidate budget exceeded"));
         }
@@ -126,9 +125,37 @@ impl Inner {
         if let Some(t) = query.temporal.clone() {
             filters.extend(temporal::filters(t)?);
         }
-        let neighbors=self.index.with_filter(&self.locations,&filters,|allowed|
-            graph::neighbors_view(self,options.neighbors,allowed)).await?;
+        let selection = if filters.is_empty() {
+            None
+        } else {
+            let handle = {
+                let inner = self.inner.lock().await;
+                if !inner.healthy
+                    || inner.state.sealed_for.is_some()
+                    || self.indexes.error().is_some()
+                {
+                    return Err(RecordError::RecoveryRequired);
+                }
+                inner.index.capture_query(query.length).await?
+            };
+            Some(handle.filter(&filters).await?)
+        };
+        let neighbors = {
+            let mut inner = self.inner.lock().await;
+            inner.advance_time().await?;
+            if !inner.healthy || inner.state.sealed_for.is_some() || self.indexes.error().is_some()
+            {
+                return Err(RecordError::RecoveryRequired);
+            }
+            let components = inner.index.components().await;
+            graph::neighbors_view(&inner, options.neighbors, |id| {
+                selection
+                    .as_ref()
+                    .is_none_or(|selection| selection.allows(id, &inner.locations, &components))
+            })?
+        };
         let mut scores = BTreeMap::<String, f32>::new();
+        let mut versions = BTreeMap::<String, u64>::new();
         let mut explanations = BTreeMap::<String, Vec<crate::search::ChannelExplanation>>::new();
         let mut terms = Vec::new();
         for (enabled, limit, weight, mode) in [
@@ -158,7 +185,7 @@ impl Inner {
             }
             let is_lexical = matches!(mode, SearchMode::Lexical);
             let result = self
-                .query_view(RecordQuery {
+                .query_independent(RecordQuery {
                     temporal: None,
                     text: if is_lexical {
                         query.text.clone()
@@ -184,6 +211,10 @@ impl Inner {
                 terms = result.query_terms;
             }
             for (rank, hit) in result.hits.into_iter().enumerate() {
+                versions
+                    .entry(hit.record.record_id.clone())
+                    .and_modify(|version| *version = (*version).max(hit.record.version))
+                    .or_insert(hit.record.version);
                 let contribution = rrf_contribution(weight, rrf.constant, rank);
                 explanations
                     .entry(hit.record.record_id.clone())
@@ -202,6 +233,10 @@ impl Inner {
         if options.relation_weight > 0.0 {
             for hit in &neighbors.hits {
                 if seen.insert(hit.neighbor.record_id.clone()) {
+                    versions
+                        .entry(hit.neighbor.record_id.clone())
+                        .and_modify(|version| *version = (*version).max(hit.neighbor.version))
+                        .or_insert(hit.neighbor.version);
                     let rank = seen.len() - 1;
                     let contribution =
                         rrf_contribution(options.relation_weight, rrf.constant, rank);
@@ -222,13 +257,26 @@ impl Inner {
         let count = scores.len();
         let mut ranks: Vec<_> = scores.into_iter().collect();
         ranks.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut inner = self.inner.lock().await;
+        inner.advance_time().await?;
+        if !inner.healthy || inner.state.sealed_for.is_some() || self.indexes.error().is_some() {
+            return Err(RecordError::RecoveryRequired);
+        }
         let hits = ranks
             .into_iter()
+            .filter(|(id, _)| {
+                inner.locations.contains_key(id)
+                    && inner
+                        .state
+                        .records
+                        .get(id)
+                        .is_some_and(|record| versions.get(id) == Some(&record.version))
+            })
             .skip(query.offset)
             .take(query.length)
             .map(|(id, score)| RecordHit {
                 channels: explanations.remove(&id).unwrap_or_default(),
-                record: self.state.records[&id].clone(),
+                record: inner.state.records[&id].clone(),
                 score,
             })
             .collect();
@@ -239,16 +287,17 @@ impl Inner {
                 relation_complete: neighbors.complete,
                 relation_reason: neighbors.reason,
             }),
-            evaluation_time_ms: self.evaluation_time_ms,
+            evaluation_time_ms: inner.evaluation_time_ms,
             count_total: count,
             query_terms: terms,
-            visible_seq: self.state.seq,
+            visible_seq: inner.state.seq,
             hits,
-            statistics: self.statistics(),
+            statistics: inner.statistics(),
         };
         if serde_json::to_vec(&result).map_err(storage)?.len() > 4 * 1024 * 1024 {
             return Err(reject("fusion response exceeds byte budget"));
         }
+        barrier.deliver(|| ())?;
         Ok(result)
     }
 }
