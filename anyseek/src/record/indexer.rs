@@ -22,6 +22,8 @@ pub(super) struct Tail {
     pub bytes:u64,
     pub max_bytes:u64,
     pub overflowed:bool,
+    // Counts committed append identities, including same-sequence maintenance.
+    pub revision:u64,
 }
 struct Plan {
     root: PathBuf, config:RecordConfig, snapshot:State,
@@ -119,7 +121,7 @@ impl RecordPartition {
                 let result = Plan {root,config:inner.config.clone(),snapshot:inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?,prior:inner.payloads.clone(),
                     base:serde_json::to_vec(&inner.anchor).map_err(storage)?,disk,memory,resources,
                     #[cfg(feature="s3-object-store")] remote};
-                inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false});
+                inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false,revision:0});
                 result
             };
             let Plan{root,config,snapshot,prior,base,disk,memory,resources:_resources,
@@ -138,7 +140,7 @@ impl RecordPartition {
                 let mut index = view::RetrievalView::single(loaded.index);
                 let mut ordinals = loaded.ordinals;
                 let mut locations = loaded.locations;
-                let cache = root.join(format!("cache-{:032x}",rand::random::<u128>()));
+                let cache = root.join(format!("segment-{:032x}",rand::random::<u128>()));
                 let (tail,_) = build_at(&root,&cache,&config,&State::default()).await?;
                 index.rotate_tail(tail,&mut ordinals,&mut locations,view::RotationBudget{
                     max_segments:64,max_address_slots:config.max_records.checked_add(config.max_operations)
@@ -159,42 +161,47 @@ impl RecordPartition {
                     },
                     None => None,
                 };
-                let mut inner = owner.lock().await;
-                if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
-                if started.elapsed() >= timeout || inner.background.as_ref().is_none_or(|t|t.id!=id || t.overflowed)
-                    || serde_json::to_vec(&inner.anchor).map_err(storage)? != base { return Err(RecordError::Busy); }
-                let entries = &inner.background.as_ref().unwrap().entries;
-                // Raw tail buffers and their decoded Entry values coexist. The raw
-                // tail lease cannot stand in for the decoded allocation lifetime.
-                let decoded_bytes = entries.iter().try_fold(0u64, |sum, entry| {
-                    sum.checked_add(entry.len() as u64)
-                }).and_then(|n| n.checked_mul(32))
-                    .ok_or_else(||storage("index decoded tail estimate overflow"))?;
-                let _decoded_tail = crate::storage::build_budget::reserve_memory(decoded_bytes).map_err(storage)?;
-                let entries: Vec<Entry> = entries.iter().map(|b|serde_json::from_slice(b).map_err(storage)).collect::<Result<_,_>>()?;
-                // Candidate catch-up cannot publish or append WAL. Restore the
-                // current view even when replay fails; output is not yet fenced.
-                // A panic during speculative replay must leave the partition
-                // fenced before dropping its guard, even before the catch handler
-                // can reacquire it on another runtime worker.
-                inner.healthy=false;
-                let replay_fenced={
-                    let mut output=inner.output.write().map_err(|_|RecordError::RecoveryRequired)?;
-                    let previous=output.fenced;output.fenced=true;previous
-                };
-                candidate.swap(&mut inner);
-                let replay = async {
-                    for entry in entries { inner.replay_anchor_tail(entry).await?; }
-                    if checkpoint_codec::json_digest(&inner.state)? != checkpoint_codec::json_digest(&candidate.state)? {
-                        return Err(storage("index catch-up did not reproduce current authoritative state"));
+                // Never swap speculative state into the live partition. Capture
+                // a bounded suffix and comparison cut, then replay and prove it
+                // without the foreground lock. A versioned recheck closes the gap.
+                let mut consumed=0usize;
+                let mut rounds=0usize;
+                let mut inner=loop {
+                    rounds+=1;
+                    if rounds>8 || started.elapsed()>=timeout {return Err(RecordError::Busy);}
+                    let (raw,expected,revision,entry_count,entry_bytes,_raw,_decoded)={
+                        let inner=owner.lock().await;
+                        if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
+                        let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
+                        if serde_json::to_vec(&inner.anchor).map_err(storage)?!=base || consumed>tail.entries.len(){return Err(RecordError::Busy);}
+                        let suffix=&tail.entries[consumed..];
+                        let raw_bytes=suffix.iter().try_fold(0u64,|n,b|n.checked_add(b.len() as u64)
+                            .and_then(|n|n.checked_add((2*std::mem::size_of::<Vec<u8>>()) as u64)))
+                            .ok_or_else(||storage("index raw catch-up estimate overflow"))?;
+                        let raw_lease=crate::storage::build_budget::reserve_memory(raw_bytes).map_err(storage)?;
+                        let decoded_lease=crate::storage::build_budget::reserve_memory(raw_bytes.checked_mul(32)
+                            .ok_or_else(||storage("index decoded tail estimate overflow"))?).map_err(storage)?;
+                        (suffix.to_vec(),inner.state.try_clone()?,tail.revision,tail.entries.len(),tail.bytes,raw_lease,decoded_lease)
+                    };
+                    {
+                        let _phase=maintenance::Phase::new("background_replay_and_proof",expected.seq);
+                        let mut context=replay::Context {root:&root,config:&config,state:&mut candidate.state,
+                            index:&mut candidate.index,ordinals:&mut candidate.ordinals,locations:&mut candidate.locations,
+                            snapshot_bytes:&mut candidate.snapshot_bytes,graph_cache:&mut candidate.graph,
+                            #[cfg(test)] fail_publication_stage:0};
+                        for bytes in raw {context.replay(serde_json::from_slice(&bytes).map_err(storage)?).await?;}
+                        state_proof::verify(&config,&expected,&candidate.state)?;
                     }
-                    Ok(())
-                }.await;
-                candidate.swap(&mut inner);
-                inner.healthy=true;
-                inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=replay_fenced;
-                replay?;
-                if started.elapsed() >= timeout { return Err(RecordError::Busy); }
+                    consumed=entry_count;
+                    #[cfg(test)]
+                    pause_catchup(&root,timeout).await;
+                    let inner=owner.lock().await;
+                    if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
+                    if started.elapsed()>=timeout || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
+                    let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
+                    if tail.revision!=revision || tail.entries.len()!=entry_count || tail.bytes!=entry_bytes {continue;}
+                    break inner;
+                };
                 let certificate = encode_entry(&Entry::Anchor(reference.clone()))?;
                 let suffix = &inner.background.as_ref().unwrap().entries;
                 // Bound the entire certificate+suffix before any authority publication.
@@ -309,6 +316,16 @@ async fn pause(root:&Path,timeout:Duration) {
 }
 
 #[cfg(test)]
+async fn pause_catchup(root:&Path,timeout:Duration) {
+    let gate=root.join(".test-indexer-catchup-pause");
+    if gate.exists() {
+        std::fs::write(root.join(".test-indexer-catchup-started"),b"candidate proved outside lock").unwrap();
+        let until=Instant::now()+timeout;
+        while gate.exists() && Instant::now()<until {tokio::time::sleep(Duration::from_millis(5)).await;}
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use super::super::tests::{config,path,write,source_write,query};
@@ -316,6 +333,49 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5),async {
             while !root.join(".test-indexer-started").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
         }).await.unwrap();
+    }
+    #[tokio::test]
+    async fn catchup_proof_releases_live_lock_and_rechecks_new_suffix() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        std::fs::write(root.join(".test-indexer-catchup-pause"),b"pause").unwrap();
+        let job=p.start_index_committed(Duration::from_secs(20)).unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while !root.join(".test-indexer-catchup-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        let request=write("concurrent","b","beta",ExpectedVersion::Absent);
+        let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
+        assert_eq!(receipt.seq,2);
+        assert!(tokio::time::timeout(Duration::from_secs(2),p.get("b")).await.unwrap().unwrap().is_some());
+        std::fs::remove_file(root.join(".test-indexer-catchup-pause")).unwrap();
+        assert_eq!(job.finish().await.unwrap(),1);
+        assert_eq!(p.write(request.clone()).await.unwrap(),receipt);
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(request).await.unwrap(),receipt);assert!(p.get("b").await.unwrap().is_some());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn catchup_install_rechecks_same_sequence_feed_trim() {
+        struct Fixed(u64);
+        impl temporal::Clock for Fixed {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0)}}
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.inner.lock().await.clock=Arc::new(Fixed(1_000));
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        std::fs::write(root.join(".test-indexer-catchup-pause"),b"pause").unwrap();
+        let job=p.start_index_committed(Duration::from_secs(20)).unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while !root.join(".test-indexer-catchup-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        let seq=p.inner.lock().await.state.seq;
+        p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().change_feed.retention_ms));
+        p.advance_time().await.unwrap();
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,seq);assert_eq!(inner.state.feed.floor,seq);assert_eq!(inner.background.as_ref().unwrap().revision,1);}
+        std::fs::remove_file(root.join(".test-indexer-catchup-pause")).unwrap();
+        assert_eq!(job.finish().await.unwrap(),seq);
+        assert_eq!(p.inner.lock().await.state.feed.floor,seq);
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.inner.lock().await.state.feed.floor,seq);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn background_index_cut_keeps_concurrent_writes_deletes_receipts_and_output_barrier() {

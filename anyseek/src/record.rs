@@ -731,6 +731,8 @@ impl Inner {
             return Err(RecordError::OutcomeUnknown(error.to_string()));
         }
         if let Some(tail) = self.background.as_mut() {
+            if let Some(revision)=tail.revision.checked_add(1) {tail.revision=revision;}
+            else {tail.overflowed=true;}
             // Capture has its own pre-reserved bound. Exceeding it abandons this
             // build, never reclassifies an acknowledged foreground write or lets
             // the worker publish an incomplete suffix.
