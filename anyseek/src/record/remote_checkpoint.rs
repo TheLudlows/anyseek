@@ -1877,6 +1877,7 @@ impl Inner {
     pub(super) async fn ensure_remote_tail_room(&mut self,seq:u64,operation_id:&str,payload:&[u8])->Result<(),RecordError> {
         let Some(remote)=self.remote.as_ref() else{return Ok(())};
         if !remote.tail_needs_checkpoint(seq,operation_id,payload).await? {return Ok(());}
+        log::info!("record_maintenance cause=remote_tail_room seq={} incoming_bytes={}",self.state.seq,payload.len());
         self.publish_anchor().await?;
         if self.remote.as_ref().ok_or(RecordError::RecoveryRequired)?.tail_needs_checkpoint(seq,operation_id,payload).await? {
             return Err(RecordError::Rejected("remote WAL recovery budget unavailable after checkpoint".into()));

@@ -39,6 +39,7 @@ pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
 mod publication;
 mod indexer;
+mod maintenance;
 pub use indexer::IndexJob;
 mod segment_state;
 mod state_chunks;

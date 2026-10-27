@@ -183,6 +183,7 @@ impl Reference {
     }
     async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
         let state=encoded.state();
+        let _phase=maintenance::Phase::new("anchor_prepare",state.seq);
         let id=format!("{:032x}",rand::random::<u128>());
         let prepared=root.join(format!(".anchor-prepare-{id}"));
         std::fs::create_dir(&prepared).map_err(storage)?;
@@ -191,7 +192,8 @@ impl Reference {
         // At the bounded object ceiling rebuild the complete referenced payload
         // set privately. Old selected objects remain protected by the existing
         // publication/GC protocol and DiskScope charges both generations.
-        let pool_compaction = prior.objects.len() == payload_budget.objects;
+        let prior_objects=prior.objects.len();
+        let pool_compaction = prior_objects == payload_budget.objects;
         let prior = if pool_compaction {
             Closure::default()
         } else { prior };
@@ -205,11 +207,16 @@ impl Reference {
         let mut previous_capture=None;
         let mut incremental=None;
         let mut image_lease=None;
+        let mut base_reason=if compact {"explicit_rewrite"} else if pool_compaction {"payload_pool_bound"}
+            else if state.private_cleanup_pending {"private_cleanup"} else {"missing_predecessor_or_journal"};
         if !compact && !pool_compaction && !state.private_cleanup_pending {
             if let (Some(previous),Some(journal))=(previous,journal) {
+                base_reason="missing_captured_proof";
                 if previous.captured.get().is_some() {
                     let (_,manifest,_,mut manifest_lease)=previous.authenticated_manifest(root,config.max_journal_bytes)?;
+                    base_reason="delta_count_bound";
                     if manifest.state.deltas.len()<anchor_image::MAX_DELTAS {
+                        base_reason="empty_journal_suffix";
                         if let Some(delta)=state_chunks::Delta::write(&prepared,config,&mut pool,journal,previous,previous.id.clone())? {
                             let growth=checkpoint_codec::json_length(&delta)?
                                 .checked_add(id.len()+128)
@@ -224,12 +231,16 @@ impl Reference {
                             state_blocks.push(StateFiles{id:previous.id.clone(),files:previous.files.clone()});
                             previous_capture=Some(previous.captured.clone());
                             incremental=Some(image);
+                            base_reason="incremental";
                             image_lease=Some(manifest_lease);
                         }
                     }
                 }
             }
         }
+        log::info!("record_maintenance phase=state_image seq={} reason={} incremental={} compact={} payload_compaction={} private_cleanup={} prior_objects={} prior_deltas={}",
+            state.seq,base_reason,incremental.is_some(),compact,pool_compaction,state.private_cleanup_pending,
+            prior_objects,previous.map_or(0,|p|p.state_blocks.len()));
         let referenced=match incremental {
             Some(image)=>{pool.retain_prior_closure();image},
             None=>anchor_image::Image {
@@ -245,6 +256,7 @@ impl Reference {
         // without constructing an encoded Vec or writing an oversized manifest.
         if !checkpoint_codec::json_fits(&manifest,config.max_journal_bytes.min(16*1024*1024))? {
             if !manifest.state.deltas.is_empty() {
+                log::info!("record_maintenance cause=manifest_byte_bound seq={} deltas={} byte_limit={}",state.seq,manifest.state.deltas.len(),config.max_journal_bytes.min(16*1024*1024));
                 // The failed candidate is private. Reuse its bounded Payload
                 // closure (including all old dependencies), but write a new full
                 // base once. No journal/certificate/owner has changed. Existing
@@ -264,7 +276,11 @@ impl Reference {
         drop(manifest);
         drop(image_lease);
         let mut segments=Vec::new();let mut statistics=Vec::new();
-        if !compact && previous.is_some_and(|p|p.segments.len()+view.map_or(0,|v|v.pending_seals.len())<capacity::segments(config)) {
+        let reuse_native=!compact && previous.is_some_and(|p|p.segments.len()+view.map_or(0,|v|v.pending_seals.len())<capacity::segments(config));
+        log::info!("record_maintenance phase=native_packages seq={} reuse={} selected={} pending={} package_limit={}",
+            state.seq,reuse_native,previous.map_or(0,|p|p.segments.len()),view.map_or(0,|v|v.pending_seals.len()),capacity::segments(config));
+        let native_phase=maintenance::Phase::new("native_prepare",state.seq);
+        if reuse_native {
             let previous=previous.unwrap();
             let local=view.ok_or_else(||storage("missing incremental input view"))?.local_statistics().await?;
             let pending=&view.unwrap().pending_seals;
@@ -282,6 +298,7 @@ impl Reference {
         }
         // Keep one empty physical segment so the query engine retains schema.
         if segments.is_empty(){let (segment,active)=Frozen::prepare(root,config,state,None).await?;segments.push(segment);statistics.push(active);}
+        drop(native_phase);
         write_json(&prepared.join("statistics"),&Statistics{segments:statistics})?;
         let members=files(&prepared,closure_limit(config.max_journal_bytes)?)?;
         sync_tree(&prepared)?;
@@ -307,6 +324,7 @@ impl Reference {
         Ok(())
     }
     fn verify_live_suffix(&self,root:&Path,config:&RecordConfig,live:&State,journal:&mut PartitionJournal,pending:&[Frozen])->Result<(),RecordError>{
+        let _phase=maintenance::Phase::new("live_suffix_authentication_and_proof",live.seq);
         let captured=self.captured.get().ok_or_else(||storage("missing certified State proof owner"))?;
         // captured is set only after full load/manifest validation and cannot
         // mutate. Reauthenticated inventory binds the exact originally validated
@@ -408,6 +426,7 @@ impl Reference {
     }
     async fn load_verified_encoded(&self,root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>)->Result<VerifiedView,RecordError>{
         let state=encoded.state();
+        let _phase=maintenance::Phase::new("candidate_authentication_and_load",state.seq);
         let (path,manifest,pool,_manifest_lease)=self.authenticated_manifest(root,config.max_journal_bytes)?;
         if manifest.seq!=state.seq || serde_json::to_vec(manifest.state.config()).map_err(storage)?!=serde_json::to_vec(config).map_err(storage)? {
             return Err(storage("expected anchor identity mismatch"));
@@ -571,11 +590,15 @@ impl Inner {
     pub(super) async fn maintain_index_tail(&mut self)->Result<(),RecordError> {
         if self.background.is_some(){return Err(RecordError::Busy);}
         let root=self.journal.root().to_path_buf();
-        let eligible=!self.state.private_cleanup_pending
-            && self.anchor.as_ref().is_some_and(|a|a.captured.get().is_some()
-                && a.segments.len()+self.index.pending_seals.len()+1<capacity::segments(&self.config))
-            && self.index.stable_tail_path(&root).await.is_some();
-        if !eligible {self.publish_anchor().await?;return Ok(());}
+        let selected=self.anchor.as_ref().map_or(0,|a|a.segments.len());
+        let captured=self.anchor.as_ref().is_some_and(|a|a.captured.get().is_some());
+        let fallback=maintenance::seal_fallback(self.state.private_cleanup_pending,captured,
+            selected,self.index.pending_seals.len(),capacity::segments(&self.config),
+            self.index.stable_tail_path(&root).await.is_some());
+        log::info!("record_maintenance cause=tail_admission seq={} fallback={:?} selected={} pending={} package_limit={}",
+            self.state.seq,fallback,selected,self.index.pending_seals.len(),capacity::segments(&self.config));
+        let _phase=maintenance::Phase::new("tail_maintenance",self.state.seq);
+        if fallback.is_some() {self.publish_anchor().await?;return Ok(());}
         #[cfg(feature="s3-object-store")]
         if let Some(remote)=self.remote.as_ref() {
             if let Err(error)=remote.verify_seal_inputs(self.anchor.as_ref().unwrap(),self.state.seq,&mut self.journal,self.config.max_journal_bytes).await {
@@ -594,7 +617,10 @@ impl Inner {
         Ok(())
     }
     pub(super) async fn ensure_journal_room(&mut self,bytes:usize,reserve:usize)->Result<(),RecordError> {
-        if self.journal.checkpoint_can_make_room(bytes,reserve){self.publish_anchor().await?;}
+        if self.journal.checkpoint_can_make_room(bytes,reserve){
+            log::info!("record_maintenance cause=journal_room seq={} incoming_bytes={} reserved_bytes={}",self.state.seq,bytes,reserve);
+            self.publish_anchor().await?;
+        }
         self.validate_journal_room(bytes,reserve)
     }
     pub(super) fn validate_journal_room(&self,bytes:usize,reserve:usize)->Result<(),RecordError> {
@@ -603,6 +629,7 @@ impl Inner {
         })
     }
     async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
+        let _phase=maintenance::Phase::new("full_checkpoint",self.state.seq);
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
@@ -619,7 +646,7 @@ impl Inner {
         // candidates (snapshot/takeover) still own their independent State.
         let next=candidate.as_ref().unwrap_or(&self.state);
         let next_seq=next.seq;
-        let encoded=checkpoint_codec::StateEncoding::new(next)?;
+        let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",next.seq);checkpoint_codec::StateEncoding::new(next)?};
         let snapshot_bytes=encoded.checkpoint_length(&self.config)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
         let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None}).await?;
@@ -651,7 +678,10 @@ impl Inner {
         if let Some(remote)=self.remote.as_mut() {
             remote.publish_anchor(&root,&reference,&loaded.payloads,next_seq,self.config.max_journal_bytes,false).await?;
         }
-        match self.journal.checkpoint(&payload){
+        let journal_phase=maintenance::Phase::new("journal_certificate_install",next_seq);
+        let journal_result=self.journal.checkpoint(&payload);
+        drop(journal_phase);
+        match journal_result{
             Ok(())=>{},
             Err(error@CreateError::NotPublished(_))=>{
                 #[cfg(feature="s3-object-store")]
