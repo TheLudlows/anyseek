@@ -53,6 +53,7 @@ mod segment_state;
 mod state_chunks;
 mod state_memory;
 mod state_values;
+mod generation_values;
 mod state_proof;
 mod capacity;
 mod snapshot;
@@ -324,7 +325,7 @@ struct State {
     evidence_quarantined: bool,
     records: state_values::Records,
     source_revisions: state_values::Values<Record>,
-    generations: BTreeMap<String, generation::Manifest>,
+    generations: generation_values::Generations,
     // Vec avoids JSON's restriction on structured map keys. Bounded by config.
     operations: state_values::Values<Applied>,
     #[serde(skip)]

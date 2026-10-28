@@ -117,5 +117,7 @@
   "storage::journal::tests::chunked_committed_cut_keeps_concurrent_append_cursor_and_large_frames",
   "storage::journal::tests::chunked_committed_scan_rejects_late_corruption_and_truncation",
   "storage::partition::tests::chunked_cut_rejects_changed_generation_and_invalid_marker",
-  "record::indexer::tests::chunked_source_proof_keeps_append_same_sequence_trim_and_cancelled_owner"
+  "record::indexer::tests::chunked_source_proof_keeps_append_same_sequence_trim_and_cancelled_owner",
+  "record::generation_values::tests::controlled_mutation_invalidates_counts_and_wire_remains_legacy_map",
+  "record::generation_values::tests::recovery_oracle_rejects_stale_cache_without_trusting_it"
 ]

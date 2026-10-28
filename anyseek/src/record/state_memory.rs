@@ -122,6 +122,7 @@ impl State {
         let values = self.records.bytes().checked_add(self.source_revisions.bytes())
             .and_then(|n|n.checked_add(self.operations.bytes())).ok_or_else(||storage("shared value total overflow"))?;
         total.checked_sub(values).and_then(|n|n.checked_add(self.lookup_bytes))
+            .and_then(|n|n.checked_add(std::mem::size_of::<std::sync::OnceLock<generation_values::Counts>>()))
             .ok_or_else(||storage("state container size overflow"))
     }
     // Container keys, pointers, lookup and nonshared metadata are copied only
