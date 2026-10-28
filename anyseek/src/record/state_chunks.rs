@@ -250,6 +250,7 @@ fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError>
             seq: state.seq,
             epoch_watermark: state.epoch_watermark,
             time_watermark_ms: state.time_watermark_ms,
+            retired_operation_prefix: state.retired_operation_prefix.clone(),
             private_cleanup_pending: state.private_cleanup_pending,
             evidence_quarantined: state.evidence_quarantined,
             ..State::default()

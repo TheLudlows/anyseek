@@ -62,6 +62,7 @@ impl Drop for Runtime {
     }
 }
 impl Runtime {
+    pub(crate) fn package_path(&self) -> &Path { &self.pin.paths()[0] }
     pub(crate) fn create(path: &Path, config: &RecordConfig) -> Result<Arc<Self>, RecordError> {
         let analyzer = super::query::Analyzer::admitted(config.index.clone())?;
         let pin = crate::record::package_pins::Pin::acquire(&[path
@@ -354,6 +355,71 @@ impl Runtime {
         if data.write_state != WriteState::Writable { return Err(storage("native writer is sealed or failed")); }
         self.flush_locked(&mut data)
     }
+    /// Compact a bounded set of committed native segments without rebuilding
+    /// Record state or acquiring its publication guard. Fixed readers retain
+    /// their old Searcher; the replacement keeps the identical logical cut.
+    pub(crate) async fn merge_small_segments(&self) -> Result<(), RecordError> {
+        let mut data = self.data.lock().await;
+        if data.write_state != WriteState::Writable {
+            return Err(storage("native writer is sealed or failed"));
+        }
+        // Private analysis may belong to an unpublished business cut. Optional
+        // merge must never commit/publish it as a side effect.
+        if data.pending_analysis_documents != 0 { return Ok(()); }
+        let mut segments = data.index.searchable_segment_metas().map_err(storage)?;
+        if segments.len() < 8 { return Ok(()); }
+        segments.sort_by_key(|segment| segment.num_docs());
+        let mut documents = 0u64;
+        let mut selected = Vec::new();
+        for segment in segments.iter().take(8) {
+            let next = documents + u64::from(segment.num_docs());
+            if next > 128 { break; }
+            documents = next;
+            selected.push(segment.id());
+        }
+        if selected.len() < 2 { return Ok(()); }
+        // Reserve before scheduling Tantivy's internal merge worker. Admission
+        // pressure defers optional maintenance; it does not fail consumption.
+        // Measure immutable index inputs, not the configured maximum request
+        // size (which would prevent tiny documents in a 1 MiB schema merging).
+        let searcher = data.reader.searcher();
+        let input_bytes = searcher.segment_readers().iter()
+            .filter(|reader|selected.contains(&reader.segment_id()))
+            .try_fold(0u64,|n,reader| {
+                n.checked_add(reader.space_usage().map_err(storage)?.total().get_bytes())
+                    .ok_or_else(||storage("native merge input overflow"))
+            })?;
+        let bytes = input_bytes.checked_mul(32).and_then(|n| n.checked_add(WRITER_BYTES as u64))
+            .ok_or_else(|| storage("native merge memory overflow"))?;
+        let Ok(_memory) = Charge::new(bytes) else { return Ok(()); };
+        self.ensure_writer_locked(&mut data)?;
+        let _phase = crate::record::maintenance::Phase::new("lexical_merge_without_record_guard",data.cut.sequence);
+        // A cancellation/failed merge must never permit append to an uncertain
+        // writer. The owned consumer normally cannot be cancelled by callers.
+        data.write_state = WriteState::Failed;
+        let merge = data.writer.as_mut().unwrap().merge(&selected);
+        #[cfg(test)]
+        let test_path = self.directory.as_ref().unwrap().test_path();
+        crate::resources::spawn_background(async move {
+            let _memory = _memory;
+            #[cfg(test)]
+            if test_path.join(".test-merge-pause").exists() {
+                let _ = std::fs::write(test_path.join(".test-merge-started"),b"started");
+                while test_path.join(".test-merge-pause").exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
+            let result = merge.await.map_err(storage);
+            #[cfg(test)]
+            if test_path.join(".test-merge-started").exists() {
+                std::fs::write(test_path.join(".test-merge-finished"),b"finished").map_err(storage)?;
+            }
+            result
+        }).await.map_err(storage)??;
+        self.flush_locked(&mut data)?;
+        data.write_state = WriteState::Writable;
+        Ok(())
+    }
     /// Finish a private candidate before its immutable inventory is certified.
     /// Readers keep their fixed Searcher/pin. No directory rename or authority
     /// publication occurs here, and a failed join never permits another writer.
@@ -592,6 +658,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn independent_merge_preserves_cut_identities_fixed_readers_and_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let mut settings = config();
+        settings.max_record_bytes = 1024 * 1024;
+        let native = Runtime::create(&package.join("native"), &settings).unwrap();
+        let document = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+        for i in 0..8 {
+            native.append(Identity { id: format!("r-{i}"), version: 1, revision: i+1 }, &document, true).await.unwrap();
+        }
+        let held = native.snapshot().await.unwrap();
+        assert_eq!(held.searcher.segment_readers().len(), 8);
+        native.merge_small_segments().await.unwrap();
+        let merged = native.snapshot().await.unwrap();
+        assert_eq!(merged.searcher.segment_readers().len(), 1);
+        assert_eq!(merged.identities, held.identities);
+        assert_eq!(merged.cut, held.cut);
+        assert_eq!(held.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 8);
+        native.append(Identity { id: "later".into(), version: 1, revision: 9 }, &document, true).await.unwrap();
+        assert_eq!(merged.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 8);
+        native.seal().await.unwrap();
+        drop(native);
+        let reopened = Runtime::open(&package.join("native"), &settings).unwrap();
+        assert_eq!(reopened.snapshot().await.unwrap().identities.len(), 9);
+    }
+
+    #[tokio::test]
+    async fn failed_independent_merge_preserves_published_reader_and_fences_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let native = Runtime::create(&package.join("native"), &config()).unwrap();
+        let document = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+        for i in 0..8 {
+            native.append(Identity { id: format!("r-{i}"), version: 1, revision: i+1 }, &document, true).await.unwrap();
+        }
+        let held = native.snapshot().await.unwrap();
+        native.directory.as_ref().unwrap().reject_writes_for_test();
+        assert!(native.merge_small_segments().await.is_err());
+        assert!(Arc::ptr_eq(&held, &native.snapshot().await.unwrap()));
+        assert_eq!(held.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 8);
+        assert!(native.append(Identity { id: "later".into(), version: 1, revision: 9 }, &document, true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn independent_merge_admits_small_batches_with_large_record_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let mut settings = config();
+        settings.max_record_bytes = 1024 * 1024;
+        let native = Runtime::create(&package.join("native"), &settings).unwrap();
+        let document = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+        for i in 0..128 {
+            native.append(Identity { id: format!("r-{i}"), version: 1, revision: i+1 }, &document, false).await.unwrap();
+            if i%16==15 {native.flush().await.unwrap();}
+        }
+        assert_eq!(native.published_shape().await,(128,8));
+        native.merge_small_segments().await.unwrap();
+        assert_eq!(native.published_shape().await,(128,1));
+    }
+
+    #[tokio::test]
+    async fn cancelled_independent_merge_fences_append_and_owned_worker_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let native_path = package.join("native");
+        let native = Runtime::create(&native_path, &config()).unwrap();
+        let document = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+        for i in 0..8 {
+            native.append(Identity { id: format!("r-{i}"), version: 1, revision: i+1 }, &document, true).await.unwrap();
+        }
+        let held = native.snapshot().await.unwrap();
+        std::fs::write(native_path.join(".test-merge-pause"), b"pause").unwrap();
+        let worker_native = native.clone();
+        let caller = tokio::spawn(async move {worker_native.merge_small_segments().await});
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !native_path.join(".test-merge-started").exists() {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(Arc::ptr_eq(&held, &native.snapshot().await.unwrap()));
+        assert!(native.append(Identity { id: "later".into(), version: 1, revision: 9 }, &document, true).await.is_err());
+        std::fs::remove_file(native_path.join(".test-merge-pause")).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !native_path.join(".test-merge-finished").exists() {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        assert_eq!(held.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 8);
+    }
+
+    #[tokio::test]
+    async fn independent_merge_serializes_append_without_blocking_fixed_reader() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        let native_path = package.join("native");
+        let native = Runtime::create(&native_path, &config()).unwrap();
+        let document:Document = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
+        for i in 0..8 {
+            native.append(Identity { id: format!("r-{i}"), version: 1, revision: i+1 }, &document, true).await.unwrap();
+        }
+        let held = native.snapshot().await.unwrap();
+        std::fs::write(native_path.join(".test-merge-pause"), b"pause").unwrap();
+        let worker_native = native.clone();
+        let merger = tokio::spawn(async move {worker_native.merge_small_segments().await});
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !native_path.join(".test-merge-started").exists() {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        let writer_native = native.clone();
+        let appender = tokio::spawn(async move {
+            writer_native.append(Identity {id:"later".into(),version:1,revision:9},&document,true).await
+        });
+        let current = tokio::time::timeout(std::time::Duration::from_secs(1),native.snapshot()).await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&held,&current));
+        assert_eq!(current.searcher.search(&tantivy::query::AllQuery,&tantivy::collector::Count).unwrap(),8);
+        std::fs::remove_file(native_path.join(".test-merge-pause")).unwrap();
+        merger.await.unwrap().unwrap();
+        appender.await.unwrap().unwrap();
+        assert_eq!(native.published_shape().await,(9,2));
+        assert_eq!(held.identities.len(),8);
+    }
+
+    #[tokio::test]
     async fn sealed_writer_keeps_fixed_readers_and_rejects_future_writes() {
         let root = tempfile::tempdir().unwrap();
         let package = root.path().join("package");
@@ -694,8 +885,12 @@ mod tests {
             assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,0);
             if fail {p.inner.lock().await.fail_publication_stage=1;}
             let request=generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()});
-            let result=p.write(request.clone()).await;
-            assert!(p.inner.lock().await.anchor.is_some(),"127 + 100 must rotate before the durable publish");
+            // Derived rotation keeps WAL as the authority. Preserve the exact
+            // publish operation across maintenance admission and unknown results.
+            let result=crate::record::tests::write_after_maintenance(&p,request.clone()).await;
+            {let inner=p.inner.lock().await;
+                assert!(inner.anchor.is_none(),"derived rotation must not publish a certificate");
+                assert_eq!(inner.index.components().await.len(),2,"127 + 100 must rotate before publication");}
             if fail {
                 assert_eq!(result.unwrap_err(),crate::record::RecordError::DurablePending(129));
                 assert!(p.generation_status("doc").await.is_err());
@@ -727,7 +922,9 @@ mod tests {
         partition.inner.lock().await.fail_publication_stage=1;
         let request=write("rotate-and-retry","r-new","alpha",ExpectedVersion::Absent);
         assert_eq!(crate::record::tests::write_after_maintenance(&partition,request.clone()).await.unwrap_err(),crate::record::RecordError::DurablePending(129));
-        assert!(partition.inner.lock().await.anchor.is_some(),"rotation must certify before WAL append");
+        {let inner=partition.inner.lock().await;
+            assert!(inner.anchor.is_none(),"derived rotation must leave WAL authority unchanged");
+            assert_eq!(inner.index.components().await.len(),2);}
         assert_eq!(held.identities.len(),128,"captured Searcher remains at its original cut");
         drop(partition);
         let partition=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();

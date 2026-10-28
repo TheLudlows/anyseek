@@ -23,14 +23,37 @@ impl Inner {
     }
 }
 impl Context<'_> {
-    async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
-        let target=self.root.join(format!("segment-{:032x}",rand::random::<u128>()));
+    pub(super) async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
+        let disk_limit=self.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
+            .ok_or_else(||storage("recovery cache disk budget overflow"))?;
+        // Catch-up may already own a build scope. Ordinary cold recovery starts
+        // a fresh scope per maintenance round after reclaiming obsolete caches.
+        cache_merge::reclaim_recovery_caches(self.root,self.index).await?;
+        let _disk=crate::storage::build_budget::ensure_scope(self.root,disk_limit).map_err(storage)?;
+        let limit=capacity::segments(self.config)+1;
+        if self.index.components().await.len()>=limit {
+            let compacted=async {
+                let Some(sources)=self.index.capture_merge(cache_merge::MAX_ROWS).await? else{return Ok(false);};
+                let snapshot=match cache_merge::Snapshot::capture(self.state,self.config,&sources) {
+                    Ok(snapshot)=>snapshot,Err(RecordError::Busy)=>return Ok(false),Err(error)=>return Err(error),
+                };
+                let merged=match cache_merge::build_candidate(self.root,self.config,&snapshot).await {
+                    Ok(merged)=>merged,Err(RecordError::Busy)=>return Ok(false),Err(error)=>return Err(error),
+                };
+                self.index.install_merge(&sources,merged,self.ordinals,self.locations,cache_merge::address_limit(self.config)?).await
+            }.await?;
+            if !compacted {
+                let (index,ordinals,locations)=cache_merge::rebuild_recovery_view(self.root,self.config,self.state).await?;
+                *self.index=index;*self.ordinals=ordinals;*self.locations=locations;
+            }
+            cache_merge::reclaim_recovery_caches(self.root,self.index).await?;
+        }
+        let target=self.root.join(format!("cache-{:032x}",rand::random::<u128>()));
         let (successor,_)=build_at(self.root,&target,self.config,&State::default()).await?;
         successor.read().await.record_lexical[0].admit_writer().await?;
-        let budget=view::RotationBudget{max_segments:capacity::segments(self.config).checked_add(1).ok_or_else(||storage("recovery segment limit overflow"))?,
+        let budget=view::RotationBudget{max_segments:limit,
             max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?};
-        let limit=self.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("replay closure budget overflow"))?;
-        self.index.seal_into_successor(self.root,successor,self.ordinals,self.locations,budget,limit).await
+        self.index.seal_cache_into_successor(successor,self.ordinals,self.locations,budget).await
     }
 }
 impl Context<'_> {

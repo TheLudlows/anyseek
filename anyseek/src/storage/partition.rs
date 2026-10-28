@@ -428,6 +428,10 @@ impl PartitionJournal {
     /// No generation containing a certificate but missing suffix can be selected.
     pub(crate) fn checkpoint_with_tail(&mut self, payload: &[u8], tail: &[Vec<u8>]) -> Result<(), CreateError> {
         Self::validate_initial(payload.len(), self.max_bytes)?;
+        #[cfg(test)]
+        if self.path.join(".test-checkpoint-before-certificate").exists() {
+            return Err(CreateError::NotPublished(io::Error::other("injected before checkpoint certificate with suffix")));
+        }
         self.clean_obsolete()?;
         let next = self.generation.checked_add(1).ok_or_else(|| io::Error::other("generation exhausted"))?;
         let mut frames: Vec<&[u8]> = vec![payload, PUBLISHED];

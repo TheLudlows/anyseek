@@ -14,7 +14,14 @@ enum BorrowedEntry<'a, S: ?Sized> {
 }
 
 pub(super) fn length(config: &RecordConfig, state: &State) -> Result<usize, RecordError> {
-    json_length(&BorrowedEntry::Checkpoint { config, state })
+    // Shared immutable payloads were measured when admitted. Only serialize the
+    // small envelope and metadata; counting a checkpoint must not traverse all
+    // documents and retained request bodies under the foreground Record guard.
+    let state_length = super::state_proof::length(state)?;
+    json_length(&BorrowedEntry::Checkpoint { config, state: &() })?
+        .checked_sub(4)
+        .and_then(|n| n.checked_add(state_length))
+        .ok_or_else(|| storage("checkpoint length overflow"))
 }
 
 /// Attempt-local encoding evidence. The borrow prevents changing this State

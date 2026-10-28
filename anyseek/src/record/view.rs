@@ -12,6 +12,9 @@ pub(super) struct RetrievalView {
     tail: IndexArc,
     // Ordered like query components after the mutable tail, before certified packages.
     pub(super) pending_seals: Vec<segment::Package>,
+    pub(super) detached_cache: bool,
+    merge_address_memory: Option<crate::storage::build_budget::MemoryLease>,
+    merge_address_scope: Option<crate::resources::Lease>,
     // Intake buffers native inputs while Record/vector materialization owns
     // the partition guard; publication then runs in an independent consumer.
     batch: bool,
@@ -26,16 +29,25 @@ pub(super) struct RetrievalView {
     owner: std::sync::Weak<Mutex<Inner>>,
 }
 impl RetrievalView {
+    pub(super) fn retain_address_budget(&mut self,memory:crate::storage::build_budget::MemoryLease,scope:Option<crate::resources::Lease>) {
+        self.merge_address_memory=Some(memory);self.merge_address_scope=scope;
+    }
     pub(super) async fn capture_query(&self,length:usize)->Result<super::query::Handle,RecordError> {
         super::query::Handle::capture(&self.query,length).await
     }
     pub(super) async fn components(&self)->Vec<crate::component::ShardArc> {
         self.query.read().await.shard_vec.clone()
     }
-    pub(super) async fn matches(&self,ordinal:usize,component:&crate::component::ShardArc,local:usize)->bool {
+    pub(super) async fn matches_identity(&self, ordinal:usize, identity:&lexical::Identity, fingerprint:Option<[u8; 32]>)->Result<bool, RecordError> {
         let root=self.query.read().await;
-        let n=root.shard_number;
-        ordinal/n==local && Arc::ptr_eq(&root.shard_vec[ordinal%n],component)
+        let shard=root.shard_vec[ordinal % root.shard_number].read().await;
+        let local=ordinal / root.shard_number;
+        if shard.failed { return Err(RecordError::RecoveryRequired); }
+        Ok(shard.active.as_ref().is_some_and(|active| active.is_live(local)
+            && active.keys.get(local)==Some(&identity.id)
+            && active.revisions.get(local).is_some_and(|&(version, revision)| version == identity.version
+                && (revision == identity.revision || fingerprint.is_some()
+                    && active.fingerprints.get(local).copied().flatten() == fingerprint))))
     }
     pub(super) async fn can_admit(&self,bytes:u64,native_updates:usize)->bool {
         let root=self.tail.read().await;
@@ -54,6 +66,9 @@ impl RetrievalView {
             query: index.clone(),
             tail: index,
             pending_seals: Vec::new(),
+            detached_cache: false,
+            merge_address_memory: None,
+            merge_address_scope: None,
             batch: false,
             batch_inputs: Vec::new(),
             batch_vectors:Vec::new(), vector:None, reserved_rows:None, component_bytes:0, retired:Vec::new(),
@@ -147,14 +162,14 @@ impl RetrievalView {
         }
         let mut statistics = Vec::new();
         statistics.try_reserve(next).map_err(storage)?;
-        let mut new_stats = local.clone_local();
+        let new_stats = local.clone();
         statistics.push(new_stats);
         for shard in &shards {
             let mut local = shard
                 .active
                 .as_ref()
                 .ok_or_else(|| storage("missing segment statistics"))?
-                .clone_local();
+                .clone();
             statistics.push(local);
         }
         let ids = (0..next)
@@ -255,7 +270,7 @@ impl RetrievalView {
                 .as_mut()
                 .ok_or_else(|| storage("missing tail statistics"))?;
             let local = active.keys.len();
-            active.keys.push(key);
+            active.append_identity(key, version, revision, crate::active::fingerprint(&document).map_err(storage)?);
             local
         };
         let native = self.tail.read().await.record_lexical[0].clone();
@@ -334,7 +349,9 @@ impl RetrievalView {
         let mut shard=root.shard_vec[ordinal%n].write().await;
         let local=ordinal/n;
         shard.delete_hashset.insert(local);
-        shard.active.as_mut().ok_or_else(||storage("missing view statistics"))?.retire(local);
+        let active = shard.active.as_mut().ok_or_else(||storage("missing view statistics"))?;
+        if let Some(mask) = &active.retired { mask.insert(local).map_err(storage)?; }
+        active.retire(local);
         Ok(())
     }
     #[cfg(test)]
@@ -375,7 +392,10 @@ impl RetrievalView {
         Ok(bytes)
     }
     pub(super) async fn storage_paths(&self)->Vec<PathBuf>{
-        vec![PathBuf::from(&self.query.read().await.index_path_string),PathBuf::from(&self.tail.read().await.index_path_string)]
+        let mut paths = self.query.read().await.record_lexical.iter()
+            .map(|native| native.package_path().to_owned()).collect::<Vec<_>>();
+        paths.push(PathBuf::from(&self.tail.read().await.index_path_string));
+        paths.sort(); paths.dedup(); paths
     }
     #[cfg(test)]
     pub(super) fn test_index(&self) -> &IndexArc {
@@ -676,3 +696,7 @@ mod tests {
         std::fs::remove_dir_all(reference).unwrap();
     }
 }
+
+#[path = "view_merge.rs"]
+mod merge;
+pub(super) use merge::MergeSources;

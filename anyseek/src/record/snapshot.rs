@@ -236,7 +236,7 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .insert("original-opaque".into(), serde_json::json!(blob));
-            let receipt = source.write(request.clone()).await.unwrap();
+            let receipt = super::super::tests::write_after_maintenance(&source, request.clone()).await.unwrap();
             accepted.push((request, receipt));
             if (n + 1) % 50 == 0 {
                 log::info!("large-snapshot accepted={}/300", n + 1);

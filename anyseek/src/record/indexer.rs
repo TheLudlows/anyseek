@@ -5,7 +5,7 @@ use super::*;
 use futures::FutureExt;
 use std::{sync::LazyLock, time::{Duration, Instant}};
 
-static WORKERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
+pub(super) static WORKERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
 const MAX_DEADLINE: Duration = Duration::from_secs(300);
 
 fn crash_boundary(point:&str) {
@@ -17,7 +17,7 @@ fn crash_boundary(point:&str) {
 }
 
 pub(super) struct Tail {
-    id: u128,
+    pub(super) id: u128,
     pub entries: Vec<Vec<u8>>,
     pub bytes:u64,
     pub max_bytes:u64,
@@ -57,7 +57,7 @@ impl Candidate {
 /// An accepted cancellation-safe maintenance job. Dropping this handle leaves
 /// its bounded owned worker running; `finish` waits for the indexed cut.
 pub struct IndexJob {
-    handle: tokio::task::JoinHandle<Result<u64,RecordError>>,
+    pub(super) handle: tokio::task::JoinHandle<Result<u64,RecordError>>,
 }
 impl IndexJob {
     /// Wait for publication. Output still requires the service authorization permit.
@@ -128,6 +128,7 @@ impl RecordPartition {
                 let snapshot={let _phase=maintenance::Phase::new("snapshot_clone_locked",inner.state.seq);
                     inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?};
                 let base=serde_json::to_vec(&inner.anchor).map_err(storage)?;
+                let intent=maintenance::Intent::capture(&inner,automatic)?;
                 #[cfg(feature="s3-object-store")]
                 let remote = match inner.remote.as_mut() {
                     Some(remote) => Some(remote.begin_background_build(timeout).await?),
@@ -144,7 +145,6 @@ impl RecordPartition {
                     inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
                     return Err(RecordError::RecoveryRequired);
                 }
-                let intent=maintenance::Intent::capture(&inner,automatic);
                 let result = Plan {source,intent,root,config:inner.config.clone(),snapshot,prior:inner.payloads.clone(),
                     base,disk,memory,resources,
                     #[cfg(feature="s3-object-store")] remote};

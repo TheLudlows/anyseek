@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Bounded final-build asynchronous comparison; outputs raw evidence outside git.
+
+Both services run sequentially on CPU 0–1, client on 2–3. This measures small
+batch completion latency, not saturated ingestion throughput. 202 is acceptance
+only. Successful terminal receipts and published indexes are checked separately.
+"""
+import argparse
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+import time
+from http_engine import Engine, doc, dump, op, stats, disk
+
+
+def request_with_busy_wait(e, method, path, body=None, timeout=180):
+    """Retry only explicit pre-admission Busy, preserving the exact request.
+
+    Every attempt remains in the raw log. Unknown/transport outcomes are never
+    retried. Returned wall time includes rejected attempts and their backoff.
+    """
+    started = time.perf_counter()
+    deadline = time.monotonic() + timeout
+    attempts = []
+    while True:
+        code, result, ms, size = e.request(method, path, body, required=False)
+        attempt = {'status': code, 'http_ms': ms, 'response': result}
+        attempts.append(attempt)
+        e.event('http_attempt', method=method, path=path, attempt=len(attempts), **attempt)
+        if 200 <= code < 300:
+            return code, result, (time.perf_counter() - started) * 1000, attempts
+        if (e.name != 'anyseek' or code != 429 or result.get('code') != 'busy'
+                or time.monotonic() >= deadline):
+            raise RuntimeError(('request failed; no unknown-outcome retry', method, path, attempts))
+        time.sleep(min(.05, max(0, deadline - time.monotonic())))
+
+
+def run(engine, rows, queries, out, batch_size):
+    out.mkdir(parents=True, exist_ok=False)
+    e = Engine(engine, 'restricted', out)
+    summary = {'engine': engine, 'documents': len(rows), 'batch_size': batch_size,
+               'status': 'running', 'server_cpus': [0, 1], 'client_cpus': [2, 3],
+               'cpu_max': Path('/sys/fs/cgroup/cpu.max').read_text().strip(),
+               'memory_max': Path('/sys/fs/cgroup/memory.max').read_text().strip()}
+    submits, completes, http_submits = [], [], []
+    summary['submit_attempts'] = 0
+    summary['submit_busy_rejections'] = 0
+    try:
+        summary['startup_ms'] = e.start()
+        e.create()
+        e.phase = 'load'
+        started = time.perf_counter()
+        for offset in range(0, len(rows), batch_size):
+            free = os.statvfs(out)
+            if free.f_bavail * free.f_frsize < 4 * 1024**3:
+                raise RuntimeError('4GiB free-space reserve reached; all data retained')
+            if disk(out.parent)['allocated_bytes'] > 1536 * 1024**2:
+                raise RuntimeError('1.5GiB run budget reached; all data retained')
+            docs = [doc(r) for r in rows[offset:offset + batch_size]]
+            batch_started = time.perf_counter()
+            if engine == 'anyseek':
+                writes = []
+                for d in docs:
+                    e.seq += 1
+                    writes.append({'operation_id': op(e.seq), 'record_id': d['id'],
+                                   'routing_key': 'benchmark', 'expected': 'Any', 'document': d})
+                code, result, ms, attempts = request_with_busy_wait(e, 'POST', '/api/v1/index/bench/ingest', {'records': writes})
+                e.event('accept', offset=offset, code=code, result=result, ms=ms)
+                assert code == 202 and len(result['receipts']) == len(writes), result
+                until = time.monotonic() + 180
+                while True:
+                    progress = e.request('GET', '/api/v1/index/bench/ingest')[1]
+                    if progress['blocked'] or progress['index_error']:
+                        raise RuntimeError(progress)
+                    if (progress['pending'] == 0 and progress['completed_seq'] == progress['durable_seq']
+                            and progress['lexical_seq'] >= progress['materialized_seq']
+                            and progress['vector_seq'] >= progress['materialized_seq']):
+                        break
+                    if time.monotonic() >= until:
+                        raise RuntimeError(('completion timeout', progress))
+                    time.sleep(.005)
+                # Every accepted operation must have a successful business outcome.
+                # This validation is excluded from each batch's completion timer.
+                complete_ms = (time.perf_counter() - batch_started) * 1000
+                for w in writes:
+                    oid = w['operation_id']
+                    status = e.request('GET', f"/api/v1/index/bench/ingest/operation/{oid['epoch']}/{oid['nonce']}")[1]['status']
+                    assert status and status['receipt'] and status['error'] is None, status
+                e.event('published', progress=progress)
+            else:
+                code, result, ms, attempts = request_with_busy_wait(e, 'POST', '/indexes/bench/documents', docs)
+                assert code == 202, result
+                task = e.task(result)
+                complete_ms = (time.perf_counter() - batch_started) * 1000
+                e.event('accept_and_complete', offset=offset, result=result, task=task, ms=ms)
+            summary['submit_attempts'] += len(attempts)
+            summary['submit_busy_rejections'] += len(attempts) - 1
+            http_submits.append(attempts[-1]['http_ms'])
+            submits.append(ms)
+            completes.append(complete_ms)
+            print(engine, 'completed', offset + len(docs), flush=True)
+        summary['load_wall_seconds_including_validation'] = time.perf_counter() - started
+        summary['batch_acceptance_including_busy_wait'] = stats(submits)
+        summary['successful_acceptance_http_only'] = stats(http_submits)
+        summary['batch_published_completion'] = stats(completes)
+        summary['summed_batch_completion_seconds'] = sum(completes) / 1000
+        summary['completion_documents_per_second'] = len(rows) / (sum(completes) / 1000)
+        summary['visible_count'] = e.count()
+        assert summary['visible_count'] == len(rows), summary
+        # Same representative corpus title queried on each engine after publishing.
+        checks = []
+        for row in rows[:8]:
+            token = row['title'].strip()
+            if not token:
+                continue
+            code, response, ms, _ = e.query(token)
+            checks.append({'query': token, 'code': code, 'expected_docid': row['docid'],
+                           'expected_found': row['docid'] in e.hit_ids(response), 'hits': e.hit_ids(response)})
+            assert code == 200, response
+        dump(out / 'representative-searches.json', checks)
+        assert any(c['expected_found'] for c in checks), 'no representative search found its source document'
+        e.phase = 'query'
+        measurements = []
+        for query in queries:
+            code, result, ms, _ = e.query(query['text'])
+            measurements.append({'qid': query['qid'], 'status': code, 'ms': ms, 'hits': e.hit_ids(result)})
+        dump(out / 'query-results.json', measurements)
+        summary['query_latency'] = stats([q['ms'] for q in measurements])
+        summary['query_errors'] = sum(q['status'] != 200 for q in measurements)
+        summary['query_empty'] = sum(not q['hits'] for q in measurements)
+        assert summary['query_errors'] == 0
+        e.phase = 'checkpoint'
+        checkpoint_started = time.perf_counter()
+        if engine == 'anyseek':
+            code, result, elapsed, attempts = request_with_busy_wait(e, 'PATCH', '/api/v1/index/bench')
+            summary['checkpoint'] = result
+            summary['checkpoint_attempts'] = len(attempts)
+            summary['checkpoint_busy_rejections'] = len(attempts) - 1
+        else:
+            summary['checkpoint'] = e.checkpoint()
+        summary['checkpoint_ms'] = (time.perf_counter() - checkpoint_started) * 1000
+        e.stop()
+        summary['reopen_ms'] = e.start()
+        summary['reopened_count'] = e.count()
+        assert summary['reopened_count'] == len(rows)
+        summary['status'] = 'complete'
+    except Exception as exc:
+        summary['status'] = 'failed'
+        summary['error'] = repr(exc)
+        raise
+    finally:
+        e.close()
+        summary['peak_rss_kib'] = max((r['rss_kib'] for r in e.resources), default=0)
+        summary['disk'] = disk(e.data)
+        phases = {}
+        for name, elapsed in re.findall(r'record_maintenance phase=(\w+) seq=\d+ event=exit elapsed_us=(\d+)', (out / 'server.log').read_text()):
+            phases.setdefault(name, []).append(int(elapsed) / 1000)
+        summary['maintenance_phases'] = {name: {**stats(values), 'max_ms': max(values)}
+                                         for name, values in phases.items()}
+        summary['maintenance_phase_caveat'] = 'Named intervals may overlap; locked phases cover only the instrumented critical-section interval, not mutex wait time.'
+        dump(out / 'summary.json', summary)
+    return summary
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--anyseek', required=True, type=Path)
+    p.add_argument('--meili', required=True, type=Path)
+    p.add_argument('--data', required=True, type=Path)
+    p.add_argument('--out', required=True, type=Path)
+    p.add_argument('--revision', required=True)
+    p.add_argument('--take', type=int, default=1000)
+    p.add_argument('--batch-size', type=int, default=16)
+    a = p.parse_args()
+    assert not any(k.startswith('ANYSEEK_') for k in os.environ), 'inherited engine overrides forbidden'
+    assert 1 <= a.batch_size <= 64
+    a.out.mkdir(parents=True, exist_ok=False)
+    os.sched_setaffinity(0, {2, 3})
+    os.environ['TOKENIZER_ANYSEEK_BINARY'] = str(a.anyseek.resolve())
+    os.environ['TOKENIZER_MEILI_BINARY'] = str(a.meili.resolve())
+    rows = json.loads(a.data.read_text())[:a.take]
+    queries = json.loads(Path(__file__).with_name('queries-393.json').read_text())
+    manifest = {'revision': a.revision, 'documents': len(rows),
+                'selected_data_sha256': hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
+                'anyseek_binary_sha256': hashlib.sha256(a.anyseek.read_bytes()).hexdigest(),
+                'meili_binary_sha256': hashlib.sha256(a.meili.read_bytes()).hexdigest(),
+                'query_sha256': hashlib.sha256(Path(__file__).with_name('queries-393.json').read_bytes()).hexdigest(),
+                'comparison_limits': 'Small sequential batches; validation overhead excluded from batch completion but included in total wall time; independent default tokenizers; AND/all do not imply identical semantics; empty queries are reported; checkpoint has no Meili equivalent.'}
+    dump(a.out / 'manifest.json', manifest)
+    summaries = [run(engine, rows, queries, a.out / engine, a.batch_size) for engine in ['anyseek', 'meili']]
+    dump(a.out / 'summary.json', {'manifest': manifest, 'results': summaries})
+
+
+if __name__ == '__main__':
+    main()

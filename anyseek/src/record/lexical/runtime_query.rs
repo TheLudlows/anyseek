@@ -89,8 +89,8 @@ pub(crate) async fn search(
     let root = index.read().await;
     let shards = futures::future::join_all(root.shard_vec.iter().map(|s| s.read())).await;
     if shards.iter().any(|shard|shard.failed) {return Err(RecordError::RecoveryRequired);}
-    if root.record_lexical.len() != shards.len() {
-        return Err(storage("native/vector view topology mismatch"));
+    if root.record_lexical.is_empty() || shards.is_empty() {
+        return Err(storage("empty retrieval view"));
     }
     let config = &root.record_lexical[0].config;
     // Admission precedes active identity maps, term/field scorers and Top-K buffers.
@@ -117,28 +117,32 @@ pub(crate) async fn search(
     let mut locations = BTreeMap::new();
     let mut allowed = BTreeSet::new();
     let n = shards.len();
-    for (slot, (shard, snapshot)) in shards.iter().zip(&snapshots).enumerate() {
-        let active = shard
-            .active
-            .as_ref()
-            .ok_or_else(|| storage("native metadata statistics absent"))?;
-        // Native intake consumption may lag vector/metadata. Its published
-        // prefix contributes lexical hits; retired revisions stay masked.
-        if active.keys.len() != snapshot.identities.len() && !root.record_lexical[slot].allows_lag() {
-            return Err(storage("native/vector identity count mismatch"));
+    // Components expose stable logical identities. Native and vector rows can
+    // be reordered or merged independently; local ordinals are only addresses
+    // inside the vector engine, never the cross-index join key.
+    let mut vectors = BTreeMap::new();
+    for (slot, shard) in shards.iter().enumerate() {
+        let active = shard.active.as_ref().ok_or_else(|| storage("native metadata statistics absent"))?;
+        if active.revisions.len() != active.keys.len() {
+            return Err(storage("vector revision identities missing"));
         }
         let compiled = crate::metadata_filter::compile_filters(shard, &filters)
             .map_err(RecordError::Rejected)?;
-        for (local, identity) in snapshot.identities.iter().take(active.keys.len()).enumerate() {
-            if active.keys[local] != identity.id {
-                return Err(storage("native/vector identity mismatch"));
+        for (local, key) in active.keys.iter().enumerate().filter(|(local, _)| active.is_live(*local)) {
+            let (version, revision) = active.revisions[local];
+            let identity = Identity { id: key.clone(), version, revision };
+            if vectors.insert(identity, (local * n + slot,
+                !crate::metadata_filter::is_facet_filter(shard, &compiled, local))).is_some() {
+                return Err(storage("duplicate live vector revision identity"));
             }
-            if active.is_live(local) {
+        }
+    }
+    for snapshot in &snapshots {
+        for identity in snapshot.identities.iter() {
+            if let Some(&(address, accepts)) = vectors.get(identity) {
                 selected.insert(identity.clone());
-                locations.insert(identity.clone(), local * n + slot);
-                if !crate::metadata_filter::is_facet_filter(shard, &compiled, local) {
-                    allowed.insert(identity.clone());
-                }
+                locations.insert(identity.clone(), address);
+                if accepts { allowed.insert(identity.clone()); }
             }
         }
     }

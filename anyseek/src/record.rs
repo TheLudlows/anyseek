@@ -44,6 +44,7 @@ mod query;
 mod replay;
 mod indexer;
 mod maintenance;
+mod cache_merge;
 mod ingest_log;
 mod ingestion;
 pub use ingestion::{IngestPipeline, IngestReceipt, IngestStatus, IngestProgress, IngestFailure};
@@ -313,6 +314,8 @@ struct State {
     seq: u64,
     epoch_watermark: u64,
     time_watermark_ms: u64,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    retired_operation_prefix: Option<temporal::RetiredPrefix>,
     expirations: Vec<temporal::Expiration>,
     lease_expirations: Vec<lease::Expiration>,
     private_cleanup_pending: bool,
@@ -869,13 +872,16 @@ async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Res
     build_at_selected(path,cache,config,state,None).await
 }
 async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(IndexArc,Vec<String>),RecordError>{
-    let disk_limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("build disk limit overflow"))?;
-    let _disk=crate::storage::build_budget::ensure_scope(path,disk_limit).map_err(storage)?;
     let visible = evidence::visibility(&state.records)?;
     let records: Vec<_> = state.records.values().filter(|record|
         visible.get(&record.record_id) == Some(&true)
         && selected.is_none_or(|keys|keys.contains(&record.record_id))
         && !(state.evidence_quarantined && temporal::protected(record))).collect();
+    build_records_at(path,cache,config,state.seq,records).await
+}
+async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u64,records:Vec<&Record>)->Result<(IndexArc,Vec<String>),RecordError>{
+    let disk_limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("build disk limit overflow"))?;
+    let _disk=crate::storage::build_budget::ensure_scope(path,disk_limit).map_err(storage)?;
     let reservation=build_budget::admit(config,records.iter().copied())?;
     let index = create_index(
         &cache,
@@ -911,15 +917,15 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
 
     let native = lexical::runtime::Runtime::create(&cache.join("native"), config)?;
     for record in &records {
-        native.append(lexical::Identity { id:record.record_id.clone(),version:record.version,revision:state.seq },record.document.as_ref().unwrap(),false).await?;
+        native.append(lexical::Identity { id:record.record_id.clone(),version:record.version,revision:sequence },record.document.as_ref().unwrap(),false).await?;
         index.read().await.shard_vec[0]
             .write()
             .await
             .active
             .as_mut()
             .unwrap()
-            .keys
-            .push(record.record_id.clone());
+            .append_identity(record.record_id.clone(), record.version, sequence,
+                crate::active::fingerprint(&temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)).map_err(storage)?);
         index
             .index_documents(vec![temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)])
             .await
@@ -1452,7 +1458,7 @@ impl RecordPartition {
         for entry in pending {
             inner.replay_anchor_tail(entry).await?;
             #[cfg(test)]
-            if path.join(".test-recovery-after-derived-seal").exists() && !inner.index.pending_seals.is_empty(){
+            if path.join(".test-recovery-after-derived-seal").exists() && inner.index.detached_cache {
                 return Err(storage("injected recovery interruption after derived seal"));
             }
         }
@@ -2199,7 +2205,10 @@ mod tests {
         let GenerationCommand::Stage{source,members,chunks,..}=stage_generation("g",&["one","two"]) else{unreachable!()};
         p.write(generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members})).await.unwrap();
         clock.set(now+100);let batch=generation_write("batch",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks:vec![chunks[0].clone()]});let receipt=p.write(batch.clone()).await.unwrap();
-        clock.set(now+1_800_100);assert!(p.generation_status("doc").await.unwrap().unwrap().staged_generation.is_none());
+        clock.set(now+1_800_100);
+        assert!(matches!(p.generation_status("doc").await, Err(RecordError::Busy)));
+        settle_maintenance(&p).await;
+        assert!(p.generation_status("doc").await.unwrap().unwrap().staged_generation.is_none());
         assert_eq!(p.write(batch.clone()).await.unwrap(),receipt);
         let state=p.inner.lock().await.state.clone();let op=state.operations.iter().find(|o|o.request.operation_id==batch.operation_id).unwrap();assert!(op.request_digest.is_some());
         assert!(matches!(&op.request.generation,Some(GenerationCommand::StageBatch{chunks,..}) if chunks.is_empty()));lease::validate_state(&state).unwrap();
@@ -2606,6 +2615,7 @@ mod tests {
         p.write(write("source-update", "s", "new source", ExpectedVersion::Match(1))).await.unwrap();
         assert!(p.write(generation_write("publish", ExpectedVersion::Match(1), GenerationCommand::Publish { generation_id:"g1".into() })).await.is_err());
         p.write(generation_write("abort", ExpectedVersion::Match(1), GenerationCommand::Abort { generation_id:"g1".into() })).await.unwrap();
+        settle_maintenance(&p).await;
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
         assert!(p.write(generation_write("reuse", ExpectedVersion::Match(2), stage_generation("g1", &["a","b"]))).await.is_err());
         drop(p); std::fs::remove_dir_all(root).unwrap();
@@ -2641,6 +2651,7 @@ mod tests {
         let mut delete=write("delete","s","",ExpectedVersion::Match(1)); delete.document=None; p.write(delete).await.unwrap();
         assert!(p.write(generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish { generation_id:"g1".into() })).await.is_err());
         p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort { generation_id:"g1".into() })).await.unwrap();
+        settle_maintenance(&p).await;
         assert_eq!(p.statistics().await.unwrap().active_records,0);
         drop(p); let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
@@ -3913,8 +3924,8 @@ mod tests {
                     .active
                     .as_mut()
                     .unwrap()
-                    .keys
-                    .push("a".into());
+                    .append_identity("a".into(), id as u64 + 1, 0,
+                        crate::active::fingerprint(original.document.as_ref().unwrap()).unwrap());
                 inner
                     .index.test_index()
                     .index_documents(vec![original.document.clone().unwrap()])
@@ -4565,6 +4576,7 @@ mod tests {
         let recovered=RecordPartition::open_s3_with_remote(
             &target_path,config().max_journal_bytes,remote,
         ).await.unwrap();
+        settle_maintenance(&recovered).await;
         assert_eq!(recovered.get("a").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote first");
         recovered.write(write("second-remote","b","alpha remote second",ExpectedVersion::Absent)).await.unwrap();
         let revision=write("update-remote","a","alpha remote updated",ExpectedVersion::Match(1));
@@ -4672,6 +4684,7 @@ mod tests {
             assert_eq!(inner.state.seq, 1);
             inner.remote = Some(remote);
         }
+        settle_maintenance(&recovered).await;
         let record = recovered.get("remote-record").await.unwrap().unwrap();
         assert_eq!(record.version, 1);
         assert_eq!(record.document.unwrap()["body"], "alpha remote durable");
@@ -4689,11 +4702,14 @@ mod tests {
             let mut inner = recovered.inner.lock().await;
             let future = inner.state.time_watermark_ms
                 .saturating_add(9 * 86_400_000);
-            inner.trim_feed(future).await.unwrap();
-            // Feed trimming publishes a complete remote checkpoint at this same
-            // sequence; it must survive removal of the rebuildable local cache.
-            assert!(inner.state.feed.floor > 0);
+            inner.clock = Arc::new(TestClock(std::sync::atomic::AtomicU64::new(future)));
+            assert!(matches!(inner.trim_feed(future).await, Err(RecordError::Busy)));
         }
+        recovered.kick_maintenance().await;
+        settle_maintenance(&recovered).await;
+        // Feed trimming publishes a complete remote checkpoint at this same
+        // sequence; it must survive removal of the rebuildable local cache.
+        assert!(recovered.inner.lock().await.state.feed.floor > 0);
         let (bundle_json, visible_seq, partition_id) =
             recovered.create_s3_backup("record-backup", 200, 1024 * 1024).await.unwrap();
         assert_eq!(visible_seq, 2);

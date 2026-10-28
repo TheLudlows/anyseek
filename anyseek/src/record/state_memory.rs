@@ -106,7 +106,7 @@ impl State {
         Ok(())
     }
     pub(super) fn admit_lookup(&mut self, bytes: usize) -> Result<(), RecordError> {
-        let metadata=self.container_bytes(checkpoint_codec::json_length(self)?)?
+        let metadata=self.container_bytes(state_proof::length(self)?)?
             .checked_sub(self.lookup_bytes).and_then(|n|n.checked_add(bytes))
             .ok_or_else(||storage("lookup metadata estimate overflow"))?;
         self.admit_containers(metadata)?;
@@ -147,6 +147,7 @@ impl State {
             seq: self.seq,
             epoch_watermark: self.epoch_watermark,
             time_watermark_ms: self.time_watermark_ms,
+            retired_operation_prefix: self.retired_operation_prefix.clone(),
             expirations: self.expirations.clone(),
             lease_expirations: self.lease_expirations.clone(),
             private_cleanup_pending: self.private_cleanup_pending,

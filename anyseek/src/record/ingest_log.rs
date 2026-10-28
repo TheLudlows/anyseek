@@ -24,6 +24,10 @@ struct Envelope<T> {
 
 pub(super) struct Log {
     control: Journal,
+    // Root control remains the stable owner across generation swaps.
+    base_control: Option<Journal>,
+    selection_root: PathBuf,
+    identity: String,
     active: Journal,
     root: PathBuf,
     segment: u64,
@@ -54,6 +58,7 @@ impl Log {
             .ok_or_else(|| storage("intake log needs parent"))?;
         let stage = parent.join(format!(".intake-prepare-{:032x}", rand::random::<u128>()));
         fs::create_dir(&stage).map_err(storage)?;
+        let mut preparation = Preparation { root: stage.clone(), selector: stage.join("unused-selector"), armed: true };
         let header = serde_json::to_vec(&Header {
             format: FORMAT,
             identity: identity.into(),
@@ -81,6 +86,7 @@ impl Log {
             .map_err(failure)?,
         );
         PartitionJournal::publish_prepared_root(&stage, root).map_err(failure)?;
+        preparation.armed = false;
         Self::open::<serde_json::Value>(root, identity, segment_bytes, max_bytes)
             .map(|(log, _)| log)
     }
@@ -93,6 +99,29 @@ impl Log {
         // The stable control journal lock excludes a second owner throughout a roll.
         let (control, frames) =
             Journal::open(&root.join("control"), CONTROL_BYTES).map_err(storage)?;
+        let selector = root.join("CURRENT");
+        if selector.exists() {
+            let name = fs::read_to_string(&selector).map_err(storage)?;
+            if !name.strip_prefix("generation-").is_some_and(|s|
+                s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())) {
+                return Err(storage("invalid intake generation selector"));
+            }
+            let selected_root = root.join(&name);
+            if !fs::symlink_metadata(&selected_root).map_err(storage)?.file_type().is_dir()
+                || selected_root.join("CURRENT").exists() {
+                return Err(storage("nested or invalid intake generation"));
+            }
+            let (mut selected, values) = Self::open::<T>(
+                &selected_root, identity, segment_bytes, max_bytes)?;
+            if selected.base_control.is_some() {
+                return Err(storage("nested intake generation selector"));
+            }
+            selected.base_control = Some(control);
+            selected.selection_root = root.into();
+            if selected.bytes() > max_bytes { return Err(RecordError::Busy); }
+            selected.cleanup_generations()?;
+            return Ok((selected, values));
+        }
         let header: Header = serde_json::from_slice(
             frames
                 .first()
@@ -178,6 +207,9 @@ impl Log {
         Ok((
             Self {
                 control,
+                base_control: None,
+                selection_root: root.into(),
+                identity: identity.into(),
                 active: active.unwrap(),
                 root: root.into(),
                 segment: segments.len() as u64 - 1,
@@ -190,11 +222,75 @@ impl Log {
             values,
         ))
     }
+    /// Publish a replacement event chain before reclaiming any selected file.
+    /// CURRENT is replaced atomically while the original control owner stays held.
+    pub(super) fn compact(&mut self, events: &[Vec<u8>]) -> Result<(), RecordError> {
+        if self.failed { return Err(RecordError::RecoveryRequired); }
+        let name = format!("generation-{:032x}", rand::random::<u128>());
+        let root = self.selection_root.join(&name);
+        // One selected chain plus one bounded candidate; no unbounded retries.
+        let estimate = events.iter().try_fold(1024u64, |sum, e| sum.checked_add(e.len() as u64 + 1024))
+            .filter(|n| *n <= self.max_bytes).ok_or(RecordError::Busy)?;
+        let _peak = self.bytes().checked_add(estimate).filter(|n| *n <= self.max_bytes.saturating_mul(2))
+            .ok_or(RecordError::Busy)?;
+        self.cleanup_generations()?;
+        let temporary = self.selection_root.join(format!(".selector-{:032x}", rand::random::<u128>()));
+        let mut preparation = Preparation { root: root.clone(), selector: temporary.clone(), armed: true };
+        let mut candidate = Self::create(&root, &self.identity, self.segment_bytes, self.max_bytes)?;
+        for event in events { candidate.append_serialized(event)?; }
+        let owner_bytes = self.base_control.as_ref().unwrap_or(&self.control).physical_bytes();
+        if candidate.bytes().checked_add(owner_bytes).is_none_or(|n| n > self.max_bytes) {
+            return Err(RecordError::Busy);
+        }
+        #[cfg(test)] if self.selection_root.join(".test-intake-before-select").exists() {
+            return Err(storage("injected intake failure before selection"));
+        }
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(storage)?;
+        file.write_all(name.as_bytes()).map_err(storage)?;
+        file.sync_all().map_err(storage)?;
+        drop(file);
+        // From rename onwards the selected chain is uncertain on any error.
+        self.failed = true;
+        preparation.armed = false;
+        replace_selector(&temporary, &self.selection_root.join("CURRENT"))
+            .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+        #[cfg(test)] if self.selection_root.join(".test-intake-after-select").exists() {
+            return Err(RecordError::OutcomeUnknown("injected intake failure after selection".into()));
+        }
+        sync_directory(&self.selection_root)
+            .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+        candidate.selection_root = self.selection_root.clone();
+        let old = std::mem::replace(self, candidate);
+        self.base_control = old.base_control.or(Some(old.control));
+        drop(old.active);
+        // Cleanup failure leaks obsolete files, never changes the committed chain.
+        let _ = self.cleanup_generations();
+        Ok(())
+    }
+    fn cleanup_generations(&self) -> Result<(), RecordError> {
+        let _phase = maintenance::Phase::new("intake_local_cleanup", self.event);
+        for row in fs::read_dir(&self.selection_root).map_err(storage)? {
+            let row = row.map_err(storage)?;
+            let name = row.file_name().to_string_lossy().into_owned();
+            let generation = name.strip_prefix("generation-").is_some_and(|s|
+                s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+            let original_segment = self.base_control.is_some() && name.strip_prefix("segment-").is_some_and(|s|
+                s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+            let selector = name.strip_prefix(".selector-").is_some_and(|s|
+                s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+            if selector { fs::remove_file(row.path()).map_err(storage)?; }
+            else if (generation && row.path() != self.root) || original_segment {
+                fs::remove_dir_all(row.path()).map_err(storage)?;
+            }
+        }
+        sync_directory(&self.selection_root).map_err(storage)
+    }
     pub(super) fn bytes(&self) -> u64 {
-        self.retained_bytes
+        self.retained_bytes + self.base_control.as_ref().map_or(0, Journal::physical_bytes)
     }
     pub(super) fn available(&self) -> u64 {
-        self.max_bytes.saturating_sub(self.retained_bytes)
+        self.max_bytes.saturating_sub(self.bytes())
     }
     pub(super) fn append<T: Serialize>(&mut self, value: &T) -> Result<(), RecordError> {
         self.append_serialized(&serde_json::to_vec(value).map_err(storage)?)
@@ -218,7 +314,7 @@ impl Log {
         let roll = self.active.validate_append(bytes.len()).is_err();
         let overhead = if roll { 512 } else { 0 };
         if self
-            .retained_bytes
+            .bytes()
             .checked_add(bytes.len() as u64 + 24 + overhead)
             .is_none_or(|n| n > self.max_bytes)
         {
@@ -265,6 +361,51 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compaction_keeps_stable_owner_and_only_selected_snapshot() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("intake");
+        let mut log = Log::create(&root, "config", 1024, 16384).unwrap();
+        for n in 0..12u64 { log.append(&(n, "x".repeat(180))).unwrap(); }
+        let before = log.bytes();
+        log.compact(&[serde_json::to_vec(&(12u64, "snapshot".to_owned())).unwrap()]).unwrap();
+        assert!(log.bytes() < before);
+        assert!(Log::open::<(u64, String)>(&root, "config", 1024, 16384).is_err());
+        log.append(&(13u64, "next".to_owned())).unwrap();
+        log.compact(&[serde_json::to_vec(&(14u64, "second".to_owned())).unwrap()]).unwrap();
+        drop(log);
+        let (_, values) = Log::open::<(u64, String)>(&root, "config", 1024, 16384).unwrap();
+        assert_eq!(values, vec![(14, "second".to_owned())]);
+        assert_eq!(fs::read_dir(&root).unwrap().filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("generation-")).count(), 1);
+    }
+    #[test]
+    fn compaction_failure_before_and_after_selection_recovers_exact_chain() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("intake");
+        let mut log = Log::create(&root, "config", 1024, 16384).unwrap();
+        log.append(&1u64).unwrap();
+        fs::write(root.join(".test-intake-before-select"), b"").unwrap();
+        for _ in 0..3 { assert!(log.compact(&[b"2".to_vec()]).is_err()); }
+        assert!(!root.join("CURRENT").exists());
+        assert_eq!(fs::read_dir(&root).unwrap().filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with("generation-")).count(), 0);
+        fs::remove_file(root.join(".test-intake-before-select")).unwrap();
+        log.append(&3u64).unwrap();
+        fs::write(root.join(".test-intake-after-select"), b"").unwrap();
+        assert!(matches!(log.compact(&[b"4".to_vec()]), Err(RecordError::OutcomeUnknown(_))));
+        assert!(matches!(log.append(&5u64), Err(RecordError::RecoveryRequired)));
+        drop(log);
+        let (log, values) = Log::open::<u64>(&root, "config", 1024, 16384).unwrap();
+        assert_eq!(values, vec![4]);
+        drop(log);
+        let selected = fs::read_to_string(root.join("CURRENT")).unwrap();
+        fs::write(root.join(&selected).join("CURRENT"), &selected).unwrap();
+        assert!(Log::open::<u64>(&root, "config", 1024, 16384).is_err());
+        fs::remove_file(root.join(&selected).join("CURRENT")).unwrap();
+        fs::remove_dir_all(root.join(selected)).unwrap();
+        assert!(Log::open::<u64>(&root, "config", 1024, 16384).is_err());
+    }
     #[test]
     fn rolls_without_checkpoint_and_reopens_the_complete_chain() {
         let temporary = tempfile::tempdir().unwrap();
@@ -334,5 +475,47 @@ mod tests {
         drop(log);
         let (_, values) = Log::open::<String>(&root, "config", 1024, 1200).unwrap();
         assert_eq!(values.len(), accepted);
+    }
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> { fs::File::open(path)?.sync_all() }
+#[cfg(not(unix))]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn replace_selector(source: &Path, target: &Path) -> std::io::Result<()> { fs::rename(source, target) }
+#[cfg(windows)]
+fn replace_selector(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+    let wide = |path: &Path| -> std::io::Result<Vec<u16>> {
+        let absolute = path.parent().ok_or_else(|| std::io::Error::other("missing parent"))?
+            .canonicalize()?.join(path.file_name().ok_or_else(|| std::io::Error::other("missing filename"))?);
+        let mut value: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+        if value.contains(&0) { return Err(std::io::Error::other("NUL in selector path")); }
+        value.push(0); Ok(value)
+    };
+    let (source, target) = (wide(source)?, wide(target)?);
+    if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+#[cfg(not(any(unix, windows)))]
+fn replace_selector(_: &Path, _: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "uncertified persistence platform"))
+}
+
+struct Preparation { root: PathBuf, selector: PathBuf, armed: bool }
+impl Drop for Preparation {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.selector);
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 }

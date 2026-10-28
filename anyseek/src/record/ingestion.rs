@@ -65,6 +65,8 @@ pub struct IngestProgress {
 }
 #[derive(Serialize, Deserialize)]
 enum Event {
+    Reset { base: u64, epoch_floor: u64, materialized_seq: u64 },
+    Retain { digest: [u8; 32], status: IngestStatus },
     Accept {
         first: u64,
         requests: Vec<RecordWrite>,
@@ -75,7 +77,8 @@ enum Event {
     },
 }
 struct Row {
-    request: RecordWrite,
+    request: Option<RecordWrite>,
+    digest: [u8; 32],
     status: IngestStatus,
     _memory: crate::storage::build_budget::MemoryLease,
 }
@@ -84,6 +87,9 @@ struct Spool {
     rows: Vec<Row>,
     operations: BTreeMap<OperationId, usize>,
     completed: usize,
+    base: u64,
+    epoch_floor: u64,
+    completed_since_compaction: usize,
     materialized_seq: u64,
     completion_reserve: u64,
     max_pending: usize,
@@ -121,11 +127,27 @@ impl DurableLog {
             Self::Remote(log) => log.append(event).await,
         }
     }
-    fn admit_accept(&self, bytes: u64, completion_reserve: u64) -> Result<(), RecordError> {
+    async fn compact(&mut self, events: Vec<Vec<u8>>, completion_slots: u64) -> Result<bool, RecordError> {
+        match self {
+            Self::Local(log) => {
+                let log = log.clone();
+                tokio::task::spawn_blocking(move || {
+                    log.lock().map_err(|_| RecordError::RecoveryRequired)?.compact(&events)
+                }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))??;
+                Ok(true)
+            }
+            #[cfg(feature = "s3-object-store")]
+            Self::Remote(log) => { log.compact(events, completion_slots).await?; Ok(true) },
+        }
+    }
+    fn admit_accept(&self, bytes: u64, completion_reserve: u64, completion_slots: u64) -> Result<(), RecordError> {
         let (available, factor) = match self {
             Self::Local(log) => (log.lock().map(|log| log.available()).unwrap_or(0), 1),
             #[cfg(feature = "s3-object-store")]
-            Self::Remote(log) => (log.available(), 5),
+            Self::Remote(log) => {
+                log.admit_objects(completion_slots.checked_add(1).ok_or(RecordError::Busy)?)?;
+                (log.available(), 5)
+            },
         };
         if bytes
             .checked_add(completion_reserve)
@@ -139,11 +161,87 @@ impl DurableLog {
         }
     }
 }
+fn request_digest(request: &RecordWrite) -> Result<[u8; 32], RecordError> {
+    // Preserve structural JSON equality: object insertion order is irrelevant.
+    let mut value = serde_json::to_value(request).map_err(storage)?;
+    value.sort_all_objects();
+    fn normalize_zero(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Number(number) if number.is_f64() && number.as_f64() == Some(0.0) => {
+                *number = serde_json::Number::from_f64(0.0).expect("finite zero");
+            }
+            serde_json::Value::Array(values) => values.iter_mut().for_each(normalize_zero),
+            serde_json::Value::Object(values) => values.values_mut().for_each(normalize_zero),
+            _ => {},
+        }
+    }
+    normalize_zero(&mut value);
+    checkpoint_codec::json_digest(&value)
+}
 impl Spool {
+    async fn reclaim(&mut self, epoch: u64) -> Result<(), RecordError> {
+        let floor = self.epoch_floor.max(epoch.saturating_sub(1));
+        let expired = self.rows[..self.completed].iter()
+            .take_while(|r| r.status.accepted.operation_id.epoch < floor).count();
+        if expired == 0 && self.completed_since_compaction < 64.max(self.completed / 2) { return Ok(()); }
+        let _phase = maintenance::Phase::new("intake_compaction_locked", self.base + self.completed as u64);
+        let base = self.base.checked_add(expired as u64).ok_or_else(|| storage("intake sequence overflow"))?;
+        let snapshot_bytes = self.rows[expired..].iter().try_fold(1024u64, |total, row| {
+            let bytes = if let Some(request) = &row.request { checkpoint_codec::json_length(request)? }
+                else { checkpoint_codec::json_length(&row.status)? + 256 };
+            total.checked_add(bytes as u64).ok_or(RecordError::Busy)
+        })?;
+        let Ok(_snapshot_memory) = crate::storage::build_budget::reserve_memory(
+            snapshot_bytes.checked_mul(34).ok_or(RecordError::Busy)?) else { return Ok(()); };
+        let mut events = vec![serde_json::to_vec(&Event::Reset {
+            base, epoch_floor: floor, materialized_seq: self.materialized_seq,
+        }).map_err(storage)?];
+        for row in &self.rows[expired..] {
+            let event = if let Some(request) = &row.request {
+                Event::Accept { first: row.status.accepted.durable_seq, requests: vec![request.clone()] }
+            } else {
+                Event::Retain { digest: row.digest, status: row.status.clone() }
+            };
+            events.push(serde_json::to_vec(&event).map_err(storage)?);
+        }
+        match self.log.compact(events, (self.rows.len() - self.completed) as u64).await {
+            Ok(true) => {},
+            Ok(false) | Err(RecordError::Busy) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        self.rows.drain(..expired);
+        self.completed -= expired;
+        self.base = base;
+        self.epoch_floor = floor;
+        self.completed_since_compaction = 0;
+        self.operations = self.rows.iter().enumerate()
+            .map(|(i, r)| (r.status.accepted.operation_id.clone(), i)).collect();
+        Ok(())
+    }
     fn apply(&mut self, event: Event) -> Result<(), RecordError> {
         match event {
+            Event::Reset { base, epoch_floor, materialized_seq } => {
+                if !self.rows.is_empty() || self.base != 0 || base.checked_add(self.max_operations as u64).is_none() { return Err(storage("intake reset after entries")); }
+                self.base = base;
+                self.epoch_floor = epoch_floor;
+                self.materialized_seq = materialized_seq;
+            }
+            Event::Retain { digest, status } => {
+                if !status.completed() || status.receipt.is_some() == status.error.is_some()
+                    || self.rows.len() != self.completed
+                    || self.rows.len() >= self.max_operations
+                    || status.accepted.durable_seq != self.base + self.rows.len() as u64 + 1
+                    || self.operations.contains_key(&status.accepted.operation_id) {
+                    return Err(storage("invalid compacted intake ledger"));
+                }
+                let memory = crate::storage::build_budget::reserve_memory(
+                    checkpoint_codec::json_length(&status)? as u64 * 32 + 1024).map_err(storage)?;
+                self.operations.insert(status.accepted.operation_id.clone(), self.rows.len());
+                self.rows.push(Row { request: None, digest, status, _memory: memory });
+                self.completed += 1;
+            }
             Event::Accept { first, requests } => {
-                if requests.is_empty() || first != self.rows.len() as u64 + 1 {
+                if requests.is_empty() || first != self.base + self.rows.len() as u64 + 1 {
                     return Err(storage("invalid intake batch sequence"));
                 }
                 for request in requests {
@@ -164,13 +262,14 @@ impl Spool {
                         .checked_add(bytes + 16384)
                         .ok_or_else(|| storage("intake completion reserve overflow"))?;
                     let accepted = IngestReceipt {
-                        durable_seq: self.rows.len() as u64 + 1,
+                        durable_seq: self.base + self.rows.len() as u64 + 1,
                         operation_id: request.operation_id.clone(),
                     };
                     self.operations
                         .insert(request.operation_id.clone(), self.rows.len());
                     self.rows.push(Row {
-                        request,
+                        digest: request_digest(&request)?,
+                        request: Some(request),
                         status: IngestStatus {
                             accepted,
                             receipt: None,
@@ -182,7 +281,7 @@ impl Spool {
             }
             Event::Complete { first, results } => {
                 if results.is_empty()
-                    || first != self.completed as u64 + 1
+                    || first != self.base + self.completed as u64 + 1
                     || self.completed + results.len() > self.rows.len()
                 {
                     return Err(storage("invalid intake completion sequence"));
@@ -191,7 +290,7 @@ impl Spool {
                     let row = &mut self.rows[self.completed];
                     self.completion_reserve = self
                         .completion_reserve
-                        .checked_sub(checkpoint_codec::json_length(&row.request)? as u64 + 16384)
+                        .checked_sub(checkpoint_codec::json_length(row.request.as_ref().ok_or_else(|| storage("missing pending request"))?)? as u64 + 16384)
                         .ok_or_else(|| storage("invalid completion reserve"))?;
                     match result {
                         Ok(receipt) => {
@@ -200,7 +299,11 @@ impl Spool {
                         }
                         Err(error) => row.status.error = Some(error),
                     }
+                    row.request = None;
+                    row._memory = crate::storage::build_budget::reserve_memory(
+                        checkpoint_codec::json_length(&row.status)? as u64 * 32 + 1024).map_err(storage)?;
                     self.completed += 1;
+                    self.completed_since_compaction += 1;
                 }
             }
         }
@@ -287,6 +390,9 @@ impl IngestPipeline {
             rows: Vec::new(),
             operations: BTreeMap::new(),
             completed: 0,
+            base: 0,
+            epoch_floor: 0,
+            completed_since_compaction: 0,
             materialized_seq: 0,
             completion_reserve: 0,
             max_pending: config.max_operations.min(1024),
@@ -297,6 +403,7 @@ impl IngestPipeline {
         for event in events {
             spool.apply(event)?;
         }
+        spool.reclaim(current_epoch()).await?;
         let pipeline = Self {
             spool: Arc::new(Mutex::new(spool)),
             running: Arc::new(AtomicBool::new(false)),
@@ -333,6 +440,14 @@ impl IngestPipeline {
         requests: Vec<RecordWrite>,
     ) -> Result<Vec<IngestReceipt>, RecordError> {
         let mut spool = self.spool.lock().await;
+        if spool.blocked.is_none() {
+            if let Err(error) = spool.reclaim(current_epoch()).await {
+                if matches!(error, RecordError::OutcomeUnknown(_) | RecordError::RecoveryRequired) {
+                    spool.blocked = Some(error.to_string());
+                }
+                return Err(error);
+            }
+        }
         let mut seen = std::collections::BTreeSet::new();
         let mut fresh = Vec::new();
         let mut receipts = Vec::new();
@@ -349,8 +464,7 @@ impl IngestPipeline {
                 .filter(|n| *n <= BATCH_BYTES)
                 .ok_or_else(|| RecordError::Rejected("intake batch exceeds 4 MiB".into()))?;
             if let Some(&position) = spool.operations.get(&request.operation_id) {
-                if serde_json::to_value(&spool.rows[position].request).map_err(storage)?
-                    != serde_json::to_value(&request).map_err(storage)?
+                if spool.rows[position].digest != request_digest(&request)?
                 {
                     return Err(RecordError::Conflict(
                         "operation identity reused with another request".into(),
@@ -362,6 +476,7 @@ impl IngestPipeline {
             let epoch = current_epoch();
             if request.operation_id.epoch > epoch
                 || request.operation_id.epoch.saturating_add(1) < epoch
+                || request.operation_id.epoch < spool.epoch_floor
             {
                 return Err(RecordError::OperationExpired);
             }
@@ -378,7 +493,7 @@ impl IngestPipeline {
                 validate_document_depth(document)?;
             }
             receipts.push(IngestReceipt {
-                durable_seq: (spool.rows.len() + fresh.len()) as u64 + 1,
+                durable_seq: spool.base + (spool.rows.len() + fresh.len()) as u64 + 1,
                 operation_id: request.operation_id.clone(),
             });
             fresh.push(request);
@@ -406,7 +521,7 @@ impl IngestPipeline {
                 .map_err(storage)?,
             );
         }
-        let first = spool.rows.len() as u64 + 1;
+        let first = spool.base + spool.rows.len() as u64 + 1;
         let event = Event::Accept {
             first,
             requests: fresh,
@@ -424,6 +539,7 @@ impl IngestPipeline {
                 .completion_reserve
                 .checked_add(extra_reserve)
                 .ok_or(RecordError::Busy)?,
+            (spool.rows.len() - spool.completed + memory.len()) as u64,
         )?;
         spool.rows.try_reserve(receipts.len()).map_err(storage)?;
         if let Err(error) = spool.log.append(&event).await {
@@ -441,7 +557,7 @@ impl IngestPipeline {
         for (request, charge) in requests.into_iter().zip(memory) {
             spool.completion_reserve += checkpoint_codec::json_length(&request)? as u64 + 16384;
             let accepted = IngestReceipt {
-                durable_seq: spool.rows.len() as u64 + 1,
+                durable_seq: spool.base + spool.rows.len() as u64 + 1,
                 operation_id: request.operation_id.clone(),
             };
             let position = spool.rows.len();
@@ -449,7 +565,8 @@ impl IngestPipeline {
                 .operations
                 .insert(request.operation_id.clone(), position);
             spool.rows.push(Row {
-                request,
+                digest: request_digest(&request)?,
+                request: Some(request),
                 status: IngestStatus {
                     accepted,
                     receipt: None,
@@ -472,8 +589,8 @@ impl IngestPipeline {
     pub async fn progress(&self) -> IngestProgress {
         let spool = self.spool.lock().await;
         IngestProgress {
-            durable_seq: spool.rows.len() as u64,
-            completed_seq: spool.completed as u64,
+            durable_seq: spool.base + spool.rows.len() as u64,
+            completed_seq: spool.base + spool.completed as u64,
             materialized_seq: spool.materialized_seq,
             lexical_seq: self.partition.indexes.lexical.load(Ordering::Acquire),
             vector_seq: self.partition.indexes.vector.load(Ordering::Acquire),
@@ -497,11 +614,15 @@ impl IngestPipeline {
         } else {
             // A published cursor can precede the final task-owner drop. Join
             // before management releases the source owner or removes mmap files.
-            self.finish().await.map(|_| ())
+            self.finish().await?;
+            let inner=self.partition.inner.lock().await;
+            if inner.background.is_some() || inner.maintenance_scheduled {Err(RecordError::Busy)}else{Ok(())}
         }
     }
     /// Explicitly wait for pending work and its owned task to finish. Normal
     /// submission never calls this. Concurrent producers can add more work.
+    /// Optional cache compaction may still own the partition after this returns;
+    /// administrative callers use `require_drained` before releasing its owner.
     pub async fn finish(&self) -> Result<IngestProgress, RecordError> {
         loop {
             let handle = self
@@ -581,7 +702,7 @@ impl IngestPipeline {
                 let mut requests = Vec::new();
                 let mut bytes = 0usize;
                 for row in spool.rows[spool.completed..].iter().take(BATCH_RECORDS) {
-                    let length = match checkpoint_codec::json_length(&row.request) {
+                    let length = match checkpoint_codec::json_length(row.request.as_ref().expect("pending row")) {
                         Ok(length) => length,
                         Err(error) => {
                             spool.blocked = Some(error.to_string());
@@ -592,9 +713,9 @@ impl IngestPipeline {
                         break;
                     }
                     bytes += length;
-                    requests.push(row.request.clone());
+                    requests.push(row.request.as_ref().expect("pending row").clone());
                 }
-                (spool.completed as u64 + 1, requests)
+                (spool.base + spool.completed as u64 + 1, requests)
             };
             let (seq, requests) = next;
             let started = std::time::Instant::now();
@@ -652,6 +773,10 @@ impl IngestPipeline {
                 spool.blocked = Some(error.to_string());
                 return;
             }
+            if let Err(error) = spool.reclaim(current_epoch()).await {
+                spool.blocked = Some(error.to_string());
+                return;
+            }
             if let Some(error) = stop {
                 if error != RecordError::Busy {
                     spool.blocked = Some(error.to_string());
@@ -666,6 +791,88 @@ impl IngestPipeline {
 mod tests {
     use super::super::tests::{config, write};
     use super::*;
+    #[tokio::test]
+    async fn compacted_terminal_digest_preserves_json_equality_and_original_receipt() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let settings = config();
+        let p = RecordPartition::create(&root, settings.clone()).await.unwrap();
+        let pipeline = paused(p.clone()).await;
+        let mut request = write("canonical", "a", "alpha", ExpectedVersion::Absent);
+        request.document = Some(serde_json::from_str(r#"{"text":"alpha","nested":{"a":1,"b":[{"x":2,"y":3}],"zero":-0.0}}"#).unwrap());
+        let original = pipeline.submit(vec![request.clone()]).await.unwrap();
+        let mut reordered = request.clone();
+        reordered.document = Some(serde_json::from_str(r#"{"nested":{"zero":0.0,"b":[{"y":3,"x":2}],"a":1},"text":"alpha"}"#).unwrap());
+        assert_eq!(pipeline.submit(vec![reordered.clone()]).await.unwrap(), original);
+        pipeline.paused.store(false, Ordering::Release);
+        drained(&pipeline).await;
+        {
+            let mut spool = pipeline.spool.lock().await;
+            assert!(spool.rows[0].request.is_none());
+            spool.completed_since_compaction = 64;
+            spool.reclaim(current_epoch()).await.unwrap();
+        }
+        assert_eq!(pipeline.submit(vec![reordered.clone()]).await.unwrap(), original);
+        drained(&pipeline).await;
+        drop(pipeline); drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes).await.unwrap();
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        assert_eq!(pipeline.submit(vec![reordered.clone()]).await.unwrap(), original);
+        reordered.document = Some(serde_json::from_str(r#"{"text":"different"}"#).unwrap());
+        assert!(matches!(pipeline.submit(vec![reordered]).await, Err(RecordError::Conflict(_))));
+        assert_eq!(p.statistics().await.unwrap().retained_operations, 1);
+    }
+    #[tokio::test]
+    async fn uncertain_gc_selection_blocks_until_reopen_and_keeps_retry_receipt() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let settings = config();
+        let p = RecordPartition::create(&root, settings.clone()).await.unwrap();
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        let request = write("gc-unknown", "a", "alpha", ExpectedVersion::Absent);
+        let original = pipeline.submit(vec![request.clone()]).await.unwrap();
+        drained(&pipeline).await;
+        pipeline.spool.lock().await.completed_since_compaction = 64;
+        let fault = root.join("intake/.test-intake-after-select");
+        std::fs::write(&fault, b"").unwrap();
+        assert!(matches!(pipeline.submit(vec![request.clone()]).await, Err(RecordError::OutcomeUnknown(_))));
+        assert!(pipeline.progress().await.blocked.is_some());
+        assert!(pipeline.finish().await.is_err());
+        drop(pipeline); drop(p);
+        std::fs::remove_file(fault).unwrap();
+        let p = RecordPartition::open(&root, settings.max_journal_bytes).await.unwrap();
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        assert_eq!(pipeline.submit(vec![request.clone()]).await.unwrap(), original);
+        drained(&pipeline).await;
+        assert_eq!(pipeline.operation(&request.operation_id).await.unwrap().receipt.unwrap().seq, 1);
+        assert_eq!(p.statistics().await.unwrap().retained_operations, 1);
+    }
+    #[tokio::test]
+    async fn expired_terminal_prefix_is_reclaimed_without_reusing_sequences_or_identities() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let settings = config();
+        let p = RecordPartition::create(&root, settings.clone()).await.unwrap();
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        let mut old = write("old", "a", "alpha", ExpectedVersion::Absent);
+        old.operation_id.epoch = current_epoch() - 1;
+        pipeline.submit(vec![old.clone()]).await.unwrap();
+        drained(&pipeline).await;
+        pipeline.spool.lock().await.reclaim(current_epoch() + 1).await.unwrap();
+        assert_eq!(pipeline.progress().await.completed_seq, 1);
+        assert!(pipeline.operation(&old.operation_id).await.is_none());
+        assert!(matches!(pipeline.submit(vec![old.clone()]).await, Err(RecordError::OperationExpired)));
+        let next = write("new", "b", "beta", ExpectedVersion::Absent);
+        assert_eq!(pipeline.submit(vec![next.clone()]).await.unwrap()[0].durable_seq, 2);
+        drained(&pipeline).await;
+        drained(&pipeline).await;
+        drop(pipeline); drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes).await.unwrap();
+        let pipeline = IngestPipeline::open(p).await.unwrap();
+        assert_eq!(pipeline.progress().await.completed_seq, 2);
+        assert!(matches!(pipeline.submit(vec![old]).await, Err(RecordError::OperationExpired)));
+        assert_eq!(pipeline.submit(vec![next]).await.unwrap()[0].durable_seq, 2);
+    }
     async fn drained(pipeline: &IngestPipeline) {
         tokio::time::timeout(std::time::Duration::from_secs(20), pipeline.finish())
             .await

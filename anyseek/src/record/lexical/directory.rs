@@ -92,6 +92,8 @@ impl Budget {
 
 #[derive(Clone)]
 pub(super) struct BudgetDirectory {
+    #[cfg(test)]
+    path: PathBuf,
     inner: MmapDirectory,
     selected: bool,
     budget: Arc<Budget>,
@@ -102,6 +104,8 @@ impl fmt::Debug for BudgetDirectory {
     }
 }
 impl BudgetDirectory {
+    #[cfg(test)]
+    pub(super) fn test_path(&self) -> PathBuf { self.path.clone() }
     #[cfg(test)]
     pub(super) fn reject_writes_for_test(&self) {
         self.budget.fail_writes.store(true, std::sync::atomic::Ordering::Release);
@@ -200,7 +204,7 @@ impl BudgetDirectory {
         let buffer=scope.as_ref().map(|s|s.bytes(metadata)).transpose().map_err(storage)?;
         let inner=MmapDirectory::open(path).map_err(storage)?;
         drop(io);drop(gate);
-        Ok(Self {inner,selected:true,budget:Arc::new(Budget {
+        Ok(Self {#[cfg(test)] path:path.to_owned(),inner,selected:true,budget:Arc::new(Budget {
             #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
             pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
@@ -224,6 +228,7 @@ impl BudgetDirectory {
             .transpose()
             .map_err(storage)?;
         Ok(Self {
+            #[cfg(test)] path:path.to_owned(),
             inner: MmapDirectory::open(path).map_err(storage)?,
             selected: false,
             budget: Arc::new(Budget {

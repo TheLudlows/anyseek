@@ -1284,11 +1284,16 @@ mod tests {
             .unwrap();
         let page = p.changes(None, 10).await.unwrap();
         let cursor = page.next;
-        let (seq, floor) = {
+        {
             let mut inner = p.inner.lock().await;
             let future = clock.0.load(Ordering::SeqCst) + inner.config.change_feed.retention_ms + 1;
             clock.0.store(future, Ordering::SeqCst);
-            inner.trim_feed(future).await.unwrap();
+            assert!(matches!(inner.trim_feed(future).await, Err(RecordError::Busy)));
+        }
+        p.kick_maintenance().await;
+        super::super::tests::settle_maintenance(&p).await;
+        let (seq, floor) = {
+            let inner = p.inner.lock().await;
             assert!(inner.state.feed.floor > 0);
             let r = inner.remote.as_ref().unwrap();
             let h = r
@@ -1488,6 +1493,7 @@ mod tests {
         assert!(matches!(p.generation_status("doc").await,Err(RecordError::DurablePending(3))));
         assert!(p.output_permit().is_err());
         let p=cold(p,&root,clock).await;
+        super::super::tests::settle_maintenance(&p).await;
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
         assert_eq!(p.write(stage).await.unwrap(),receipt);
         assert!(p.get("a").await.unwrap().is_none());

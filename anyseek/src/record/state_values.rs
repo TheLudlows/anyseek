@@ -77,6 +77,12 @@ impl<T: Serialize> Values<T> {
         self.bytes = bytes;
         Ok(())
     }
+    pub(super) fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
+        let bytes = &mut self.bytes;
+        self.values.retain(|value| {
+            if keep(value) { true } else { *bytes -= value.wire_bytes(); false }
+        });
+    }
     pub(super) fn edit(
         &mut self,
         index: usize,

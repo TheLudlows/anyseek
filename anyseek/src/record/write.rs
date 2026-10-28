@@ -123,6 +123,10 @@ impl Inner {
             return Err(RecordError::Busy);
         }
         self.advance_time().await?;
+        if !self.state.operation_lookup.contains_key(&request.operation_id)
+            && maintenance::has_expired_operations(&self.state,current_epoch())? {
+            return Err(self.request_checkpoint("expired_operation_receipts"));
+        }
         let (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, mut candidate, _planning) =
             match mutation::prepare_at(
                 &self.state,
