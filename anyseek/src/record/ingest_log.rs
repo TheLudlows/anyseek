@@ -224,7 +224,7 @@ impl Log {
     }
     /// Publish a replacement event chain before reclaiming any selected file.
     /// CURRENT is replaced atomically while the original control owner stays held.
-    pub(super) fn compact(&mut self, events: &[Vec<u8>]) -> Result<(), RecordError> {
+    pub(super) fn compact(&mut self, events: &[Vec<u8>], completion_bytes: u64) -> Result<(), RecordError> {
         if self.failed { return Err(RecordError::RecoveryRequired); }
         let name = format!("generation-{:032x}", rand::random::<u128>());
         let root = self.selection_root.join(&name);
@@ -239,7 +239,7 @@ impl Log {
         let mut candidate = Self::create(&root, &self.identity, self.segment_bytes, self.max_bytes)?;
         for event in events { candidate.append_serialized(event)?; }
         let owner_bytes = self.base_control.as_ref().unwrap_or(&self.control).physical_bytes();
-        if candidate.bytes().checked_add(owner_bytes).is_none_or(|n| n > self.max_bytes) {
+        if candidate.bytes().checked_add(owner_bytes).and_then(|n| n.checked_add(completion_bytes)).is_none_or(|n| n > self.max_bytes) {
             return Err(RecordError::Busy);
         }
         #[cfg(test)] if self.selection_root.join(".test-intake-before-select").exists() {
@@ -362,17 +362,40 @@ impl Log {
 mod tests {
     use super::*;
     #[test]
+    fn compaction_preserves_pending_completion_byte_headroom() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("intake");
+        let mut log = Log::create(&root, "config", 8192, 16384).unwrap();
+        log.append(&"pending").unwrap();
+        let before = log.bytes();
+        let completion_bytes = log.available() - 1024;
+        // A valid alternate JSON encoding of the same cut, larger than the
+        // selected chain but still fitting the standalone generation budget.
+        let snapshot = format!("{}\"pending\"", " ".repeat(4096)).into_bytes();
+        assert!(snapshot.len() as u64 + 2048 < log.max_bytes);
+        assert!(matches!(log.compact(&[snapshot], completion_bytes), Err(RecordError::Busy)));
+        assert_eq!(log.bytes(), before);
+        assert!(!root.join("CURRENT").exists());
+        assert!(!fs::read_dir(&root).unwrap().filter_map(Result::ok)
+            .any(|row| row.file_name().to_string_lossy().starts_with("generation-")));
+        // Rejected maintenance must leave the original append chain usable.
+        log.append(&"completed").unwrap();
+        drop(log);
+        let (_, values) = Log::open::<String>(&root, "config", 8192, 16384).unwrap();
+        assert_eq!(values, vec!["pending".to_owned(), "completed".to_owned()]);
+    }
+    #[test]
     fn compaction_keeps_stable_owner_and_only_selected_snapshot() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("intake");
         let mut log = Log::create(&root, "config", 1024, 16384).unwrap();
         for n in 0..12u64 { log.append(&(n, "x".repeat(180))).unwrap(); }
         let before = log.bytes();
-        log.compact(&[serde_json::to_vec(&(12u64, "snapshot".to_owned())).unwrap()]).unwrap();
+        log.compact(&[serde_json::to_vec(&(12u64, "snapshot".to_owned())).unwrap()], 0).unwrap();
         assert!(log.bytes() < before);
         assert!(Log::open::<(u64, String)>(&root, "config", 1024, 16384).is_err());
         log.append(&(13u64, "next".to_owned())).unwrap();
-        log.compact(&[serde_json::to_vec(&(14u64, "second".to_owned())).unwrap()]).unwrap();
+        log.compact(&[serde_json::to_vec(&(14u64, "second".to_owned())).unwrap()], 0).unwrap();
         drop(log);
         let (_, values) = Log::open::<(u64, String)>(&root, "config", 1024, 16384).unwrap();
         assert_eq!(values, vec![(14, "second".to_owned())]);
@@ -386,14 +409,14 @@ mod tests {
         let mut log = Log::create(&root, "config", 1024, 16384).unwrap();
         log.append(&1u64).unwrap();
         fs::write(root.join(".test-intake-before-select"), b"").unwrap();
-        for _ in 0..3 { assert!(log.compact(&[b"2".to_vec()]).is_err()); }
+        for _ in 0..3 { assert!(log.compact(&[b"2".to_vec()], 0).is_err()); }
         assert!(!root.join("CURRENT").exists());
         assert_eq!(fs::read_dir(&root).unwrap().filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with("generation-")).count(), 0);
         fs::remove_file(root.join(".test-intake-before-select")).unwrap();
         log.append(&3u64).unwrap();
         fs::write(root.join(".test-intake-after-select"), b"").unwrap();
-        assert!(matches!(log.compact(&[b"4".to_vec()]), Err(RecordError::OutcomeUnknown(_))));
+        assert!(matches!(log.compact(&[b"4".to_vec()], 0), Err(RecordError::OutcomeUnknown(_))));
         assert!(matches!(log.append(&5u64), Err(RecordError::RecoveryRequired)));
         drop(log);
         let (log, values) = Log::open::<u64>(&root, "config", 1024, 16384).unwrap();

@@ -134,7 +134,7 @@ impl Log {
         let _ = log.cleanup().await;
         Ok((log, events))
     }
-    pub(super) async fn compact(&mut self, events: Vec<Vec<u8>>, completion_slots: u64) -> Result<(), RecordError> {
+    pub(super) async fn compact(&mut self, events: Vec<Vec<u8>>, completion_slots: u64, completion_bytes: u64) -> Result<(), RecordError> {
         if self.failed { return Err(RecordError::RecoveryRequired); }
         let head = self.authority.read_head(&self.partition).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
         if head.committed_seq != self.events || head.owner_epoch != self.epoch { return Err(RecordError::RecoveryRequired); }
@@ -180,6 +180,11 @@ impl Log {
         for child in &snapshot.chunks { self.authority.register_object_edge(&manifest, child).map_err(storage)?; }
         let retained = snapshot.chunks.iter().try_fold(bytes.len() as u64, |n, chunk| n.checked_add(chunk.length))
             .filter(|n| *n <= self.max_bytes).ok_or(RecordError::Busy)?;
+        // Object-slot reservation is not a substitute for the byte headroom
+        // already promised to accepted, pending commands.
+        if retained.checked_add(completion_bytes).is_none_or(|n| n > self.max_bytes) {
+            return Err(RecordError::Busy);
+        }
         #[cfg(test)] if self.authority.database_path().with_extension("fail-intake-before-select").exists() {
             return Err(storage("injected failure after verified snapshot upload"));
         }
@@ -293,6 +298,32 @@ impl Log {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn remote_compaction_preserves_pending_completion_byte_headroom() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = (S3CompatibleStore::from_store(Arc::new(object_store::memory::InMemory::new()), 128 * 1024),
+            temporary.path().join("authority.sqlite"), "source".to_owned(), 1, 128 * 1024);
+        // The identity is duplicated in the snapshot descriptor, so a complete
+        // selected snapshot can occupy more bytes than the original short tail.
+        let identity = "configuration".repeat(5000);
+        let (mut log, _) = Log::open(source.clone(), &identity, 128, 16384).await.unwrap();
+        let request = super::super::super::tests::write("pending-reserve", "a", "alpha", ExpectedVersion::Absent);
+        log.append(&Event::Accept { first: 1, requests: vec![request.clone()] }).await.unwrap();
+        let head = log.authority.read_head(&log.partition).unwrap().unwrap();
+        let completion_bytes = completion_headroom(checkpoint_codec::json_length(&request).unwrap() as u64 + 16384, 5).unwrap();
+        assert!(log.bytes() + completion_bytes <= log.max_bytes);
+        let snapshot = vec![
+            serde_json::to_vec(&Event::Reset { base: 0, epoch_floor: 0, materialized_seq: 0 }).unwrap(),
+            serde_json::to_vec(&Event::Accept { first: 1, requests: vec![request.clone()] }).unwrap(),
+        ];
+        assert!(matches!(log.compact(snapshot, 1, completion_bytes).await, Err(RecordError::Busy)));
+        assert_eq!(log.authority.read_head(&log.partition).unwrap().unwrap(), head);
+        log.append(&Event::Complete { first: 1, results: vec![Err(IngestFailure { code: "conflict".into(), message: "terminal".into() })] }).await.unwrap();
+        drop(log);
+        let (_, events) = Log::open(source, &identity, 128, 16384).await.unwrap();
+        assert!(matches!(&events[..], [Event::Accept { first: 1, requests }, Event::Complete { first: 1, results }]
+            if requests[0].operation_id == request.operation_id && results[0].is_err()));
+    }
+    #[tokio::test]
     async fn remote_unknown_upload_inventory_is_bounded_and_preserves_pending() {
         use object_store::ObjectStore;
         let temporary = tempfile::tempdir().unwrap();
@@ -312,7 +343,7 @@ mod tests {
         ];
         let mut failures = 0;
         loop {
-            match log.compact(snapshot(), 1).await {
+            match log.compact(snapshot(), 1, 0).await {
                 Err(RecordError::OutcomeUnknown(_)) => failures += 1,
                 Err(RecordError::Busy) => break,
                 other => panic!("unexpected compaction result: {other:?}"),
@@ -329,7 +360,7 @@ mod tests {
         assert_eq!(count, 6);
         assert_eq!(log.authority.read_head(&log.partition).unwrap().unwrap(), selected);
         for _ in 0..3 {
-            assert!(matches!(log.compact(snapshot(), 1).await, Err(RecordError::Busy)));
+            assert!(matches!(log.compact(snapshot(), 1, 0).await, Err(RecordError::Busy)));
             assert_eq!(log.authority.intake_inventory_count(&log.partition, log.epoch).unwrap(), count);
         }
         // Simulate a PUT arriving after DELETE: the state-5 identity stays known
@@ -361,8 +392,8 @@ mod tests {
         let selected = log.authority.read_head(&log.partition).unwrap().unwrap();
         std::fs::write(log.authority.database_path().with_extension("fail-intake-before-select"), b"").unwrap();
         let snapshot = || vec![serde_json::to_vec(&Event::Reset { base: 0, epoch_floor: 0, materialized_seq: 0 }).unwrap()];
-        for _ in 0..3 { assert!(matches!(log.compact(snapshot(), 0).await, Err(RecordError::Storage(_)))); }
-        for _ in 0..3 { assert!(matches!(log.compact(snapshot(), 0).await, Err(RecordError::Busy))); }
+        for _ in 0..3 { assert!(matches!(log.compact(snapshot(), 0, 0).await, Err(RecordError::Storage(_)))); }
+        for _ in 0..3 { assert!(matches!(log.compact(snapshot(), 0, 0).await, Err(RecordError::Busy))); }
         assert_eq!(log.authority.intake_inventory_count(&log.partition, log.epoch).unwrap(), 7);
         assert_eq!(log.authority.read_head(&log.partition).unwrap().unwrap(), selected);
         drop(log);
@@ -378,7 +409,7 @@ mod tests {
         let (mut log, _) = Log::open(source, "config", 128, 16384).await.unwrap();
         log.max_objects = 8;
         for _ in 0..20 {
-            log.compact(vec![serde_json::to_vec(&Event::Reset { base: 0, epoch_floor: 0, materialized_seq: 0 }).unwrap()], 0).await.unwrap();
+            log.compact(vec![serde_json::to_vec(&Event::Reset { base: 0, epoch_floor: 0, materialized_seq: 0 }).unwrap()], 0, 0).await.unwrap();
             assert_eq!(log.authority.intake_inventory_count(&log.partition, log.epoch).unwrap(), 3);
         }
     }
@@ -402,7 +433,7 @@ mod tests {
         ];
         let fault = log.authority.database_path().with_extension("fail-intake-after-select");
         std::fs::write(&fault, b"").unwrap();
-        assert!(matches!(log.compact(events, 0).await, Err(RecordError::OutcomeUnknown(_))));
+        assert!(matches!(log.compact(events, 0, 0).await, Err(RecordError::OutcomeUnknown(_))));
         assert!(matches!(log.append(&Event::Reset { base: 0, epoch_floor: 0, materialized_seq: 0 }).await,
             Err(RecordError::RecoveryRequired)));
         drop(log);

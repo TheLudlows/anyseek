@@ -127,17 +127,18 @@ impl DurableLog {
             Self::Remote(log) => log.append(event).await,
         }
     }
-    async fn compact(&mut self, events: Vec<Vec<u8>>, completion_slots: u64) -> Result<bool, RecordError> {
+    async fn compact(&mut self, events: Vec<Vec<u8>>, completion_slots: u64, completion_reserve: u64) -> Result<bool, RecordError> {
         match self {
             Self::Local(log) => {
                 let log = log.clone();
+                let completion_bytes = completion_headroom(completion_reserve, 1)?;
                 tokio::task::spawn_blocking(move || {
-                    log.lock().map_err(|_| RecordError::RecoveryRequired)?.compact(&events)
+                    log.lock().map_err(|_| RecordError::RecoveryRequired)?.compact(&events, completion_bytes)
                 }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))??;
                 Ok(true)
             }
             #[cfg(feature = "s3-object-store")]
-            Self::Remote(log) => { log.compact(events, completion_slots).await?; Ok(true) },
+            Self::Remote(log) => { log.compact(events, completion_slots, completion_headroom(completion_reserve, 5)?).await?; Ok(true) },
         }
     }
     fn admit_accept(&self, bytes: u64, completion_reserve: u64, completion_slots: u64) -> Result<(), RecordError> {
@@ -160,6 +161,12 @@ impl DurableLog {
             Ok(())
         }
     }
+}
+// Match acceptance's backend expansion factor and fixed WAL rollover margin.
+// Empty pending sets need no completion space reservation.
+fn completion_headroom(reserve: u64, factor: u64) -> Result<u64, RecordError> {
+    if reserve == 0 { return Ok(0); }
+    reserve.checked_mul(factor).and_then(|n| n.checked_add(4096)).ok_or(RecordError::Busy)
 }
 fn request_digest(request: &RecordWrite) -> Result<[u8; 32], RecordError> {
     // Preserve structural JSON equality: object insertion order is irrelevant.
@@ -204,7 +211,7 @@ impl Spool {
             };
             events.push(serde_json::to_vec(&event).map_err(storage)?);
         }
-        match self.log.compact(events, (self.rows.len() - self.completed) as u64).await {
+        match self.log.compact(events, (self.rows.len() - self.completed) as u64, self.completion_reserve).await {
             Ok(true) => {},
             Ok(false) | Err(RecordError::Busy) => return Ok(()),
             Err(error) => return Err(error),

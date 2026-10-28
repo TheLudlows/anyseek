@@ -111,5 +111,7 @@
   "record::remote_checkpoint::tests::first_checkpoint_rejects_corrupt_remote_wal_without_replacing_head",
   "record::state_values::admission_count_tests::admission_counts_follow_replacement_edit_clone_and_legacy_wire",
   "record::state_values::admission_count_tests::restored_admission_counts_reject_corrupt_derived_cache",
-  "record::state_values::admission_count_tests::ttl_deadline_bound_skips_scan_and_tracks_early_update_extension_delete_restore"
+  "record::state_values::admission_count_tests::ttl_deadline_bound_skips_scan_and_tracks_early_update_extension_delete_restore",
+  "record::ingest_log::tests::compaction_preserves_pending_completion_byte_headroom",
+  "record::ingestion::remote::tests::remote_compaction_preserves_pending_completion_byte_headroom"
 ]
