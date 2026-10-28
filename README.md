@@ -64,5 +64,3 @@ python3 scripts/check_docs_brand.py
 ```
 
 [开发与验证指南](docs/development.md)包含独立核心、rustdoc、HTTP/Chromium 和故障测试命令。[Record 语义](docs/record-model.md)与[存储协议](docs/storage.md)说明现行不变量；[后续路线](docs/roadmap.md)列出剩余工作。
-
-项目源自 SeekStorm，独立维护。保留[上游归属](UPSTREAM.md)与第三方许可，使用 [Apache-2.0](LICENSE) 许可证。
