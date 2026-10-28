@@ -145,6 +145,13 @@ impl Engine {
                     .join(".test-vector-consumer-panic-after-append")
                     .exists();
                 let mut shard = component.write().await;
+                // Global lock order: component guard, then I/O. No index/shard
+                // lock is acquired while this permit is held. Wait before identity.
+                let permit = match crate::resources::Scope::current() {
+                    Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(storage)?),
+                    _ => None,
+                };
+                let append = async {
                 let outcome = std::panic::AssertUnwindSafe(async {
                     if shard.failed {
                         return Err(RecordError::RecoveryRequired);
@@ -188,6 +195,11 @@ impl Engine {
                     cursors.fail(error);
                 }
                 result
+                };
+                match permit {
+                    Some(permit) => permit.run_async(append).await,
+                    None => append.await,
+                }
             }
         }
     }
@@ -399,3 +411,7 @@ impl Consumer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "index_consumer_io_tests.rs"]
+mod io_tests;

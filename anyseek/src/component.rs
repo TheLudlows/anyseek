@@ -166,6 +166,16 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
 
 pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&Vec<SchemaField>,shards:Option<usize>)->Result<IndexArc,String>{
     if shards!=Some(1) {return Err("Record component requires one physical partition".into());}
+    let permit = match crate::resources::Scope::current() {
+        Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(|e|e.to_string())?),
+        _ => None,
+    };
+    let create = || create_component_files(path, meta, schema);
+    match permit { Some(permit) => permit.run(create), None => create() }
+}
+// Serial local file construction only: no acquired Index/Shard locks, native
+// writer, spawned task, or remote I/O can be reached while this loan is held.
+fn create_component_files(path:&Path,meta:IndexMetaObject,schema:&[SchemaField])->Result<IndexArc,String>{
     fs::create_dir(path).map_err(|e|e.to_string())?;
     // Keep the independently authenticated schema file for package validation.
     let schema_file=File::create(path.join("schema.json")).map_err(|e|e.to_string())?;
@@ -234,6 +244,18 @@ impl Shard {
         }
     }
     async fn commit_component(&mut self)->std::io::Result<()> {
+        let permit = match crate::resources::Scope::current() {
+            Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(std::io::Error::other)?),
+            _ => None,
+        };
+        let result = match permit {
+            Some(permit) => permit.run_async(self.commit_component_admitted()).await,
+            None => self.commit_component_admitted().await,
+        };
+        if result.is_err() { self.failed = true; }
+        result
+    }
+    async fn commit_component_admitted(&mut self)->std::io::Result<()> {
         if self.uncommitted {
             if self.is_vector_indexing { self.commit_vector_shard().await?; }
             if !self.is_last_level_incomplete {self.vector_levels+=1;}
@@ -251,6 +273,10 @@ impl Shard {
         serde_json::to_writer(&file,&descriptor)?;file.sync_all()?;
         Ok(())
     }
+    #[cfg(test)]
+    pub(crate) fn readonly_metadata_for_test(&mut self) {
+        self.facets_file = File::open(self.path.join(FACETS)).unwrap();
+    }
     fn ensure_metadata_capacity(&mut self, documents: usize)->Result<(),String>{
         if self.facets_size_sum==0 {return Ok(());}
         let bytes=documents.div_ceil(ROARING_BLOCK_SIZE).checked_mul(ROARING_BLOCK_SIZE)
@@ -264,6 +290,16 @@ impl Shard {
         Ok(())
     }
     pub(crate) async fn append(&mut self, document:Document)->Result<(),String>{
+        let permit = match crate::resources::Scope::current() {
+            Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(|e|e.to_string())?),
+            _ => None,
+        };
+        match permit {
+            Some(permit) => permit.run_async(self.append_admitted(document)).await,
+            None => self.append_admitted(document).await,
+        }
+    }
+    async fn append_admitted(&mut self, document:Document)->Result<(),String>{
         let ordinal=self.indexed_doc_count;
         if ordinal>0 && ordinal.is_multiple_of(ROARING_BLOCK_SIZE) && self.uncommitted {self.commit_component().await.map_err(|e|e.to_string())?;}
         // The full input is consumed by this call, never stored in the component.

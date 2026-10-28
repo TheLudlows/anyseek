@@ -157,5 +157,11 @@
   "resources::tests::journal_io_loan_is_synchronous_scoped_and_covers_both_witnesses",
   "resources::tests::file_io_async_loan_survives_yield_without_escaping_to_children",
   "record::indexer::tests::checkpoint_io_loan_waits_after_native_work_and_preserves_suffix",
-  "record::indexer::tests::compact_native_probe_releases_io_before_waiting_for_shard_statistics"
+  "record::indexer::tests::compact_native_probe_releases_io_before_waiting_for_shard_statistics",
+  "record::index_consumers::io_tests::vector_io_waits_before_identity_and_metadata_growth",
+  "record::index_consumers::io_tests::component_commit_waits_then_finishes_vector_and_descriptor_under_one_loan",
+  "record::index_consumers::io_tests::vector_real_metadata_io_failure_still_fences_component_and_cursor",
+  "record::index_consumers::io_tests::component_real_vector_write_failure_still_fences_after_partial_commit",
+  "record::index_consumers::io_tests::component_guard_owner_can_finish_io_while_consumer_waits_for_guard",
+  "record::index_consumers::io_tests::successor_component_creation_waits_before_touching_candidate_and_keeps_old_writer"
 ]
