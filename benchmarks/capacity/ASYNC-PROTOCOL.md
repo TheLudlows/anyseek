@@ -111,3 +111,10 @@ Compact phases are not default coverage requirements. They require a separate
 explicit-Compact experiment before any corresponding hold-time claim.
 Debug test phase timings are supplementary regression evidence and are not
 release benchmark measurements.
+
+The harness explicitly sets `RUST_LOG=error,anyseek::record::maintenance=info`
+for the services: the execution environment's inherited error-only filter would
+otherwise suppress maintenance evidence. This is logging configuration only.
+Failed runs retain partial acceptance/completion latency, accepted-record counts,
+verified receipt/batch counts and the last observed intake progress; partial
+measurements must not be presented as a completed paired comparison.

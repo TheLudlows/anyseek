@@ -87,6 +87,9 @@ def run(engine, rows, queries, out, batch_size):
     submits, completes, http_submits = [], [], []
     summary['submit_attempts'] = 0
     summary['submit_busy_rejections'] = 0
+    summary['durably_accepted_records'] = 0
+    summary['verified_business_receipts'] = 0
+    summary['log_filter'] = os.environ.get('RUST_LOG')
     try:
         summary['startup_ms'] = e.start()
         e.create()
@@ -109,9 +112,15 @@ def run(engine, rows, queries, out, batch_size):
                 code, result, ms, attempts = request_with_busy_wait(e, 'POST', '/api/v1/index/bench/ingest', {'records': writes})
                 e.event('accept', offset=offset, code=code, result=result, ms=ms)
                 assert code == 202 and len(result['receipts']) == len(writes), result
+                summary['durably_accepted_records'] += len(writes)
+                summary['submit_attempts'] += len(attempts)
+                summary['submit_busy_rejections'] += len(attempts) - 1
+                http_submits.append(attempts[-1]['http_ms'])
+                submits.append(ms)
                 until = time.monotonic() + 180
                 while True:
                     progress = e.request('GET', '/api/v1/index/bench/ingest')[1]
+                    summary['last_ingest_progress'] = progress
                     if progress['blocked'] or progress['index_error']:
                         raise RuntimeError(progress)
                     if (progress['pending'] == 0 and progress['completed_seq'] == progress['durable_seq']
@@ -128,17 +137,19 @@ def run(engine, rows, queries, out, batch_size):
                     oid = w['operation_id']
                     status = e.request('GET', f"/api/v1/index/bench/ingest/operation/{oid['epoch']}/{oid['nonce']}")[1]['status']
                     assert status and status['receipt'] and status['error'] is None, status
+                    summary['verified_business_receipts'] += 1
                 e.event('published', progress=progress)
             else:
                 code, result, ms, attempts = request_with_busy_wait(e, 'POST', '/indexes/bench/documents', docs)
                 assert code == 202, result
+                summary['durably_accepted_records'] += len(docs)
+                summary['submit_attempts'] += len(attempts)
+                summary['submit_busy_rejections'] += len(attempts) - 1
+                http_submits.append(attempts[-1]['http_ms'])
+                submits.append(ms)
                 task = e.task(result)
                 complete_ms = (time.perf_counter() - batch_started) * 1000
                 e.event('accept_and_complete', offset=offset, result=result, task=task, ms=ms)
-            summary['submit_attempts'] += len(attempts)
-            summary['submit_busy_rejections'] += len(attempts) - 1
-            http_submits.append(attempts[-1]['http_ms'])
-            submits.append(ms)
             completes.append(complete_ms)
             print(engine, 'completed', offset + len(docs), flush=True)
         summary['load_wall_seconds_including_validation'] = time.perf_counter() - started
@@ -192,6 +203,10 @@ def run(engine, rows, queries, out, batch_size):
         raise
     finally:
         e.close()
+        summary['batch_acceptance_including_busy_wait'] = stats(submits)
+        summary['successful_acceptance_http_only'] = stats(http_submits)
+        summary['batch_published_completion'] = stats(completes)
+        summary['verified_published_batches'] = len(completes)
         summary['peak_rss_kib'] = max((r['rss_kib'] for r in e.resources), default=0)
         summary['disk'] = disk(e.data)
         if engine == 'anyseek':
@@ -223,6 +238,8 @@ def main():
     os.environ['TOKENIZER_ANYSEEK_BINARY'] = str(a.anyseek.resolve())
     os.environ['TOKENIZER_MEILI_BINARY'] = str(a.meili.resolve())
     os.environ['TOKENIZER_PROFILE'] = 'JiebaMixedV1'
+    # The execution host may inherit an error-only filter, hiding phase evidence.
+    os.environ['RUST_LOG'] = 'error,anyseek::record::maintenance=info'
     rows = json.loads(a.data.read_text())[:a.take]
     assert len(rows) == a.take, 'source sample is smaller than requested paired corpus'
     queries = json.loads(Path(__file__).with_name('queries-393.json').read_text())

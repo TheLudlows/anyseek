@@ -23,14 +23,14 @@
 
 | 检查 | 当前结果 |
 | --- | --- |
-| Linux 完整 lib（固定测试二进制） | 本轮中间版本完成：376 通过、8 失败、12 忽略；失败已逐项定位并专项修复，须在最终代码重跑 |
-| 服务端及全部其他 targets | `ce525b8` 的 34 个非 lib targets 通过；部分初跑工作目录错误，使用各 Cargo package 目录重跑通过；不代替最终版本复验 |
-| 明确核心回归清单 | 随每步增加专项；最终清单与最终二进制待统一核验 |
-| 独立 core 默认/无默认特性 | `53749ee` 两种独立依赖图与编译均通过 |
-| 文档示例 | `53749ee` doctest 9 项通过 |
+| Linux 完整 lib（固定测试二进制） | `08f485d`：417 通过、0 失败、12 忽略，1549.27 秒 |
+| 服务端及全部其他 targets | `08f485d` 全部 34 个非 lib targets 通过；总计 35 targets、524 通过、0 失败、13 忽略 |
+| 明确核心回归清单 | 最终二进制包含全部 146 个清单用例；Linux CI 清单已通过；Windows 无断言失败，但远端长测运行时触及 30 分钟 job 上限被取消 |
+| 独立 core 默认/无默认特性 | `08f485d` 两种独立依赖图与编译均通过 |
+| 文档示例 | `08f485d` doctest 9 项通过 |
 | 静态文档、词法覆盖、Python、diff | `53749ee` 文档链接/品牌、完整词法矩阵源检查、Python 语法和 diff 通过；汇总更新后再检查 |
-| 同数据同资源 Meilisearch 对比 | 等待最终构建，仅测最终代码；旧 release 二进制不用于验收 |
-| 远端最终 SHA 与 CI | Draft PR 已发布；最终 SHA 的完整 CI 尚未验收 |
+| 同数据同资源 Meilisearch 对比 | `08f485d` 基准暴露后台合并/native 写入 I/O 配额争用，尚未完成成对对比；修复后重新冻结 release |
+| 远端最终 SHA 与 CI | `08f485d` static、双平台 lexical、Ubuntu core 通过；Windows core 被 job 时限取消，full-acceptance skipped |
 
 最初诊断回归发现历史维护边界测试不符合异步 Busy、可变 tail 和合法时钟契约，均保留测试并修正其设置/断言；也发现运行中测试二进制被并行 cargo 替换会使子进程用例 ENOENT。最终运行使用固定副本，避免这类验证干扰。
 
@@ -79,3 +79,9 @@ generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock �
 跨平台 CI 修复：Windows 串行磁盘重扫的既有断言得到 7 而非 8，目录枚举未反映仍打开文件的增长。Windows 分支改用 metadata-only 文件句柄读取真实长度，非 Windows 路径不变；不修改原断言或在测试里强制 flush。Linux build_budget 9 项通过，Windows 结果等待新 SHA CI。此差异对应 [Microsoft 对 NTFS 目录枚举属性时效的说明](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-findfirstfilea)。`53749ee` 固定 Linux 全量运行继续收集；不会将旧二进制称作更新后 SHA 的重新执行。
 
 完整回归终态与修复：`53749ee` 库测试完成 413 通过、4 失败、12 忽略（1533.54 秒），失败集中于三个 checkpoint 子进程边界/未认证清理夹具，以及 sealed owner 的 Compact。新 `checkpoint_with_tail` 在目录选择前已写完整 certificate/suffix，因此未认证清理夹具改为调用仍存在的旧发布路径制造真实未认证状态；新路径补齐 certified/switched/reclaimed 的真实测试中断点。Compact 恢复对 sealed cut 的合法维护，保留 seal 和永久输出屏障；普通 Index/Automatic 仍拒绝 sealed。四项原失败及 takeover、seal、indexer、checkpoint-with-tail 相邻组均专项通过，不放宽超时、不删除正确性断言。修复后重跑最终完整固定二进制回归，不能把 413/4 当作通过。
+
+最终库回归证据：`08f485d` 的固定二进制完整运行再次通过三项原生复用原断言（direct tail seal、pending seals 隔离、successive flush）及四项 checkpoint/takeover 修复。12 个 ignored 中，11 个是由已执行父测试启动的子进程入口，另 1 个是真实 S3 条件测试；不能把忽略的真实云测试记为云验收。所有长测保留原数据规模。
+
+基准发现的待修复问题：`08f485d` 在 1040 条持久接收、1024 条完成回执及索引核验后，后台合并占用 Background I/O 配额导致 native Directory 写入遇到 Busy，索引进入失败状态。该运行未完成查询、重启或 Meilisearch 对比，不构成性能验收。需在实际写入的资源准入边界处理争用，不能直接重试已部分执行的索引批次或隐藏真实 I/O 错误。
+
+CI 时限诊断：Windows core 的本地 long-suffix 用例通过（734.37 秒），远端 long-suffix 仍在运行时整个 job 达到 30 分钟上限；GitHub annotation 明确报告 job 超时，没有用例断言失败。仅该矩阵 job 的预算调整为 45 分钟，保留测试数据规模、用例超时和 runner 数量；调整后仍须验证新的终态。
