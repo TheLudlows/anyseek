@@ -566,7 +566,6 @@ mod tests {
         drop(leases);
         assert_eq!(counter.load(Ordering::Acquire), before);
     }
-}
     #[test]
     fn concurrent_rescan_preserves_inflight_charge_and_serial_rescan_refunds_retired_files() {
         let root=root();
@@ -591,3 +590,4 @@ mod tests {
         assert_eq!(serial.disk.ledger.lock().unwrap().used,8);
         drop(candidate);drop(retained);drop(serial);fs::remove_dir_all(root).unwrap();
     }
+}
