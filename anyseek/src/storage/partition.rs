@@ -457,10 +457,16 @@ impl PartitionJournal {
         if self.path.join(".test-checkpoint-after-certificate").exists() {
             return Err(CreateError::PublicationUnknown(io::Error::other("injected after checkpoint certificate with suffix")));
         }
+        #[cfg(test)]
+        crash_boundary("certified");
         let previous = std::mem::replace(&mut self.journal,candidate);
         self.generation = next;
         drop(previous);
+        #[cfg(test)]
+        crash_boundary("switched");
         if let Err(error) = self.clean_obsolete() { log::warn!("checkpoint published; cleanup pending: {error}"); }
+        #[cfg(test)]
+        crash_boundary("reclaimed");
         Ok(())
     }
 

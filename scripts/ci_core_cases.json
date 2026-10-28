@@ -140,5 +140,9 @@
   "record::ingestion::remote::tests::unlocked_snapshot_spare_reservation_preserves_pending_completion",
   "record::ingestion::tests::remote_snapshot_low_inventory_drains_before_first_upload",
   "record::ingestion::tests::remote_snapshot_busy_clears_drain_and_spare_and_finish_returns",
-  "record::ingestion::remote::tests::unlocked_snapshot_exact_chunk_boundary_never_emits_empty_extra_chunk"
+  "record::ingestion::remote::tests::unlocked_snapshot_exact_chunk_boundary_never_emits_empty_extra_chunk",
+  "record::tests::record_checkpoint_sync_failure_fences_and_recovery_failure_preserves_authority",
+  "record::tests::record_online_checkpoint_process_crashes_recover_and_accept_new_writes",
+  "record::tests::record_takeover_seal_successor_preserves_final_state_and_rejects_archives",
+  "record::tests::record_uncertified_generation_cleanup_can_be_interrupted_again"
 ]

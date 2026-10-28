@@ -2897,6 +2897,9 @@ mod tests {
         let mut other = binding.clone(); other.target_collection_id = "different".into();
         assert!(matches!(p.seal_for_takeover(other).await, Err(RecordError::Conflict(_))));
         p.compact_journal().await.unwrap();
+        assert!(p.output_permit().is_err(), "compacting a sealed cut must not reopen output");
+        assert!(p.get("ordinary").await.is_err());
+        assert_eq!(p.seal_for_takeover(binding.clone()).await.unwrap(), seal);
         p.checkpoint(&copied).await.unwrap();
         drop(old_owner); drop(p);
         let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
@@ -3778,9 +3781,15 @@ mod tests {
         let partition = RecordPartition::open(&location, config().max_journal_bytes)
             .await
             .unwrap();
+        // Old generations published the directory before appending PUBLISHED.
+        // Keep constructing that real on-disk state for recovery compatibility
+        // tests; owned compaction now publishes certificate+suffix atomically.
+        let legacy_fixture=std::env::var_os("ANYSEEK_CHECKPOINT_UNCERTIFIED_FIXTURE").is_some();
         if std::env::var_os("ANYSEEK_CHECKPOINT_EXPECT_UNKNOWN").is_some() {
+            let result=if legacy_fixture {partition.inner.lock().await.publish_anchor().await}
+                else{partition.compact_journal().await};
             assert!(matches!(
-                partition.compact_journal().await,
+                result,
                 Err(RecordError::OutcomeUnknown(_))
             ));
             assert!(matches!(
@@ -3790,7 +3799,8 @@ mod tests {
             std::process::exit(77);
         }
         if std::env::var_os("ANYSEEK_PARTITION_RECOVER").is_none() {
-            partition.compact_journal().await.unwrap();
+            if legacy_fixture {partition.inner.lock().await.publish_anchor().await.unwrap();}
+            else {partition.compact_journal().await.unwrap();}
         }
         panic!("checkpoint crash boundary not reached");
     }
@@ -3887,6 +3897,7 @@ mod tests {
             };
             let output = worker()
                 .env("ANYSEEK_JOURNAL_CRASH", "initial_published")
+                .env("ANYSEEK_CHECKPOINT_UNCERTIFIED_FIXTURE", "1")
                 .output()
                 .unwrap();
             assert_eq!(output.status.code(), Some(73));
@@ -4046,6 +4057,15 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(77), "{output:?}");
+        // The new owned path's rename already includes PUBLISHED and its tail.
+        // Separately create a legacy uncertified generation so the following
+        // interrupted-retirement assertions exercise their intended disk state.
+        let output = worker()
+            .env("ANYSEEK_CHECKPOINT_EXPECT_UNKNOWN", "1")
+            .env("ANYSEEK_CHECKPOINT_UNCERTIFIED_FIXTURE", "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(77), "legacy fixture: {output:?}");
         // Interrupted recovery retirement also must not serve or erase the
         // old certified authority; a subsequent recovery is safe.
         let output = worker()

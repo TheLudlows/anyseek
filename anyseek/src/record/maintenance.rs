@@ -349,7 +349,7 @@ impl SourceCapture {
             .checked_mul((2*std::mem::size_of::<segment::Package>()) as u64).ok_or_else(||storage("source package inventory overflow"))?).map_err(storage)?;
         Ok(Self{cut,proof:SourceProof{anchor:inner.anchor.clone(),pending:inner.index.pending_seals.clone(),frames:Vec::new(),_memory:memory}})
     }
-    pub(super) async fn collect(mut self,owner:&Arc<Mutex<Inner>>,id:u128,deadline:std::time::Instant)->Result<SourceProof,RecordError> {
+    pub(super) async fn collect(mut self,owner:&Arc<Mutex<Inner>>,id:u128,deadline:std::time::Instant,allow_sealed:bool)->Result<SourceProof,RecordError> {
         let _memory=crate::storage::build_budget::reserve_memory(crate::storage::journal::READ_CHUNK as u64).map_err(storage)?;
         let mut buffer=vec![0;crate::storage::journal::READ_CHUNK];
         let mut scan=self.cut.scan();let mut offset=0;let mut published=false;
@@ -361,7 +361,7 @@ impl SourceCapture {
             {
                 let mut inner=owner.lock().await;
                 let _phase=Phase::new("source_chunk_read_locked",inner.state.seq);
-                if !inner.healthy || inner.state.sealed_for.is_some() {return Err(RecordError::RecoveryRequired);}
+                if !inner.healthy || (!allow_sealed && inner.state.sealed_for.is_some()) {return Err(RecordError::RecoveryRequired);}
                 if inner.background.as_ref().is_none_or(|tail|tail.id!=id || tail.overflowed) {return Err(RecordError::Busy);}
                 if let Err(error)=inner.journal.read_cut_chunk(&self.cut,offset,&mut buffer[..length]) {
                     // read_cut_chunk restores the append cursor before returning
