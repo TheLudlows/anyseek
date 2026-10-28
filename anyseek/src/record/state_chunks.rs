@@ -43,12 +43,28 @@ impl Delta {
         root: &Path, config: &RecordConfig, pool: &mut PoolBuilder,
         journal: &mut PartitionJournal, parent: &anchor::Reference, identity: String,
     ) -> Result<Option<Self>, RecordError> {
+        Self::write_from(root,config,pool,parent,identity,|accept|journal.visit_committed(accept))
+    }
+    pub(super) fn write_captured(root:&Path,config:&RecordConfig,pool:&mut PoolBuilder,
+        frames:&[Vec<u8>],parent:&anchor::Reference,identity:String)->Result<Option<Self>,RecordError> {
+        Self::write_from(root,config,pool,parent,identity,|accept|{
+            for frame in frames {
+                // The live journal visitor owns this scratch lease while its
+                // callback decodes. Captured frames retain only raw bytes.
+                let _decode=reserve_memory((frame.len() as u64).checked_mul(32)
+                    .ok_or_else(||std::io::Error::other("captured delta decode overflow"))?)?;
+                accept(frame)?;
+            }Ok(())
+        })
+    }
+    fn write_from(root:&Path,config:&RecordConfig,pool:&mut PoolBuilder,parent:&anchor::Reference,identity:String,
+        visit:impl FnOnce(&mut dyn FnMut(&[u8])->std::io::Result<()>)->std::io::Result<()>)->Result<Option<Self>,RecordError> {
         let mut writer = Writer { root, config, pool, file: None, chunks: Vec::new(), entries: 0, expanded: 0,
             metadata:descriptor_admission(config)?, };
         let mut digest = PieceDigest::new();
         let mut first = true;
         let mut failure = None;
-        let visited = journal.visit_committed(|bytes| {
+        let visited = visit(&mut |bytes| {
             let result = (|| -> Result<(), RecordError> {
                 let entry: Entry = serde_json::from_slice(bytes).map_err(storage)?;
                 if first {

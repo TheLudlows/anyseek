@@ -201,9 +201,14 @@ impl Reference {
     }
     pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
         let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",state.seq);checkpoint_codec::StateEncoding::new(state)?};
-        Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal).await
+        Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal,None).await
     }
-    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
+    pub(super) async fn prepare_captured(root:&Path,config:&RecordConfig,state:&State,prior:Closure,
+        previous:Option<&Reference>,frames:&[Vec<u8>])->Result<Self,RecordError> {
+        let encoded=checkpoint_codec::StateEncoding::new(state)?;
+        Self::prepare_encoded(root,config,&encoded,prior,previous,None,false,None,Some(frames)).await
+    }
+    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>,captured:Option<&[Vec<u8>]>)->Result<Self,RecordError>{
         let state=encoded.state();
         let _phase=maintenance::Phase::new("anchor_prepare",state.seq);
         let id=format!("{:032x}",rand::random::<u128>());
@@ -232,14 +237,17 @@ impl Reference {
         let mut base_reason=if compact {"forced_full_base"} else if pool_compaction {"payload_pool_bound"}
             else if state.private_cleanup_pending {"private_cleanup"} else {"missing_predecessor_or_journal"};
         if !compact && !pool_compaction && !state.private_cleanup_pending {
-            if let (Some(previous),Some(journal))=(previous,journal) {
+            if let Some(previous)=previous.filter(|_|journal.is_some() || captured.is_some()) {
                 base_reason="missing_captured_proof";
                 if previous.captured.get().is_some() {
                     let (_,manifest,_,mut manifest_lease)=previous.authenticated_manifest(root,config.max_journal_bytes)?;
                     base_reason="delta_count_bound";
                     if manifest.state.deltas.len()<anchor_image::MAX_DELTAS {
                         base_reason="empty_journal_suffix";
-                        if let Some(delta)=state_chunks::Delta::write(&prepared,config,&mut pool,journal,previous,previous.id.clone())? {
+                        let delta=if let Some(frames)=captured {
+                            state_chunks::Delta::write_captured(&prepared,config,&mut pool,frames,previous,previous.id.clone())?
+                        }else{state_chunks::Delta::write(&prepared,config,&mut pool,journal.unwrap(),previous,previous.id.clone())?};
+                        if let Some(delta)=delta {
                             let growth=checkpoint_codec::json_length(&delta)?
                                 .checked_add(id.len()+128)
                                 .and_then(|n|n.checked_add((manifest.state.deltas.len()+1)*std::mem::size_of::<anchor_image::Block>()))
@@ -290,7 +298,7 @@ impl Reference {
                 drop(metadata_lease);
                 drop(state_blocks);
                 drop(previous_capture);
-                return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None)).await;
+                return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None)).await;
             }
             return Err(storage("complete anchor manifest byte budget exceeded"));
         }
@@ -521,7 +529,7 @@ pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&Stat
     ->Result<(Vec<u8>,crate::storage::build_budget::MemoryLease,crate::storage::build_budget::DiskScope),RecordError>{
     let disk=crate::storage::build_budget::DiskScope::begin(root,closure_limit(config.max_journal_bytes)?).map_err(storage)?;
     let encoded=checkpoint_codec::StateEncoding::new(state)?;
-    let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None).await?;
+    let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None,None).await?;
     let verified=reference.load_verified_encoded(root,config,&encoded).await?;
     drop(verified); // Close all mappings before later Windows root publication.
     let estimate=checkpoint_codec::json_length(&reference)?.checked_add(64).ok_or_else(||storage("snapshot authority overflow"))?;
@@ -664,7 +672,7 @@ impl Inner {
         let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",next.seq);checkpoint_codec::StateEncoding::new(next)?};
         let snapshot_bytes=encoded.checkpoint_length(&self.config)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
-        let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None}).await?;
+        let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None},None).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));

@@ -1697,14 +1697,15 @@ impl RecordPartition {
 
     /// Publish an authenticated state/index anchor, retaining canonical payload
     /// objects and retiring the covered WAL only after its certificate is durable.
+    /// Construction runs in an owned background job while writes continue.
+    /// Cancellation leaves accepted work running; the result is its captured cut.
+    /// Uses a 300-second build deadline. Saturated admission or failure to reach
+    /// a stable publication cut within the deadline returns `Busy`.
+    /// Authenticated State deltas and payload objects are reused where eligible.
+    /// Native indexes are rebuilt privately, requiring CPU and temporary disk
+    /// for the complete indexed cut in addition to the currently selected view.
     pub async fn compact_journal(&self) -> Result<u64, RecordError> {
-        let permit=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
-        let owner=self.inner.clone();
-        crate::resources::spawn(async move {
-            let _permit=permit;let mut inner=owner.lock().await;
-            if !inner.healthy{return Err(RecordError::RecoveryRequired);}
-            inner.publish_anchor().await
-        }).await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?
+        self.start_compact_job()?.finish().await
     }
 
     /// Create an independently recoverable snapshot at a new location. No live

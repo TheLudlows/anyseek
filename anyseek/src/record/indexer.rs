@@ -8,6 +8,9 @@ use std::{sync::LazyLock, time::{Duration, Instant}};
 pub(super) static WORKERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(2)));
 const MAX_DEADLINE: Duration = Duration::from_secs(300);
 
+#[derive(Clone,Copy,Eq,PartialEq)]
+enum JobMode { Index, Automatic, Compact }
+
 fn crash_boundary(point:&str) {
     #[cfg(test)]
     if std::env::var("ANYSEEK_INDEXER_TEST_CRASH").as_deref()==Ok(point) { std::process::exit(93); }
@@ -86,6 +89,13 @@ impl RecordPartition {
         })})
     }
     pub(super) fn start_index_job(&self,timeout:Duration,automatic:bool)->Result<IndexJob,RecordError> {
+        self.start_owned_index_job(timeout,if automatic {JobMode::Automatic}else{JobMode::Index})
+    }
+    pub(super) fn start_compact_job(&self)->Result<IndexJob,RecordError> {
+        self.start_owned_index_job(MAX_DEADLINE,JobMode::Compact)
+    }
+    fn start_owned_index_job(&self,timeout:Duration,mode:JobMode)->Result<IndexJob,RecordError> {
+        let automatic=mode==JobMode::Automatic;
         if timeout.is_zero() || timeout > MAX_DEADLINE {
             return Err(RecordError::Rejected("index build deadline must be within 1ns..=300s".into()));
         }
@@ -106,7 +116,7 @@ impl RecordPartition {
                 if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
                 inner.index.drain_indexes().await?;
-                if !automatic {inner.advance_time().await?;}
+                if mode==JobMode::Index {inner.advance_time().await?;}
                 inner.reclaim_anchor_objects().await?;
                 let estimate = (inner.snapshot_bytes as u64).checked_mul(4)
                     .ok_or_else(||storage("index snapshot estimate overflow"))?;
@@ -123,7 +133,7 @@ impl RecordPartition {
                 let limit = inner.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
                     .ok_or_else(||storage("index disk budget overflow"))?;
                 let disk = crate::storage::build_budget::DiskScope::begin(&root,limit).map_err(storage)?;
-                let source=if automatic {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
+                let source=if mode!=JobMode::Index {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
                 // Complete fallible local capture before acquiring the remote pin.
                 let snapshot={let _phase=maintenance::Phase::new("snapshot_clone_locked",inner.state.seq);
                     inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?};
@@ -158,9 +168,14 @@ impl RecordPartition {
             pause(&root,timeout).await;
             let result = async {
                 if started.elapsed() >= timeout { return Err(RecordError::Busy); }
-                if let Some(source)=source {
+                let source=if let Some(source)=source {
                     let source=source.collect(&owner,id,started+timeout).await?;
-                    source.verify(&root,&config,&snapshot)?;
+                    source.verify(&root,&config,&snapshot).map_err(|error| {
+                        if mode==JobMode::Compact && !matches!(error,RecordError::Busy) {
+                            log::warn!("compact source authentication failed: {error}");
+                            RecordError::RecoveryRequired
+                        }else{error}
+                    })?;
                     #[cfg(feature="s3-object-store")]
                     if let Some(remote)=&remote {
                         source.verify_remote(remote,&root,&config).await.map_err(|error| {
@@ -170,14 +185,28 @@ impl RecordPartition {
                             }
                         })?;
                     }
-                }
+                    Some(source)
+                }else{None};
+                let source=if mode==JobMode::Compact {source}else{None};
                 intent.apply(&mut snapshot,&config)?;
                 let prior=if intent.rewrites_payloads(){Default::default()}else{prior};
-                let reference = anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true,None).await?;
+                let reference = if mode==JobMode::Compact {
+                    let source=source.as_ref().ok_or(RecordError::RecoveryRequired)?;
+                    anchor::Reference::prepare_captured(&root,&config,&snapshot,prior,source.anchor(),source.frames()).await?
+                }else{anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true,None).await?};
+                drop(source);
+                #[cfg(test)]
+                if mode==JobMode::Compact && root.join(".test-anchor-reject-prepared").exists() {
+                    return Err(storage("injected candidate rejection before certificate"));
+                }
                 // The pinned cut already owns complete history. Verify the
                 // authenticated package against it and transfer that same owner
                 // into the candidate instead of decoding a duplicate State.
                 let loaded = reference.load_captured(&root, config.clone(), snapshot).await?;
+                #[cfg(test)]
+                if mode==JobMode::Compact && root.join(".test-anchor-reject-loaded").exists() {
+                    return Err(storage("injected loaded candidate rejection before certificate"));
+                }
                 let payloads = loaded.payloads;
                 let mut index = view::RetrievalView::single(loaded.index);
                 let mut ordinals = loaded.ordinals;
@@ -281,6 +310,12 @@ impl RecordPartition {
                     let Inner{journal,background,..} = &mut *inner;
                     journal.checkpoint_with_tail(&certificate,&background.as_ref().unwrap().entries)
                 };
+                #[cfg(test)]
+                let journal_result=if mode==JobMode::Compact && root.join(".test-checkpoint-before-certificate").exists() {
+                    journal_result.map_err(|error|match error {
+                        CreateError::NotPublished(error)=>CreateError::PublicationUnknown(error),error=>error,
+                    })
+                }else{journal_result};
                 if let Err(error) = journal_result {
                     #[cfg(feature="s3-object-store")]
                     if remote.is_some() { return Err(RecordError::DurablePending(inner.state.seq)); }
@@ -337,6 +372,14 @@ impl RecordPartition {
                 if let Some(active) = inner.remote.as_mut() {
                     if let Err(error) = active.authority.lock().await.cancel_index_build(&remote.build) {
                         log::warn!("index build pin cleanup pending: {error}");
+                    }
+                }
+                if mode==JobMode::Compact && result.is_ok() && inner.healthy {
+                    let _phase=maintenance::Phase::new("compact_remote_gc_locked",inner.state.seq);
+                    if let Some(active)=inner.remote.as_mut() {
+                        if let Err(error)=active.collect_objects().await {
+                            log::warn!("remote object collection pending: {error}");
+                        }
                     }
                 }
             }
@@ -418,6 +461,58 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5),async {
             while !root.join(".test-indexer-started").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
         }).await.unwrap();
+    }
+    #[tokio::test]
+    async fn compact_owned_job_preserves_time_receipts_and_concurrent_same_seq_trim() {
+        struct Fixed(u64);
+        impl temporal::Clock for Fixed {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0)}}
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.inner.lock().await.clock=Arc::new(Fixed(1_000));
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().change_feed.retention_ms));
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        let job=p.start_compact_job().unwrap();wait_started(&root).await;
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.time_watermark_ms,1_000);assert_eq!(inner.state.feed.floor,0);}
+        let request=write("second","b","beta",ExpectedVersion::Absent);
+        let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.feed.floor,1);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
+        let completion=job.handle.abort_handle();drop(job);drop(p);
+        assert!(RecordPartition::open(&root,config().max_journal_bytes).await.is_err());
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+        tokio::time::timeout(Duration::from_secs(30),async {
+            while !completion.is_finished(){tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.operations.len(),2);assert_eq!(inner.state.feed.floor,1);assert!(inner.anchor.is_some());}
+        assert_eq!(p.write(request).await.unwrap(),receipt);drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn compact_owned_job_faults_preserve_source_and_recover_unknown_publication() {
+        for gate in [".test-anchor-reject-prepared",".test-anchor-reject-loaded",".test-checkpoint-before-certificate",".test-checkpoint-after-certificate"] {
+            let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+            let request=write("first","a","alpha",ExpectedVersion::Absent);let receipt=p.write(request.clone()).await.unwrap();
+            std::fs::write(root.join(gate),b"fault").unwrap();
+            let result=p.start_compact_job().unwrap().finish().await;
+            let unknown=gate.starts_with(".test-checkpoint-");
+            assert!(result.is_err());assert_eq!(matches!(result,Err(RecordError::OutcomeUnknown(_))),unknown,"{gate}: {result:?}");
+            {let inner=p.inner.lock().await;assert_eq!(inner.healthy,!unknown);assert!(inner.anchor.is_none());assert!(inner.background.is_none());}
+            std::fs::remove_file(root.join(gate)).unwrap();drop(p);
+            let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+            assert_eq!(p.write(request).await.unwrap(),receipt);assert!(p.get("a").await.unwrap().is_some());
+            p.start_compact_job().unwrap().finish().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn compact_owned_job_deadline_refuses_before_authority_without_fencing() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        let request=write("first","a","alpha",ExpectedVersion::Absent);let receipt=p.write(request.clone()).await.unwrap();
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        let job=p.start_owned_index_job(Duration::from_millis(10),JobMode::Compact).unwrap();
+        assert!(matches!(job.finish().await,Err(RecordError::Busy)));
+        {let inner=p.inner.lock().await;assert!(inner.healthy);assert!(inner.anchor.is_none());assert!(inner.background.is_none());}
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+        assert_eq!(p.write(request).await.unwrap(),receipt);
+        p.compact_journal().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn chunked_source_proof_keeps_append_same_sequence_trim_and_cancelled_owner() {

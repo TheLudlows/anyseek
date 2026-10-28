@@ -122,5 +122,9 @@
   "record::generation_values::tests::recovery_oracle_rejects_stale_cache_without_trusting_it",
   "storage::sqlite_authority::tests::intake_staging_reservation_is_atomic_bounded_and_pins_unknown_uploads",
   "storage::sqlite_authority::tests::intake_staging_reservation_pins_survive_verified_backup_restore",
-  "storage::sqlite_authority::tests::intake_staging_reservation_rejects_old_snapshot_watermarks"
+  "storage::sqlite_authority::tests::intake_staging_reservation_rejects_old_snapshot_watermarks",
+  "record::indexer::tests::compact_owned_job_deadline_refuses_before_authority_without_fencing",
+  "record::indexer::tests::compact_owned_job_faults_preserve_source_and_recover_unknown_publication",
+  "record::indexer::tests::compact_owned_job_preserves_time_receipts_and_concurrent_same_seq_trim",
+  "record::remote_checkpoint::tests::compact_owned_job_authenticates_remote_wal_before_and_after_anchor"
 ]

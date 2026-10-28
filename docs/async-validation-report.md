@@ -64,3 +64,5 @@ generation 的可重建操作/租约证据已可回收；精确拒绝历史 gene
 generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock 三统计缓存，普通写复用 staged members/control/TTL 数量；旧 map wire 格式不变、固定缓存内存计量、恢复全扫 oracle 保留。11 项专项通过。身份占用检查和 staging 到期搜索仍扫描，不宣称全部 generation 路径常数时间。
 
 远端候选保护基础：SQLite 一次事务预登记完整候选并创建无过期 staging pins，校验 owner/head、水位、全库存与 pending 名额；支持精确 build 释放。3 项专项通过，覆盖未知上传保护及备份恢复。此提交只是远端锁外回收的前置 API，尚未接入，不代表远端回收已解锁。
+
+显式 Compact 中间步骤：迁移到 owned 后台候选路径，保留不推进时间/不额外 GC 的语义，保留 State delta/payload 复用及未知发布隔离，300 秒构建期限。10 项关键专项通过；修复了资源拒绝误 fence 和压缩后遗漏远端 GC。当前此中间版本重建 native 索引，3 项既有 native 包复用断言仍失败，未修改断言；下一独立步骤恢复安全不可变包复用，不能把本步称为完整验收。

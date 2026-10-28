@@ -364,6 +364,12 @@ impl SourceCapture {
                 if !inner.healthy || inner.state.sealed_for.is_some() {return Err(RecordError::RecoveryRequired);}
                 if inner.background.as_ref().is_none_or(|tail|tail.id!=id || tail.overflowed) {return Err(RecordError::Busy);}
                 if let Err(error)=inner.journal.read_cut_chunk(&self.cut,offset,&mut buffer[..length]) {
+                    // read_cut_chunk restores the append cursor before returning
+                    // the read error. A typed I/O admission refusal is retryable;
+                    // restoration errors deliberately lose that Busy identity.
+                    if error.get_ref().is_some_and(|cause|cause.is::<crate::resources::Busy>()) {
+                        return Err(RecordError::Busy);
+                    }
                     inner.healthy=false;
                     inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
                     log::warn!("captured source read failed: {error}");
@@ -392,6 +398,8 @@ impl SourceCapture {
     }
 }
 impl SourceProof {
+    pub(super) fn anchor(&self)->Option<&anchor::Reference> {self.anchor.as_ref()}
+    pub(super) fn frames(&self)->&[Vec<u8>] {&self.frames}
     pub(super) fn capture(inner:&mut Inner)->Result<Self,RecordError> {
         let _phase=Phase::new("source_frames_capture_locked",inner.state.seq);
         let mut memory=crate::storage::build_budget::reserve_memory(0).map_err(storage)?;
