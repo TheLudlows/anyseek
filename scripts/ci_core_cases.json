@@ -119,5 +119,8 @@
   "storage::partition::tests::chunked_cut_rejects_changed_generation_and_invalid_marker",
   "record::indexer::tests::chunked_source_proof_keeps_append_same_sequence_trim_and_cancelled_owner",
   "record::generation_values::tests::controlled_mutation_invalidates_counts_and_wire_remains_legacy_map",
-  "record::generation_values::tests::recovery_oracle_rejects_stale_cache_without_trusting_it"
+  "record::generation_values::tests::recovery_oracle_rejects_stale_cache_without_trusting_it",
+  "storage::sqlite_authority::tests::intake_staging_reservation_is_atomic_bounded_and_pins_unknown_uploads",
+  "storage::sqlite_authority::tests::intake_staging_reservation_pins_survive_verified_backup_restore",
+  "storage::sqlite_authority::tests::intake_staging_reservation_rejects_old_snapshot_watermarks"
 ]

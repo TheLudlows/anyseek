@@ -62,3 +62,5 @@ generation 的可重建操作/租约证据已可回收；精确拒绝历史 gene
 后台 checkpoint 来源捕获：固定物理提交 cut 和 generation，每次借原句柄最多读取 64 KiB，恢复当次 cursor 后释放 Record 锁；帧拼装、校验和与分配在锁外执行。保持完整发布标记、序号、损坏及任务归属校验。新增 4 项、原 committed-stream 7 项、GC catch-up 1 项、indexer 8 项通过（另 1 个子进程辅助测试忽略）。64 KiB 限制 I/O 量而非设备等待时间；State 容器 clone、初始目录预算扫描仍在锁内，显式 compact 尚待下一步。
 
 generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock 三统计缓存，普通写复用 staged members/control/TTL 数量；旧 map wire 格式不变、固定缓存内存计量、恢复全扫 oracle 保留。11 项专项通过。身份占用检查和 staging 到期搜索仍扫描，不宣称全部 generation 路径常数时间。
+
+远端候选保护基础：SQLite 一次事务预登记完整候选并创建无过期 staging pins，校验 owner/head、水位、全库存与 pending 名额；支持精确 build 释放。3 项专项通过，覆盖未知上传保护及备份恢复。此提交只是远端锁外回收的前置 API，尚未接入，不代表远端回收已解锁。

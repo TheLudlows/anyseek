@@ -342,6 +342,89 @@ impl SqliteAuthority {
         u64::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)
     }
 
+    /// Atomically reserve a complete intake snapshot candidate before any PUT.
+    /// False means the captured head or inventory budget no longer permits it.
+    /// Pins have no expiry: cancellation requires the stable intake owner to
+    /// explicitly release this build, including after process recovery.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reserve_intake_snapshot_uploads(
+        &mut self, partition: &str, epoch: u64, expected_head_version: u64,
+        build_id: &str, objects: &[ObjectRef], at: i64, max_objects: u64,
+        completion_slots: u64,
+    ) -> rusqlite::Result<bool> {
+        if build_id.is_empty() || !build_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || objects.is_empty() { return Err(rusqlite::Error::InvalidQuery); }
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !is_intake_namespace(&tx, partition)? { return Err(rusqlite::Error::InvalidQuery); }
+        let head = read_head(&tx, partition)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if head.owner_epoch != epoch { return Err(rusqlite::Error::InvalidQuery); }
+        if head.head_version != expected_head_version { return Ok(false); }
+        let version = expected_head_version.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
+        let prefix = format!("partitions/{partition}/snapshot/{version:020}-{build_id}/");
+        let inventory_prefix = format!("partitions/{partition}/");
+        let pin_prefix = intake_build_pin_prefix(partition, epoch, build_id)?;
+        let mut keys = std::collections::BTreeSet::new();
+        let mut additional = 0u64;
+        for object in objects {
+            if !object.key.starts_with(&prefix) || object.key.len() == prefix.len()
+                || !keys.insert(&object.key) || retired_intake_key(&tx, &object.key)? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            ensure_intake_manifest_advances(&tx, partition, object)?;
+            let row: Option<(Vec<u8>, i64, i64)> = tx.query_row(
+                "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
+                [&object.key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+            match row {
+                Some((digest, length, state)) if digest.as_slice() == object.sha256
+                    && length == to_i64(object.length)? && matches!(state, 0 | 1) => {},
+                Some(_) => return Err(rusqlite::Error::InvalidQuery),
+                None => { to_i64(object.length)?; additional += 1; },
+            }
+        }
+        let prior = {
+            let mut query = tx.prepare("SELECT object_key FROM object_pins WHERE partition_id=?1 AND pin_kind='staging'
+                AND substr(pin_id,1,length(?2))=?2")?;
+            query.query_map(params![partition, pin_prefix], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?
+        };
+        if !prior.is_empty() && (prior.len() != keys.len() || prior.iter().any(|key| !keys.contains(key))) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM object_uploads WHERE substr(object_key,1,length(?1))=?1",
+            [&inventory_prefix], |r| r.get(0))?;
+        let count = u64::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if count.checked_add(additional).and_then(|n| n.checked_add(completion_slots))
+            .is_none_or(|n| n > max_objects) { return Ok(false); }
+        for object in objects {
+            tx.execute("INSERT OR IGNORE INTO object_uploads VALUES(?1,?2,?3,0,?4)",
+                params![object.key, object.sha256.as_slice(), to_i64(object.length)?, at])?;
+            tx.execute("INSERT OR IGNORE INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms)
+                VALUES(?1,?2,?3,'staging',NULL)",
+                params![format!("{pin_prefix}{}", object.key), partition, object.key])?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Release only this build's pins. The caller must hold the stable intake
+    /// owner lock, and must first resolve any uncertain publication. Never call
+    /// this merely because a pin is old; unknown PUT inventory remains durable.
+    pub(crate) fn release_intake_snapshot_uploads(
+        &mut self, partition: &str, epoch: u64, build_id: &str,
+    ) -> rusqlite::Result<usize> {
+        let prefix = intake_build_pin_prefix(partition, epoch, build_id)?;
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !is_intake_namespace(&tx, partition)?
+            || read_head(&tx, partition)?.is_none_or(|head| head.owner_epoch != epoch) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let deleted = tx.execute("DELETE FROM object_pins WHERE partition_id=?1 AND pin_kind='staging'
+            AND substr(pin_id,1,length(?2))=?2", params![partition, prefix])?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+
     /// Internal intake event identities are monotonic and never submitted by clients.
     /// Their publication receipts may be removed only behind a selected checkpoint.
     pub(crate) fn prune_intake_receipts(&mut self, partition: &str, epoch: u64, seq: u64) -> rusqlite::Result<()> {
@@ -1139,6 +1222,12 @@ fn registry_reference(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRef> {
 
 /// Walk immutable dependency metadata. All callers making lifecycle decisions
 /// execute this under their publication transaction; pins are roots, not clocks.
+fn intake_build_pin_prefix(partition: &str, epoch: u64, build_id: &str) -> rusqlite::Result<String> {
+    if build_id.is_empty() { return Err(rusqlite::Error::InvalidQuery); }
+    Ok(format!("intake-staging:{}:", serde_json::to_string(&(partition, epoch, build_id))
+        .map_err(|_| rusqlite::Error::InvalidQuery)?))
+}
+
 fn is_intake_namespace(connection: &Connection, partition: &str) -> rusqlite::Result<bool> {
     connection.query_row("SELECT EXISTS(SELECT 1 FROM intake_namespaces WHERE partition_id=?1)", [partition], |row| row.get(0))
 }
@@ -1276,6 +1365,79 @@ mod tests {
     fn object(key: &str, byte: u8) -> ObjectRef {
         ObjectRef { key:key.to_owned(),sha256:[byte;32],length:128 }
     }
+    #[test]
+    fn intake_staging_reservation_is_atomic_bounded_and_pins_unknown_uploads() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut db = SqliteAuthority::open(&temporary.path().join("source.sqlite"), Duration::from_secs(1)).unwrap();
+        let partition = "stage-intake";
+        let head = db.create_partition(partition, 1).unwrap();
+        let refs = vec![object(&format!("partitions/{partition}/snapshot/{:020}-build/chunk", head.head_version + 1), 1),
+            object(&format!("partitions/{partition}/snapshot/{:020}-build/manifest", head.head_version + 1), 2)];
+        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 3, 1).is_err());
+        db.enable_intake_gc(partition, 1).unwrap();
+        assert!(!db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 2, 1).unwrap());
+        assert_eq!(db.intake_inventory_count(partition, 1).unwrap(), 0);
+        assert!(!db.reserve_intake_snapshot_uploads(partition, 1, head.head_version + 1, "build", &refs, 0, 3, 1).unwrap());
+        assert!(db.reserve_intake_snapshot_uploads(partition, 2, head.head_version, "build", &refs, 0, 3, 1).is_err());
+        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 3, 1).unwrap());
+        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 3, 1).unwrap());
+        assert_eq!(db.intake_inventory_count(partition, 1).unwrap(), 2);
+        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs[..1], 0, 3, 1).is_err());
+        let mut bad = refs.clone(); bad[1].sha256 = [9; 32];
+        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &bad, 0, 3, 1).is_err());
+        for reference in &refs { assert!(!db.retire_object(&reference.key, 0, i64::MAX).unwrap()); }
+        assert!(db.release_intake_snapshot_uploads(partition, 2, "build").is_err());
+        assert_eq!(db.release_intake_snapshot_uploads(partition, 1, "other").unwrap(), 0);
+        assert_eq!(db.release_intake_snapshot_uploads(partition, 1, "build").unwrap(), 2);
+        for reference in &refs {
+            assert!(db.retire_object(&reference.key, 0, 2).unwrap());
+            assert!(db.mark_object_deleted(reference).unwrap());
+            assert!(db.mark_object_deleted(reference).unwrap());
+            assert!(db.collectible_objects(3).unwrap().contains(reference));
+        }
+        assert_eq!(db.intake_inventory_count(partition, 1).unwrap(), 2);
+        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 3, 1).is_err());
+    }
+
+    #[test]
+    fn intake_staging_reservation_pins_survive_verified_backup_restore() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut db = SqliteAuthority::open(&temporary.path().join("source.sqlite"), Duration::from_secs(1)).unwrap();
+        let partition = "stage-intake";
+        let head = db.create_partition(partition, 1).unwrap();
+        db.enable_intake_gc(partition, 1).unwrap();
+        let refs = [object(&format!("partitions/{partition}/snapshot/{:020}-build/manifest", head.head_version + 1), 1)];
+        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 1, 0).unwrap());
+        // In-flight unknown bytes cannot be certified by a backup.
+        assert!(db.prepare_backup_snapshot("staging-backup", &refs, 1, 1024 * 1024).is_err());
+        db.register_durable_object(&refs[0], 1).unwrap();
+        let snapshot = db.prepare_backup_snapshot("staging-backup", &refs, 1, 1024 * 1024).unwrap();
+        let decoded: AuthorityBackupSnapshot = serde_json::from_slice(&snapshot).unwrap();
+        assert_eq!(decoded.pins.iter().filter(|pin| pin.pin_kind == "staging" && pin.expires_at_ms.is_none()).count(), 1);
+        let mut restored = SqliteAuthority::open(&temporary.path().join("restore.sqlite"), Duration::from_secs(1)).unwrap();
+        restored.restore_backup_snapshot(&snapshot, 1024 * 1024).unwrap();
+        restored.release_backup_pins("staging-backup").unwrap();
+        assert!(!restored.retire_object(&refs[0].key, 0, i64::MAX).unwrap());
+        assert_eq!(restored.release_intake_snapshot_uploads(partition, 1, "build").unwrap(), 1);
+        assert!(restored.retire_object(&refs[0].key, 0, i64::MAX).unwrap());
+    }
+
+    #[test]
+    fn intake_staging_reservation_rejects_old_snapshot_watermarks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut db = SqliteAuthority::open(&temporary.path().join("source.sqlite"), Duration::from_secs(1)).unwrap();
+        let partition = "stage-intake";
+        let head = db.create_partition(partition, 1).unwrap();
+        db.enable_intake_gc(partition, 1).unwrap();
+        let selected = object("partitions/stage-intake/snapshot/00000000000000000100-selected/manifest", 1);
+        db.register_durable_object(&selected, 0).unwrap();
+        let next = db.publish_checkpoint(partition, head.head_version, 1, 0, selected).unwrap().unwrap();
+        let refs = [object(&format!("partitions/{partition}/snapshot/{:020}-old/chunk", next.head_version + 1), 2)];
+        assert!(db.reserve_intake_snapshot_uploads(partition, 1, next.head_version, "old", &refs, 1, 4, 0).is_err());
+        assert_eq!(db.intake_inventory_count(partition, 1).unwrap(), 1);
+        assert!(!db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "old", &refs, 1, 4, 0).unwrap());
+    }
+
     #[test]
     fn intake_deleted_metadata_uses_persisted_floors_and_keeps_unknown_put_tombstones() {
         let temporary = tempfile::tempdir().unwrap();
