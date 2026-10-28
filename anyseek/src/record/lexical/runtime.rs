@@ -614,7 +614,7 @@ impl Runtime {
             let native = scope.clone().run(Runtime::create_owned(&package.join("native"), &config())).await.unwrap();
             let document = serde_json::from_str(r#"{"body":"alpha"}"#).unwrap();
             scope.clone().run(native.append(Identity { id: "a".into(), version: 1, revision: 1 }, &document, false)).await.unwrap();
-            let held = scope.io().unwrap();
+            let held = crate::resources::hold_io_for_test(&scope).await;
             let release = async { tokio::time::sleep(std::time::Duration::from_millis(20)).await; drop(held); };
             let flush = scope.clone().run(native.flush());
             let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(release, flush) }).await.unwrap();
@@ -634,7 +634,7 @@ impl Runtime {
                 .admit("cancelled-flush".into(), crate::resources::Lane::Background, 0).unwrap();
             let native = scope.clone().run(Runtime::create_owned(&package.join("native"), &config())).await.unwrap();
             native.append(Identity { id: "a".into(), version: 1, revision: 1 }, &serde_json::from_str(r#"{"body":"alpha"}"#).unwrap(), false).await.unwrap();
-            let held = scope.io().unwrap();
+            let held = crate::resources::hold_io_for_test(&scope).await;
             let owner = native.clone();
             let task = tokio::spawn(async move { owner.flush().await });
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -661,7 +661,7 @@ impl Runtime {
                 .admit("drop-contention".into(), crate::resources::Lane::Background, 0).unwrap();
             let native = scope.clone().run(Runtime::create_owned(&package.join("native"), &config())).await.unwrap();
             native.append(Identity { id: "a".into(), version: 1, revision: 1 }, &serde_json::from_str(r#"{"body":"alpha"}"#).unwrap(), false).await.unwrap();
-            let held = scope.io().unwrap();
+            let held = crate::resources::hold_io_for_test(&scope).await;
             let (done, finished) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || { drop(native); done.send(()).unwrap(); });
             finished.recv_timeout(std::time::Duration::from_secs(5)).expect("Drop must cancel native waiters before joining");

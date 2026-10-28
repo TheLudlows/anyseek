@@ -497,9 +497,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap(); let root = temp.path().join("records");
         let scope = Arc::new(crate::resources::Governor::default())
             .admit("native-probe".into(), crate::resources::Lane::Background, 0).unwrap();
-        let p = scope.clone().run(RecordPartition::create(&root, config())).await.unwrap();
-        scope.clone().run(p.write(write("first", "a", "alpha", ExpectedVersion::Absent))).await.unwrap();
-        scope.clone().run(p.compact_journal()).await.unwrap();
+        // Keep setup workers outside the probe governor: the deliberate first
+        // poll must stop at the held shard lock, not an unrelated setup I/O.
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(write("first", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
         let inner = p.inner.lock().await;
         let shard = inner.index.test_index().read().await.shard_vec[0].clone();
         let guard = shard.write().await;
@@ -518,7 +520,7 @@ mod tests {
         assert!(admission.await.unwrap().is_some());
         }
         // Saturation already present at entry still refuses before any handoff.
-        let held = scope.io().unwrap();
+        let held = crate::resources::hold_io_for_test(&scope).await;
         assert!(matches!(scope.clone().run(anchor::NativeReuse::admit(&inner)).await, Err(RecordError::Busy)));
         assert!(inner.healthy);
         drop(held); drop(inner);
@@ -551,7 +553,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !root.join(".test-journal-io-started").exists() { tokio::time::sleep(Duration::from_millis(1)).await; }
             }).await.unwrap();
-            let held = scope.io().unwrap();
+            let held = crate::resources::hold_io_for_test(&scope).await;
             std::fs::remove_file(root.join(".test-journal-io-pause")).unwrap();
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert!(!task.is_finished(), "generation must wait before touching its first file");

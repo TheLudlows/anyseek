@@ -30,7 +30,7 @@
 | 文档示例 | `adc15e2` doctest 9 项通过 |
 | 静态文档、词法覆盖、Python、diff | 实现 head 的 CI static 通过；本次汇总提交前重新执行文档、词法源检查与 diff |
 | 同数据同资源 Meilisearch 对比 | `1359d7e` 固定 release 完成双方 2305 文档、393 查询及重启核验，详见下方；前两次失败实验不计性能验收 |
-| 精确实现 SHA 的 CI | [run 40682398056](https://github.com/TheLudlows/anyseek/actions/runs/40682398056)：static、双平台 lexical、Ubuntu core 通过；Windows core 的部分 intake 写入故障注入断言失败，已改为 owner 句柄注入，修复后 CI 待核验；full-acceptance skipped |
+| 精确发布 SHA 的 CI | `71f2384` 的 [run 40689146077](https://github.com/TheLudlows/anyseek/actions/runs/40689146077) 四项必需检查通过，Windows core 失败于 native 测试占位配额准备竞态；修复后新 SHA 待核验。full-acceptance skipped，不计为通过 |
 
 最初诊断回归发现历史维护边界测试不符合异步 Busy、可变 tail 和合法时钟契约，均保留测试并修正其设置/断言；也发现运行中测试二进制被并行 cargo 替换会使子进程用例 ENOENT。最终运行使用固定副本，避免这类验证干扰。
 
@@ -146,3 +146,7 @@ Vector/metadata 与 required successor 小步：先取得组件锁，再在身�
 Windows 故障注入修正：`adc15e2` 的 Windows core 在 37 分钟时失败于 `local_partial_intake_write_still_fences_and_recovers_the_selected_cut`，不是 job 超时。测试 hook 另开被锁 WAL 导致 Windows sharing 拒绝，尚未写入即返回 Storage。仅 `cfg(test)` 的注入改为从现有 owner 句柄 seek/write/sync 未提交尾部并标记需要恢复，保留真实部分写入、OutcomeUnknown、后续 RecoveryRequired 和重启恢复原 cut 的断言；生产 append 与配额不变。修复后目标用例 1/1、本地接收组 6/6 通过，独立只读复核通过；不将原 Windows 失败记为通过，新精确 SHA CI 仍待核实。
 
 最终产物复核：测试注入修正后重建的 release 哈希与此前不同，故重新冻结 `1359d7e` 产物并完成同一成对协议，harness exit 0；本节指标全部取自该最新运行，未混用先前数据。新实验分配 62.05 MiB，连既有 Meilisearch 二进制与样本合计 407.06 MiB，低于 2 GiB 增量预算，结束后空闲约 10.99 GiB。所有实验数据保留，未创建云资源。后续仅汇总文档提交不改变该测量实现；精确发布 SHA 的 CI 终态以 Draft PR 检查及描述为准。
+
+Windows 配额测试准备同步：`71f2384` 的 Windows core 失败于 `external_io_contention_waits_off_executor_and_commits_once` 准备占位 permit 时的 unwrap，native append 返回后短后台 I/O 仍可占唯一 slot，尚未进入被测 flush。仅对 6 处共享活跃 native scope 的测试 setup 增加有界空闲等待；独立 scope 的 fixture 和最终 permit 归还断言不弱化。32 项配额回归前移到 CI 清单开头，178 项集合与规模不变，便于尽早定位跨平台准备错误。该失败不是超时，原 partial WAL 注入修复在此次 Windows 运行尚未执行到，不宣称通过。
+
+同步修复的本地验证：六项目标回归 6/6 通过，三个 native 并发用例各重复 20 轮共 60/60 通过，重排后的完整 32 项配额矩阵按 CI exact 调用方式全部通过。独立只读复核确认后续提交、取消、pin、恢复和最终归还断言保持不变；这些结果不替代新的 Windows CI。

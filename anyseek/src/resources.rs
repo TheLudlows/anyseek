@@ -473,3 +473,20 @@ mod tests {
         assert!(governor.ledger.lock().unwrap().subjects.is_empty());
     }
 }
+
+#[cfg(test)]
+pub(crate) async fn hold_io_for_test(scope: &Scope) -> Lease {
+    // Native append can return while its bounded worker finishes a short leaf
+    // operation. Establish contention only after this fixture owns the slot.
+    let started = std::time::Instant::now();
+    loop {
+        match scope.io() {
+            Ok(lease) => return lease,
+            Err(error) => {
+                assert!(started.elapsed() < std::time::Duration::from_secs(5),
+                    "test I/O slot did not become available: {error}");
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+    }
+}

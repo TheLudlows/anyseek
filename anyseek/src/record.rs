@@ -1776,7 +1776,7 @@ mod tests {
             .admit("journal-contention".into(), crate::resources::Lane::Background, 0).unwrap();
         let p = scope.clone().run(RecordPartition::create(&location, config())).await.unwrap();
         let request = write("contended-frame", "a", "alpha", ExpectedVersion::Absent);
-        let held = scope.io().unwrap();
+        let held = crate::resources::hold_io_for_test(&scope).await;
         let release = async { tokio::time::sleep(std::time::Duration::from_millis(20)).await; drop(held); };
         let operation = scope.clone().run(p.write(request.clone()));
         let (_, receipt) = tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(release, operation) }).await.unwrap();
