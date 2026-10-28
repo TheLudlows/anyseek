@@ -87,3 +87,5 @@ generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock �
 CI 时限诊断：Windows core 的本地 long-suffix 用例通过（734.37 秒），远端 long-suffix 仍在运行时整个 job 达到 30 分钟上限；GitHub annotation 明确报告 job 超时，没有用例断言失败。仅该矩阵 job 的预算调整为 45 分钟，保留测试数据规模、用例超时和 runner 数量；调整后仍须验证新的终态。
 
 I/O 争用修复前置切片：新增仅供已准入 native 工作使用的资源等待与显式同步 Scope 传播。普通 I/O 仍立即拒绝；仅 I/O 计数饱和可等待，取消、无效主体、零容量及 poisoned ledger 立即返回。资源组 8/8 通过（3 项新增），覆盖单线程运行时异步持有者释放、取消不退还其他 owner 的租约、永久错误不等待。尚未接入 Runtime/Directory，不能认为基准故障已修复。
+
+I/O 争用修复接入：Runtime 的同步 native mutation/commit/reload/seal 及生产 create/open 改为拥有 Scope、Data guard 和 Runtime 的阻塞工作；Directory 只在实际文件操作前等待配额，不重放 Consumer 批次。取消而未取回结果会 fence writer；明确返回的准入错误保持原语义。Drop 先取消自身 Directory 等待再 join，固定 reader 的 pin 保留。META_LOCK 使用释放配额后的非阻塞探测重试，避免持配额等锁的循环；merge 启动时立即将额外 Charge 移给 owned 后台任务。专项 40/40 通过：Runtime 25、Directory 7、资源 8，覆盖真实配额竞争、单线程执行器、取消后拒绝复用、Drop、原生写错、旧 reader/pin 与 metadata 锁争用。此前首轮 24/25 的明确拒绝误 fence 已修复并复验；尚待新 SHA 完整回归与固定 release 基准，不能用专项替代最终验收。

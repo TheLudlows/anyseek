@@ -192,7 +192,7 @@ impl Frozen {
         let mut reservation=build_budget::admit(config,std::iter::empty()).map_err(|e|storage(format!("stage=frozen_component_base package={} {e}",self.id)))?;
         reservation.grow(estimate).map_err(storage)?;
         let index=crate::index::open_index(&path).await.map_err(storage)?;
-        index.write().await.record_lexical.push(lexical::runtime::Runtime::open(&path.join("native"),config)?);
+        index.write().await.record_lexical.push(lexical::runtime::Runtime::open_owned(&path.join("native"),config).await?);
         // Legacy certificates did not persist vector revision identities. Their
         // format required the same native/vector order; migrate only that format.
         // New statistics carry their own identities and may have independent order.

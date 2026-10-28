@@ -916,7 +916,7 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
         }
     }
 
-    let native = lexical::runtime::Runtime::create(&cache.join("native"), config)?;
+    let native = lexical::runtime::Runtime::create_owned(&cache.join("native"), config).await?;
     for record in &records {
         native.append(lexical::Identity { id:record.record_id.clone(),version:record.version,revision:sequence },record.document.as_ref().unwrap(),false).await?;
         index.read().await.shard_vec[0]
