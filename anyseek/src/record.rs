@@ -941,6 +941,7 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
     ))
 }
 fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordError>{
+        state.records.validate_counts()?;
     validate_config(config)?;
         evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
         locator::validate_history(&state).map_err(storage)?;
@@ -2433,21 +2434,28 @@ mod tests {
         let mut source=source_write("ttl-source","s",&[]);
         source.temporal=Some(TemporalMetadata { expire_at_ms:Some(now+100),..Default::default() });
         let receipt=p.write(source.clone()).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.write(source_write("ttl-derived","d",&[("s",1)])).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.write(source_write("ttl-indirect","e",&[("d",1)])).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         clock.set(now+99); assert_eq!(p.statistics().await.unwrap().active_records,3);
         clock.set(now+100); assert_eq!(p.statistics().await.unwrap().active_records,0);
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         for id in ["s","d","e"] { assert!(p.get(id).await.unwrap().is_none()); }
         let state=p.inner.lock().await; assert_eq!(state.state.records["s"].version,2);
         assert_eq!(state.state.records["s"].expired_at_ms,Some(now+100));
         assert_eq!(state.state.expirations.len(),1); drop(state);
         assert_eq!(p.write(source).await.unwrap(),receipt);
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         let mut revive=source_write("ttl-revive","s",&[]); revive.expected=ExpectedVersion::Match(2);
         revive.temporal=Some(TemporalMetadata {expire_at_ms:Some(now+10000),..Default::default()});
         assert!(p.write(revive).await.is_err());
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         clock.set(now); assert!(p.get("s").await.unwrap().is_none());
         p.compact_journal().await.unwrap(); drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.statistics().await.unwrap().active_records,0);
         assert_eq!(p.record_status("s").await.unwrap().unwrap().version,2);
         drop(p); std::fs::remove_dir_all(root).unwrap();
@@ -2569,18 +2577,24 @@ mod tests {
     async fn generation_stage_publish_switch_and_enrich() {
         let root = path(); let p = RecordPartition::create(&root, config()).await.unwrap();
         p.write(source_write("source", "s", &[])).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         let stage = generation_write("stage", ExpectedVersion::Absent, stage_generation("g1", &["a","b"]));
         let receipt = p.write(stage.clone()).await.unwrap(); assert!(receipt.staged_only); assert_eq!(receipt.version,1);
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.write(stage).await.unwrap(), receipt);
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert!(p.get("a").await.unwrap().is_none()); assert_eq!(p.statistics().await.unwrap().active_records,1);
         assert!(p.write(write("steal", "a", "body", ExpectedVersion::Absent)).await.is_err());
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.compact_journal().await.unwrap(); drop(p);
         let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,2);
         assert!(p.get("a").await.unwrap().is_none());
         let publish = generation_write("publish", ExpectedVersion::Match(1), GenerationCommand::Publish { generation_id:"g1".into() });
         let mut competing = publish.clone(); competing.operation_id = OperationId::new("competing".into());
         let (a,b) = tokio::join!(p.write(publish),p.write(competing)); assert_ne!(a.is_ok(), b.is_ok());
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,2);
         assert_eq!(p.statistics().await.unwrap().active_records,3);
         assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(),2);
@@ -2588,17 +2602,23 @@ mod tests {
         let mut patch = write("fill-a", "a", "", ExpectedVersion::Match(1)); patch.document = None;
         patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
         p.write(patch.clone()).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.write(source_write("downstream", "downstream", &[("a",1)])).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.write(generation_write("stage2", ExpectedVersion::Match(2), stage_generation("g2", &["c","d"]))).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         let old_output = p.output_permit().unwrap();
         p.write(generation_write("publish2", ExpectedVersion::Match(3), GenerationCommand::Publish { generation_id:"g2".into() })).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert!(old_output.deliver(|| ()).is_err());
         for id in ["a","b","downstream"] { assert!(p.get(id).await.unwrap().is_none()); assert_eq!(p.record_status(id).await.unwrap().unwrap().visibility,EvidenceVisibility::Stale); }
         assert_eq!(p.statistics().await.unwrap().active_records,3);
         assert_eq!(query(&p, SearchMode::Lexical).await.hits.iter().map(|h| h.record.record_id.as_str()).collect::<Vec<_>>(), vec!["c","d"]);
         patch.operation_id = OperationId::new("late-fill".into()); assert!(p.write(patch).await.is_err());
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.compact_journal().await.unwrap(); drop(p);
         let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().active_generation.as_deref(),Some("g2"));
         assert!(p.get("a").await.unwrap().is_none()); assert!(p.get("c").await.unwrap().is_some());
         drop(p); std::fs::remove_dir_all(root).unwrap();

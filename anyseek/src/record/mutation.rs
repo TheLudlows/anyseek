@@ -119,7 +119,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     // journal frame overhead. No evidence edges are copied into delete requests.
     let previous_ttl=state.records.get(&request.record_id).is_some_and(temporal::live_ttl);
     let next_ttl=next_document.is_some() && temporal.expire_at_ms.is_some();
-    let feed_reserve = reserved_slots + state.records.values().filter(|r| temporal::live_ttl(r)).count() + generation::staged_ttl_count(state) + usize::from(next_ttl) - usize::from(previous_ttl);
+    let feed_reserve = reserved_slots + state.records.live_ttl_count() + generation::staged_ttl_count(state) + usize::from(next_ttl) - usize::from(previous_ttl);
     let reserve_bytes = reserved_slots * 8192 + generation::reserved(state) * 32768
         + temporal::reserve_bytes(state) + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
@@ -135,7 +135,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         ));
     }
     let previous = state.records.get(&request.record_id);
-    let live_sources = state.records.values().filter(|r| evidence::retained_revision(r)).count();
+    let live_sources = state.records.retained_source_count();
     let adding_history = request.vector_patch.is_none() && previous.is_some_and(evidence::retained_revision);
     let new_source = previous.is_none() && request.system.as_ref().is_some_and(|s| s.kind == EvidenceKind::Source);
     let deleting_source = adding_history && next_document.is_none();

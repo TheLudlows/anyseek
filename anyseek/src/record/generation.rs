@@ -124,7 +124,7 @@ pub(super) fn reserved(state: &State) -> usize {
     state.generations.values().filter_map(|g| g.staged.as_ref()).map(|g| g.members.len()).sum()
 }
 pub(super) fn reserve_slots(state: &State) -> usize {
-    state.records.values().filter(|r| r.system.is_some() && r.document.is_some()).count()
+    state.records.live_typed_count()
         + reserved(state) + state.generations.values().filter_map(|g|g.staged.as_ref()).map(|s|if s.sealed{1}else{2}).sum::<usize>()
 }
 pub(super) fn staged_ttl_count(state:&State)->usize {

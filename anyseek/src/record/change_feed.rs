@@ -217,11 +217,7 @@ pub(super) fn pending_expiry(state: &State, seq: u64, at: u64) -> Result<Point, 
 }
 pub(super) fn reserve(state: &State) -> usize {
     generation::reserve_slots(state)
-        + state
-            .records
-            .values()
-            .filter(|r| temporal::live_ttl(r))
-            .count()
+        + state.records.live_ttl_count()
         + generation::staged_ttl_count(state)
 }
 impl Cache {

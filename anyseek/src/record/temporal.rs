@@ -137,7 +137,7 @@ pub(super) fn live_ttl(record: &Record) -> bool {
     record.document.is_some() && record.temporal.expire_at_ms.is_some()
 }
 pub(super) fn reserve_bytes(state: &State) -> usize {
-    (state.records.values().filter(|r| live_ttl(r)).count() + generation::staged_ttl_count(state))
+    (state.records.live_ttl_count() + generation::staged_ttl_count(state))
         * 8192
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

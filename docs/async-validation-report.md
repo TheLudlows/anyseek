@@ -50,3 +50,7 @@
 本轮持久水位裁剪只适用于显式登记的 intake 命名空间。通用 Record checkpoint、内容寻址对象和备份的 SQLite `retired_objects`／`object_uploads` 墓碑仍保留，尚未实现持续有界裁剪。这些键没有统一的单调分配序号；删除墓碑会使迟到上传或旧引用重新注册已退休键，破坏“退休后永不重新发布或 pin”的不变量。闭环需要为通用对象引入可认证的分配 epoch/水位，并在上传登记、所有发布入口、pin、备份与恢复中同时拒绝旧 epoch；还须证明迟到未知 PUT 不会在删除后复活。不能仅按删除成功或时间过期清表。本轮未改变这套通用协议，因此此项明确未完成。
 
 generation 的可重建操作/租约证据已可回收；精确拒绝历史 generation ID 复用的 `used` 集合仍永久保留，并由已有全局 `max_records` 总数上限拒绝继续增长。此处实现的是有限容量下的安全反压，不是无限创建 generation 的有界滚动历史。若要永久运行且支持任意旧字符串 ID，必须改变身份契约（例如受认证 epoch 的 generation ID）或保留精确历史；单个普通哈希摘要无法支持任意 ID 的精确成员查询。
+
+## 小步收尾进度
+
+第一步：Records 容器增量维护 live TTL、retained Source 和 live typed 三项派生计数，去掉普通写入/预留中的对应 Record 全扫。持久化格式不变，恢复时重建并全扫校验；更新失败不修改计数。两项新容器测试与五项 TTL、generation、Source/abort/feed 预算回归共 7 项通过。generation staged reserve 和到期候选扫描仍待后续步骤，不宣称整个写路径为常数时间。
