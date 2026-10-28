@@ -101,3 +101,5 @@ Checkpoint 准入与锁序小步：两条 local generation/PUBLISHED 发布路�
 Vector/metadata 与 required successor 小步：先取得组件锁，再在身份/mmap/buffer 修改前预占 File 事务；append、vector 分段提交和 descriptor 共用准确作用域 loan。新组件在创建目录前预占，覆盖 schema 与初始化，结束后才进入 native 工作，避免瞬态配额错误被字符串化为阻塞已接收命令的 Storage。6/6 确定性专项通过，覆盖取消等待、扩容、单行 vector 提交、相反锁序、真实只读文件错误仍 fence，以及候选未触盘与原 writer 继续可用。
 
 本地 intake 小步：Accept、Complete 和滚段的 blocking worker 显式保留 Scope，并在完整 File 事务前预占；GC prepare 的 loan 在取得 Spool 前释放，选择阶段统一 Spool→I/O→log 顺序。6/6 本地专项通过，覆盖终态只持久化不重执行业务、滚段、GC prepare/select/finish、真实部分 WAL 仍隔离并恢复。远端 typed admission 与 Complete 的确定拒绝重试仍在下一步完成；不能将此本地结果当作真实云验证。
+
+远端准入类型与来源读取小步：上传的 I/O/payload/readback 配额拒绝只有在库存登记及 PUT 前才产生独立 Admission；Record 只将该类型作为确定拒绝，普通 ObjectStore 错误即使包装 Busy 也仍 Unknown。S3 adapter 3/3、本地 RemoteRecord 分类/拒绝/已提交恢复及 source-cut 拒读游标恢复 4/4 通过。fixture 在本机验证 PUT 成功、读回失败，保留未知库存；GET 返回后不再占 I/O，DELETE 拒绝不记为完成。以上均为模拟/本地 HTTP，不是云 S3 验收。

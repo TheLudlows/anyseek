@@ -38,6 +38,7 @@ pub(crate) struct ObjectLogBlock {
 /// fails the read; callers must never return a partial tail as a complete result.
 #[derive(Debug)]
 pub(crate) enum TailError {
+    Admission(crate::resources::Busy),
     ObjectStore(object_store::Error),
     Metadata(rusqlite::Error),
     Invalid(&'static str),
@@ -46,6 +47,7 @@ pub(crate) enum TailError {
 impl fmt::Display for TailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Admission(e) => write!(f, "object-log upload admission denied: {e}"),
             Self::ObjectStore(e) => write!(f, "object-store tail read failed: {e}"),
             Self::Metadata(e) => write!(f, "SQLite head read failed: {e}"),
             Self::Invalid(e) => write!(f, "invalid committed object log: {e}"),
@@ -57,6 +59,7 @@ impl std::error::Error for TailError {}
 impl From<UploadRegisterError> for TailError {
     fn from(value: UploadRegisterError) -> Self {
         match value {
+            UploadRegisterError::Admission(e) => Self::Admission(e),
             UploadRegisterError::ObjectStore(e) => Self::ObjectStore(e),
             UploadRegisterError::Metadata(e) => Self::Metadata(e),
         }

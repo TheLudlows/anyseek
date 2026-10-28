@@ -429,6 +429,17 @@ impl From<String> for RemoteCommitError { fn from(error: String) -> Self { Self:
 #[cfg(feature = "s3-object-store")]
 impl From<&str> for RemoteCommitError { fn from(error: &str) -> Self { Self::Unknown(error.into()) } }
 #[cfg(feature = "s3-object-store")]
+impl From<crate::storage::object_log::TailError> for RemoteCommitError {
+    fn from(error: crate::storage::object_log::TailError) -> Self {
+        match error {
+            // Only this explicit variant proves that neither inventory nor PUT
+            // was attempted. A backend/verification error remains uncertain.
+            crate::storage::object_log::TailError::Admission(_) => Self::Busy,
+            error => Self::Unknown(error.to_string()),
+        }
+    }
+}
+#[cfg(feature = "s3-object-store")]
 impl std::fmt::Display for RemoteCommitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self { Self::Busy => f.write_str("resource budget exhausted before commit publication"), Self::Unknown(error) => f.write_str(error) }
@@ -496,10 +507,7 @@ impl RemotePersistence {
         let reference = crate::storage::object_log::upload_log_block(
             &self.store, &mut authority, &key, &block,
             unix_time_ms_i64(), self.max_object_bytes,
-        ).await.map_err(|error| match error {
-            crate::storage::object_log::TailError::ObjectStore(ref object) if crate::storage::s3_compatible::is_resource_error(object) => RemoteCommitError::Busy,
-            error => RemoteCommitError::Unknown(error.to_string()),
-        })?;
+        ).await.map_err(RemoteCommitError::from)?;
         match authority.publish_commit(
             &self.partition_id, head.head_version, self.owner_epoch, &operation_id,
             digest, seq, reference, None,
@@ -4709,6 +4717,58 @@ mod tests {
         let _=std::fs::remove_file(&authority_path);
         let _=std::fs::remove_file(authority_path.with_extension("sqlite-wal"));
         let _=std::fs::remove_file(authority_path.with_extension("sqlite-shm"));
+    }
+
+    #[cfg(feature = "s3-object-store")]
+    #[test]
+    fn remote_record_only_typed_admission_is_a_definite_refusal() {
+        use crate::storage::object_log::TailError;
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("typed-refusal".into(), crate::resources::Lane::Background, 0).unwrap();
+        let _held = scope.io().unwrap();
+        assert!(matches!(RemoteCommitError::from(TailError::Admission(scope.io().err().unwrap())), RemoteCommitError::Busy));
+        let backend = object_store::Error::Generic { store: "test-backend", source: Box::new(scope.io().err().unwrap()) };
+        assert!(matches!(RemoteCommitError::from(TailError::ObjectStore(backend)), RemoteCommitError::Unknown(_)));
+    }
+
+    #[cfg(feature = "s3-object-store")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_record_upload_admission_refuses_before_put_and_keeps_writer_usable() {
+        use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
+        use object_store::{memory::InMemory, ObjectStore};
+        use futures::TryStreamExt;
+        let root = tempfile::tempdir().unwrap(); let location = root.path().join("records");
+        let backend = Arc::new(InMemory::new());
+        let store = S3CompatibleStore::from_store(backend.clone(), 1024 * 1024);
+        let mut authority = SqliteAuthority::open(&root.path().join("authority.sqlite"), std::time::Duration::from_secs(1)).unwrap();
+        authority.create_partition("quota-record", 1).unwrap();
+        let p = RecordPartition::create(&location, config()).await.unwrap();
+        {
+            let mut inner = p.inner.lock().await;
+            let checkpoint = encode_entry(&Entry::Checkpoint { config: inner.config.clone(), state: inner.state.clone() }).unwrap();
+            store.publish_bootstrap(&mut authority, "quota-record", 1, &checkpoint, unix_time_ms_i64()).await.unwrap();
+            inner.remote = Some(RemotePersistence { _owner: None, store, authority: tokio::sync::Mutex::new(authority),
+                partition_id: "quota-record".into(), owner_epoch: 1, max_tail_blocks: 128,
+                max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024 });
+        }
+        let before = backend.list(None).try_collect::<Vec<_>>().await.unwrap().len();
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("quota-record".into(), crate::resources::Lane::Background, 0).unwrap();
+        let held = scope.io().unwrap();
+        let request = write("quota-retry", "a", "alpha", ExpectedVersion::Absent);
+        assert!(matches!(scope.clone().run(p.write(request.clone())).await, Err(RecordError::Busy)));
+        assert_eq!(backend.list(None).try_collect::<Vec<_>>().await.unwrap().len(), before);
+        {
+            let inner = p.inner.lock().await;
+            assert!(inner.healthy); assert!(!inner.output.read().unwrap().fenced); assert_eq!(inner.state.seq, 0);
+            let remote = inner.remote.as_ref().unwrap();
+            assert_eq!(remote.authority.lock().await.read_head("quota-record").unwrap().unwrap().committed_seq, 0);
+        }
+        drop(held);
+        let receipt = scope.clone().run(p.write(request.clone())).await.unwrap();
+        assert_eq!(receipt.seq, 1);
+        assert_eq!(scope.run(p.write(request)).await.unwrap(), receipt);
+        assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 1);
     }
 
     #[cfg(feature = "s3-object-store")]

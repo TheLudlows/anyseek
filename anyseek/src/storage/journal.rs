@@ -599,6 +599,26 @@ mod tests {
         assert!(recovery);
     }
     #[test]
+    fn chunked_cut_io_refusal_restores_cursor_and_allows_next_append() {
+        let root = tempfile::tempdir().unwrap(); let path = root.path().join("journal");
+        let mut journal = Journal::create(&path, 4096).unwrap();
+        journal.append(b"first").unwrap();
+        let cut = journal.capture_cut(&path).unwrap();
+        let cursor = journal.log.stream_position().unwrap();
+        let scope = std::sync::Arc::new(crate::resources::Governor::default())
+            .admit("cut-reader".into(), crate::resources::Lane::Background, 0).unwrap();
+        let held = scope.io().unwrap();
+        let mut bytes = vec![0; cut.end as usize];
+        let error = scope.clone().run_sync(|| journal.read_cut_chunk(cut, 0, &mut bytes)).unwrap_err();
+        assert!(error.get_ref().is_some_and(|error| error.is::<crate::resources::Busy>()));
+        assert_eq!(journal.log.stream_position().unwrap(), cursor);
+        assert!(!journal.needs_recovery);
+        drop(held);
+        scope.run_sync(|| journal.append(b"second")).unwrap();
+        drop(journal);
+        assert_eq!(Journal::open(&path, 4096).unwrap().1, vec![b"first".to_vec(), b"second".to_vec()]);
+    }
+    #[test]
     fn chunked_committed_cut_keeps_concurrent_append_cursor_and_large_frames() {
         let root=path();let mut journal=Journal::create(&root,1024*1024).unwrap();
         let large=vec![42;READ_CHUNK*3+19];
