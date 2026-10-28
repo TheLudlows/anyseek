@@ -310,7 +310,7 @@ mod tests {
             receipt=Some(applied.receipt.clone());
             inner.remote.as_mut().unwrap().commit_entry(applied.receipt.seq,
                 format!("{}:{}",request.operation_id.epoch,request.operation_id.nonce),&bytes).await.unwrap();
-            inner.append_operation(&bytes,applied.receipt.seq).unwrap();
+            inner.append_operation(&bytes,applied.receipt.seq).await.unwrap();
             inner.replay_context().replay(Entry::Applied(applied)).await.unwrap();
             inner.feed_cache=change_feed::Cache::rebuild(&inner.state,&inner.config.change_feed).unwrap();
         }

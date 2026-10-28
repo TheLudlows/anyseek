@@ -377,7 +377,7 @@ impl Inner {
             .write()
             .map_err(|_| RecordError::RecoveryRequired)?
             .fenced = true;
-        self.append_operation(&bytes,self.state.seq)?;
+        self.append_operation(&bytes,self.state.seq).await?;
         #[cfg(feature = "fault-injection")]
         match std::env::var("ANYSEEK_FEED_TRIM_FAULT").ok().as_deref() {
             Some("after_append_unknown") => {

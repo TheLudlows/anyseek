@@ -728,8 +728,15 @@ impl Inner {
     // In S3 mode the caller has already received SQLite commit confirmation.
     // A cache append error cannot turn that known durable operation into an
     // unknown remote commit. The caller keeps health/output fenced until reopen.
-    fn append_operation(&mut self, bytes: &[u8], seq: u64) -> Result<(), RecordError> {
-        let result = (|| {
+    async fn append_operation(&mut self, bytes: &[u8], seq: u64) -> Result<(), RecordError> {
+        // Reserve the whole local frame before its first byte. File callbacks
+        // borrow this permit through both redundant witnesses; no native or
+        // remote work runs inside the synchronous loan.
+        let permit = match crate::resources::Scope::current() {
+            Some(scope) => scope.journal_io().await.map(Some).map_err(std::io::Error::other),
+            None => Ok(None),
+        };
+        let mut append = || {
             #[cfg(test)]
             if self.journal.root().join(".test-cache-append-failure").exists() {
                 return Err(std::io::Error::other("injected cache append failure"));
@@ -739,7 +746,12 @@ impl Inner {
                 return Err(std::io::Error::other("injected cache append failure"));
             }
             self.journal.append(bytes)
-        })();
+        };
+        let result = match permit {
+            Ok(Some(permit)) => permit.run(append),
+            Ok(None) => append(),
+            Err(error) => Err(error),
+        };
         if let Err(error) = result {
             #[cfg(feature="s3-object-store")]
             if self.remote.is_some() { return Err(RecordError::DurablePending(seq)); }
@@ -1749,6 +1761,50 @@ mod tests {
     };
     use crate::vector::Inference;
     use crate::vector_similarity::AnnMode;
+    #[tokio::test(flavor = "current_thread")]
+    async fn journal_frame_waits_for_external_io_and_preserves_retry_on_reopen() {
+        let root = tempfile::tempdir().unwrap(); let location = root.path().join("records");
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("journal-contention".into(), crate::resources::Lane::Background, 0).unwrap();
+        let p = scope.clone().run(RecordPartition::create(&location, config())).await.unwrap();
+        let request = write("contended-frame", "a", "alpha", ExpectedVersion::Absent);
+        let held = scope.io().unwrap();
+        let release = async { tokio::time::sleep(std::time::Duration::from_millis(20)).await; drop(held); };
+        let operation = scope.clone().run(p.write(request.clone()));
+        let (_, receipt) = tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(release, operation) }).await.unwrap();
+        let receipt = receipt.unwrap();
+        assert_eq!(receipt.seq, 1);
+        assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 1);
+        drop(p);
+        let p = scope.clone().run(RecordPartition::open(&location, config().max_journal_bytes)).await.unwrap();
+        assert_eq!(scope.run(p.write(request)).await.unwrap(), receipt);
+        assert_eq!(p.get("a").await.unwrap().unwrap().version, 1);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn journal_frame_partial_write_still_reports_unknown_and_requires_recovery() {
+        let root = tempfile::tempdir().unwrap(); let location = root.path().join("records");
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("journal-partial".into(), crate::resources::Lane::Background, 0).unwrap();
+        let p = RecordPartition::create(&location, config()).await.unwrap();
+        let mut inner = p.inner.lock().await;
+        // Isolate this fault ledger from the partition's live cache ledger.
+        // Exercise the real append/error mapper with an ordinary published WAL.
+        let isolated = root.path().join("fault-journal");
+        inner.journal = PartitionJournal::create(&isolated, 65536, b"previous checkpoint").unwrap();
+        let generation = inner.journal.root().join("generation-0000000000000000");
+        let used: u64 = std::fs::read_dir(&generation).unwrap().map(|entry| entry.unwrap().metadata().unwrap().len()).sum();
+        let wal = generation.join("wal"); let before = std::fs::metadata(&wal).unwrap().len();
+        let disk = crate::storage::build_budget::DiskScope::begin(&generation, used + 16).unwrap();
+        drop(inner);
+        let request = write("partial-frame", "a", "alpha", ExpectedVersion::Absent);
+        let error = scope.clone().run(p.write(request.clone())).await.unwrap_err();
+        assert!(matches!(error, RecordError::OutcomeUnknown(_)), "{error:?}");
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), before + 16, "header reached disk before checksum admission failed");
+        assert!(matches!(scope.run(p.write(request)).await, Err(RecordError::RecoveryRequired)));
+        drop(p); drop(disk);
+        let (_, recovered) = PartitionJournal::open(&isolated, 65536).unwrap();
+        assert_eq!(recovered, vec![b"previous checkpoint".to_vec()]);
+    }
     pub(super) fn path() -> PathBuf {
         let base = std::env::var_os("ANYSEEK_TEST_ROOT")
             .map(std::path::PathBuf::from)

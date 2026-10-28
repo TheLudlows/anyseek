@@ -254,7 +254,7 @@ impl Inner {
             remote.commit_entry(event.seq, format!("system:expired:{}", event.seq), &bytes)
                 .await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?;
         }
-        self.append_operation(&bytes,event.seq)?;
+        self.append_operation(&bytes,event.seq).await?;
         #[cfg(feature = "fault-injection")]
         match std::env::var("ANYSEEK_TEMPORAL_FAULT").ok().as_deref() {
             Some("after_append_unknown") => {

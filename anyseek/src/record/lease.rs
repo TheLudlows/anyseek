@@ -129,7 +129,7 @@ impl Inner {
             remote.commit_entry(event.seq, format!("system:lease-expired:{}", event.seq), &bytes)
                 .await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?;
         }
-        self.append_operation(&bytes,event.seq)?;
+        self.append_operation(&bytes,event.seq).await?;
         #[cfg(feature="fault-injection")]
         match std::env::var("ANYSEEK_LEASE_FAULT").ok().as_deref(){Some("after_append_unknown")=>return Err(RecordError::OutcomeUnknown("injected lease append".into())),Some("after_durable")=>return Err(RecordError::DurablePending(event.seq)),Some("crash_after_durable")=>std::process::exit(86),_=>{}}
         #[cfg(test)] if self.fail_after_durable{return Err(RecordError::DurablePending(event.seq));}

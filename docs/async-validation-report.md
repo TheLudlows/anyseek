@@ -23,16 +23,18 @@
 
 | 检查 | 当前结果 |
 | --- | --- |
-| Linux 完整 lib（固定测试二进制） | `08f485d`：417 通过、0 失败、12 忽略，1549.27 秒 |
-| 服务端及全部其他 targets | `08f485d` 全部 34 个非 lib targets 通过；总计 35 targets、524 通过、0 失败、13 忽略 |
-| 明确核心回归清单 | 最终二进制包含全部 146 个清单用例；Linux CI 清单已通过；Windows 无断言失败，但远端长测运行时触及 30 分钟 job 上限被取消 |
-| 独立 core 默认/无默认特性 | `08f485d` 两种独立依赖图与编译均通过 |
-| 文档示例 | `08f485d` doctest 9 项通过 |
+| Linux 完整 lib（固定测试二进制） | `b121579`：424 通过、0 失败、12 忽略，1546.70 秒 |
+| 服务端及全部其他 targets | `b121579` 全部 35 targets 成功，531 通过、0 失败、13 忽略，runner exit 0 |
+| 明确核心回归清单 | 固定二进制包含更新后的全部 153 个 CI 清单用例；`97736d6` 的 Ubuntu core 已通过，Windows core 运行中 |
+| 独立 core 默认/无默认特性 | `b121579` 两种独立依赖图与编译均通过 |
+| 文档示例 | `b121579` doctest 9 项通过 |
 | 静态文档、词法覆盖、Python、diff | `53749ee` 文档链接/品牌、完整词法矩阵源检查、Python 语法和 diff 通过；汇总更新后再检查 |
-| 同数据同资源 Meilisearch 对比 | `08f485d` 基准暴露后台合并/native 写入 I/O 配额争用，尚未完成成对对比；修复后重新冻结 release |
-| 远端最终 SHA 与 CI | `08f485d` static、双平台 lexical、Ubuntu core 通过；Windows core 被 job 时限取消，full-acceptance skipped |
+| 同数据同资源 Meilisearch 对比 | `08f485d` 基准发现的 I/O 争用已由 `b121579` 修复并通过 40 项专项与完整库回归；新 release 已冻结，全部本地回归结束后开始成对测量 |
+| 远端最终 SHA 与 CI | `97736d6` static、双平台 lexical、Ubuntu core 通过；Windows core 运行中，full-acceptance skipped |
 
 最初诊断回归发现历史维护边界测试不符合异步 Busy、可变 tail 和合法时钟契约，均保留测试并修正其设置/断言；也发现运行中测试二进制被并行 cargo 替换会使子进程用例 ENOENT。最终运行使用固定副本，避免这类验证干扰。
+
+当前生产修复版本为 `b121579`；`97736d6` 只更新 CI 用例清单，生产源码不变。最新 head 下重新构建 release 与固定二进制逐字节相同（SHA256 `890bf2f1e7db2cc41f1f6412a6b9b42df3fe6b80379513fef0d5e497a57694f6`）。新全量与旧诊断结果分别记录，不重复使用旧生产二进制进行性能验收。
 
 ## 真实环境与资源
 
@@ -89,3 +91,7 @@ CI 时限诊断：Windows core 的本地 long-suffix 用例通过（734.37 秒�
 I/O 争用修复前置切片：新增仅供已准入 native 工作使用的资源等待与显式同步 Scope 传播。普通 I/O 仍立即拒绝；仅 I/O 计数饱和可等待，取消、无效主体、零容量及 poisoned ledger 立即返回。资源组 8/8 通过（3 项新增），覆盖单线程运行时异步持有者释放、取消不退还其他 owner 的租约、永久错误不等待。尚未接入 Runtime/Directory，不能认为基准故障已修复。
 
 I/O 争用修复接入：Runtime 的同步 native mutation/commit/reload/seal 及生产 create/open 改为拥有 Scope、Data guard 和 Runtime 的阻塞工作；Directory 只在实际文件操作前等待配额，不重放 Consumer 批次。取消而未取回结果会 fence writer；明确返回的准入错误保持原语义。Drop 先取消自身 Directory 等待再 join，固定 reader 的 pin 保留。META_LOCK 使用释放配额后的非阻塞探测重试，避免持配额等锁的循环；merge 启动时立即将额外 Charge 移给 owned 后台任务。专项 40/40 通过：Runtime 25、Directory 7、资源 8，覆盖真实配额竞争、单线程执行器、取消后拒绝复用、Drop、原生写错、旧 reader/pin 与 metadata 锁争用。此前首轮 24/25 的明确拒绝误 fence 已修复并复验；尚待新 SHA 完整回归与固定 release 基准，不能用专项替代最终验收。
+
+第二次固定 release 实验（生产 `b121579`、CI 清单 head `97736d6`）：完整本地回归 531/0/13 及该 head 的五个必需 CI 任务均通过，但成对基准再次在 1040 接收、1024 回执/索引核验后中止。这次 native index_error 为空，物化 Journal 分段写入因 Background I/O 争用返回 OutcomeUnknown；没有重放该批次，也未运行 Meilisearch、查询和恢复阶段。需在 Journal frame/witness 开始前预占整个同步写事务的 I/O，并让内部 File 操作借用该租约；不能在帧写到一半时再进行会拒绝的独立准入。此第二处修复与新版本复验仍在进行，当前没有成对性能验收。
+
+Journal 事务准入小步：在本地完整 frame 与双 witness 开始前异步预占一个 I/O permit，File 只在同 governor/subject/lane 的同步事务中借用；该 loan 不传播给 spawn 或 native worker。11/11 专项通过（2 项 Journal、9 项资源），包括竞争解除后的写入与冷恢复幂等、真实 header 部分落盘后仍 OutcomeUnknown 并要求恢复。此时 vector/metadata live 提交、checkpoint、接收与终态的全链配额审查/专项仍在进行，不将单一 WAL 修复称作全链验收。

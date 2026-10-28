@@ -42,7 +42,7 @@ fn exceeded() -> io::Error {
     io::Error::other("record build resource budget exceeded")
 }
 fn io_admission() -> io::Result<Option<crate::resources::Lease>> {
-    crate::resources::Scope::current().map(|scope| scope.io()).transpose().map_err(io::Error::other)
+    crate::resources::Scope::current().map(|scope| scope.file_io()).transpose().map(Option::flatten).map_err(io::Error::other)
 }
 pub(crate) struct MemoryLease(u64, Arc<AtomicU64>);
 pub(crate) fn reserve_memory(bytes: u64) -> io::Result<MemoryLease> {

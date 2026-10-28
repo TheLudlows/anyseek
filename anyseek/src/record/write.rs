@@ -262,7 +262,7 @@ impl Inner {
                 }
             }
         }
-        self.append_operation(&bytes, receipt.seq)?;
+        self.append_operation(&bytes, receipt.seq).await?;
         #[cfg(feature = "fault-injection")]
         match injected.as_deref() {
             Some("after_append_unknown") => {
