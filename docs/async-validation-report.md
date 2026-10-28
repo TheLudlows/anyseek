@@ -54,3 +54,5 @@ generation 的可重建操作/租约证据已可回收；精确拒绝历史 gene
 ## 小步收尾进度
 
 第一步：Records 容器增量维护 live TTL、retained Source 和 live typed 三项派生计数，去掉普通写入/预留中的对应 Record 全扫。持久化格式不变，恢复时重建并全扫校验；更新失败不修改计数。两项新容器测试与五项 TTL、generation、Source/abort/feed 预算回归共 7 项通过。generation staged reserve 和到期候选扫描仍待后续步骤，不宣称整个写路径为常数时间。
+
+第二步：非持久化最早 TTL 下界避免未到期时遍历 Records；延期/删除允许保守早值，到达下界后仍完整扫描候选并刷新。更早更新即时下调，恢复重建，全扫 oracle 拒绝会漏过期限的缓存。9 项专项通过，含精确“未扫描”断言；到期扫描和 generation staging 扫描仍保留。

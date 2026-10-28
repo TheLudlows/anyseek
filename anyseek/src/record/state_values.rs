@@ -167,17 +167,40 @@ impl AdmissionCounts {
 #[derive(Debug, Clone, Default)]
 pub(super) struct Records {
     counts: AdmissionCounts,
+    // Conservative lower bound, not authority. Removal/extension may leave it
+    // early until the next candidate scan; insertion must never leave it late.
+    ttl_deadline_lower_bound: Option<u64>,
     values: BTreeMap<String, Shared<Record>>,
     bytes: usize,
 }
 impl Records {
+    pub(super) fn visit_due_ttl(&mut self, evaluation: u64, mut visit: impl FnMut(&Record)) -> bool {
+        if self.ttl_deadline_lower_bound.is_none_or(|deadline| deadline > evaluation) { return false; }
+        let mut earliest = None;
+        for record in self.values.values() {
+            if !temporal::live_ttl(record) { continue; }
+            let deadline = record.temporal.expire_at_ms.expect("live TTL deadline");
+            earliest = Some(earliest.map_or(deadline, |old: u64| old.min(deadline)));
+            if deadline <= evaluation { visit(record); }
+        }
+        self.ttl_deadline_lower_bound = earliest;
+        true
+    }
     pub(super) fn live_ttl_count(&self) -> usize { self.counts.ttl }
     pub(super) fn retained_source_count(&self) -> usize { self.counts.sources }
     pub(super) fn live_typed_count(&self) -> usize { self.counts.typed }
     pub(super) fn validate_counts(&self) -> Result<(), RecordError> {
         let mut counts = AdmissionCounts::default();
+        let mut earliest = None;
         for record in self.values() {
+            if temporal::live_ttl(record) {
+                let deadline = record.temporal.expire_at_ms.unwrap();
+                earliest = Some(earliest.map_or(deadline, |old: u64| old.min(deadline)));
+            }
             counts = counts.replacing(AdmissionCounts::default(), AdmissionCounts::of(record))?;
+        }
+        if earliest.is_some_and(|deadline| self.ttl_deadline_lower_bound.is_none_or(|bound| bound > deadline)) {
+            return Err(storage("record TTL deadline lower bound invalid"));
         }
         if counts != self.counts { return Err(storage("record admission counts mismatch")); }
         Ok(())
@@ -253,9 +276,15 @@ impl Records {
             .ok_or_else(|| storage("record replacement overflow"))?;
         let counts = self.counts.replacing(
             self.get(&id).map(AdmissionCounts::of).unwrap_or_default(), AdmissionCounts::of(&value))?;
+        let next_deadline = temporal::live_ttl(&value).then_some(value.temporal.expire_at_ms).flatten();
+        let deadline = match (self.ttl_deadline_lower_bound, next_deadline) {
+            (Some(old), Some(next)) => Some(old.min(next)),
+            (old, next) => old.or(next),
+        };
         let previous = self.values.insert(id, value);
         self.bytes = bytes;
         self.counts = counts;
+        self.ttl_deadline_lower_bound = deadline;
         Ok(previous)
     }
     pub(super) fn edit(
@@ -354,6 +383,54 @@ mod admission_count_tests {
         let before = serde_json::to_value(&state.records).unwrap();
         assert!(state.records.edit("id-0", 0, |r| { r.document = None; Err(storage("injected edit failure")) }).is_err());
         check(&state.records); assert_eq!(before, serde_json::to_value(&state.records).unwrap());
+    }
+
+    #[test]
+    fn ttl_deadline_bound_skips_scan_and_tracks_early_update_extension_delete_restore() {
+        let mut state = State::default();
+        let mut request = super::super::tests::write("deadline", "id", "alpha", ExpectedVersion::Any);
+        request.temporal = Some(TemporalMetadata { expire_at_ms: Some(1000), ..Default::default() });
+        let applied = Applied { request_digest: None, graph_invalidation: false,
+            receipt: WriteReceipt { staged_only: false, seq: 1, version: 1, record_id: "id".into() },
+            request, observed_epoch: 1, observed_time_ms: 1 };
+        apply(&mut state, &applied).unwrap();
+        let records = &mut state.records;
+        assert!(!records.visit_due_ttl(999, |_| panic!("early callback")));
+        // Same-version changes still lower the bound, independent of identity version.
+        records.edit("id", 0, |r| { r.temporal.expire_at_ms = Some(100); Ok(()) }).unwrap();
+        check(records);
+        let mut due = Vec::new();
+        assert!(records.visit_due_ttl(100, |r| due.push(r.record_id.clone())));
+        assert_eq!(due, ["id"]);
+        records.edit("id", 32, |r| { r.temporal.expire_at_ms = Some(2000); Ok(()) }).unwrap();
+        assert_eq!(records.ttl_deadline_lower_bound, Some(100));
+        assert!(records.visit_due_ttl(100, |_| panic!("extended record expired")));
+        assert_eq!(records.ttl_deadline_lower_bound, Some(2000));
+        assert!(!records.visit_due_ttl(1999, |_| panic!("unexpected scan")));
+        let mut jumped = 0;
+        assert!(records.visit_due_ttl(10000, |_| jumped += 1));
+        assert_eq!(jumped, 1);
+        let before = records.ttl_deadline_lower_bound;
+        assert!(records.edit("id", 0, |r| { r.temporal.expire_at_ms = Some(1); Err(storage("rollback")) }).is_err());
+        assert_eq!(before, records.ttl_deadline_lower_bound);
+        records.edit("id", 0, |r| { r.document = None; Ok(()) }).unwrap();
+        check(records);
+        let restored: Records = serde_json::from_slice(&serde_json::to_vec(records).unwrap()).unwrap();
+        assert_eq!(restored.ttl_deadline_lower_bound, None);
+        assert!(records.same_values(&restored).unwrap());
+        assert!(records.visit_due_ttl(2000, |_| panic!("deleted record expired")));
+        assert!(!records.visit_due_ttl(u64::MAX, |_| panic!("empty scan")));
+        let mut restored = Records::default();
+        // Invalid late/absent watermarks are detected by the recovery oracle.
+        restored.insert("id".into(), mutation::projected_record(&State::default(), &applied,
+            applied.request.document.clone(), applied.request.temporal.clone().unwrap())).unwrap();
+        restored.ttl_deadline_lower_bound = Some(1001);
+        assert!(restored.validate_counts().is_err());
+        restored.ttl_deadline_lower_bound = None;
+        assert!(restored.validate_counts().is_err());
+        let mut rebuilt: Records = serde_json::from_slice(&serde_json::to_vec(&restored).unwrap()).unwrap();
+        check(&rebuilt);
+        let mut n = 0; assert!(rebuilt.visit_due_ttl(1000, |_| n += 1)); assert_eq!(n, 1);
     }
 
     #[test]

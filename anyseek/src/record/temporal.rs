@@ -213,16 +213,11 @@ impl Inner {
         self.expire_staging(evaluation).await?;
         self.cleanup_private().await?;
         self.trim_feed(evaluation).await?;
-        let targets: Vec<_> = self
-            .state
-            .records
-            .values()
-            .filter(|r| live_ttl(r) && r.temporal.expire_at_ms.unwrap() <= evaluation)
-            .map(|r| ExpiredTarget {
-                record_id: r.record_id.clone(),
-                previous_version: r.version,
-            })
-            .collect();
+        let mut targets = Vec::new();
+        self.state.records.visit_due_ttl(evaluation, |r| targets.push(ExpiredTarget {
+            record_id: r.record_id.clone(),
+            previous_version: r.version,
+        }));
         if targets.is_empty() {
             self.evaluation_time_ms = evaluation;
             return Ok(());
