@@ -19,17 +19,40 @@ phase events before claiming maintenance coverage. Missing events are a validati
 gap, not a zero-cost maintenance result. This remains a small finite workload.
 
 Submit identical documents in batches of 16. For anyseek, measure HTTP 202
-acceptance separately from waiting for terminal-prefix completion and both index
-watermarks. Check every operation has a successful business receipt, then query
+acceptance, business completion and index-watermark completion separately.
+Business timing is the first poll observing `completed_seq >= batch_durable_cut`
+and `pending == 0`. The cut comes from that batch's returned acceptance receipts.
+The completion prefix includes rejected operations, so the timing becomes evidence
+of successful business completion only after every operation's successful receipt
+has been verified. Index timing is recorded separately when both lexical/vector
+watermarks reach the materialized sequence after the business prefix completes.
+Both elapsed intervals start at the original batch submission and include Busy
+waits. They are polling observations, not exact internal transition timestamps. Check every operation has a successful business receipt, then query
 representative titles and verify visible document count. For Meilisearch, likewise
 measure HTTP 202 acceptance separately from successful task completion and check
 visible count and representative searches. A 202 response is never counted as
 business completion or search visibility. Polling granularity differs (5 ms for
 anyseek and 10 ms for Meilisearch) and is included in completion latency.
+Meilisearch's successful task supplies the same observed value for business and
+index completion because this harness has no separate corresponding watermarks.
+This is an API-model difference, not evidence that anyseek's stages are equivalent.
+Watermark/task observations do not replace final representative search validation.
+The summary exposes `batch_business_completion_observed` and
+`batch_index_watermarks_observed`; `batch_published_completion` retains the latter
+value for compatibility, not an independently measured instant of searchability.
 
 Report batch acceptance/completion p50, p95 and p99, total load wall time, summed
 batch completion time, observed peak RSS, query latency and empty-result count,
 checkpoint duration where available, reopened count, and database disk size.
+`reopen_health_ms` (also retained as `reopen_ms`) stops at the health endpoint.
+`reopen_verified_count_ms` separately measures startup plus the first count query
+and its expected-count verification, including any lazy partition recovery.
+After count verification, replay one previously successful representative query
+and assert that it still returns its original document ID. Report only its boolean
+verification result and `reopen_verified_search_ms` (startup through count and
+representative-search verification) in the summary; query text and hit IDs remain
+in private raw events. This checks one lexical query after restart, not full query
+correctness or vector recovery. Health/count alone are not search verification.
 Sequential-batch document rates are not saturated throughput. Per-operation
 receipt validation is excluded from individual completion intervals but included
 in total load wall time. Peak RSS uses 100 ms sampling and can miss short peaks.

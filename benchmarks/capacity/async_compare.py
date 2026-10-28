@@ -84,11 +84,19 @@ def run(engine, rows, queries, out, batch_size):
                'status': 'running', 'server_cpus': [0, 1], 'client_cpus': [2, 3],
                'cpu_max': Path('/sys/fs/cgroup/cpu.max').read_text().strip(),
                'memory_max': Path('/sys/fs/cgroup/memory.max').read_text().strip()}
-    submits, completes, http_submits = [], [], []
+    submits, completes, http_submits, business_completes = [], [], [], []
     summary['submit_attempts'] = 0
     summary['submit_busy_rejections'] = 0
     summary['durably_accepted_records'] = 0
     summary['verified_business_receipts'] = 0
+    summary['verified_meili_tasks'] = 0
+    summary['completion_observation_model'] = (
+        'First poll with completed_seq >= batch durable cut and pending=0; terminal prefix includes '
+        'rejections, so business success additionally requires every receipt check. Separate index '
+        'timing observes lexical/vector watermarks; search is validated by later queries.'
+        if engine == 'anyseek' else
+        'Successful Meili task is the shared business/index-completion observation; no independently '
+        'exposed business/lexical/vector watermarks are measured. Search is validated by later queries.')
     summary['log_filter'] = os.environ.get('RUST_LOG')
     try:
         summary['startup_ms'] = e.start()
@@ -117,13 +125,21 @@ def run(engine, rows, queries, out, batch_size):
                 summary['submit_busy_rejections'] += len(attempts) - 1
                 http_submits.append(attempts[-1]['http_ms'])
                 submits.append(ms)
+                batch_cut = max(receipt['durable_seq'] for receipt in result['receipts'])
+                business_ms = None
                 until = time.monotonic() + 180
                 while True:
                     progress = e.request('GET', '/api/v1/index/bench/ingest')[1]
                     summary['last_ingest_progress'] = progress
+                    if (business_ms is None and progress['completed_seq'] >= batch_cut
+                            and progress['pending'] == 0):
+                        business_ms = (time.perf_counter() - batch_started) * 1000
+                        business_completes.append(business_ms)
+                        e.event('business_completion_observed', offset=offset, durable_cut=batch_cut,
+                                elapsed_ms=business_ms, progress=progress)
                     if progress['blocked'] or progress['index_error']:
                         raise RuntimeError(progress)
-                    if (progress['pending'] == 0 and progress['completed_seq'] == progress['durable_seq']
+                    if (business_ms is not None
                             and progress['lexical_seq'] >= progress['materialized_seq']
                             and progress['vector_seq'] >= progress['materialized_seq']):
                         break
@@ -133,12 +149,15 @@ def run(engine, rows, queries, out, batch_size):
                 # Every accepted operation must have a successful business outcome.
                 # This validation is excluded from each batch's completion timer.
                 complete_ms = (time.perf_counter() - batch_started) * 1000
+                e.event('index_watermarks_observed', offset=offset, durable_cut=batch_cut,
+                        elapsed_ms=complete_ms, progress=progress)
                 for w in writes:
                     oid = w['operation_id']
                     status = e.request('GET', f"/api/v1/index/bench/ingest/operation/{oid['epoch']}/{oid['nonce']}")[1]['status']
                     assert status and status['receipt'] and status['error'] is None, status
                     summary['verified_business_receipts'] += 1
-                e.event('published', progress=progress)
+                e.event('published', progress=progress, business_elapsed_ms=business_ms,
+                        index_watermarks_elapsed_ms=complete_ms)
             else:
                 code, result, ms, attempts = request_with_busy_wait(e, 'POST', '/indexes/bench/documents', docs)
                 assert code == 202, result
@@ -149,12 +168,17 @@ def run(engine, rows, queries, out, batch_size):
                 submits.append(ms)
                 task = e.task(result)
                 complete_ms = (time.perf_counter() - batch_started) * 1000
-                e.event('accept_and_complete', offset=offset, result=result, task=task, ms=ms)
+                business_completes.append(complete_ms)
+                summary['verified_meili_tasks'] += 1
+                e.event('accept_and_complete', offset=offset, result=result, task=task, ms=ms,
+                        business_elapsed_ms=complete_ms, index_completion_elapsed_ms=complete_ms)
             completes.append(complete_ms)
             print(engine, 'completed', offset + len(docs), flush=True)
         summary['load_wall_seconds_including_validation'] = time.perf_counter() - started
         summary['batch_acceptance_including_busy_wait'] = stats(submits)
         summary['successful_acceptance_http_only'] = stats(http_submits)
+        summary['batch_business_completion_observed'] = stats(business_completes)
+        summary['batch_index_watermarks_observed'] = stats(completes)
         summary['batch_published_completion'] = stats(completes)
         summary['summed_batch_completion_seconds'] = sum(completes) / 1000
         summary['completion_documents_per_second'] = len(rows) / (sum(completes) / 1000)
@@ -193,9 +217,21 @@ def run(engine, rows, queries, out, batch_size):
             summary['checkpoint'] = e.checkpoint()
         summary['checkpoint_ms'] = (time.perf_counter() - checkpoint_started) * 1000
         e.stop()
+        reopen_started = time.perf_counter()
         summary['reopen_ms'] = e.start()
+        summary['reopen_health_ms'] = summary['reopen_ms']
         summary['reopened_count'] = e.count()
         assert summary['reopened_count'] == len(rows)
+        summary['reopen_verified_count_ms'] = (time.perf_counter() - reopen_started) * 1000
+        representative = next(check for check in checks if check['expected_found'])
+        code, response, ms, _ = e.query(representative['query'])
+        restored_hits = e.hit_ids(response)
+        e.event('reopen_representative_search', query=representative['query'],
+                expected_docid=representative['expected_docid'], status=code, hits=restored_hits, ms=ms)
+        summary['reopen_representative_search_verified'] = (
+            code == 200 and representative['expected_docid'] in restored_hits)
+        assert summary['reopen_representative_search_verified'], 'representative document missing after restart'
+        summary['reopen_verified_search_ms'] = (time.perf_counter() - reopen_started) * 1000
         summary['status'] = 'complete'
     except Exception as exc:
         summary['status'] = 'failed'
@@ -205,7 +241,10 @@ def run(engine, rows, queries, out, batch_size):
         e.close()
         summary['batch_acceptance_including_busy_wait'] = stats(submits)
         summary['successful_acceptance_http_only'] = stats(http_submits)
+        summary['batch_business_completion_observed'] = stats(business_completes)
+        summary['batch_index_watermarks_observed'] = stats(completes)
         summary['batch_published_completion'] = stats(completes)
+        summary['observed_business_completion_batches'] = len(business_completes)
         summary['verified_published_batches'] = len(completes)
         summary['peak_rss_kib'] = max((r['rss_kib'] for r in e.resources), default=0)
         summary['disk'] = disk(e.data)
