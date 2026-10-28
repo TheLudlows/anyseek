@@ -85,3 +85,5 @@ generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock �
 基准发现的待修复问题：`08f485d` 在 1040 条持久接收、1024 条完成回执及索引核验后，后台合并占用 Background I/O 配额导致 native Directory 写入遇到 Busy，索引进入失败状态。该运行未完成查询、重启或 Meilisearch 对比，不构成性能验收。需在实际写入的资源准入边界处理争用，不能直接重试已部分执行的索引批次或隐藏真实 I/O 错误。
 
 CI 时限诊断：Windows core 的本地 long-suffix 用例通过（734.37 秒），远端 long-suffix 仍在运行时整个 job 达到 30 分钟上限；GitHub annotation 明确报告 job 超时，没有用例断言失败。仅该矩阵 job 的预算调整为 45 分钟，保留测试数据规模、用例超时和 runner 数量；调整后仍须验证新的终态。
+
+I/O 争用修复前置切片：新增仅供已准入 native 工作使用的资源等待与显式同步 Scope 传播。普通 I/O 仍立即拒绝；仅 I/O 计数饱和可等待，取消、无效主体、零容量及 poisoned ledger 立即返回。资源组 8/8 通过（3 项新增），覆盖单线程运行时异步持有者释放、取消不退还其他 owner 的租约、永久错误不等待。尚未接入 Runtime/Directory，不能认为基准故障已修复。

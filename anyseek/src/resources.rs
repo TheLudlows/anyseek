@@ -1,8 +1,10 @@
 //! Bounded service admission and explicit buffer/I/O accounting.
 //!
 //! These are conservative reservations, not a process allocator or an RSS cap.
-//! No task waits in a resource queue. Leases follow the actual task/buffer owner.
-use std::{collections::BTreeMap, future::Future, sync::{Arc, LazyLock, Mutex}};
+//! Admission never queues tasks. Leases follow the actual task/buffer owner.
+//! Already-admitted native transactions may wait for I/O on dedicated blocking
+//! workers; ordinary admission, bytes, and I/O requests still refuse immediately.
+use std::{collections::BTreeMap, future::Future, sync::{Arc, Condvar, LazyLock, Mutex, atomic::{AtomicBool, Ordering}}};
 
 /// Independent resource classes. Control capacity is never lent to data work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +72,7 @@ impl Usage {
 #[derive(Default)]
 struct Ledger { total: [Usage; 5], subjects: BTreeMap<String, [Usage; 5]> }
 /// Shared budgets. Use one governor for all collections served by a service.
-pub struct Governor { limits: [Limits; 5], ledger: Mutex<Ledger> }
+pub struct Governor { limits: [Limits; 5], ledger: Mutex<Ledger>, io_available: Condvar }
 /// A definite refusal to acquire resources, before the guarded I/O/allocation.
 #[derive(Debug)]
 pub struct Busy { detail: String }
@@ -80,7 +82,7 @@ impl std::fmt::Display for Busy {
 }
 impl std::error::Error for Busy {}
 impl Default for Governor {
-    fn default() -> Self { Self { limits: Lane::ALL.map(Limits::defaults), ledger: Mutex::new(Ledger::default()) } }
+    fn default() -> Self { Self { limits: Lane::ALL.map(Limits::defaults), ledger: Mutex::new(Ledger::default()), io_available: Condvar::new() } }
 }
 impl Governor {
     /// Load optional ANYSEEK_{LANE}_{SLOTS,PER_COLLECTION,BYTES,PER_COLLECTION_BYTES,IO,PER_COLLECTION_IO}.
@@ -129,6 +131,28 @@ impl Governor {
         ledger.subjects.entry(subject.into()).or_default()[i] = local;
         Ok(Lease { governor: self.clone(), subject: subject.into(), lane, amount })
     }
+    // Only I/O saturation is waitable. Invalid identities, poisoned accounting,
+    // and impossible capacity are permanent refusals, never retry loops.
+    fn native_io_wait(self: &Arc<Self>, subject: &str, lane: Lane, cancelled: &AtomicBool) -> Result<Lease, Busy> {
+        let mut ledger = self.ledger.lock().map_err(|_| Busy::new("class=ledger_poisoned"))?;
+        let i = lane.index();
+        let cap = self.limits[i];
+        loop {
+            if cancelled.load(Ordering::Acquire) { return Err(Busy::new("class=native_cancelled")); }
+            if subject.len() > 272 || (!ledger.subjects.contains_key(subject) && ledger.subjects.len() >= 128) {
+                return Err(Busy::new("class=subject_registry"));
+            }
+            if cap.io == 0 || cap.subject_io == 0 { return Err(Busy::new("class=io_capacity")); }
+            let local = ledger.subjects.get(subject).map(|u| u[i]).unwrap_or_default();
+            if ledger.total[i].io < cap.io && local.io < cap.subject_io {
+                ledger.total[i].io += 1;
+                ledger.subjects.entry(subject.into()).or_default()[i].io += 1;
+                return Ok(Lease { governor: self.clone(), subject: subject.into(), lane,
+                    amount: Usage { io: 1, ..Usage::default() } });
+            }
+            ledger = self.io_available.wait(ledger).map_err(|_| Busy::new("class=ledger_poisoned"))?;
+        }
+    }
     /// Admit before reading large bodies. `bytes` reserves body/output workspace.
     /// Subjects must come from trusted stable collection identities; unknown IDs share a service subject.
     pub fn admit(self: &Arc<Self>, subject: String, lane: Lane, bytes: u64) -> Result<Scope, Busy> {
@@ -156,6 +180,7 @@ impl Drop for Lease {
             local[self.lane.index()].subtract(self.amount);
             if local.iter().all(|u| u.empty()) { ledger.subjects.remove(&self.subject); }
         }
+        self.governor.io_available.notify_all();
     }
 }
 /// Cloneable task context; clones share the original admission reservation.
@@ -170,6 +195,21 @@ impl Scope {
     pub(crate) fn retained_io(&self) -> Self { Self { governor:self.governor.clone(),subject:self.subject.clone(),lane:Lane::Background,_entry:None } }
     /// Run work under this context, including synchronous response serialization.
     pub async fn run<F: Future>(self, future: F) -> F::Output { CURRENT.scope(self, future).await }
+    /// Propagate accounting explicitly into a synchronous blocking worker.
+    pub(crate) fn run_sync<T>(self, work: impl FnOnce() -> T) -> T { CURRENT.sync_scope(self, work) }
+    /// Internal native transaction exception: call only on a dedicated blocking
+    /// or Tantivy worker, never an executor thread, while holding no I/O lease
+    /// or shared native I/O gate. The existing admitted owner bounds waiters.
+    pub(crate) fn native_io_wait(&self, cancelled: &AtomicBool) -> Result<Lease, Busy> {
+        self.governor.native_io_wait(&self.subject, self.lane, cancelled)
+    }
+    /// Wake this owner's native waiters before synchronously joining its workers.
+    /// Taking the predicate mutex prevents a cancellation/wait lost wakeup.
+    pub(crate) fn cancel_native_io(&self, cancelled: &AtomicBool) {
+        let _ledger = self.governor.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        cancelled.store(true, Ordering::Release);
+        self.governor.io_available.notify_all();
+    }
     /// Reserve explicit buffer bytes before allocation, retained by the buffer owner.
     pub fn bytes(&self, bytes: u64) -> Result<Lease, Busy> { self.governor.reserve(&self.subject, self.lane, Usage {bytes, ..Usage::default()}) }
     /// Acquire I/O capacity immediately; there is no hidden waiting queue.
@@ -213,6 +253,59 @@ impl std::fmt::Debug for Buffer { fn fmt(&self, f: &mut std::fmt::Formatter<'_>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_io_wait_preserves_scope_and_allows_async_holder_to_release() {
+        let governor = Arc::new(Governor::default());
+        let scope = governor.admit("native".into(), Lane::Background, 0).unwrap();
+        let held = scope.io().unwrap();
+        assert!(scope.io().is_err()); // Ordinary admission remains immediate.
+        let context = scope.clone();
+        let (start, started) = tokio::sync::oneshot::channel();
+        let worker = tokio::task::spawn_blocking(move || context.run_sync(|| {
+            let current = Scope::current().unwrap();
+            let bytes = current.bytes(7).unwrap();
+            start.send(()).unwrap();
+            let io = current.native_io_wait(&AtomicBool::new(false)).unwrap();
+            (bytes, io)
+        }));
+        started.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(!worker.is_finished());
+        drop(held);
+        let (bytes, io) = tokio::time::timeout(std::time::Duration::from_secs(2), worker).await.unwrap().unwrap();
+        assert_eq!(governor.ledger.lock().unwrap().total[Lane::Background.index()].bytes, 7);
+        assert!(scope.io().is_err());
+        drop((bytes, io, scope));
+        assert!(governor.ledger.lock().unwrap().subjects.is_empty());
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_io_cancellation_wakes_without_refunding_another_owner() {
+        let scope = Arc::new(Governor::default()).admit("native".into(), Lane::Background, 0).unwrap();
+        let held = scope.io().unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let context = scope.clone();
+        let flag = cancelled.clone();
+        let worker = tokio::task::spawn_blocking(move || context.native_io_wait(&flag).err().unwrap().detail);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        scope.cancel_native_io(&cancelled);
+        let detail = tokio::time::timeout(std::time::Duration::from_secs(2), worker).await.unwrap().unwrap();
+        assert_eq!(detail, "class=native_cancelled");
+        assert!(scope.io().is_err());
+        drop(held);
+        assert!(scope.io().is_ok());
+    }
+    #[test]
+    fn native_io_permanent_refusals_never_wait() {
+        let governor = Arc::new(Governor::default());
+        let flag = AtomicBool::new(false);
+        assert_eq!(governor.native_io_wait(&"x".repeat(273), Lane::Background, &flag).err().unwrap().detail, "class=subject_registry");
+        let mut zero = Governor::default();
+        zero.limits[Lane::Background.index()].io = 0;
+        assert_eq!(Arc::new(zero).native_io_wait("x", Lane::Background, &flag).err().unwrap().detail, "class=io_capacity");
+        let poisoned = governor.clone();
+        let _ = std::thread::spawn(move || { let _guard = poisoned.ledger.lock().unwrap(); panic!("test poisoned ledger"); }).join();
+        assert_eq!(governor.native_io_wait("x", Lane::Background, &flag).err().unwrap().detail, "class=ledger_poisoned");
+    }
     #[tokio::test]
     async fn hot_subject_refuses_before_global_exhaustion_and_control_has_reserved_capacity() {
         let governor = Arc::new(Governor::default());
