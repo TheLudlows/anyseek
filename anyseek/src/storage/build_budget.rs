@@ -149,7 +149,17 @@ impl DiskScope {
                 if k.is_dir() {
                     scan(&e.path(), l, cap)?;
                 } else if k.is_file() {
+                    #[cfg(not(windows))]
                     let n = e.metadata()?.len();
+                    #[cfg(windows)]
+                    let n = {
+                        use std::os::windows::fs::OpenOptionsExt;
+                        // NTFS directory enumeration can cache the size while a
+                        // writer remains open. Query the actual handle instead.
+                        // Metadata-only access also works for exclusively locked
+                        // WAL data ranges and never changes the writer's cursor.
+                        fs::OpenOptions::new().access_mode(0).open(e.path())?.metadata()?.len()
+                    };
                     l.used = l
                         .used
                         .checked_add(n)

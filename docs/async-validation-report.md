@@ -26,8 +26,9 @@
 | Linux 完整 lib（固定测试二进制） | 本轮中间版本完成：376 通过、8 失败、12 忽略；失败已逐项定位并专项修复，须在最终代码重跑 |
 | 服务端及全部其他 targets | `ce525b8` 的 34 个非 lib targets 通过；部分初跑工作目录错误，使用各 Cargo package 目录重跑通过；不代替最终版本复验 |
 | 明确核心回归清单 | 随每步增加专项；最终清单与最终二进制待统一核验 |
-| 独立 core 默认/无默认特性 | 中间版本通过，待最终复验 |
-| 静态文档、词法覆盖、Python、diff | 随步骤检查，待最终复验 |
+| 独立 core 默认/无默认特性 | `53749ee` 两种独立依赖图与编译均通过 |
+| 文档示例 | `53749ee` doctest 9 项通过 |
+| 静态文档、词法覆盖、Python、diff | `53749ee` 文档链接/品牌、完整词法矩阵源检查、Python 语法和 diff 通过；汇总更新后再检查 |
 | 同数据同资源 Meilisearch 对比 | 等待最终构建，仅测最终代码；旧 release 二进制不用于验收 |
 | 远端最终 SHA 与 CI | Draft PR 已发布；最终 SHA 的完整 CI 尚未验收 |
 
@@ -74,3 +75,5 @@ generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock �
 远端 Spool 快照：固定 cut 编码与 PUT、候选释放/退休/DELETE/回执裁剪移到锁外，短锁内原子预登记完整候选与 pending 名额并复验 CAS。unknown publication 保留 pins，稳定 owner 恢复后才取消遗留 build pins；未知 PUT inventory 不遗忘。最终 ingestion 26 项和 SQLite staging 4 项通过，覆盖慢上传/删除下 Accept/Complete/status 推进、stale cut、finish 归属、未知选择及选中 manifest closure 保护。这是 SQLite/内存对象存储的协议验证，不是真实 S3。捕获 Arc 行、原子预登记及选择时可达性扫描仍在 Spool 锁内，append 的网络锁语义未改变。
 
 远端维护进展：首次候选保留下一完整快照的对象名额，并持续计入 append 准入；首次 stale 或不足以保留第二候选时转为排空模式，新身份 Busy、旧身份回执照常、pending 继续完成，随后稳定构建。已知资源 Busy 解除临时门控与备用名额；未知结果仍隔离。30 项 ingestion 专项通过，包含 16 次并发新提交被背压后精确一次 stale/一次成功、低库存无首轮上传、pending 终态名额、精确分块边界无额外空块和 Busy 后 finish 可结束。首轮低库存测试失败是门控文件路径错误，修正路径后通过，未放宽超时。普通远端 append 的锁内网络仍会阻塞 status/progress 和 Complete，后续解耦需要单独的追加串行器及提交中状态，未混入此回收协议切片。
+
+跨平台 CI 修复：Windows 串行磁盘重扫的既有断言得到 7 而非 8，目录枚举未反映仍打开文件的增长。Windows 分支改用 metadata-only 文件句柄读取真实长度，非 Windows 路径不变；不修改原断言或在测试里强制 flush。Linux build_budget 9 项通过，Windows 结果等待新 SHA CI。此差异对应 [Microsoft 对 NTFS 目录枚举属性时效的说明](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-findfirstfilea)。`53749ee` 固定 Linux 全量运行继续收集；不会将旧二进制称作更新后 SHA 的重新执行。
