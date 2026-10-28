@@ -37,6 +37,53 @@ pub(super) struct Log {
     retained_bytes: u64,
     failed: bool,
 }
+/// Immutable source binding. The original Log owner must outlive preparation.
+#[derive(Clone)]
+pub(super) struct Cut {
+    root: PathBuf,
+    selection_root: PathBuf,
+    identity: String,
+    event: u64,
+    segment_bytes: u64,
+    max_bytes: u64,
+    owner_bytes: u64,
+}
+pub(super) struct Prepared {
+    candidate: Option<Log>,
+    preparation: Preparation,
+    cut: Cut,
+}
+pub(super) struct Garbage {
+    active: Option<Journal>,
+    control: Option<Journal>,
+    root: PathBuf,
+    selection_root: PathBuf,
+    segment: u64,
+}
+impl Garbage {
+    /// Release old handles and only the exact obsolete generation after selection.
+    pub(super) fn cleanup(mut self) -> Result<(), RecordError> {
+        drop(self.active.take());
+        drop(self.control.take());
+        if self.root == self.selection_root {
+            for id in 0..=self.segment {
+                fs::remove_dir_all(self.root.join(format!("segment-{id:016x}"))).map_err(storage)?;
+            }
+        } else { fs::remove_dir_all(&self.root).map_err(storage)?; }
+        sync_directory(&self.selection_root).map_err(storage)
+    }
+}
+impl Prepared {
+    pub(super) fn discard(mut self) -> Result<(), RecordError> {
+        drop(self.candidate.take());
+        if self.preparation.armed {
+            if self.preparation.selector.exists() { fs::remove_file(&self.preparation.selector).map_err(storage)?; }
+            if self.preparation.root.exists() { fs::remove_dir_all(&self.preparation.root).map_err(storage)?; }
+            self.preparation.armed = false;
+        }
+        Ok(())
+    }
+}
 fn failure(error: CreateError) -> RecordError {
     match error {
         CreateError::NotPublished(e) => storage(e),
@@ -222,27 +269,27 @@ impl Log {
             values,
         ))
     }
-    /// Publish a replacement event chain before reclaiming any selected file.
-    /// CURRENT is replaced atomically while the original control owner stays held.
-    pub(super) fn compact(&mut self, events: &[Vec<u8>], completion_bytes: u64) -> Result<(), RecordError> {
+    pub(super) fn cut(&self) -> Result<Cut, RecordError> {
         if self.failed { return Err(RecordError::RecoveryRequired); }
+        Ok(Cut { root: self.root.clone(), selection_root: self.selection_root.clone(),
+            identity: self.identity.clone(), event: self.event, segment_bytes: self.segment_bytes,
+            max_bytes: self.max_bytes, owner_bytes: self.base_control.as_ref().unwrap_or(&self.control).physical_bytes() })
+    }
+    /// Build and synchronize a private candidate without the source Log mutex.
+    pub(super) fn prepare(cut: Cut, events: &[Vec<u8>], completion_bytes: u64) -> Result<Prepared, RecordError> {
+        let _phase = maintenance::Phase::new("intake_local_prepare_unlocked", cut.event);
         let name = format!("generation-{:032x}", rand::random::<u128>());
-        let root = self.selection_root.join(&name);
-        // One selected chain plus one bounded candidate; no unbounded retries.
-        let estimate = events.iter().try_fold(1024u64, |sum, e| sum.checked_add(e.len() as u64 + 1024))
-            .filter(|n| *n <= self.max_bytes).ok_or(RecordError::Busy)?;
-        let _peak = self.bytes().checked_add(estimate).filter(|n| *n <= self.max_bytes.saturating_mul(2))
-            .ok_or(RecordError::Busy)?;
-        self.cleanup_generations()?;
-        let temporary = self.selection_root.join(format!(".selector-{:032x}", rand::random::<u128>()));
-        let mut preparation = Preparation { root: root.clone(), selector: temporary.clone(), armed: true };
-        let mut candidate = Self::create(&root, &self.identity, self.segment_bytes, self.max_bytes)?;
+        let root = cut.selection_root.join(&name);
+        // The selected chain and the sole candidate each remain within max_bytes.
+        events.iter().try_fold(1024u64, |sum, e| sum.checked_add(e.len() as u64 + 1024))
+            .filter(|n| *n <= cut.max_bytes).ok_or(RecordError::Busy)?;
+        let temporary = cut.selection_root.join(format!(".selector-{:032x}", rand::random::<u128>()));
+        let preparation = Preparation { root: root.clone(), selector: temporary.clone(), armed: true };
+        let mut candidate = Self::create(&root, &cut.identity, cut.segment_bytes, cut.max_bytes)?;
         for event in events { candidate.append_serialized(event)?; }
-        let owner_bytes = self.base_control.as_ref().unwrap_or(&self.control).physical_bytes();
-        if candidate.bytes().checked_add(owner_bytes).and_then(|n| n.checked_add(completion_bytes)).is_none_or(|n| n > self.max_bytes) {
-            return Err(RecordError::Busy);
-        }
-        #[cfg(test)] if self.selection_root.join(".test-intake-before-select").exists() {
+        if candidate.bytes().checked_add(cut.owner_bytes).and_then(|n| n.checked_add(completion_bytes))
+            .is_none_or(|n| n > cut.max_bytes) { return Err(RecordError::Busy); }
+        #[cfg(test)] if cut.selection_root.join(".test-intake-before-select").exists() {
             return Err(storage("injected intake failure before selection"));
         }
         use std::io::Write;
@@ -250,23 +297,43 @@ impl Log {
         file.write_all(name.as_bytes()).map_err(storage)?;
         file.sync_all().map_err(storage)?;
         drop(file);
-        // From rename onwards the selected chain is uncertain on any error.
+        Ok(Prepared { candidate: Some(candidate), preparation, cut })
+    }
+    /// Only selection needs the source lock. A stale cut leaves both chains intact;
+    /// the caller discards the unselected candidate after releasing its locks.
+    pub(super) fn select(&mut self, prepared: &mut Prepared, completion_bytes: u64) -> Result<Option<Garbage>, RecordError> {
+        if self.failed { return Err(RecordError::RecoveryRequired); }
+        if self.root != prepared.cut.root || self.event != prepared.cut.event { return Ok(None); }
+        let candidate = prepared.candidate.as_ref().ok_or(RecordError::RecoveryRequired)?;
+        let owner_bytes = self.base_control.as_ref().unwrap_or(&self.control).physical_bytes();
+        if candidate.bytes().checked_add(owner_bytes).and_then(|n| n.checked_add(completion_bytes))
+            .is_none_or(|n| n > self.max_bytes) { return Err(RecordError::Busy); }
         self.failed = true;
-        preparation.armed = false;
-        replace_selector(&temporary, &self.selection_root.join("CURRENT"))
+        prepared.preparation.armed = false;
+        replace_selector(&prepared.preparation.selector, &self.selection_root.join("CURRENT"))
             .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
         #[cfg(test)] if self.selection_root.join(".test-intake-after-select").exists() {
             return Err(RecordError::OutcomeUnknown("injected intake failure after selection".into()));
         }
-        sync_directory(&self.selection_root)
-            .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+        sync_directory(&self.selection_root).map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+        let mut candidate = prepared.candidate.take().ok_or(RecordError::RecoveryRequired)?;
         candidate.selection_root = self.selection_root.clone();
         let old = std::mem::replace(self, candidate);
-        self.base_control = old.base_control.or(Some(old.control));
-        drop(old.active);
-        // Cleanup failure leaks obsolete files, never changes the committed chain.
-        let _ = self.cleanup_generations();
-        Ok(())
+        let control = if let Some(owner) = old.base_control {
+            self.base_control = Some(owner); Some(old.control)
+        } else { self.base_control = Some(old.control); None };
+        Ok(Some(Garbage { active: Some(old.active), control, root: old.root,
+            selection_root: self.selection_root.clone(), segment: old.segment }))
+    }
+    // Serial compatibility path for tests and startup callers with exclusive ownership.
+    pub(super) fn compact(&mut self, events: &[Vec<u8>], completion_bytes: u64) -> Result<(), RecordError> {
+        if self.failed { return Err(RecordError::RecoveryRequired); }
+        self.cleanup_generations()?;
+        let mut prepared = Self::prepare(self.cut()?, events, completion_bytes)?;
+        match self.select(&mut prepared, completion_bytes)? {
+            Some(garbage) => { let _ = garbage.cleanup(); Ok(()) },
+            None => { prepared.discard()?; Err(RecordError::Busy) },
+        }
     }
     fn cleanup_generations(&self) -> Result<(), RecordError> {
         let _phase = maintenance::Phase::new("intake_local_cleanup", self.event);

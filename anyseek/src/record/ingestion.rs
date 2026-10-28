@@ -80,11 +80,14 @@ struct Row {
     request: Option<RecordWrite>,
     digest: [u8; 32],
     status: IngestStatus,
+    snapshot_bytes: u64,
     _memory: crate::storage::build_budget::MemoryLease,
 }
 struct Spool {
     log: DurableLog,
-    rows: Vec<Row>,
+    rows: Vec<Arc<Row>>,
+    revision: u64,
+    gc_pressure: bool,
     operations: BTreeMap<OperationId, usize>,
     completed: usize,
     base: u64,
@@ -97,12 +100,29 @@ struct Spool {
     max_record_bytes: usize,
     blocked: Option<String>,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SpoolCut {
+    revision: u64, base: u64, rows: usize, completed: usize, epoch_floor: u64,
+    materialized_seq: u64, completion_reserve: u64, completed_since_compaction: usize,
+}
+struct LocalPlan {
+    source: SpoolCut,
+    cut: ingest_log::Cut,
+    log: Arc<std::sync::Mutex<ingest_log::Log>>,
+    rows: Vec<Arc<Row>>,
+    base: u64,
+    completed: usize,
+    floor: u64,
+    completion_bytes: u64,
+    _memory: crate::storage::build_budget::MemoryLease,
+}
 enum DurableLog {
     Local(Arc<std::sync::Mutex<ingest_log::Log>>),
     #[cfg(feature = "s3-object-store")]
     Remote(remote::Log),
 }
 impl DurableLog {
+    fn is_local(&self) -> bool { matches!(self, Self::Local(_)) }
     fn bytes(&self) -> u64 {
         match self {
             Self::Local(log) => log.lock().map(|log| log.bytes()).unwrap_or(u64::MAX),
@@ -186,6 +206,29 @@ fn request_digest(request: &RecordWrite) -> Result<[u8; 32], RecordError> {
     checkpoint_codec::json_digest(&value)
 }
 impl Spool {
+    fn cut(&self) -> SpoolCut {
+        SpoolCut { revision: self.revision, base: self.base, rows: self.rows.len(), completed: self.completed,
+            epoch_floor: self.epoch_floor, materialized_seq: self.materialized_seq,
+            completion_reserve: self.completion_reserve, completed_since_compaction: self.completed_since_compaction }
+    }
+    fn local_plan(&self, epoch: u64) -> Result<Option<LocalPlan>, RecordError> {
+        let DurableLog::Local(log) = &self.log else { return Ok(None); };
+        if self.blocked.is_some() { return Ok(None); }
+        let floor = self.epoch_floor.max(epoch.saturating_sub(1));
+        let expired = self.rows[..self.completed].iter()
+            .take_while(|row| row.status.accepted.operation_id.epoch < floor).count();
+        if expired == 0 && self.completed_since_compaction < 64.max(self.completed / 2)
+            && !(self.gc_pressure && self.completed > 0) { return Ok(None); }
+        let _phase = maintenance::Phase::new("intake_snapshot_locked", self.base + self.completed as u64);
+        let bytes = self.rows[expired..].iter().try_fold(1024u64, |n, row| n.checked_add(row.snapshot_bytes))
+            .and_then(|n| n.checked_mul(34)).ok_or(RecordError::Busy)?;
+        let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(|_| RecordError::Busy)?;
+        let cut = log.lock().map_err(|_| RecordError::RecoveryRequired)?.cut()?;
+        Ok(Some(LocalPlan { source: self.cut(), cut, log: log.clone(), rows: self.rows[expired..].to_vec(),
+            base: self.base.checked_add(expired as u64).ok_or(RecordError::RecoveryRequired)?,
+            completed: self.completed - expired, floor, completion_bytes: completion_headroom(self.completion_reserve, 1)?,
+            _memory: memory }))
+    }
     async fn reclaim(&mut self, epoch: u64) -> Result<(), RecordError> {
         let floor = self.epoch_floor.max(epoch.saturating_sub(1));
         let expired = self.rows[..self.completed].iter()
@@ -211,11 +254,13 @@ impl Spool {
             };
             events.push(serde_json::to_vec(&event).map_err(storage)?);
         }
+        let revision = self.revision.checked_add(1).ok_or(RecordError::RecoveryRequired)?;
         match self.log.compact(events, (self.rows.len() - self.completed) as u64, self.completion_reserve).await {
             Ok(true) => {},
             Ok(false) | Err(RecordError::Busy) => return Ok(()),
             Err(error) => return Err(error),
         }
+        self.revision = revision;
         self.rows.drain(..expired);
         self.completed -= expired;
         self.base = base;
@@ -226,6 +271,7 @@ impl Spool {
         Ok(())
     }
     fn apply(&mut self, event: Event) -> Result<(), RecordError> {
+        let revision = self.revision.checked_add(1).ok_or(RecordError::RecoveryRequired)?;
         match event {
             Event::Reset { base, epoch_floor, materialized_seq } => {
                 if !self.rows.is_empty() || self.base != 0 || base.checked_add(self.max_operations as u64).is_none() { return Err(storage("intake reset after entries")); }
@@ -244,7 +290,7 @@ impl Spool {
                 let memory = crate::storage::build_budget::reserve_memory(
                     checkpoint_codec::json_length(&status)? as u64 * 32 + 1024).map_err(storage)?;
                 self.operations.insert(status.accepted.operation_id.clone(), self.rows.len());
-                self.rows.push(Row { request: None, digest, status, _memory: memory });
+                self.rows.push(Arc::new(Row { request: None, digest, snapshot_bytes: checkpoint_codec::json_length(&status)? as u64 + 256, status, _memory: memory }));
                 self.completed += 1;
             }
             Event::Accept { first, requests } => {
@@ -274,7 +320,7 @@ impl Spool {
                     };
                     self.operations
                         .insert(request.operation_id.clone(), self.rows.len());
-                    self.rows.push(Row {
+                    self.rows.push(Arc::new(Row {
                         digest: request_digest(&request)?,
                         request: Some(request),
                         status: IngestStatus {
@@ -282,8 +328,9 @@ impl Spool {
                             receipt: None,
                             error: None,
                         },
+                        snapshot_bytes: bytes + 128,
                         _memory: memory,
-                    });
+                    }));
                 }
             }
             Event::Complete { first, results } => {
@@ -294,26 +341,25 @@ impl Spool {
                     return Err(storage("invalid intake completion sequence"));
                 }
                 for result in results {
-                    let row = &mut self.rows[self.completed];
-                    self.completion_reserve = self
-                        .completion_reserve
+                    let row = &self.rows[self.completed];
+                    self.completion_reserve = self.completion_reserve
                         .checked_sub(checkpoint_codec::json_length(row.request.as_ref().ok_or_else(|| storage("missing pending request"))?)? as u64 + 16384)
                         .ok_or_else(|| storage("invalid completion reserve"))?;
+                    let mut status = row.status.clone();
                     match result {
-                        Ok(receipt) => {
-                            self.materialized_seq = receipt.seq;
-                            row.status.receipt = Some(receipt);
-                        }
-                        Err(error) => row.status.error = Some(error),
+                        Ok(receipt) => { self.materialized_seq = receipt.seq; status.receipt = Some(receipt); }
+                        Err(error) => status.error = Some(error),
                     }
-                    row.request = None;
-                    row._memory = crate::storage::build_budget::reserve_memory(
-                        checkpoint_codec::json_length(&row.status)? as u64 * 32 + 1024).map_err(storage)?;
+                    let status_bytes = checkpoint_codec::json_length(&status)? as u64;
+                    let memory = crate::storage::build_budget::reserve_memory(status_bytes * 32 + 1024).map_err(storage)?;
+                    self.rows[self.completed] = Arc::new(Row { request: None, digest: row.digest, status,
+                        snapshot_bytes: status_bytes + 256, _memory: memory });
                     self.completed += 1;
                     self.completed_since_compaction += 1;
                 }
             }
         }
+        self.revision = revision;
         Ok(())
     }
 }
@@ -325,6 +371,17 @@ pub struct IngestPipeline {
     running: Arc<AtomicBool>,
     worker: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     partition: RecordPartition,
+    gc_running: Arc<AtomicBool>,
+    gc_requested: Arc<AtomicBool>,
+    gc_worker: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    #[cfg(test)]
+    gc_pause: Arc<AtomicBool>,
+    #[cfg(test)]
+    gc_prepared: Arc<AtomicBool>,
+    #[cfg(test)]
+    gc_stale: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    gc_committed: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     paused: Arc<AtomicBool>,
 }
@@ -395,6 +452,8 @@ impl IngestPipeline {
         let mut spool = Spool {
             log,
             rows: Vec::new(),
+            revision: 0,
+            gc_pressure: false,
             operations: BTreeMap::new(),
             completed: 0,
             base: 0,
@@ -410,16 +469,28 @@ impl IngestPipeline {
         for event in events {
             spool.apply(event)?;
         }
-        spool.reclaim(current_epoch()).await?;
+        if !spool.log.is_local() { spool.reclaim(current_epoch()).await?; }
         let pipeline = Self {
             spool: Arc::new(Mutex::new(spool)),
             running: Arc::new(AtomicBool::new(false)),
             worker: Arc::new(std::sync::Mutex::new(None)),
             partition,
+            gc_running: Arc::new(AtomicBool::new(false)),
+            gc_requested: Arc::new(AtomicBool::new(false)),
+            gc_worker: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            gc_pause: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            gc_prepared: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            gc_stale: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            gc_committed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             paused: Arc::new(AtomicBool::new(false)),
         };
         pipeline.kick();
+        pipeline.kick_gc();
         Ok(pipeline)
     }
     /// Append up to 64 commands with one WAL commit. Same-identity retries
@@ -437,6 +508,7 @@ impl IngestPipeline {
         crate::resources::spawn(async move {
             let result = pipeline.submit_owned(requests).await;
             pipeline.kick();
+            pipeline.kick_gc();
             result
         })
         .await
@@ -447,7 +519,7 @@ impl IngestPipeline {
         requests: Vec<RecordWrite>,
     ) -> Result<Vec<IngestReceipt>, RecordError> {
         let mut spool = self.spool.lock().await;
-        if spool.blocked.is_none() {
+        if spool.blocked.is_none() && !spool.log.is_local() {
             if let Err(error) = spool.reclaim(current_epoch()).await {
                 if matches!(error, RecordError::OutcomeUnknown(_) | RecordError::RecoveryRequired) {
                     spool.blocked = Some(error.to_string());
@@ -514,6 +586,7 @@ impl IngestPipeline {
         if spool.rows.len() + fresh.len() > spool.max_operations
             || spool.rows.len() - spool.completed + fresh.len() > spool.max_pending
         {
+            spool.gc_pressure = true;
             return Err(RecordError::Busy);
         }
         // Retained decoded requests are admitted before the durable commit.
@@ -540,15 +613,18 @@ impl IngestPipeline {
             })?,
             _ => unreachable!(),
         };
-        spool.log.admit_accept(
+        let admission = spool.log.admit_accept(
             checkpoint_codec::json_length(&event)? as u64,
             spool
                 .completion_reserve
                 .checked_add(extra_reserve)
                 .ok_or(RecordError::Busy)?,
             (spool.rows.len() - spool.completed + memory.len()) as u64,
-        )?;
+        );
+        if matches!(admission, Err(RecordError::Busy)) { spool.gc_pressure = true; }
+        admission?;
         spool.rows.try_reserve(receipts.len()).map_err(storage)?;
+        let revision = spool.revision.checked_add(1).ok_or(RecordError::RecoveryRequired)?;
         if let Err(error) = spool.log.append(&event).await {
             if matches!(
                 error,
@@ -571,7 +647,8 @@ impl IngestPipeline {
             spool
                 .operations
                 .insert(request.operation_id.clone(), position);
-            spool.rows.push(Row {
+            let snapshot_bytes = checkpoint_codec::json_length(&request)? as u64 + 128;
+            spool.rows.push(Arc::new(Row {
                 digest: request_digest(&request)?,
                 request: Some(request),
                 status: IngestStatus {
@@ -579,9 +656,11 @@ impl IngestPipeline {
                     receipt: None,
                     error: None,
                 },
+                snapshot_bytes,
                 _memory: charge,
-            });
+            }));
         }
+        spool.revision = revision;
         Ok(receipts)
     }
     /// Inspect an identity without acquiring the Record/index mutex.
@@ -631,6 +710,7 @@ impl IngestPipeline {
     /// Optional cache compaction may still own the partition after this returns;
     /// administrative callers use `require_drained` before releasing its owner.
     pub async fn finish(&self) -> Result<IngestProgress, RecordError> {
+        self.kick_gc();
         loop {
             let handle = self
                 .worker
@@ -640,11 +720,13 @@ impl IngestPipeline {
             if let Some(handle) = handle {
                 handle.await.map_err(storage)?;
             }
+            let gc = self.gc_worker.lock().map_err(|_| RecordError::RecoveryRequired)?.take();
+            if let Some(gc) = gc { gc.await.map_err(storage)?; }
             let progress = self.progress().await;
             if progress.blocked.is_some() {
                 return Err(RecordError::RecoveryRequired);
             }
-            if progress.pending == 0 && !self.running.load(Ordering::Acquire) {
+            if progress.pending == 0 && !self.running.load(Ordering::Acquire) && !self.gc_running.load(Ordering::Acquire) {
                 self.partition
                     .inner
                     .lock()
@@ -654,9 +736,100 @@ impl IngestPipeline {
                     .await?;
                 return Ok(self.progress().await);
             }
-            self.kick();
+            if progress.pending != 0 { self.kick(); }
             tokio::task::yield_now().await;
         }
+    }
+    fn kick_gc(&self) {
+        self.gc_requested.store(true, Ordering::Release);
+        let Ok(mut worker) = self.gc_worker.lock() else { return; };
+        if self.gc_running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() { return; }
+        let pipeline = self.clone();
+        *worker = Some(crate::resources::spawn_background(async move {
+            loop {
+                pipeline.gc_requested.store(false, Ordering::Release);
+                let retry = match std::panic::AssertUnwindSafe(pipeline.local_gc_once()).catch_unwind().await {
+                    Ok(Ok(retry)) => retry,
+                    Ok(Err(RecordError::Busy)) => false,
+                    Ok(Err(error)) => { pipeline.spool.lock().await.blocked = Some(error.to_string()); false },
+                    Err(_) => { pipeline.spool.lock().await.blocked = Some("intake compaction task panicked; reopen required".into()); false },
+                };
+                if retry { tokio::task::yield_now().await; continue; }
+                // Registration and the final dirty check share a mutex: a producer
+                // either wakes this worker or observes running=false and starts one.
+                let again = match pipeline.gc_worker.lock() {
+                    Ok(_registration) => {
+                        if pipeline.gc_requested.swap(false, Ordering::AcqRel) { true }
+                        else { pipeline.gc_running.store(false, Ordering::Release); false }
+                    }
+                    Err(_) => { pipeline.gc_running.store(false, Ordering::Release); false },
+                };
+                if !again { break; }
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+    async fn local_gc_once(&self) -> Result<bool, RecordError> {
+        let plan = { self.spool.lock().await.local_plan(current_epoch())? };
+        let Some(plan) = plan else { return Ok(false); };
+        let (mut plan, mut prepared, operations) = tokio::task::spawn_blocking(move || {
+            let mut events = vec![serde_json::to_vec(&Event::Reset { base: plan.base,
+                epoch_floor: plan.floor, materialized_seq: plan.source.materialized_seq }).map_err(storage)?];
+            let mut operations = BTreeMap::new();
+            for (position, row) in plan.rows.iter().enumerate() {
+                let event = if let Some(request) = &row.request {
+                    Event::Accept { first: row.status.accepted.durable_seq, requests: vec![request.clone()] }
+                } else { Event::Retain { digest: row.digest, status: row.status.clone() } };
+                events.push(serde_json::to_vec(&event).map_err(storage)?);
+                operations.insert(row.status.accepted.operation_id.clone(), position);
+            }
+            let prepared = ingest_log::Log::prepare(plan.cut.clone(), &events, plan.completion_bytes)?;
+            Ok::<_, RecordError>((plan, prepared, operations))
+        }).await.map_err(|error| RecordError::OutcomeUnknown(error.to_string()))??;
+        #[cfg(test)] {
+            self.gc_prepared.store(true, Ordering::Release);
+            while self.gc_pause.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        let spool = self.spool.clone();
+        let retry = tokio::task::spawn_blocking(move || {
+            let selected = {
+                let mut spool = spool.blocking_lock();
+                let _phase = maintenance::Phase::new("intake_selection_locked", plan.source.base + plan.source.completed as u64);
+                if spool.blocked.is_some() || spool.cut() != plan.source { None }
+                else {
+                    let revision = spool.revision.checked_add(1).ok_or(RecordError::RecoveryRequired)?;
+                    let mut log = plan.log.lock().map_err(|_| RecordError::RecoveryRequired)?;
+                    match log.select(&mut prepared, completion_headroom(spool.completion_reserve, 1)?)? {
+                        None => None,
+                        Some(garbage) => {
+                            let rows = std::mem::replace(&mut spool.rows, std::mem::take(&mut plan.rows));
+                            let old_operations = std::mem::replace(&mut spool.operations, operations);
+                            spool.base = plan.base;
+                            spool.completed = plan.completed;
+                            spool.epoch_floor = plan.floor;
+                            spool.completed_since_compaction = 0;
+                            spool.gc_pressure = false;
+                            spool.revision = revision;
+                            Some((garbage, rows, old_operations))
+                        }
+                    }
+                }
+            };
+            match selected {
+                None => { prepared.discard()?; Ok(true) },
+                Some((garbage, rows, operations)) => {
+                    let _phase = maintenance::Phase::new("intake_local_release_unlocked", plan.source.base + plan.source.completed as u64);
+                    drop(rows); drop(operations);
+                    garbage.cleanup()?;
+                    Ok(false)
+                }
+            }
+        }).await.map_err(|error| RecordError::OutcomeUnknown(error.to_string()))??;
+        #[cfg(test)] if retry { self.gc_stale.fetch_add(1, Ordering::AcqRel); }
+        #[cfg(test)] if !retry { self.gc_committed.fetch_add(1, Ordering::AcqRel); }
+        Ok(retry)
     }
     fn kick(&self) {
         #[cfg(test)]
@@ -780,9 +953,11 @@ impl IngestPipeline {
                 spool.blocked = Some(error.to_string());
                 return;
             }
-            if let Err(error) = spool.reclaim(current_epoch()).await {
-                spool.blocked = Some(error.to_string());
-                return;
+            if !spool.log.is_local() {
+                if let Err(error) = spool.reclaim(current_epoch()).await {
+                    spool.blocked = Some(error.to_string());
+                    return;
+                }
             }
             if let Some(error) = stop {
                 if error != RecordError::Busy {
@@ -790,12 +965,15 @@ impl IngestPipeline {
                     return;
                 }
             }
+            drop(spool);
+            self.kick_gc();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
     use super::super::tests::{config, write};
     use super::*;
     #[tokio::test]
@@ -830,6 +1008,59 @@ mod tests {
         assert_eq!(p.statistics().await.unwrap().retained_operations, 1);
     }
     #[tokio::test]
+    async fn local_gc_rejects_stale_cut_without_blocking_accept_completion_or_finish() {
+        let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
+        let settings=config();let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
+        let pipeline=IngestPipeline::open(p.clone()).await.unwrap();
+        let first=write("cut-first","a","alpha",ExpectedVersion::Absent);
+        let receipt=pipeline.submit(vec![first.clone()]).await.unwrap();pipeline.finish().await.unwrap();
+        pipeline.gc_pause.store(true,Ordering::Release);pipeline.gc_prepared.store(false,Ordering::Release);
+        {let mut spool=pipeline.spool.lock().await;spool.completed_since_compaction=64;spool.max_pending=1;}
+        pipeline.kick_gc();
+        tokio::time::timeout(Duration::from_secs(5),async {while !pipeline.gc_prepared.load(Ordering::Acquire){tokio::task::yield_now().await;}}).await.unwrap();
+        pipeline.paused.store(true,Ordering::Release);
+        let second=write("cut-second","b","beta",ExpectedVersion::Absent);
+        tokio::time::timeout(Duration::from_secs(2),pipeline.submit(vec![second.clone()])).await.unwrap().unwrap();
+        let third=write("cut-third","c","gamma",ExpectedVersion::Absent);
+        assert!(matches!(pipeline.submit(vec![third.clone()]).await,Err(RecordError::Busy)));
+        assert_eq!(pipeline.progress().await.pending,1);
+        pipeline.paused.store(false,Ordering::Release);pipeline.kick();
+        tokio::time::timeout(Duration::from_secs(5),async {while pipeline.progress().await.pending!=0 {tokio::task::yield_now().await;}}).await.unwrap();
+        assert_eq!(pipeline.operation(&second.operation_id).await.unwrap().receipt.unwrap().seq,2);
+        let waiter=pipeline.clone();let finish=tokio::spawn(async move {waiter.finish().await});
+        tokio::task::yield_now().await;assert!(!finish.is_finished());
+        pipeline.gc_pause.store(false,Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(5),finish).await.unwrap().unwrap().unwrap();
+        assert!(pipeline.gc_stale.load(Ordering::Acquire)>0);
+        assert!(pipeline.gc_committed.load(Ordering::Acquire)>0);
+        assert!(pipeline.progress().await.blocked.is_none());
+        pipeline.submit(vec![third]).await.unwrap();pipeline.finish().await.unwrap();
+        assert_eq!(pipeline.submit(vec![first.clone()]).await.unwrap(),receipt);pipeline.finish().await.unwrap();
+        drop(pipeline);drop(p);
+        let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+        let pipeline=IngestPipeline::open(p.clone()).await.unwrap();
+        assert_eq!(pipeline.submit(vec![first]).await.unwrap(),receipt);pipeline.finish().await.unwrap();
+        assert_eq!(p.statistics().await.unwrap().visible_seq,3);
+    }
+    #[tokio::test]
+    async fn local_gc_owned_task_holds_partition_after_public_handles_drop() {
+        let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
+        let settings=config();let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
+        let pipeline=IngestPipeline::open(p.clone()).await.unwrap();
+        pipeline.submit(vec![write("owned-cut","a","alpha",ExpectedVersion::Absent)]).await.unwrap();pipeline.finish().await.unwrap();
+        pipeline.gc_pause.store(true,Ordering::Release);pipeline.gc_prepared.store(false,Ordering::Release);
+        pipeline.spool.lock().await.completed_since_compaction=64;pipeline.kick_gc();
+        tokio::time::timeout(Duration::from_secs(5),async {while !pipeline.gc_prepared.load(Ordering::Acquire){tokio::task::yield_now().await;}}).await.unwrap();
+        let pause=pipeline.gc_pause.clone();let waiter=pipeline.clone();
+        let finish=tokio::spawn(async move {waiter.finish().await});
+        drop(pipeline);drop(p);
+        assert!(RecordPartition::open(&root,settings.max_journal_bytes).await.is_err());
+        pause.store(false,Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(5),finish).await.unwrap().unwrap().unwrap();
+        let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+        assert!(p.get("a").await.unwrap().is_some());
+    }
+    #[tokio::test]
     async fn uncertain_gc_selection_blocks_until_reopen_and_keeps_retry_receipt() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("records");
@@ -842,8 +1073,13 @@ mod tests {
         pipeline.spool.lock().await.completed_since_compaction = 64;
         let fault = root.join("intake/.test-intake-after-select");
         std::fs::write(&fault, b"").unwrap();
-        assert!(matches!(pipeline.submit(vec![request.clone()]).await, Err(RecordError::OutcomeUnknown(_))));
+        // Known retries return their original durable receipt while maintenance
+        // runs independently; an uncertain selection fences later fresh writes.
+        assert_eq!(pipeline.submit(vec![request.clone()]).await.unwrap(), original);
+        assert!(pipeline.finish().await.is_err());
         assert!(pipeline.progress().await.blocked.is_some());
+        assert!(matches!(pipeline.submit(vec![write("after-unknown", "b", "beta", ExpectedVersion::Absent)]).await,
+            Err(RecordError::RecoveryRequired)));
         assert!(pipeline.finish().await.is_err());
         drop(pipeline); drop(p);
         std::fs::remove_file(fault).unwrap();

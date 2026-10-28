@@ -126,5 +126,7 @@
   "record::indexer::tests::compact_owned_job_deadline_refuses_before_authority_without_fencing",
   "record::indexer::tests::compact_owned_job_faults_preserve_source_and_recover_unknown_publication",
   "record::indexer::tests::compact_owned_job_preserves_time_receipts_and_concurrent_same_seq_trim",
-  "record::remote_checkpoint::tests::compact_owned_job_authenticates_remote_wal_before_and_after_anchor"
+  "record::remote_checkpoint::tests::compact_owned_job_authenticates_remote_wal_before_and_after_anchor",
+  "record::ingestion::tests::local_gc_rejects_stale_cut_without_blocking_accept_completion_or_finish",
+  "record::ingestion::tests::local_gc_owned_task_holds_partition_after_public_handles_drop"
 ]

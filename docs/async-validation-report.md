@@ -66,3 +66,5 @@ generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock �
 远端候选保护基础：SQLite 一次事务预登记完整候选并创建无过期 staging pins，校验 owner/head、水位、全库存与 pending 名额；支持精确 build 释放。3 项专项通过，覆盖未知上传保护及备份恢复。此提交只是远端锁外回收的前置 API，尚未接入，不代表远端回收已解锁。
 
 显式 Compact 中间步骤：迁移到 owned 后台候选路径，保留不推进时间/不额外 GC 的语义，保留 State delta/payload 复用及未知发布隔离，300 秒构建期限。10 项关键专项通过；修复了资源拒绝误 fence 和压缩后遗漏远端 GC。当前此中间版本重建 native 索引，3 项既有 native 包复用断言仍失败，未修改断言；下一独立步骤恢复安全不可变包复用，不能把本步称为完整验收。
+
+本地 Spool 快照：持锁只捕获 Arc<Row> 和完整 revision/cut，锁外编码并同步新 generation，短锁在 cut 未变时选择 CURRENT 并整体换表，旧行与目录锁外释放。并发 Accept/Complete 使候选弃选重试，pending 完成预留在选择前复验；finish/admin 等待 owned GC。28 项 ingest 回归通过，包括压力下 pending 完成、stale cut、owner、未知选择恢复。持续写入仍可能反复弃选，不能宣称无饥饿；远端此时仍为串行压缩，后续接入独立预登记/pin。
