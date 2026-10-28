@@ -146,6 +146,16 @@ impl<S: Seek> Drop for RestoreCursor<'_, S> {
 }
 
 impl Journal {
+    /// Inject a durable uncommitted suffix through the owning handle. Reopening
+    /// the locked WAL by path is not portable to Windows sharing modes.
+    #[cfg(test)]
+    pub(crate) fn inject_partial_tail_for_test(&mut self) -> io::Result<()> {
+        self.needs_recovery = true;
+        self.log.seek(SeekFrom::Start(self.end))?;
+        self.log.write_all(b"partial-intake-frame")?;
+        self.log.sync_all()
+    }
+
     pub(crate) fn capture_cut(&self,path:&Path)->io::Result<CommittedCut> {
         if self.needs_recovery {return Err(io::Error::other("journal requires recovery"));}
         if !fs::symlink_metadata(path.join("wal"))?.file_type().is_file() {return Err(corrupt("journal is not a regular file"));}
