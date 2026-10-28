@@ -1395,7 +1395,7 @@ mod tests {
             drained(&pipeline).await;
             offset += count;
         }
-        assert!(!p.inner.lock().await.index.pending_seals.is_empty());
+        assert!(p.inner.lock().await.index.components().await.len()>2);
         assert_eq!(pipeline.progress().await.lexical_seq, 131);
         assert_eq!(
             p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)

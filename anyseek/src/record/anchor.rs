@@ -557,7 +557,7 @@ impl Inner {
         }
         result
     }
-    async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
+    pub(super) async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
         let root=self.journal.root().to_path_buf();
         let target=root.join(format!("segment-{:032x}",rand::random::<u128>()));
         let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;

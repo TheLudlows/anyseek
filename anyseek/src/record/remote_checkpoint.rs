@@ -848,7 +848,8 @@ mod tests {
             std::fs::write(root.join(fault),b"fail").unwrap();
             {
                 let mut inner=p.inner.lock().await;
-                assert!(inner.maintain_index_tail().await.is_err());
+                inner.stage_stable_tail().await.unwrap();
+                assert!(inner.publish_remote_index_tail().await.is_err());
                 assert_eq!(inner.healthy,!after);
                 let remote=inner.remote.as_ref().unwrap();
                 let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
@@ -873,7 +874,7 @@ mod tests {
         p.compact_journal().await.unwrap();
         let request=write("tail","tail","alpha tail",ExpectedVersion::Absent);
         let receipt=p.write(request.clone()).await.unwrap();
-        p.inner.lock().await.maintain_index_tail().await.unwrap();
+        {let mut inner=p.inner.lock().await;inner.stage_stable_tail().await.unwrap();inner.publish_remote_index_tail().await.unwrap();}
         {
             let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
             let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();

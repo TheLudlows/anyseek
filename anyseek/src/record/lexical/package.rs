@@ -196,7 +196,7 @@ mod tests {
                 identity.clone(),
                 serde_json::from_value(serde_json::json!({"body":"alpha beta"})).unwrap(),
             )],
-            32 * 1024 * 1024,
+            config.max_journal_bytes * 64 + 32 * 1024 * 1024,
         )
         .await
         .unwrap();
@@ -236,7 +236,7 @@ mod lifecycle_tests {
                 evaluation_time_ms: 0,
             },
             vec![],
-            32 * 1024 * 1024,
+            config.max_journal_bytes * 64 + 32 * 1024 * 1024,
         )
         .await
         .unwrap();
@@ -294,7 +294,7 @@ mod lifecycle_tests {
                     evaluation_time_ms: 0,
                 },
                 vec![],
-                32 * 1024 * 1024,
+                worker_config.max_journal_bytes * 64 + 32 * 1024 * 1024,
             )
             .await
         });
