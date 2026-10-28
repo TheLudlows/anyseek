@@ -144,5 +144,12 @@
   "record::tests::record_checkpoint_sync_failure_fences_and_recovery_failure_preserves_authority",
   "record::tests::record_online_checkpoint_process_crashes_recover_and_accept_new_writes",
   "record::tests::record_takeover_seal_successor_preserves_final_state_and_rejects_archives",
-  "record::tests::record_uncertified_generation_cleanup_can_be_interrupted_again"
+  "record::tests::record_uncertified_generation_cleanup_can_be_interrupted_again",
+  "resources::tests::native_io_wait_preserves_scope_and_allows_async_holder_to_release",
+  "resources::tests::native_io_cancellation_wakes_without_refunding_another_owner",
+  "resources::tests::native_io_permanent_refusals_never_wait",
+  "record::lexical::runtime::tests::external_io_contention_waits_off_executor_and_commits_once",
+  "record::lexical::runtime::tests::cancelled_flush_retains_runtime_pin_until_blocking_owner_finishes",
+  "record::lexical::runtime::tests::drop_cancels_native_io_wait_without_waiting_for_external_holder",
+  "record::lexical::directory::tests::contended_metadata_lock_releases_io_for_lock_owner_and_can_cancel"
 ]
