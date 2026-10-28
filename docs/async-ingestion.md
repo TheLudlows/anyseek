@@ -77,7 +77,13 @@ Record 维护捕获固定的退休集合，先验证来源，再把时间前缀�
 
 独立全文合并最多选择 8 个小段、合计不超过 128 文档，按实际不可变输入大小预留资源。它不取得 Record 锁、不构建 State checkpoint，也不改变逻辑消费水位；旧 Searcher 保留原视图。失败或调用取消隔离不确定 writer，后台工作保有资源直到结束。另外，两份冻结全文/向量组件可独立合并为派生缓存：最多捕获 16384 条记录，输入预算 32 MiB、可选构建分析预算 256 MiB；锁外构建后短锁复验来源并安装。共享失效 token 保证更新、删除和来源级联继续影响旧读句柄，reader pin 保护仍在使用的文件。普通 tail 轮转不再每 128 次更新生成权威 checkpoint；合并不推进业务或索引消费水位，也不修改权威 WAL/certificate。冷恢复遇到可选合并预算不足时从已验证 State 重建私有缓存，不拒绝已提交日志。完整权威 checkpoint 仍验证来源证明。并发磁盘扫描保留旧 ledger 的逐路径高水位，避免遗漏正在写入的预收费；串行恢复/权威构建可重新扫描回收保守额度。
 
-接收快照回收仍持 Spool 锁，向量发布仍持组件写锁；相关维护临界区和接收长尾必须实测，不把“异步”解释为无阻塞。
+写入预留复用 Records 的 live TTL/Source/typed 增量计数与 generation staged 统计缓存。非持久化最早 TTL 下界跳过尚未到期的 Records 扫描；下界到达时仍完整检查，恢复重新构建并验证缓存，不能以缓存放松租约或撤权规则。
+
+后台 checkpoint 固定物理 WAL cut 与 generation，以每段不超过 64 KiB 的持锁读取保留原句柄所有权和 cursor；帧组装、校验与来源重放在锁外执行。显式 Compact 使用 owned 后台任务，保留 State delta/payload 复用，并在冻结 membership 后锁外复用不可变原生包。完整 State 仍驻内存，初始 State/索引元数据捕获仍与规模相关；有界 mutable tail handoff、最终权威安装的部分 I/O 仍在 Record 锁内。读取字节上限不保证设备等待时长上限。
+
+接收快照按 Spool revision 捕获 Arc<Row> 与固定 cut，编码和本地新 generation 写入在锁外进行，短锁复验后选择 CURRENT。远端在短锁内原子预登记候选全部对象及无过期 staging pins，PUT 在锁外执行，只有原 cut/head 未变才 CAS 选择；迟到候选弃选重试。未知选择保留 pins 并隔离写入，重新取得稳定 owner 且解析选中 head 后才取消遗留 build pins。旧行释放、对象退休、DELETE 和回执裁剪在锁外进行。pending 终态字节与对象预留仍需复验；未知 PUT 登记不会按时间遗忘。finish/admin 等待 owned GC，慢上传或删除不再占用 Spool 锁。
+
+捕获仍遍历保留行，远端预登记事务和选择时的可达性扫描仍在 Spool 锁内；持续写入可能反复使候选失效。普通远端 append 网络操作及向量发布的组件写锁也保留。相关维护临界区和接收长尾必须实测，不把“异步”解释为无阻塞。
 
 ## 接收首批的历史验证记录（2026-10-27）
 

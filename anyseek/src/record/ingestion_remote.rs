@@ -29,6 +29,96 @@ pub(super) struct Log {
     failed: bool,
     _owner: std::fs::File,
 }
+pub(super) struct Cut {
+    store: S3CompatibleStore, database: PathBuf, partition: String, epoch: u64,
+    identity: String, head: crate::storage::sqlite_authority::PartitionHead,
+    events: u64, base: u64, max_bytes: u64, max_object_bytes: usize,
+    _owner: std::fs::File,
+}
+pub(super) struct Prepared {
+    cut: Cut, build: String, objects: Vec<(ObjectRef, Vec<u8>)>, manifest: ObjectRef,
+    retained: u64,
+}
+impl Prepared {
+    pub(super) fn encode(cut: Cut, events: Vec<Vec<u8>>) -> Result<Self, RecordError> {
+        let build = format!("{:032x}", rand::random::<u128>());
+        let prefix = format!("partitions/{}/snapshot/{:020}-{build}", cut.partition,
+            cut.head.head_version.checked_add(1).ok_or(RecordError::RecoveryRequired)?);
+        let mut objects = Vec::new();
+        let mut buffer = vec![b'['];
+        let mut retained = 0u64;
+        let mut add = |key: String, bytes: Vec<u8>| -> Result<ObjectRef, RecordError> {
+            if bytes.len() > cut.max_object_bytes { return Err(RecordError::Busy); }
+            retained = retained.checked_add(bytes.len() as u64).filter(|n| *n <= cut.max_bytes).ok_or(RecordError::Busy)?;
+            let reference = ObjectRef { key, sha256: Sha256::digest(&bytes).into(), length: bytes.len() as u64 };
+            objects.push((reference.clone(), bytes)); Ok(reference)
+        };
+        let mut chunks = Vec::new();
+        for event in events {
+            if event.len().checked_add(2).is_none_or(|n| n > cut.max_object_bytes) { return Err(RecordError::Busy); }
+            if buffer.len() + event.len() + 2 > cut.max_object_bytes {
+                buffer.push(b']'); chunks.push(add(format!("{prefix}/{}", chunks.len()), buffer)?);
+                buffer = vec![b'['];
+            }
+            if buffer.len() > 1 { buffer.push(b','); }
+            buffer.extend(event);
+        }
+        buffer.push(b']'); chunks.push(add(format!("{prefix}/{}", chunks.len()), buffer)?);
+        let snapshot = Snapshot { format: 1, identity: cut.identity.clone(), seq: cut.events, chunks };
+        let manifest = add(format!("{prefix}/manifest"), serde_json::to_vec(&snapshot).map_err(storage)?)?;
+        Ok(Self { cut, build, objects, manifest, retained })
+    }
+    fn authority(&self) -> Result<SqliteAuthority, RecordError> {
+        SqliteAuthority::open(&self.cut.database, std::time::Duration::from_secs(5)).map_err(storage)
+    }
+    pub(super) async fn upload(&self) -> Result<(), RecordError> {
+        let _phase = maintenance::Phase::new("intake_remote_upload_unlocked", self.cut.events);
+        let mut authority = self.authority()?;
+        #[cfg(test)] self.pause("upload").await;
+        for (reference, bytes) in &self.objects {
+            #[cfg(test)] if authority.database_path().with_extension("fail-intake-unknown-put").exists() {
+                return Err(RecordError::OutcomeUnknown("injected snapshot PUT response loss".into()));
+            }
+            self.cut.store.put_and_register(&mut authority, &reference.key, bytes, unix_time_ms_i64()).await.map_err(storage)?;
+        }
+        for (child, _) in &self.objects[..self.objects.len()-1] {
+            authority.register_object_edge(&self.manifest, child).map_err(storage)?;
+        }
+        #[cfg(test)] if authority.database_path().with_extension("fail-intake-before-select").exists() {
+            return Err(storage("injected failure after verified snapshot upload"));
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    async fn pause(&self, phase: &str) {
+        let gate = self.cut.database.with_extension(format!("pause-intake-{phase}"));
+        if gate.exists() {
+            std::fs::write(self.cut.database.with_extension(format!("entered-intake-{phase}")), b"").unwrap();
+            while gate.exists() { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        }
+    }
+    pub(super) async fn release(&self, garbage: Vec<ObjectRef>) -> Result<(), RecordError> {
+        let _phase = maintenance::Phase::new("intake_remote_release_unlocked", self.cut.events);
+        let mut authority = self.authority()?;
+        authority.release_intake_snapshot_uploads(&self.cut.partition, self.cut.epoch, &self.build).map_err(storage)?;
+        let head = authority.read_head(&self.cut.partition).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if head.log_base_seq > 0 {
+            authority.prune_intake_receipts(&self.cut.partition, self.cut.epoch, head.log_base_seq).map_err(storage)?;
+        }
+        let now = unix_time_ms_i64();
+        for object in garbage.iter().chain(self.objects.iter().map(|(r, _)| r)) {
+            authority.retire_object(&object.key, self.cut.events, now).map_err(storage)?;
+        }
+        #[cfg(test)] self.pause("delete").await;
+        for object in authority.collectible_objects(now).map_err(storage)? {
+            if object.key.starts_with(&format!("partitions/{}/", self.cut.partition)) {
+                self.cut.store.delete_retired(&mut authority, &object.key, now).await.map_err(storage)?;
+            }
+        }
+        authority.prune_intake_deleted_objects(&self.cut.partition, self.cut.epoch).map_err(storage)?;
+        Ok(())
+    }
+}
 impl Log {
     pub(super) async fn open(
         source: (S3CompatibleStore, PathBuf, String, u64, usize),
@@ -131,9 +221,46 @@ impl Log {
                 failed: false,
                 _owner: owner,
             };
+        log.authority.cancel_intake_snapshot_uploads(&log.partition, log.epoch).map_err(storage)?;
         let _ = log.cleanup().await;
         Ok((log, events))
     }
+    pub(super) fn cut(&self) -> Result<Cut, RecordError> {
+        if self.failed { return Err(RecordError::RecoveryRequired); }
+        let head = self.authority.read_head(&self.partition).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
+        if head.committed_seq != self.events || head.owner_epoch != self.epoch { return Err(RecordError::RecoveryRequired); }
+        Ok(Cut { store: self.store.clone(), database: self.authority.database_path().to_path_buf(),
+            partition: self.partition.clone(), epoch: self.epoch, identity: self.identity.clone(), head,
+            events: self.events, base: self.base, max_bytes: self.max_bytes, max_object_bytes: self.max_object_bytes,
+            _owner: self._owner.try_clone().map_err(storage)? })
+    }
+    pub(super) fn reserve(&mut self, prepared: &Prepared, slots: u64, bytes: u64) -> Result<bool, RecordError> {
+        if self.failed { return Err(RecordError::RecoveryRequired); }
+        if self.events != prepared.cut.events || self.base != prepared.cut.base { return Ok(false); }
+        if prepared.retained.checked_add(bytes).is_none_or(|n| n > self.max_bytes) { return Err(RecordError::Busy); }
+        let objects = prepared.objects.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
+        self.authority.reserve_intake_snapshot_uploads(&self.partition, self.epoch,
+            prepared.cut.head.head_version, &prepared.build, &objects, unix_time_ms_i64(), self.max_objects, slots).map_err(storage)
+    }
+    pub(super) fn select(&mut self, prepared: &Prepared, bytes: u64) -> Result<bool, RecordError> {
+        if self.failed { return Err(RecordError::RecoveryRequired); }
+        if self.events != prepared.cut.events || self.base != prepared.cut.base { return Ok(false); }
+        if prepared.retained.checked_add(bytes).is_none_or(|n| n > self.max_bytes) { return Err(RecordError::Busy); }
+        self.failed = true;
+        let selected = self.authority.publish_checkpoint(&self.partition, prepared.cut.head.head_version,
+            self.epoch, self.events, prepared.manifest.clone()).map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+        if selected.is_none() { self.failed = false; return Ok(false); }
+        #[cfg(test)] if self.authority.database_path().with_extension("fail-intake-after-select").exists() {
+            return Err(RecordError::OutcomeUnknown("injected remote intake response loss".into()));
+        }
+        self.base = self.events; self.snapshot_bytes = prepared.retained; self.bytes = prepared.retained; self.failed = false;
+        Ok(true)
+    }
+    pub(super) fn garbage(&self) -> Result<Vec<ObjectRef>, RecordError> {
+        let prefix = format!("partitions/{}/", self.partition);
+        Ok(self.authority.unreferenced_objects().map_err(storage)?.into_iter().filter(|o| o.key.starts_with(&prefix)).collect())
+    }
+    #[cfg(test)]
     pub(super) async fn compact(&mut self, events: Vec<Vec<u8>>, completion_slots: u64, completion_bytes: u64) -> Result<(), RecordError> {
         if self.failed { return Err(RecordError::RecoveryRequired); }
         let head = self.authority.read_head(&self.partition).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
@@ -203,6 +330,7 @@ impl Log {
         let _ = self.cleanup().await;
         Ok(())
     }
+    #[cfg(test)]
     async fn upload_snapshot(&mut self, key: &str, bytes: &[u8]) -> Result<ObjectRef, RecordError> {
         #[cfg(test)] if self.authority.database_path().with_extension("fail-intake-unknown-put").exists() {
             let reference = ObjectRef { key: key.into(), sha256: Sha256::digest(bytes).into(), length: bytes.len() as u64 };
@@ -297,6 +425,96 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn unlocked_snapshot_stale_cut_pins_unknown_and_preserves_append_suffix() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = (S3CompatibleStore::from_store(Arc::new(object_store::memory::InMemory::new()), 16384),
+            temporary.path().join("authority.sqlite"), "source".to_owned(), 1, 16384);
+        let (mut log, _) = Log::open(source.clone(), "config", 128, 16384).await.unwrap();
+        let events = || vec![serde_json::to_vec(&Event::Reset { base: 0, epoch_floor: 0, materialized_seq: 0 }).unwrap()];
+        let candidate = Prepared::encode(log.cut().unwrap(), events()).unwrap();
+        assert!(log.reserve(&candidate, 0, 0).unwrap());
+        for (reference, _) in &candidate.objects {
+            assert!(!log.authority.retire_object(&reference.key, 0, i64::MAX).unwrap());
+        }
+        let request = super::super::super::tests::write("concurrent", "a", "alpha", ExpectedVersion::Absent);
+        log.append(&Event::Accept { first: 1, requests: vec![request.clone()] }).await.unwrap();
+        log.append(&Event::Complete { first: 1, results: vec![Err(IngestFailure { code: "conflict".into(), message: "terminal".into() })] }).await.unwrap();
+        candidate.upload().await.unwrap();
+        assert!(!log.select(&candidate, 0).unwrap());
+        let garbage = log.garbage().unwrap();
+        candidate.release(garbage).await.unwrap();
+        assert!(!log.failed);
+        drop(log);
+        // In-flight maintenance retains stable ownership until it finishes.
+        assert!(Log::open(source.clone(), "config", 128, 16384).await.is_err());
+        drop(candidate);
+        let (mut log, recovered) = Log::open(source.clone(), "config", 128, 16384).await.unwrap();
+        assert!(matches!(&recovered[..], [Event::Accept { .. }, Event::Complete { .. }]));
+        let candidate = Prepared::encode(log.cut().unwrap(), events()).unwrap();
+        assert!(log.reserve(&candidate, 1, 0).unwrap());
+        let fault = log.authority.database_path().with_extension("fail-intake-unknown-put");
+        std::fs::write(&fault, b"").unwrap();
+        assert!(matches!(candidate.upload().await, Err(RecordError::OutcomeUnknown(_))));
+        candidate.release(Vec::new()).await.unwrap();
+        for (reference, _) in &candidate.objects {
+            assert!(log.authority.collectible_objects(0).unwrap().contains(reference));
+            assert!(log.authority.mark_object_deleted(reference).unwrap());
+        }
+        std::fs::remove_file(fault).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unlocked_snapshot_selected_release_preserves_manifest_closure() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = (S3CompatibleStore::from_store(Arc::new(object_store::memory::InMemory::new()), 16384),
+            temporary.path().join("authority.sqlite"), "source".to_owned(), 1, 16384);
+        let (mut log, _) = Log::open(source.clone(), "config", 128, 16384).await.unwrap();
+        let candidate = Prepared::encode(log.cut().unwrap(), vec![serde_json::to_vec(&Event::Reset {
+            base: 0, epoch_floor: 0, materialized_seq: 0 }).unwrap()]).unwrap();
+        assert!(log.reserve(&candidate, 0, 0).unwrap());
+        candidate.upload().await.unwrap();
+        assert!(log.select(&candidate, 0).unwrap());
+        candidate.release(log.garbage().unwrap()).await.unwrap();
+        for (reference, _) in &candidate.objects {
+            assert!(!log.authority.retire_object(&reference.key, 0, i64::MAX).unwrap());
+            assert!(log.store.get_verified(reference).await.is_ok());
+        }
+        assert_eq!(log.authority.release_intake_snapshot_uploads(&log.partition, 1, &candidate.build).unwrap(), 0);
+        drop(candidate); drop(log);
+        let (_, events) = Log::open(source, "config", 128, 16384).await.unwrap();
+        assert!(matches!(&events[..], [Event::Reset { .. }]));
+    }
+
+    #[tokio::test]
+    async fn unlocked_snapshot_publication_unknown_keeps_pins_until_owner_recovery() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = (S3CompatibleStore::from_store(Arc::new(object_store::memory::InMemory::new()), 16384),
+            temporary.path().join("authority.sqlite"), "source".to_owned(), 1, 16384);
+        let (mut log, _) = Log::open(source.clone(), "config", 128, 16384).await.unwrap();
+        let candidate = Prepared::encode(log.cut().unwrap(), vec![serde_json::to_vec(&Event::Reset {
+            base: 0, epoch_floor: 0, materialized_seq: 0 }).unwrap()]).unwrap();
+        assert!(log.reserve(&candidate, 0, 0).unwrap());
+        let before = log.authority.database_path().with_extension("fail-intake-before-select");
+        std::fs::write(&before, b"").unwrap();
+        assert!(candidate.upload().await.is_err());
+        assert_eq!(log.authority.read_head(&log.partition).unwrap().unwrap(), candidate.cut.head);
+        std::fs::remove_file(before).unwrap();
+        candidate.upload().await.unwrap();
+        let after = log.authority.database_path().with_extension("fail-intake-after-select");
+        std::fs::write(&after, b"").unwrap();
+        assert!(matches!(log.select(&candidate, 0), Err(RecordError::OutcomeUnknown(_))));
+        assert!(matches!(log.append(&Event::Reset { base: 0, epoch_floor: 0, materialized_seq: 0 }).await, Err(RecordError::RecoveryRequired)));
+        assert_eq!(log.authority.release_intake_snapshot_uploads(&log.partition, 2, &candidate.build).is_err(), true);
+        let manifest = candidate.manifest.clone();
+        drop(candidate); drop(log); std::fs::remove_file(after).unwrap();
+        let (mut reopened, events) = Log::open(source, "config", 128, 16384).await.unwrap();
+        assert!(matches!(&events[..], [Event::Reset { .. }]));
+        assert_eq!(reopened.authority.read_head(&reopened.partition).unwrap().unwrap().manifest, Some(manifest.clone()));
+        assert_eq!(reopened.authority.cancel_intake_snapshot_uploads(&reopened.partition, 1).unwrap(), 0);
+        assert!(!reopened.authority.retire_object(&manifest.key, 0, i64::MAX).unwrap());
+    }
+
     #[tokio::test]
     async fn remote_compaction_preserves_pending_completion_byte_headroom() {
         let temporary = tempfile::tempdir().unwrap();

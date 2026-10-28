@@ -70,3 +70,5 @@ generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock �
 本地 Spool 快照：持锁只捕获 Arc<Row> 和完整 revision/cut，锁外编码并同步新 generation，短锁在 cut 未变时选择 CURRENT 并整体换表，旧行与目录锁外释放。并发 Accept/Complete 使候选弃选重试，pending 完成预留在选择前复验；finish/admin 等待 owned GC。28 项 ingest 回归通过，包括压力下 pending 完成、stale cut、owner、未知选择恢复。持续写入仍可能反复弃选，不能宣称无饥饿；远端此时仍为串行压缩，后续接入独立预登记/pin。
 
 显式 Compact 原生复用：固定 cut 时捕获不带共享失效 token 的 membership，锁外复用 immutable native 包并仅构建 tail；同版本向量补丁、并发删除由 catch-up 和安装复验处理。detached cache 或包数压力仍私有全重建，预算拒绝发生在 tail handoff 前。新增 3 项、既有 3 项原生复用原断言及 Compact/delta/远端专项通过；上一中间步骤的三项复用失败已解决。可复用 mutable tail 的有界 handoff 仍在 Record 锁内执行 I/O，且 metadata 捕获仍遍历索引成员，已单独计时，不声称所有工作均已移出锁。
+
+远端 Spool 快照：固定 cut 编码与 PUT、候选释放/退休/DELETE/回执裁剪移到锁外，短锁内原子预登记完整候选与 pending 名额并复验 CAS。unknown publication 保留 pins，稳定 owner 恢复后才取消遗留 build pins；未知 PUT inventory 不遗忘。最终 ingestion 26 项和 SQLite staging 4 项通过，覆盖慢上传/删除下 Accept/Complete/status 推进、stale cut、finish 归属、未知选择及选中 manifest closure 保护。这是 SQLite/内存对象存储的协议验证，不是真实 S3。捕获 Arc 行、原子预登记及选择时可达性扫描仍在 Spool 锁内，append 的网络锁语义未改变。

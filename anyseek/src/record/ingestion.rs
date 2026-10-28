@@ -147,6 +147,7 @@ impl DurableLog {
             Self::Remote(log) => log.append(event).await,
         }
     }
+    #[cfg(test)]
     async fn compact(&mut self, events: Vec<Vec<u8>>, completion_slots: u64, completion_reserve: u64) -> Result<bool, RecordError> {
         match self {
             Self::Local(log) => {
@@ -229,6 +230,7 @@ impl Spool {
             completed: self.completed - expired, floor, completion_bytes: completion_headroom(self.completion_reserve, 1)?,
             _memory: memory }))
     }
+    #[cfg(test)]
     async fn reclaim(&mut self, epoch: u64) -> Result<(), RecordError> {
         let floor = self.epoch_floor.max(epoch.saturating_sub(1));
         let expired = self.rows[..self.completed].iter()
@@ -469,7 +471,6 @@ impl IngestPipeline {
         for event in events {
             spool.apply(event)?;
         }
-        if !spool.log.is_local() { spool.reclaim(current_epoch()).await?; }
         let pipeline = Self {
             spool: Arc::new(Mutex::new(spool)),
             running: Arc::new(AtomicBool::new(false)),
@@ -519,14 +520,6 @@ impl IngestPipeline {
         requests: Vec<RecordWrite>,
     ) -> Result<Vec<IngestReceipt>, RecordError> {
         let mut spool = self.spool.lock().await;
-        if spool.blocked.is_none() && !spool.log.is_local() {
-            if let Err(error) = spool.reclaim(current_epoch()).await {
-                if matches!(error, RecordError::OutcomeUnknown(_) | RecordError::RecoveryRequired) {
-                    spool.blocked = Some(error.to_string());
-                }
-                return Err(error);
-            }
-        }
         let mut seen = std::collections::BTreeSet::new();
         let mut fresh = Vec::new();
         let mut receipts = Vec::new();
@@ -770,6 +763,8 @@ impl IngestPipeline {
         }));
     }
     async fn local_gc_once(&self) -> Result<bool, RecordError> {
+        #[cfg(feature = "s3-object-store")]
+        if !self.spool.lock().await.log.is_local() { return self.remote_gc_once().await; }
         let plan = { self.spool.lock().await.local_plan(current_epoch())? };
         let Some(plan) = plan else { return Ok(false); };
         let (mut plan, mut prepared, operations) = tokio::task::spawn_blocking(move || {
@@ -830,6 +825,86 @@ impl IngestPipeline {
         #[cfg(test)] if retry { self.gc_stale.fetch_add(1, Ordering::AcqRel); }
         #[cfg(test)] if !retry { self.gc_committed.fetch_add(1, Ordering::AcqRel); }
         Ok(retry)
+    }
+    #[cfg(feature = "s3-object-store")]
+    async fn remote_gc_once(&self) -> Result<bool, RecordError> {
+        let captured = {
+            let spool = self.spool.lock().await;
+            let _phase = maintenance::Phase::new("intake_remote_capture_locked", spool.revision);
+            let DurableLog::Remote(log) = &spool.log else { return Ok(false); };
+            if spool.blocked.is_some() { return Ok(false); }
+            let floor = spool.epoch_floor.max(current_epoch().saturating_sub(1));
+            let expired = spool.rows[..spool.completed].iter()
+                .take_while(|r| r.status.accepted.operation_id.epoch < floor).count();
+            if expired == 0 && spool.completed_since_compaction < 64.max(spool.completed / 2)
+                && !(spool.gc_pressure && spool.completed > 0) { return Ok(false); }
+            let bytes = spool.rows[expired..].iter().try_fold(1024u64, |n, r| n.checked_add(r.snapshot_bytes))
+                .and_then(|n| n.checked_mul(34)).ok_or(RecordError::Busy)?;
+            let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(|_| RecordError::Busy)?;
+            (spool.cut(), log.cut()?, spool.rows[expired..].to_vec(), expired, floor, memory)
+        };
+        let (source, cut, rows, expired, floor, memory) = captured;
+        let (prepared, rows, operations, _memory) = tokio::task::spawn_blocking(move || {
+            let _phase = maintenance::Phase::new("intake_remote_encode_unlocked", source.revision);
+            let mut events = vec![serde_json::to_vec(&Event::Reset { base: source.base + expired as u64,
+                epoch_floor: floor, materialized_seq: source.materialized_seq }).map_err(storage)?];
+            let mut operations = BTreeMap::new();
+            for (position, row) in rows.iter().enumerate() {
+                let event = if let Some(request) = &row.request {
+                    Event::Accept { first: row.status.accepted.durable_seq, requests: vec![request.clone()] }
+                } else { Event::Retain { digest: row.digest, status: row.status.clone() } };
+                events.push(serde_json::to_vec(&event).map_err(storage)?);
+                operations.insert(row.status.accepted.operation_id.clone(), position);
+            }
+            Ok::<_, RecordError>((remote::Prepared::encode(cut, events)?, rows, operations, memory))
+        }).await.map_err(storage)??;
+        {
+            let mut spool = self.spool.lock().await;
+            let _phase = maintenance::Phase::new("intake_remote_reserve_locked", source.revision);
+            if spool.blocked.is_some() || spool.cut() != source { return Ok(true); }
+            let slots = (spool.rows.len() - spool.completed) as u64;
+            let bytes = completion_headroom(spool.completion_reserve, 5)?;
+            let DurableLog::Remote(log) = &mut spool.log else { return Err(RecordError::RecoveryRequired); };
+            if !log.reserve(&prepared, slots, bytes)? { return Ok(false); }
+        }
+        #[cfg(test)] {
+            self.gc_prepared.store(true, Ordering::Release);
+            while self.gc_pause.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        if let Err(error) = prepared.upload().await {
+            let _ = prepared.release(Vec::new()).await;
+            return Err(error);
+        }
+        let (selected, garbage, old) = {
+            let mut spool = self.spool.lock().await;
+            let _phase = maintenance::Phase::new("intake_remote_selection_locked", source.revision);
+            let unchanged = spool.blocked.is_none() && spool.cut() == source;
+            let bytes = completion_headroom(spool.completion_reserve, 5)?;
+            let revision = spool.revision.checked_add(1).ok_or(RecordError::RecoveryRequired)?;
+            let DurableLog::Remote(log) = &mut spool.log else { return Err(RecordError::RecoveryRequired); };
+            // Unknown publication returns before releasing pins; reopen resolves authority.
+            let selected = unchanged && log.select(&prepared, bytes)?;
+            // Cleanup discovery is optional after a confirmed CAS: its failure
+            // must not interrupt installation of the selected in-memory cut.
+            let garbage = log.garbage().unwrap_or_default();
+            let old = if selected {
+                let old = (std::mem::replace(&mut spool.rows, rows), std::mem::replace(&mut spool.operations, operations));
+                spool.base = source.base + expired as u64; spool.completed = source.completed - expired;
+                spool.epoch_floor = floor; spool.completed_since_compaction = 0;
+                spool.gc_pressure = false; spool.revision = revision;
+                Some(old)
+            } else { None };
+            (selected, garbage, old)
+        };
+        drop(old);
+        // Publication is authoritative before optional cleanup; failed deletes
+        // retain registered inventory and are retried on the next build/reopen.
+        let _ = prepared.release(garbage).await;
+        #[cfg(test)] if selected { self.gc_committed.fetch_add(1, Ordering::AcqRel); }
+        #[cfg(test)] if !selected { self.gc_stale.fetch_add(1, Ordering::AcqRel); }
+        Ok(!selected)
     }
     fn kick(&self) {
         #[cfg(test)]
@@ -952,12 +1027,6 @@ impl IngestPipeline {
             if let Err(error) = spool.apply(event) {
                 spool.blocked = Some(error.to_string());
                 return;
-            }
-            if !spool.log.is_local() {
-                if let Err(error) = spool.reclaim(current_epoch()).await {
-                    spool.blocked = Some(error.to_string());
-                    return;
-                }
             }
             if let Some(error) = stop {
                 if error != RecordError::Busy {
@@ -1835,6 +1904,89 @@ mod tests {
             1
         );
     }
+    #[cfg(feature = "s3-object-store")]
+    #[tokio::test]
+    async fn remote_snapshot_upload_and_delete_leave_spool_available_and_finish_joins() {
+        use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let database = temporary.path().join("authority.sqlite");
+        let settings = config();
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        let store = S3CompatibleStore::from_store(objects.clone(), 1024 * 1024);
+        let mut authority =
+            SqliteAuthority::open(&database, std::time::Duration::from_secs(1)).unwrap();
+        authority.create_partition("source", 1).unwrap();
+        let bootstrap = {
+            let inner = p.inner.lock().await;
+            encode_entry(&Entry::Checkpoint {
+                config: inner.config.clone(),
+                state: inner.state.try_clone().unwrap(),
+            })
+            .unwrap()
+        };
+        store
+            .publish_bootstrap(&mut authority, "source", 1, &bootstrap, unix_time_ms_i64())
+            .await
+            .unwrap();
+        p.inner.lock().await.remote = Some(RemotePersistence {
+            store,
+            authority: Mutex::new(authority),
+            partition_id: "source".into(),
+            owner_epoch: 1,
+            max_tail_blocks: 128,
+            max_tail_bytes: 1024 * 1024,
+            max_object_bytes: 1024 * 1024,
+            _owner: None,
+        });
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        let first = write("first", "a", "alpha", ExpectedVersion::Absent);
+        pipeline.submit(vec![first.clone()]).await.unwrap();
+        pipeline.finish().await.unwrap();
+        let intake_database = database.with_extension("intake.sqlite");
+        let upload_gate = intake_database.with_extension("pause-intake-upload");
+        let delete_gate = intake_database.with_extension("pause-intake-delete");
+        std::fs::write(&upload_gate, b"").unwrap();
+        std::fs::write(&delete_gate, b"").unwrap();
+        pipeline.spool.lock().await.completed_since_compaction = 64;
+        pipeline.kick_gc();
+        async fn entered(path: &std::path::Path) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !path.exists() { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+            }).await.unwrap();
+        }
+        entered(&intake_database.with_extension("entered-intake-upload")).await;
+        // Acceptance and materialization both change the captured cut during PUT.
+        let second = write("second", "a", "beta", ExpectedVersion::Any);
+        tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.submit(vec![second.clone()])).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !pipeline.operation(&second.operation_id).await.unwrap().completed() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let waiter = pipeline.clone();
+        let finish = tokio::spawn(async move { waiter.finish().await });
+        assert!(!finish.is_finished());
+        std::fs::remove_file(upload_gate).unwrap();
+        entered(&intake_database.with_extension("entered-intake-delete")).await;
+        assert!(!finish.is_finished());
+        let third = write("third", "a", "terminal", ExpectedVersion::Any);
+        tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.submit(vec![third.clone()])).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.progress()).await.unwrap();
+        std::fs::remove_file(delete_gate).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), finish).await.unwrap().unwrap().unwrap();
+        assert!(pipeline.gc_stale.load(Ordering::Acquire) >= 1);
+        assert!(pipeline.gc_committed.load(Ordering::Acquire) >= 1);
+        let receipt = pipeline.operation(&third.operation_id).await.unwrap();
+        assert!(receipt.completed());
+        drop(pipeline);
+        let reopened = IngestPipeline::open(p.clone()).await.unwrap();
+        assert_eq!(reopened.operation(&third.operation_id).await.unwrap(), receipt);
+        assert_eq!(reopened.submit(vec![first]).await.unwrap()[0].durable_seq, 1);
+        reopened.finish().await.unwrap();
+    }
+
     #[cfg(feature = "s3-object-store")]
     #[tokio::test]
     async fn remote_intake_recovers_pending_commands_and_receipts_after_cache_loss() {

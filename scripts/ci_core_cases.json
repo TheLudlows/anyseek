@@ -131,5 +131,10 @@
   "record::ingestion::tests::local_gc_owned_task_holds_partition_after_public_handles_drop",
   "record::indexer::tests::compact_native_capture_isolated_from_same_version_patch_and_concurrent_delete",
   "record::indexer::tests::compact_native_capture_budget_refuses_before_tail_handoff",
-  "record::indexer::tests::compact_native_reuse_rejects_corrupt_selected_package"
+  "record::indexer::tests::compact_native_reuse_rejects_corrupt_selected_package",
+  "record::ingestion::remote::tests::unlocked_snapshot_stale_cut_pins_unknown_and_preserves_append_suffix",
+  "record::ingestion::remote::tests::unlocked_snapshot_selected_release_preserves_manifest_closure",
+  "record::ingestion::remote::tests::unlocked_snapshot_publication_unknown_keeps_pins_until_owner_recovery",
+  "record::ingestion::tests::remote_snapshot_upload_and_delete_leave_spool_available_and_finish_joins",
+  "storage::sqlite_authority::tests::intake_staging_recovery_cancel_preserves_other_pin_kinds_and_unknown_inventory"
 ]

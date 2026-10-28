@@ -425,6 +425,19 @@ impl SqliteAuthority {
         Ok(deleted)
     }
 
+    /// Recovery only: caller must have reacquired the exclusive stable intake
+    /// owner file and resolved the selected head before cancelling old builds.
+    pub(crate) fn cancel_intake_snapshot_uploads(&mut self, partition: &str, epoch: u64) -> rusqlite::Result<usize> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !is_intake_namespace(&tx, partition)? || read_head(&tx, partition)?.is_none_or(|h| h.owner_epoch != epoch) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let n = tx.execute("DELETE FROM object_pins WHERE partition_id=?1 AND pin_kind='staging'
+            AND substr(pin_id,1,15)='intake-staging:'", [partition])?;
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Internal intake event identities are monotonic and never submitted by clients.
     /// Their publication receipts may be removed only behind a selected checkpoint.
     pub(crate) fn prune_intake_receipts(&mut self, partition: &str, epoch: u64, seq: u64) -> rusqlite::Result<()> {
@@ -1420,6 +1433,27 @@ mod tests {
         assert!(!restored.retire_object(&refs[0].key, 0, i64::MAX).unwrap());
         assert_eq!(restored.release_intake_snapshot_uploads(partition, 1, "build").unwrap(), 1);
         assert!(restored.retire_object(&refs[0].key, 0, i64::MAX).unwrap());
+    }
+
+    #[test]
+    fn intake_staging_recovery_cancel_preserves_other_pin_kinds_and_unknown_inventory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut db = SqliteAuthority::open(&temporary.path().join("source.sqlite"), Duration::from_secs(1)).unwrap();
+        let head = db.create_partition("stage-intake", 1).unwrap();
+        db.enable_intake_gc("stage-intake", 1).unwrap();
+        let refs = [object(&format!("partitions/stage-intake/snapshot/{:020}-build/manifest", head.head_version + 1), 1)];
+        assert!(db.reserve_intake_snapshot_uploads("stage-intake", 1, head.head_version, "build", &refs, 0, 2, 0).unwrap());
+        let other = object("ordinary", 2);
+        db.register_durable_object(&other, 0).unwrap();
+        db.pin_object("ordinary-staging", "stage-intake", &other.key, "staging", None).unwrap();
+        assert!(db.cancel_intake_snapshot_uploads("stage-intake", 2).is_err());
+        assert!(!db.retire_object(&refs[0].key, 0, i64::MAX).unwrap());
+        assert_eq!(db.cancel_intake_snapshot_uploads("stage-intake", 1).unwrap(), 1);
+        assert!(!db.retire_object(&other.key, 0, i64::MAX).unwrap());
+        assert_eq!(db.intake_inventory_count("stage-intake", 1).unwrap(), 1);
+        assert!(db.retire_object(&refs[0].key, 0, 1).unwrap());
+        assert!(db.mark_object_deleted(&refs[0]).unwrap());
+        assert!(db.collectible_objects(2).unwrap().contains(&refs[0]));
     }
 
     #[test]
