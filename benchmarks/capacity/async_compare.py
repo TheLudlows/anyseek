@@ -159,6 +159,12 @@ def run(engine, rows, queries, out, batch_size):
             phases.setdefault(name, []).append(int(elapsed) / 1000)
         summary['maintenance_phases'] = {name: {**stats(values), 'max_ms': max(values)}
                                          for name, values in phases.items()}
+        if engine == 'anyseek':
+            required_phases = ['intake_compaction_locked', 'cache_merge_capture_locked',
+                               'cache_merge_install_locked', 'cache_merge_cleanup_locked',
+                               'cache_merge_build_unlocked']
+            summary['maintenance_coverage'] = {name: len(phases.get(name, [])) for name in required_phases}
+            summary['required_maintenance_observed'] = all(summary['maintenance_coverage'].values())
         summary['maintenance_phase_caveat'] = 'Named intervals may overlap; locked phases cover only the instrumented critical-section interval, not mutex wait time.'
         dump(out / 'summary.json', summary)
     return summary
@@ -171,20 +177,28 @@ def main():
     p.add_argument('--data', required=True, type=Path)
     p.add_argument('--out', required=True, type=Path)
     p.add_argument('--revision', required=True)
-    p.add_argument('--take', type=int, default=1000)
+    p.add_argument('--expected-anyseek-sha256', required=True,
+                   help='SHA256 recorded by the final-build owner; rejects a stale binary')
+    p.add_argument('--take', type=int, default=2305)
     p.add_argument('--batch-size', type=int, default=16)
     a = p.parse_args()
     assert not any(k.startswith('ANYSEEK_') for k in os.environ), 'inherited engine overrides forbidden'
     assert 1 <= a.batch_size <= 64
+    assert a.take > 0
+    assert not a.out.resolve().is_relative_to(Path(__file__).resolve().parents[2]), 'raw output must stay outside repository'
+    anyseek_hash = hashlib.sha256(a.anyseek.read_bytes()).hexdigest()
+    assert anyseek_hash == a.expected_anyseek_sha256, 'binary does not match final-build SHA256'
     a.out.mkdir(parents=True, exist_ok=False)
     os.sched_setaffinity(0, {2, 3})
     os.environ['TOKENIZER_ANYSEEK_BINARY'] = str(a.anyseek.resolve())
     os.environ['TOKENIZER_MEILI_BINARY'] = str(a.meili.resolve())
+    os.environ['TOKENIZER_PROFILE'] = 'JiebaMixedV1'
     rows = json.loads(a.data.read_text())[:a.take]
+    assert len(rows) == a.take, 'source sample is smaller than requested paired corpus'
     queries = json.loads(Path(__file__).with_name('queries-393.json').read_text())
     manifest = {'revision': a.revision, 'documents': len(rows),
                 'selected_data_sha256': hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
-                'anyseek_binary_sha256': hashlib.sha256(a.anyseek.read_bytes()).hexdigest(),
+                'anyseek_binary_sha256': anyseek_hash,
                 'meili_binary_sha256': hashlib.sha256(a.meili.read_bytes()).hexdigest(),
                 'query_sha256': hashlib.sha256(Path(__file__).with_name('queries-393.json').read_bytes()).hexdigest(),
                 'comparison_limits': 'Small sequential batches; validation overhead excluded from batch completion but included in total wall time; independent default tokenizers; AND/all do not imply identical semantics; empty queries are reported; checkpoint has no Meili equivalent.'}
