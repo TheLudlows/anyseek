@@ -99,3 +99,5 @@ Journal 事务准入小步：在本地完整 frame 与双 witness 开始前异�
 Checkpoint 准入与锁序小步：两条 local generation/PUBLISHED 发布路径只在 remote/native 工作完成后取得同步 File 事务 loan；异步 File loan 保持真实租约到 future 完成，子任务不继承。indexer 组 15 通过、1 个原有子进程入口忽略，资源组 10/10。NativeReuse 的 I/O 探针现先释放，再等待 shard 统计锁；确定性的反向锁序与相关原生复用 4/4 通过。该修复未提高配额，真实落盘失败及远端已提交后的隔离保持不变。
 
 Vector/metadata 与 required successor 小步：先取得组件锁，再在身份/mmap/buffer 修改前预占 File 事务；append、vector 分段提交和 descriptor 共用准确作用域 loan。新组件在创建目录前预占，覆盖 schema 与初始化，结束后才进入 native 工作，避免瞬态配额错误被字符串化为阻塞已接收命令的 Storage。6/6 确定性专项通过，覆盖取消等待、扩容、单行 vector 提交、相反锁序、真实只读文件错误仍 fence，以及候选未触盘与原 writer 继续可用。
+
+本地 intake 小步：Accept、Complete 和滚段的 blocking worker 显式保留 Scope，并在完整 File 事务前预占；GC prepare 的 loan 在取得 Spool 前释放，选择阶段统一 Spool→I/O→log 顺序。6/6 本地专项通过，覆盖终态只持久化不重执行业务、滚段、GC prepare/select/finish、真实部分 WAL 仍隔离并恢复。远端 typed admission 与 Complete 的确定拒绝重试仍在下一步完成；不能将此本地结果当作真实云验证。

@@ -117,6 +117,15 @@ struct LocalPlan {
     completion_bytes: u64,
     _memory: crate::storage::build_budget::MemoryLease,
 }
+// Pre-admit a complete file-only transaction before entering its write phase.
+// Callers that need Spool must already own it: never hold this permit and then
+// wait for Spool (Accept/Complete can own Spool while waiting for the same I/O).
+async fn intake_file_io<T: Send + 'static>(work: impl FnOnce() -> Result<T, RecordError> + Send + 'static) -> Result<T, RecordError> {
+    let scope = crate::resources::io_scope(crate::resources::Lane::Background);
+    let permit = scope.journal_io().await.map_err(|_| RecordError::Busy)?;
+    tokio::task::spawn_blocking(move || scope.run_sync(|| permit.run(work)))
+        .await.map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?
+}
 enum DurableLog {
     Local(Arc<std::sync::Mutex<ingest_log::Log>>),
     #[cfg(feature = "s3-object-store")]
@@ -136,13 +145,9 @@ impl DurableLog {
             Self::Local(log) => {
                 let log = log.clone();
                 let bytes = serde_json::to_vec(event).map_err(storage)?;
-                tokio::task::spawn_blocking(move || {
-                    log.lock()
-                        .map_err(|_| RecordError::RecoveryRequired)?
-                        .append_serialized(&bytes)
-                })
-                .await
-                .map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?
+                intake_file_io(move || {
+                    log.lock().map_err(|_| RecordError::RecoveryRequired)?.append_serialized(&bytes)
+                }).await
             }
             #[cfg(feature = "s3-object-store")]
             Self::Remote(log) => log.append(event).await,
@@ -154,9 +159,9 @@ impl DurableLog {
             Self::Local(log) => {
                 let log = log.clone();
                 let completion_bytes = completion_headroom(completion_reserve, 1)?;
-                tokio::task::spawn_blocking(move || {
+                intake_file_io(move || {
                     log.lock().map_err(|_| RecordError::RecoveryRequired)?.compact(&events, completion_bytes)
-                }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))??;
+                }).await?;
                 Ok(true)
             }
             #[cfg(feature = "s3-object-store")]
@@ -387,6 +392,10 @@ pub struct IngestPipeline {
     gc_committed: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     paused: Arc<AtomicBool>,
+    #[cfg(test)]
+    completion_pause: Arc<AtomicBool>,
+    #[cfg(test)]
+    completion_ready: Arc<AtomicBool>,
 }
 impl IngestPipeline {
     /// Open the collection's intake WAL and resume pending commands. S3 intake
@@ -491,6 +500,10 @@ impl IngestPipeline {
             gc_committed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             paused: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            completion_pause: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            completion_ready: Arc::new(AtomicBool::new(false)),
         };
         pipeline.kick();
         pipeline.kick_gc();
@@ -778,7 +791,7 @@ impl IngestPipeline {
         }
         let plan = { self.spool.lock().await.local_plan(current_epoch())? };
         let Some(plan) = plan else { return Ok(false); };
-        let (mut plan, mut prepared, operations) = tokio::task::spawn_blocking(move || {
+        let (mut plan, mut prepared, operations) = intake_file_io(move || {
             let mut events = vec![serde_json::to_vec(&Event::Reset { base: plan.base,
                 epoch_floor: plan.floor, materialized_seq: plan.source.materialized_seq }).map_err(storage)?];
             let mut operations = BTreeMap::new();
@@ -791,17 +804,18 @@ impl IngestPipeline {
             }
             let prepared = ingest_log::Log::prepare(plan.cut.clone(), &events, plan.completion_bytes)?;
             Ok::<_, RecordError>((plan, prepared, operations))
-        }).await.map_err(|error| RecordError::OutcomeUnknown(error.to_string()))??;
+        }).await?;
         #[cfg(test)] {
             self.gc_prepared.store(true, Ordering::Release);
             while self.gc_pause.load(Ordering::Acquire) {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         }
-        let spool = self.spool.clone();
-        let retry = tokio::task::spawn_blocking(move || {
+        // Same lock order as append: Spool first, then I/O. Preparation released
+        // its loan before reaching this point; no permit waits for Spool.
+        let mut spool = self.spool.clone().lock_owned().await;
+        let retry = intake_file_io(move || {
             let selected = {
-                let mut spool = spool.blocking_lock();
                 let _phase = maintenance::Phase::new("intake_selection_locked", plan.source.base + plan.source.completed as u64);
                 if spool.blocked.is_some() || spool.cut() != plan.source { None }
                 else {
@@ -823,6 +837,7 @@ impl IngestPipeline {
                     }
                 }
             };
+            drop(spool);
             match selected {
                 None => { prepared.discard()?; Ok(true) },
                 Some((garbage, rows, operations)) => {
@@ -832,7 +847,7 @@ impl IngestPipeline {
                     Ok(false)
                 }
             }
-        }).await.map_err(|error| RecordError::OutcomeUnknown(error.to_string()))??;
+        }).await?;
         #[cfg(test)] if retry { self.gc_stale.fetch_add(1, Ordering::AcqRel); }
         #[cfg(test)] if !retry { self.gc_committed.fetch_add(1, Ordering::AcqRel); }
         Ok(retry)
@@ -1039,6 +1054,12 @@ impl IngestPipeline {
                     Some(stop.unwrap_or(RecordError::RecoveryRequired).to_string());
                 return;
             }
+            #[cfg(test)] {
+                self.completion_ready.store(true, Ordering::Release);
+                while self.completion_pause.load(Ordering::Acquire) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
             let mut spool = self.spool.lock().await;
             let event = Event::Complete {
                 first: seq,
@@ -1069,6 +1090,135 @@ mod tests {
     use std::time::Duration;
     use super::super::tests::{config, write};
     use super::*;
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_intake_waits_for_one_scoped_permit_and_rolls_without_reentry() {
+        use crate::resources::{Governor, Lane, Scope};
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("intake");
+        let log = Arc::new(std::sync::Mutex::new(ingest_log::Log::create(&root, "config", 1024, 16384).unwrap()));
+        let governor = Arc::new(Governor::default());
+        let scope = governor.admit("intake-io".into(), Lane::Background, 0).unwrap();
+        let held = scope.io().unwrap();
+        assert!(scope.io().is_err());
+        let original_bytes = log.lock().unwrap().bytes();
+        let writer = log.clone();
+        let request = write("one", "a", "alpha", ExpectedVersion::Absent);
+        let worker = tokio::spawn(scope.clone().run(async move {
+            let mut durable = DurableLog::Local(writer);
+            durable.append(&Event::Accept { first: 1, requests: vec![request] }).await
+        }));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!worker.is_finished());
+        assert_eq!(log.lock().unwrap().bytes(), original_bytes);
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), worker).await.unwrap().unwrap().unwrap();
+        for seq in 2..=8 {
+            let writer = log.clone();
+            scope.clone().run(intake_file_io(move || {
+                let current = Scope::current().expect("blocking worker keeps scope");
+                assert!(current.has_file_io_loan());
+                assert!(current.io().is_err(), "the unique I/O permit is already owned");
+                writer.lock().unwrap().append(&Event::Accept { first: seq,
+                    requests: vec![write(&format!("op-{seq}"), &format!("r-{seq}"), "alpha", ExpectedVersion::Absent)] })
+            })).await.unwrap();
+        }
+        drop(scope.io().unwrap());
+        drop(log);
+        let (_, events) = ingest_log::Log::open::<Event>(&root, "config", 1024, 16384).unwrap();
+        assert_eq!(events.len(), 8);
+        assert!(root.join("segment-0000000000000001").exists());
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_complete_waits_for_io_without_reexecuting_the_record() {
+        use crate::resources::{Governor, Lane};
+        let temporary = tempfile::tempdir().unwrap();
+        let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        pipeline.completion_pause.store(true, Ordering::Release);
+        let scope = Arc::new(Governor::default()).admit("terminal-io".into(), Lane::Foreground, 0).unwrap();
+        let request = write("terminal", "a", "alpha", ExpectedVersion::Absent);
+        scope.clone().run(pipeline.submit(vec![request.clone()])).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !pipeline.completion_ready.load(Ordering::Acquire) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(pipeline.progress().await.pending, 1);
+        let background = scope.in_lane(Lane::Background);
+        let held = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop { if let Ok(lease) = background.io() { break lease; } tokio::task::yield_now().await; }
+        }).await.unwrap();
+        pipeline.completion_pause.store(false, Ordering::Release);
+        let waiting = pipeline.clone();
+        let finish = tokio::spawn(async move { waiting.finish().await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!finish.is_finished());
+        drop(held);
+        let progress = tokio::time::timeout(std::time::Duration::from_secs(10), finish).await.unwrap().unwrap().unwrap();
+        assert_eq!(progress.completed_seq, 1);
+        assert!(progress.blocked.is_none());
+        assert_eq!(pipeline.operation(&request.operation_id).await.unwrap().receipt.unwrap().seq, 1);
+        assert_eq!(p.statistics().await.unwrap().retained_operations, 1);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_gc_io_waits_preserve_lock_order_and_finish() {
+        use crate::resources::{Governor, Lane};
+        let temporary = tempfile::tempdir().unwrap();
+        let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
+        let pipeline = IngestPipeline::open(p).await.unwrap();
+        pipeline.submit(vec![write("first", "a", "alpha", ExpectedVersion::Absent)]).await.unwrap();
+        drained(&pipeline).await;
+        pipeline.spool.lock().await.gc_pressure = true;
+        pipeline.gc_pause.store(true, Ordering::Release);
+        let foreground = Arc::new(Governor::default()).admit("gc-io".into(), Lane::Foreground, 0).unwrap();
+        let background = foreground.clone().in_lane(Lane::Background);
+        let held = background.io().unwrap();
+        background.clone().run(async { pipeline.kick_gc(); }).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!pipeline.gc_prepared.load(Ordering::Acquire));
+        // Preparation owns no Spool lock while waiting for background capacity.
+        tokio::time::timeout(std::time::Duration::from_secs(2), foreground.run(
+            pipeline.submit(vec![write("second", "b", "beta", ExpectedVersion::Absent)]))).await.unwrap().unwrap();
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !pipeline.gc_prepared.load(Ordering::Acquire) || pipeline.progress().await.completed_seq != 2 {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let held = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop { if let Ok(lease) = background.io() { break lease; } tokio::task::yield_now().await; }
+        }).await.unwrap();
+        pipeline.gc_pause.store(false, Ordering::Release);
+        let waiting = pipeline.clone();
+        let finish = tokio::spawn(async move { waiting.finish().await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!finish.is_finished());
+        drop(held);
+        let progress = tokio::time::timeout(std::time::Duration::from_secs(10), finish).await.unwrap().unwrap().unwrap();
+        assert_eq!(progress.completed_seq, 2);
+        assert!(progress.blocked.is_none());
+        assert!(pipeline.gc_stale.load(Ordering::Acquire) >= 1);
+        assert!(pipeline.gc_committed.load(Ordering::Acquire) >= 1);
+        drop(background.io().unwrap());
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_partial_intake_write_still_fences_and_recovers_the_selected_cut() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("intake");
+        let log = Arc::new(std::sync::Mutex::new(ingest_log::Log::create(&root, "config", 4096, 16384).unwrap()));
+        let mut durable = DurableLog::Local(log.clone());
+        durable.append(&Event::Accept { first: 1, requests: vec![write("kept", "a", "alpha", ExpectedVersion::Absent)] }).await.unwrap();
+        std::fs::write(root.join(".test-intake-partial-append"), b"").unwrap();
+        let complete = Event::Complete { first: 1, results: vec![Err(IngestFailure { code: "conflict".into(), message: "terminal".into() })] };
+        assert!(matches!(durable.append(&complete).await, Err(RecordError::OutcomeUnknown(_))));
+        assert!(matches!(durable.append(&complete).await, Err(RecordError::RecoveryRequired)));
+        drop(durable); drop(log);
+        std::fs::remove_file(root.join(".test-intake-partial-append")).unwrap();
+        let (log, events) = ingest_log::Log::open::<Event>(&root, "config", 4096, 16384).unwrap();
+        assert!(matches!(&events[..], [Event::Accept { first: 1, .. }]));
+        let mut durable = DurableLog::Local(Arc::new(std::sync::Mutex::new(log)));
+        durable.append(&complete).await.unwrap();
+        drop(durable);
+        assert_eq!(ingest_log::Log::open::<Event>(&root, "config", 4096, 16384).unwrap().1.len(), 2);
+    }
     #[tokio::test]
     async fn compacted_terminal_digest_preserves_json_equality_and_original_receipt() {
         let temporary = tempfile::tempdir().unwrap();

@@ -163,5 +163,9 @@
   "record::index_consumers::io_tests::vector_real_metadata_io_failure_still_fences_component_and_cursor",
   "record::index_consumers::io_tests::component_real_vector_write_failure_still_fences_after_partial_commit",
   "record::index_consumers::io_tests::component_guard_owner_can_finish_io_while_consumer_waits_for_guard",
-  "record::index_consumers::io_tests::successor_component_creation_waits_before_touching_candidate_and_keeps_old_writer"
+  "record::index_consumers::io_tests::successor_component_creation_waits_before_touching_candidate_and_keeps_old_writer",
+  "record::ingestion::tests::local_intake_waits_for_one_scoped_permit_and_rolls_without_reentry",
+  "record::ingestion::tests::local_complete_waits_for_io_without_reexecuting_the_record",
+  "record::ingestion::tests::local_gc_io_waits_preserve_lock_order_and_finish",
+  "record::ingestion::tests::local_partial_intake_write_still_fences_and_recovers_the_selected_cut"
 ]

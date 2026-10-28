@@ -416,6 +416,14 @@ impl Log {
         }
         self.failed = true;
         let before = self.active.physical_bytes();
+        #[cfg(test)] if self.root.join(".test-intake-partial-append").exists() {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new().append(true)
+                .open(self.root.join(format!("segment-{:016x}/wal", self.segment))).map_err(storage)?;
+            file.write_all(b"partial-intake-frame").map_err(storage)?;
+            file.sync_all().map_err(storage)?;
+            return Err(RecordError::OutcomeUnknown("injected I/O failure after partial WAL write".into()));
+        }
         self.active
             .append(&bytes)
             .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
