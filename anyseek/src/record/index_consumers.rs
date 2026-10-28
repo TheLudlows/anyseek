@@ -40,6 +40,7 @@ impl Cursors {
 pub(super) struct Input {
     identity: lexical::Identity,
     ordinal: usize,
+    fingerprint: Option<[u8; 32]>,
     document: Document,
     _memory: crate::storage::build_budget::MemoryLease,
     _scope: Option<crate::resources::Lease>,
@@ -73,6 +74,7 @@ impl Input {
         Ok(Self {
             identity,
             ordinal: 0,
+            fingerprint: None,
             document,
             _memory: memory,
             _scope: scope,
@@ -90,6 +92,7 @@ impl Input {
             .map(|scope| scope.retained_io().bytes(bytes))
             .transpose()
             .map_err(storage)?;
+        let fingerprint = Some(crate::active::fingerprint(document).map_err(storage)?);
         let document = retrieval_schema(config)
             .into_iter()
             .filter(|f| f.index_vector || f.facet)
@@ -102,6 +105,7 @@ impl Input {
         Ok(Self {
             identity,
             ordinal,
+            fingerprint,
             document,
             _memory: memory,
             _scope: scope,
@@ -141,6 +145,13 @@ impl Engine {
                     .join(".test-vector-consumer-panic-after-append")
                     .exists();
                 let mut shard = component.write().await;
+                // Global lock order: component guard, then I/O. No index/shard
+                // lock is acquired while this permit is held. Wait before identity.
+                let permit = match crate::resources::Scope::current() {
+                    Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(storage)?),
+                    _ => None,
+                };
+                let append = async {
                 let outcome = std::panic::AssertUnwindSafe(async {
                     if shard.failed {
                         return Err(RecordError::RecoveryRequired);
@@ -159,7 +170,7 @@ impl Engine {
                             .grow(build_budget::identity_estimate(&input.identity.id)?)
                             .map_err(storage)?;
                     }
-                    shard.active.as_mut().unwrap().keys.push(input.identity.id);
+                    shard.active.as_mut().unwrap().append_identity(input.identity.id, input.identity.version, input.identity.revision, input.fingerprint.ok_or_else(|| storage("vector fingerprint missing"))?);
                     shard.append(input.document).await.map_err(storage)?;
                     #[cfg(test)]
                     if panic_after {
@@ -184,12 +195,20 @@ impl Engine {
                     cursors.fail(error);
                 }
                 result
+                };
+                match permit {
+                    Some(permit) => permit.run_async(append).await,
+                    None => append.await,
+                }
             }
         }
     }
     async fn flush(&self) -> Result<(), RecordError> {
         match self {
-            Self::Lexical(native) => native.flush().await,
+            Self::Lexical(native) => {
+                native.flush().await?;
+                native.merge_small_segments().await
+            },
             Self::Vector { .. } => Ok(()),
         }
     }
@@ -392,3 +411,7 @@ impl Consumer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "index_consumer_io_tests.rs"]
+mod io_tests;

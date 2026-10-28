@@ -42,7 +42,7 @@ fn exceeded() -> io::Error {
     io::Error::other("record build resource budget exceeded")
 }
 fn io_admission() -> io::Result<Option<crate::resources::Lease>> {
-    crate::resources::Scope::current().map(|scope| scope.io()).transpose().map_err(io::Error::other)
+    crate::resources::Scope::current().map(|scope| scope.file_io()).transpose().map(Option::flatten).map_err(io::Error::other)
 }
 pub(crate) struct MemoryLease(u64, Arc<AtomicU64>);
 pub(crate) fn reserve_memory(bytes: u64) -> io::Result<MemoryLease> {
@@ -126,6 +126,14 @@ pub(crate) struct DiskScope {
 }
 impl DiskScope {
     pub(crate) fn begin(root: &Path, limit: u64) -> io::Result<Self> {
+        Self::begin_mode(root,limit,false)
+    }
+    /// Independent consumers can still charge files during the filesystem scan.
+    /// Preserve their old high-water ledger rather than refunding that traffic.
+    pub(crate) fn begin_concurrent(root:&Path,limit:u64)->io::Result<Self> {
+        Self::begin_mode(root,limit,true)
+    }
+    fn begin_mode(root: &Path, limit: u64, concurrent:bool) -> io::Result<Self> {
         let root = fs::canonicalize(root)?;
         let mut ledger = Ledger {
             used: 0,
@@ -141,7 +149,17 @@ impl DiskScope {
                 if k.is_dir() {
                     scan(&e.path(), l, cap)?;
                 } else if k.is_file() {
+                    #[cfg(not(windows))]
                     let n = e.metadata()?.len();
+                    #[cfg(windows)]
+                    let n = {
+                        use std::os::windows::fs::OpenOptionsExt;
+                        // NTFS directory enumeration can cache the size while a
+                        // writer remains open. Query the actual handle instead.
+                        // Metadata-only access also works for exclusively locked
+                        // WAL data ranges and never changes the writer's cursor.
+                        fs::OpenOptions::new().access_mode(0).open(e.path())?.metadata()?.len()
+                    };
                     l.used = l
                         .used
                         .checked_add(n)
@@ -158,10 +176,21 @@ impl DiskScope {
         let mut scopes = SCOPES.lock().map_err(|_| exceeded())?;
         scopes.retain(|_, w| w.strong_count() > 0);
         let disk = if let Some(d) = scopes.get(&root).and_then(Weak::upgrade) {
-            if d.limit != limit || d.building.swap(true, Ordering::AcqRel) {
+            if d.limit != limit || d.building.load(Ordering::Acquire) {
                 return Err(io::Error::other("overlapping record build"));
             }
-            *d.ledger.lock().map_err(|_| exceeded())? = ledger;
+            let mut current=d.ledger.lock().map_err(|_| exceeded())?;
+            if concurrent {
+                for (path,bytes) in &current.files {
+                    let scanned=ledger.files.get(path).copied().unwrap_or(0);
+                    ledger.used=ledger.used.checked_add(bytes.saturating_sub(scanned))
+                        .filter(|used|*used<=limit).ok_or_else(exceeded)?;
+                    ledger.files.insert(path.clone(),scanned.max(*bytes));
+                }
+            }
+            *current = ledger;
+            d.building.store(true,Ordering::Release);
+            drop(current);
             d
         } else {
             if scopes
@@ -194,7 +223,10 @@ fn lookup(path: &Path) -> io::Result<Option<Arc<Disk>>> {
 }
 pub(crate) fn ensure_scope(root: &Path, limit: u64) -> io::Result<Option<DiskScope>> {
     let root = fs::canonicalize(root)?;
-    if lookup(&root)?.is_some() {
+    // Open mmap/File owners retain the ledger after a build ends. They are not
+    // an active construction scope: a new serialized round must rescan after
+    // cache retirement instead of indefinitely charging deleted old caches.
+    if lookup(&root)?.is_some_and(|scope|scope.building.load(Ordering::Acquire)) {
         Ok(None)
     } else {
         DiskScope::begin(&root, limit).map(Some)
@@ -543,5 +575,29 @@ mod tests {
         assert!(reserve_from(&counter, BUILD_MEMORY).is_err());
         drop(leases);
         assert_eq!(counter.load(Ordering::Acquire), before);
+    }
+    #[test]
+    fn concurrent_rescan_preserves_inflight_charge_and_serial_rescan_refunds_retired_files() {
+        let root=root();
+        let first=DiskScope::begin(&root,8).unwrap();
+        let mut retained=File::create(root.join("retained")).unwrap();
+        retained.write_all(&[1]).unwrap();
+        let retired=File::create(root.join("retired")).unwrap();
+        // A writer charges before its OS write. Its reserved end can be newer
+        // than the scan's physical metadata, including a not-yet-written file.
+        retired.charge(7).unwrap();
+        drop(first);
+        let concurrent=DiskScope::begin_concurrent(&root,8).unwrap();
+        assert_eq!(concurrent.disk.ledger.lock().unwrap().used,8);
+        let mut rejected=File::create(root.join("candidate")).unwrap();
+        assert!(rejected.write_all(&[2]).is_err());
+        drop(rejected);drop(retired);
+        fs::remove_file(root.join("retired")).unwrap();
+        drop(concurrent);
+        let serial=ensure_scope(&root,8).unwrap().expect("old open handles are not an active build");
+        let mut candidate=File::create(root.join("candidate")).unwrap();
+        candidate.write_all(&[3;7]).unwrap();
+        assert_eq!(serial.disk.ledger.lock().unwrap().used,8);
+        drop(candidate);drop(retained);drop(serial);fs::remove_dir_all(root).unwrap();
     }
 }

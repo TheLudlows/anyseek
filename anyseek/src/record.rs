@@ -44,6 +44,7 @@ mod query;
 mod replay;
 mod indexer;
 mod maintenance;
+mod cache_merge;
 mod ingest_log;
 mod ingestion;
 pub use ingestion::{IngestPipeline, IngestReceipt, IngestStatus, IngestProgress, IngestFailure};
@@ -52,6 +53,7 @@ mod segment_state;
 mod state_chunks;
 mod state_memory;
 mod state_values;
+mod generation_values;
 mod state_proof;
 mod capacity;
 mod snapshot;
@@ -313,6 +315,8 @@ struct State {
     seq: u64,
     epoch_watermark: u64,
     time_watermark_ms: u64,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    retired_operation_prefix: Option<temporal::RetiredPrefix>,
     expirations: Vec<temporal::Expiration>,
     lease_expirations: Vec<lease::Expiration>,
     private_cleanup_pending: bool,
@@ -321,7 +325,7 @@ struct State {
     evidence_quarantined: bool,
     records: state_values::Records,
     source_revisions: state_values::Values<Record>,
-    generations: BTreeMap<String, generation::Manifest>,
+    generations: generation_values::Generations,
     // Vec avoids JSON's restriction on structured map keys. Bounded by config.
     operations: state_values::Values<Applied>,
     #[serde(skip)]
@@ -425,6 +429,17 @@ impl From<String> for RemoteCommitError { fn from(error: String) -> Self { Self:
 #[cfg(feature = "s3-object-store")]
 impl From<&str> for RemoteCommitError { fn from(error: &str) -> Self { Self::Unknown(error.into()) } }
 #[cfg(feature = "s3-object-store")]
+impl From<crate::storage::object_log::TailError> for RemoteCommitError {
+    fn from(error: crate::storage::object_log::TailError) -> Self {
+        match error {
+            // Only this explicit variant proves that neither inventory nor PUT
+            // was attempted. A backend/verification error remains uncertain.
+            crate::storage::object_log::TailError::Admission(_) => Self::Busy,
+            error => Self::Unknown(error.to_string()),
+        }
+    }
+}
+#[cfg(feature = "s3-object-store")]
 impl std::fmt::Display for RemoteCommitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self { Self::Busy => f.write_str("resource budget exhausted before commit publication"), Self::Unknown(error) => f.write_str(error) }
@@ -492,10 +507,7 @@ impl RemotePersistence {
         let reference = crate::storage::object_log::upload_log_block(
             &self.store, &mut authority, &key, &block,
             unix_time_ms_i64(), self.max_object_bytes,
-        ).await.map_err(|error| match error {
-            crate::storage::object_log::TailError::ObjectStore(ref object) if crate::storage::s3_compatible::is_resource_error(object) => RemoteCommitError::Busy,
-            error => RemoteCommitError::Unknown(error.to_string()),
-        })?;
+        ).await.map_err(RemoteCommitError::from)?;
         match authority.publish_commit(
             &self.partition_id, head.head_version, self.owner_epoch, &operation_id,
             digest, seq, reference, None,
@@ -724,8 +736,15 @@ impl Inner {
     // In S3 mode the caller has already received SQLite commit confirmation.
     // A cache append error cannot turn that known durable operation into an
     // unknown remote commit. The caller keeps health/output fenced until reopen.
-    fn append_operation(&mut self, bytes: &[u8], seq: u64) -> Result<(), RecordError> {
-        let result = (|| {
+    async fn append_operation(&mut self, bytes: &[u8], seq: u64) -> Result<(), RecordError> {
+        // Reserve the whole local frame before its first byte. File callbacks
+        // borrow this permit through both redundant witnesses; no native or
+        // remote work runs inside the synchronous loan.
+        let permit = match crate::resources::Scope::current() {
+            Some(scope) => scope.journal_io().await.map(Some).map_err(std::io::Error::other),
+            None => Ok(None),
+        };
+        let mut append = || {
             #[cfg(test)]
             if self.journal.root().join(".test-cache-append-failure").exists() {
                 return Err(std::io::Error::other("injected cache append failure"));
@@ -735,7 +754,12 @@ impl Inner {
                 return Err(std::io::Error::other("injected cache append failure"));
             }
             self.journal.append(bytes)
-        })();
+        };
+        let result = match permit {
+            Ok(Some(permit)) => permit.run(append),
+            Ok(None) => append(),
+            Err(error) => Err(error),
+        };
         if let Err(error) = result {
             #[cfg(feature="s3-object-store")]
             if self.remote.is_some() { return Err(RecordError::DurablePending(seq)); }
@@ -869,13 +893,16 @@ async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Res
     build_at_selected(path,cache,config,state,None).await
 }
 async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(IndexArc,Vec<String>),RecordError>{
-    let disk_limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("build disk limit overflow"))?;
-    let _disk=crate::storage::build_budget::ensure_scope(path,disk_limit).map_err(storage)?;
     let visible = evidence::visibility(&state.records)?;
     let records: Vec<_> = state.records.values().filter(|record|
         visible.get(&record.record_id) == Some(&true)
         && selected.is_none_or(|keys|keys.contains(&record.record_id))
         && !(state.evidence_quarantined && temporal::protected(record))).collect();
+    build_records_at(path,cache,config,state.seq,records).await
+}
+async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u64,records:Vec<&Record>)->Result<(IndexArc,Vec<String>),RecordError>{
+    let disk_limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("build disk limit overflow"))?;
+    let _disk=crate::storage::build_budget::ensure_scope(path,disk_limit).map_err(storage)?;
     let reservation=build_budget::admit(config,records.iter().copied())?;
     let index = create_index(
         &cache,
@@ -909,17 +936,17 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
         }
     }
 
-    let native = lexical::runtime::Runtime::create(&cache.join("native"), config)?;
+    let native = lexical::runtime::Runtime::create_owned(&cache.join("native"), config).await?;
     for record in &records {
-        native.append(lexical::Identity { id:record.record_id.clone(),version:record.version,revision:state.seq },record.document.as_ref().unwrap(),false).await?;
+        native.append(lexical::Identity { id:record.record_id.clone(),version:record.version,revision:sequence },record.document.as_ref().unwrap(),false).await?;
         index.read().await.shard_vec[0]
             .write()
             .await
             .active
             .as_mut()
             .unwrap()
-            .keys
-            .push(record.record_id.clone());
+            .append_identity(record.record_id.clone(), record.version, sequence,
+                crate::active::fingerprint(&temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)).map_err(storage)?);
         index
             .index_documents(vec![temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)])
             .await
@@ -935,6 +962,7 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
     ))
 }
 fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordError>{
+        state.records.validate_counts()?;
     validate_config(config)?;
         evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
         locator::validate_history(&state).map_err(storage)?;
@@ -1452,7 +1480,7 @@ impl RecordPartition {
         for entry in pending {
             inner.replay_anchor_tail(entry).await?;
             #[cfg(test)]
-            if path.join(".test-recovery-after-derived-seal").exists() && !inner.index.pending_seals.is_empty(){
+            if path.join(".test-recovery-after-derived-seal").exists() && inner.index.detached_cache {
                 return Err(storage("injected recovery interruption after derived seal"));
             }
         }
@@ -1689,14 +1717,16 @@ impl RecordPartition {
 
     /// Publish an authenticated state/index anchor, retaining canonical payload
     /// objects and retiring the covered WAL only after its certificate is durable.
+    /// Construction runs in an owned background job while writes continue.
+    /// Cancellation leaves accepted work running; the result is its captured cut.
+    /// Uses a 300-second build deadline. Saturated admission or failure to reach
+    /// a stable publication cut within the deadline returns `Busy`.
+    /// Authenticated State deltas and payload objects are reused where eligible.
+    /// Eligible immutable native packages are reused with frozen membership.
+    /// Detached caches and package pressure require a private full native rebuild.
+    /// The bounded mutable-tail handoff still performs I/O under the live lock.
     pub async fn compact_journal(&self) -> Result<u64, RecordError> {
-        let permit=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
-        let owner=self.inner.clone();
-        crate::resources::spawn(async move {
-            let _permit=permit;let mut inner=owner.lock().await;
-            if !inner.healthy{return Err(RecordError::RecoveryRequired);}
-            inner.publish_anchor().await
-        }).await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?
+        self.start_compact_job()?.finish().await
     }
 
     /// Create an independently recoverable snapshot at a new location. No live
@@ -1739,6 +1769,50 @@ mod tests {
     };
     use crate::vector::Inference;
     use crate::vector_similarity::AnnMode;
+    #[tokio::test(flavor = "current_thread")]
+    async fn journal_frame_waits_for_external_io_and_preserves_retry_on_reopen() {
+        let root = tempfile::tempdir().unwrap(); let location = root.path().join("records");
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("journal-contention".into(), crate::resources::Lane::Background, 0).unwrap();
+        let p = scope.clone().run(RecordPartition::create(&location, config())).await.unwrap();
+        let request = write("contended-frame", "a", "alpha", ExpectedVersion::Absent);
+        let held = crate::resources::hold_io_for_test(&scope).await;
+        let release = async { tokio::time::sleep(std::time::Duration::from_millis(20)).await; drop(held); };
+        let operation = scope.clone().run(p.write(request.clone()));
+        let (_, receipt) = tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(release, operation) }).await.unwrap();
+        let receipt = receipt.unwrap();
+        assert_eq!(receipt.seq, 1);
+        assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 1);
+        drop(p);
+        let p = scope.clone().run(RecordPartition::open(&location, config().max_journal_bytes)).await.unwrap();
+        assert_eq!(scope.run(p.write(request)).await.unwrap(), receipt);
+        assert_eq!(p.get("a").await.unwrap().unwrap().version, 1);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn journal_frame_partial_write_still_reports_unknown_and_requires_recovery() {
+        let root = tempfile::tempdir().unwrap(); let location = root.path().join("records");
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("journal-partial".into(), crate::resources::Lane::Background, 0).unwrap();
+        let p = RecordPartition::create(&location, config()).await.unwrap();
+        let mut inner = p.inner.lock().await;
+        // Isolate this fault ledger from the partition's live cache ledger.
+        // Exercise the real append/error mapper with an ordinary published WAL.
+        let isolated = root.path().join("fault-journal");
+        inner.journal = PartitionJournal::create(&isolated, 65536, b"previous checkpoint").unwrap();
+        let generation = inner.journal.root().join("generation-0000000000000000");
+        let used: u64 = std::fs::read_dir(&generation).unwrap().map(|entry| entry.unwrap().metadata().unwrap().len()).sum();
+        let wal = generation.join("wal"); let before = std::fs::metadata(&wal).unwrap().len();
+        let disk = crate::storage::build_budget::DiskScope::begin(&generation, used + 16).unwrap();
+        drop(inner);
+        let request = write("partial-frame", "a", "alpha", ExpectedVersion::Absent);
+        let error = scope.clone().run(p.write(request.clone())).await.unwrap_err();
+        assert!(matches!(error, RecordError::OutcomeUnknown(_)), "{error:?}");
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), before + 16, "header reached disk before checksum admission failed");
+        assert!(matches!(scope.run(p.write(request)).await, Err(RecordError::RecoveryRequired)));
+        drop(p); drop(disk);
+        let (_, recovered) = PartitionJournal::open(&isolated, 65536).unwrap();
+        assert_eq!(recovered, vec![b"previous checkpoint".to_vec()]);
+    }
     pub(super) fn path() -> PathBuf {
         let base = std::env::var_os("ANYSEEK_TEST_ROOT")
             .map(std::path::PathBuf::from)
@@ -2199,7 +2273,10 @@ mod tests {
         let GenerationCommand::Stage{source,members,chunks,..}=stage_generation("g",&["one","two"]) else{unreachable!()};
         p.write(generation_write("begin",ExpectedVersion::Absent,GenerationCommand::Begin{generation_id:"g".into(),source,members})).await.unwrap();
         clock.set(now+100);let batch=generation_write("batch",ExpectedVersion::Match(1),GenerationCommand::StageBatch{generation_id:"g".into(),chunks:vec![chunks[0].clone()]});let receipt=p.write(batch.clone()).await.unwrap();
-        clock.set(now+1_800_100);assert!(p.generation_status("doc").await.unwrap().unwrap().staged_generation.is_none());
+        clock.set(now+1_800_100);
+        assert!(matches!(p.generation_status("doc").await, Err(RecordError::Busy)));
+        settle_maintenance(&p).await;
+        assert!(p.generation_status("doc").await.unwrap().unwrap().staged_generation.is_none());
         assert_eq!(p.write(batch.clone()).await.unwrap(),receipt);
         let state=p.inner.lock().await.state.clone();let op=state.operations.iter().find(|o|o.request.operation_id==batch.operation_id).unwrap();assert!(op.request_digest.is_some());
         assert!(matches!(&op.request.generation,Some(GenerationCommand::StageBatch{chunks,..}) if chunks.is_empty()));lease::validate_state(&state).unwrap();
@@ -2424,21 +2501,28 @@ mod tests {
         let mut source=source_write("ttl-source","s",&[]);
         source.temporal=Some(TemporalMetadata { expire_at_ms:Some(now+100),..Default::default() });
         let receipt=p.write(source.clone()).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.write(source_write("ttl-derived","d",&[("s",1)])).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.write(source_write("ttl-indirect","e",&[("d",1)])).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         clock.set(now+99); assert_eq!(p.statistics().await.unwrap().active_records,3);
         clock.set(now+100); assert_eq!(p.statistics().await.unwrap().active_records,0);
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         for id in ["s","d","e"] { assert!(p.get(id).await.unwrap().is_none()); }
         let state=p.inner.lock().await; assert_eq!(state.state.records["s"].version,2);
         assert_eq!(state.state.records["s"].expired_at_ms,Some(now+100));
         assert_eq!(state.state.expirations.len(),1); drop(state);
         assert_eq!(p.write(source).await.unwrap(),receipt);
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         let mut revive=source_write("ttl-revive","s",&[]); revive.expected=ExpectedVersion::Match(2);
         revive.temporal=Some(TemporalMetadata {expire_at_ms:Some(now+10000),..Default::default()});
         assert!(p.write(revive).await.is_err());
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         clock.set(now); assert!(p.get("s").await.unwrap().is_none());
         p.compact_journal().await.unwrap(); drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.statistics().await.unwrap().active_records,0);
         assert_eq!(p.record_status("s").await.unwrap().unwrap().version,2);
         drop(p); std::fs::remove_dir_all(root).unwrap();
@@ -2560,18 +2644,24 @@ mod tests {
     async fn generation_stage_publish_switch_and_enrich() {
         let root = path(); let p = RecordPartition::create(&root, config()).await.unwrap();
         p.write(source_write("source", "s", &[])).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         let stage = generation_write("stage", ExpectedVersion::Absent, stage_generation("g1", &["a","b"]));
         let receipt = p.write(stage.clone()).await.unwrap(); assert!(receipt.staged_only); assert_eq!(receipt.version,1);
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.write(stage).await.unwrap(), receipt);
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert!(p.get("a").await.unwrap().is_none()); assert_eq!(p.statistics().await.unwrap().active_records,1);
         assert!(p.write(write("steal", "a", "body", ExpectedVersion::Absent)).await.is_err());
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.compact_journal().await.unwrap(); drop(p);
         let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,2);
         assert!(p.get("a").await.unwrap().is_none());
         let publish = generation_write("publish", ExpectedVersion::Match(1), GenerationCommand::Publish { generation_id:"g1".into() });
         let mut competing = publish.clone(); competing.operation_id = OperationId::new("competing".into());
         let (a,b) = tokio::join!(p.write(publish),p.write(competing)); assert_ne!(a.is_ok(), b.is_ok());
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,2);
         assert_eq!(p.statistics().await.unwrap().active_records,3);
         assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(),2);
@@ -2579,17 +2669,23 @@ mod tests {
         let mut patch = write("fill-a", "a", "", ExpectedVersion::Match(1)); patch.document = None;
         patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
         p.write(patch.clone()).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.write(source_write("downstream", "downstream", &[("a",1)])).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.write(generation_write("stage2", ExpectedVersion::Match(2), stage_generation("g2", &["c","d"]))).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         let old_output = p.output_permit().unwrap();
         p.write(generation_write("publish2", ExpectedVersion::Match(3), GenerationCommand::Publish { generation_id:"g2".into() })).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert!(old_output.deliver(|| ()).is_err());
         for id in ["a","b","downstream"] { assert!(p.get(id).await.unwrap().is_none()); assert_eq!(p.record_status(id).await.unwrap().unwrap().visibility,EvidenceVisibility::Stale); }
         assert_eq!(p.statistics().await.unwrap().active_records,3);
         assert_eq!(query(&p, SearchMode::Lexical).await.hits.iter().map(|h| h.record.record_id.as_str()).collect::<Vec<_>>(), vec!["c","d"]);
         patch.operation_id = OperationId::new("late-fill".into()); assert!(p.write(patch).await.is_err());
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         p.compact_journal().await.unwrap(); drop(p);
         let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        p.inner.lock().await.state.records.validate_counts().unwrap();
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().active_generation.as_deref(),Some("g2"));
         assert!(p.get("a").await.unwrap().is_none()); assert!(p.get("c").await.unwrap().is_some());
         drop(p); std::fs::remove_dir_all(root).unwrap();
@@ -2606,6 +2702,7 @@ mod tests {
         p.write(write("source-update", "s", "new source", ExpectedVersion::Match(1))).await.unwrap();
         assert!(p.write(generation_write("publish", ExpectedVersion::Match(1), GenerationCommand::Publish { generation_id:"g1".into() })).await.is_err());
         p.write(generation_write("abort", ExpectedVersion::Match(1), GenerationCommand::Abort { generation_id:"g1".into() })).await.unwrap();
+        settle_maintenance(&p).await;
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
         assert!(p.write(generation_write("reuse", ExpectedVersion::Match(2), stage_generation("g1", &["a","b"]))).await.is_err());
         drop(p); std::fs::remove_dir_all(root).unwrap();
@@ -2641,6 +2738,7 @@ mod tests {
         let mut delete=write("delete","s","",ExpectedVersion::Match(1)); delete.document=None; p.write(delete).await.unwrap();
         assert!(p.write(generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish { generation_id:"g1".into() })).await.is_err());
         p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort { generation_id:"g1".into() })).await.unwrap();
+        settle_maintenance(&p).await;
         assert_eq!(p.statistics().await.unwrap().active_records,0);
         drop(p); let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
@@ -2863,6 +2961,9 @@ mod tests {
         let mut other = binding.clone(); other.target_collection_id = "different".into();
         assert!(matches!(p.seal_for_takeover(other).await, Err(RecordError::Conflict(_))));
         p.compact_journal().await.unwrap();
+        assert!(p.output_permit().is_err(), "compacting a sealed cut must not reopen output");
+        assert!(p.get("ordinary").await.is_err());
+        assert_eq!(p.seal_for_takeover(binding.clone()).await.unwrap(), seal);
         p.checkpoint(&copied).await.unwrap();
         drop(old_owner); drop(p);
         let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
@@ -3744,9 +3845,15 @@ mod tests {
         let partition = RecordPartition::open(&location, config().max_journal_bytes)
             .await
             .unwrap();
+        // Old generations published the directory before appending PUBLISHED.
+        // Keep constructing that real on-disk state for recovery compatibility
+        // tests; owned compaction now publishes certificate+suffix atomically.
+        let legacy_fixture=std::env::var_os("ANYSEEK_CHECKPOINT_UNCERTIFIED_FIXTURE").is_some();
         if std::env::var_os("ANYSEEK_CHECKPOINT_EXPECT_UNKNOWN").is_some() {
+            let result=if legacy_fixture {partition.inner.lock().await.publish_anchor().await}
+                else{partition.compact_journal().await};
             assert!(matches!(
-                partition.compact_journal().await,
+                result,
                 Err(RecordError::OutcomeUnknown(_))
             ));
             assert!(matches!(
@@ -3756,7 +3863,8 @@ mod tests {
             std::process::exit(77);
         }
         if std::env::var_os("ANYSEEK_PARTITION_RECOVER").is_none() {
-            partition.compact_journal().await.unwrap();
+            if legacy_fixture {partition.inner.lock().await.publish_anchor().await.unwrap();}
+            else {partition.compact_journal().await.unwrap();}
         }
         panic!("checkpoint crash boundary not reached");
     }
@@ -3853,6 +3961,7 @@ mod tests {
             };
             let output = worker()
                 .env("ANYSEEK_JOURNAL_CRASH", "initial_published")
+                .env("ANYSEEK_CHECKPOINT_UNCERTIFIED_FIXTURE", "1")
                 .output()
                 .unwrap();
             assert_eq!(output.status.code(), Some(73));
@@ -3913,8 +4022,8 @@ mod tests {
                     .active
                     .as_mut()
                     .unwrap()
-                    .keys
-                    .push("a".into());
+                    .append_identity("a".into(), id as u64 + 1, 0,
+                        crate::active::fingerprint(original.document.as_ref().unwrap()).unwrap());
                 inner
                     .index.test_index()
                     .index_documents(vec![original.document.clone().unwrap()])
@@ -4012,6 +4121,15 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(77), "{output:?}");
+        // The new owned path's rename already includes PUBLISHED and its tail.
+        // Separately create a legacy uncertified generation so the following
+        // interrupted-retirement assertions exercise their intended disk state.
+        let output = worker()
+            .env("ANYSEEK_CHECKPOINT_EXPECT_UNKNOWN", "1")
+            .env("ANYSEEK_CHECKPOINT_UNCERTIFIED_FIXTURE", "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(77), "legacy fixture: {output:?}");
         // Interrupted recovery retirement also must not serve or erase the
         // old certified authority; a subsequent recovery is safe.
         let output = worker()
@@ -4565,6 +4683,7 @@ mod tests {
         let recovered=RecordPartition::open_s3_with_remote(
             &target_path,config().max_journal_bytes,remote,
         ).await.unwrap();
+        settle_maintenance(&recovered).await;
         assert_eq!(recovered.get("a").await.unwrap().unwrap().document.unwrap()["body"],"alpha remote first");
         recovered.write(write("second-remote","b","alpha remote second",ExpectedVersion::Absent)).await.unwrap();
         let revision=write("update-remote","a","alpha remote updated",ExpectedVersion::Match(1));
@@ -4598,6 +4717,58 @@ mod tests {
         let _=std::fs::remove_file(&authority_path);
         let _=std::fs::remove_file(authority_path.with_extension("sqlite-wal"));
         let _=std::fs::remove_file(authority_path.with_extension("sqlite-shm"));
+    }
+
+    #[cfg(feature = "s3-object-store")]
+    #[test]
+    fn remote_record_only_typed_admission_is_a_definite_refusal() {
+        use crate::storage::object_log::TailError;
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("typed-refusal".into(), crate::resources::Lane::Background, 0).unwrap();
+        let _held = scope.io().unwrap();
+        assert!(matches!(RemoteCommitError::from(TailError::Admission(scope.io().err().unwrap())), RemoteCommitError::Busy));
+        let backend = object_store::Error::Generic { store: "test-backend", source: Box::new(scope.io().err().unwrap()) };
+        assert!(matches!(RemoteCommitError::from(TailError::ObjectStore(backend)), RemoteCommitError::Unknown(_)));
+    }
+
+    #[cfg(feature = "s3-object-store")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_record_upload_admission_refuses_before_put_and_keeps_writer_usable() {
+        use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
+        use object_store::{memory::InMemory, ObjectStore};
+        use futures::TryStreamExt;
+        let root = tempfile::tempdir().unwrap(); let location = root.path().join("records");
+        let backend = Arc::new(InMemory::new());
+        let store = S3CompatibleStore::from_store(backend.clone(), 1024 * 1024);
+        let mut authority = SqliteAuthority::open(&root.path().join("authority.sqlite"), std::time::Duration::from_secs(1)).unwrap();
+        authority.create_partition("quota-record", 1).unwrap();
+        let p = RecordPartition::create(&location, config()).await.unwrap();
+        {
+            let mut inner = p.inner.lock().await;
+            let checkpoint = encode_entry(&Entry::Checkpoint { config: inner.config.clone(), state: inner.state.clone() }).unwrap();
+            store.publish_bootstrap(&mut authority, "quota-record", 1, &checkpoint, unix_time_ms_i64()).await.unwrap();
+            inner.remote = Some(RemotePersistence { _owner: None, store, authority: tokio::sync::Mutex::new(authority),
+                partition_id: "quota-record".into(), owner_epoch: 1, max_tail_blocks: 128,
+                max_tail_bytes: 1024 * 1024, max_object_bytes: 1024 * 1024 });
+        }
+        let before = backend.list(None).try_collect::<Vec<_>>().await.unwrap().len();
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("quota-record".into(), crate::resources::Lane::Background, 0).unwrap();
+        let held = scope.io().unwrap();
+        let request = write("quota-retry", "a", "alpha", ExpectedVersion::Absent);
+        assert!(matches!(scope.clone().run(p.write(request.clone())).await, Err(RecordError::Busy)));
+        assert_eq!(backend.list(None).try_collect::<Vec<_>>().await.unwrap().len(), before);
+        {
+            let inner = p.inner.lock().await;
+            assert!(inner.healthy); assert!(!inner.output.read().unwrap().fenced); assert_eq!(inner.state.seq, 0);
+            let remote = inner.remote.as_ref().unwrap();
+            assert_eq!(remote.authority.lock().await.read_head("quota-record").unwrap().unwrap().committed_seq, 0);
+        }
+        drop(held);
+        let receipt = scope.clone().run(p.write(request.clone())).await.unwrap();
+        assert_eq!(receipt.seq, 1);
+        assert_eq!(scope.run(p.write(request)).await.unwrap(), receipt);
+        assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 1);
     }
 
     #[cfg(feature = "s3-object-store")]
@@ -4672,6 +4843,7 @@ mod tests {
             assert_eq!(inner.state.seq, 1);
             inner.remote = Some(remote);
         }
+        settle_maintenance(&recovered).await;
         let record = recovered.get("remote-record").await.unwrap().unwrap();
         assert_eq!(record.version, 1);
         assert_eq!(record.document.unwrap()["body"], "alpha remote durable");
@@ -4689,11 +4861,14 @@ mod tests {
             let mut inner = recovered.inner.lock().await;
             let future = inner.state.time_watermark_ms
                 .saturating_add(9 * 86_400_000);
-            inner.trim_feed(future).await.unwrap();
-            // Feed trimming publishes a complete remote checkpoint at this same
-            // sequence; it must survive removal of the rebuildable local cache.
-            assert!(inner.state.feed.floor > 0);
+            inner.clock = Arc::new(TestClock(std::sync::atomic::AtomicU64::new(future)));
+            assert!(matches!(inner.trim_feed(future).await, Err(RecordError::Busy)));
         }
+        recovered.kick_maintenance().await;
+        settle_maintenance(&recovered).await;
+        // Feed trimming publishes a complete remote checkpoint at this same
+        // sequence; it must survive removal of the rebuildable local cache.
+        assert!(recovered.inner.lock().await.state.feed.floor > 0);
         let (bundle_json, visible_seq, partition_id) =
             recovered.create_s3_backup("record-backup", 200, 1024 * 1024).await.unwrap();
         assert_eq!(visible_seq, 2);

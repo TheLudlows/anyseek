@@ -21,12 +21,15 @@ use crate::resources::{self, Buffer, Lane, Lease, Scope};
 /// Error from the object-first persistence stage.
 #[derive(Debug)]
 pub(crate) enum UploadRegisterError {
+    /// Admission failed before inventory mutation or any object-store request.
+    Admission(crate::resources::Busy),
     ObjectStore(object_store::Error),
     Metadata(rusqlite::Error),
 }
 impl fmt::Display for UploadRegisterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Admission(error) => write!(f, "upload admission denied: {error}"),
             Self::ObjectStore(error) => write!(f, "object-store operation failed: {error}"),
             Self::Metadata(error) => write!(f, "SQLite object registration failed: {error}"),
         }
@@ -145,22 +148,26 @@ impl S3CompatibleStore {
         key: &str,
         bytes: &[u8],
     ) -> object_store::Result<ObjectRef> {
-        let budget = self.upload_budget(key, bytes.len())?;
+        let budget = self.upload_budget(key, bytes.len()).map_err(|error| match error {
+            UploadRegisterError::Admission(error) => resource_error(error),
+            UploadRegisterError::ObjectStore(error) => error,
+            UploadRegisterError::Metadata(error) => object_store::Error::Generic { store: "s3-compatible", source: Box::new(error) },
+        })?;
         self.put_budgeted(key, bytes, budget).await
     }
 
-    fn upload_budget(&self, key: &str, length: usize) -> object_store::Result<UploadBudget> {
-        Self::object_path(key)?;
+    fn upload_budget(&self, key: &str, length: usize) -> Result<UploadBudget, UploadRegisterError> {
+        Self::object_path(key).map_err(UploadRegisterError::ObjectStore)?;
         if length > self.max_object_bytes {
-            return Err(object_store::Error::Generic {
+            return Err(UploadRegisterError::ObjectStore(object_store::Error::Generic {
                 store: "s3-compatible",
                 source: format!("object size {length} exceeds configured limit {}", self.max_object_bytes).into(),
-            });
+            }));
         }
         let scope = self.scope(Lane::Foreground);
-        let _io = scope.io().map_err(resource_error)?;
-        let _payload = scope.bytes(length as u64).map_err(resource_error)?;
-        let readback = scope.bytes((length as u64).checked_mul(2).ok_or_else(||object_error("object byte budget overflow"))?).map_err(resource_error)?;
+        let _io = scope.io().map_err(UploadRegisterError::Admission)?;
+        let _payload = scope.bytes(length as u64).map_err(UploadRegisterError::Admission)?;
+        let readback = scope.bytes((length as u64).checked_mul(2).ok_or_else(||UploadRegisterError::ObjectStore(object_error("object byte budget overflow")))?).map_err(UploadRegisterError::Admission)?;
         Ok(UploadBudget { _io, _payload, readback })
     }
 
@@ -216,7 +223,7 @@ impl S3CompatibleStore {
         bytes: &[u8],
         created_at_ms: i64,
     ) -> Result<ObjectRef, UploadRegisterError> {
-        let budget = self.upload_budget(key, bytes.len()).map_err(UploadRegisterError::ObjectStore)?;
+        let budget = self.upload_budget(key, bytes.len())?;
         self.register_budgeted(authority, key, bytes, created_at_ms, budget).await
     }
     async fn register_budgeted(&self, authority: &mut SqliteAuthority, key: &str, bytes: &[u8], created_at_ms: i64, budget: UploadBudget) -> Result<ObjectRef, UploadRegisterError> {
@@ -245,7 +252,7 @@ impl S3CompatibleStore {
 
     async fn put_backup_object(&self,authority:&mut SqliteAuthority,backup_id:&str,key:&str,bytes:&[u8],at:i64)
         ->Result<ObjectRef,UploadRegisterError> {
-        let budget = self.upload_budget(key, bytes.len()).map_err(UploadRegisterError::ObjectStore)?;
+        let budget = self.upload_budget(key, bytes.len())?;
         let planned=ObjectRef{key:key.to_owned(),sha256:Sha256::digest(bytes).into(),length:bytes.len() as u64};
         authority.reserve_backup_upload(&planned,at,Some(backup_id)).map_err(UploadRegisterError::Metadata)?;
         #[cfg(feature="fault-injection")]
@@ -503,6 +510,7 @@ impl S3CompatibleStore {
         for reference in refs {
             let _ = self.delete_retired(authority, &reference.key, now_ms).await
                 .map_err(|error| match error {
+                    UploadRegisterError::Admission(e) => BackupError::ObjectStore(resource_error(e)),
                     UploadRegisterError::ObjectStore(e) => BackupError::ObjectStore(e),
                     UploadRegisterError::Metadata(e) => BackupError::Metadata(e),
                 })?;
@@ -525,7 +533,7 @@ impl S3CompatibleStore {
         };
         let location = Self::object_path(&reference.key)
             .map_err(UploadRegisterError::ObjectStore)?;
-        let _io = self.scope(Lane::Background).io().map_err(resource_error).map_err(UploadRegisterError::ObjectStore)?;
+        let _io = self.scope(Lane::Background).io().map_err(UploadRegisterError::Admission)?;
         match self.store.delete(&location).await {
             Ok(())|Err(object_store::Error::NotFound{..})=>{},
             Err(error)=>return Err(UploadRegisterError::ObjectStore(error)),
@@ -885,6 +893,7 @@ mod tests {
 }
 
 fn backup_upload_error(error:UploadRegisterError)->BackupError {match error {
+    UploadRegisterError::Admission(e)=>BackupError::ObjectStore(resource_error(e)),
     UploadRegisterError::Metadata(e)=>BackupError::Metadata(e),UploadRegisterError::ObjectStore(e)=>BackupError::ObjectStore(e),
 }}
 
@@ -929,3 +938,7 @@ mod upload_retirement_tests {
         assert!(store.get_verified(&reference).await.is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "s3_admission_tests.rs"]
+mod admission_tests;

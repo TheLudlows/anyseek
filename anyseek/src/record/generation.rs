@@ -121,14 +121,14 @@ fn rejected(s: &str) -> RecordError { RecordError::Rejected(s.into()) }
 fn conflict(s: &str) -> RecordError { RecordError::Conflict(s.into()) }
 fn bounded(s: &str) -> bool { !s.is_empty() && s.len() <= 256 }
 pub(super) fn reserved(state: &State) -> usize {
-    state.generations.values().filter_map(|g| g.staged.as_ref()).map(|g| g.members.len()).sum()
+    state.generations.counts().members
 }
 pub(super) fn reserve_slots(state: &State) -> usize {
-    state.records.values().filter(|r| r.system.is_some() && r.document.is_some()).count()
-        + reserved(state) + state.generations.values().filter_map(|g|g.staged.as_ref()).map(|s|if s.sealed{1}else{2}).sum::<usize>()
+    state.records.live_typed_count()
+        + reserved(state) + state.generations.counts().controls
 }
 pub(super) fn staged_ttl_count(state:&State)->usize {
-    state.generations.values().filter_map(|g|g.staged.as_ref()).flat_map(|g|g.chunks.iter()).filter(|c|c.temporal.as_ref().is_some_and(|t|t.expire_at_ms.is_some())).count()
+    state.generations.counts().ttl
 }
 pub(super) fn reserve_bytes(state: &State) -> usize {
     // Staging also reserves the move-to-Record envelope and publish operation;
@@ -270,6 +270,7 @@ pub(super) fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordEr
     Ok(())
 }
 pub(super) fn validate_state(state: &State, config: &RecordConfig) -> Result<(), RecordError> {
+    state.generations.validate_counts()?;
     if state.records.len() + state.generations.len() + reserved(state) > config.max_records
         || state.generations.values().map(|g| g.used.len()).sum::<usize>() > config.max_records {
         return Err(rejected("generation retained identity budget exceeded"));

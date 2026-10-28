@@ -425,7 +425,7 @@ pub(super) struct Snapshot {
     pub fields: Vec<Field>,
     names: Vec<String>,
     pub cut: Cut,
-    identities: Arc<Vec<Identity>>,
+    pub(super) identities: Arc<Vec<Identity>>,
     addresses: Vec<Vec<usize>>,
     lengths: Vec<Vec<Vec<u64>>>,
     // Declared after native handles so the charge outlives their destruction.

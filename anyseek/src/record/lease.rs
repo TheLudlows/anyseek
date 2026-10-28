@@ -1,6 +1,7 @@
-//! Bounded private staging lifetime; not general version or receipt GC.
+//! Bounded private staging lifetime and the evidence retained by receipt GC.
 use super::*;
 use sha2::{Digest,Sha256};
+use std::collections::BTreeSet;
 const LEASE_MS:u64=30*60*1000;
 pub(super) fn deadline(now:u64)->Result<u64,RecordError>{now.checked_add(LEASE_MS).filter(|t|*t<=253_402_300_799_999).ok_or_else(||RecordError::Rejected("staging lease time overflow".into()))}
 pub(super) fn digest<T:Serialize>(request:&T)->Result<String,RecordError>{
@@ -39,6 +40,53 @@ pub(super) fn apply(state:&mut State,event:&Expiration)->Result<(),RecordError>{
         redact(state,&target.record_id,&target.generation_id)?;
     }
     state.seq=event.seq;state.time_watermark_ms=event.evaluation_time_ms;state.lease_expirations.push(event.clone());Ok(())
+}
+/// Business evidence that cannot be retired with an expired retry receipt.
+/// The caller freezes this set with its authenticated maintenance source cut;
+/// it must not recompute it against a later catch-up suffix.
+pub(super) fn protected_operation_sequences(state:&State)->BTreeSet<u64> {
+    let expiry_versions:BTreeSet<_>=state.lease_expirations.iter()
+        .flat_map(|event|event.targets.iter().map(|target|(target.record_id.as_str(),target.previous_version)))
+        .collect();
+    let mut redacted=BTreeSet::new();
+    for op in &state.operations {
+        if op.request_digest.is_some() {
+            if let Some(GenerationCommand::Stage {generation_id,..}|GenerationCommand::StageBatch {generation_id,..})=&op.request.generation {
+                redacted.insert((op.request.record_id.as_str(),generation_id.as_str()));
+            }
+        }
+    }
+    let mut protected=BTreeSet::new();
+    let mut latest_renew=BTreeMap::new();
+    for op in &state.operations {
+        let Some(command)=&op.request.generation else {continue;};
+        let generation_id=match command {
+            GenerationCommand::Stage {generation_id,..}|GenerationCommand::Begin {generation_id,..}
+            |GenerationCommand::StageBatch {generation_id,..}|GenerationCommand::Seal {generation_id,..}
+            |GenerationCommand::Renew {generation_id}|GenerationCommand::Publish {generation_id}
+            |GenerationCommand::Abort {generation_id}=>generation_id,
+        };
+        if expiry_versions.contains(&(op.request.record_id.as_str(),op.receipt.version)) {
+            protected.insert(op.receipt.seq);
+        }
+        if state.generations.get(&op.request.record_id).and_then(|g|g.staged.as_ref())
+            .is_some_and(|stage|stage.id==*generation_id) {
+            if matches!(command,GenerationCommand::Renew {..}) {
+                // Rebuilding the private upload needs only the last renewal's
+                // deadline. Origins, batches and seals remain exact decisions.
+                latest_renew.entry(op.request.record_id.as_str())
+                    .and_modify(|seq:&mut u64|*seq=(*seq).max(op.receipt.seq)).or_insert(op.receipt.seq);
+            } else {
+                protected.insert(op.receipt.seq);
+            }
+        }
+        if matches!(command,GenerationCommand::Abort {..})
+            && redacted.contains(&(op.request.record_id.as_str(),generation_id.as_str())) {
+            protected.insert(op.receipt.seq);
+        }
+    }
+    protected.extend(latest_renew.into_values());
+    protected
 }
 pub(super) fn validate_state(state:&State)->Result<(),RecordError>{
     let mut retired=std::collections::BTreeSet::new();
@@ -81,7 +129,7 @@ impl Inner {
             remote.commit_entry(event.seq, format!("system:lease-expired:{}", event.seq), &bytes)
                 .await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?;
         }
-        self.append_operation(&bytes,event.seq)?;
+        self.append_operation(&bytes,event.seq).await?;
         #[cfg(feature="fault-injection")]
         match std::env::var("ANYSEEK_LEASE_FAULT").ok().as_deref(){Some("after_append_unknown")=>return Err(RecordError::OutcomeUnknown("injected lease append".into())),Some("after_durable")=>return Err(RecordError::DurablePending(event.seq)),Some("crash_after_durable")=>std::process::exit(86),_=>{}}
         #[cfg(test)] if self.fail_after_durable{return Err(RecordError::DurablePending(event.seq));}
@@ -94,5 +142,103 @@ impl Inner {
         // Keep the erasure obligation until a fully authenticated replacement
         // is installed. The owned worker rewrites payloads outside the live lock.
         Err(self.request_checkpoint("private_cleanup"))
+    }
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::*;
+    use crate::record::tests::{config,source_write,generation_write,stage_generation};
+
+    async fn staged() -> (tempfile::TempDir,RecordPartition) {
+        let root=tempfile::tempdir().unwrap();
+        let p=RecordPartition::create(&root.path().join("live"),config()).await.unwrap();
+        p.write(source_write("source","s",&[])).await.unwrap();
+        p.write(generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"]))).await.unwrap();
+        (root,p)
+    }
+    async fn reopen(root:&Path,state:State) -> RecordPartition {
+        let settings=config();
+        validate_restored_state(&settings,&state).unwrap();
+        let bytes=encode_entry(&Entry::Checkpoint {config:settings.clone(),state}).unwrap();
+        drop(PartitionJournal::create(root,settings.max_journal_bytes,&bytes).unwrap());
+        RecordPartition::open(root,settings.max_journal_bytes).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn generation_gc_retires_redundant_renewals_preserves_live_upload_and_epoch_fence() {
+        let (root,p)=staged().await;
+        for version in 1..=3 {
+            p.write(generation_write(&format!("renew-{version}"),ExpectedVersion::Match(version),
+                GenerationCommand::Renew {generation_id:"g".into()})).await.unwrap();
+        }
+        let mut state=p.inner.lock().await.state.try_clone().unwrap();
+        let epoch=current_epoch()+2;
+        state.feed.floor=state.seq;
+        maintenance::collect_operations(&mut state,epoch).unwrap();
+        assert_eq!(state.operations.len(),2,"only upload origin and latest renewal are evidence");
+        assert_eq!(state.operations[0].request.operation_id.nonce,"stage");
+        assert_eq!(state.operations[1].request.operation_id.nonce,"renew-3");
+        upload::validate_history(&state,"doc",&state.generations["doc"]).unwrap();
+        let recovered=reopen(&root.path().join("recovered"),state).await;
+        let old=generation_write("renew-1",ExpectedVersion::Match(1),GenerationCommand::Renew {generation_id:"g".into()});
+        assert!(matches!(recovered.write(old).await,Err(RecordError::OperationExpired)));
+        let mut next=generation_write("next",ExpectedVersion::Match(4),GenerationCommand::Renew {generation_id:"g".into()});
+        next.operation_id.epoch=epoch;
+        let receipt=recovered.write(next.clone()).await.unwrap();
+        assert_eq!(receipt.version,5);
+        assert_eq!(recovered.write(next).await.unwrap(),receipt);
+    }
+
+    #[tokio::test]
+    async fn generation_gc_reclaims_closed_controls_but_preserves_exact_spent_identity() {
+        let (root,p)=staged().await;
+        p.write(generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish {generation_id:"g".into()})).await.unwrap();
+        let mut state=p.inner.lock().await.state.try_clone().unwrap();
+        state.feed.floor=state.seq;
+        let epoch=current_epoch()+2;
+        maintenance::collect_operations(&mut state,epoch).unwrap();
+        assert!(state.operations.is_empty());
+        assert!(state.generations["doc"].was_used("g"));
+        let recovered=reopen(&root.path().join("recovered"),state).await;
+        assert!(recovered.get("chunk").await.unwrap().is_some());
+        let mut reused=generation_write("reuse",ExpectedVersion::Match(2),stage_generation("g",&["fresh"]));
+        reused.operation_id.epoch=epoch;
+        assert!(matches!(recovered.write(reused).await,Err(RecordError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn generation_gc_preserves_expiry_and_redaction_provenance_until_unneeded() {
+        for expires in [false,true] {
+            let (root,p)=staged().await;
+            if expires {
+                let mut inner=p.inner.lock().await;
+                let at=inner.state.time_watermark_ms+LEASE_MS+1;
+                inner.expire_staging(at).await.unwrap();
+            } else {
+                p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort {generation_id:"g".into()})).await.unwrap();
+            }
+            let mut state=p.inner.lock().await.state.try_clone().unwrap();
+            state.feed.floor=state.seq;
+            maintenance::collect_operations(&mut state,current_epoch()+2).unwrap();
+            assert_eq!(state.operations.len(),1);
+            if expires {
+                assert!(matches!(state.operations[0].request.generation,Some(GenerationCommand::Stage {..})));
+                assert!(state.operations[0].request_digest.is_some());
+                assert_eq!(state.lease_expirations.len(),1);
+                let mut corrupted=state.try_clone().unwrap();
+                corrupted.operations.retain(|_|false);
+                assert!(validate_state(&corrupted).is_err(),"expiry cannot lose its prior-version proof");
+            } else {
+                assert!(matches!(state.operations[0].request.generation,Some(GenerationCommand::Abort {..})));
+                maintenance::collect_operations(&mut state,current_epoch()+2).unwrap();
+                assert!(state.operations.is_empty(),"terminal proof can retire after all redacted receipts retire");
+            }
+            let recovered=reopen(&root.path().join("recovered"),state).await;
+            let inner=recovered.inner.lock().await;
+            assert!(inner.state.generations["doc"].staged.is_none());
+            assert!(inner.state.generations["doc"].was_used("g"));
+            validate_state(&inner.state).unwrap();
+        }
     }
 }

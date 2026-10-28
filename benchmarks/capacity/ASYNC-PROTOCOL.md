@@ -1,0 +1,143 @@
+# Final-build asynchronous comparison
+
+Run `async_compare.py` only after the final production implementation is fixed and
+its checks pass. Record the actual release binary hash and source revision. Do not
+run a previous anyseek revision. Raw data, databases, logs and downloaded binaries
+belong in a newly created directory outside the repository; preserve existing runs.
+
+The bounded experiment uses the same first 2,305 records of the verified
+`prepare.py` 10,001-document MIRACL sample and all 393 frozen query strings for both
+services. It is a relevance-enriched small corpus, not a full-corpus quality or
+capacity result. Both services run sequentially on CPUs 0–1, the client on CPUs
+2–3, under the same existing cgroup memory/CPU limits. No compilation or other
+benchmark may overlap measurement. Keep at least 4 GiB of free disk space.
+There are 145 batches (144 of 16, one of 1). This exceeds sixteen 128-update
+mutable-tail boundaries and is intended to exercise automatic derived-cache
+merge. Tail/checkpoint policy can change, so document count alone is not evidence:
+require observed intake compaction and cache-merge capture/build/install/cleanup
+phase events before claiming maintenance coverage. Missing events are a validation
+gap, not a zero-cost maintenance result. This remains a small finite workload.
+
+Submit identical documents in batches of 16. For anyseek, measure HTTP 202
+acceptance, business completion and index-watermark completion separately.
+Business timing is the first poll observing `completed_seq >= batch_durable_cut`
+and `pending == 0`. The cut comes from that batch's returned acceptance receipts.
+The completion prefix includes rejected operations, so the timing becomes evidence
+of successful business completion only after every operation's successful receipt
+has been verified. Index timing is recorded separately when both lexical/vector
+watermarks reach the materialized sequence after the business prefix completes.
+Both elapsed intervals start at the original batch submission and include Busy
+waits. They are polling observations, not exact internal transition timestamps. Check every operation has a successful business receipt, then query
+representative titles and verify visible document count. For Meilisearch, likewise
+measure HTTP 202 acceptance separately from successful task completion and check
+visible count and representative searches. A 202 response is never counted as
+business completion or search visibility. Polling granularity differs (5 ms for
+anyseek and 10 ms for Meilisearch) and is included in completion latency.
+Meilisearch's successful task supplies the same observed value for business and
+index completion because this harness has no separate corresponding watermarks.
+This is an API-model difference, not evidence that anyseek's stages are equivalent.
+Watermark/task observations do not replace final representative search validation.
+The summary exposes `batch_business_completion_observed` and
+`batch_index_watermarks_observed`; `batch_published_completion` retains the latter
+value for compatibility, not an independently measured instant of searchability.
+
+Report batch acceptance/completion p50, p95 and p99, total load wall time, summed
+batch completion time, observed peak RSS, query latency and empty-result count,
+checkpoint duration where available, reopened count, and database disk size.
+`reopen_health_ms` (also retained as `reopen_ms`) stops at the health endpoint.
+`reopen_verified_count_ms` separately measures startup plus the first count query
+and its expected-count verification, including any lazy partition recovery.
+After count verification, replay one previously successful representative query
+and assert that it still returns its original document ID. Report only its boolean
+verification result and `reopen_verified_search_ms` (startup through count and
+representative-search verification) in the summary; query text and hit IDs remain
+in private raw events. This checks one lexical query after restart, not full query
+correctness or vector recovery. Health/count alone are not search verification.
+Sequential-batch document rates are not saturated throughput. Per-operation
+receipt validation is excluded from individual completion intervals but included
+in total load wall time. Peak RSS uses 100 ms sampling and can miss short peaks.
+
+Query fields are title/text, explicit JiebaMixedV1 and AND for anyseek, and
+Meilisearch all with typo tolerance/prefix disabled. Token boundaries and scoring
+remain different. Query latency is not a quality ranking, especially when many
+queries return empty results. The script retains all raw result IDs locally.
+Meilisearch has no equivalent per-index checkpoint in this harness; its successful
+task and process-reopen checks are reported separately.
+
+The approved local download is Meilisearch Community v1.56.0 from the project's
+[official release](https://github.com/meilisearch/meilisearch/releases/tag/v1.56.0),
+asset `meilisearch-linux-amd64`, 357,300,520 bytes, SHA256
+`5a32e1d7a6a69e0ee5634a7456c421f59273d73f078b6f0d8f01384eafe79729`.
+The experiment allocates at most 2 GiB for downloaded binary, sample, logs and
+new databases, independent of preserved compilation/test binaries. The first
+2,305 sample records encode to 1,277,744 JSON bytes before request envelopes,
+with a largest record of 2,986 bytes. The 341 MiB Meili binary and 4.3 MiB frozen
+sample leave more than 1.5 GiB for the new run within the 2 GiB planning budget.
+The harness checks allocated run-directory size between batches and stops above
+1.5 GiB, preserving data; this is a guard, not a hard quota against an individual
+batch's temporary peak. Previously retained test executables and logs are outside
+this incremental performance budget and must not be deleted.
+
+Additional debug maintenance instrumentation must be run separately on the same final source.
+`ANYSEEK_TEST_PHASE_TIMINGS` records named intervals; only explicitly locked
+intervals may be described as lock measurements, and nested intervals must not be
+summed. A checkpoint HTTP duration is not a Record mutex hold time. Simulated S3,
+real cloud S3 and physical power-loss evidence remain distinct.
+
+```bash
+python3 benchmarks/capacity/async_compare.py \
+  --anyseek /path/to/final/anyseek_server \
+  --meili /path/to/meilisearch-v1.56.0 \
+  --data /path/to/data/corpus-10001.json \
+  --out /path/outside/repository/new-run \
+  --revision FINAL_REVISION \
+  --expected-anyseek-sha256 FINAL_BUILD_SHA256 \
+  --take 2305
+```
+
+Only explicit HTTP 429 `code=busy` is retried, with the identical request and
+operation IDs, a 50 ms backoff and 180 s deadline. Every attempt is retained.
+Transport failures, unknown outcomes and other rejection codes stop the run.
+Acceptance wall latency and batch completion latency include Busy attempts and
+backoff; successful HTTP-only latency is reported separately. Checkpoint wall
+time likewise includes all Busy waits, with attempts/rejections counted. Automatic
+background merge remains enabled throughout measurement.
+
+The harness verifies the final-build owner's expected anyseek binary SHA256 before
+starting a service and rejects raw-output paths inside the repository. Successful
+completion alone does not prove maintenance coverage: inspect
+`required_maintenance_observed`, `missing_required_maintenance_phases`, and each
+`maintenance_coverage` entry in the anyseek summary. The default local workload
+requires these observed info-log intervals:
+
+- Spool lock: `intake_snapshot_locked` and `intake_selection_locked`.
+- Outside the Spool lock: `intake_local_prepare_unlocked` and
+  `intake_local_release_unlocked`.
+- Record lock: `cache_merge_capture_locked`, `cache_merge_install_locked` and
+  `cache_merge_cleanup_locked`.
+- Outside the Record lock: `cache_merge_build_unlocked`.
+
+`maintenance_phases_by_lock_scope` separates locked, unlocked and unclassified
+phase statistics; the latter makes no lock-scope claim. Missing required coverage
+is `null`, is listed explicitly, and has no latency statistics: it is never a
+zero-duration sample. All intervals can overlap, and an exit log also occurs on
+errors/cancellation; observing a phase does not itself prove a successful merge.
+The prepare interval wraps candidate file preparation, not the earlier complete
+snapshot serialization, so it must not be presented as all lock-free GC work.
+
+The prior `intake_compaction_locked` belongs to a test-only reclaim helper and
+is not required for the production local GC path. Explicit journal Compact may
+emit `compact_tail_handoff_locked` and `compact_native_membership_capture_locked`;
+these are reported in `optional_explicit_compact_coverage` with `null` for absent
+events. This harness's HTTP PATCH invokes `JobMode::Index`, so those conditional
+Compact phases are not default coverage requirements. They require a separate
+explicit-Compact experiment before any corresponding hold-time claim.
+Debug test phase timings are supplementary regression evidence and are not
+release benchmark measurements.
+
+The harness explicitly sets `RUST_LOG=error,anyseek::record::maintenance=info`
+for the services: the execution environment's inherited error-only filter would
+otherwise suppress maintenance evidence. This is logging configuration only.
+Failed runs retain partial acceptance/completion latency, accepted-record counts,
+verified receipt/batch counts and the last observed intake progress; partial
+measurements must not be presented as a completed paired comparison.

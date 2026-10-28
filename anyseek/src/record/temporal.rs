@@ -137,7 +137,7 @@ pub(super) fn live_ttl(record: &Record) -> bool {
     record.document.is_some() && record.temporal.expire_at_ms.is_some()
 }
 pub(super) fn reserve_bytes(state: &State) -> usize {
-    (state.records.values().filter(|r| live_ttl(r)).count() + generation::staged_ttl_count(state))
+    (state.records.live_ttl_count() + generation::staged_ttl_count(state))
         * 8192
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -213,16 +213,11 @@ impl Inner {
         self.expire_staging(evaluation).await?;
         self.cleanup_private().await?;
         self.trim_feed(evaluation).await?;
-        let targets: Vec<_> = self
-            .state
-            .records
-            .values()
-            .filter(|r| live_ttl(r) && r.temporal.expire_at_ms.unwrap() <= evaluation)
-            .map(|r| ExpiredTarget {
-                record_id: r.record_id.clone(),
-                previous_version: r.version,
-            })
-            .collect();
+        let mut targets = Vec::new();
+        self.state.records.visit_due_ttl(evaluation, |r| targets.push(ExpiredTarget {
+            record_id: r.record_id.clone(),
+            previous_version: r.version,
+        }));
         if targets.is_empty() {
             self.evaluation_time_ms = evaluation;
             return Ok(());
@@ -259,7 +254,7 @@ impl Inner {
             remote.commit_entry(event.seq, format!("system:expired:{}", event.seq), &bytes)
                 .await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?;
         }
-        self.append_operation(&bytes,event.seq)?;
+        self.append_operation(&bytes,event.seq).await?;
         #[cfg(feature = "fault-injection")]
         match std::env::var("ANYSEEK_TEMPORAL_FAULT").ok().as_deref() {
             Some("after_append_unknown") => {
@@ -409,9 +404,21 @@ pub(super) fn filters(filter: TemporalFilter) -> Result<Vec<FacetFilter>, Record
     Ok(filters)
 }
 
+/// Authenticated checkpoint summary of a fully validated committed-time prefix.
+/// Business expiry/lease evidence remains separately retained and checked.
+#[derive(Clone,Debug,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RetiredPrefix {pub seq:u64,pub time_ms:u64}
+
 pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
-    // V7 retains every applied command and expiration cause. A checkpoint must
-    // account for each sequence exactly once, including the internal TTL writes.
+    if state.operations.iter().zip(state.operations.iter().skip(1))
+        .any(|(a,b)|a.receipt.seq>=b.receipt.seq)
+        || state.lease_expirations.windows(2).any(|pair|pair[0].seq>=pair[1].seq) {
+        return Err(storage("unordered retained committed history"));
+    }
+    // Legacy images retain every command/cause. A GC checkpoint may summarize a
+    // verified prefix; its remaining suffix still accounts for every sequence
+    // exactly once, including internal TTL writes.
     let mut commits = BTreeMap::new();
     for (seq, time) in state
         .operations
@@ -429,12 +436,22 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
             return Err(storage("duplicate committed time sequence"));
         }
     }
-    if commits.len() as u64 != state.seq {
+    let (floor,mut previous_time)=if let Some(prefix)=&state.retired_operation_prefix {
+        if prefix.seq==0 || prefix.seq>state.feed.floor || prefix.seq>state.seq
+            || prefix.time_ms>state.time_watermark_ms {return Err(storage("invalid retired operation time prefix"));}
+        let mut retained_time=0;
+        for (_,time) in commits.range(..=prefix.seq) {
+            if *time<retained_time || *time>prefix.time_ms {return Err(storage("invalid retained prefix time ordering"));}
+            retained_time=*time;
+        }
+        (prefix.seq,prefix.time_ms)
+    } else {(0,0)};
+    let suffix=commits.range((std::ops::Bound::Excluded(floor),std::ops::Bound::Unbounded));
+    if suffix.clone().count() as u64 != state.seq-floor {
         return Err(storage("incomplete committed time sequence"));
     }
-    let mut previous_time = 0;
-    for (position, (seq, time)) in commits.into_iter().enumerate() {
-        if seq != position as u64 + 1 || time < previous_time || time > state.time_watermark_ms {
+    for (position, (&seq, &time)) in suffix.enumerate() {
+        if seq != floor + position as u64 + 1 || time < previous_time || time > state.time_watermark_ms {
             return Err(storage("invalid committed time ordering"));
         }
         previous_time = time;

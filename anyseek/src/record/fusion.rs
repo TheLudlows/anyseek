@@ -125,7 +125,7 @@ impl RecordPartition {
         if let Some(t) = query.temporal.clone() {
             filters.extend(temporal::filters(t)?);
         }
-        let selection = if filters.is_empty() {
+        let mut selection = if filters.is_empty() {
             None
         } else {
             let handle = {
@@ -148,10 +148,11 @@ impl RecordPartition {
                 return Err(RecordError::RecoveryRequired);
             }
             let components = inner.index.components().await;
+            if let Some(selection) = &mut selection {
+                selection.revalidate(&inner.locations, &components).await?;
+            }
             graph::neighbors_view(&inner, options.neighbors, |id| {
-                selection
-                    .as_ref()
-                    .is_none_or(|selection| selection.allows(id, &inner.locations, &components))
+                selection.as_ref().is_none_or(|selection| selection.allows(id))
             })?
         };
         let mut scores = BTreeMap::<String, f32>::new();

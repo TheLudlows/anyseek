@@ -23,6 +23,7 @@ pub(super) struct Pin {
     paths: Vec<PathBuf>,
 }
 impl Pin {
+    pub(super) fn paths(&self) -> &[PathBuf] { &self.paths }
     pub(super) fn acquire(paths: &[PathBuf]) -> Result<Arc<Self>, RecordError> {
         let paths = paths
             .iter()

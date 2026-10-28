@@ -18,7 +18,7 @@ use tantivy::directory::{
 };
 
 // Native merge, indexing and reload may overlap. Serialize their short filesystem
-// operations before service admission so they cannot reject one another mid-commit.
+// operations after service admission. Never hold this gate while waiting for capacity.
 // This gate does not retain an I/O lease between operations.
 static NATIVE_IO: Mutex<()> = Mutex::new(());
 
@@ -31,6 +31,7 @@ struct WriterReservation {
     _buffer: Option<resources::Lease>,
 }
 struct Budget {
+    cancelled: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_writes: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -80,18 +81,20 @@ impl Budget {
         Ok(())
     }
     fn io(&self) -> io::Result<(Option<resources::Lease>, std::sync::MutexGuard<'static, ()>)> {
-        let gate = NATIVE_IO.lock().map_err(|_| io::Error::other("native I/O gate poisoned"))?;
         let lease = self.scope
             .as_ref()
-            .map(|s| s.io())
+            .map(|s| s.native_io_wait(&self.cancelled))
             .transpose()
             .map_err(io::Error::other)?;
+        let gate = NATIVE_IO.lock().map_err(|_| io::Error::other("native I/O gate poisoned"))?;
         Ok((lease, gate))
     }
 }
 
 #[derive(Clone)]
 pub(super) struct BudgetDirectory {
+    #[cfg(test)]
+    path: PathBuf,
     inner: MmapDirectory,
     selected: bool,
     budget: Arc<Budget>,
@@ -102,6 +105,13 @@ impl fmt::Debug for BudgetDirectory {
     }
 }
 impl BudgetDirectory {
+    pub(super) fn cancel_io_waiters(&self) {
+        if let Some(scope) = &self.budget.scope { scope.cancel_native_io(&self.budget.cancelled); }
+        else { self.budget.cancelled.store(true, std::sync::atomic::Ordering::Release); }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_path(&self) -> PathBuf { self.path.clone() }
     #[cfg(test)]
     pub(super) fn reject_writes_for_test(&self) {
         self.budget.fail_writes.store(true, std::sync::atomic::Ordering::Release);
@@ -183,8 +193,8 @@ impl BudgetDirectory {
     /// Keep reader metadata admission and I/O ownership with Directory clones.
     pub(super) fn open_selected(path: &Path, limit: u64) -> Result<Self, RecordError> {
         let scope = resources::Scope::current().map(|scope| scope.retained_io());
+        let io = scope.as_ref().map(|s|s.native_io_wait(&std::sync::atomic::AtomicBool::new(false))).transpose().map_err(storage)?;
         let gate=NATIVE_IO.lock().map_err(|_|storage("native I/O gate poisoned"))?;
-        let io = scope.as_ref().map(|s|s.io()).transpose().map_err(storage)?;
         let mut total=0u64;let mut metadata=65536u64;let mut count=0usize;
         for entry in std::fs::read_dir(path).map_err(storage)? {
             let entry=entry.map_err(storage)?;let kind=entry.file_type().map_err(storage)?;
@@ -200,7 +210,8 @@ impl BudgetDirectory {
         let buffer=scope.as_ref().map(|s|s.bytes(metadata)).transpose().map_err(storage)?;
         let inner=MmapDirectory::open(path).map_err(storage)?;
         drop(io);drop(gate);
-        Ok(Self {inner,selected:true,budget:Arc::new(Budget {
+        Ok(Self {#[cfg(test)] path:path.to_owned(),inner,selected:true,budget:Arc::new(Budget {
+            cancelled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
             pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),ledger:Mutex::new(Ledger {written:0,paths:BTreeSet::new()}),bytes:0,files:1,scope,
@@ -224,9 +235,11 @@ impl BudgetDirectory {
             .transpose()
             .map_err(storage)?;
         Ok(Self {
+            #[cfg(test)] path:path.to_owned(),
             inner: MmapDirectory::open(path).map_err(storage)?,
             selected: false,
             budget: Arc::new(Budget {
+                cancelled: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(test)] fail_writes: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(test)] failed_writes: std::sync::atomic::AtomicUsize::new(0),
                 pin:Mutex::new(None),writer_memory:Mutex::new(None),pending_analysis:Mutex::new(Vec::new()),
@@ -323,8 +336,26 @@ impl Directory for BudgetDirectory {
         self.budget
             .charge(&lock.filepath, 0)
             .map_err(LockError::wrap_io_error)?;
-        let _io = self.budget.io().map_err(LockError::wrap_io_error)?;
-        self.inner.acquire_lock(lock)
+        // Never hold scarce I/O capacity while blocking on an OS metadata
+        // lock: its owner may need the same capacity to read before unlocking.
+        let attempt = Lock { filepath: lock.filepath.clone(), is_blocking: false };
+        loop {
+            if self.budget.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(LockError::wrap_io_error(io::Error::other("native lock cancelled")));
+            }
+            let result = {
+                let _io = self.budget.io().map_err(LockError::wrap_io_error)?;
+                self.inner.acquire_lock(&attempt)
+            };
+            match result {
+                Err(LockError::LockBusy) if lock.is_blocking => {
+                    // Only dedicated native/blocking workers reach this path.
+                    // No lease or native gate is retained between attempts.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                result => return result,
+            }
+        }
     }
     fn watch(&self, callback: WatchCallback) -> tantivy::Result<WatchHandle> {
         self.inner.watch(callback)
@@ -336,6 +367,36 @@ mod tests {
     use super::*;
     use crate::record::lexical::tests::Temp;
 
+    #[test]
+    fn contended_metadata_lock_releases_io_for_lock_owner_and_can_cancel() {
+        let root = Temp::new(); std::fs::create_dir(&root.0).unwrap();
+        let scope = Arc::new(resources::Governor::default())
+            .admit("meta-lock".into(), resources::Lane::Background, 0).unwrap();
+        let directory = scope.run_sync(|| BudgetDirectory::persistent(&root.0, 65536, 16, 0)).unwrap();
+        directory.atomic_write(Path::new("payload"), b"value").unwrap();
+        let held = directory.acquire_lock(&tantivy::directory::META_LOCK).unwrap();
+        let waiter = directory.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || { done.send(waiter.acquire_lock(&tantivy::directory::META_LOCK).is_ok()).unwrap(); });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let reader = directory.clone();
+        let (read, read_done) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || { read.send(reader.atomic_read(Path::new("payload"))).unwrap(); });
+        assert_eq!(read_done.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap(), b"value");
+        reading.join().unwrap();
+        assert!(finished.try_recv().is_err());
+        drop(held);
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(5)).unwrap());
+        worker.join().unwrap();
+        let held = directory.acquire_lock(&tantivy::directory::META_LOCK).unwrap();
+        let waiter = directory.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || { done.send(waiter.acquire_lock(&tantivy::directory::META_LOCK).is_err()).unwrap(); });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        directory.cancel_io_waiters();
+        assert!(finished.recv_timeout(std::time::Duration::from_secs(5)).unwrap());
+        worker.join().unwrap(); drop(held);
+    }
     #[test]
     fn detached_directory_worker_retains_package_pin_and_reservation() {
         let root=Temp::new();std::fs::create_dir(&root.0).unwrap();

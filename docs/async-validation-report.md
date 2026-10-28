@@ -1,0 +1,152 @@
+# 异步架构实施与验证汇总
+
+本轮基线为 master `50f88396af2e92fda391965353d5763462394ea5`，包含 #86/#87。工作区原先干净；实现、测试与基准均在新分支进行。只发布代码、测试和汇总，不发布原始实验数据、请求明细或本地日志。
+
+## 实现
+
+| 阶段 | 本轮实现 |
+| --- | --- |
+| 索引身份 | 全文与向量/元数据按稳定逻辑身份关联，允许物理行及组件拓扑不同。候选按版本及完整索引输入指纹复验；同版本向量补丁、删除、来源级联及组件故障仍隔离 |
+| State/checkpoint | 长度与 lookup 计量复用已计量的共享值；过期回执由认证时间前缀替代，保留 epoch 拒绝水位；合并只引用选中记录，不克隆完整 State/操作账本 |
+| 接收日志 | 终态释放命令正文；本地先选择完整新 generation 再删除旧代；远端先发布分块快照 CAS 再退休对象；保留绝对序号和旧身份拒绝水位 |
+| Record 账本 | 固定维护捕获的删除集合，保留重试窗口、Feed 保留范围及必要租约证据；新 FeedTrim 可由完整提交时间推进私有控制流，旧事件保持原恢复规则 |
+| 元数据容量 | 已确认删除的 intake 对象登记由持久水位保护后裁剪；未知 PUT 记录不遗忘。intake 命名空间的全部 inventory 状态受 `8 × max_operations + 256` 上限约束，并为 pending 终态预留对象名额 |
+| 独立合并 | 全文内部小段合并；两份冻结全文/向量组件的有界派生缓存合并，锁外构建、短锁重映射安装、共享失效 token 与 reader pin 保护。权威 WAL/certificate 不因派生合并改变 |
+
+202 仅代表命令已持久接收。业务成功回执、全文水位和向量水位分别核验，不把 202 当作立即可搜。回收预算耗尽时反压，不遗忘未知结果以恢复写入。
+
+完整 State 驻内存、权威 checkpoint 的来源证明与认证发布仍保留。可选派生合并有输入、构建及组件预算；超限不能转化为已提交 WAL 的冷恢复失败，恢复使用私有缓存重建回退。generation ID 的永久精确拒绝复用集合仍受 `max_records` 硬上限约束。以上是明确的容量契约，不是无限容量承诺。
+
+## 验证状态
+
+2026-10-28 已按用户授权保存并发布 Draft PR #88，后续按独立小步持续提交。以下区分中间版本诊断与最终验收；专项通过不代表最新源码全量通过。原接管前 `/tmp` 日志丢失的运行不计入结果。
+
+| 检查 | 当前结果 |
+| --- | --- |
+| Linux 完整 lib（固定测试二进制） | `adc15e2`：449 通过、0 失败、12 忽略，1541.09 秒 |
+| 服务端及全部其他 targets | `adc15e2` 全部 35 targets 成功，556 通过、0 失败、13 忽略，runner exit 0 |
+| 明确核心回归清单 | 固定二进制包含全部 178 个 CI 清单用例；三项原生包复用及四项历史 checkpoint/takeover 故障回归在本次全量全部通过 |
+| 独立 core 默认/无默认特性 | `adc15e2` 两种独立依赖图与编译均通过 |
+| 文档示例 | `adc15e2` doctest 9 项通过 |
+| 静态文档、词法覆盖、Python、diff | 实现 head 的 CI static 通过；本次汇总提交前重新执行文档、词法源检查与 diff |
+| 同数据同资源 Meilisearch 对比 | `1359d7e` 固定 release 完成双方 2305 文档、393 查询及重启核验，详见下方；前两次失败实验不计性能验收 |
+| 精确发布 SHA 的 CI | `71f2384` 的 [run 40689146077](https://github.com/TheLudlows/anyseek/actions/runs/40689146077) 四项必需检查通过，Windows core 失败于 native 测试占位配额准备竞态；修复后新 SHA 待核验。full-acceptance skipped，不计为通过 |
+
+最初诊断回归发现历史维护边界测试不符合异步 Busy、可变 tail 和合法时钟契约，均保留测试并修正其设置/断言；也发现运行中测试二进制被并行 cargo 替换会使子进程用例 ENOENT。最终运行使用固定副本，避免这类验证干扰。
+
+最终测量源码为 `1359d7e25639af929d575a609117c11d42341339`（最后生产行为改动 `0f67d4d`，之后为测试注入修复及汇总）。release SHA256 为 `07c27055f7baa0e9e99d5761b29331f5ca539c8653c4b92fc5e76321aeb07d0f`，全量测试使用预先冻结的独立副本，未在运行中替换二进制。13 个忽略项为 11 个由父测试实际调用的子进程入口、1 个真实 S3 条件测试和 1 个手工 AES 验证；不将后两项计为验收。下方“小步收尾进度”保留中间版本诊断历史，其中“待执行”是该步骤当时状态，不替代本节最终结果。
+
+## 最终固定版本成对测量
+
+双方顺序使用相同 2305 文档、145 个批次（每批最多 16 条）、393 条冻结查询，服务绑定 CPU 0–1，客户端 CPU 2–3；同一 4 CPU／16 GiB cgroup。Meilisearch Community v1.56.0。测量期间无编译或其他测试，未运行旧版本基准；原始请求、查询文本、命中和日志仅保留在仓库外。具体协议见 [ASYNC-PROTOCOL](../benchmarks/capacity/ASYNC-PROTOCOL.md)。
+
+| 指标 | AnySeek | Meilisearch |
+| --- | ---: | ---: |
+| 批接收 p50 / p95 / p99（ms） | 2.67 / 3.79 / 12.33 | 2.09 / 2.68 / 4.45 |
+| 业务完成观测 p50 / p95 / p99（ms） | 25.11 / 60.82 / 74.81 | 51.75 / 69.98 / 82.11 |
+| 双索引水位／任务完成观测 p50 / p95 / p99（ms） | 41.87 / 101.90 / 929.23 | 51.75 / 69.98 / 82.11 |
+| 完整加载墙钟，含回执验证（s） | 11.65 | 7.80 |
+| 按批完成时间之和计算的文档速率（条/s） | 214.51 | 309.14 |
+| 查询 p50 / p95 / p99（ms） | 6.26 / 8.89 / 10.67 | 0.71 / 0.91 / 1.63 |
+| 查询错误 / 空结果（共 393） | 0 / 390 | 0 / 387 |
+| 100 ms 采样峰值 RSS（MiB） | 206.59 | 188.20 |
+| 数据库逻辑 / 实际分配空间（MiB） | 11.76 / 7.29 | 53.59 / 53.48 |
+| 重启 health / 验证计数 / 验证代表查询（ms） | 203.86 / 212.49 / 313.91 | 52.10 / 53.06 / 235.20 |
+
+AnySeek 2305 条成功业务回执、145 批双水位全部验证，最终 pending=0、无 blocked/index_error；Meilisearch 145 个任务全部成功。两端可见数及重启后计数均为 2305，代表查询重启核验通过。提交及 AnySeek checkpoint 均无 Busy 拒绝；不能据此声称高并发下无背压。AnySeek HTTP Index checkpoint 用时 1744.79 ms，Meilisearch 无对应测量，不能将其无操作占位时间作为 checkpoint 延迟。
+
+业务与索引观测均从提交开始计时，包含轮询与等待；AnySeek 轮询 5 ms，Meilisearch 10 ms。Meilisearch 的任务完成同时充当业务／索引观测，未获得独立水位。最终实际查询验证不能反推每批瞬时可搜时间。202 仅为接收；AnySeek 业务完成 p99 75 ms 与索引水位 p99 929 ms 的差距保留在结果中；索引水位观测最大 1778.91 ms，接收最大 19.92 ms、业务完成最大 76.98 ms，不隐藏写入长尾。
+
+这是小规模串行批次试验，不是饱和吞吐、长期容量或高并发服务等级验收。两端分词与评分不同，且 393 查询绝大多数为空，因此此查询延迟不构成相关性质量或通用速度排名。未设置明确性能门槛，本轮只能报告实测，不能宣称已达成未定义的性能目标。
+
+### 维护持锁区间
+
+生产日志观察到所有 8 个必需阶段：6 次 intake 捕获／准备／选择／释放，以及 11 次派生缓存捕获／构建／安装／清理。
+
+| 已标记的临界区 | 样本数 | p95 / p99 / 最大值（ms） |
+| --- | ---: | ---: |
+| Spool 快照捕获 | 6 | 0.103 / 0.103 / 0.103 |
+| Spool 选择 | 6 | 0.658 / 0.658 / 0.658 |
+| Record 派生缓存捕获 | 11 | 3.094 / 3.094 / 3.094 |
+| Record 派生缓存安装 | 11 | 1.661 / 1.661 / 1.661 |
+| Record 派生缓存清理 | 11 | 1.723 / 1.723 / 1.723 |
+
+单次后台 checkpoint 捕获 3.245 ms、Journal 安装 7.439 ms、候选安装 7.780 ms；单样本不能形成可靠分位分布。锁外 intake 文件准备最大 1731.494 ms，缓存构建最大 333.204 ms。命名区间可能重叠，不相加；锁内区间不包含获取互斥锁之前的等待，也不是所有请求的完整持锁成本。退出事件可能来自取消／错误，阶段次数自身不证明每次安装成功。显式 Compact 的两个可选阶段未覆盖，此 HTTP 工作负载运行 Index；不报告其持锁验收。以上仅为本地存储测量，不外推到真实 S3。
+
+## 真实环境与资源
+
+本地初始约 30 GiB 可写磁盘、16 GiB 可用内存、4 CPU 配额。编译限制两个任务；基准顺序运行，服务绑 CPU 0–1、客户端绑 CPU 2–3，保持至少 4 GiB 空闲。下载、样本、日志及新建基准数据库预算为 2 GiB。没有创建凭据或计费资源，也没有清理现存实验数据。
+
+真实 S3 阻塞：专用端点、桶、region、访问标识和密钥配置均缺失，变量名与最小隔离权限见[实施清单](async-completion-checklist.md#真实-s3-验收前提)。SQLite＋内存对象存储／本地 HTTP fixture 只提供协议与故障验证，不能算作真实云 S3 验收。
+
+进程故障注入、退出与强杀不能替代系统/文件系统崩溃或硬断电。真实云与硬断电仍需独立环境验收，不阻止本轮代码以 Draft PR 供审查；不自动合并或部署。
+
+## 本次发布的限制
+
+Draft PR 包含代码、故障及并发测试和基准脚本，本次提交不是完整验收声明。完整诊断回归中的夹具及断言问题、checkpoint 对现有远端权威损坏的认证问题已分别修复并通过专项。小步改造中的中间失败会继续明确记录；只有最终固定二进制全量结果才能更新验收结论。最新固定版本已完成上述本地成对测量；性能门槛、高并发长期负载、真实 S3 和硬断电仍未验收。
+
+## 尚未闭环的长期元数据保留
+
+本轮持久水位裁剪只适用于显式登记的 intake 命名空间。通用 Record checkpoint、内容寻址对象和备份的 SQLite `retired_objects`／`object_uploads` 墓碑仍保留，尚未实现持续有界裁剪。这些键没有统一的单调分配序号；删除墓碑会使迟到上传或旧引用重新注册已退休键，破坏“退休后永不重新发布或 pin”的不变量。闭环需要为通用对象引入可认证的分配 epoch/水位，并在上传登记、所有发布入口、pin、备份与恢复中同时拒绝旧 epoch；还须证明迟到未知 PUT 不会在删除后复活。不能仅按删除成功或时间过期清表。本轮未改变这套通用协议，因此此项明确未完成。
+
+generation 的可重建操作/租约证据已可回收；精确拒绝历史 generation ID 复用的 `used` 集合仍永久保留，并由已有全局 `max_records` 总数上限拒绝继续增长。此处实现的是有限容量下的安全反压，不是无限创建 generation 的有界滚动历史。若要永久运行且支持任意旧字符串 ID，必须改变身份契约（例如受认证 epoch 的 generation ID）或保留精确历史；单个普通哈希摘要无法支持任意 ID 的精确成员查询。
+
+## 小步收尾进度
+
+第一步：Records 容器增量维护 live TTL、retained Source 和 live typed 三项派生计数，去掉普通写入/预留中的对应 Record 全扫。持久化格式不变，恢复时重建并全扫校验；更新失败不修改计数。两项新容器测试与五项 TTL、generation、Source/abort/feed 预算回归共 7 项通过。generation staged reserve 和到期候选扫描仍待后续步骤，不宣称整个写路径为常数时间。
+
+第二步：非持久化最早 TTL 下界避免未到期时遍历 Records；延期/删除允许保守早值，到达下界后仍完整扫描候选并刷新。更早更新即时下调，恢复重建，全扫 oracle 拒绝会漏过期限的缓存。9 项专项通过，含精确“未扫描”断言；到期扫描和 generation staging 扫描仍保留。
+
+接收回收安全修复：替换快照选择前同时验证 pending 完成记录的字节预留（本地及远端各自编码系数），不足仅反压且保留旧链。两项新增精确容量边界测试和 ingest 全组 26 项通过。
+
+后台 checkpoint 来源捕获：固定物理提交 cut 和 generation，每次借原句柄最多读取 64 KiB，恢复当次 cursor 后释放 Record 锁；帧拼装、校验和与分配在锁外执行。保持完整发布标记、序号、损坏及任务归属校验。新增 4 项、原 committed-stream 7 项、GC catch-up 1 项、indexer 8 项通过（另 1 个子进程辅助测试忽略）。64 KiB 限制 I/O 量而非设备等待时间；State 容器 clone、初始目录预算扫描仍在锁内，显式 compact 尚待下一步。
+
+generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock 三统计缓存，普通写复用 staged members/control/TTL 数量；旧 map wire 格式不变、固定缓存内存计量、恢复全扫 oracle 保留。11 项专项通过。身份占用检查和 staging 到期搜索仍扫描，不宣称全部 generation 路径常数时间。
+
+远端候选保护基础：SQLite 一次事务预登记完整候选并创建无过期 staging pins，校验 owner/head、水位、全库存与 pending 名额；支持精确 build 释放。3 项专项通过，覆盖未知上传保护及备份恢复。此提交只是远端锁外回收的前置 API，尚未接入，不代表远端回收已解锁。
+
+显式 Compact 中间步骤：迁移到 owned 后台候选路径，保留不推进时间/不额外 GC 的语义，保留 State delta/payload 复用及未知发布隔离，300 秒构建期限。10 项关键专项通过；修复了资源拒绝误 fence 和压缩后遗漏远端 GC。当前此中间版本重建 native 索引，3 项既有 native 包复用断言仍失败，未修改断言；下一独立步骤恢复安全不可变包复用，不能把本步称为完整验收。
+
+本地 Spool 快照：持锁只捕获 Arc<Row> 和完整 revision/cut，锁外编码并同步新 generation，短锁在 cut 未变时选择 CURRENT 并整体换表，旧行与目录锁外释放。并发 Accept/Complete 使候选弃选重试，pending 完成预留在选择前复验；finish/admin 等待 owned GC。28 项 ingest 回归通过，包括压力下 pending 完成、stale cut、owner、未知选择恢复。持续写入仍可能反复弃选，不能宣称无饥饿；远端此时仍为串行压缩，后续接入独立预登记/pin。
+
+显式 Compact 原生复用：固定 cut 时捕获不带共享失效 token 的 membership，锁外复用 immutable native 包并仅构建 tail；同版本向量补丁、并发删除由 catch-up 和安装复验处理。detached cache 或包数压力仍私有全重建，预算拒绝发生在 tail handoff 前。新增 3 项、既有 3 项原生复用原断言及 Compact/delta/远端专项通过；上一中间步骤的三项复用失败已解决。可复用 mutable tail 的有界 handoff 仍在 Record 锁内执行 I/O，且 metadata 捕获仍遍历索引成员，已单独计时，不声称所有工作均已移出锁。
+
+远端 Spool 快照：固定 cut 编码与 PUT、候选释放/退休/DELETE/回执裁剪移到锁外，短锁内原子预登记完整候选与 pending 名额并复验 CAS。unknown publication 保留 pins，稳定 owner 恢复后才取消遗留 build pins；未知 PUT inventory 不遗忘。最终 ingestion 26 项和 SQLite staging 4 项通过，覆盖慢上传/删除下 Accept/Complete/status 推进、stale cut、finish 归属、未知选择及选中 manifest closure 保护。这是 SQLite/内存对象存储的协议验证，不是真实 S3。捕获 Arc 行、原子预登记及选择时可达性扫描仍在 Spool 锁内，append 的网络锁语义未改变。
+
+远端维护进展：首次候选保留下一完整快照的对象名额，并持续计入 append 准入；首次 stale 或不足以保留第二候选时转为排空模式，新身份 Busy、旧身份回执照常、pending 继续完成，随后稳定构建。已知资源 Busy 解除临时门控与备用名额；未知结果仍隔离。30 项 ingestion 专项通过，包含 16 次并发新提交被背压后精确一次 stale/一次成功、低库存无首轮上传、pending 终态名额、精确分块边界无额外空块和 Busy 后 finish 可结束。首轮低库存测试失败是门控文件路径错误，修正路径后通过，未放宽超时。普通远端 append 的锁内网络仍会阻塞 status/progress 和 Complete，后续解耦需要单独的追加串行器及提交中状态，未混入此回收协议切片。
+
+跨平台 CI 修复：Windows 串行磁盘重扫的既有断言得到 7 而非 8，目录枚举未反映仍打开文件的增长。Windows 分支改用 metadata-only 文件句柄读取真实长度，非 Windows 路径不变；不修改原断言或在测试里强制 flush。Linux build_budget 9 项通过，Windows 结果等待新 SHA CI。此差异对应 [Microsoft 对 NTFS 目录枚举属性时效的说明](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-findfirstfilea)。`53749ee` 固定 Linux 全量运行继续收集；不会将旧二进制称作更新后 SHA 的重新执行。
+
+完整回归终态与修复：`53749ee` 库测试完成 413 通过、4 失败、12 忽略（1533.54 秒），失败集中于三个 checkpoint 子进程边界/未认证清理夹具，以及 sealed owner 的 Compact。新 `checkpoint_with_tail` 在目录选择前已写完整 certificate/suffix，因此未认证清理夹具改为调用仍存在的旧发布路径制造真实未认证状态；新路径补齐 certified/switched/reclaimed 的真实测试中断点。Compact 恢复对 sealed cut 的合法维护，保留 seal 和永久输出屏障；普通 Index/Automatic 仍拒绝 sealed。四项原失败及 takeover、seal、indexer、checkpoint-with-tail 相邻组均专项通过，不放宽超时、不删除正确性断言。修复后重跑最终完整固定二进制回归，不能把 413/4 当作通过。
+
+最终库回归证据：`08f485d` 的固定二进制完整运行再次通过三项原生复用原断言（direct tail seal、pending seals 隔离、successive flush）及四项 checkpoint/takeover 修复。12 个 ignored 中，11 个是由已执行父测试启动的子进程入口，另 1 个是真实 S3 条件测试；不能把忽略的真实云测试记为云验收。所有长测保留原数据规模。
+
+基准发现的待修复问题：`08f485d` 在 1040 条持久接收、1024 条完成回执及索引核验后，后台合并占用 Background I/O 配额导致 native Directory 写入遇到 Busy，索引进入失败状态。该运行未完成查询、重启或 Meilisearch 对比，不构成性能验收。需在实际写入的资源准入边界处理争用，不能直接重试已部分执行的索引批次或隐藏真实 I/O 错误。
+
+CI 时限诊断：Windows core 的本地 long-suffix 用例通过（734.37 秒），远端 long-suffix 仍在运行时整个 job 达到 30 分钟上限；GitHub annotation 明确报告 job 超时，没有用例断言失败。仅该矩阵 job 的预算调整为 45 分钟，保留测试数据规模、用例超时和 runner 数量；调整后仍须验证新的终态。
+
+I/O 争用修复前置切片：新增仅供已准入 native 工作使用的资源等待与显式同步 Scope 传播。普通 I/O 仍立即拒绝；仅 I/O 计数饱和可等待，取消、无效主体、零容量及 poisoned ledger 立即返回。资源组 8/8 通过（3 项新增），覆盖单线程运行时异步持有者释放、取消不退还其他 owner 的租约、永久错误不等待。尚未接入 Runtime/Directory，不能认为基准故障已修复。
+
+I/O 争用修复接入：Runtime 的同步 native mutation/commit/reload/seal 及生产 create/open 改为拥有 Scope、Data guard 和 Runtime 的阻塞工作；Directory 只在实际文件操作前等待配额，不重放 Consumer 批次。取消而未取回结果会 fence writer；明确返回的准入错误保持原语义。Drop 先取消自身 Directory 等待再 join，固定 reader 的 pin 保留。META_LOCK 使用释放配额后的非阻塞探测重试，避免持配额等锁的循环；merge 启动时立即将额外 Charge 移给 owned 后台任务。专项 40/40 通过：Runtime 25、Directory 7、资源 8，覆盖真实配额竞争、单线程执行器、取消后拒绝复用、Drop、原生写错、旧 reader/pin 与 metadata 锁争用。此前首轮 24/25 的明确拒绝误 fence 已修复并复验；尚待新 SHA 完整回归与固定 release 基准，不能用专项替代最终验收。
+
+第二次固定 release 实验（生产 `b121579`、CI 清单 head `97736d6`）：完整本地回归 531/0/13 及该 head 的五个必需 CI 任务均通过，但成对基准再次在 1040 接收、1024 回执/索引核验后中止。这次 native index_error 为空，物化 Journal 分段写入因 Background I/O 争用返回 OutcomeUnknown；没有重放该批次，也未运行 Meilisearch、查询和恢复阶段。需在 Journal frame/witness 开始前预占整个同步写事务的 I/O，并让内部 File 操作借用该租约；不能在帧写到一半时再进行会拒绝的独立准入。此第二处修复与新版本复验仍在进行，当前没有成对性能验收。
+
+Journal 事务准入小步：在本地完整 frame 与双 witness 开始前异步预占一个 I/O permit，File 只在同 governor/subject/lane 的同步事务中借用；该 loan 不传播给 spawn 或 native worker。11/11 专项通过（2 项 Journal、9 项资源），包括竞争解除后的写入与冷恢复幂等、真实 header 部分落盘后仍 OutcomeUnknown 并要求恢复。此时 vector/metadata live 提交、checkpoint、接收与终态的全链配额审查/专项仍在进行，不将单一 WAL 修复称作全链验收。
+
+Checkpoint 准入与锁序小步：两条 local generation/PUBLISHED 发布路径只在 remote/native 工作完成后取得同步 File 事务 loan；异步 File loan 保持真实租约到 future 完成，子任务不继承。indexer 组 15 通过、1 个原有子进程入口忽略，资源组 10/10。NativeReuse 的 I/O 探针现先释放，再等待 shard 统计锁；确定性的反向锁序与相关原生复用 4/4 通过。该修复未提高配额，真实落盘失败及远端已提交后的隔离保持不变。
+
+Vector/metadata 与 required successor 小步：先取得组件锁，再在身份/mmap/buffer 修改前预占 File 事务；append、vector 分段提交和 descriptor 共用准确作用域 loan。新组件在创建目录前预占，覆盖 schema 与初始化，结束后才进入 native 工作，避免瞬态配额错误被字符串化为阻塞已接收命令的 Storage。6/6 确定性专项通过，覆盖取消等待、扩容、单行 vector 提交、相反锁序、真实只读文件错误仍 fence，以及候选未触盘与原 writer 继续可用。
+
+本地 intake 小步：Accept、Complete 和滚段的 blocking worker 显式保留 Scope，并在完整 File 事务前预占；GC prepare 的 loan 在取得 Spool 前释放，选择阶段统一 Spool→I/O→log 顺序。6/6 本地专项通过，覆盖终态只持久化不重执行业务、滚段、GC prepare/select/finish、真实部分 WAL 仍隔离并恢复。远端 typed admission 与 Complete 的确定拒绝重试仍在下一步完成；不能将此本地结果当作真实云验证。
+
+远端准入类型与来源读取小步：上传的 I/O/payload/readback 配额拒绝只有在库存登记及 PUT 前才产生独立 Admission；Record 只将该类型作为确定拒绝，普通 ObjectStore 错误即使包装 Busy 也仍 Unknown。S3 adapter 3/3、本地 RemoteRecord 分类/拒绝/已提交恢复及 source-cut 拒读游标恢复 4/4 通过。fixture 在本机验证 PUT 成功、读回失败，保留未知库存；GET 返回后不再占 I/O，DELETE 拒绝不记为完成。以上均为模拟/本地 HTTP，不是云 S3 验收。
+
+远端 intake 与终态小步：只有 typed Admission 允许 Log.failed 复位并延期；Complete 只重试既有终态事件，释放 Spool 等待，最多 300 秒，不重执行业务。GC 上传逐对象保留同一 build/keys/pins，已验证前缀不重传；明确拒绝到限后 blocked，不能丢候选再不断生成无法裁剪的未知库存。完整 ingestion 37/37 通过，生产 GC 路径测试覆盖中间对象拒绝、释放后一次选择、库存稳定及到限后重复调度不增；独立复核确认此前库存活性漏洞关闭。真正 Unknown、ObjectStore 或 SQLite 错误不进入该重试路径。新全链小回归已闭环，仍需冻结最新代码重新完成整体验证及成对基准。
+
+Windows 故障注入修正：`adc15e2` 的 Windows core 在 37 分钟时失败于 `local_partial_intake_write_still_fences_and_recovers_the_selected_cut`，不是 job 超时。测试 hook 另开被锁 WAL 导致 Windows sharing 拒绝，尚未写入即返回 Storage。仅 `cfg(test)` 的注入改为从现有 owner 句柄 seek/write/sync 未提交尾部并标记需要恢复，保留真实部分写入、OutcomeUnknown、后续 RecoveryRequired 和重启恢复原 cut 的断言；生产 append 与配额不变。修复后目标用例 1/1、本地接收组 6/6 通过，独立只读复核通过；不将原 Windows 失败记为通过，新精确 SHA CI 仍待核实。
+
+最终产物复核：测试注入修正后重建的 release 哈希与此前不同，故重新冻结 `1359d7e` 产物并完成同一成对协议，harness exit 0；本节指标全部取自该最新运行，未混用先前数据。新实验分配 62.05 MiB，连既有 Meilisearch 二进制与样本合计 407.06 MiB，低于 2 GiB 增量预算，结束后空闲约 10.99 GiB。所有实验数据保留，未创建云资源。后续仅汇总文档提交不改变该测量实现；精确发布 SHA 的 CI 终态以 Draft PR 检查及描述为准。
+
+Windows 配额测试准备同步：`71f2384` 的 Windows core 失败于 `external_io_contention_waits_off_executor_and_commits_once` 准备占位 permit 时的 unwrap，native append 返回后短后台 I/O 仍可占唯一 slot，尚未进入被测 flush。仅对 6 处共享活跃 native scope 的测试 setup 增加有界空闲等待；独立 scope 的 fixture 和最终 permit 归还断言不弱化。32 项配额回归前移到 CI 清单开头，178 项集合与规模不变，便于尽早定位跨平台准备错误。该失败不是超时，原 partial WAL 注入修复在此次 Windows 运行尚未执行到，不宣称通过。
+
+同步修复的本地验证：六项目标回归 6/6 通过，三个 native 并发用例各重复 20 轮共 60/60 通过，重排后的完整 32 项配额矩阵按 CI exact 调用方式全部通过。独立只读复核确认后续提交、取消、pin、恢复和最终归还断言保持不变；这些结果不替代新的 Windows CI。

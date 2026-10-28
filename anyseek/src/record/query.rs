@@ -10,32 +10,39 @@ pub(super) struct Handle {
     _scope: Option<crate::resources::Lease>,
 }
 pub(super) struct Candidate {
-    component: crate::component::ShardArc,
-    local: usize,
-    key: String,
+    identity: lexical::Identity,
+    fingerprint: Option<[u8; 32]>,
     hit: crate::min_heap::Result,
 }
 pub(super) struct Selection {
-    rows: BTreeMap<String, (crate::component::ShardArc, usize)>,
+    rows: BTreeMap<String, ((u64, u64), Option<[u8; 32]>)>,
     _pins: Vec<Arc<lexical::runtime::Runtime>>,
     _memory: crate::storage::build_budget::MemoryLease,
     _scope: Option<crate::resources::Lease>,
 }
 impl Selection {
-    pub fn allows(
-        &self,
-        key: &str,
+    pub async fn revalidate(
+        &mut self,
         locations: &BTreeMap<String, usize>,
         components: &[crate::component::ShardArc],
-    ) -> bool {
-        let Some(&ordinal) = locations.get(key) else {
-            return false;
-        };
-        self.rows.get(key).is_some_and(|(component, local)| {
-            ordinal / components.len() == *local
-                && Arc::ptr_eq(&components[ordinal % components.len()], component)
-        })
+    ) -> Result<(), RecordError> {
+        // One read guard per component, not one lock acquisition per record.
+        let shards = futures::future::join_all(components.iter().map(|shard| shard.read())).await;
+        if shards.iter().any(|shard| shard.failed) { return Err(RecordError::RecoveryRequired); }
+        self.rows.retain(|key, (revision, fingerprint)| {
+            let Some(&ordinal) = locations.get(key) else { return false; };
+            let local = ordinal / shards.len();
+            shards[ordinal % shards.len()].active.as_ref().is_some_and(|active| {
+                active.is_live(local) && active.keys.get(local) == Some(key)
+                    && active.revisions.get(local).is_some_and(|&current| current.0 == revision.0
+                        && (current.1 == revision.1 || fingerprint.is_some()
+                            && active.fingerprints.get(local).copied().flatten() == *fingerprint))
+            })
+        });
+        Ok(())
     }
+    pub fn allows(&self, key: &str) -> bool { self.rows.contains_key(key) }
+
 }
 impl Handle {
     pub async fn filter(&self, filters: &[FacetFilter]) -> Result<Selection, RecordError> {
@@ -63,7 +70,7 @@ impl Handle {
             .transpose()
             .map_err(storage)?;
         let mut rows = BTreeMap::new();
-        for (slot, shard) in shards.iter().enumerate() {
+        for shard in &shards {
             let active = shard.active.as_ref().unwrap();
             let filters = crate::metadata_filter::compile_filters(shard, filters)
                 .map_err(RecordError::Rejected)?;
@@ -71,7 +78,8 @@ impl Handle {
                 if active.is_live(local)
                     && !crate::metadata_filter::is_facet_filter(shard, &filters, local)
                 {
-                    rows.insert(key.clone(), (root.shard_vec[slot].clone(), local));
+                    let revision = *active.revisions.get(local).ok_or_else(|| storage("filter revision missing"))?;
+                    rows.insert(key.clone(), (revision, active.fingerprints.get(local).copied().flatten()));
                 }
             }
         }
@@ -133,9 +141,12 @@ impl Handle {
                 .get(local)
                 .ok_or_else(|| storage("candidate ordinal outside captured topology"))?;
             candidates.push(Candidate {
-                component: root.shard_vec[slot].clone(),
-                local,
-                key: key.clone(),
+                identity: lexical::Identity {
+                    id: key.clone(),
+                    version: active.revisions.get(local).ok_or_else(|| storage("candidate revision missing"))?.0,
+                    revision: active.revisions[local].1,
+                },
+                fingerprint: active.fingerprints.get(local).copied().flatten(),
                 hit,
             });
         }
@@ -220,17 +231,17 @@ impl RecordPartition {
         }
         let mut hits = Vec::with_capacity(candidates.len());
         for (rank, candidate) in candidates.into_iter().enumerate() {
-            let Some(&ordinal) = inner.locations.get(&candidate.key) else {
+            let Some(&ordinal) = inner.locations.get(&candidate.identity.id) else {
                 continue;
             };
             if !inner
                 .index
-                .matches(ordinal, &candidate.component, candidate.local)
-                .await
+                .matches_identity(ordinal, &candidate.identity, candidate.fingerprint)
+                .await?
             {
                 continue;
             }
-            let Some(record) = inner.state.records.get(&candidate.key) else {
+            let Some(record) = inner.state.records.get(&candidate.identity.id) else {
                 continue;
             };
             let channels = if let Some(channel) = channel {
@@ -312,6 +323,7 @@ async fn pause(root: &Path, name: &str) -> Result<(), RecordError> {
 mod tests {
     use super::super::tests::{config, source_write, write};
     use super::*;
+    use std::collections::BTreeSet;
     async fn entered(root: &Path, name: &str) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !root.join(format!("{name}-entered")).exists() {
@@ -321,6 +333,106 @@ mod tests {
         .await
         .unwrap();
     }
+    #[tokio::test]
+    async fn candidate_and_filter_revalidation_fence_failed_component_after_capture() {
+        let temporary = tempfile::tempdir().unwrap();
+        let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
+        p.write(write("a", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
+        let inner = p.inner.lock().await;
+        let handle = inner.index.capture_query(10).await.unwrap();
+        let mut selection = handle.filter(&[]).await.unwrap();
+        let components = inner.index.components().await;
+        components[0].write().await.failed = true;
+        let identity = lexical::Identity { id: "a".into(), version: 1, revision: 1 };
+        assert!(matches!(inner.index.matches_identity(0, &identity, None).await,
+            Err(RecordError::RecoveryRequired)));
+        assert!(matches!(selection.revalidate(&inner.locations, &components).await,
+            Err(RecordError::RecoveryRequired)));
+    }
+
+    #[tokio::test]
+    async fn independent_lexical_order_and_topology_join_by_revision() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        for id in ["a", "b"] {
+            p.write(write(id, id, "alpha", ExpectedVersion::Absent)).await.unwrap();
+        }
+        let handle = p.inner.lock().await.index.capture_query(10).await.unwrap();
+        let one = lexical::runtime::Runtime::create(&temporary.path().join("lexical-one"), &config()).unwrap();
+        let two = lexical::runtime::Runtime::create(&temporary.path().join("lexical-two"), &config()).unwrap();
+        let doc = write("unused", "unused", "alpha", ExpectedVersion::Absent).document.unwrap();
+        one.append(lexical::Identity { id: "b".into(), version: 1, revision: 2 }, &doc, true).await.unwrap();
+        // Same body version, stale enrichment revision must not join the live row.
+        one.append(lexical::Identity { id: "a".into(), version: 1, revision: 0 }, &doc, true).await.unwrap();
+        two.append(lexical::Identity { id: "a".into(), version: 1, revision: 1 }, &doc, true).await.unwrap();
+        one.seal().await.unwrap(); two.seal().await.unwrap();
+        // Open immutable packages again to exercise persisted identity addresses.
+        let one = lexical::runtime::Runtime::open(&temporary.path().join("lexical-one"), &config()).unwrap();
+        let two = lexical::runtime::Runtime::open(&temporary.path().join("lexical-two"), &config()).unwrap();
+        handle.index.write().await.record_lexical = vec![one, two];
+        let result = lexical::runtime_query::search(&handle.index, "alpha".into(),
+            Some(Embedding::F32(vec![1.0, 0.0])), SearchMode::Hybrid {
+                similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All },
+            QueryType::Intersection, 0, 10, ResultType::TopkCount, vec![], vec![], vec![],
+            lexical::Cut { sequence: u64::MAX, evaluation_time_ms: u64::MAX }).await.unwrap();
+        assert_eq!(result.result_count_total, 2);
+        let identities = handle.candidates(result.results).await.unwrap().into_iter()
+            .map(|candidate| candidate.identity.id).collect::<BTreeSet<_>>();
+        assert_eq!(identities, BTreeSet::from(["a".into(), "b".into()]));
+    }
+
+    #[tokio::test]
+    async fn captured_candidates_survive_cache_rebuild_with_new_physical_rows() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(write("a", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("b", "b", "beta", ExpectedVersion::Absent)).await.unwrap();
+        let gate = ".test-query-candidates-pause";
+        std::fs::write(root.join(gate), b"pause").unwrap();
+        let pending = { let p = p.clone(); tokio::spawn(async move {
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await
+        }) };
+        entered(&root, gate).await;
+        {
+            let mut inner = p.inner.lock().await;
+            // Rebuild uses sequence 2, while a's captured indexing revision is 1.
+            let (index, ordinals) = build(&root, &inner.config, &inner.state).await.unwrap();
+            inner.index = index;
+            inner.locations = ordinals.iter().enumerate().map(|(i, id)| (id.clone(), i)).collect();
+            inner.ordinals = ordinals;
+        }
+        std::fs::remove_file(root.join(gate)).unwrap();
+        let result = pending.await.unwrap().unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].record.record_id, "a");
+    }
+
+    #[tokio::test]
+    async fn captured_candidate_rejects_same_body_version_vector_patch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let mut initial = write("initial", "a", "alpha", ExpectedVersion::Absent);
+        initial.document.as_mut().unwrap().shift_remove("vector");
+        p.write(initial).await.unwrap();
+        let gate = ".test-query-candidates-pause";
+        std::fs::write(root.join(gate), b"pause").unwrap();
+        let pending = { let p = p.clone(); tokio::spawn(async move {
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await
+        }) };
+        entered(&root, gate).await;
+        let mut patch = write("patch", "a", "", ExpectedVersion::Match(1));
+        patch.document = None;
+        patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector": [1.0, 0.0]})).unwrap());
+        let receipt = p.write(patch).await.unwrap();
+        assert_eq!(receipt.version, 1);
+        std::fs::remove_file(root.join(gate)).unwrap();
+        assert!(pending.await.unwrap().unwrap().hits.is_empty());
+        assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
+    }
+
     #[tokio::test]
     async fn scoring_releases_record_guard_and_accepts_newer_cache_publication() {
         let temporary = tempfile::tempdir().unwrap();

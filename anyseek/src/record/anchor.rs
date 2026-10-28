@@ -83,6 +83,45 @@ fn read_manifest(path:&Path,limit:u64)->Result<(Manifest,crate::storage::build_b
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Statistics {segments:Vec<crate::active::ActiveStatistics>}
+/// Membership is frozen at the same cut as State. No mutable retirement token
+/// escapes capture; immutable packages remain protected by the owned build.
+pub(super) struct NativeReuse {
+    pending:Vec<Frozen>,
+    local:Vec<crate::active::ActiveStatistics>,
+    _admission:NativeAdmission,
+}
+pub(super) struct NativeAdmission {
+    _memory:crate::storage::build_budget::MemoryLease,
+    _resources:crate::resources::Lease,
+}
+impl NativeReuse {
+    pub(super) async fn admit(inner:&Inner)->Result<Option<NativeAdmission>,RecordError> {
+        let _phase=maintenance::Phase::new("compact_native_admission_locked",inner.state.seq);
+        if inner.index.detached_cache || inner.anchor.as_ref().is_none_or(|previous|
+            previous.segments.len()+inner.index.pending_seals.len()>=capacity::segments(&inner.config)) {return Ok(None);}
+        // Refuse known I/O saturation before preparing or sealing a successor.
+        // Actual handoff I/O retains its own admission and failure fencing.
+        let probe=crate::resources::io_scope(crate::resources::Lane::Background).io().map_err(|_|RecordError::Busy)?;
+        // Statistics await shard locks. Their writer may be awaiting I/O, so a
+        // preflight probe must never retain capacity across that lock boundary.
+        drop(probe);
+        let bytes=(inner.index.statistics_wire_length().await? as u64).checked_mul(64)
+            .and_then(|n|n.checked_add(1024*1024)).ok_or_else(||storage("native capture metadata overflow"))?;
+        #[cfg(test)]
+        if inner.journal.root().join(".test-compact-native-capture-budget").exists() {return Err(RecordError::Busy);}
+        let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(|_|RecordError::Busy)?;
+        let resources=crate::resources::io_scope(crate::resources::Lane::Background).bytes(bytes).map_err(|_|RecordError::Busy)?;
+        Ok(Some(NativeAdmission{_memory:memory,_resources:resources}))
+    }
+    pub(super) async fn capture(inner:&Inner,admission:NativeAdmission)->Result<Self,RecordError> {
+        let _phase=maintenance::Phase::new("compact_native_membership_capture_locked",inner.state.seq);
+        let local=inner.index.local_statistics().await?;
+        let previous=inner.anchor.as_ref().ok_or_else(||storage("missing native capture predecessor"))?;
+        if inner.index.detached_cache || local.len()!=previous.segments.len()+inner.index.pending_seals.len()+1
+            || local.iter().any(|active|active.retired.is_some()) {return Err(storage("native capture topology mismatch"));}
+        Ok(Self{pending:inner.index.pending_seals.clone(),local,_admission:admission})
+    }
+}
 pub(super) struct Loaded {
     pub config:RecordConfig,pub state:State,pub index:IndexArc,
     pub ordinals:Vec<String>,pub locations:BTreeMap<String,usize>,pub payloads:Closure,
@@ -146,7 +185,7 @@ impl Frozen {
         }
         Ok(())
     }
-    async fn load(&self,root:&Path,config:&RecordConfig,active:crate::active::ActiveStatistics)->Result<IndexArc,RecordError>{
+    async fn load(&self,root:&Path,config:&RecordConfig,mut active:crate::active::ActiveStatistics)->Result<IndexArc,RecordError>{
         let path=self.verify(root,closure_limit(config.max_journal_bytes)?)?;
         active.validate_sparse(retrieval_schema(config).iter().filter(|f|f.index_lexical||f.index_vector).count()).map_err(storage)?;
         let schema:Vec<SchemaField>=serde_json::from_slice(&read_bounded(&path.join("schema.json"),config.max_journal_bytes)?).map_err(storage)?;
@@ -156,7 +195,19 @@ impl Frozen {
         let mut reservation=build_budget::admit(config,std::iter::empty()).map_err(|e|storage(format!("stage=frozen_component_base package={} {e}",self.id)))?;
         reservation.grow(estimate).map_err(storage)?;
         let index=crate::index::open_index(&path).await.map_err(storage)?;
-        index.write().await.record_lexical.push(lexical::runtime::Runtime::open(&path.join("native"),config)?);
+        index.write().await.record_lexical.push(lexical::runtime::Runtime::open_owned(&path.join("native"),config).await?);
+        // Legacy certificates did not persist vector revision identities. Their
+        // format required the same native/vector order; migrate only that format.
+        // New statistics carry their own identities and may have independent order.
+        if active.revisions.is_empty() && !active.keys.is_empty() {
+            let native = index.read().await.record_lexical[0].clone();
+            let snapshot = native.snapshot().await?;
+            if snapshot.identities.len() != active.keys.len()
+                || snapshot.identities.iter().zip(&active.keys).any(|(identity, key)| &identity.id != key) {
+                return Err(storage("legacy native/vector identity mismatch"));
+            }
+            active.revisions = snapshot.identities.iter().map(|identity| (identity.version, identity.revision)).collect();
+        }
         index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
         {
             let index=index.read().await;
@@ -164,6 +215,7 @@ impl Frozen {
             let mut shard=index.shard_vec[0].write().await;
             if shard.indexed_doc_count!=active.keys.len(){return Err(storage("frozen cardinality mismatch"));}
             shard.delete_hashset=(0..active.keys.len()).filter(|id|!active.is_live(*id)).collect();
+            active.retired.get_or_insert_with(Default::default);
             shard.active=Some(active);
         }
         Ok(index)
@@ -188,9 +240,14 @@ impl Reference {
     }
     pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
         let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",state.seq);checkpoint_codec::StateEncoding::new(state)?};
-        Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal).await
+        Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal,None,None).await
     }
-    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
+    pub(super) async fn prepare_captured(root:&Path,config:&RecordConfig,state:&State,prior:Closure,
+        previous:Option<&Reference>,frames:&[Vec<u8>],native:Option<&NativeReuse>)->Result<Self,RecordError> {
+        let encoded=checkpoint_codec::StateEncoding::new(state)?;
+        Self::prepare_encoded(root,config,&encoded,prior,previous,None,false,None,Some(frames),native).await
+    }
+    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>,captured:Option<&[Vec<u8>]>,native:Option<&NativeReuse>)->Result<Self,RecordError>{
         let state=encoded.state();
         let _phase=maintenance::Phase::new("anchor_prepare",state.seq);
         let id=format!("{:032x}",rand::random::<u128>());
@@ -219,14 +276,17 @@ impl Reference {
         let mut base_reason=if compact {"forced_full_base"} else if pool_compaction {"payload_pool_bound"}
             else if state.private_cleanup_pending {"private_cleanup"} else {"missing_predecessor_or_journal"};
         if !compact && !pool_compaction && !state.private_cleanup_pending {
-            if let (Some(previous),Some(journal))=(previous,journal) {
+            if let Some(previous)=previous.filter(|_|journal.is_some() || captured.is_some()) {
                 base_reason="missing_captured_proof";
                 if previous.captured.get().is_some() {
                     let (_,manifest,_,mut manifest_lease)=previous.authenticated_manifest(root,config.max_journal_bytes)?;
                     base_reason="delta_count_bound";
                     if manifest.state.deltas.len()<anchor_image::MAX_DELTAS {
                         base_reason="empty_journal_suffix";
-                        if let Some(delta)=state_chunks::Delta::write(&prepared,config,&mut pool,journal,previous,previous.id.clone())? {
+                        let delta=if let Some(frames)=captured {
+                            state_chunks::Delta::write_captured(&prepared,config,&mut pool,frames,previous,previous.id.clone())?
+                        }else{state_chunks::Delta::write(&prepared,config,&mut pool,journal.unwrap(),previous,previous.id.clone())?};
+                        if let Some(delta)=delta {
                             let growth=checkpoint_codec::json_length(&delta)?
                                 .checked_add(id.len()+128)
                                 .and_then(|n|n.checked_add((manifest.state.deltas.len()+1)*std::mem::size_of::<anchor_image::Block>()))
@@ -277,7 +337,7 @@ impl Reference {
                 drop(metadata_lease);
                 drop(state_blocks);
                 drop(previous_capture);
-                return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None)).await;
+                return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None,native)).await;
             }
             return Err(storage("complete anchor manifest byte budget exceeded"));
         }
@@ -285,14 +345,16 @@ impl Reference {
         drop(manifest);
         drop(image_lease);
         let mut segments=Vec::new();let mut statistics=Vec::new();
-        let reuse_native=!compact && previous.is_some_and(|p|p.segments.len()+view.map_or(0,|v|v.pending_seals.len())<capacity::segments(config));
+        let pending_count=native.map_or_else(||view.map_or(0,|v|v.pending_seals.len()),|capture|capture.pending.len());
+        let reuse_native=!compact && (native.is_some() || view.is_some_and(|view|!view.detached_cache))
+            && previous.is_some_and(|p|p.segments.len()+pending_count<capacity::segments(config));
         log::info!("record_maintenance phase=native_packages seq={} reuse={} selected={} pending={} package_limit={}",
-            state.seq,reuse_native,previous.map_or(0,|p|p.segments.len()),view.map_or(0,|v|v.pending_seals.len()),capacity::segments(config));
+            state.seq,reuse_native,previous.map_or(0,|p|p.segments.len()),pending_count,capacity::segments(config));
         let native_phase=maintenance::Phase::new("native_prepare",state.seq);
         if reuse_native {
             let previous=previous.unwrap();
-            let local=view.ok_or_else(||storage("missing incremental input view"))?.local_statistics().await?;
-            let pending=&view.unwrap().pending_seals;
+            let local=if let Some(capture)=native {capture.local.clone()}else{view.ok_or_else(||storage("missing incremental input view"))?.local_statistics().await?};
+            let pending=if let Some(capture)=native {&capture.pending}else{&view.unwrap().pending_seals};
             if local.len()!=previous.segments.len()+pending.len()+1{return Err(storage("selected segment/view mismatch"));}
             let mut local=local.into_iter();let tail=local.next().unwrap();
             for (segment,active) in pending.iter().chain(previous.segments.iter()).zip(local) {
@@ -508,7 +570,7 @@ pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&Stat
     ->Result<(Vec<u8>,crate::storage::build_budget::MemoryLease,crate::storage::build_budget::DiskScope),RecordError>{
     let disk=crate::storage::build_budget::DiskScope::begin(root,closure_limit(config.max_journal_bytes)?).map_err(storage)?;
     let encoded=checkpoint_codec::StateEncoding::new(state)?;
-    let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None).await?;
+    let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None,None,None).await?;
     let verified=reference.load_verified_encoded(root,config,&encoded).await?;
     drop(verified); // Close all mappings before later Windows root publication.
     let estimate=checkpoint_codec::json_length(&reference)?.checked_add(64).ok_or_else(||storage("snapshot authority overflow"))?;
@@ -544,7 +606,7 @@ impl Inner {
         }
         result
     }
-    async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
+    pub(super) async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
         let root=self.journal.root().to_path_buf();
         let target=root.join(format!("segment-{:032x}",rand::random::<u128>()));
         let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
@@ -566,33 +628,29 @@ impl Inner {
     pub(super) async fn maintain_index_tail(&mut self)->Result<(),RecordError> {
         self.index.drain_batch_prefix(self.state.seq).await?;
         if self.background.is_some(){return Err(RecordError::Busy);}
+        if self.state.private_cleanup_pending {return Err(self.request_checkpoint("private_cleanup"));}
+        // The certificate continues selecting its own immutable packages. The
+        // live derived view has an independent finite component allowance plus
+        // one successor, so foreground writes can proceed during a merge.
+        let limit=capacity::segments(&self.config)+1;
+        if self.index.components().await.len()>=limit {
+            return Err(self.request_checkpoint(cache_merge::CAUSE));
+        }
         let root=self.journal.root().to_path_buf();
-        let selected=self.anchor.as_ref().map_or(0,|a|a.segments.len());
-        let captured=self.anchor.as_ref().is_some_and(|a|a.captured.get().is_some());
-        let mut fallback=maintenance::seal_fallback(self.state.private_cleanup_pending,captured,
-            selected,self.index.pending_seals.len(),capacity::segments(&self.config),true);
-        if fallback.is_none() && self.index.stable_tail_path(&root).await.is_none() {
-            fallback=Some(maintenance::SealFallback::UnstableTail);
-        }
-        log::info!("record_maintenance cause=tail_admission seq={} fallback={:?} selected={} pending={} package_limit={}",
-            self.state.seq,fallback,selected,self.index.pending_seals.len(),capacity::segments(&self.config));
-        let _phase=maintenance::Phase::new("tail_maintenance",self.state.seq);
-        if fallback.is_some() {return Err(self.request_checkpoint("tail_requires_checkpoint"));}
-        #[cfg(feature="s3-object-store")]
-        if let Some(remote)=self.remote.as_ref() {
-            if let Err(error)=remote.verify_seal_inputs(self.anchor.as_ref().unwrap(),self.state.seq,&mut self.journal,self.config.max_journal_bytes).await {
-                if matches!(error,RecordError::Busy) {return Err(error);}
-                self.healthy=false;
-                self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
-                return Err(error);
-            }
-        }
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
-        self.anchor.as_ref().unwrap().verify_live_suffix(&root,&self.config,&self.state,&mut self.journal,&self.index.pending_seals)?;
-        if self.index.local_statistics().await?.first().is_none_or(|s|s.keys.is_empty()){return Ok(());}
-        self.stage_stable_tail().await?;
-        #[cfg(feature="s3-object-store")]
-        self.publish_remote_index_tail().await?;
+        let target=root.join(format!("cache-{:032x}",rand::random::<u128>()));
+        let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
+        successor.read().await.record_lexical[0].admit_writer().await?;
+        let budget=view::RotationBudget{max_segments:limit,max_address_slots:cache_merge::address_limit(&self.config)?};
+        let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
+        self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+        self.healthy=false;
+        self.index.seal_cache_into_successor(successor,&mut self.ordinals,&mut self.locations,budget).await?;
+        self.healthy=true;
+        self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
+        if self.index.components().await.len()>=limit && self.maintenance_requested.is_none() {
+            self.maintenance_requested=Some(cache_merge::CAUSE);
+        }
         Ok(())
     }
     pub(super) async fn ensure_journal_room(&mut self,bytes:usize,reserve:usize)->Result<(),RecordError> {
@@ -615,12 +673,33 @@ impl Inner {
     async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
         self.index.drain_batch_prefix(self.state.seq).await?;
         let _phase=maintenance::Phase::new("full_checkpoint",self.state.seq);
+        #[cfg(feature="s3-object-store")]
+        if let Some(remote)=self.remote.as_ref() {
+            if let Err(error)=remote.verify_seal_inputs(self.anchor.as_ref(),self.state.seq,&mut self.journal,self.config.max_journal_bytes).await {
+                if matches!(error,RecordError::Busy){return Err(error);}
+                self.healthy=false;
+                self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+                return Err(error);
+            }
+        }
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
+        if self.index.detached_cache {
+            // A disposable cache no longer has the certificate's topology.
+            // Full authority replacement must still authenticate its original
+            // selected closure and WAL, never certify over hidden corruption.
+            let source=maintenance::SourceProof::capture(self)?;
+            if let Err(error)=source.verify(&root,&self.config,&self.state) {
+                if matches!(error,RecordError::Busy){return Err(error);}
+                self.healthy=false;
+                self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+                return Err(RecordError::RecoveryRequired);
+            }
+        }
         // Pre-admit a separate writer before making the current tail immutable.
         // Explicit replacement/compaction remains on the authoritative rebuild path.
-        if candidate.is_none() && reuse && self.anchor.as_ref().is_some_and(|a|
+        if candidate.is_none() && reuse && !self.index.detached_cache && self.anchor.as_ref().is_some_and(|a|
             a.segments.len()+self.index.pending_seals.len()+1<capacity::segments(&self.config))
             && self.index.stable_tail_path(&root).await.is_some()
             && self.index.local_statistics().await?.first().is_some_and(|s|!s.keys.is_empty()) {
@@ -634,7 +713,7 @@ impl Inner {
         let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",next.seq);checkpoint_codec::StateEncoding::new(next)?};
         let snapshot_bytes=encoded.checkpoint_length(&self.config)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
-        let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None}).await?;
+        let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None},None,None).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));
@@ -664,7 +743,19 @@ impl Inner {
             remote.publish_anchor(&root,&reference,&loaded.payloads,next_seq,self.config.max_journal_bytes,false).await?;
         }
         let journal_phase=maintenance::Phase::new("journal_certificate_install",next_seq);
-        let journal_result=self.journal.checkpoint(&payload);
+        #[cfg(test)] indexer::pause_journal_install(&root).await;
+        // Remote publication and native sealing have finished. The local
+        // generation, all witnesses and PUBLISHED share one synchronous loan.
+        let permit = match crate::resources::Scope::current() {
+            Some(scope) => scope.journal_io().await.map(Some)
+                .map_err(|error| CreateError::NotPublished(std::io::Error::other(error))),
+            None => Ok(None),
+        };
+        let journal_result = match permit {
+            Ok(Some(permit)) => permit.run(|| self.journal.checkpoint(&payload)),
+            Ok(None) => self.journal.checkpoint(&payload),
+            Err(error) => Err(error),
+        };
         drop(journal_phase);
         match journal_result{
             Ok(())=>{},
@@ -735,6 +826,26 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn legacy_statistics_migrate_revision_identity_on_package_open() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        p.write(write("a", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
+        let inner = p.inner.lock().await;
+        let (package, mut active) = segment::Package::prepare(&root, &inner.config, &inner.state, None).await.unwrap();
+        let expected = active.revisions.clone();
+        active.revisions.clear(); active.fingerprints.clear();
+        let old = serde_json::to_value(&active).unwrap();
+        assert!(old.get("revisions").is_none());
+        let old: crate::active::ActiveStatistics = serde_json::from_value(old).unwrap();
+        let restored = package.load(&root, &inner.config, old).await.unwrap();
+        let root = restored.read().await;
+        let shard = root.shard_vec[0].read().await;
+        assert_eq!(shard.active.as_ref().unwrap().revisions, expected);
+        assert!(shard.active.as_ref().unwrap().is_live(0));
+    }
+
     #[tokio::test]
     async fn manifest_writer_and_reader_agree_at_exact_byte_boundary() {
         let root=tempfile::tempdir().unwrap();
@@ -955,7 +1066,8 @@ mod tests {
         let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
         let request=write("oversized-analysis","a",&"a ".repeat(300_000),ExpectedVersion::Absent);
         assert!(build_budget::document_estimate(request.document.as_ref().unwrap(), &settings.schema).unwrap() > crate::storage::build_budget::BUILD_MEMORY);
-        assert!(matches!(p.write(request).await,Err(RecordError::Rejected(message)) if message.contains("build admission")));
+        let error = p.write(request).await.unwrap_err();
+        assert!(matches!(&error, RecordError::Rejected(message) if message.contains("record build resource budget exceeded: class=single")), "{error:?}");
         assert_eq!(p.inner.lock().await.state.seq,0);
         let accepted=write("oversized-analysis","a","alpha",ExpectedVersion::Absent);
         p.write(accepted.clone()).await.unwrap();p.compact_journal().await.unwrap();
@@ -983,14 +1095,14 @@ mod tests {
         let selected=p.inner.lock().await.anchor.as_ref().unwrap().id.clone();
         let mut receipts=Vec::new();
         for n in 0..129 {let req=write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(req.clone()).await.unwrap();receipts.push((req,receipt));}
-        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().id,selected,"native rotation must not replace the State checkpoint");assert_eq!(inner.index.pending_seals.len(),1);}
+        {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().id,selected,"native rotation must not replace the State checkpoint");assert!(inner.index.detached_cache);assert_eq!(inner.index.components().await.len(),3);}
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],200).await.unwrap().count_total,130);
         drop(p);
         std::fs::write(path.join(".test-recovery-after-derived-seal"),b"fail").unwrap();
         let mut leftovers=None;
         for _ in 0..3 {
             assert!(RecordPartition::open(&path,settings.max_journal_bytes).await.is_err());
-            let count=std::fs::read_dir(&path).unwrap().filter_map(Result::ok).filter(|e|e.file_name().to_string_lossy().starts_with("segment-")).count();
+            let count=std::fs::read_dir(&path).unwrap().filter_map(Result::ok).filter(|e|{let name=e.file_name();let name=name.to_string_lossy();name.starts_with("segment-")||name.starts_with("cache-")}).count();
             if let Some(expected)=leftovers {assert_eq!(count,expected,"interrupted recovery cannot accumulate derived packages");} else {leftovers=Some(count);}
         }
         std::fs::remove_file(path.join(".test-recovery-after-derived-seal")).unwrap();
@@ -1001,23 +1113,23 @@ mod tests {
         p.compact_journal().await.unwrap();assert_ne!(p.inner.lock().await.anchor.as_ref().unwrap().id,selected);
     }
     #[tokio::test]
-    async fn derived_package_bound_falls_back_to_checkpoint_without_dropping_records() {
+    async fn derived_package_bound_merges_without_changing_checkpoint_or_dropping_records() {
         let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let settings=config();
         let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
         p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
         let original=p.inner.lock().await.anchor.as_ref().unwrap().id.clone();
         let bound=capacity::segments(&settings);
         for n in 0..bound {
-            p.write(write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
+            super::super::tests::write_after_maintenance(&p,write(&format!("op-{n}"),&format!("r-{n}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
             let result=p.inner.lock().await.maintain_index_tail().await;
-            if matches!(result,Err(RecordError::Busy)) {
-                p.kick_maintenance().await;super::super::tests::wait_maintenance_idle(&p).await;
-            } else {result.unwrap();}
+            if !matches!(result,Err(RecordError::Busy)) {result.unwrap();}
+            p.kick_maintenance().await;super::super::tests::wait_maintenance_idle(&p).await;
             let inner=p.inner.lock().await;
             assert!(inner.index.local_statistics().await.unwrap().len()<=bound+1);
             assert!(inner.anchor.as_ref().unwrap().segments.len()<=bound);
         }
-        assert_ne!(p.inner.lock().await.anchor.as_ref().unwrap().id,original);
+        p.kick_maintenance().await;super::super::tests::wait_maintenance_idle(&p).await;
+        assert_eq!(p.inner.lock().await.anchor.as_ref().unwrap().id,original);
         drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
         assert_eq!(query(&p,SearchMode::Lexical).await.hits.len(),bound+1);
         assert_eq!(p.inner.lock().await.state.operations.len(),bound+1);
@@ -1053,27 +1165,31 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn seal_proof_rejects_old_closure_or_semantic_wal_damage_before_handoff() {
-        for target in ["payload","state","pending","wal"] {
+    async fn checkpoint_proof_rejects_old_closure_or_semantic_wal_damage_after_cache_rotation() {
+        for target in ["payload","state","selected","wal"] {
             let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");let settings=config();
             let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
             for id in ["a","b"] {p.write(write(id,id,"alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();}
             p.write(write("c","c","alpha",ExpectedVersion::Absent)).await.unwrap();
-            let mut inner=p.inner.lock().await;inner.maintain_index_tail().await.unwrap();
-            let tail=inner.index.stable_tail_path(&path).await.unwrap();let pending=inner.index.pending_seals.len();
-            if target=="wal" {inner.journal.append(br#"{"RecordFeedTrimV12":{"previous":0,"floor":999999,"at":0}}"#).unwrap();}
-            else {
-                let file=match target {
-                    "payload"=>path.join(format!("payload-{}",inner.payloads.objects.keys().next().unwrap())),
-                    "state"=>{let block=&inner.anchor.as_ref().unwrap().state_blocks[0];directory(&path,&block.id).unwrap().join(&block.files[0].path)},
-                    _=>{let package=&inner.index.pending_seals[0];package.path(&path).unwrap().join(&package.files[0].path)},
-                };
-                use std::io::{Seek,Write};let mut file=std::fs::OpenOptions::new().write(true).open(file).unwrap();
-                file.seek(std::io::SeekFrom::End(0)).unwrap();file.write_all(b"corrupt").unwrap();file.sync_all().unwrap();
-            }
-            assert!(inner.maintain_index_tail().await.is_err(),"{target}");
-            assert_eq!(inner.index.stable_tail_path(&path).await.unwrap(),tail,"verify before handoff");
-            assert_eq!(inner.index.pending_seals.len(),pending);
+            let selected={
+                let mut inner=p.inner.lock().await;inner.maintain_index_tail().await.unwrap();
+                let selected=inner.anchor.as_ref().unwrap().id.clone();
+                if target=="wal" {inner.journal.append(br#"{"RecordFeedTrimV12":{"previous":0,"floor":999999,"at":0}}"#).unwrap();}
+                else {
+                    let file=match target {
+                        "payload"=>path.join(format!("payload-{}",inner.payloads.objects.keys().next().unwrap())),
+                        "state"=>{let block=&inner.anchor.as_ref().unwrap().state_blocks[0];directory(&path,&block.id).unwrap().join(&block.files[0].path)},
+                        _=>{let package=&inner.anchor.as_ref().unwrap().segments[0];package.path(&path).unwrap().join(&package.files[0].path)},
+                    };
+                    use std::io::{Seek,Write};let mut file=std::fs::OpenOptions::new().write(true).open(file).unwrap();
+                    file.seek(std::io::SeekFrom::End(0)).unwrap();file.write_all(b"corrupt").unwrap();file.sync_all().unwrap();
+                }
+                selected
+            };
+            assert!(p.compact_journal().await.is_err(),"{target}");
+            assert_eq!(p.inner.lock().await.anchor.as_ref().unwrap().id,selected,"corrupt authority must not be replaced");
+            drop(p);
+            assert!(RecordPartition::open(&path,settings.max_journal_bytes).await.is_err(),"{target}");
         }
     }
     #[tokio::test]
@@ -1289,7 +1405,8 @@ mod tests {
             assert!(reference.segments.len()<=8);
             if round==0 {
                 assert_eq!(reference.segments.len(),2);
-                assert_eq!(reference.segments[0].id,first.id);
+                assert!(reference.segments.iter().any(|segment| segment.id == first.id),
+                    "the retained package may move when the new tail is prepended");
                 assert_eq!(serde_json::to_vec(&files(&first.path(&root).unwrap(),closure_limit(settings.max_journal_bytes).unwrap()).unwrap()).unwrap(),fingerprint);
             }
             for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {
@@ -1305,7 +1422,11 @@ mod tests {
         let receipt=p.write(tail.clone()).await.unwrap();drop(p);
         p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.write(tail).await.unwrap(),receipt);
-        let inner=p.inner.lock().await;let selected=inner.anchor.as_ref().unwrap().segments.iter().map(|s|s.id.clone()).collect::<std::collections::BTreeSet<_>>();
+        let inner=p.inner.lock().await;let mut selected=inner.anchor.as_ref().unwrap().segments.iter().map(|s|s.id.clone()).collect::<std::collections::BTreeSet<_>>();
+        // Recovery owns a mutable successor in addition to the certified frozen
+        // closure. Account for that exact tail, while still rejecting orphans.
+        let tail = inner.index.stable_tail_path(&root).await.unwrap();
+        selected.insert(tail.file_name().unwrap().to_str().unwrap().strip_prefix("segment-").unwrap().to_owned());
         let actual=std::fs::read_dir(&root).unwrap().map(Result::unwrap).filter_map(|e|e.file_name().to_str().and_then(|s|s.strip_prefix("segment-")).map(str::to_owned)).collect::<std::collections::BTreeSet<_>>();
         assert_eq!(actual,selected);
         drop(inner);drop(p);drop(oracle);std::fs::remove_dir_all(root).unwrap();std::fs::remove_dir_all(oracle_root).unwrap();

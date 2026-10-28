@@ -211,7 +211,7 @@ impl RemotePersistence {
     }
     /// Authenticate the existing remote authority without advancing its recovery
     /// baseline. Local pending packages are derived caches, never remote authority.
-    pub(super) async fn verify_seal_inputs(&self, reference:&anchor::Reference, seq:u64,
+    pub(super) async fn verify_seal_inputs(&self, reference:Option<&anchor::Reference>, seq:u64,
         journal:&mut PartitionJournal, authority_budget:u64)->Result<(),RecordError> {
         let authority=self.authority.lock().await;
         let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
@@ -219,9 +219,14 @@ impl RemotePersistence {
             return Err(RecordError::RecoveryRequired);
         }
         let store=self.store.uncached();
+        let bootstrap = if head.manifest.is_none() {
+            if reference.is_some(){return Err(RecordError::RecoveryRequired);}
+            Some(store.get_verified(head.bootstrap.as_ref().ok_or(RecordError::RecoveryRequired)?).await.map_err(remote_read_error)?)
+        } else {None};
+        if head.manifest.is_some() {
         let selected=self.selected(&head,true).await?;
         let checkpoint=&selected.checkpoint;
-        if checkpoint_codec::json_digest(&checkpoint.anchor)?!=checkpoint_codec::json_digest(reference)? {
+        if checkpoint_codec::json_digest(&checkpoint.anchor)?!=checkpoint_codec::json_digest(reference.ok_or(RecordError::RecoveryRequired)?)? {
             return Err(storage("remote seal authority mismatch"));
         }
         // Fresh backend reads preserve the publication-time corruption check.
@@ -242,10 +247,13 @@ impl RemotePersistence {
             let digest:[u8;32]=hash.finalize().into();
             if length!=file.length || digest!=file.sha256 {return Err(storage("remote seal file checksum"));}
         }
+        }
         let entries=crate::storage::object_log::load_committed_entries_after(&store,&head,head.log_base_seq,self.max_tail_blocks,self.max_tail_bytes).await.map_err(|e|match e {crate::storage::object_log::TailError::ObjectStore(e)=>remote_read_error(e),other=>storage(other)})?;
         let mut index=0usize;let mut first=true;
         journal.visit_committed(|bytes| {
-            if first {first=false;return Ok(());}
+            if first {first=false;
+                if bootstrap.as_ref().is_some_and(|initial|initial.as_ref()!=bytes){return Err(std::io::Error::other("remote/local bootstrap differs"));}
+                return Ok(());}
             let Some(entry)=entries.get(index) else{return Err(std::io::Error::other("local suffix exceeds remote authority"));};
             if entry.payload!=bytes || entry.request_sha256!=<[u8;32]>::from(Sha256::digest(bytes)) {
                 return Err(std::io::Error::other("remote/local suffix differs"));
@@ -840,7 +848,8 @@ mod tests {
             std::fs::write(root.join(fault),b"fail").unwrap();
             {
                 let mut inner=p.inner.lock().await;
-                assert!(inner.maintain_index_tail().await.is_err());
+                inner.stage_stable_tail().await.unwrap();
+                assert!(inner.publish_remote_index_tail().await.is_err());
                 assert_eq!(inner.healthy,!after);
                 let remote=inner.remote.as_ref().unwrap();
                 let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
@@ -865,7 +874,7 @@ mod tests {
         p.compact_journal().await.unwrap();
         let request=write("tail","tail","alpha tail",ExpectedVersion::Absent);
         let receipt=p.write(request.clone()).await.unwrap();
-        p.inner.lock().await.maintain_index_tail().await.unwrap();
+        {let mut inner=p.inner.lock().await;inner.stage_stable_tail().await.unwrap();inner.publish_remote_index_tail().await.unwrap();}
         {
             let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
             let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
@@ -983,9 +992,9 @@ mod tests {
         let mut receipts=Vec::new();
         for i in 0..129 {let request=write(&format!("op{i}"),&format!("r{i}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(request.clone()).await.unwrap();receipts.push((request,receipt));}
         {let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
-            assert_eq!(head.indexed_seq,129);assert_eq!(head.log_base_seq,before.log_base_seq);assert_ne!(head.manifest,before.manifest);
-            assert_eq!(head.committed_seq,130);assert!(!inner.index.pending_seals.is_empty());
-            let selected=remote.selected(&head,true).await.unwrap();assert_eq!(selected.checkpoint_ref,before.manifest.clone().unwrap());assert!(selected.index.is_some());}
+            assert_eq!(head.indexed_seq,before.indexed_seq);assert_eq!(head.log_base_seq,before.log_base_seq);assert_eq!(head.manifest,before.manifest);
+            assert_eq!(head.committed_seq,130);assert!(inner.index.components().await.len()>1);
+            let selected=remote.selected(&head,true).await.unwrap();assert_eq!(selected.checkpoint_ref,before.manifest.clone().unwrap());assert!(selected.index.is_none());}
         let expected=scores(&p).await;
         let p=cold(p,&root,clock).await;
         assert_eq!(scores(&p).await,expected);
@@ -1022,17 +1031,56 @@ mod tests {
         p.write(write("seed","seed","alpha",ExpectedVersion::Absent)).await.unwrap();
         p.compact_journal().await.unwrap();
         p.write(write("tail","tail","alpha",ExpectedVersion::Absent)).await.unwrap();
-        let governor=Arc::new(Governor::default());let scope=governor.admit("seal".into(),Lane::Foreground,0).unwrap();
-        let one=scope.io().unwrap();let two=scope.io().unwrap();
-        let result=scope.run(async {p.inner.lock().await.maintain_index_tail().await}).await;
-        assert!(matches!(result,Err(RecordError::Busy)));assert!(p.inner.lock().await.healthy);
-        drop(one);drop(two);
+        // Explicit compaction now uses the owned background lane. Saturate its
+        // per-subject I/O allowance, retaining the same refusal/fencing oracle.
+        let governor=Arc::new(Governor::default());let scope=governor.admit("seal".into(),Lane::Background,0).unwrap();
+        let one=scope.io().unwrap();
+        let result=scope.run(p.compact_journal()).await;
+        assert!(matches!(result,Err(RecordError::Busy)),"{result:?}");
+        assert!(p.inner.lock().await.healthy);assert_eq!(p.statistics().await.unwrap().visible_seq,2);
+        drop(one);
         p.write(write("after-busy","third","alpha",ExpectedVersion::Absent)).await.unwrap();
         let tip={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head.wal_tip.unwrap()};
         use object_store::ObjectStore;
         backend.put(&object_store::path::Path::from(tip.key),object_store::PutPayload::from_static(b"corrupt")).await.unwrap();
-        assert!(p.inner.lock().await.maintain_index_tail().await.is_err());
+        // Derived rotation does not certify or replace the remote WAL.
+        // Authority publication must still detect corruption and fence.
+        p.inner.lock().await.maintain_index_tail().await.unwrap();
+        assert!(p.compact_journal().await.is_err());
         assert!(!p.inner.lock().await.healthy);
+    }
+
+    #[tokio::test]
+    async fn first_checkpoint_rejects_corrupt_remote_wal_without_replacing_head() {
+        let (p,backend,_root,_db,_clock)=source().await;
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let before={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
+            let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head};
+        assert!(before.manifest.is_none());
+        use object_store::ObjectStore;
+        backend.put(&object_store::path::Path::from(before.wal_tip.as_ref().unwrap().key.clone()),object_store::PutPayload::from_static(b"corrupt")).await.unwrap();
+        assert!(p.compact_journal().await.is_err());
+        let inner=p.inner.lock().await;
+        assert!(!inner.healthy);
+        let remote=inner.remote.as_ref().unwrap();
+        assert_eq!(remote.authority.lock().await.read_head("source").unwrap().unwrap(),before);
+    }
+    #[tokio::test]
+    async fn compact_owned_job_authenticates_remote_wal_before_and_after_anchor() {
+        for anchored in [false,true] {
+            let (p,backend,_root,_db,_clock)=source().await;
+            p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+            if anchored {p.start_compact_job().unwrap().finish().await.unwrap();}
+            p.write(write("second","b","beta",ExpectedVersion::Absent)).await.unwrap();
+            let before={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
+                let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head};
+            use object_store::ObjectStore;
+            backend.put(&object_store::path::Path::from(before.wal_tip.as_ref().unwrap().key.clone()),object_store::PutPayload::from_static(b"corrupt")).await.unwrap();
+            assert!(matches!(p.start_compact_job().unwrap().finish().await,Err(RecordError::RecoveryRequired)));
+            let inner=p.inner.lock().await;assert!(!inner.healthy);assert!(inner.background.is_none());
+            let remote=inner.remote.as_ref().unwrap();
+            assert_eq!(remote.authority.lock().await.read_head("source").unwrap().unwrap(),before);
+        }
     }
 
     #[tokio::test]
@@ -1284,11 +1332,16 @@ mod tests {
             .unwrap();
         let page = p.changes(None, 10).await.unwrap();
         let cursor = page.next;
-        let (seq, floor) = {
+        {
             let mut inner = p.inner.lock().await;
             let future = clock.0.load(Ordering::SeqCst) + inner.config.change_feed.retention_ms + 1;
             clock.0.store(future, Ordering::SeqCst);
-            inner.trim_feed(future).await.unwrap();
+            assert!(matches!(inner.trim_feed(future).await, Err(RecordError::Busy)));
+        }
+        p.kick_maintenance().await;
+        super::super::tests::settle_maintenance(&p).await;
+        let (seq, floor) = {
+            let inner = p.inner.lock().await;
             assert!(inner.state.feed.floor > 0);
             let r = inner.remote.as_ref().unwrap();
             let h = r
@@ -1488,6 +1541,7 @@ mod tests {
         assert!(matches!(p.generation_status("doc").await,Err(RecordError::DurablePending(3))));
         assert!(p.output_permit().is_err());
         let p=cold(p,&root,clock).await;
+        super::super::tests::settle_maintenance(&p).await;
         assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
         assert_eq!(p.write(stage).await.unwrap(),receipt);
         assert!(p.get("a").await.unwrap().is_none());
