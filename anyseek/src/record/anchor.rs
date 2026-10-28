@@ -101,7 +101,10 @@ impl NativeReuse {
             previous.segments.len()+inner.index.pending_seals.len()>=capacity::segments(&inner.config)) {return Ok(None);}
         // Refuse known I/O saturation before preparing or sealing a successor.
         // Actual handoff I/O retains its own admission and failure fencing.
-        let _io=crate::resources::io_scope(crate::resources::Lane::Background).io().map_err(|_|RecordError::Busy)?;
+        let probe=crate::resources::io_scope(crate::resources::Lane::Background).io().map_err(|_|RecordError::Busy)?;
+        // Statistics await shard locks. Their writer may be awaiting I/O, so a
+        // preflight probe must never retain capacity across that lock boundary.
+        drop(probe);
         let bytes=(inner.index.statistics_wire_length().await? as u64).checked_mul(64)
             .and_then(|n|n.checked_add(1024*1024)).ok_or_else(||storage("native capture metadata overflow"))?;
         #[cfg(test)]
@@ -740,7 +743,19 @@ impl Inner {
             remote.publish_anchor(&root,&reference,&loaded.payloads,next_seq,self.config.max_journal_bytes,false).await?;
         }
         let journal_phase=maintenance::Phase::new("journal_certificate_install",next_seq);
-        let journal_result=self.journal.checkpoint(&payload);
+        #[cfg(test)] indexer::pause_journal_install(&root).await;
+        // Remote publication and native sealing have finished. The local
+        // generation, all witnesses and PUBLISHED share one synchronous loan.
+        let permit = match crate::resources::Scope::current() {
+            Some(scope) => scope.journal_io().await.map(Some)
+                .map_err(|error| CreateError::NotPublished(std::io::Error::other(error))),
+            None => Ok(None),
+        };
+        let journal_result = match permit {
+            Ok(Some(permit)) => permit.run(|| self.journal.checkpoint(&payload)),
+            Ok(None) => self.journal.checkpoint(&payload),
+            Err(error) => Err(error),
+        };
         drop(journal_phase);
         match journal_result{
             Ok(())=>{},

@@ -187,13 +187,21 @@ impl Drop for Lease {
 #[derive(Clone)]
 pub struct Scope { governor: Arc<Governor>, subject: String, lane: Lane, _entry: Option<Arc<Lease>> }
 tokio::task_local! { static CURRENT: Scope; }
-// Synchronous only: a complete journal frame borrows one pre-admitted permit.
-// This context is never inherited by tasks or native index workers.
+// A complete file transaction borrows one pre-admitted permit in this task.
+// This context is never inherited by spawned tasks or native index workers.
 tokio::task_local! { static JOURNAL_IO: Scope; }
 pub(crate) struct JournalIo { scope: Scope, _lease: Lease }
 impl JournalIo {
     pub(crate) fn run<T>(self, work: impl FnOnce() -> T) -> T {
         JOURNAL_IO.sync_scope(self.scope.clone(), work)
+    }
+    /// Keep ownership through a serial file-only async transaction. Do not
+    /// enter native/S3 operations that independently acquire the same permit.
+    /// Children spawned by the transaction deliberately do not inherit its loan.
+    pub(crate) async fn run_async<F: Future>(self, work: F) -> F::Output {
+        let result = JOURNAL_IO.scope(self.scope.clone(), work).await;
+        drop(self);
+        result
     }
 }
 impl Scope {
@@ -235,9 +243,13 @@ impl Scope {
     /// File leaves within a journal transaction share its permit, never another
     /// subject's/lane's capacity. All other file operations keep immediate admission.
     pub(crate) fn file_io(&self) -> Result<Option<Lease>, Busy> {
-        let borrowed = JOURNAL_IO.try_with(|scope| Arc::ptr_eq(&scope.governor, &self.governor)
-            && scope.subject == self.subject && scope.lane == self.lane).unwrap_or(false);
-        if borrowed { Ok(None) } else { self.io().map(Some) }
+        if self.has_file_io_loan() { Ok(None) } else { self.io().map(Some) }
+    }
+    /// Check only the currently polled transaction; never return an unowned
+    /// borrowed permit that could escape its owner's lifetime.
+    pub(crate) fn has_file_io_loan(&self) -> bool {
+        JOURNAL_IO.try_with(|scope| Arc::ptr_eq(&scope.governor, &self.governor)
+            && scope.subject == self.subject && scope.lane == self.lane).unwrap_or(false)
     }
     /// Use an independent I/O class while retaining the caller's accepted task reservation.
     pub fn in_lane(mut self, lane: Lane) -> Self { self.lane = lane; self }
@@ -278,6 +290,25 @@ impl std::fmt::Debug for Buffer { fn fmt(&self, f: &mut std::fmt::Formatter<'_>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "current_thread")]
+    async fn file_io_async_loan_survives_yield_without_escaping_to_children() {
+        let scope = Arc::new(Governor::default()).admit("async-file".into(), Lane::Background, 0).unwrap();
+        scope.clone().run(async {
+            let permit = scope.journal_io().await.unwrap();
+            permit.run_async(async {
+                assert!(scope.has_file_io_loan());
+                tokio::task::yield_now().await;
+                assert!(scope.file_io().unwrap().is_none());
+                let child_scope = scope.clone();
+                assert!(spawn(async move {
+                    !child_scope.has_file_io_loan() && child_scope.file_io().is_err()
+                }).await.unwrap());
+                assert!(scope.io().is_err(), "transaction still owns real capacity");
+            }).await;
+            assert!(!scope.has_file_io_loan());
+            assert!(scope.io().is_ok());
+        }).await;
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn journal_io_loan_is_synchronous_scoped_and_covers_both_witnesses() {
         let root = tempfile::tempdir().unwrap();

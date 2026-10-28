@@ -321,8 +321,19 @@ impl RecordPartition {
                 // before the new local generation acquires its certificate.
                 let journal_result = {
                     let _phase=maintenance::Phase::new("background_journal_install_locked",inner.state.seq);
+                    #[cfg(test)] pause_journal_install(&root).await;
+                    let permit = match crate::resources::Scope::current() {
+                        Some(scope) => scope.journal_io().await.map(Some)
+                            .map_err(|error| CreateError::NotPublished(std::io::Error::other(error))),
+                        None => Ok(None),
+                    };
                     let Inner{journal,background,..} = &mut *inner;
-                    journal.checkpoint_with_tail(&certificate,&background.as_ref().unwrap().entries)
+                    let mut install = || journal.checkpoint_with_tail(&certificate,&background.as_ref().unwrap().entries);
+                    match permit {
+                        Ok(Some(permit)) => permit.run(install),
+                        Ok(None) => install(),
+                        Err(error) => Err(error),
+                    }
                 };
                 #[cfg(test)]
                 let journal_result=if mode==JobMode::Compact && root.join(".test-checkpoint-before-certificate").exists() {
@@ -468,9 +479,94 @@ async fn pause_catchup(root:&Path,timeout:Duration) {
 }
 
 #[cfg(test)]
+pub(super) async fn pause_journal_install(root: &Path) {
+    let gate = root.join(".test-journal-io-pause");
+    if gate.exists() {
+        std::fs::write(root.join(".test-journal-io-started"), b"ready").unwrap();
+        while gate.exists() { tokio::time::sleep(Duration::from_millis(1)).await; }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use super::super::tests::{config,path,write,source_write,query};
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_native_probe_releases_io_before_waiting_for_shard_statistics() {
+        use std::{future::Future, io::Write, task::Poll};
+        let temp = tempfile::tempdir().unwrap(); let root = temp.path().join("records");
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("native-probe".into(), crate::resources::Lane::Background, 0).unwrap();
+        let p = scope.clone().run(RecordPartition::create(&root, config())).await.unwrap();
+        scope.clone().run(p.write(write("first", "a", "alpha", ExpectedVersion::Absent))).await.unwrap();
+        scope.clone().run(p.compact_journal()).await.unwrap();
+        let inner = p.inner.lock().await;
+        let shard = inner.index.test_index().read().await.shard_vec[0].clone();
+        let guard = shard.write().await;
+        {
+        let admission = scope.clone().run(anchor::NativeReuse::admit(&inner));
+        tokio::pin!(admission);
+        // Poll exactly through the I/O probe to the contested shard lock; no
+        // timing assumption or background scheduling is needed for this edge.
+        assert!(std::future::poll_fn(|cx| Poll::Ready(admission.as_mut().poll(cx).is_pending())).await);
+        let permit = tokio::time::timeout(Duration::from_secs(5), scope.journal_io()).await.unwrap().unwrap();
+        permit.run(|| scope.clone().run_sync(|| {
+            let mut file = crate::storage::build_budget::File::create(temp.path().join("guard-owner-io")).unwrap();
+            file.write_all(b"guard owner completes its I/O").unwrap();
+        }));
+        drop(guard);
+        assert!(admission.await.unwrap().is_some());
+        }
+        // Saturation already present at entry still refuses before any handoff.
+        let held = scope.io().unwrap();
+        assert!(matches!(scope.clone().run(anchor::NativeReuse::admit(&inner)).await, Err(RecordError::Busy)));
+        assert!(inner.healthy);
+        drop(held); drop(inner);
+        scope.run(p.write(write("second", "b", "alpha", ExpectedVersion::Absent))).await.unwrap();
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn checkpoint_io_loan_waits_after_native_work_and_preserves_suffix() {
+        for background in [false, true] {
+            let temp = tempfile::tempdir().unwrap(); let root = temp.path().join("records");
+            let scope = Arc::new(crate::resources::Governor::default())
+                .admit("checkpoint-io".into(), crate::resources::Lane::Background, 0).unwrap();
+            let p = scope.clone().run(RecordPartition::create(&root, config())).await.unwrap();
+            let first = write("first", "a", "alpha", ExpectedVersion::Absent);
+            let receipt = scope.clone().run(p.write(first.clone())).await.unwrap();
+            std::fs::write(root.join(".test-journal-io-pause"), b"pause").unwrap();
+            if background { std::fs::write(root.join(".test-indexer-pause"), b"pause").unwrap(); }
+            let owner = p.clone();
+            let task = tokio::spawn(scope.clone().run(async move {
+                if background { owner.compact_journal().await }
+                else { owner.inner.lock().await.publish_anchor().await }
+            }));
+            let mut second = None;
+            if background {
+                wait_started(&root).await;
+                let request = write("suffix", "b", "alpha", ExpectedVersion::Absent);
+                let receipt = scope.clone().run(p.write(request.clone())).await.unwrap();
+                second = Some((request, receipt));
+                std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !root.join(".test-journal-io-started").exists() { tokio::time::sleep(Duration::from_millis(1)).await; }
+            }).await.unwrap();
+            let held = scope.io().unwrap();
+            std::fs::remove_file(root.join(".test-journal-io-pause")).unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(!task.is_finished(), "generation must wait before touching its first file");
+            drop(held);
+            tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap().unwrap();
+            assert_eq!(scope.clone().run(p.write(first.clone())).await.unwrap(), receipt);
+            drop(p);
+            let p = scope.clone().run(RecordPartition::open(&root, config().max_journal_bytes)).await.unwrap();
+            assert_eq!(scope.clone().run(p.write(first)).await.unwrap(), receipt);
+            if let Some((request, receipt)) = second {
+                assert_eq!(scope.clone().run(p.write(request)).await.unwrap(), receipt);
+            }
+            assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), if background { 2 } else { 1 });
+        }
+    }
     async fn wait_started(root:&Path) {
         tokio::time::timeout(Duration::from_secs(5),async {
             while !root.join(".test-indexer-started").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }

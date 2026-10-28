@@ -95,3 +95,5 @@ I/O 争用修复接入：Runtime 的同步 native mutation/commit/reload/seal �
 第二次固定 release 实验（生产 `b121579`、CI 清单 head `97736d6`）：完整本地回归 531/0/13 及该 head 的五个必需 CI 任务均通过，但成对基准再次在 1040 接收、1024 回执/索引核验后中止。这次 native index_error 为空，物化 Journal 分段写入因 Background I/O 争用返回 OutcomeUnknown；没有重放该批次，也未运行 Meilisearch、查询和恢复阶段。需在 Journal frame/witness 开始前预占整个同步写事务的 I/O，并让内部 File 操作借用该租约；不能在帧写到一半时再进行会拒绝的独立准入。此第二处修复与新版本复验仍在进行，当前没有成对性能验收。
 
 Journal 事务准入小步：在本地完整 frame 与双 witness 开始前异步预占一个 I/O permit，File 只在同 governor/subject/lane 的同步事务中借用；该 loan 不传播给 spawn 或 native worker。11/11 专项通过（2 项 Journal、9 项资源），包括竞争解除后的写入与冷恢复幂等、真实 header 部分落盘后仍 OutcomeUnknown 并要求恢复。此时 vector/metadata live 提交、checkpoint、接收与终态的全链配额审查/专项仍在进行，不将单一 WAL 修复称作全链验收。
+
+Checkpoint 准入与锁序小步：两条 local generation/PUBLISHED 发布路径只在 remote/native 工作完成后取得同步 File 事务 loan；异步 File loan 保持真实租约到 future 完成，子任务不继承。indexer 组 15 通过、1 个原有子进程入口忽略，资源组 10/10。NativeReuse 的 I/O 探针现先释放，再等待 shard 统计锁；确定性的反向锁序与相关原生复用 4/4 通过。该修复未提高配额，真实落盘失败及远端已提交后的隔离保持不变。

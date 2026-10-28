@@ -151,5 +151,11 @@
   "record::lexical::runtime::tests::external_io_contention_waits_off_executor_and_commits_once",
   "record::lexical::runtime::tests::cancelled_flush_retains_runtime_pin_until_blocking_owner_finishes",
   "record::lexical::runtime::tests::drop_cancels_native_io_wait_without_waiting_for_external_holder",
-  "record::lexical::directory::tests::contended_metadata_lock_releases_io_for_lock_owner_and_can_cancel"
+  "record::lexical::directory::tests::contended_metadata_lock_releases_io_for_lock_owner_and_can_cancel",
+  "record::tests::journal_frame_waits_for_external_io_and_preserves_retry_on_reopen",
+  "record::tests::journal_frame_partial_write_still_reports_unknown_and_requires_recovery",
+  "resources::tests::journal_io_loan_is_synchronous_scoped_and_covers_both_witnesses",
+  "resources::tests::file_io_async_loan_survives_yield_without_escaping_to_children",
+  "record::indexer::tests::checkpoint_io_loan_waits_after_native_work_and_preserves_suffix",
+  "record::indexer::tests::compact_native_probe_releases_io_before_waiting_for_shard_statistics"
 ]
