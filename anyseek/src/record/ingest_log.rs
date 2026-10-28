@@ -325,7 +325,8 @@ impl Log {
         Ok(Some(Garbage { active: Some(old.active), control, root: old.root,
             selection_root: self.selection_root.clone(), segment: old.segment }))
     }
-    // Serial compatibility path for tests and startup callers with exclusive ownership.
+    // Serial compatibility path for tests with exclusive ownership.
+    #[cfg(test)]
     pub(super) fn compact(&mut self, events: &[Vec<u8>], completion_bytes: u64) -> Result<(), RecordError> {
         if self.failed { return Err(RecordError::RecoveryRequired); }
         self.cleanup_generations()?;
@@ -359,6 +360,7 @@ impl Log {
     pub(super) fn available(&self) -> u64 {
         self.max_bytes.saturating_sub(self.bytes())
     }
+    #[cfg(test)]
     pub(super) fn append<T: Serialize>(&mut self, value: &T) -> Result<(), RecordError> {
         self.append_serialized(&serde_json::to_vec(value).map_err(storage)?)
     }

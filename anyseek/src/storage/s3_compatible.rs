@@ -143,6 +143,7 @@ impl S3CompatibleStore {
     /// Conditionally create a new object, then read it back and verify exact bytes.
     /// A pre-existing key is an error even if the caller believes the bytes match;
     /// callers must resolve retries by deterministic key plus metadata, not overwrite.
+    #[cfg(test)]
     pub(crate) async fn put_verified(
         &self,
         key: &str,
@@ -408,6 +409,7 @@ impl S3CompatibleStore {
     /// Create a backup from the authority's current transitive object graph. Every
     /// manifest/WAL/segment object must have its child dependencies registered via
     /// register_object_edge before this call; missing registry entries fail closed.
+    #[cfg(test)]
     pub(crate) async fn create_authoritative_backup_bundle(
         &self,
         authority: &mut SqliteAuthority,

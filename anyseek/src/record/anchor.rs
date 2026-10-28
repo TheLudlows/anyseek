@@ -222,6 +222,7 @@ impl Frozen {
     }
 }
 impl Reference {
+    #[cfg(any(test,feature="s3-object-store"))]
     pub(super) fn identity(&self)->&str {&self.id}
     pub(super) fn retained_packages(&self)->&[segment::Package] {&self.segments}
     #[cfg(feature="s3-object-store")]
@@ -394,9 +395,6 @@ impl Reference {
         }
         Ok(())
     }
-    fn verify_live_suffix(&self,root:&Path,config:&RecordConfig,live:&State,journal:&mut PartitionJournal,pending:&[Frozen])->Result<(),RecordError>{
-        self.verify_suffix_with(root,config,live,pending,|accept|journal.visit_committed(accept))
-    }
     pub(super) fn verify_captured_suffix(&self,root:&Path,config:&RecordConfig,live:&State,frames:&[Vec<u8>],pending:&[Frozen])->Result<(),RecordError>{
         self.verify_suffix_with(root,config,live,pending,|accept|{for frame in frames {accept(frame)?;}Ok(())})
     }
@@ -530,6 +528,7 @@ impl Reference {
         let statistics:Statistics=serde_json::from_slice(&read_bounded(&path.join("statistics"),closure_limit(authority_budget)?)?).map_err(storage)?;
         Self::load_parts(root,config,state,payloads,&self.segments,statistics.segments).await
     }
+    #[cfg(feature="s3-object-store")]
     pub(super) async fn verify_derived_parts(root:&Path,config:&RecordConfig,state:&State,
         segments:&[segment::Package],statistics:Vec<crate::active::ActiveStatistics>)->Result<(),RecordError> {
         let verified=Self::load_parts(root,config,state,Closure::default(),segments,statistics).await?;
@@ -587,6 +586,7 @@ impl Inner {
 }
 
 impl Inner {
+    #[cfg(any(test,feature="s3-object-store"))]
     pub(super) async fn publish_anchor(&mut self)->Result<u64,RecordError>{
         self.publish_anchor_candidate(None,true).await
     }
@@ -1157,7 +1157,7 @@ mod tests {
             p.kick_maintenance().await;super::super::tests::wait_maintenance_idle(&p).await;
             {let inner=p.inner.lock().await;
                 if unknown {assert!(!inner.healthy);assert!(inner.output.read().unwrap().fenced);}
-                else {assert_ne!(inner.anchor.as_ref().unwrap().id,before);assert!(inner.journal.validate_append(size).is_ok());}
+                else {assert_ne!(inner.anchor.as_ref().unwrap().id,before);assert!(inner.journal.validate_append_with_reserve(size,0).is_ok());}
             }
             if unknown {std::fs::remove_file(path.join(".test-checkpoint-after-certificate")).unwrap();}
             drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();

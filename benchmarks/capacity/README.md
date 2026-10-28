@@ -1,9 +1,8 @@
 # Single-collection capacity boundary probes
 
-This staged repair measures finite capacity refusals; it is not yet a 100k
-benchmark or a Meilisearch ranking. See [baseline](BASELINE.md),
-[first repair](REPAIR-01.md), [both repairs](REPAIR-02.md), [ownership audit](../../docs/capacity-build-admission.md)
-and [remaining design](../../docs/capacity-100k-plan.md).
+This staged harness measures finite capacity refusals; it is not a 100k
+benchmark or a Meilisearch ranking. Historical baseline, repair, ownership-audit
+and capacity-plan records are retained in Git history.
 
 Inputs: the repository's pinned `miracl-corpus-v1.0-zh/manifest.json` and all ten
 shards; official MIRACL Chinese dev topics/qrels from

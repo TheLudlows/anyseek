@@ -27,10 +27,7 @@ pub(crate) struct Index {
     pub meta: IndexMetaObject,
     pub shard_number: usize,
     pub shard_vec: Vec<ShardArc>,
-    pub vector_precision: Precision,
     pub quantization: Quantization,
-    pub vector_dimensions: usize,
-    pub vector_dimensions_original: usize,
     pub vector_similarity: VectorSimilarity,
     pub is_simd: bool,
     pub is_vector_indexing: bool,
@@ -46,6 +43,7 @@ pub(crate) struct Shard {
     pub uncommitted: bool,
     pub schema_map: HashMap<String, SchemaField>,
     pub indexed_schema_vec: Vec<SchemaField>,
+    #[cfg(test)]
     pub stored_field_names: Vec<String>,
     pub meta: IndexMetaObject,
     pub is_last_level_incomplete: bool,
@@ -140,7 +138,7 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
     let vector_map=unsafe{Mmap::map(&vector_file)}.map_err(|e|e.to_string())?;
     let facet_map=if width==0 {MmapOptions::new().len(1).map_anon()}else{unsafe{MmapMut::map_mut(&facets_file)}}.map_err(|e|e.to_string())?;
     let mut shard=Shard {failed:false,indexed_doc_count:0,indexed_vector_count:0,indexed_cluster_count:0,committed_doc_count:0,uncommitted:false,
-        schema_map:schema_map.clone(),indexed_schema_vec:indexed,stored_field_names:Vec::new(),meta:meta.clone(),is_last_level_incomplete:false,
+        schema_map:schema_map.clone(),indexed_schema_vec:indexed,#[cfg(test)] stored_field_names:Vec::new(),meta:meta.clone(),is_last_level_incomplete:false,
         last_level_vector_file_start_pos:0,vector_levels:0,delete_hashset:AHashSet::new(),active:None,build_reservation:None,build_input_covered:false,
         path:path.to_owned(),facets,facets_map,facets_size_sum:width,facets_file,facets_file_mmap:facet_map,string_set_to_single_term_id_vec:Vec::new(),
         is_simd:simd,is_vector_indexing:original>0,vector_file,vector_file_mmap:vector_map,block_vector_buffer:Vec::new(),vector_dimensions:dimensions,
@@ -160,8 +158,8 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
     }
     shard.string_set_to_single_term_id();
     Ok(Arc::new(RwLock::new(Index {index_path_string:path.to_string_lossy().into_owned(),record_lexical:Vec::new(),schema_map,stored_field_names:Vec::new(),meta,shard_number:1,
-        shard_vec:vec![Arc::new(RwLock::new(shard))],vector_precision:precision,quantization,vector_dimensions:dimensions,
-        vector_dimensions_original:original,vector_similarity:similarity,is_simd:simd,is_vector_indexing:original>0,turbo_quant:turbo})))
+        shard_vec:vec![Arc::new(RwLock::new(shard))],quantization,
+        vector_similarity:similarity,is_simd:simd,is_vector_indexing:original>0,turbo_quant:turbo})))
 }
 
 pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&Vec<SchemaField>,shards:Option<usize>)->Result<IndexArc,String>{

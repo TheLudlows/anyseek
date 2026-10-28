@@ -26,6 +26,7 @@ const ENGINE: &str = "tantivy-0.27.0";
 const FORMAT: u32 = 1;
 const WRITER_BYTES: usize = 20_000_000;
 // A package stays small; a selected corpus may span multiple packages.
+#[cfg(test)]
 const MAX_DOCUMENTS: usize = 10_000;
 const MAX_POPULATION: usize = super::capacity::MAX_RECORDS;
 const MAX_FIELDS: usize = 64;
@@ -58,6 +59,7 @@ pub(super) struct Cut {
 
 /// Already analyzed positional tokens. Tokenization is outside the native codec;
 /// no Tantivy default analyzer can silently change the application contract.
+#[cfg(test)]
 pub(super) struct Input {
     pub identity: Identity,
     pub fields: Vec<Vec<String>>,
@@ -68,6 +70,7 @@ pub(super) struct AnalyzedField {
     pub tokens: Vec<Token>,
     pub length: u32,
 }
+#[cfg(test)]
 pub(super) struct AnalyzedInput {
     pub identity: Identity,
     pub fields: Vec<AnalyzedField>,

@@ -22,7 +22,7 @@ vb = []
 # Explicit test binaries only; no remote activation endpoint.
 fault-injection = []
 # HTTP dependencies are absent from the default core dependency graph.
-s3-object-store = ["dep:object_store"]
+s3-object-store = ["dep:object_store", "dep:rusqlite"]
 server = ["dep:http-body", "dep:env_logger", "dep:axum", "dep:utoipa", "s3-object-store"]
 
 [[bin]]
@@ -43,7 +43,7 @@ http-body = { version = "1", optional = true }
 env_logger = { version = "0.11", optional = true }
 axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "http2", "json", "query", "tokio", "matched-path"] }
 utoipa = { version = "6.0.0", optional = true, features = ["preserve_order", "preserve_path_order", "yaml", "indexmap"] }
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+rusqlite = { version = "0.37.0", features = ["bundled"], optional = true }
 object_store = { version = "0.12", optional = true, default-features = false, features = ["aws"] }
 xxhash-rust = { version = "=0.8.15", default-features = false, features = ["xxh64"] }
 log = "0.4"

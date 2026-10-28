@@ -57,14 +57,6 @@ impl<T: Serialize> Shared<T> {
         let lease = admitted.split_off(bytes).map_err(storage)?;
         Ok(Self(Arc::new(ValueOwner { value, _lease: lease })))
     }
-    /// Reserve transfer precedes the actual deep clone, including on rejection.
-    pub(super) fn copy_from_admitted(value: &T, admitted: &mut MemoryLease) -> Result<Self, RecordError>
-    where T: Clone {
-        let bytes = (checkpoint_codec::json_length(value)? as u64).checked_mul(32)
-            .ok_or_else(|| storage("shared state value estimate overflow"))?;
-        let lease = admitted.split_off(bytes).map_err(storage)?;
-        Ok(Self(Arc::new(ValueOwner { value: value.clone(), _lease: lease })))
-    }
     // Test-only non-growing mutation probe. Production values are immutable;
     // unique Arc ownership alone never authorizes an allocation or growth.
     #[cfg(test)]
@@ -294,30 +286,6 @@ mod ownership_tests {
         drop(live); assert!(owner.upgrade().is_some());
         assert_eq!(serde_json::to_vec(&old).unwrap(), wire);
         drop(old); assert!(owner.upgrade().is_none());
-    }
-    #[test]
-    fn rejected_cow_does_not_clone_or_change_snapshot() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static COPIES: AtomicUsize = AtomicUsize::new(0);
-        #[derive(Serialize, Debug)]
-        struct Tracked { body: String }
-        impl Clone for Tracked {
-            fn clone(&self) -> Self { COPIES.fetch_add(1, Ordering::SeqCst); Self { body: self.body.clone() } }
-        }
-        let value = Tracked { body: "retained original".into() };
-        let size = checkpoint_codec::json_length(&value).unwrap() as u64 * 32;
-        let mut first = reserve_memory(size).unwrap();
-        let old = Shared::from_admitted(value, &mut first).unwrap();
-        let wire = serde_json::to_vec(&old).unwrap();
-        let mut short = reserve_memory(size - 1).unwrap();
-        assert!(Shared::copy_from_admitted(&*old, &mut short).is_err());
-        assert_eq!(COPIES.load(Ordering::SeqCst), 0, "rejection precedes allocation");
-        let mut gross = reserve_memory(size).unwrap();
-        let mut next = Shared::copy_from_admitted(&*old, &mut gross).unwrap();
-        assert_eq!(COPIES.load(Ordering::SeqCst), 1);
-        next.unique_mut().unwrap().body.replace_range(.., "changed content!");
-        assert_eq!(serde_json::to_vec(&old).unwrap(), wire);
-        assert_ne!(serde_json::to_vec(&next).unwrap(), wire);
     }
     #[test]
     fn value_transfer_rejects_before_changing_admitted_balance() {

@@ -53,4 +53,4 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 这是有界单机实现：Record 累计账本默认 10,000 项、完整 checkpoint 16 MiB 等限制见 [FEATURES](FEATURES.md)。checkpoint 回收旧 WAL 代，不等于持续账本/物理版本 GC。P2 的 source/evidence、generation、TTL、feed、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、服务总缓存预算和完整资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文替换的复用边界见 [Tantivy 评估](docs/tantivy-evaluation.md)。
 
-[Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/server/README.md) · [上游来源](UPSTREAM.md) · [许可](LICENSE)
+[Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/server/README.md) · [许可](LICENSE)

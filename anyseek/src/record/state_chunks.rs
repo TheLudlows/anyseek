@@ -378,6 +378,7 @@ impl Descriptor {
     pub(super) fn config(&self) -> &RecordConfig {
         &self.config
     }
+    #[cfg(test)]
     pub(super) fn write(
         root: &Path,
         config: &RecordConfig,
@@ -530,6 +531,7 @@ impl Descriptor {
     }
     // Verify the complete authenticated wire stream against the guard-pinned
     // State, retaining only one decoded frame rather than a second full history.
+    #[cfg(test)]
     pub(super) fn verify_expected(&self,root:&Path,pool:&PoolReader,authority:u64,state:&State)->Result<(),RecordError> {
         if self.format != 1 { return Err(invalid("unsupported complete state format")); }
         self.verify_encoded(root, pool, authority, &checkpoint_codec::StateEncoding::new(state)?)

@@ -317,8 +317,9 @@ Hybrid channel ranks are assigned before final fusion sorting/pagination. A pure
 64 MiB <= 单份 <= 共享 <= 8 GiB。按进程固定，不支持运行中热改。
 Governor各通道的全局字节配置不得超过8 GiB，其他层级/控制余量约束不变。
 这都是保守逻辑预留，并非RSS硬上限；中文分析器、旧视图、候选构建与输出可同时存活，
-部署前应为这些预算和未计入的运行时开销准备足够RAM。16 GiB测试宿主上的[验证结果与限制](../../docs/resource-budget-followup.md)已单独记录；
-小内存部署应显式降低预算，不能把默认值视为任意规模容量承诺。
+部署前应为这些预算和未计入的运行时开销准备足够RAM。小内存部署应显式降低预算，不能把默认值视为任意规模容量承诺。
+
+集合创建请求可显式指定 `capacity_profile: "bounded_100k"`，将记录与操作准入上限提高到 100000；未指定或使用默认 profile 时保持 10000，未知 profile 名称一律拒绝。该 profile 只提高记录与操作的准入上限，其余限额不变：authority 256 MiB、单文档 1 MiB、候选 10000 与现有内存层级照旧。它是准入上界而非容量承诺，不表示任意 10 万条记录可完整驻留内存。
 
 资源不足仍立即拒绝，没有无限等待队列。HTTP/1在读取请求体之前拒绝时明确发送
 `Connection: close`，客户端须为下一请求新建连接，写入重试保持原operation_id；
@@ -336,4 +337,3 @@ Tantivy 0.27 SimpleTokenizer + LowerCaser。二者都不使用默认40字节过�
 及词典摘要进入 native 包认证配置；不提供旧索引迁移/读取兼容链。原文不变，OpenCC仍由
 独立不可变配置控制。切词变化会改变词频、字段长度、命中和分数，即使评分公式不变。
 既有显式英文/折叠/空白配置保留其标点与折叠契约；新简单英文模式与旧模式不保证等价。
-实现进度和未验收项见[分词改造清单](../../docs/tokenizer-implementation.md)。

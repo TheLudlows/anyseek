@@ -2,6 +2,7 @@
 //! select committed bytes; mmap indexes never act as independent commit witnesses.
 
 pub(crate) mod journal;
+#[cfg(feature = "s3-object-store")]
 pub(crate) mod sqlite_authority;
 #[cfg(feature = "s3-object-store")]
 pub(crate) mod s3_compatible;
