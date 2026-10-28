@@ -35,6 +35,7 @@ struct Plan {
     memory:crate::storage::build_budget::MemoryLease,
     resources: crate::resources::Lease,
     source:Option<maintenance::SourceCapture>,
+    native:Option<anchor::NativeReuse>,
     intent:maintenance::Intent,
     #[cfg(feature="s3-object-store")]
     remote:Option<remote_checkpoint::RemoteBuild>,
@@ -133,6 +134,18 @@ impl RecordPartition {
                 let limit = inner.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
                     .ok_or_else(||storage("index disk budget overflow"))?;
                 let disk = crate::storage::build_budget::DiskScope::begin(&root,limit).map_err(storage)?;
+                let native=if mode==JobMode::Compact {
+                    if let Some(admission)=anchor::NativeReuse::admit(&inner).await? {
+                        if inner.anchor.as_ref().is_some_and(|previous|
+                            previous.retained_packages().len()+inner.index.pending_seals.len()+1<capacity::segments(&inner.config))
+                            && inner.index.stable_tail_path(&root).await.is_some()
+                            && inner.index.has_tail_rows().await? {
+                            let _phase=maintenance::Phase::new("compact_tail_handoff_locked",inner.state.seq);
+                            inner.stage_stable_tail().await?;
+                        }
+                        Some(anchor::NativeReuse::capture(&inner,admission).await?)
+                    }else{None}
+                }else{None};
                 let source=if mode!=JobMode::Index {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
                 // Complete fallible local capture before acquiring the remote pin.
                 let snapshot={let _phase=maintenance::Phase::new("snapshot_clone_locked",inner.state.seq);
@@ -155,13 +168,13 @@ impl RecordPartition {
                     inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
                     return Err(RecordError::RecoveryRequired);
                 }
-                let result = Plan {source,intent,root,config:inner.config.clone(),snapshot,prior:inner.payloads.clone(),
+                let result = Plan {source,native,intent,root,config:inner.config.clone(),snapshot,prior:inner.payloads.clone(),
                     base,disk,memory,resources,
                     #[cfg(feature="s3-object-store")] remote};
                 inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false,revision:0});
                 result
             };
-            let Plan{source,intent,root,config,mut snapshot,prior,base,disk,memory,resources:_resources,
+            let Plan{source,native,intent,root,config,mut snapshot,prior,base,disk,memory,resources:_resources,
                 #[cfg(feature="s3-object-store")] remote} = plan;
             let cut = snapshot.seq;
             #[cfg(any(test,feature="fault-injection"))]
@@ -192,9 +205,10 @@ impl RecordPartition {
                 let prior=if intent.rewrites_payloads(){Default::default()}else{prior};
                 let reference = if mode==JobMode::Compact {
                     let source=source.as_ref().ok_or(RecordError::RecoveryRequired)?;
-                    anchor::Reference::prepare_captured(&root,&config,&snapshot,prior,source.anchor(),source.frames()).await?
+                    anchor::Reference::prepare_captured(&root,&config,&snapshot,prior,source.anchor(),source.frames(),native.as_ref()).await?
                 }else{anchor::Reference::prepare(&root,&config,&snapshot,prior,None,None,true,None).await?};
                 drop(source);
+                drop(native);
                 #[cfg(test)]
                 if mode==JobMode::Compact && root.join(".test-anchor-reject-prepared").exists() {
                     return Err(storage("injected candidate rejection before certificate"));
@@ -461,6 +475,58 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5),async {
             while !root.join(".test-indexer-started").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
         }).await.unwrap();
+    }
+    #[tokio::test]
+    async fn compact_native_capture_isolated_from_same_version_patch_and_concurrent_delete() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        let mut initial=write("a","a","alpha",ExpectedVersion::Absent);
+        initial.document.as_mut().unwrap().shift_remove("vector");
+        p.write(initial).await.unwrap();p.write(write("b","b","alpha",ExpectedVersion::Absent)).await.unwrap();
+        p.compact_journal().await.unwrap();
+        let selected=p.inner.lock().await.anchor.as_ref().unwrap().retained_packages()[0].id.clone();
+        p.write(write("c","c","alpha",ExpectedVersion::Absent)).await.unwrap();
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        let job=p.start_compact_job().unwrap();wait_started(&root).await;
+        let mut patch=write("patch","a","",ExpectedVersion::Match(1));patch.document=None;
+        patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[1.0,0.0]})).unwrap());
+        let receipt=p.write(patch.clone()).await.unwrap();assert_eq!(receipt.version,1);
+        let mut delete=write("delete","b","",ExpectedVersion::Match(1));delete.document=None;p.write(delete).await.unwrap();
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();job.finish().await.unwrap();
+        assert!(p.inner.lock().await.anchor.as_ref().unwrap().retained_packages().iter().any(|package|package.id==selected));
+        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {
+            let result=query(&p,mode).await;assert_eq!(result.count_total,2);assert!(result.hits.iter().all(|hit|hit.record.record_id!="b"));
+        }
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(patch).await.unwrap(),receipt);assert!(p.get("b").await.unwrap().is_none());
+        assert_eq!(query(&p,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}).await.count_total,2);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn compact_native_capture_budget_refuses_before_tail_handoff() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(write("a","a","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
+        p.write(write("b","b","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let tail=p.inner.lock().await.index.stable_tail_path(&root).await.unwrap();
+        std::fs::write(root.join(".test-compact-native-capture-budget"),b"reject admission").unwrap();
+        assert!(matches!(p.compact_journal().await,Err(RecordError::Busy)));
+        {let inner=p.inner.lock().await;assert!(inner.healthy);assert!(inner.background.is_none());assert!(inner.index.pending_seals.is_empty());assert_eq!(inner.index.stable_tail_path(&root).await.unwrap(),tail);}
+        p.write(write("c","c","alpha",ExpectedVersion::Absent)).await.unwrap();
+        std::fs::remove_file(root.join(".test-compact-native-capture-budget")).unwrap();p.compact_journal().await.unwrap();
+        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();assert_eq!(query(&p,SearchMode::Lexical).await.count_total,3);
+        drop(p);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn compact_native_reuse_rejects_corrupt_selected_package() {
+        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
+        p.write(write("a","a","alpha",ExpectedVersion::Absent)).await.unwrap();p.compact_journal().await.unwrap();
+        let before=p.inner.lock().await.anchor.clone().unwrap();
+        let path=before.retained_packages()[0].path(&root).unwrap().join("schema.json");
+        let original=std::fs::read(&path).unwrap();std::fs::write(&path,b"corrupt").unwrap();
+        assert!(matches!(p.compact_journal().await,Err(RecordError::RecoveryRequired)));
+        {let inner=p.inner.lock().await;assert!(!inner.healthy);assert_eq!(inner.anchor.as_ref().unwrap().identity(),before.identity());}
+        drop(p);assert!(RecordPartition::open(&root,config().max_journal_bytes).await.is_err());
+        std::fs::write(&path,original).unwrap();let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert!(p.get("a").await.unwrap().is_some());drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn compact_owned_job_preserves_time_receipts_and_concurrent_same_seq_trim() {

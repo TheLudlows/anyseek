@@ -83,6 +83,42 @@ fn read_manifest(path:&Path,limit:u64)->Result<(Manifest,crate::storage::build_b
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Statistics {segments:Vec<crate::active::ActiveStatistics>}
+/// Membership is frozen at the same cut as State. No mutable retirement token
+/// escapes capture; immutable packages remain protected by the owned build.
+pub(super) struct NativeReuse {
+    pending:Vec<Frozen>,
+    local:Vec<crate::active::ActiveStatistics>,
+    _admission:NativeAdmission,
+}
+pub(super) struct NativeAdmission {
+    _memory:crate::storage::build_budget::MemoryLease,
+    _resources:crate::resources::Lease,
+}
+impl NativeReuse {
+    pub(super) async fn admit(inner:&Inner)->Result<Option<NativeAdmission>,RecordError> {
+        let _phase=maintenance::Phase::new("compact_native_admission_locked",inner.state.seq);
+        if inner.index.detached_cache || inner.anchor.as_ref().is_none_or(|previous|
+            previous.segments.len()+inner.index.pending_seals.len()>=capacity::segments(&inner.config)) {return Ok(None);}
+        // Refuse known I/O saturation before preparing or sealing a successor.
+        // Actual handoff I/O retains its own admission and failure fencing.
+        let _io=crate::resources::io_scope(crate::resources::Lane::Background).io().map_err(|_|RecordError::Busy)?;
+        let bytes=(inner.index.statistics_wire_length().await? as u64).checked_mul(64)
+            .and_then(|n|n.checked_add(1024*1024)).ok_or_else(||storage("native capture metadata overflow"))?;
+        #[cfg(test)]
+        if inner.journal.root().join(".test-compact-native-capture-budget").exists() {return Err(RecordError::Busy);}
+        let memory=crate::storage::build_budget::reserve_memory(bytes).map_err(|_|RecordError::Busy)?;
+        let resources=crate::resources::io_scope(crate::resources::Lane::Background).bytes(bytes).map_err(|_|RecordError::Busy)?;
+        Ok(Some(NativeAdmission{_memory:memory,_resources:resources}))
+    }
+    pub(super) async fn capture(inner:&Inner,admission:NativeAdmission)->Result<Self,RecordError> {
+        let _phase=maintenance::Phase::new("compact_native_membership_capture_locked",inner.state.seq);
+        let local=inner.index.local_statistics().await?;
+        let previous=inner.anchor.as_ref().ok_or_else(||storage("missing native capture predecessor"))?;
+        if inner.index.detached_cache || local.len()!=previous.segments.len()+inner.index.pending_seals.len()+1
+            || local.iter().any(|active|active.retired.is_some()) {return Err(storage("native capture topology mismatch"));}
+        Ok(Self{pending:inner.index.pending_seals.clone(),local,_admission:admission})
+    }
+}
 pub(super) struct Loaded {
     pub config:RecordConfig,pub state:State,pub index:IndexArc,
     pub ordinals:Vec<String>,pub locations:BTreeMap<String,usize>,pub payloads:Closure,
@@ -201,14 +237,14 @@ impl Reference {
     }
     pub(super) async fn prepare(root:&Path,config:&RecordConfig,state:&State,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>)->Result<Self,RecordError>{
         let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",state.seq);checkpoint_codec::StateEncoding::new(state)?};
-        Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal,None).await
+        Self::prepare_encoded(root,config,&encoded,prior,previous,view,compact,journal,None,None).await
     }
     pub(super) async fn prepare_captured(root:&Path,config:&RecordConfig,state:&State,prior:Closure,
-        previous:Option<&Reference>,frames:&[Vec<u8>])->Result<Self,RecordError> {
+        previous:Option<&Reference>,frames:&[Vec<u8>],native:Option<&NativeReuse>)->Result<Self,RecordError> {
         let encoded=checkpoint_codec::StateEncoding::new(state)?;
-        Self::prepare_encoded(root,config,&encoded,prior,previous,None,false,None,Some(frames)).await
+        Self::prepare_encoded(root,config,&encoded,prior,previous,None,false,None,Some(frames),native).await
     }
-    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>,captured:Option<&[Vec<u8>]>)->Result<Self,RecordError>{
+    async fn prepare_encoded(root:&Path,config:&RecordConfig,encoded:&checkpoint_codec::StateEncoding<'_>,prior:Closure,previous:Option<&Reference>,view:Option<&view::RetrievalView>,compact:bool,journal:Option<&mut PartitionJournal>,captured:Option<&[Vec<u8>]>,native:Option<&NativeReuse>)->Result<Self,RecordError>{
         let state=encoded.state();
         let _phase=maintenance::Phase::new("anchor_prepare",state.seq);
         let id=format!("{:032x}",rand::random::<u128>());
@@ -298,7 +334,7 @@ impl Reference {
                 drop(metadata_lease);
                 drop(state_blocks);
                 drop(previous_capture);
-                return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None)).await;
+                return Box::pin(Self::prepare_encoded(root,config,encoded,payloads,previous,view,compact,None,None,native)).await;
             }
             return Err(storage("complete anchor manifest byte budget exceeded"));
         }
@@ -306,14 +342,16 @@ impl Reference {
         drop(manifest);
         drop(image_lease);
         let mut segments=Vec::new();let mut statistics=Vec::new();
-        let reuse_native=!compact && view.is_some_and(|view|!view.detached_cache) && previous.is_some_and(|p|p.segments.len()+view.map_or(0,|v|v.pending_seals.len())<capacity::segments(config));
+        let pending_count=native.map_or_else(||view.map_or(0,|v|v.pending_seals.len()),|capture|capture.pending.len());
+        let reuse_native=!compact && (native.is_some() || view.is_some_and(|view|!view.detached_cache))
+            && previous.is_some_and(|p|p.segments.len()+pending_count<capacity::segments(config));
         log::info!("record_maintenance phase=native_packages seq={} reuse={} selected={} pending={} package_limit={}",
-            state.seq,reuse_native,previous.map_or(0,|p|p.segments.len()),view.map_or(0,|v|v.pending_seals.len()),capacity::segments(config));
+            state.seq,reuse_native,previous.map_or(0,|p|p.segments.len()),pending_count,capacity::segments(config));
         let native_phase=maintenance::Phase::new("native_prepare",state.seq);
         if reuse_native {
             let previous=previous.unwrap();
-            let local=view.ok_or_else(||storage("missing incremental input view"))?.local_statistics().await?;
-            let pending=&view.unwrap().pending_seals;
+            let local=if let Some(capture)=native {capture.local.clone()}else{view.ok_or_else(||storage("missing incremental input view"))?.local_statistics().await?};
+            let pending=if let Some(capture)=native {&capture.pending}else{&view.unwrap().pending_seals};
             if local.len()!=previous.segments.len()+pending.len()+1{return Err(storage("selected segment/view mismatch"));}
             let mut local=local.into_iter();let tail=local.next().unwrap();
             for (segment,active) in pending.iter().chain(previous.segments.iter()).zip(local) {
@@ -529,7 +567,7 @@ pub(super) async fn snapshot_payload(root:&Path,config:&RecordConfig,state:&Stat
     ->Result<(Vec<u8>,crate::storage::build_budget::MemoryLease,crate::storage::build_budget::DiskScope),RecordError>{
     let disk=crate::storage::build_budget::DiskScope::begin(root,closure_limit(config.max_journal_bytes)?).map_err(storage)?;
     let encoded=checkpoint_codec::StateEncoding::new(state)?;
-    let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None,None).await?;
+    let reference=Reference::prepare_encoded(root,config,&encoded,Closure::default(),None,None,true,None,None,None).await?;
     let verified=reference.load_verified_encoded(root,config,&encoded).await?;
     drop(verified); // Close all mappings before later Windows root publication.
     let estimate=checkpoint_codec::json_length(&reference)?.checked_add(64).ok_or_else(||storage("snapshot authority overflow"))?;
@@ -672,7 +710,7 @@ impl Inner {
         let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",next.seq);checkpoint_codec::StateEncoding::new(next)?};
         let snapshot_bytes=encoded.checkpoint_length(&self.config)?;
         let prior=if reuse{self.payloads.clone()}else{Closure::default()};
-        let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None},None).await?;
+        let mut reference=Reference::prepare_encoded(&root,&self.config,&encoded,prior,self.anchor.as_ref(),Some(&self.index),!reuse,if candidate.is_none() && reuse {Some(&mut self.journal)}else{None},None,None).await?;
         #[cfg(test)]
         if root.join(".test-anchor-reject-prepared").exists() {
             return Err(storage("injected candidate rejection before certificate"));

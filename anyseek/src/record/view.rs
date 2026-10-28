@@ -382,6 +382,11 @@ impl RetrievalView {
         }
         Ok(result)
     }
+    pub(super) async fn has_tail_rows(&self)->Result<bool,RecordError> {
+        let root=self.tail.read().await;
+        let tail=root.shard_vec[0].read().await;
+        Ok(!tail.active.as_ref().ok_or_else(||storage("missing tail statistics"))?.keys.is_empty())
+    }
     pub(super) async fn statistics_wire_length(&self)->Result<usize,RecordError>{
         let root=self.query.read().await;let mut bytes=2usize;
         for shard in &root.shard_vec {

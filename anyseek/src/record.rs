@@ -1702,8 +1702,9 @@ impl RecordPartition {
     /// Uses a 300-second build deadline. Saturated admission or failure to reach
     /// a stable publication cut within the deadline returns `Busy`.
     /// Authenticated State deltas and payload objects are reused where eligible.
-    /// Native indexes are rebuilt privately, requiring CPU and temporary disk
-    /// for the complete indexed cut in addition to the currently selected view.
+    /// Eligible immutable native packages are reused with frozen membership.
+    /// Detached caches and package pressure require a private full native rebuild.
+    /// The bounded mutable-tail handoff still performs I/O under the live lock.
     pub async fn compact_journal(&self) -> Result<u64, RecordError> {
         self.start_compact_job()?.finish().await
     }
