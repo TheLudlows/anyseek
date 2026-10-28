@@ -27,6 +27,7 @@ pub(super) struct Log {
     max_bytes: u64,
     max_object_bytes: usize,
     failed: bool,
+    spare_objects: u64,
     _owner: std::fs::File,
 }
 pub(super) struct Cut {
@@ -56,7 +57,7 @@ impl Prepared {
         let mut chunks = Vec::new();
         for event in events {
             if event.len().checked_add(2).is_none_or(|n| n > cut.max_object_bytes) { return Err(RecordError::Busy); }
-            if buffer.len() + event.len() + 2 > cut.max_object_bytes {
+            if buffer.len() + event.len() + 1 + usize::from(buffer.len() > 1) > cut.max_object_bytes {
                 buffer.push(b']'); chunks.push(add(format!("{prefix}/{}", chunks.len()), buffer)?);
                 buffer = vec![b'['];
             }
@@ -219,6 +220,7 @@ impl Log {
                 max_bytes,
                 max_object_bytes,
                 failed: false,
+                spare_objects: 0,
                 _owner: owner,
             };
         log.authority.cancel_intake_snapshot_uploads(&log.partition, log.epoch).map_err(storage)?;
@@ -242,6 +244,16 @@ impl Log {
         self.authority.reserve_intake_snapshot_uploads(&self.partition, self.epoch,
             prepared.cut.head.head_version, &prepared.build, &objects, unix_time_ms_i64(), self.max_objects, slots).map_err(storage)
     }
+    pub(super) fn reserve_with_spare(&mut self, prepared: &Prepared, slots: u64, bytes: u64, spare: u64) -> Result<bool, RecordError> {
+        let reserved = self.reserve(prepared, slots.checked_add(spare).ok_or(RecordError::Busy)?, bytes)?;
+        if reserved { self.spare_objects = spare; }
+        Ok(reserved)
+    }
+    #[cfg(test)]
+    pub(super) fn set_inventory_limit(&mut self, limit: u64) { self.max_objects = limit; }
+    #[cfg(test)]
+    pub(super) fn set_spare_for_test(&mut self, spare: u64) { self.spare_objects = spare; }
+    pub(super) fn clear_spare(&mut self) { self.spare_objects = 0; }
     pub(super) fn select(&mut self, prepared: &Prepared, bytes: u64) -> Result<bool, RecordError> {
         if self.failed { return Err(RecordError::RecoveryRequired); }
         if self.events != prepared.cut.events || self.base != prepared.cut.base { return Ok(false); }
@@ -341,7 +353,7 @@ impl Log {
     }
     pub(super) fn admit_objects(&self, additional: u64) -> Result<(), RecordError> {
         let retained = self.authority.intake_inventory_count(&self.partition, self.epoch).map_err(storage)?;
-        if retained.checked_add(additional).is_none_or(|n| n > self.max_objects) { return Err(RecordError::Busy); }
+        if retained.checked_add(additional).and_then(|n| n.checked_add(self.spare_objects)).is_none_or(|n| n > self.max_objects) { return Err(RecordError::Busy); }
         Ok(())
     }
     async fn cleanup(&mut self) -> Result<(), RecordError> {
@@ -425,6 +437,39 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn unlocked_snapshot_exact_chunk_boundary_never_emits_empty_extra_chunk() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = (S3CompatibleStore::from_store(Arc::new(object_store::memory::InMemory::new()), 4096),
+            temporary.path().join("authority.sqlite"), "source".to_owned(), 1, 4096);
+        let (log, _) = Log::open(source, "config", 128, 4096).await.unwrap();
+        let event = vec![b' '; 4094]; // packing boundary independent of Event decoding
+        let candidate = Prepared::encode(log.cut().unwrap(), vec![event.clone(), event]).unwrap();
+        assert_eq!(candidate.objects.len(), 3); // two chunks and one manifest
+        assert_eq!(candidate.objects[0].0.length, 4096);
+        assert_eq!(candidate.objects[1].0.length, 4096);
+    }
+
+    #[tokio::test]
+    async fn unlocked_snapshot_spare_reservation_preserves_pending_completion() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = (S3CompatibleStore::from_store(Arc::new(object_store::memory::InMemory::new()), 16384),
+            temporary.path().join("authority.sqlite"), "source".to_owned(), 1, 16384);
+        let (mut log, _) = Log::open(source, "config", 128, 16384).await.unwrap();
+        let request = super::super::super::tests::write("pending", "a", "alpha", ExpectedVersion::Absent);
+        log.append(&Event::Accept { first: 1, requests: vec![request] }).await.unwrap();
+        let candidate = Prepared::encode(log.cut().unwrap(), vec![serde_json::to_vec(&Event::Reset { base: 0, epoch_floor: 0, materialized_seq: 0 }).unwrap()]).unwrap();
+        log.max_objects = 7;
+        assert!(log.reserve_with_spare(&candidate, 1, 0, 2).unwrap());
+        assert!(matches!(log.admit_objects(2), Err(RecordError::Busy)));
+        log.append(&Event::Complete { first: 1, results: vec![Err(IngestFailure { code: "conflict".into(), message: "done".into() })] }).await.unwrap();
+        assert_eq!(log.spare_objects, 2);
+        let stable = Prepared::encode(log.cut().unwrap(), vec![serde_json::to_vec(&Event::Reset { base: 0, epoch_floor: 0, materialized_seq: 0 }).unwrap()]).unwrap();
+        assert!(log.reserve_with_spare(&stable, 0, 0, 0).unwrap());
+        assert_eq!(log.spare_objects, 0);
+        assert_eq!(log.authority.intake_inventory_count(&log.partition, log.epoch).unwrap(), 7);
+    }
+
     #[tokio::test]
     async fn unlocked_snapshot_stale_cut_pins_unknown_and_preserves_append_suffix() {
         let temporary = tempfile::tempdir().unwrap();

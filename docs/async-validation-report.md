@@ -72,3 +72,5 @@ generation 预留统计：私有容器的 insert/get_mut 自动失效 OnceLock �
 显式 Compact 原生复用：固定 cut 时捕获不带共享失效 token 的 membership，锁外复用 immutable native 包并仅构建 tail；同版本向量补丁、并发删除由 catch-up 和安装复验处理。detached cache 或包数压力仍私有全重建，预算拒绝发生在 tail handoff 前。新增 3 项、既有 3 项原生复用原断言及 Compact/delta/远端专项通过；上一中间步骤的三项复用失败已解决。可复用 mutable tail 的有界 handoff 仍在 Record 锁内执行 I/O，且 metadata 捕获仍遍历索引成员，已单独计时，不声称所有工作均已移出锁。
 
 远端 Spool 快照：固定 cut 编码与 PUT、候选释放/退休/DELETE/回执裁剪移到锁外，短锁内原子预登记完整候选与 pending 名额并复验 CAS。unknown publication 保留 pins，稳定 owner 恢复后才取消遗留 build pins；未知 PUT inventory 不遗忘。最终 ingestion 26 项和 SQLite staging 4 项通过，覆盖慢上传/删除下 Accept/Complete/status 推进、stale cut、finish 归属、未知选择及选中 manifest closure 保护。这是 SQLite/内存对象存储的协议验证，不是真实 S3。捕获 Arc 行、原子预登记及选择时可达性扫描仍在 Spool 锁内，append 的网络锁语义未改变。
+
+远端维护进展：首次候选保留下一完整快照的对象名额，并持续计入 append 准入；首次 stale 或不足以保留第二候选时转为排空模式，新身份 Busy、旧身份回执照常、pending 继续完成，随后稳定构建。已知资源 Busy 解除临时门控与备用名额；未知结果仍隔离。30 项 ingestion 专项通过，包含 16 次并发新提交被背压后精确一次 stale/一次成功、低库存无首轮上传、pending 终态名额、精确分块边界无额外空块和 Busy 后 finish 可结束。首轮低库存测试失败是门控文件路径错误，修正路径后通过，未放宽超时。普通远端 append 的锁内网络仍会阻塞 status/progress 和 Complete，后续解耦需要单独的追加串行器及提交中状态，未混入此回收协议切片。

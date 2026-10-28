@@ -84,6 +84,7 @@ struct Row {
     _memory: crate::storage::build_budget::MemoryLease,
 }
 struct Spool {
+    remote_gc_drain: bool,
     log: DurableLog,
     rows: Vec<Arc<Row>>,
     revision: u64,
@@ -452,6 +453,7 @@ impl IngestPipeline {
             )
         };
         let mut spool = Spool {
+            remote_gc_drain: false,
             log,
             rows: Vec::new(),
             revision: 0,
@@ -576,6 +578,7 @@ impl IngestPipeline {
         if spool.blocked.is_some() {
             return Err(RecordError::RecoveryRequired);
         }
+        if spool.remote_gc_drain { return Err(RecordError::Busy); }
         if spool.rows.len() + fresh.len() > spool.max_operations
             || spool.rows.len() - spool.completed + fresh.len() > spool.max_pending
         {
@@ -764,7 +767,15 @@ impl IngestPipeline {
     }
     async fn local_gc_once(&self) -> Result<bool, RecordError> {
         #[cfg(feature = "s3-object-store")]
-        if !self.spool.lock().await.log.is_local() { return self.remote_gc_once().await; }
+        if !self.spool.lock().await.log.is_local() {
+            let result = self.remote_gc_once().await;
+            if matches!(result, Err(RecordError::Busy)) {
+                let mut spool = self.spool.lock().await;
+                spool.remote_gc_drain = false;
+                if let DurableLog::Remote(log) = &mut spool.log { log.clear_spare(); }
+            }
+            return result;
+        }
         let plan = { self.spool.lock().await.local_plan(current_epoch())? };
         let Some(plan) = plan else { return Ok(false); };
         let (mut plan, mut prepared, operations) = tokio::task::spawn_blocking(move || {
@@ -833,10 +844,11 @@ impl IngestPipeline {
             let _phase = maintenance::Phase::new("intake_remote_capture_locked", spool.revision);
             let DurableLog::Remote(log) = &spool.log else { return Ok(false); };
             if spool.blocked.is_some() { return Ok(false); }
+            if spool.remote_gc_drain && spool.completed != spool.rows.len() { return Ok(false); }
             let floor = spool.epoch_floor.max(current_epoch().saturating_sub(1));
             let expired = spool.rows[..spool.completed].iter()
                 .take_while(|r| r.status.accepted.operation_id.epoch < floor).count();
-            if expired == 0 && spool.completed_since_compaction < 64.max(spool.completed / 2)
+            if !spool.remote_gc_drain && expired == 0 && spool.completed_since_compaction < 64.max(spool.completed / 2)
                 && !(spool.gc_pressure && spool.completed > 0) { return Ok(false); }
             let bytes = spool.rows[expired..].iter().try_fold(1024u64, |n, r| n.checked_add(r.snapshot_bytes))
                 .and_then(|n| n.checked_mul(34)).ok_or(RecordError::Busy)?;
@@ -861,11 +873,21 @@ impl IngestPipeline {
         {
             let mut spool = self.spool.lock().await;
             let _phase = maintenance::Phase::new("intake_remote_reserve_locked", source.revision);
-            if spool.blocked.is_some() || spool.cut() != source { return Ok(true); }
+            if spool.blocked.is_some() { return Ok(false); }
+            if spool.cut() != source { spool.remote_gc_drain = true; return Ok(true); }
             let slots = (spool.rows.len() - spool.completed) as u64;
             let bytes = completion_headroom(spool.completion_reserve, 5)?;
+            let draining = spool.remote_gc_drain;
+            // At most one chunk per row plus Reset, and one manifest.
+            let spare = if draining { 0 } else { (spool.max_operations as u64).checked_add(2).ok_or(RecordError::Busy)? };
             let DurableLog::Remote(log) = &mut spool.log else { return Err(RecordError::RecoveryRequired); };
-            if !log.reserve(&prepared, slots, bytes)? { return Ok(false); }
+            if !log.reserve_with_spare(&prepared, slots, bytes, spare)? {
+                if draining { return Err(RecordError::Busy); }
+                // No object was registered: drain first when a second complete
+                // candidate cannot be reserved alongside concurrent completions.
+                spool.remote_gc_drain = true;
+                return Ok(true);
+            }
         }
         #[cfg(test)] {
             self.gc_prepared.store(true, Ordering::Release);
@@ -889,6 +911,8 @@ impl IngestPipeline {
             // Cleanup discovery is optional after a confirmed CAS: its failure
             // must not interrupt installation of the selected in-memory cut.
             let garbage = log.garbage().unwrap_or_default();
+            if selected { log.clear_spare(); }
+            spool.remote_gc_drain = !selected;
             let old = if selected {
                 let old = (std::mem::replace(&mut spool.rows, rows), std::mem::replace(&mut spool.operations, operations));
                 spool.base = source.base + expired as u64; spool.completed = source.completed - expired;
@@ -1960,11 +1984,10 @@ mod tests {
         }
         entered(&intake_database.with_extension("entered-intake-upload")).await;
         // Acceptance and materialization both change the captured cut during PUT.
+        pipeline.paused.store(true, Ordering::Release);
         let second = write("second", "a", "beta", ExpectedVersion::Any);
         tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.submit(vec![second.clone()])).await.unwrap().unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !pipeline.operation(&second.operation_id).await.unwrap().completed() { tokio::task::yield_now().await; }
-        }).await.unwrap();
+        assert_eq!(pipeline.progress().await.pending, 1);
         let waiter = pipeline.clone();
         let finish = tokio::spawn(async move { waiter.finish().await });
         assert!(!finish.is_finished());
@@ -1972,12 +1995,20 @@ mod tests {
         entered(&intake_database.with_extension("entered-intake-delete")).await;
         assert!(!finish.is_finished());
         let third = write("third", "a", "terminal", ExpectedVersion::Any);
-        tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.submit(vec![third.clone()])).await.unwrap().unwrap();
+        for _ in 0..16 {
+            assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.submit(vec![third.clone()])).await.unwrap(), Err(RecordError::Busy)));
+        }
+        assert_eq!(pipeline.submit(vec![first.clone()]).await.unwrap()[0].durable_seq, 1);
         tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.progress()).await.unwrap();
+        pipeline.paused.store(false, Ordering::Release);
+        pipeline.kick();
         std::fs::remove_file(delete_gate).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), finish).await.unwrap().unwrap().unwrap();
         assert!(pipeline.gc_stale.load(Ordering::Acquire) >= 1);
-        assert!(pipeline.gc_committed.load(Ordering::Acquire) >= 1);
+        assert_eq!(pipeline.gc_committed.load(Ordering::Acquire), 1);
+        assert_eq!(pipeline.gc_stale.load(Ordering::Acquire), 1);
+        pipeline.submit(vec![third.clone()]).await.unwrap();
+        pipeline.finish().await.unwrap();
         let receipt = pipeline.operation(&third.operation_id).await.unwrap();
         assert!(receipt.completed());
         drop(pipeline);
@@ -1985,6 +2016,138 @@ mod tests {
         assert_eq!(reopened.operation(&third.operation_id).await.unwrap(), receipt);
         assert_eq!(reopened.submit(vec![first]).await.unwrap()[0].durable_seq, 1);
         reopened.finish().await.unwrap();
+    }
+
+    #[cfg(feature = "s3-object-store")]
+    #[tokio::test]
+    async fn remote_snapshot_low_inventory_drains_before_first_upload() {
+        use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let database = temporary.path().join("authority.sqlite");
+        let settings = config();
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        let store = S3CompatibleStore::from_store(objects.clone(), 1024 * 1024);
+        let mut authority =
+            SqliteAuthority::open(&database, std::time::Duration::from_secs(1)).unwrap();
+        authority.create_partition("source", 1).unwrap();
+        let bootstrap = {
+            let inner = p.inner.lock().await;
+            encode_entry(&Entry::Checkpoint {
+                config: inner.config.clone(),
+                state: inner.state.try_clone().unwrap(),
+            })
+            .unwrap()
+        };
+        store
+            .publish_bootstrap(&mut authority, "source", 1, &bootstrap, unix_time_ms_i64())
+            .await
+            .unwrap();
+        p.inner.lock().await.remote = Some(RemotePersistence {
+            store,
+            authority: Mutex::new(authority),
+            partition_id: "source".into(),
+            owner_epoch: 1,
+            max_tail_blocks: 128,
+            max_tail_bytes: 1024 * 1024,
+            max_object_bytes: 1024 * 1024,
+            _owner: None,
+        });
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        let first = write("first-low", "a", "alpha", ExpectedVersion::Absent);
+        pipeline.submit(vec![first.clone()]).await.unwrap();
+        pipeline.finish().await.unwrap();
+        let intake_database = database.with_extension("intake.sqlite");
+        let gate = intake_database.with_extension("pause-intake-upload");
+        std::fs::write(&gate, b"").unwrap();
+        {
+            let mut spool = pipeline.spool.lock().await;
+            let DurableLog::Remote(log) = &mut spool.log else { panic!("remote expected"); };
+            log.set_inventory_limit(5); // bootstrap + Accept + Complete + two snapshot objects
+            spool.completed_since_compaction = 64;
+        }
+        pipeline.kick_gc();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !intake_database.with_extension("entered-intake-upload").exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert!(pipeline.spool.lock().await.remote_gc_drain);
+        assert_eq!(pipeline.submit(vec![first.clone()]).await.unwrap()[0].durable_seq, 1);
+        let next = write("next-low", "a", "beta", ExpectedVersion::Any);
+        assert!(matches!(pipeline.submit(vec![next.clone()]).await, Err(RecordError::Busy)));
+        std::fs::remove_file(gate).unwrap();
+        pipeline.finish().await.unwrap();
+        assert_eq!(pipeline.gc_stale.load(Ordering::Acquire), 0);
+        assert_eq!(pipeline.gc_committed.load(Ordering::Acquire), 1);
+        assert!(!pipeline.spool.lock().await.remote_gc_drain);
+        pipeline.submit(vec![next]).await.unwrap();
+        pipeline.finish().await.unwrap();
+    }
+
+    #[cfg(feature = "s3-object-store")]
+    #[tokio::test]
+    async fn remote_snapshot_busy_clears_drain_and_spare_and_finish_returns() {
+        use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let database = temporary.path().join("authority.sqlite");
+        let settings = config();
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        let store = S3CompatibleStore::from_store(objects.clone(), 1024 * 1024);
+        let mut authority =
+            SqliteAuthority::open(&database, std::time::Duration::from_secs(1)).unwrap();
+        authority.create_partition("source", 1).unwrap();
+        let bootstrap = {
+            let inner = p.inner.lock().await;
+            encode_entry(&Entry::Checkpoint {
+                config: inner.config.clone(),
+                state: inner.state.try_clone().unwrap(),
+            })
+            .unwrap()
+        };
+        store
+            .publish_bootstrap(&mut authority, "source", 1, &bootstrap, unix_time_ms_i64())
+            .await
+            .unwrap();
+        p.inner.lock().await.remote = Some(RemotePersistence {
+            store,
+            authority: Mutex::new(authority),
+            partition_id: "source".into(),
+            owner_epoch: 1,
+            max_tail_blocks: 128,
+            max_tail_bytes: 1024 * 1024,
+            max_object_bytes: 1024 * 1024,
+            _owner: None,
+        });
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        let first = write("first-busy", "a", "alpha", ExpectedVersion::Absent);
+        pipeline.submit(vec![first]).await.unwrap();
+        pipeline.finish().await.unwrap();
+        {
+            let mut spool = pipeline.spool.lock().await;
+            spool.remote_gc_drain = true;
+            spool.completed_since_compaction = 64;
+            let DurableLog::Remote(log) = &mut spool.log else { panic!("remote expected"); };
+            log.set_inventory_limit(4); // three existing objects cannot fit two candidate objects
+            log.set_spare_for_test(2);
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.finish()).await.unwrap().unwrap();
+        {
+            let mut spool = pipeline.spool.lock().await;
+            assert!(!spool.remote_gc_drain);
+            assert!(spool.blocked.is_none());
+            let DurableLog::Remote(log) = &mut spool.log else { panic!("remote expected"); };
+            log.set_inventory_limit(6);
+            log.admit_objects(3).unwrap(); // fails if the stale spare was not cleared
+        }
+        pipeline.submit(vec![write("after-busy", "a", "beta", ExpectedVersion::Any)]).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.finish()).await.unwrap().unwrap();
+        assert_eq!(pipeline.progress().await.pending, 0);
     }
 
     #[cfg(feature = "s3-object-store")]
