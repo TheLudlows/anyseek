@@ -39,6 +39,15 @@ pub(crate) struct PartitionJournal {
     // Stable across generation replacement; released after every journal file.
     _owner: File,
 }
+pub(crate) struct CommittedCut {generation:u64, journal:super::journal::CommittedCut}
+impl CommittedCut {
+    pub(crate) fn end(&self)->u64 {self.journal.end}
+    pub(crate) fn scan(&self)->super::journal::CommittedScan {super::journal::CommittedScan::new(self.journal)}
+    pub(crate) fn is_publication(ordinal:u64,payload:&[u8])->io::Result<bool> {
+        if (ordinal==2)!=(payload==PUBLISHED) {return Err(io::Error::new(io::ErrorKind::InvalidData,"invalid publication marker position"));}
+        Ok(payload==PUBLISHED)
+    }
+}
 fn generation_path(root: &Path, generation: u64) -> PathBuf {
     root.join(format!("generation-{generation:016x}"))
 }
@@ -400,6 +409,13 @@ impl PartitionJournal {
     pub(crate) fn append(&mut self, payload: &[u8]) -> io::Result<u64> {
         self.journal.append(payload)
     }
+    pub(crate) fn capture_cut(&self)->io::Result<CommittedCut> {
+        Ok(CommittedCut{generation:self.generation,journal:self.journal.capture_cut(&generation_path(&self.path,self.generation))?})
+    }
+    pub(crate) fn read_cut_chunk(&mut self,cut:&CommittedCut,offset:u64,bytes:&mut [u8])->io::Result<()> {
+        if self.generation!=cut.generation {return Err(io::Error::other("captured journal generation changed"));}
+        self.journal.read_cut_chunk(cut.journal,offset,bytes)
+    }
     /// Stream the selected certificate and complete ordered suffix. The
     /// publication marker is protocol metadata, not a Record Entry. In
     /// particular, do not filter using business seq: maintenance entries can
@@ -516,6 +532,18 @@ fn crash_boundary(stage: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chunked_cut_rejects_changed_generation_and_invalid_marker() {
+        let path=root();let mut store=PartitionJournal::create(&path,4096,b"base").unwrap();
+        let cut=store.capture_cut().unwrap();let mut buffer=vec![0;cut.end() as usize];
+        store.read_cut_chunk(&cut,0,&mut buffer).unwrap();let mut scan=cut.scan();let mut published=false;
+        scan.push(&buffer,|ordinal,payload|{published|=CommittedCut::is_publication(ordinal,payload)?;Ok(())}).unwrap();
+        scan.finish().unwrap();assert!(published);
+        assert!(CommittedCut::is_publication(1,PUBLISHED).is_err());
+        assert!(CommittedCut::is_publication(2,b"wrong-marker").is_err());
+        store.checkpoint(b"new-base").unwrap();assert!(store.read_cut_chunk(&cut,0,&mut buffer).is_err());
+        drop(store);std::fs::remove_dir_all(path).unwrap();
+    }
     #[test]
     fn committed_stream_preserves_checkpoint_suffix_order() {
         let path = root();

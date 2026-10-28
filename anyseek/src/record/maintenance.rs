@@ -338,6 +338,59 @@ pub(super) struct SourceProof {
     frames:Vec<Vec<u8>>,
     _memory:crate::storage::build_budget::MemoryLease,
 }
+pub(super) struct SourceCapture {
+    cut:crate::storage::partition::CommittedCut,
+    proof:SourceProof,
+}
+impl SourceCapture {
+    pub(super) fn capture(inner:&Inner)->Result<Self,RecordError> {
+        let cut=inner.journal.capture_cut().map_err(storage)?;
+        let memory=crate::storage::build_budget::reserve_memory((inner.index.pending_seals.len() as u64)
+            .checked_mul((2*std::mem::size_of::<segment::Package>()) as u64).ok_or_else(||storage("source package inventory overflow"))?).map_err(storage)?;
+        Ok(Self{cut,proof:SourceProof{anchor:inner.anchor.clone(),pending:inner.index.pending_seals.clone(),frames:Vec::new(),_memory:memory}})
+    }
+    pub(super) async fn collect(mut self,owner:&Arc<Mutex<Inner>>,id:u128,deadline:std::time::Instant)->Result<SourceProof,RecordError> {
+        let _memory=crate::storage::build_budget::reserve_memory(crate::storage::journal::READ_CHUNK as u64).map_err(storage)?;
+        let mut buffer=vec![0;crate::storage::journal::READ_CHUNK];
+        let mut scan=self.cut.scan();let mut offset=0;let mut published=false;
+        #[cfg(test)]
+        let root=owner.lock().await.journal.root().to_path_buf();
+        while offset<self.cut.end() {
+            if std::time::Instant::now()>=deadline {return Err(RecordError::Busy);}
+            let length=(self.cut.end()-offset).min(buffer.len() as u64) as usize;
+            {
+                let mut inner=owner.lock().await;
+                let _phase=Phase::new("source_chunk_read_locked",inner.state.seq);
+                if !inner.healthy || inner.state.sealed_for.is_some() {return Err(RecordError::RecoveryRequired);}
+                if inner.background.as_ref().is_none_or(|tail|tail.id!=id || tail.overflowed) {return Err(RecordError::Busy);}
+                if let Err(error)=inner.journal.read_cut_chunk(&self.cut,offset,&mut buffer[..length]) {
+                    inner.healthy=false;
+                    inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+                    log::warn!("captured source read failed: {error}");
+                    return Err(RecordError::RecoveryRequired);
+                }
+            }
+            scan.push(&buffer[..length],|ordinal,bytes| {
+                if crate::storage::partition::CommittedCut::is_publication(ordinal,bytes)? {published=true;return Ok(());}
+                let charge=bytes.len().checked_add(2*std::mem::size_of::<Vec<u8>>()).ok_or_else(||std::io::Error::other("source frame inventory overflow"))?;
+                self.proof._memory.grow(charge as u64)?;
+                self.proof.frames.push(bytes.to_vec());Ok(())
+            }).map_err(|error|if error.kind()==std::io::ErrorKind::InvalidData {RecordError::RecoveryRequired}else{storage(error)})?;
+            offset+=length as u64;
+            #[cfg(test)]
+            if offset==length as u64 && root.join(".test-source-chunk-pause").exists() {
+                std::fs::write(root.join(".test-source-chunk-started"),b"first source chunk parsed outside lock").map_err(storage)?;
+                while root.join(".test-source-chunk-pause").exists() && std::time::Instant::now()<deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        scan.finish().map_err(|_|RecordError::RecoveryRequired)?;
+        if !published {return Err(RecordError::RecoveryRequired);}
+        Ok(self.proof)
+    }
+}
 impl SourceProof {
     pub(super) fn capture(inner:&mut Inner)->Result<Self,RecordError> {
         let _phase=Phase::new("source_frames_capture_locked",inner.state.seq);

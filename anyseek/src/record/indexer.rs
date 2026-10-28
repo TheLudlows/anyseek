@@ -31,7 +31,7 @@ struct Plan {
     disk:crate::storage::build_budget::DiskScope,
     memory:crate::storage::build_budget::MemoryLease,
     resources: crate::resources::Lease,
-    source:Option<maintenance::SourceProof>,
+    source:Option<maintenance::SourceCapture>,
     intent:maintenance::Intent,
     #[cfg(feature="s3-object-store")]
     remote:Option<remote_checkpoint::RemoteBuild>,
@@ -123,7 +123,7 @@ impl RecordPartition {
                 let limit = inner.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
                     .ok_or_else(||storage("index disk budget overflow"))?;
                 let disk = crate::storage::build_budget::DiskScope::begin(&root,limit).map_err(storage)?;
-                let source=if automatic {Some(maintenance::SourceProof::capture(&mut inner)?)}else{None};
+                let source=if automatic {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
                 // Complete fallible local capture before acquiring the remote pin.
                 let snapshot={let _phase=maintenance::Phase::new("snapshot_clone_locked",inner.state.seq);
                     inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?};
@@ -159,6 +159,7 @@ impl RecordPartition {
             let result = async {
                 if started.elapsed() >= timeout { return Err(RecordError::Busy); }
                 if let Some(source)=source {
+                    let source=source.collect(&owner,id,started+timeout).await?;
                     source.verify(&root,&config,&snapshot)?;
                     #[cfg(feature="s3-object-store")]
                     if let Some(remote)=&remote {
@@ -417,6 +418,35 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5),async {
             while !root.join(".test-indexer-started").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
         }).await.unwrap();
+    }
+    #[tokio::test]
+    async fn chunked_source_proof_keeps_append_same_sequence_trim_and_cancelled_owner() {
+        struct Fixed(u64);
+        impl temporal::Clock for Fixed {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0)}}
+        let root=path();let mut settings=config();settings.max_record_bytes=256*1024;settings.max_journal_bytes=8*1024*1024;
+        let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
+        p.inner.lock().await.clock=Arc::new(Fixed(1_000));
+        p.write(write("first","a",&"alpha ".repeat(15000),ExpectedVersion::Absent)).await.unwrap();
+        std::fs::write(root.join(".test-source-chunk-pause"),b"pause").unwrap();
+        let job=p.start_index_job(Duration::from_secs(30),true).unwrap();
+        tokio::time::timeout(Duration::from_secs(10),async {
+            while !root.join(".test-source-chunk-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        let request=write("second","b","beta",ExpectedVersion::Absent);
+        let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
+        p.inner.lock().await.clock=Arc::new(Fixed(1_001+settings.change_feed.retention_ms));
+        p.advance_time().await.unwrap();
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,2);assert_eq!(inner.state.feed.floor,2);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
+        let completion=job.handle.abort_handle();drop(job);drop(p);
+        assert!(RecordPartition::open(&root,settings.max_journal_bytes).await.is_err());
+        std::fs::remove_file(root.join(".test-source-chunk-pause")).unwrap();
+        tokio::time::timeout(Duration::from_secs(30),async {
+            while !completion.is_finished(){tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+        {let inner=p.inner.lock().await;assert!(inner.anchor.is_some());assert_eq!(inner.state.seq,2);assert_eq!(inner.state.feed.floor,2);}
+        assert_eq!(p.write(request).await.unwrap(),receipt);assert!(p.get("a").await.unwrap().is_some());
+        drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn catchup_proof_releases_live_lock_and_rechecks_new_suffix() {

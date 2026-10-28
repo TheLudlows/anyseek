@@ -65,6 +65,64 @@ pub(crate) struct Journal {
     needs_recovery: bool,
 }
 
+pub(crate) const READ_CHUNK: usize = 64 * 1024;
+/// Physical committed extent captured from the healthy writer, never from a
+/// subsequently changing witness. The partition binds it to one generation.
+#[derive(Clone, Copy)]
+pub(crate) struct CommittedCut { seq:u64, pub(crate) end:u64, max_bytes:u64 }
+
+/// Incremental validation is performed outside the partition lock. At most one
+/// frame is assembled; its scratch admission is independent of retained frames.
+pub(crate) struct CommittedScan {
+    cut:CommittedCut, offset:u64, sequence:u64, header:Vec<u8>, payload:Vec<u8>,
+    length:Option<usize>, memory:Option<super::build_budget::MemoryLease>,
+}
+impl CommittedScan {
+    pub(crate) fn new(cut:CommittedCut)->Self {
+        Self{cut,offset:0,sequence:0,header:Vec::with_capacity(FRAME_HEADER),payload:Vec::new(),length:None,memory:None}
+    }
+    pub(crate) fn push(&mut self,mut bytes:&[u8],mut accept:impl FnMut(u64,&[u8])->io::Result<()>)->io::Result<()> {
+        while !bytes.is_empty() {
+            if self.offset==0 || self.header.len()<FRAME_HEADER && self.length.is_none() {
+                let target=if self.offset<8 {8}else{FRAME_HEADER};
+                let take=(target-self.header.len()).min(bytes.len());
+                self.header.extend_from_slice(&bytes[..take]);bytes=&bytes[take..];
+                if self.header.len()!=target {continue;}
+                if self.offset==0 {
+                    if self.header.as_slice()!=MAGIC {return Err(corrupt("unsupported journal format"));}
+                    self.offset=8;self.header.clear();continue;
+                }
+                let length=number(&self.header[..8]);
+                self.sequence=self.sequence.checked_add(1).ok_or_else(||corrupt("sequence overflow"))?;
+                if length>MAX_FRAME as u64 || self.cut.end-self.offset<FRAME_HEADER as u64
+                    || length>self.cut.end-self.offset-FRAME_HEADER as u64 || number(&self.header[8..16])!=self.sequence {
+                    return Err(corrupt("invalid committed frame length or sequence"));
+                }
+                self.memory=Some(super::build_budget::reserve_memory(length.checked_mul(32).ok_or_else(||corrupt("frame admission overflow"))?)?);
+                self.payload=Vec::with_capacity(length as usize);self.length=Some(length as usize);
+            }
+            if let Some(length)=self.length {
+                let take=(length-self.payload.len()).min(bytes.len());
+                self.payload.extend_from_slice(&bytes[..take]);bytes=&bytes[take..];
+                if self.payload.len()!=length {continue;}
+                let mut checksum=xxhash_rust::xxh64::Xxh64::new(0);
+                checksum.update(&self.header[..16]);checksum.update(&self.payload);
+                if checksum.digest()!=number(&self.header[16..]) {return Err(corrupt("committed frame checksum mismatch"));}
+                accept(self.sequence,&self.payload)?;
+                self.offset+=FRAME_HEADER as u64+length as u64;
+                self.header.clear();self.payload=Vec::new();self.length=None;self.memory=None;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn finish(self)->io::Result<()> {
+        if self.offset!=self.cut.end || !self.header.is_empty() || self.length.is_some() || self.sequence!=self.cut.seq {
+            return Err(corrupt("incomplete committed frame sequence"));
+        }
+        Ok(())
+    }
+}
+
 // Restore the writer's cursor on success, ordinary errors and unwind. Never
 // unlock or reopen the WAL: Windows byte-range locks belong to this handle.
 struct RestoreCursor<'a, S: Seek> {
@@ -88,6 +146,22 @@ impl<S: Seek> Drop for RestoreCursor<'_, S> {
 }
 
 impl Journal {
+    pub(crate) fn capture_cut(&self,path:&Path)->io::Result<CommittedCut> {
+        if self.needs_recovery {return Err(io::Error::other("journal requires recovery"));}
+        if !fs::symlink_metadata(path.join("wal"))?.file_type().is_file() {return Err(corrupt("journal is not a regular file"));}
+        if self.end<8 || self.end>self.max_bytes || self.end>self.log.metadata()?.len() {return Err(corrupt("invalid committed journal extent"));}
+        Ok(CommittedCut{seq:self.seq,end:self.end,max_bytes:self.max_bytes})
+    }
+    pub(crate) fn read_cut_chunk(&mut self,cut:CommittedCut,offset:u64,bytes:&mut [u8])->io::Result<()> {
+        if self.needs_recovery {return Err(io::Error::other("journal requires recovery"));}
+        if self.seq<cut.seq || self.end<cut.end || self.max_bytes!=cut.max_bytes || bytes.len()>READ_CHUNK
+            || offset>cut.end || bytes.len() as u64>cut.end-offset {return Err(corrupt("invalid captured journal read"));}
+        let saved=self.log.stream_position()?;
+        let mut guard=RestoreCursor{input:&mut self.log,saved,needs_recovery:&mut self.needs_recovery,attempted:false};
+        let result=(||{guard.input.seek(SeekFrom::Start(offset))?;guard.input.read_exact(bytes)})();
+        guard.restore().map_err(|error|io::Error::other(format!("committed WAL cursor restoration failed: {error}")))?;
+        result
+    }
     /// Visit the healthy writer's committed cut without reopening its owner or
     /// changing its append cursor. The caller holds the partition owner and
     /// supplies that owner's current generation directory. Callback results are
@@ -523,6 +597,43 @@ mod tests {
         let mut input=FailedSeek;let mut recovery=false;
         {let mut guard=RestoreCursor {input:&mut input,saved:19,needs_recovery:&mut recovery,attempted:false};assert!(guard.restore().is_err());}
         assert!(recovery);
+    }
+    #[test]
+    fn chunked_committed_cut_keeps_concurrent_append_cursor_and_large_frames() {
+        let root=path();let mut journal=Journal::create(&root,1024*1024).unwrap();
+        let large=vec![42;READ_CHUNK*3+19];
+        journal.append(&large).unwrap();journal.append(b"").unwrap();journal.append(b"last").unwrap();
+        let cut=journal.capture_cut(&root).unwrap();let mut scan=CommittedScan::new(cut);
+        let mut bytes=vec![0;READ_CHUNK];let mut offset=0;let mut frames=Vec::new();
+        while offset<cut.end {
+            journal.append(b"concurrent").unwrap();let cursor=journal.log.stream_position().unwrap();
+            let length=(cut.end-offset).min(READ_CHUNK as u64) as usize;
+            journal.read_cut_chunk(cut,offset,&mut bytes[..length]).unwrap();
+            assert_eq!(journal.log.stream_position().unwrap(),cursor);
+            scan.push(&bytes[..length],|seq,payload|{frames.push((seq,payload.to_vec()));Ok(())}).unwrap();
+            offset+=length as u64;
+        }
+        scan.finish().unwrap();assert_eq!(frames,vec![(1,large.clone()),(2,vec![]),(3,b"last".to_vec())]);
+        journal.append(b"after").unwrap();drop(journal);
+        let (journal,all)=Journal::open(&root,1024*1024).unwrap();
+        assert_eq!(all[0],large);assert_eq!(all.last().unwrap(),b"after");assert_eq!(all.len(),8);
+        drop(journal);std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn chunked_committed_scan_rejects_late_corruption_and_truncation() {
+        let root=path();let mut journal=Journal::create(&root,1024*1024).unwrap();
+        journal.append(b"first").unwrap();journal.append(&vec![1;READ_CHUNK+9]).unwrap();
+        let cut=journal.capture_cut(&root).unwrap();
+        let mut scan=CommittedScan::new(cut);let mut buffer=vec![0;READ_CHUNK];
+        journal.read_cut_chunk(cut,0,&mut buffer).unwrap();
+        let mut accepted=0;scan.push(&buffer,|_,_|{accepted+=1;Ok(())}).unwrap();assert_eq!(accepted,1);
+        let remaining=(cut.end-READ_CHUNK as u64) as usize;
+        journal.read_cut_chunk(cut,READ_CHUNK as u64,&mut buffer[..remaining]).unwrap();buffer[remaining-1]^=1;
+        assert!(scan.push(&buffer[..remaining],|_,_|{accepted+=1;Ok(())}).is_err());assert_eq!(accepted,1);
+        let mut scan=CommittedScan::new(cut);journal.read_cut_chunk(cut,0,&mut buffer).unwrap();
+        scan.push(&buffer,|_,_|Ok(())).unwrap();assert!(scan.finish().is_err());
+        journal.needs_recovery=true;assert!(journal.read_cut_chunk(cut,0,&mut buffer).is_err());
+        drop(journal);std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn committed_stream_keeps_append_cursor_and_ignores_uncommitted_suffix() {

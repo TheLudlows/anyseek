@@ -113,5 +113,9 @@
   "record::state_values::admission_count_tests::restored_admission_counts_reject_corrupt_derived_cache",
   "record::state_values::admission_count_tests::ttl_deadline_bound_skips_scan_and_tracks_early_update_extension_delete_restore",
   "record::ingest_log::tests::compaction_preserves_pending_completion_byte_headroom",
-  "record::ingestion::remote::tests::remote_compaction_preserves_pending_completion_byte_headroom"
+  "record::ingestion::remote::tests::remote_compaction_preserves_pending_completion_byte_headroom",
+  "storage::journal::tests::chunked_committed_cut_keeps_concurrent_append_cursor_and_large_frames",
+  "storage::journal::tests::chunked_committed_scan_rejects_late_corruption_and_truncation",
+  "storage::partition::tests::chunked_cut_rejects_changed_generation_and_invalid_marker",
+  "record::indexer::tests::chunked_source_proof_keeps_append_same_sequence_trim_and_cancelled_owner"
 ]
