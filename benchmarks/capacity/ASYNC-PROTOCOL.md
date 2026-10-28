@@ -55,7 +55,7 @@ The harness checks allocated run-directory size between batches and stops above
 batch's temporary peak. Previously retained test executables and logs are outside
 this incremental performance budget and must not be deleted.
 
-Maintenance instrumentation must be run separately on the same final source.
+Additional debug maintenance instrumentation must be run separately on the same final source.
 `ANYSEEK_TEST_PHASE_TIMINGS` records named intervals; only explicitly locked
 intervals may be described as lock measurements, and nested intervals must not be
 summed. A checkpoint HTTP duration is not a Record mutex hold time. Simulated S3,
@@ -83,9 +83,31 @@ background merge remains enabled throughout measurement.
 The harness verifies the final-build owner's expected anyseek binary SHA256 before
 starting a service and rejects raw-output paths inside the repository. Successful
 completion alone does not prove maintenance coverage: inspect
-`required_maintenance_observed` and each `maintenance_coverage` count in the anyseek
-summary. Server info logs supply `intake_compaction_locked`,
-`cache_merge_capture_locked`, `cache_merge_install_locked`,
-`cache_merge_cleanup_locked` and `cache_merge_build_unlocked`; the last interval is
-explicitly outside the Record lock. Debug test phase timings are supplementary
-regression evidence and are not release benchmark measurements.
+`required_maintenance_observed`, `missing_required_maintenance_phases`, and each
+`maintenance_coverage` entry in the anyseek summary. The default local workload
+requires these observed info-log intervals:
+
+- Spool lock: `intake_snapshot_locked` and `intake_selection_locked`.
+- Outside the Spool lock: `intake_local_prepare_unlocked` and
+  `intake_local_release_unlocked`.
+- Record lock: `cache_merge_capture_locked`, `cache_merge_install_locked` and
+  `cache_merge_cleanup_locked`.
+- Outside the Record lock: `cache_merge_build_unlocked`.
+
+`maintenance_phases_by_lock_scope` separates locked, unlocked and unclassified
+phase statistics; the latter makes no lock-scope claim. Missing required coverage
+is `null`, is listed explicitly, and has no latency statistics: it is never a
+zero-duration sample. All intervals can overlap, and an exit log also occurs on
+errors/cancellation; observing a phase does not itself prove a successful merge.
+The prepare interval wraps candidate file preparation, not the earlier complete
+snapshot serialization, so it must not be presented as all lock-free GC work.
+
+The prior `intake_compaction_locked` belongs to a test-only reclaim helper and
+is not required for the production local GC path. Explicit journal Compact may
+emit `compact_tail_handoff_locked` and `compact_native_membership_capture_locked`;
+these are reported in `optional_explicit_compact_coverage` with `null` for absent
+events. This harness's HTTP PATCH invokes `JobMode::Index`, so those conditional
+Compact phases are not default coverage requirements. They require a separate
+explicit-Compact experiment before any corresponding hold-time claim.
+Debug test phase timings are supplementary regression evidence and are not
+release benchmark measurements.

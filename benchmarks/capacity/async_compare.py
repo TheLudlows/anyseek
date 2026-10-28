@@ -37,6 +37,46 @@ def request_with_busy_wait(e, method, path, body=None, timeout=180):
         time.sleep(min(.05, max(0, deadline - time.monotonic())))
 
 
+def summarize_maintenance(log_text):
+    """Report observed intervals; missing evidence is null, never zero duration."""
+    phases = {}
+    for name, elapsed in re.findall(
+            r'record_maintenance phase=(\w+) seq=\d+ event=exit elapsed_us=(\d+)', log_text):
+        phases.setdefault(name, []).append(int(elapsed) / 1000)
+    measured = {name: {**stats(values), 'max_ms': max(values)}
+                for name, values in sorted(phases.items())}
+    grouped = {'locked': {}, 'unlocked': {}, 'unclassified': {}}
+    for name, values in measured.items():
+        group = ('unlocked' if name.endswith('_unlocked') else
+                 'locked' if name.endswith('_locked') else 'unclassified')
+        grouped[group][name] = values
+    required = [
+        'intake_snapshot_locked', 'intake_selection_locked',
+        'intake_local_prepare_unlocked', 'intake_local_release_unlocked',
+        'cache_merge_capture_locked', 'cache_merge_build_unlocked',
+        'cache_merge_install_locked', 'cache_merge_cleanup_locked',
+    ]
+    # HTTP PATCH uses JobMode::Index. Native handoff/membership are conditional
+    # JobMode::Compact work and cannot be required by this HTTP-only workload.
+    explicit_compact = ['compact_tail_handoff_locked', 'compact_native_membership_capture_locked']
+    coverage = {name: len(phases[name]) if name in phases else None for name in required}
+    return {
+        'maintenance_phases': measured,
+        'maintenance_phases_by_lock_scope': grouped,
+        'maintenance_coverage': coverage,
+        'missing_required_maintenance_phases': [name for name, count in coverage.items() if count is None],
+        'required_maintenance_observed': all(count is not None for count in coverage.values()),
+        'optional_explicit_compact_coverage': {
+            name: len(phases[name]) if name in phases else None for name in explicit_compact},
+        'maintenance_phase_caveat': (
+            'Named intervals may overlap; locked phases cover only the instrumented critical-section '
+            'interval, not mutex wait time. Unclassified phases have no asserted lock scope. '
+            'An exit event includes errors/cancellation and does not prove successful installation. '
+            'Missing coverage is null and has no timing statistics. Explicit Compact phases are '
+            'optional: the HTTP PATCH in this workload runs Index, not Compact.'),
+    }
+
+
 def run(engine, rows, queries, out, batch_size):
     out.mkdir(parents=True, exist_ok=False)
     e = Engine(engine, 'restricted', out)
@@ -154,18 +194,8 @@ def run(engine, rows, queries, out, batch_size):
         e.close()
         summary['peak_rss_kib'] = max((r['rss_kib'] for r in e.resources), default=0)
         summary['disk'] = disk(e.data)
-        phases = {}
-        for name, elapsed in re.findall(r'record_maintenance phase=(\w+) seq=\d+ event=exit elapsed_us=(\d+)', (out / 'server.log').read_text()):
-            phases.setdefault(name, []).append(int(elapsed) / 1000)
-        summary['maintenance_phases'] = {name: {**stats(values), 'max_ms': max(values)}
-                                         for name, values in phases.items()}
         if engine == 'anyseek':
-            required_phases = ['intake_compaction_locked', 'cache_merge_capture_locked',
-                               'cache_merge_install_locked', 'cache_merge_cleanup_locked',
-                               'cache_merge_build_unlocked']
-            summary['maintenance_coverage'] = {name: len(phases.get(name, [])) for name in required_phases}
-            summary['required_maintenance_observed'] = all(summary['maintenance_coverage'].values())
-        summary['maintenance_phase_caveat'] = 'Named intervals may overlap; locked phases cover only the instrumented critical-section interval, not mutex wait time.'
+            summary.update(summarize_maintenance((out / 'server.log').read_text()))
         dump(out / 'summary.json', summary)
     return summary
 
