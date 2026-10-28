@@ -983,9 +983,9 @@ mod tests {
         let mut receipts=Vec::new();
         for i in 0..129 {let request=write(&format!("op{i}"),&format!("r{i}"),"alpha",ExpectedVersion::Absent);let receipt=p.write(request.clone()).await.unwrap();receipts.push((request,receipt));}
         {let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
-            assert_eq!(head.indexed_seq,129);assert_eq!(head.log_base_seq,before.log_base_seq);assert_ne!(head.manifest,before.manifest);
-            assert_eq!(head.committed_seq,130);assert!(!inner.index.pending_seals.is_empty());
-            let selected=remote.selected(&head,true).await.unwrap();assert_eq!(selected.checkpoint_ref,before.manifest.clone().unwrap());assert!(selected.index.is_some());}
+            assert_eq!(head.indexed_seq,before.indexed_seq);assert_eq!(head.log_base_seq,before.log_base_seq);assert_eq!(head.manifest,before.manifest);
+            assert_eq!(head.committed_seq,130);assert!(inner.index.components().await.len()>1);
+            let selected=remote.selected(&head,true).await.unwrap();assert_eq!(selected.checkpoint_ref,before.manifest.clone().unwrap());assert!(selected.index.is_none());}
         let expected=scores(&p).await;
         let p=cold(p,&root,clock).await;
         assert_eq!(scores(&p).await,expected);
@@ -1031,7 +1031,10 @@ mod tests {
         let tip={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head.wal_tip.unwrap()};
         use object_store::ObjectStore;
         backend.put(&object_store::path::Path::from(tip.key),object_store::PutPayload::from_static(b"corrupt")).await.unwrap();
-        assert!(p.inner.lock().await.maintain_index_tail().await.is_err());
+        // Derived rotation does not certify or replace the remote WAL.
+        // Authority publication must still detect corruption and fence.
+        p.inner.lock().await.maintain_index_tail().await.unwrap();
+        assert!(p.compact_journal().await.is_err());
         assert!(!p.inner.lock().await.healthy);
     }
 
