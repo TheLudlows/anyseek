@@ -624,6 +624,15 @@ impl Inner {
     async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
         self.index.drain_batch_prefix(self.state.seq).await?;
         let _phase=maintenance::Phase::new("full_checkpoint",self.state.seq);
+        #[cfg(feature="s3-object-store")]
+        if let Some(remote)=self.remote.as_ref() {
+            if let Err(error)=remote.verify_seal_inputs(self.anchor.as_ref(),self.state.seq,&mut self.journal,self.config.max_journal_bytes).await {
+                if matches!(error,RecordError::Busy){return Err(error);}
+                self.healthy=false;
+                self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
+                return Err(error);
+            }
+        }
         self.reclaim_anchor_objects().await?;
         let root=self.journal.root().to_path_buf();
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;

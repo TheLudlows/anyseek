@@ -211,7 +211,7 @@ impl RemotePersistence {
     }
     /// Authenticate the existing remote authority without advancing its recovery
     /// baseline. Local pending packages are derived caches, never remote authority.
-    pub(super) async fn verify_seal_inputs(&self, reference:&anchor::Reference, seq:u64,
+    pub(super) async fn verify_seal_inputs(&self, reference:Option<&anchor::Reference>, seq:u64,
         journal:&mut PartitionJournal, authority_budget:u64)->Result<(),RecordError> {
         let authority=self.authority.lock().await;
         let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
@@ -219,9 +219,14 @@ impl RemotePersistence {
             return Err(RecordError::RecoveryRequired);
         }
         let store=self.store.uncached();
+        let bootstrap = if head.manifest.is_none() {
+            if reference.is_some(){return Err(RecordError::RecoveryRequired);}
+            Some(store.get_verified(head.bootstrap.as_ref().ok_or(RecordError::RecoveryRequired)?).await.map_err(remote_read_error)?)
+        } else {None};
+        if head.manifest.is_some() {
         let selected=self.selected(&head,true).await?;
         let checkpoint=&selected.checkpoint;
-        if checkpoint_codec::json_digest(&checkpoint.anchor)?!=checkpoint_codec::json_digest(reference)? {
+        if checkpoint_codec::json_digest(&checkpoint.anchor)?!=checkpoint_codec::json_digest(reference.ok_or(RecordError::RecoveryRequired)?)? {
             return Err(storage("remote seal authority mismatch"));
         }
         // Fresh backend reads preserve the publication-time corruption check.
@@ -242,10 +247,13 @@ impl RemotePersistence {
             let digest:[u8;32]=hash.finalize().into();
             if length!=file.length || digest!=file.sha256 {return Err(storage("remote seal file checksum"));}
         }
+        }
         let entries=crate::storage::object_log::load_committed_entries_after(&store,&head,head.log_base_seq,self.max_tail_blocks,self.max_tail_bytes).await.map_err(|e|match e {crate::storage::object_log::TailError::ObjectStore(e)=>remote_read_error(e),other=>storage(other)})?;
         let mut index=0usize;let mut first=true;
         journal.visit_committed(|bytes| {
-            if first {first=false;return Ok(());}
+            if first {first=false;
+                if bootstrap.as_ref().is_some_and(|initial|initial.as_ref()!=bytes){return Err(std::io::Error::other("remote/local bootstrap differs"));}
+                return Ok(());}
             let Some(entry)=entries.get(index) else{return Err(std::io::Error::other("local suffix exceeds remote authority"));};
             if entry.payload!=bytes || entry.request_sha256!=<[u8;32]>::from(Sha256::digest(bytes)) {
                 return Err(std::io::Error::other("remote/local suffix differs"));
@@ -1024,8 +1032,9 @@ mod tests {
         p.write(write("tail","tail","alpha",ExpectedVersion::Absent)).await.unwrap();
         let governor=Arc::new(Governor::default());let scope=governor.admit("seal".into(),Lane::Foreground,0).unwrap();
         let one=scope.io().unwrap();let two=scope.io().unwrap();
-        let result=scope.run(async {p.inner.lock().await.maintain_index_tail().await}).await;
-        assert!(matches!(result,Err(RecordError::Busy)));assert!(p.inner.lock().await.healthy);
+        let result=scope.run(p.compact_journal()).await;
+        assert!(matches!(result,Err(RecordError::Busy)),"{result:?}");
+        assert!(p.inner.lock().await.healthy);assert_eq!(p.statistics().await.unwrap().visible_seq,2);
         drop(one);drop(two);
         p.write(write("after-busy","third","alpha",ExpectedVersion::Absent)).await.unwrap();
         let tip={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head.wal_tip.unwrap()};
@@ -1036,6 +1045,22 @@ mod tests {
         p.inner.lock().await.maintain_index_tail().await.unwrap();
         assert!(p.compact_journal().await.is_err());
         assert!(!p.inner.lock().await.healthy);
+    }
+
+    #[tokio::test]
+    async fn first_checkpoint_rejects_corrupt_remote_wal_without_replacing_head() {
+        let (p,backend,_root,_db,_clock)=source().await;
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        let before={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
+            let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head};
+        assert!(before.manifest.is_none());
+        use object_store::ObjectStore;
+        backend.put(&object_store::path::Path::from(before.wal_tip.as_ref().unwrap().key.clone()),object_store::PutPayload::from_static(b"corrupt")).await.unwrap();
+        assert!(p.compact_journal().await.is_err());
+        let inner=p.inner.lock().await;
+        assert!(!inner.healthy);
+        let remote=inner.remote.as_ref().unwrap();
+        assert_eq!(remote.authority.lock().await.read_head("source").unwrap().unwrap(),before);
     }
 
     #[tokio::test]
