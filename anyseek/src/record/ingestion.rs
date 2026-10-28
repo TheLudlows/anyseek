@@ -122,7 +122,7 @@ struct LocalPlan {
 // wait for Spool (Accept/Complete can own Spool while waiting for the same I/O).
 async fn intake_file_io<T: Send + 'static>(work: impl FnOnce() -> Result<T, RecordError> + Send + 'static) -> Result<T, RecordError> {
     let scope = crate::resources::io_scope(crate::resources::Lane::Background);
-    let permit = scope.journal_io().await.map_err(|_| RecordError::Busy)?;
+    let permit = scope.journal_io().await.map_err(storage)?;
     tokio::task::spawn_blocking(move || scope.run_sync(|| permit.run(work)))
         .await.map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?
 }
@@ -1060,15 +1060,25 @@ impl IngestPipeline {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
             }
-            let mut spool = self.spool.lock().await;
-            let event = Event::Complete {
-                first: seq,
-                results,
+            let event = Event::Complete { first: seq, results };
+            let terminal_started = std::time::Instant::now();
+            let mut spool = loop {
+                let mut spool = self.spool.lock().await;
+                if spool.blocked.is_some() { return; }
+                match spool.log.append(&event).await {
+                    Ok(()) => break spool,
+                    Err(RecordError::Busy) if terminal_started.elapsed() < std::time::Duration::from_secs(300) => {
+                        // Only persistence is retried. Business results are already fixed;
+                        // dropping Spool lets admission, status and maintenance make progress.
+                        drop(spool);
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(error) => {
+                        spool.blocked = Some(error.to_string());
+                        return;
+                    }
+                }
             };
-            if let Err(error) = spool.log.append(&event).await {
-                spool.blocked = Some(error.to_string());
-                return;
-            }
             if let Err(error) = spool.apply(event) {
                 spool.blocked = Some(error.to_string());
                 return;
@@ -1134,6 +1144,112 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
         let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        pipeline.completion_pause.store(true, Ordering::Release);
+        let scope = Arc::new(Governor::default()).admit("terminal-io".into(), Lane::Foreground, 0).unwrap();
+        let request = write("terminal", "a", "alpha", ExpectedVersion::Absent);
+        scope.clone().run(pipeline.submit(vec![request.clone()])).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !pipeline.completion_ready.load(Ordering::Acquire) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(pipeline.progress().await.pending, 1);
+        let background = scope.in_lane(Lane::Background);
+        let held = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop { if let Ok(lease) = background.io() { break lease; } tokio::task::yield_now().await; }
+        }).await.unwrap();
+        pipeline.completion_pause.store(false, Ordering::Release);
+        let waiting = pipeline.clone();
+        let finish = tokio::spawn(async move { waiting.finish().await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!finish.is_finished());
+        drop(held);
+        let progress = tokio::time::timeout(std::time::Duration::from_secs(10), finish).await.unwrap().unwrap().unwrap();
+        assert_eq!(progress.completed_seq, 1);
+        assert!(progress.blocked.is_none());
+        assert_eq!(pipeline.operation(&request.operation_id).await.unwrap().receipt.unwrap().seq, 1);
+        assert_eq!(p.statistics().await.unwrap().retained_operations, 1);
+    }
+    #[cfg(feature = "s3-object-store")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_gc_mid_upload_admission_reuses_one_build_and_inventory() {
+        use crate::resources::{Governor, Lane};
+        let temporary = tempfile::tempdir().unwrap();
+        let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        let database = temporary.path().join("authority.sqlite");
+        let source = (crate::storage::s3_compatible::S3CompatibleStore::from_store(
+            Arc::new(object_store::memory::InMemory::new()), 1024 * 1024),
+            database.clone(), "gc-admission".to_owned(), 1, 1024 * 1024);
+        let (remote, _) = remote::Log::open(source, "terminal", 128, 1024 * 1024).await.unwrap();
+        pipeline.spool.lock().await.log = DurableLog::Remote(remote);
+        let request = write("gc-retry", "a", "alpha", ExpectedVersion::Absent);
+        let acceptance = pipeline.submit(vec![request.clone()]).await.unwrap();
+        pipeline.finish().await.unwrap();
+        let database = database.with_extension("intake.sqlite");
+        let gate = database.with_extension("pause-intake-upload-prefix");
+        std::fs::write(&gate, b"").unwrap();
+        let scope = Arc::new(Governor::default()).admit("gc-admission".into(), Lane::Background, 0).unwrap();
+        pipeline.spool.lock().await.completed_since_compaction = 64;
+        scope.clone().run(async { pipeline.kick_gc(); }).await;
+        async fn entered(path: &std::path::Path) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !path.exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
+            }).await.unwrap();
+        }
+        entered(&database.with_extension("entered-intake-upload-prefix")).await;
+        let held = scope.io().unwrap();
+        std::fs::remove_file(gate).unwrap();
+        entered(&database.with_extension("entered-intake-admission")).await;
+        let inventory = {
+            let spool = pipeline.spool.lock().await;
+            let DurableLog::Remote(log) = &spool.log else { panic!() };
+            log.inventory_for_test()
+        };
+        let waiter = pipeline.clone();
+        let finish = tokio::spawn(async move { waiter.finish().await });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(!finish.is_finished());
+        assert_eq!(pipeline.submit(vec![request.clone()]).await.unwrap(), acceptance);
+        {
+            let spool = pipeline.spool.lock().await;
+            let DurableLog::Remote(log) = &spool.log else { panic!() };
+            assert_eq!(log.inventory_for_test(), inventory);
+        }
+        drop(held);
+        let progress = tokio::time::timeout(Duration::from_secs(10), finish).await.unwrap().unwrap().unwrap();
+        assert!(progress.blocked.is_none()); assert_eq!(progress.pending, 0);
+        assert_eq!(pipeline.gc_committed.load(Ordering::Acquire), 1);
+        assert_eq!(pipeline.gc_stale.load(Ordering::Acquire), 0);
+        assert_eq!(p.statistics().await.unwrap().retained_operations, 1);
+        // A permanent refusal stops the owned task instead of generating more builds.
+        std::fs::remove_file(database.with_extension("entered-intake-upload-prefix")).unwrap();
+        std::fs::write(database.with_extension("pause-intake-upload-prefix"), b"").unwrap();
+        std::fs::write(database.with_extension("fail-intake-admission-deadline"), b"").unwrap();
+        pipeline.spool.lock().await.completed_since_compaction = 64;
+        scope.clone().run(async { pipeline.kick_gc(); }).await;
+        entered(&database.with_extension("entered-intake-upload-prefix")).await;
+        let held = scope.io().unwrap();
+        std::fs::remove_file(database.with_extension("pause-intake-upload-prefix")).unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), pipeline.finish()).await.unwrap().is_err());
+        assert!(pipeline.progress().await.blocked.unwrap().contains("admission deadline"));
+        let count = { let spool = pipeline.spool.lock().await;
+            let DurableLog::Remote(log) = &spool.log else { panic!() }; log.inventory_for_test() };
+        for _ in 0..3 { pipeline.kick_gc(); tokio::task::yield_now().await; }
+        { let spool = pipeline.spool.lock().await;
+            let DurableLog::Remote(log) = &spool.log else { panic!() }; assert_eq!(log.inventory_for_test(), count); }
+        drop(held);
+    }
+    #[cfg(feature = "s3-object-store")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_complete_admission_retries_only_terminal_persistence() {
+        use crate::resources::{Governor, Lane};
+        let temporary = tempfile::tempdir().unwrap();
+        let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
+        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+        let source = (crate::storage::s3_compatible::S3CompatibleStore::from_store(
+            Arc::new(object_store::memory::InMemory::new()), 1024 * 1024),
+            temporary.path().join("authority.sqlite"), "terminal-source".to_owned(), 1, 1024 * 1024);
+        let (remote, _) = remote::Log::open(source, "terminal", 128, 1024 * 1024).await.unwrap();
+        pipeline.spool.lock().await.log = DurableLog::Remote(remote);
         pipeline.completion_pause.store(true, Ordering::Release);
         let scope = Arc::new(Governor::default()).admit("terminal-io".into(), Lane::Foreground, 0).unwrap();
         let request = write("terminal", "a", "alpha", ExpectedVersion::Absent);

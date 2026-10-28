@@ -103,3 +103,5 @@ Vector/metadata 与 required successor 小步：先取得组件锁，再在身�
 本地 intake 小步：Accept、Complete 和滚段的 blocking worker 显式保留 Scope，并在完整 File 事务前预占；GC prepare 的 loan 在取得 Spool 前释放，选择阶段统一 Spool→I/O→log 顺序。6/6 本地专项通过，覆盖终态只持久化不重执行业务、滚段、GC prepare/select/finish、真实部分 WAL 仍隔离并恢复。远端 typed admission 与 Complete 的确定拒绝重试仍在下一步完成；不能将此本地结果当作真实云验证。
 
 远端准入类型与来源读取小步：上传的 I/O/payload/readback 配额拒绝只有在库存登记及 PUT 前才产生独立 Admission；Record 只将该类型作为确定拒绝，普通 ObjectStore 错误即使包装 Busy 也仍 Unknown。S3 adapter 3/3、本地 RemoteRecord 分类/拒绝/已提交恢复及 source-cut 拒读游标恢复 4/4 通过。fixture 在本机验证 PUT 成功、读回失败，保留未知库存；GET 返回后不再占 I/O，DELETE 拒绝不记为完成。以上均为模拟/本地 HTTP，不是云 S3 验收。
+
+远端 intake 与终态小步：只有 typed Admission 允许 Log.failed 复位并延期；Complete 只重试既有终态事件，释放 Spool 等待，最多 300 秒，不重执行业务。GC 上传逐对象保留同一 build/keys/pins，已验证前缀不重传；明确拒绝到限后 blocked，不能丢候选再不断生成无法裁剪的未知库存。完整 ingestion 37/37 通过，生产 GC 路径测试覆盖中间对象拒绝、释放后一次选择、库存稳定及到限后重复调度不增；独立复核确认此前库存活性漏洞关闭。真正 Unknown、ObjectStore 或 SQLite 错误不进入该重试路径。新全链小回归已闭环，仍需冻结最新代码重新完成整体验证及成对基准。

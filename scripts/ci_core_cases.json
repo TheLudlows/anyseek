@@ -173,5 +173,8 @@
   "storage::s3_compatible::admission_tests::http_put_success_then_readback_failure_is_not_admission_refusal",
   "record::tests::remote_record_upload_admission_refuses_before_put_and_keeps_writer_usable",
   "record::tests::remote_record_only_typed_admission_is_a_definite_refusal",
-  "storage::journal::tests::chunked_cut_io_refusal_restores_cursor_and_allows_next_append"
+  "storage::journal::tests::chunked_cut_io_refusal_restores_cursor_and_allows_next_append",
+  "record::ingestion::remote::tests::remote_append_admission_is_retryable_and_snapshot_keeps_staging",
+  "record::ingestion::tests::remote_complete_admission_retries_only_terminal_persistence",
+  "record::ingestion::tests::remote_gc_mid_upload_admission_reuses_one_build_and_inventory"
 ]

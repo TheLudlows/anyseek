@@ -1,7 +1,7 @@
 //! Cloud intake authority. SQLite contains references/receipts, never commands.
 use super::*;
 use crate::storage::{
-    object_log, s3_compatible::S3CompatibleStore, sqlite_authority::{SqliteAuthority, ObjectRef},
+    object_log, s3_compatible::{S3CompatibleStore, UploadRegisterError}, sqlite_authority::{SqliteAuthority, ObjectRef},
 };
 use sha2::{Digest, Sha256};
 
@@ -76,11 +76,27 @@ impl Prepared {
         let _phase = maintenance::Phase::new("intake_remote_upload_unlocked", self.cut.events);
         let mut authority = self.authority()?;
         #[cfg(test)] self.pause("upload").await;
+        let started = std::time::Instant::now();
+        let deadline = std::time::Duration::from_secs(300);
+        #[cfg(test)] let deadline = if self.cut.database.with_extension("fail-intake-admission-deadline").exists() { std::time::Duration::ZERO } else { deadline };
         for (reference, bytes) in &self.objects {
             #[cfg(test)] if authority.database_path().with_extension("fail-intake-unknown-put").exists() {
                 return Err(RecordError::OutcomeUnknown("injected snapshot PUT response loss".into()));
             }
-            self.cut.store.put_and_register(&mut authority, &reference.key, bytes, unix_time_ms_i64()).await.map_err(storage)?;
+            loop {
+                match self.cut.store.put_and_register(&mut authority, &reference.key, bytes, unix_time_ms_i64()).await {
+                    Ok(_) => break,
+                    Err(UploadRegisterError::Admission(_)) if started.elapsed() < deadline => {
+                        // Preserve this build and its staging pins; never allocate a new
+                        // candidate for a transient refusal or repeat a verified prefix.
+                        #[cfg(test)] std::fs::write(self.cut.database.with_extension("entered-intake-admission"), b"").unwrap();
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(UploadRegisterError::Admission(error)) => return Err(storage(format!("snapshot upload admission deadline: {error}; reopen required"))),
+                    Err(error) => return Err(upload_error(error)),
+                }
+            }
+            #[cfg(test)] if reference == &self.objects[0].0 { self.pause("upload-prefix").await; }
         }
         for (child, _) in &self.objects[..self.objects.len()-1] {
             authority.register_object_edge(&self.manifest, child).map_err(storage)?;
@@ -349,7 +365,7 @@ impl Log {
             self.authority.reserve_upload(&reference, unix_time_ms_i64()).map_err(storage)?;
             return Err(RecordError::OutcomeUnknown("injected snapshot PUT response loss".into()));
         }
-        self.store.put_and_register(&mut self.authority, key, bytes, unix_time_ms_i64()).await.map_err(storage)
+        self.store.put_and_register(&mut self.authority, key, bytes, unix_time_ms_i64()).await.map_err(upload_error)
     }
     pub(super) fn admit_objects(&self, additional: u64) -> Result<(), RecordError> {
         let retained = self.authority.intake_inventory_count(&self.partition, self.epoch).map_err(storage)?;
@@ -379,6 +395,10 @@ impl Log {
     }
     pub(super) fn available(&self) -> u64 {
         self.max_bytes.saturating_sub(self.bytes)
+    }
+    #[cfg(test)]
+    pub(super) fn inventory_for_test(&self) -> u64 {
+        self.authority.intake_inventory_count(&self.partition, self.epoch).unwrap()
     }
     pub(super) async fn append(&mut self, event: &Event) -> Result<(), RecordError> {
         if self.failed {
@@ -418,7 +438,14 @@ impl Log {
             self.max_object_bytes,
         )
         .await
-        .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?;
+        .map_err(|e| match e {
+            object_log::TailError::Admission(_) => {
+                // No inventory mutation or PUT occurred: this exact event is safe to retry.
+                self.failed = false;
+                RecordError::Busy
+            }
+            other => RecordError::OutcomeUnknown(other.to_string()),
+        })?;
         let head = match outcome {
             object_log::AppendCommitOutcome::Published { head, .. }
             | object_log::AppendCommitOutcome::AlreadyPublished(head) => head,
@@ -434,9 +461,57 @@ impl Log {
     }
 }
 
+fn upload_error(error: UploadRegisterError) -> RecordError {
+    match error {
+        UploadRegisterError::Admission(_) => RecordError::Busy,
+        other => storage(other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn remote_append_admission_is_retryable_and_snapshot_keeps_staging() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = (S3CompatibleStore::from_store(Arc::new(object_store::memory::InMemory::new()), 16384),
+            temporary.path().join("authority.sqlite"), "source".to_owned(), 1, 16384);
+        let (mut log, _) = Log::open(source.clone(), "config", 128, 16384).await.unwrap();
+        let request = super::super::super::tests::write("admission", "a", "alpha", ExpectedVersion::Absent);
+        let accept = Event::Accept { first: 1, requests: vec![request] };
+        let inventory = log.authority.intake_inventory_count(&log.partition, log.epoch).unwrap();
+        let scope = Arc::new(crate::resources::Governor::default()).admit("remote-admission".into(), crate::resources::Lane::Background, 0).unwrap();
+        scope.clone().run(async {
+            let held = scope.io().unwrap();
+            assert!(matches!(log.append(&accept).await, Err(RecordError::Busy)));
+            assert!(!log.failed);
+            assert_eq!(log.events, 0);
+            assert_eq!(log.authority.intake_inventory_count(&log.partition, log.epoch).unwrap(), inventory);
+            drop(held);
+            log.append(&accept).await.unwrap();
+            let complete = Event::Complete { first: 1, results: vec![Err(IngestFailure { code: "conflict".into(), message: "done".into() })] };
+            let held = scope.io().unwrap();
+            assert!(matches!(log.append(&complete).await, Err(RecordError::Busy)));
+            assert!(!log.failed); assert_eq!(log.events, 1);
+            drop(held); log.append(&complete).await.unwrap();
+            let candidate = Prepared::encode(log.cut().unwrap(), vec![serde_json::to_vec(&accept).unwrap(), serde_json::to_vec(&complete).unwrap()]).unwrap();
+            assert!(log.reserve(&candidate, 0, 0).unwrap());
+            let held = scope.io().unwrap();
+            let upload = candidate.upload();
+            tokio::pin!(upload);
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut upload).await.is_err());
+            for (reference, _) in &candidate.objects {
+                assert!(!log.authority.retire_object(&reference.key, 0, i64::MAX).unwrap());
+            }
+            drop(held); upload.await.unwrap();
+            assert!(log.select(&candidate, 0).unwrap());
+            candidate.release(log.garbage().unwrap()).await.unwrap();
+        }).await;
+        drop(log);
+        let (_, events) = Log::open(source, "config", 128, 16384).await.unwrap();
+        assert!(matches!(&events[..], [Event::Accept { .. }, Event::Complete { .. }]));
+    }
+
     #[tokio::test]
     async fn unlocked_snapshot_exact_chunk_boundary_never_emits_empty_extra_chunk() {
         let temporary = tempfile::tempdir().unwrap();
