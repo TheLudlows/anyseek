@@ -54,12 +54,8 @@ def exercise(call, restart_with, directory, faults):
         assert call('POST', endpoint + '/query', {})['statistics']['active_records'] == 0
         assert call('POST', endpoint + '/doc', source)['receipt'] == receipt
         call('POST', endpoint + '/doc', {**source, 'operation_id': operation(), 'expected': {'Match': 2}, 'temporal': {'expire_at_ms': now + 10000}}, status=400)
-        # Final-state takeover of an old backup must retain the expiration cause.
-        take = {'operation_id': operation(), 'source_collection_id': 'temporal', 'collection_id': 'temporal-next', 'backup_id': archive['backup_id']}
-        assert call('POST', '/api/v1/takeovers', take)['status'] == 'active'
-        endpoint = '/api/v1/index/temporal-next'
-        call('POST',endpoint+'/query',{},key=reader,status=403)
-        call('GET', '/api/v1/index/temporal', status=403)
+        # Restart and clock-uncertainty keep expired records absent; a backward
+        # jump cannot restore data, and a larger jump is rejected as uncertain.
         assert call('POST', endpoint + '/query', {})['count_total'] == 0
         restart_with(env)
         assert call('POST', endpoint + '/query', {})['count_total'] == 0
@@ -67,7 +63,7 @@ def exercise(call, restart_with, directory, faults):
         assert call('POST', endpoint + '/query', {}, status=503)['code'] == 'clock_uncertain'
         clock(now + 101)
         assert call('POST', endpoint + '/query', {})['count_total'] == 0
-        print('PASS temporal HTTP: fixed view, transitive expiry, no revival, original retry, restart and final-state takeover')
+        print('PASS temporal HTTP: fixed view, transitive expiry, no revival, original retry and restart')
         for stage in ['after_append_unknown', 'after_durable', 'crash_after_durable', 'crash_after_visible']:
             # All commands use the same controlled time; no sleep determines expiry.
             cid = 'ttl-' + stage.replace('_', '-')

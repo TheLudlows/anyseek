@@ -42,7 +42,6 @@ impl Execution {
     }
     pub(super) async fn control(&self, command: &CatalogCommand) -> Result<Control, CatalogError> {
         if matches!(command, CatalogCommand::RevokeKey { .. }
-            | CatalogCommand::PrepareTakeover { .. } | CatalogCommand::FinalizeTakeover { .. }
             | CatalogCommand::RetireBackup { .. }) {
             return Ok(Control { _collection: None,
                 _global: Global::Write { _guard: self.freeze().await } });

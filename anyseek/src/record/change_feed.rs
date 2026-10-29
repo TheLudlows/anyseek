@@ -68,7 +68,7 @@ pub enum ChangeKind {
 /// Content-free invalidation/refresh notice, never a historical document reader.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChangeEvent {
-    /// Owner feed scope; changes on independent copy/takeover.
+    /// Owner feed scope; changes on independent copy/restore.
     pub scope: String,
     /// Original partition provenance, not a shared write lease.
     pub partition_id: String,
@@ -443,7 +443,7 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some() {
+        if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
         if limit == 0 || limit > 1000 {
@@ -564,7 +564,7 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let mut inner = self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some() {
+        if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
         let at = inner.evaluation_time_ms;
@@ -671,7 +671,7 @@ impl RecordPartition {
     /// Release a completed pin explicitly; the retained feed is unaffected.
     pub async fn release_bootstrap(&self, request_id: &str) -> Result<(), RecordError> {
         let mut inner = self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some() {
+        if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
         if inner.bootstrap.as_ref().is_some_and(|p| p.id == request_id) {
@@ -701,7 +701,7 @@ impl RecordPartition {
     pub async fn bootstrap_identity(&self) -> Result<String, RecordError> {
         self.advance_time().await?;
         let mut inner = self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some() {
+        if !inner.healthy {
             return Err(RecordError::RecoveryRequired);
         }
         let at = inner.evaluation_time_ms;

@@ -111,7 +111,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Includes cold-cache S3 takeover and joint-archive process fault matrices.
+    # Includes cold-cache S3 checkpoints and joint-archive process fault matrices.
     timeout-minutes: 120
     env:
       ANYSEEK_TEST_ROOT: ${{ github.workspace }}/target/p1-native-data

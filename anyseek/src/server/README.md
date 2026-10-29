@@ -194,13 +194,6 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 当前 Record 权威 journal 使用 V12 entry 标签，拒绝旧格式，不提供升级迁移。低层搜索索引格式 8 与权威 journal 版本不是同一概念。
 
 
-### 同服务受控接管
-
-使用 `POST /api/v1/takeovers`，请求为 `operation_id`、`source_collection_id`、新的 `collection_id` 和 `backup_id`。只接受当前服务中仍有完整权威历史的源及同谱系备份。此操作会永久关闭原 collection，目标追平最终封存水位，保留全部已确认写入，**不是回退到备份时点**；旧 grants 不复制。返回 `status:"active"`、`recovery:"final_sealed_waterline"` 和最终 certificate。S3 模式同样使用该入口，先持久发布源 seal 和目标独立远端 checkpoint，认证后才激活；本地缓存可重建。
-
-Web UI 的 “Take over a collection” 输入同样字段，先保存请求，响应丢失/重载后原样重试。相同目标不得换源或备份；中断后服务按持久意图续办，目标认证前不开放。完整服务备份拒绝未完成接管。独立恢复目录（含空或纯普通记录备份）不能冒充当前删除权威；没有强制解除隔离、跨服务自动灾备或双活入口。详见 [Record 语义](../../../docs/record-model.md)。
-
-
 ### 可选向量与后补
 
 正文可先写入，不需零向量占位。沿用写入端点提交 `operation_id,record_id,routing_key,expected:{"Match":当前正文版本},vector_patch:{"vector":[2,0]}`，省略 document/system；仅填充尚未存在的 schema 向量字段。正文版本保持不变，提交序号推进；重复请求必须保留 operation_id。已删除、stale 或隔离 typed 记录不可补写，来源正文版本改变后旧请求冲突。

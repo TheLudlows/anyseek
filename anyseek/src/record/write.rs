@@ -35,7 +35,7 @@ impl RecordPartition {
             let result = async {
                 let _permit = permit;
                 let mut inner = partition.inner.lock().await;
-                if !inner.healthy || inner.state.sealed_for.is_some() {
+                if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
                 inner.index.begin_batch(partition.indexes.clone(),Arc::downgrade(&partition.inner)).await?;
@@ -107,7 +107,7 @@ impl Inner {
         &mut self,
         request: RecordWrite,
     ) -> Result<WriteReceipt, RecordError> {
-        if !self.healthy || self.state.sealed_for.is_some() {
+        if !self.healthy {
             return Err(RecordError::RecoveryRequired);
         }
         // Known hard pressure must not repeatedly plan/copy a new

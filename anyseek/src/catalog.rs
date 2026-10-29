@@ -18,8 +18,6 @@ mod service_snapshot;
 mod execution;
 #[cfg(test)]
 mod execution_tests;
-mod takeover;
-pub use takeover::TakeoverIntent;
 pub use service_snapshot::ServiceSnapshot;
 
 const BUDGET: u64 = 16 * 1024 * 1024;
@@ -100,30 +98,6 @@ pub enum CatalogCommand {
         /// Generated backup ID, without path components.
         backup_id: String,
     },
-    /// Reserve a successor and close source authorization before sealing data.
-    PrepareTakeover {
-        /// New target identity.
-        collection_id: String,
-        /// Existing current source identity.
-        source_collection_id: String,
-        /// Current trusted management identity.
-        owner_key: String,
-        /// Exact source configuration.
-        config: RecordConfig,
-        /// Pinned independent backup identity.
-        backup_id: String,
-        /// Exact source provenance.
-        lineage: String,
-        /// Immutable recovery binding.
-        binding: crate::record::SealRequest,
-    },
-    /// Complete only after the rebuilt successor passes content certification.
-    FinalizeTakeover {
-        /// Reserved target identity.
-        collection_id: String,
-        /// Final source authority and intent binding.
-        certificate: crate::record::SealCertificate,
-    },
     /// Called only after the prepared RecordPartition has durably initialized.
     ActivateCollection {
         /// Stable, never reused collection identity.
@@ -194,10 +168,6 @@ pub struct CollectionEntry {
     pub deleted: bool,
     /// Retained restoration intent; never a caller-supplied filesystem path.
     pub restore_from: Option<String>,
-    /// Durable target-side recovery intent, retained beyond operation expiry.
-    pub takeover: Option<TakeoverIntent>,
-    /// Source-side binding; ordinary initialization must never reopen this owner.
-    pub takeover_target: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Applied {
@@ -391,9 +361,6 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
     }
     let active_key = |key: &str, state: &State| state.keys.get(key).is_some_and(|k| k.active);
     match &event.request.command {
-        CatalogCommand::PrepareTakeover { .. } | CatalogCommand::FinalizeTakeover { .. } => {
-            takeover::apply(state, event)?;
-        }
         CatalogCommand::AddKey { key_id, verifier } => {
             identity(key_id)?;
             if verifier.len() != 64 || !verifier.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -484,8 +451,6 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                     initialized: false,
                     deleted: false,
                     restore_from,
-                    takeover: None,
-                    takeover_target: None,
                 },
             );
         }
@@ -494,7 +459,7 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                 .collections
                 .get(collection_id)
                 .ok_or_else(|| CatalogError::Conflict("collection not prepared".into()))?;
-            if collection.active || collection.deleted || collection.takeover.is_some() || collection.takeover_target.is_some() {
+            if collection.active || collection.deleted {
                 return Err(CatalogError::Conflict("collection already active".into()));
             }
             // A revoked creator cannot strand independently owned data.
@@ -537,10 +502,6 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                 .collections
                 .get_mut(collection_id)
                 .ok_or_else(|| CatalogError::Conflict("collection not found".into()))?;
-            if collection.takeover_target.is_some() && !collection.deleted
-                || collection.takeover.is_some() && !collection.active && !collection.deleted {
-                return Err(CatalogError::Conflict("unfinished takeover pins collection".into()));
-            }
             collection.active = false;
             collection.deleted = true;
             state.grants.remove(collection_id);
@@ -703,21 +664,9 @@ impl Catalog {
     /// in the service layer. This method never implicitly authorizes a key to
     /// grant access. Accepted mutations survive cancellation of their waiter.
     pub async fn execute(&self, request: CatalogRequest) -> Result<CatalogReceipt, CatalogError> {
-        if matches!(request.command, CatalogCommand::PrepareTakeover { .. }) {
-            return Err(CatalogError::Rejected("takeover requires capacity preflight under catalog guard".into()));
-        }
-        self.execute_checked(request, None).await
+        self.execute_checked(request).await
     }
-    /// Serialize source capacity admission with all authorized data writes, then
-    /// close its grants before releasing this catalog guard. The service owns
-    /// the root; callers must not bypass authorized() for concurrent data writes.
-    pub async fn prepare_takeover(&self, request: CatalogRequest, source: crate::record::RecordPartition) -> Result<CatalogReceipt, CatalogError> {
-        if !matches!(request.command, CatalogCommand::PrepareTakeover { .. }) {
-            return Err(CatalogError::Rejected("not a takeover preparation".into()));
-        }
-        self.execute_checked(request, Some(source)).await
-    }
-    async fn execute_checked(&self, request: CatalogRequest, source: Option<crate::record::RecordPartition>) -> Result<CatalogReceipt, CatalogError> {
+    async fn execute_checked(&self, request: CatalogRequest) -> Result<CatalogReceipt, CatalogError> {
         let admission = self
             .admission
             .clone()
@@ -762,17 +711,11 @@ impl Catalog {
                         Err(CatalogError::Conflict("operation ID reused".into()))
                     };
                 }
-                if let Some(source) = source {
-                    let CatalogCommand::PrepareTakeover { ref binding, ref lineage, .. } = request.command else { unreachable!() };
-                    source.validate_takeover_capacity(binding, lineage).await
-                        .map_err(|e| CatalogError::Rejected(e.to_string()))?;
-                }
                 let revoke = matches!(
                     request.command,
                     CatalogCommand::RevokeKey { .. }
                         | CatalogCommand::RevokeGrant { .. }
                         | CatalogCommand::DeleteCollection { .. }
-                        | CatalogCommand::FinalizeTakeover { .. }
                 );
                 #[cfg(test)]
                 let operation_limit = inner.operation_limit;
@@ -808,7 +751,6 @@ impl Catalog {
                     request.command,
                     CatalogCommand::PrepareCollection { .. }
                         | CatalogCommand::PrepareRestore { .. }
-                        | CatalogCommand::PrepareTakeover { .. }
                 )
                 .then(|| format!("collection-{seq:016x}"));
                 let event = Applied {
@@ -818,20 +760,12 @@ impl Catalog {
                 };
                 let mut next = inner.state.clone();
                 apply(&mut next, &event)?;
-                let reserved = takeover::pending_count(&next);
-                if next.operations.len().saturating_add(reserved) > operation_limit {
-                    return Err(inner.capacity_failure(revoke, "takeover completion operation slots reserved"));
-                }
-                // Worst case: 256-byte owner/target/nonce each JSON-escaped to
-                // 1536 bytes; certificate, event, completed intent and new grant
-                // together stay below 16 KiB. Bound fields in takeover::apply.
-                let reserve_bytes = reserved * 16384;
                 let snapshot = encode(&Entry::Snapshot(next.clone()))?;
-                if let Err(e) = PartitionJournal::validate_initial(snapshot.len() + reserve_bytes, BUDGET) {
+                if let Err(e) = PartitionJournal::validate_initial(snapshot.len(), BUDGET) {
                     return Err(inner.capacity_failure(revoke, e));
                 }
                 let bytes = encode(&Entry::Applied(event.clone()))?;
-                if inner.journal.validate_append_with_reserve(bytes.len(), reserve_bytes).is_err() {
+                if inner.journal.validate_append(bytes.len()).is_err() {
                     if let Err(e) = inner.compact(now) {
                         if revoke {
                             inner.fence();
@@ -842,7 +776,7 @@ impl Catalog {
                     // from the now-published authority rather than reintroduce them.
                     next = inner.state.clone();
                     apply(&mut next, &event)?;
-                    if let Err(e) = inner.journal.validate_append_with_reserve(bytes.len(), reserve_bytes) {
+                    if let Err(e) = inner.journal.validate_append(bytes.len()) {
                         return Err(inner.capacity_failure(revoke, e));
                     }
                 }
@@ -1059,49 +993,6 @@ mod tests {
             operation_id: OperationId::new(nonce.into()),
             command,
         }
-    }
-    #[tokio::test]
-    async fn catalog_takeover_reserves_finalize_capacity_and_closes_old_authority() {
-        let root = root(); let catalog = setup(&root).await;
-        prepare(&catalog).await; activate(&catalog).await;
-        let data = RecordPartition::create(&root.join("data"), config()).await.unwrap();
-        let lineage = data.recovery_identity().await.unwrap().lineage;
-        let binding = crate::record::SealRequest { intent_id: "a".repeat(64), target_collection_id: "next".into(), backup_digest: "b".repeat(64) };
-        let intent = request("take", CatalogCommand::PrepareTakeover {
-            collection_id: "next".into(), source_collection_id: "shared".into(), owner_key: "a".into(),
-            config: config(), backup_id: "b".repeat(64), lineage, binding: binding.clone(),
-        });
-        let before = catalog.inner.lock().await.state.operations.len();
-        catalog.inner.lock().await.operation_limit = before + 1;
-        assert!(matches!(catalog.prepare_takeover(intent.clone(), data.clone()).await, Err(CatalogError::Rejected(_))));
-        assert!(catalog.authorized("a".into(), "shared".into(), |_| async {}).await.is_ok());
-        catalog.inner.lock().await.operation_limit = before + 2;
-        let (_, old_output) = catalog.authorized("a".into(), "shared".into(), |_| async {}).await.unwrap();
-        catalog.prepare_takeover(intent, data.clone()).await.unwrap();
-        assert!(old_output.deliver(|| ()).is_err());
-        assert!(catalog.authorized("a".into(), "shared".into(), |_| async {}).await.is_err());
-        assert!(matches!(catalog.execute(request("pressure", CatalogCommand::AddKey { key_id: "extra".into(), verifier: "c".repeat(64) })).await, Err(CatalogError::Rejected(_))));
-        assert!(catalog.execute(request("bypass", CatalogCommand::ActivateCollection { collection_id: "next".into() })).await.is_err());
-        let certificate = data.seal_for_takeover(binding).await.unwrap();
-        catalog.execute(request("finish", CatalogCommand::FinalizeTakeover { collection_id: "next".into(), certificate })).await.unwrap();
-        assert!(catalog.authorized("a".into(), "next".into(), |_| async {}).await.is_ok());
-        assert!(catalog.authorized("b".into(), "next".into(), |_| async {}).await.is_err());
-        drop(catalog); drop(data); std::fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn catalog_takeover_finalize_reserve_covers_maximum_json_escaping() {
-        let identity = "\u{1}".repeat(256);
-        let certificate = crate::record::SealCertificate { source_feed_scope: "c".repeat(32), lineage: "a".repeat(32), final_seq: u64::MAX,
-            final_state_digest: "b".repeat(64), request: crate::record::SealRequest {
-                intent_id: "c".repeat(64), target_collection_id: identity.clone(), backup_digest: "d".repeat(64) } };
-        let event = Applied { request: CatalogRequest { operation_id: OperationId { epoch: u64::MAX, nonce: identity.clone() },
-            command: CatalogCommand::FinalizeTakeover { collection_id: identity.clone(), certificate: certificate.clone() } },
-            receipt: CatalogReceipt { seq: u64::MAX, directory: None }, observed_epoch: u64::MAX };
-        let event_size = encode(&Entry::Applied(event)).unwrap().len();
-        let completed_size = serde_json::to_vec(&certificate).unwrap().len();
-        let grant_size = serde_json::to_vec(&BTreeMap::from([(identity, u64::MAX)])).unwrap().len();
-        // Additional allowance covers enum/container keys, watermarks and frame overhead.
-        assert!(event_size + completed_size + grant_size + 1024 < 16384);
     }
     pub(super) async fn setup(path: &Path) -> Catalog {
         let catalog = Catalog::create(&path.join("catalog")).await.unwrap();

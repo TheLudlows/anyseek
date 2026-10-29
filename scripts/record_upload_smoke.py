@@ -21,9 +21,6 @@ def exercise(call,restart_with,faults):
     call('POST',endpoint+'/doc',command('publish',2),status=409)
     call('POST',endpoint+'/doc',command('seal',2,manifest_sha256=status['manifest_sha256']),status=400)
     archive=call('POST',endpoint+'/backup',{'operation_id':operation()})
-    take={'operation_id':operation(),'source_collection_id':'multipart','collection_id':'multipart-next','backup_id':archive['backup_id']}
-    assert call('POST','/api/v1/takeovers',take)['status']=='active'
-    endpoint='/api/v1/index/multipart-next'
     second=command('stage_batch',2,chunks=[{'record_id':'one','document':{'body':'multipartword','payload':'y'*600000}}])
     call('POST',endpoint+'/doc',second,status=409)
     call('POST',endpoint+'/doc',command('renew',2))
@@ -60,4 +57,4 @@ def exercise(call,restart_with,faults):
                     receipt=call('POST',endpoint+'/doc',request)['receipt']
                     assert call('POST',endpoint+'/doc',request)['receipt']==receipt
                     assert call('POST',endpoint+'/query',{'query':'faultupload'})['count']==(1 if action=='publish' else 0)
-    print('PASS multipart HTTP: >1 MiB across batches, incomplete/seal fences, retained retry, owner renewal, checkpoint/takeover'+(' and all four commands x four process fault points' if faults else ''))
+    print('PASS multipart HTTP: >1 MiB across batches, incomplete/seal fences, retained retry, owner renewal and checkpoint'+(' and all four commands x four process fault points' if faults else ''))

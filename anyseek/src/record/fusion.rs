@@ -61,7 +61,7 @@ impl RecordPartition {
         let (limit, barrier) = {
             let mut inner = self.inner.lock().await;
             inner.advance_time().await?;
-            if !inner.healthy || inner.state.sealed_for.is_some() || self.indexes.error().is_some()
+            if !inner.healthy || self.indexes.error().is_some()
             {
                 return Err(RecordError::RecoveryRequired);
             }
@@ -131,7 +131,6 @@ impl RecordPartition {
             let handle = {
                 let inner = self.inner.lock().await;
                 if !inner.healthy
-                    || inner.state.sealed_for.is_some()
                     || self.indexes.error().is_some()
                 {
                     return Err(RecordError::RecoveryRequired);
@@ -143,7 +142,7 @@ impl RecordPartition {
         let neighbors = {
             let mut inner = self.inner.lock().await;
             inner.advance_time().await?;
-            if !inner.healthy || inner.state.sealed_for.is_some() || self.indexes.error().is_some()
+            if !inner.healthy || self.indexes.error().is_some()
             {
                 return Err(RecordError::RecoveryRequired);
             }
@@ -260,7 +259,7 @@ impl RecordPartition {
         ranks.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let mut inner = self.inner.lock().await;
         inner.advance_time().await?;
-        if !inner.healthy || inner.state.sealed_for.is_some() || self.indexes.error().is_some() {
+        if !inner.healthy || self.indexes.error().is_some() {
             return Err(RecordError::RecoveryRequired);
         }
         let hits = ranks

@@ -132,7 +132,7 @@ impl RecordPartition {
                 let (root,config,snapshot,sources,base,selected,_disk,_resources)={
                     let mut inner=owner.lock().await;
                     let _phase=maintenance::Phase::new("cache_merge_capture_locked",inner.state.seq);
-                    if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
+                    if !inner.healthy {return Err(RecordError::RecoveryRequired);}
                     if inner.background.is_some(){return Err(RecordError::Busy);}
                     let Some(sources)=inner.index.capture_merge(MAX_ROWS).await? else {
                         inner.maintenance_requested=Some("cache_merge_unavailable");
@@ -175,7 +175,7 @@ impl RecordPartition {
                 {
                     let mut inner=owner.lock().await;
                     let _phase=maintenance::Phase::new("cache_merge_install_locked",inner.state.seq);
-                    if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
+                    if !inner.healthy {return Err(RecordError::RecoveryRequired);}
                     if started.elapsed()>=timeout || inner.background.as_ref().is_none_or(|tail|tail.id!=id)
                         || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
                     let Inner{index,ordinals,locations,..}=&mut *inner;

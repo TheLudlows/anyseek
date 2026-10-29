@@ -1567,30 +1567,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_seal_uses_remote_authority_across_publication_failures() {
-        for stage in ["before", "after"] {
-            let (p, _, root, _, clock) = source().await;
-            p.write(write("a", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
-            let request = SealRequest { intent_id: "a".repeat(64), target_collection_id: "next".into(), backup_digest: "b".repeat(64) };
-            let permit = p.output_permit().unwrap();
-            std::fs::write(root.join(format!(".test-remote-{stage}-checkpoint")), b"fault").unwrap();
-            assert!(p.seal_for_takeover(request.clone()).await.is_err());
-            assert!(permit.deliver(|| ()).is_err());
-            assert!(p.output_permit().is_err());
-            let p = cold(p, &root, clock.clone()).await;
-            let identity = p.recovery_identity().await.unwrap();
-            assert_eq!(identity.seq, 1);
-            assert_eq!(identity.seal.is_some(), stage == "after");
-            let seal = p.seal_for_takeover(request.clone()).await.unwrap();
-            let p = cold(p, &root, clock).await;
-            assert_eq!(p.recovery_identity().await.unwrap().seal, Some(seal.clone()));
-            assert_eq!(p.seal_for_takeover(request).await.unwrap(), seal);
-            assert!(p.write(write("late", "late", "alpha", ExpectedVersion::Absent)).await.is_err());
-            assert!(p.output_permit().is_err());
-        }
-    }
-
-    #[tokio::test]
     async fn missing_checkpoint_member_fails_closed_and_bootstrap_is_not_collectible() {
         use object_store::{ObjectStore, path::Path as ObjectPath};
         let (p, store, root, _, _) = source().await;
@@ -1694,32 +1670,9 @@ impl RecordPartition {
         remote_config: S3CompatibleRecordConfig,
         restore_identity: &str,
     ) -> Result<Self, RecordError> {
-        Self::adopt_s3_authority(path, config, remote_config, restore_identity, None).await
-    }
-
-    /// Publish a catalog-authorized successor in its own S3 namespace. Its
-    /// complete final authority must match the source's permanent seal; an
-    /// independent backup cannot be promoted through this entry point.
-    pub async fn adopt_s3_takeover_successor(
-        path: &Path,
-        config: RecordConfig,
-        remote_config: S3CompatibleRecordConfig,
-        seal: &SealCertificate,
-    ) -> Result<Self, RecordError> {
-        Self::adopt_s3_authority(path, config, remote_config, &seal.request.intent_id, Some(seal)).await
-    }
-
-    async fn adopt_s3_authority(
-        path: &Path,
-        config: RecordConfig,
-        remote_config: S3CompatibleRecordConfig,
-        restore_identity: &str,
-        seal: Option<&SealCertificate>,
-    ) -> Result<Self, RecordError> {
         let mut remote = RemotePersistence::open(&remote_config)?;
-        let domain = if seal.is_some() { "takeover" } else { "service" };
         let binding: [u8; 32] = Sha256::digest(format!(
-            "{domain}:{restore_identity}:{}",
+            "service:{restore_identity}:{}",
             remote.partition_id
         ))
         .into();
@@ -1737,14 +1690,12 @@ impl RecordPartition {
             .map_err(storage)?;
         if head.is_some_and(|h| h.manifest.is_some()) {
             let p = Self::open_s3_with_remote(path, config.max_journal_bytes, remote).await?;
-            if let Some(seal) = seal { p.certify_takeover_successor(seal).await?; }
             return Ok(p);
         }
         let p = Self::open(path, config.max_journal_bytes).await?;
-        if let Some(seal) = seal { p.certify_takeover_successor(seal).await?; }
         {
             let mut inner = p.inner.lock().await;
-            if seal.is_none() && !inner.state.independent_snapshot {
+            if !inner.state.independent_snapshot {
                 return Err(RecordError::Rejected(
                     "only certified independent snapshots may be adopted".into(),
                 ));
@@ -1766,9 +1717,6 @@ impl RecordPartition {
                     Entry::Checkpoint { state, .. }
                         if state.seq == 0 && state.lineage == inner.state.lineage =>
                     {
-                        if seal.is_some() && state.feed.scope != inner.state.feed.scope {
-                            return Err(RecordError::RecoveryRequired);
-                        }
                         inner.state.feed.scope = state.feed.scope;
                     }
                     _ => return Err(RecordError::RecoveryRequired),

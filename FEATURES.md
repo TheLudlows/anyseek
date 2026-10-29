@@ -58,7 +58,6 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | GET | `/api/v1/catalog/operation/{epoch}/{nonce}` | master 控制操作查询 |
 | POST | `/api/v1/index/{id}/backup` | 独立 collection 快照；同操作 ID 保留原快照 |
 | POST | `/api/v1/restore` | master 恢复到新 collection，不恢复历史 grants |
-| POST | `/api/v1/takeovers` | master 同服务封存源并激活最终水位的后继 collection；不是回退旧备份 |
 | GET | `/api/v1/backups` | master 查看 collection 备份及退役状态 |
 | DELETE | `/api/v1/backups/{id}` | master 退役备份；未完成 restore pin 来源 |
 | POST | `/api/v1/service-backups` | master 完整 catalog/数据/collection backups 快照 |
