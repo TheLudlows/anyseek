@@ -1040,12 +1040,6 @@ impl RecordPartition {
         if state.fenced { return Err(RecordError::RecoveryRequired); }
         Ok(DataOutputPermit::new(self.output.clone(), state.revision))
     }
-    /// Close the data output barrier. Test-only; an owner that fences its
-    /// output never reopens it for in-flight responses.
-    pub fn fence_output_for_test(&self) -> Result<(), RecordError> {
-        self.output.write().map_err(|_| RecordError::RecoveryRequired)?.fenced = true;
-        Ok(())
-    }
     /// Create a Record partition whose accepted writes are committed to S3 + SQLite
     /// before local journal/index publication. The local journal remains a rebuildable
     /// cache; use open_s3 after restart to reconcile any remotely committed tail.
@@ -2851,7 +2845,7 @@ mod tests {
     }
     #[tokio::test]
     async fn record_source_revision_stale_recompute_delete_and_recovery() {
-        let root = path(); let archive = path(); let target = path();
+        let root = path(); let archive = path();
         let p = RecordPartition::create(&root, config()).await.unwrap();
         p.write(source_write("s1", "s", &[])).await.unwrap();
         p.write(source_write("d1", "d", &[("s", 1)])).await.unwrap();
@@ -2883,7 +2877,9 @@ mod tests {
         assert_eq!(p.write(update).await.unwrap(), receipt);
         assert_eq!(p.inner.lock().await.state.source_revisions[0].document.as_ref().unwrap()["body"], "evidence original");
         let backup = RecordPartition::open(&archive, config().max_journal_bytes).await.unwrap();
-        assert_eq!(backup.record_status("d").await.unwrap().unwrap().visibility, EvidenceVisibility::Stale);
+        // The live root replays stale references; an independent archive stays quarantined.
+        assert_eq!(backup.record_status("d").await.unwrap().unwrap().visibility, EvidenceVisibility::Quarantined);
+        assert!(backup.get("d").await.unwrap().is_none());
         let mut deletion = write("delete-latest", "s", "unused", ExpectedVersion::Match(2)); deletion.document = None;
         p.write(deletion).await.unwrap();
         for id in ["s", "d", "i", "fresh"] {
@@ -2892,7 +2888,7 @@ mod tests {
         }
         assert_eq!(p.statistics().await.unwrap().retained_source_revisions, 2);
         drop(p); drop(backup);
-        for path in [root, archive, target] { std::fs::remove_dir_all(path).unwrap(); }
+        for path in [root, archive] { std::fs::remove_dir_all(path).unwrap(); }
     }
     #[tokio::test]
     async fn record_source_revision_budget_reserves_delete_and_conflicting_update() {

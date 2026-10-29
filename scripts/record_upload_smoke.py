@@ -22,16 +22,18 @@ def exercise(call,restart_with,faults):
     call('POST',endpoint+'/doc',command('seal',2,manifest_sha256=status['manifest_sha256']),status=400)
     archive=call('POST',endpoint+'/backup',{'operation_id':operation()})
     second=command('stage_batch',2,chunks=[{'record_id':'one','document':{'body':'multipartword','payload':'y'*600000}}])
-    call('POST',endpoint+'/doc',second,status=409)
-    call('POST',endpoint+'/doc',command('renew',2))
-    second['expected']={'Match':3};second['operation_id']=operation();call('POST',endpoint+'/doc',second)
+    # A backup leaves the live owner's scope and lease intact; continue uploading.
+    assert not call('GET',endpoint+'/doc/doc/generation')['lease_requires_renewal']
+    second_receipt=call('POST',endpoint+'/doc',second)['receipt']
+    assert second_receipt['version']==3 and second_receipt['staged_only']
+    assert call('POST',endpoint+'/doc',second)['receipt']==second_receipt
     assert call('POST',endpoint+'/doc',first)['receipt']==receipt
     status=call('GET',endpoint+'/doc/doc/generation');assert status['staged_members']==2
-    call('POST',endpoint+'/doc',command('seal',4,manifest_sha256='0'*64),status=409)
-    seal=command('seal',4,manifest_sha256=status['manifest_sha256']);call('POST',endpoint+'/doc',seal)
+    call('POST',endpoint+'/doc',command('seal',3,manifest_sha256='0'*64),status=409)
+    seal=command('seal',3,manifest_sha256=status['manifest_sha256']);call('POST',endpoint+'/doc',seal)
     restart_with({});assert call('GET',endpoint+'/doc/doc/generation')['sealed']
     assert call('POST',endpoint+'/query',{'query':'multipartword'})['count']==0
-    publish=command('publish',5);published=call('POST',endpoint+'/doc',publish)['receipt'];assert not published['staged_only']
+    publish=command('publish',4);published=call('POST',endpoint+'/doc',publish)['receipt'];assert not published['staged_only']
     assert call('POST',endpoint+'/query',{'query':'multipartword'})['count']==2
     call('PATCH',endpoint,{})
     restart_with({});assert call('POST',endpoint+'/doc',publish)['receipt']==published
@@ -57,4 +59,4 @@ def exercise(call,restart_with,faults):
                     receipt=call('POST',endpoint+'/doc',request)['receipt']
                     assert call('POST',endpoint+'/doc',request)['receipt']==receipt
                     assert call('POST',endpoint+'/query',{'query':'faultupload'})['count']==(1 if action=='publish' else 0)
-    print('PASS multipart HTTP: >1 MiB across batches, incomplete/seal fences, retained retry, owner renewal and checkpoint'+(' and all four commands x four process fault points' if faults else ''))
+    print('PASS multipart HTTP: >1 MiB across batches, incomplete/seal fences, retained retry, same-owner continuation and checkpoint'+(' and all four commands x four process fault points' if faults else ''))

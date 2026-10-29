@@ -36,7 +36,7 @@ paths = list((root / 'anyseek/src').rglob('*.rs'))
 paths += list((root / 'anyseek/web').rglob('*.js')) + list((root / 'anyseek/web').rglob('*.html')) + list((root / 'anyseek/web').rglob('*.svg'))
 paths += list((root / 'scripts').glob('*.py')) + list((root / '.github/workflows').glob('*.yml'))
 paths += [root / 'Dockerfile', root / 'Cargo.toml', root / 'anyseek/Cargo.toml']
-allowed = re.compile(r'https?://[^\s<>"\)]+|__seekpower_time_\w*|seekpower-feed-successor|\.seekpower-service-|seekpower\.(?:apiKey|index|pending\w*|serviceBackupId)')
+allowed = re.compile(r'https?://[^\s<>"\)]+|__seekpower_time_\w*|\.seekpower-service-|seekpower\.(?:apiKey|index|pending\w*|serviceBackupId)')
 for path in paths:
     if path.name == 'check_docs_brand.py':
         continue

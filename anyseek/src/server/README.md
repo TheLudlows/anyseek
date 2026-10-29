@@ -2,7 +2,7 @@
 
 轻量写入首批新增 `/api/v1/index/{id}/ingest`：接收批次持久化后返回 202，业务条件及索引异步处理；用 `/ingest/operation/{epoch}/{nonce}` 和 `GET /ingest` 查询终态与进度。后台按批物化，Record、全文与向量/元数据分别推进；成功 Record 回执不代表任一索引已追上，可检查 `lexical_seq`、`vector_seq` 和 `index_error`。现有 `/doc` 同步语义保留。接收、恢复、资源和备份边界见[异步写入实施](../../../docs/async-ingestion.md)。
 
-默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、受控接管、来源修订、generation 多批上传/整代发布、可选向量、TTL、feed、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、feed、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -117,7 +117,7 @@ DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销身份；不会删�
 
 ## 备份与恢复
 
-独立备份恢复只恢复保存的数据，不证明备份之后没有删除：恢复 partition 保持 evidence quarantine，typed 内容不可读且没有强制解禁入口；普通记录也不能把该副本当成可信删除历史来源。要开放已核验的目标，使用仍有完整权威历史的同服务受控接管，追平最终封存水位并关闭旧 owner。详见后文；授权恢复和内容可见性是两道独立条件。
+独立备份恢复只恢复保存的数据，不证明备份之后没有删除：恢复 partition 保持 evidence quarantine，typed 内容不可读且没有强制解禁入口；普通记录也不能把该副本当成可信删除历史来源。当前没有解除 typed evidence 隔离的入口；授权恢复和内容可见性是两道独立条件。
 
 Collection backup 使用 POST `/api/v1/index/{id}/backup` 和 `{operation_id}`；原 ID 重试保留同一快照。master POST `/api/v1/restore`，body 为 `{operation_id,collection_id,backup_id}`，恢复到新身份，不恢复旧 grants。master 可 GET `/api/v1/backups`，或 DELETE `/api/v1/backups/{id}`（`{operation_id}`）持久退役备份；未完成 restore 会 pin 来源。`cleanup_pending:true` 表示逻辑退役已完成，物理清理还需重试。
 
@@ -134,11 +134,11 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 | Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
 | catalog | 16 MiB 代、10,000 操作，仅安全回收过期控制回执 |
 | admission | 普通 32/每集合 16、恢复 2/1、后台 2/1、可信控制 8/2、静态/存活 8/8；partition 内部 16；30 秒请求期限 |
-| 调度 | 不同 collection 可并行；key 撤销/接管/共同快照等保留全局排空，资源不足立即 Busy |
+| 调度 | 不同 collection 可并行；key 撤销/共同快照等保留全局排空，资源不足立即 Busy |
 | collection backups | 32 个，可持久退役 |
 | service archives / 新恢复根 | 每源根最多 4 个 archive/准备项，托管父目录最多 4 个生成根，备份权威 payload 预检 1 GiB |
 
-资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。控制通道只在 master 认证后开放，不被数据工作借用；key/grant 控制不等待备份/恢复工作流锁，但仍遵守共同快照与授权屏障；删除保留与多阶段恢复/接管工作流的原有顺序。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
+资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。控制通道只在 master 认证后开放，不被数据工作借用；key/grant 控制不等待备份/恢复工作流锁，但仍遵守共同快照与授权屏障；删除保留与多阶段恢复工作流的原有顺序。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
 
 | 类别 | 全服务 / 每集合预留字节 | 全服务 / 每集合 I/O 并发 |
 | --- | --- | --- |
@@ -170,7 +170,7 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --b
 
 ## 来源与证据
 
-当前来源、删除隐藏与接管已合入；历史平台结果与系统断电限制见 [Record 语义](../../../docs/record-model.md)。
+当前来源、删除隐藏与独立恢复已合入；历史平台结果与系统断电限制见 [Record 语义](../../../docs/record-model.md)。
 
 沿用 `POST /api/v1/index/{collection_id}/doc`，在完整 Record 请求上增加可选 `system`：
 
@@ -187,7 +187,7 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --b
 
 删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；权限撤销与数据输出各自复核。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建暂不支持，不能把 business document 中的同名字段当作已实现语义。
 
-Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。当前仍存活的原服务可以通过下面的受控接管创建已核验的新目标；这不会清除任意独立恢复目录的隔离。
+Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。存活服务的 WAL/在线 checkpoint 恢复与独立备份恢复不同；独立恢复目录不能提升为当前删除权威。
 
 `GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样执行授权与数据输出屏障。状态包括 visible、stale、deleted、unavailable、quarantined。
 
@@ -230,7 +230,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 创建 config 可携带 `change_feed:{retention_ms:604800000,max_events:100000,max_bytes:67108864}`。保留期至少七天；事件与紧急失效预留达到配额时新写入返回 429 `feed_full`，不会提前丢事件。既有 Record/journal 配额也继续有效。逻辑 feed 裁剪不删除原幂等账本，不等于 P3 物理历史回收。
 
-独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[Record 语义](../../../docs/record-model.md)。当前主干验证结论见 [STATUS](../../../STATUS.md)，历史分支结果不能代替本次源码验证。
+独立恢复会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[Record 语义](../../../docs/record-model.md)。当前主干验证结论见 [STATUS](../../../STATUS.md)，历史分支结果不能代替本次源码验证。
 
 ## 实体与显式一跳关系
 
@@ -253,7 +253,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 ## staging 租约与私有清理
 
-Stage 获得 30 分钟租约，期限为持久可信 UTC 毫秒时间 + 1800000。使用 `generation:{"action":"renew","generation_id":"g"}` 及精确 `expected:{"Match":当前控制版本}` 续租；回执 staged_only=true，不发布成员。generation 状态返回 lease_expires_at_ms、lease_fence、lease_requires_renewal、private_cleanup_pending。Publish/Abort/Renew 共用 control version fencing；到期不可续租，新建需新 generation ID。同 owner 重启保留剩余期限，接管后的 scope 变更要求显式续租。
+Stage 获得 30 分钟租约，期限为持久可信 UTC 毫秒时间 + 1800000。使用 `generation:{"action":"renew","generation_id":"g"}` 及精确 `expected:{"Match":当前控制版本}` 续租；回执 staged_only=true，不发布成员。generation 状态返回 lease_expires_at_ms、lease_fence、lease_requires_renewal、private_cleanup_pending。Publish/Abort/Renew 共用 control version fencing；到期不可续租，新建需新 generation ID。同 owner 重启保留剩余期限；普通 backup 不改变 live owner 的 scope 或 lease。独立副本的 scope 变化仍受 lease fencing 检查及证据隔离约束。
 
 Abort/到期持久退休后，只释放未发布私有 Stage/StageBatch 正文，保留规范化请求摘要和原回执；原 operation_id 重试返回原成功结果但不复活 staging。后续请求安全 checkpoint/reclaim，删除旧 WAL 失败保持 pending、未知发布 fence；不是普通历史 GC，也不删除已有备份。UI 记录页可检查租约，通过原编辑器提交 renew 并保留精确重试请求。多批上传从 Begin 起提供租约，每个成功新批次续租；详见后文。历史验证见实施记录第 21 节。
 

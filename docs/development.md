@@ -40,7 +40,7 @@ Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测�
 
 ## S3 无缓存与合同验收
 
-统一入口复用现有测试，不维护第二份业务语义。`semantic` 分为 base、locator、graph、temporal、upload、lease、feed 七个隔离服务根；每次重启删除 `collection-*` 与 `*.object-cache` 两类缓存目录，保留 catalog、SQLite 和 `s3-namespace`。`storage` 覆盖 checkpoint、GC、共同备份、恢复与接管中断；`contract` 运行显式 ignored 的对象合同测试，覆盖条件创建竞争、不可变重试、读回/HEAD、hash/长度、缺失/超限、旧 owner、共同备份原 cut 及删除。`all` 顺序运行三类。
+统一入口复用现有测试，不维护第二份业务语义。`semantic` 分为 base、locator、graph、temporal、upload、lease、feed 七个隔离服务根；每次重启删除 `collection-*` 与 `*.object-cache` 两类缓存目录，保留 catalog、SQLite 和 `s3-namespace`。`storage` 覆盖 checkpoint、GC、共同备份、恢复中断；`contract` 运行显式 ignored 的对象合同测试，覆盖条件创建竞争、不可变重试、读回/HEAD、hash/长度、缺失/超限、旧 owner、共同备份原 cut 及删除。`all` 顺序运行三类。
 
 ```sh
 cargo build -p anyseek --features server,fault-injection

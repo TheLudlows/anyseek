@@ -59,7 +59,7 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 锁顺序为全局快照屏障 → collection 执行屏障 → catalog 元数据。普通已接收工作持前两层共享 guard，只在捕获当前 collection entry 与 grant revision 时持元数据锁；Record future 在锁外执行。单 collection 授权变更与删除先取得该 collection 独占 guard，排在它之后的工作取得共享 guard 后重新查授权。不得在持 catalog 元数据锁时等待执行屏障。
 
-整 key 撤销、接管、备份退休使用全局独占屏障；完整服务快照与显式 catalog compaction 也先排空普通工作。已接收但未完成的工作仍归 owned task 所有，调用方取消不能释放它的屏障；共同快照包含排空前的完整已接收操作，不混入快照之后排队的写入。全局操作仍是有意的停顿点。
+整 key 撤销、备份退休使用全局独占屏障；完整服务快照与显式 catalog compaction 也先排空普通工作。已接收但未完成的工作仍归 owned task 所有，调用方取消不能释放它的屏障；共同快照包含排空前的完整已接收操作，不混入快照之后排队的写入。全局操作仍是有意的停顿点。
 
 异常 guard 不依赖异步获取 catalog 锁即可同步关闭输出。共享的 sticky failure latch 在重开前不清除，其他 collection 即使正在持久发布或压缩，也不能重新开放旧授权输出；普通可证明未发布的 compaction 失败保留原有恢复语义。输出交付仍检查 grant revision 与 Record 数据屏障，已交付字节不可撤回。
 
@@ -109,13 +109,13 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 
 完整服务备份完成后，同一操作重试先核验 manifest 与完成见证，直接返回原回执，避免每次重新物化全部输入而再次超过 HTTP 期限。这是已完成操作的结果查询；恢复仍须重新验证完整归档闭包。未完成的归档继续既有发布/修复协议。
 
-## 维护与受控接管
+## 维护与独立恢复
 
-封存复用完整 anchor 发布协议，S3 模式必须先由 SQLite 选择包含 seal 的远端 manifest，不能只更新本地 checkpoint。封存关闭当前输出许可；发布失败保持 fenced，恢复读取唯一权威再以原意图重试，同序号维护不会消耗业务序号。
+checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包；S3 模式由 SQLite 选择远端 manifest，旧 owner epoch 和失败后的输出 fencing 继续防止陈旧写者或不可信响应。
 
-同服务接管通过独立临时导入库校验 retained S3 备份；相同 descriptor 的私有物化采用确定 feed scope，使准备与重试绑定相同摘要。备份只证明谱系，后继复制最终封存状态，包含备份之后的已确认写入、删除和回执。后继在独立 namespace 发布并认证完整远端状态后，catalog 才能激活；旧源永久封存，旧 grants 不复制。
+独立备份恢复校验源闭包，在目标独立 namespace 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新 feed scope，不恢复历史 grants；typed evidence 保持隔离，不能据旧备份证明后续没有删除。
 
-接管中断恢复按 catalog 意图打开远端源，不能把缓存当本地权威。中断留下的私有校验目录可在获得服务根独占锁后清理。完整服务备份同样从远端打开已删除/封存的 retained collection，清空本地缓存不能导致丢失归档输入。
+完整服务归档保留 collection 与其备份的恢复输入；普通 restore 的持久意图、备份 pin、私有目录清理和安全对象 GC 仍然有效。
 
 维护审计的发布点与失败边界如下。普通写入、TTL 和 staging 租约过期共用缓存追加入口；SQLite 已明确提交成功时，缓存追加失败返回 `durable_pending` 并保持输出封锁，重开恢复原回执。SQLite 提交结果未知仍为 `outcome_unknown`，不能据此另发新操作。
 
@@ -125,14 +125,14 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 | flush、compaction、feed trim、私有 staging 清理、seal | 完整对象闭包 + SQLite 所选 manifest | 同序号维护也必须远端认证；失败保持 fenced |
 | 冷启动 | 独占权威 owner 锁，认证 bootstrap/manifest/tail | 新建缓存前校验 bootstrap 预算、配置与初始序号；错误不发布缓存目录 |
 | 备份与指针 | SQLite 中原 ID 的 snapshot/pin + 不可变 descriptor | 中断重试维持原 cut；指针第 32 槽仍可修复 |
-| 恢复、受控接管、服务归档 | 校验源闭包，目标独立 namespace；接管另认证最终 seal | catalog 激活前完成目标远端发布；归档包含 retained 源 |
+| 恢复、服务归档 | 校验源闭包，目标独立 namespace；typed evidence 保持隔离 | catalog 激活前完成目标远端发布；归档包含 retained 源 |
 | GC、备份退休 | SQLite 可达性、pin、单调退休/删除记录及 catalog 退休意图 | 删除失败留待重试；不回滚 head，不复活已退休身份 |
 
 ## 验证入口与边界
 
 - `cargo test --workspace --features server --all-targets`：Record/catalog、Segment、SQLite、上传/依赖/GC 和现有检索回归。
-- `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权、恢复与受控接管；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 与 `*.object-cache` 两类缓存。
-- `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、十种接管路径、feed floor、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
+- `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权与恢复；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 与 `*.object-cache` 两类缓存。
+- `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、feed floor、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
 - `scripts/s3_acceptance.py`：统一执行上述存储矩阵、七组共享语义与不可变对象/共同备份合同；`--backend real` 只接受专用测试配置。命令及报告边界见[开发指南](development.md)。
 - [PR #74 CI](https://github.com/TheLudlows/anyseek/actions/runs/39814329888) 对最终 head `eb9431a3` 的五个任务全部通过，包含 Linux/Windows 原生持久化和 S3 语义/合同；合入源码为 `afbe323d`，与测试 head 的 Git tree 完全相同。主干 `a36e71e0` 的 [CI 五项也已通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455)；开发分支另行验收。
 

@@ -2181,15 +2181,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_fenced_persistence_errors_keep_classification_but_not_revoked_output() {
+    async fn service_invalidated_persistence_errors_keep_classification_but_not_revoked_output() {
         use http_body::Body as _;
         for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
-            let (service,path,_)=setup().await;
+            let (service,path,headers)=setup().await;
+            let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
+            write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&source).unwrap().into()).await.unwrap();
             let record=service.record("a","c").await.unwrap(); let data=record.output_permit().unwrap();
             let (_,permit)=service.catalog.authorized("a".into(),"c".into(),|_|async{}).await.unwrap();
-            // Closing the data output barrier mimics a sealed owner: in-flight
-            // responses can no longer be delivered after the fence.
-            record.fence_output_for_test().unwrap();
+            // A real deletion invalidates the captured data permit without a public test hook.
+            let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null});
+            write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&deletion).unwrap().into()).await.unwrap();
             assert!(protected_data(Ok(json!({"body":"secret"})),permit.clone(),Some(data.clone())).is_err());
             assert!(protected_data::<Value>(Err(bad("other error")),permit.clone(),Some(data.clone())).is_err());
             let response=protected_data::<Value>(Err(error.clone().into()),permit.clone(),Some(data.clone())).unwrap();
