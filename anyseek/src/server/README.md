@@ -1,8 +1,8 @@
 # anyseek Record HTTP 服务
 
-轻量写入首批新增 `/api/v1/index/{id}/ingest`：接收批次持久化后返回 202，业务条件及索引异步处理；用 `/ingest/operation/{epoch}/{nonce}` 和 `GET /ingest` 查询终态与进度。后台按批物化，Record、全文与向量/元数据分别推进；成功 Record 回执不代表任一索引已追上，可检查 `lexical_seq`、`vector_seq` 和 `index_error`。现有 `/doc` 同步语义保留。接收、恢复、资源和备份边界见[异步写入实施](../../docs/async-ingestion.md)。
+轻量写入首批新增 `/api/v1/index/{id}/ingest`：接收批次持久化后返回 202，业务条件及索引异步处理；用 `/ingest/operation/{epoch}/{nonce}` 和 `GET /ingest` 查询终态与进度。后台按批物化，Record、全文与向量/元数据分别推进；成功 Record 回执不代表任一索引已追上，可检查 `lexical_seq`、`vector_seq` 和 `index_error`。现有 `/doc` 同步语义保留。接收、恢复、资源和备份边界见[异步写入实施](../../../docs/async-ingestion.md)。
 
-默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、受控接管、来源修订、generation 多批上传/整代发布、可选向量、TTL、feed、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../STATUS.md) 与 [阶段证据](../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、受控接管、来源修订、generation 多批上传/整代发布、可选向量、TTL、feed、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -44,7 +44,7 @@ export ANYSEEK_S3_SECRET_ACCESS_KEY='your-secret-key'
 
 PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到独立对象命名空间，不恢复原 grants，受保护证据保持隔离。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到新的服务 namespace。
 
-该后端已合入；真实目标服务的条件写/读后可见性认证与其余维护路径审计仍待完成，见[存储协议](../../docs/storage.md)。SQLite 首版是单主机协调，不提供跨主机 HA。
+该后端已合入；真实目标服务的条件写/读后可见性认证与其余维护路径审计仍待完成，见[存储协议](../../../docs/storage.md)。SQLite 首版是单主机协调，不提供跨主机 HA。
 
 ## 稳定身份、写入和重试
 
@@ -166,11 +166,11 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --b
 
 小型调用方示例使用 `scripts/anyseek_client.py`：设置 `ANYSEEK_API_KEY` 后运行 `python3 scripts/index_write_query_smoke.py --port 8080 --requests requests.json`；重复执行同一命令重试保存的请求，不生成新身份。旧 `http_smoke.py` 已由完整 Record smoke 取代。
 
-`generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。路由清单见 [FEATURES](../../FEATURES.md)，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
+`generate_openapi=true` 在可执行文件目录输出 `openapi.json` 和 `openapi.yml`。路由清单见 [FEATURES](../../../FEATURES.md)，公共请求设置在 `api_types.rs`，默认服务实现为 `record_service.rs`。
 
 ## 来源与证据
 
-当前来源、删除隐藏与接管已合入；历史平台结果与系统断电限制见 [Record 语义](../../docs/record-model.md)。
+当前来源、删除隐藏与接管已合入；历史平台结果与系统断电限制见 [Record 语义](../../../docs/record-model.md)。
 
 沿用 `POST /api/v1/index/{collection_id}/doc`，在完整 Record 请求上增加可选 `system`：
 
@@ -198,14 +198,14 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 
 使用 `POST /api/v1/takeovers`，请求为 `operation_id`、`source_collection_id`、新的 `collection_id` 和 `backup_id`。只接受当前服务中仍有完整权威历史的源及同谱系备份。此操作会永久关闭原 collection，目标追平最终封存水位，保留全部已确认写入，**不是回退到备份时点**；旧 grants 不复制。返回 `status:"active"`、`recovery:"final_sealed_waterline"` 和最终 certificate。S3 模式同样使用该入口，先持久发布源 seal 和目标独立远端 checkpoint，认证后才激活；本地缓存可重建。
 
-Web UI 的 “Take over a collection” 输入同样字段，先保存请求，响应丢失/重载后原样重试。相同目标不得换源或备份；中断后服务按持久意图续办，目标认证前不开放。完整服务备份拒绝未完成接管。独立恢复目录（含空或纯普通记录备份）不能冒充当前删除权威；没有强制解除隔离、跨服务自动灾备或双活入口。详见 [Record 语义](../../docs/record-model.md)。
+Web UI 的 “Take over a collection” 输入同样字段，先保存请求，响应丢失/重载后原样重试。相同目标不得换源或备份；中断后服务按持久意图续办，目标认证前不开放。完整服务备份拒绝未完成接管。独立恢复目录（含空或纯普通记录备份）不能冒充当前删除权威；没有强制解除隔离、跨服务自动灾备或双活入口。详见 [Record 语义](../../../docs/record-model.md)。
 
 
 ### 可选向量与后补
 
 正文可先写入，不需零向量占位。沿用写入端点提交 `operation_id,record_id,routing_key,expected:{"Match":当前正文版本},vector_patch:{"vector":[2,0]}`，省略 document/system；仅填充尚未存在的 schema 向量字段。正文版本保持不变，提交序号推进；重复请求必须保留 operation_id。已删除、stale 或隔离 typed 记录不可补写，来源正文版本改变后旧请求冲突。
 
-状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[Record 语义](../../docs/record-model.md)。
+状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[Record 语义](../../../docs/record-model.md)。
 
 
 ### 文档 generation
@@ -216,7 +216,7 @@ Web UI 的 “Take over a collection” 输入同样字段，先保存请求，�
 - Publish/Abort：`{action:"publish"或"abort",generation_id}`，必须 Match control version。成功 staging 回执 `staged_only:true`，表示仅持久、不可搜索；首次 stage version 1，publish 后 version 2。替换前重新验证来源及最终依赖可见性。
 - `GET /api/v1/index/{id}/doc/{record_id}/generation` 只返回版本、active/staged 身份和成员数。已发布成员保持精确证据并支持向量后补；换代使旧代及其派生隐藏。Abort 释放未发布成员 ID，generation ID 不可复用。
 
-Web UI envelope 模式可运行上述流程并保存原操作重试。完整示例、预留预算、恢复与验证边界见[Record 语义](../../docs/record-model.md)。
+Web UI envelope 模式可运行上述流程并保存原操作重试。完整示例、预留预算、恢复与验证边界见[Record 语义](../../../docs/record-model.md)。
 
 ## 时间条件与不可逆 TTL
 
@@ -226,7 +226,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 {"temporal":{"event_time_ms":1735689600000,"valid_from_ms":1735689600000,"valid_to_ms":1767225600000,"expire_at_ms":1893456000000}}
 ```
 
-`temporal` 是系统元数据，不放入自定义 `document`。业务有效期是半开区间 `[Record 语义](../../docs/record-model.md)。
+`temporal` 是系统元数据，不放入自定义 `document`。业务有效期是半开区间 `[Record 语义](../../../docs/record-model.md)。
 
 
 ## change feed 与快照续传
@@ -237,7 +237,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 创建 config 可携带 `change_feed:{retention_ms:604800000,max_events:100000,max_bytes:67108864}`。保留期至少七天；事件与紧急失效预留达到配额时新写入返回 429 `feed_full`，不会提前丢事件。既有 Record/journal 配额也继续有效。逻辑 feed 裁剪不删除原幂等账本，不等于 P3 物理历史回收。
 
-独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[Record 语义](../../docs/record-model.md)。当前主干验证结论见 [STATUS](../../STATUS.md)，历史分支结果不能代替本次源码验证。
+独立恢复或受控接管会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[Record 语义](../../../docs/record-model.md)。当前主干验证结论见 [STATUS](../../../STATUS.md)，历史分支结果不能代替本次源码验证。
 
 ## 实体与显式一跳关系
 
@@ -250,7 +250,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据和授权输出屏障与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
 
-关系与全文/向量同视图融合见后文；不提供模型实体消歧或完整图语言。测试状态见[Record 语义](../../docs/record-model.md)。
+关系与全文/向量同视图融合见后文；不提供模型实体消歧或完整图语言。测试状态见[Record 语义](../../../docs/record-model.md)。
 
 ## 精确来源摘录
 
@@ -317,7 +317,7 @@ Hybrid channel ranks are assigned before final fusion sorting/pagination. A pure
 64 MiB <= 单份 <= 共享 <= 8 GiB。按进程固定，不支持运行中热改。
 Governor各通道的全局字节配置不得超过8 GiB，其他层级/控制余量约束不变。
 这都是保守逻辑预留，并非RSS硬上限；中文分析器、旧视图、候选构建与输出可同时存活，
-部署前应为这些预算和未计入的运行时开销准备足够RAM。16 GiB测试宿主上的[验证结果与限制](../../docs/resource-budget-followup.md)已单独记录；
+部署前应为这些预算和未计入的运行时开销准备足够RAM。16 GiB测试宿主上的[验证结果与限制](../../../docs/resource-budget-followup.md)已单独记录；
 小内存部署应显式降低预算，不能把默认值视为任意规模容量承诺。
 
 资源不足仍立即拒绝，没有无限等待队列。HTTP/1在读取请求体之前拒绝时明确发送
@@ -336,4 +336,4 @@ Tantivy 0.27 SimpleTokenizer + LowerCaser。二者都不使用默认40字节过�
 及词典摘要进入 native 包认证配置；不提供旧索引迁移/读取兼容链。原文不变，OpenCC仍由
 独立不可变配置控制。切词变化会改变词频、字段长度、命中和分数，即使评分公式不变。
 既有显式英文/折叠/空白配置保留其标点与折叠契约；新简单英文模式与旧模式不保证等价。
-实现进度和未验收项见[分词改造清单](../../docs/tokenizer-implementation.md)。
+实现进度和未验收项见[分词改造清单](../../../docs/tokenizer-implementation.md)。

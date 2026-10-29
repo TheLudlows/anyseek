@@ -1,6 +1,6 @@
 # 当前功能与边界
 
-HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、generation、时间/TTL、feed、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续回收仍未验收。[服务使用](anyseek/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
+HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、generation、时间/TTL、feed、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续回收仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
 
 ## 检索和数据
 
@@ -27,7 +27,7 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 
 ## 默认 HTTP 路由
 
-`{id}` 是稳定 collection ID，`{record_id}` 是稳定 Record ID，均为字符串。除 live 外使用 apikey header。默认路由以 [record_service.rs](anyseek/server/record_service.rs) 为准；准确路由清单可生成 OpenAPI 查验。
+`{id}` 是稳定 collection ID，`{record_id}` 是稳定 Record ID，均为字符串。除 live 外使用 apikey header。默认路由以 [record_service.rs](anyseek/src/server/record_service.rs) 为准；准确路由清单可生成 OpenAPI 查验。
 
 | 方法 | 路径 | 当前契约 |
 | --- | --- | --- |
@@ -74,7 +74,7 @@ UI 增加实体目录/一跳关系检查及有界 bootstrap/feed 检查与响应
 
 ## 资源与未完成项
 
-Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，key 撤销/接管/共同快照仍全局排空；分级字节和 I/O 额度见[服务指南](anyseek/server/README.md)；请求期限不等于取消已接管的持久任务。
+Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，key 撤销/接管/共同快照仍全局排空；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 

@@ -1,6 +1,6 @@
 # 持久化、对象存储与恢复
 
-本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/server/README.md)。
+本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/src/server/README.md)。
 
 ## 本地 Segment 与共同视图
 
@@ -63,7 +63,7 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 异常 guard 不依赖异步获取 catalog 锁即可同步关闭输出。共享的 sticky failure latch 在重开前不清除，其他 collection 即使正在持久发布或压缩，也不能重新开放旧授权输出；普通可证明未发布的 compaction 失败保留原有恢复语义。输出交付仍检查 grant revision 与 Record 数据屏障，已交付字节不可撤回。
 
-C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级准入、共享/每集合显式缓冲与 I/O 额度；取消后的 owned task 和传输 Bytes 保留租约。S3 GET 的租约随返回缓冲，而非下载函数返回就结束；PUT 读后验证仍访问远端。能证明 SQLite 发布前的预算拒绝为 Busy，其他不确定错误继续 fenced；既有 reader/build/backup 保护与 GC 闭包不变。默认值与范围见[服务指南](../anyseek/server/README.md)。服务缓存总容量及完整 C3-3 隔离验收未完成。
+C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级准入、共享/每集合显式缓冲与 I/O 额度；取消后的 owned task 和传输 Bytes 保留租约。S3 GET 的租约随返回缓冲，而非下载函数返回就结束；PUT 读后验证仍访问远端。能证明 SQLite 发布前的预算拒绝为 Busy，其他不确定错误继续 fenced；既有 reader/build/backup 保护与 GC 闭包不变。默认值与范围见[服务指南](../anyseek/src/server/README.md)。服务缓存总容量及完整 C3-3 隔离验收未完成。
 
 ## 2. 日志与 feed 保留
 

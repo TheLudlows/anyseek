@@ -1,6 +1,6 @@
 # Record 语义与一致性
 
-HTTP 请求、字段、配额和操作示例以[服务指南](../anyseek/server/README.md)为准；本文保留实现必须维持的不变量。当前交付状态见 [STATUS](../STATUS.md)，持久化见[存储协议](storage.md)。
+HTTP 请求、字段、配额和操作示例以[服务指南](../anyseek/src/server/README.md)为准；本文保留实现必须维持的不变量。当前交付状态见 [STATUS](../STATUS.md)，持久化见[存储协议](storage.md)。
 
 ## 身份、版本与重试
 

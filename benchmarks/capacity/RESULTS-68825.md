@@ -41,7 +41,7 @@ are excluded. The driver issues one HTTP request at a time; each request contain
 | 60k–67,425 (diagnostic capture) | 6.89 |
 
 The source executes each batch item through `p.write().await`
-([HTTP handler](../../anyseek/server/record_service.rs)). Each operation synchronizes
+([HTTP handler](../../anyseek/src/server/record_service.rs)). Each operation synchronizes
 its journal and witnesses, then publishes a Tantivy commit/reload. This is not a
 shared25-operation durable commit. The mutable tail rotates after128 published
 updates ([runtime](../../anyseek/src/record/lexical/runtime.rs)); the foreground
