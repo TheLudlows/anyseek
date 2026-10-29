@@ -827,6 +827,38 @@ mod tests {
         drop(inner);
         (p, store, root, db, clock)
     }
+    #[tokio::test]
+    async fn write_preflight_authority_mismatch_fences_existing_output() {
+        for delivery in [write::IndexDelivery::Synchronous, write::IndexDelivery::Asynchronous] {
+            for column in ["owner_epoch", "committed_seq"] {
+                let (p, _store, _root, db, _clock) = source().await;
+                let seed = write("preflight-seed", "old", "alpha", ExpectedVersion::Absent);
+                p.write(seed).await.unwrap();
+                let connection = rusqlite::Connection::open(&db).unwrap();
+                connection.execute_batch(&format!("UPDATE partition_heads SET {column}={column}+1 WHERE partition_id='source';")).unwrap();
+                let request = write("preflight-next", "new", "beta", ExpectedVersion::Absent);
+                let failure = p.execute_writes_detailed(vec![request], delivery).await.err().unwrap();
+                assert!(matches!(failure.error, RecordError::RecoveryRequired));
+                assert!(failure.scope.unwrap().persistence_attempted.is_empty());
+                assert!(!p.inner.lock().await.healthy, "detected {column} mismatch must fence the owner");
+                assert!(p.output_permit().is_err());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn write_upload_unwind_fences_before_the_next_writer() {
+        let (p,_store,root,_db,_clock)=source().await;
+        std::fs::write(root.join(".test-write-upload-panic"),b"panic").unwrap();
+        let result=p.execute_writes_detailed(vec![write("panic-first","r","alpha",ExpectedVersion::Absent)],write::IndexDelivery::Asynchronous).await;
+        let failure=result.err().unwrap();
+        assert!(matches!(failure.error,RecordError::OutcomeUnknown(_)));
+        assert!(failure.scope.unwrap().persistence_attempted.is_empty());
+        assert!(!p.inner.lock().await.healthy,"unwind must not leave a live async batch");
+        assert!(p.output_permit().is_err());
+        std::fs::remove_file(root.join(".test-write-upload-panic")).unwrap();
+        assert!(matches!(p.write(write("after-panic","s","beta",ExpectedVersion::Absent)).await,Err(RecordError::RecoveryRequired)));
+    }
+
     async fn wait_upload(root:&Path) {
         tokio::time::timeout(Duration::from_secs(5),async {
             while !root.join(".test-write-upload-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
@@ -935,13 +967,15 @@ mod tests {
             std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
             let request=write("stale-upload","r","alpha",ExpectedVersion::Absent);
             let owner=p.clone();let command=request.clone();
-            let task=tokio::spawn(async move {owner.write(command).await});
+            let task=tokio::spawn(async move {owner.execute_writes_detailed(vec![command],write::IndexDelivery::Asynchronous).await});
             wait_upload(&root).await;
             let connection=rusqlite::Connection::open(&db).unwrap();
             connection.execute_batch(if owner_changed {"UPDATE partition_heads SET owner_epoch=owner_epoch+1;"}
                 else {"UPDATE partition_heads SET head_version=head_version+1;"}).unwrap();
             std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
-            assert!(matches!(task.await.unwrap(),Err(RecordError::OutcomeUnknown(_))));
+            let failure=task.await.unwrap().err().unwrap();
+            assert!(matches!(failure.error,RecordError::OutcomeUnknown(_)));
+            assert_eq!(failure.scope.unwrap().persistence_attempted,vec![0]);
             let committed:i64=connection.query_row("SELECT committed_seq FROM partition_heads WHERE partition_id='source'",[],|row|row.get(0)).unwrap();
             assert_eq!(committed,0);assert!(!p.inner.lock().await.healthy);
         }
@@ -994,7 +1028,9 @@ mod tests {
         connection.execute_batch("CREATE TRIGGER fail_batch BEFORE UPDATE OF committed_seq ON partition_heads BEGIN SELECT RAISE(FAIL, 'injected publication failure'); END;").unwrap();
         let requests=vec![write("batch-fail-a","r","alpha",ExpectedVersion::Absent),
             write("batch-fail-b","r","beta",ExpectedVersion::Match(1))];
-        assert!(matches!(p.execute_writes(requests.clone(),write::IndexDelivery::Asynchronous).await,Err(RecordError::OutcomeUnknown(_))));
+        let failure=p.execute_writes_detailed(requests.clone(),write::IndexDelivery::Asynchronous).await.err().unwrap();
+        assert!(matches!(failure.error,RecordError::OutcomeUnknown(_)));
+        assert_eq!(failure.scope.unwrap().persistence_attempted,vec![0,1]);
         {
             let inner=p.inner.lock().await; let remote=inner.remote.as_ref().unwrap();
             let authority=remote.authority.lock().await;

@@ -191,5 +191,8 @@
   "record::remote_checkpoint::tests::unlocked_upload_discards_candidate_after_ttl_passes",
   "record::remote_checkpoint::tests::unlocked_upload_owner_or_head_change_never_acknowledges",
   "record::remote_checkpoint::tests::unlocked_upload_applies_due_source_expiry_before_selecting_candidate",
-  "record::remote_checkpoint::tests::unlocked_upload_expired_generation_lease_cannot_publish"
+  "record::remote_checkpoint::tests::unlocked_upload_expired_generation_lease_cannot_publish",
+  "record::write::tests::failed_batch_retains_only_attempted_prefix_and_prior_replays",
+  "record::remote_checkpoint::tests::write_preflight_authority_mismatch_fences_existing_output",
+  "record::remote_checkpoint::tests::write_upload_unwind_fences_before_the_next_writer"
 ]

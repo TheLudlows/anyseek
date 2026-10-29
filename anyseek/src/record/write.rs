@@ -1,12 +1,43 @@
 //! Shared bounded Record execution. Successful results are durable business decisions.
 //! Index publication can be synchronous or asynchronous; intake is only a caller.
 use super::*;
+use futures::FutureExt;
 
 /// Only the completed prefix may be recorded in intake. Busy and uncertain
 /// outcomes keep their original identity and leave the suffix pending.
 pub(super) struct BatchResult {
     pub results: Vec<Result<WriteReceipt, RecordError>>,
     pub stop: Option<RecordError>,
+}
+
+/// In-memory scope only: entering publication is not proof of commitment.
+#[derive(Default, Debug)]
+pub(super) struct AttemptScope {
+    pub persistence_attempted: Vec<usize>,
+    pub replayed: Vec<(usize, WriteReceipt)>,
+}
+
+#[derive(Debug)]
+pub(super) struct BatchFailure {
+    pub error: RecordError,
+    /// None means task infrastructure failed before returning its scope.
+    pub scope: Option<AttemptScope>,
+}
+impl From<RecordError> for BatchFailure {
+    fn from(error: RecordError) -> Self {
+        Self {
+            error,
+            scope: Some(AttemptScope::default()),
+        }
+    }
+}
+fn requires_recovery(error: &RecordError) -> bool {
+    matches!(
+        error,
+        RecordError::RecoveryRequired
+            | RecordError::OutcomeUnknown(_)
+            | RecordError::DurablePending(_)
+    )
 }
 
 pub(super) fn definite(error: &RecordError) -> bool {
@@ -53,6 +84,10 @@ struct UploadedBatch {
 #[cfg(feature = "s3-object-store")]
 impl RemoteUpload {
     async fn upload(self) -> Result<UploadedBatch, RecordError> {
+        #[cfg(test)]
+        if self.root.join(".test-write-upload-panic").exists() {
+            panic!("injected upload unwind");
+        }
         #[cfg(test)]
         if self.root.join(".test-write-upload-pause").exists() {
             std::fs::write(
@@ -222,8 +257,25 @@ impl RecordPartition {
         requests: Vec<RecordWrite>,
         delivery: IndexDelivery,
     ) -> Result<BatchResult, RecordError> {
+        self.execute_writes_detailed(requests, delivery)
+            .await
+            .map_err(|failure| {
+                // Legacy callers retain their recovery contract until HTTP switches.
+                let BatchFailure {
+                    error,
+                    scope: _scope,
+                } = failure;
+                error
+            })
+    }
+
+    pub(super) async fn execute_writes_detailed(
+        &self,
+        requests: Vec<RecordWrite>,
+        delivery: IndexDelivery,
+    ) -> Result<BatchResult, BatchFailure> {
         if requests.is_empty() || requests.len() > MAX_BATCH_RECORDS {
-            return Err(RecordError::Rejected("invalid Record batch size".into()));
+            return Err(RecordError::Rejected("invalid Record batch size".into()).into());
         }
         let bytes = requests.iter().try_fold(0usize, |total, request| {
             total
@@ -241,10 +293,11 @@ impl RecordPartition {
             .map_err(|_| RecordError::Busy)?;
         let partition = self.clone();
         crate::resources::spawn(async move {
-            let result = async {
-                let _permit = permit;
-                let _memory = memory;
-                let _writer = partition.writer.lock().await;
+            let _permit = permit;
+            let _memory = memory;
+            let writer = partition.writer.lock().await;
+            let mut scope = AttemptScope::default();
+            let result = std::panic::AssertUnwindSafe(async {
                 let mut inner = partition.inner.lock().await;
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
@@ -260,6 +313,29 @@ impl RecordPartition {
                     inner.index.drain_indexes().await?;
                 }
                 let prepared = inner.prepare_batch(requests).await;
+                if let Ok(prepared) = &prepared {
+                    scope.replayed = prepared
+                        .result
+                        .results
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, result)| {
+                            result
+                                .as_ref()
+                                .ok()
+                                .filter(|r| r.seq <= prepared.base_seq)
+                                .map(|r| (i, r.clone()))
+                        })
+                        .collect();
+                    if let Some(error) = prepared
+                        .result
+                        .stop
+                        .as_ref()
+                        .filter(|e| requires_recovery(e))
+                    {
+                        return Err(error.clone());
+                    }
+                }
                 #[cfg(feature = "s3-object-store")]
                 let result = match prepared {
                     Ok(prepared) => {
@@ -271,22 +347,14 @@ impl RecordPartition {
                                 inner = partition.inner.lock().await;
                                 match uploaded {
                                     Ok(uploaded) => {
-                                        inner.commit_batch(prepared, Some(uploaded)).await
+                                        inner
+                                            .commit_batch(prepared, &mut scope, Some(uploaded))
+                                            .await
                                     }
-                                    Err(error) => {
-                                        if matches!(error, RecordError::OutcomeUnknown(_)) {
-                                            inner.healthy = false;
-                                            inner
-                                                .output
-                                                .write()
-                                                .map_err(|_| RecordError::RecoveryRequired)?
-                                                .fenced = true;
-                                        }
-                                        Err(error)
-                                    }
+                                    Err(error) => Err(error),
                                 }
                             }
-                            Ok(None) => inner.commit_batch(prepared, None).await,
+                            Ok(None) => inner.commit_batch(prepared, &mut scope, None).await,
                             Err(error) => Err(error),
                         }
                     }
@@ -294,14 +362,24 @@ impl RecordPartition {
                 };
                 #[cfg(not(feature = "s3-object-store"))]
                 let result = match prepared {
-                    Ok(prepared) => inner.commit_batch(prepared).await,
+                    Ok(prepared) => inner.commit_batch(prepared, &mut scope).await,
                     Err(error) => Err(error),
                 };
+                let stop = match &result {
+                    Ok(batch) => batch.stop.as_ref(),
+                    Err(error) => Some(error),
+                };
+                if stop.is_some_and(requires_recovery) {
+                    inner.fence_failed_write();
+                }
                 if !inner.healthy {
                     if asynchronous {
                         inner.index.abort_batch();
                     }
-                    return Err(result.err().unwrap_or(RecordError::RecoveryRequired));
+                    return Err(match result {
+                        Err(error) => error,
+                        Ok(batch) => batch.stop.unwrap_or(RecordError::RecoveryRequired),
+                    });
                 }
                 let batch = match result {
                     Ok(batch) => batch,
@@ -341,17 +419,42 @@ impl RecordPartition {
                     .map_err(|_| RecordError::RecoveryRequired)?
                     .fenced = false;
                 Ok(batch)
-            }
+            })
+            .catch_unwind()
             .await;
+            let result = result.unwrap_or_else(|_| {
+                Err(RecordError::OutcomeUnknown(
+                    "Record batch task unwound".into(),
+                ))
+            });
+            if result.as_ref().err().is_some_and(requires_recovery) {
+                // Keep writer ownership through cleanup, including unwind during upload.
+                partition.inner.lock().await.fence_failed_write();
+            }
+            drop(writer);
             partition.kick_maintenance().await;
-            result
+            result.map_err(|error| BatchFailure {
+                error,
+                scope: Some(scope),
+            })
         })
         .await
-        .map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?
+        .map_err(|error| BatchFailure {
+            error: RecordError::OutcomeUnknown(error.to_string()),
+            scope: None,
+        })?
     }
 }
 
 impl Inner {
+    fn fence_failed_write(&mut self) {
+        self.healthy = false;
+        self.index.abort_batch();
+        if let Ok(mut output) = self.output.write() {
+            output.fenced = true;
+        }
+    }
+
     async fn prepare_batch(
         &mut self,
         requests: Vec<RecordWrite>,
@@ -436,7 +539,7 @@ impl Inner {
                     .await
                 {
                     // Aggregate pressure must not durably reject a valid item.
-                    return Err(if plans.is_empty() {
+                    return Err(if plans.is_empty() || !definite(&error) {
                         error
                     } else {
                         RecordError::Busy
@@ -471,7 +574,7 @@ impl Inner {
                         Ok(false) => {}
                         Ok(true) => return Err(self.request_checkpoint("remote_tail_room")),
                         Err(error) => {
-                            return Err(if plans.is_empty() {
+                            return Err(if plans.is_empty() || !definite(&error) {
                                 error
                             } else {
                                 RecordError::Busy
@@ -580,6 +683,7 @@ impl Inner {
     async fn commit_batch(
         &mut self,
         prepared: PreparedBatch,
+        scope: &mut AttemptScope,
         #[cfg(feature = "s3-object-store")] uploaded: Option<UploadedBatch>,
     ) -> Result<BatchResult, RecordError> {
         if !self.healthy || self.state.seq != prepared.base_seq {
@@ -600,6 +704,7 @@ impl Inner {
             plans,
             publication,
             result,
+            base_seq,
             ..
         } = prepared;
         if plans.is_empty() {
@@ -637,6 +742,12 @@ impl Inner {
                 .checked_add(1)
                 .ok_or_else(|| storage("data barrier revision exhausted"))?;
         }
+        scope.persistence_attempted = result
+            .results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, result)| result.as_ref().ok().filter(|r| r.seq > base_seq).map(|_| i))
+            .collect();
         #[cfg(feature = "s3-object-store")]
         if let Some(uploaded) = uploaded {
             let remote = self.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
@@ -692,6 +803,48 @@ mod tests {
     use super::*;
     use crate::record::tests::{config, write};
     use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn failed_batch_retains_only_attempted_prefix_and_prior_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("records");
+        let settings = config();
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        let old = write("scope-old", "old", "alpha", ExpectedVersion::Absent);
+        let receipt = p.write(old.clone()).await.unwrap();
+        let new = write("scope-new", "r", "beta", ExpectedVersion::Absent);
+        let conflict = write("scope-conflict", "r", "bad", ExpectedVersion::Absent);
+        let suffix = write("scope-suffix", "s", "gamma", ExpectedVersion::Absent);
+        p.inner.lock().await.fail_after_durable = true;
+        let failure = p
+            .execute_writes_detailed(
+                vec![
+                    old,
+                    new.clone(),
+                    new.clone(),
+                    conflict.clone(),
+                    suffix.clone(),
+                ],
+                IndexDelivery::Asynchronous,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(failure.error, RecordError::DurablePending(2)));
+        let scope = failure.scope.unwrap();
+        assert_eq!(scope.persistence_attempted, vec![1, 2]);
+        assert_eq!(scope.replayed, vec![(0, receipt)]);
+        drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes)
+            .await
+            .unwrap();
+        assert_eq!(p.write(new).await.unwrap().seq, 2);
+        assert!(p.operation(&conflict.operation_id).await.unwrap().is_none());
+        assert!(p.operation(&suffix.operation_id).await.unwrap().is_none());
+        assert!(p.get("s").await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn durable_batch_unknown_reopens_all_decisions_and_replays_original_ids() {
