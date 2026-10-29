@@ -19,10 +19,6 @@
 #[cfg_attr(doctest, doc = include_str!("../../docs/library-examples.md"))]
 pub struct ReadmeDoctests;
 
-/// include FACETED_SEARCH.md in documentation
-#[cfg_attr(doctest, doc = include_str!("../../FACETED_SEARCH.md"))]
-pub struct ReadmeDoctests2;
-
 use std::sync::LazyLock;
 
 use tokio::runtime::Runtime;

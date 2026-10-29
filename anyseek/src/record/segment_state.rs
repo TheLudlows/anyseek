@@ -76,7 +76,6 @@ fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(
 pub(super) struct ReferencedState {config:RecordConfig,state:Value}
 #[cfg(test)]
 impl ReferencedState {
-    pub(super) fn config(&self)->&RecordConfig {&self.config}
     pub(super) fn write(config:&RecordConfig,state:&State,pool:&mut crate::storage::payload_pool::PoolBuilder)->Result<Self,RecordError>{
         validate_config(config)?;
         let mut wire=serde_json::to_value(state).map_err(storage)?;
