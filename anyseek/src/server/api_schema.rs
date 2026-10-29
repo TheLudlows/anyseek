@@ -14,68 +14,12 @@ use utoipa::ToSchema;
 #[derive(ToSchema, Serialize)]
 #[serde(remote = "crate::search::FacetFilter")]
 pub enum FacetFilter {
-    /// U8 range filter
-    U8 {
+    /// Int range filter
+    Int {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeU8)]
-        filter: Range<u8>,
-    },
-    /// U16 range filter
-    U16 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        #[schema(value_type=RangeU16)]
-        filter: Range<u16>,
-    },
-    /// U32 range filter
-    U32 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        #[schema(value_type=RangeU32)]
-        filter: Range<u32>,
-    },
-    /// U64 range filter
-    U64 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        #[schema(value_type=RangeU64)]
-        filter: Range<u64>,
-    },
-    /// I8 range filter
-    I8 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        #[schema(value_type=RangeI8)]
-        filter: Range<i8>,
-    },
-    /// I16 range filter
-    I16 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        #[schema(value_type=RangeI16)]
-        filter: Range<i16>,
-    },
-    /// I32 range filter
-    I32 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        #[schema(value_type=RangeI32)]
-        filter: Range<i32>,
-    },
-    /// I64 range filter
-    I64 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        #[schema(value_type=RangeI64)]
+        #[schema(value_type=RangeInt)]
         filter: Range<i64>,
     },
     /// Timestamp range filter, Unix timestamp: the number of seconds since 1 January 1970
@@ -83,48 +27,26 @@ pub enum FacetFilter {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeI64)]
+        #[schema(value_type=RangeInt)]
         filter: Range<i64>,
     },
-    /// F32 range filter
-    F32 {
+    /// Float range filter
+    Float {
         /// field name
         field: String,
         /// filter: range start, range end
-        #[schema(value_type=RangeF32)]
-        filter: Range<f32>,
-    },
-    /// F64 range filter
-    F64 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        #[schema(value_type=RangeF64)]
+        #[schema(value_type=RangeFloat)]
         filter: Range<f64>,
     },
-    /// String16 filter
-    String16 {
+    /// String filter
+    String {
         /// field name
         field: String,
         /// filter: array of facet string values
         filter: Vec<String>,
     },
-    /// StringSet16 filter
-    StringSet16 {
-        /// field name
-        field: String,
-        /// filter: array of facet string values
-        filter: Vec<String>,
-    },
-    /// String32 filter
-    String32 {
-        /// field name
-        field: String,
-        /// filter: array of facet string values
-        filter: Vec<String>,
-    },
-    /// StringSet32 filter
-    StringSet32 {
+    /// StringSet filter
+    StringSet {
         /// field name
         field: String,
         /// filter: array of facet string values
@@ -132,52 +54,26 @@ pub enum FacetFilter {
     },
 }
 
-/// FieldType defines the type of a field in the document: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, point, string, stringset, text.
+/// The eight supported document field types.
 #[derive(ToSchema, Serialize)]
 #[serde(remote = "crate::index::FieldType")]
 pub enum FieldType {
-    /// Unsigned 8-bit integer
-    U8,
-    /// Unsigned 16-bit integer
-    U16,
-    /// Unsigned 32-bit integer
-    U32,
-    /// Unsigned 64-bit integer
-    U64,
-    /// Signed 8-bit integer
-    I8,
-    /// Signed 16-bit integer
-    I16,
-    /// Signed 32-bit integer
-    I32,
     /// Signed 64-bit integer
-    I64,
-    /// Timestamp is identical to I64, but to be used for Unix timestamps <https://en.wikipedia.org/wiki/Unix_time>.
-    /// The reason for a separate FieldType is to enable the UI to interpret I64 as timestamp without using the field name as indicator.
+    Int,
+    /// Timestamp is identical to Int, but to be used for Unix timestamps <https://en.wikipedia.org/wiki/Unix_time>.
+    /// The reason for a separate FieldType is to enable the UI to interpret Int as timestamp without using the field name as indicator.
     /// For date facets and filtering.
     Timestamp,
-    /// Floating point 32-bit
-    F32,
     /// Floating point 64-bit
-    F64,
-    /// Boolean
-    Bool,
-    /// String16
-    /// allows a maximum cardinality of 65_535 (16 bit) distinct values, is space-saving.
-    /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
-    String16,
-    /// String32
+    Float,
+    /// String
     /// allows a maximum cardinality of 4_294_967_295 (32 bit) distinct values
     /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
-    String32,
-    /// StringSet16 is a set of strings, e.g. tags, categories, keywords, authors, genres, etc.
-    /// allows a maximum cardinality of 65_535 (16 bit) distinct values, is space-saving.
-    /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
-    StringSet16,
-    /// StringSet32 is a set of strings, e.g. tags, categories, keywords, authors, genres, etc.
+    String,
+    /// StringSet is a set of strings, e.g. tags, categories, keywords, authors, genres, etc.
     /// allows a maximum cardinality of 4_294_967_295 (32 bit) distinct values
     /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
-    StringSet32,
+    StringSet,
     /// Text is a text field, that will be tokenized by the selected Tokenizer into string tokens.
     Text,
     /// Hierarchical JSON Object, that will be tokenized by the selected Tokenizer into string tokens.
@@ -225,94 +121,22 @@ pub enum Quantization {
     None,
 }
 
-/// F32 range filter
+/// Float range filter
 #[derive(ToSchema)]
-pub struct RangeF32 {
-    /// range start
-    pub start: f32,
-    /// range end
-    pub end: f32,
-}
-
-/// F64 range filter
-#[derive(ToSchema)]
-pub struct RangeF64 {
+pub struct RangeFloat {
     /// range start
     pub start: f64,
     /// range end
     pub end: f64,
 }
 
-/// I16 range filter
+/// Int range filter
 #[derive(ToSchema)]
-pub struct RangeI16 {
-    /// range start
-    pub start: i16,
-    /// range end
-    pub end: i16,
-}
-
-/// I32 range filter
-#[derive(ToSchema)]
-pub struct RangeI32 {
-    /// range start
-    pub start: i32,
-    /// range end
-    pub end: i32,
-}
-
-/// I64 range filter
-#[derive(ToSchema)]
-pub struct RangeI64 {
+pub struct RangeInt {
     /// range start
     pub start: i64,
     /// range end
     pub end: i64,
-}
-
-/// I8 range filter
-#[derive(ToSchema)]
-pub struct RangeI8 {
-    /// range start
-    pub start: i8,
-    /// range end
-    pub end: i8,
-}
-
-/// U16 range filter
-#[derive(ToSchema)]
-pub struct RangeU16 {
-    /// range start
-    pub start: u16,
-    /// range end
-    pub end: u16,
-}
-
-/// U32 range filter
-#[derive(ToSchema)]
-pub struct RangeU32 {
-    /// range start
-    pub start: u32,
-    /// range end
-    pub end: u32,
-}
-
-/// U64 range filter
-#[derive(ToSchema)]
-pub struct RangeU64 {
-    /// range start
-    pub start: u64,
-    /// range end
-    pub end: u64,
-}
-
-/// U8 range filter
-#[derive(ToSchema)]
-pub struct RangeU8 {
-    /// range start
-    pub start: u8,
-    /// range end
-    pub end: u8,
 }
 
 /// Specifies the sort order for the search results.

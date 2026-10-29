@@ -26,15 +26,15 @@ fn schema() -> Vec<SchemaField> {
     let mut value = json!([
         {"field":"body","field_type":"Text","store":true,"index_lexical":true},
         {"field":"vector","field_type":"Json","store":true,"index_lexical":false,"index_vector":true},
-        {"field":"label","field_type":"U32","store":true,"index_lexical":false,"facet":true},
-        {"field":"category","field_type":"String16","store":true,"index_lexical":false,"facet":true},
-        {"field":"category32","field_type":"String32","store":false,"index_lexical":false,"facet":true},
-        {"field":"tags","field_type":"StringSet32","store":true,"index_lexical":false,"facet":true},
-        {"field":"tags16","field_type":"StringSet16","store":false,"index_lexical":false,"facet":true},
-        {"field":"price","field_type":"F64","store":false,"index_lexical":false,"facet":true},
+        {"field":"label","field_type":"Int","store":true,"index_lexical":false,"facet":true},
+        {"field":"category","field_type":"String","store":true,"index_lexical":false,"facet":true},
+        {"field":"category_unstored","field_type":"String","store":false,"index_lexical":false,"facet":true},
+        {"field":"tags","field_type":"StringSet","store":true,"index_lexical":false,"facet":true},
+        {"field":"tags_unstored","field_type":"StringSet","store":false,"index_lexical":false,"facet":true},
+        {"field":"price","field_type":"Float","store":false,"index_lexical":false,"facet":true},
         {"field":"date","field_type":"Timestamp","store":false,"index_lexical":false,"facet":true}
     ]);
-    for kind in ["U8", "U16", "U64", "I8", "I16", "I32", "I64", "F32"] {
+    for kind in ["Int", "Float"] {
         value.as_array_mut().unwrap().push(json!({"field":kind.to_lowercase(),"field_type":kind,"store":false,"index_lexical":false,"facet":true}));
     }
     serde_json::from_value(value).unwrap()
@@ -43,9 +43,9 @@ fn doc(i: usize) -> Document {
     let category = if i < 16 { "blocked" } else { "allowed" };
     let mut value = json!({"body":if i%2==0 {"common alpha"} else {"common beta"},
         "vector":[1.0, i as f32 / 24.0, 0.0], "label":i, "category":category,
-        "category32":category,"tags":["all",if i%2==0 {"even"} else {"odd"}],
-        "tags16":["all",if i%2==0 {"even"} else {"odd"}],"price":i as f64,"date":i as i64});
-    for kind in ["u8", "u16", "u64", "i8", "i16", "i32", "i64", "f32"] {
+        "category_unstored":category,"tags":["all",if i%2==0 {"even"} else {"odd"}],
+        "tags_unstored":["all",if i%2==0 {"even"} else {"odd"}],"price":i as f64,"date":i as i64});
+    for kind in ["int", "float"] {
         value[kind] = json!(i);
     }
     serde_json::from_value(value).unwrap()
@@ -81,23 +81,23 @@ async fn labels(_index: &RecordPartition, result: &RecordSearch, _realtime: bool
 async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
     let mut cases = vec![
         (
-            json!([{"String16":{"field":"category","filter":["allowed"]}}]),
+            json!([{"String":{"field":"category","filter":["allowed"]}}]),
             (16..24).collect::<Vec<_>>(),
         ),
         (
-            json!([{"String32":{"field":"category32","filter":["allowed"]}}]),
+            json!([{"String":{"field":"category_unstored","filter":["allowed"]}}]),
             (16..24).collect(),
         ),
         (
-            json!([{"StringSet32":{"field":"tags","filter":["even"]}}]),
+            json!([{"StringSet":{"field":"tags","filter":["even"]}}]),
             (0..24).filter(|i| i % 2 == 0).collect(),
         ),
         (
-            json!([{"StringSet16":{"field":"tags16","filter":["even"]}}]),
+            json!([{"StringSet":{"field":"tags_unstored","filter":["even"]}}]),
             (0..24).filter(|i| i % 2 == 0).collect(),
         ),
         (
-            json!([{"F64":{"field":"price","filter":{"start":20.,"end":24.}}}]),
+            json!([{"Float":{"field":"price","filter":{"start":20.,"end":24.}}}]),
             (20..24).collect(),
         ),
         (
@@ -105,42 +105,42 @@ async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
             (20..24).collect(),
         ),
         (
-            json!([{"U32":{"field":"label","filter":{"start":23,"end":24}}}]),
+            json!([{"Int":{"field":"label","filter":{"start":23,"end":24}}}]),
             vec![23],
         ),
         (
-            json!([{"String16":{"field":"category","filter":["absent"]}}]),
+            json!([{"String":{"field":"category","filter":["absent"]}}]),
             vec![],
         ),
         (
-            json!([{"String16":{"field":"category","filter":[]}}]),
+            json!([{"String":{"field":"category","filter":[]}}]),
             vec![],
         ),
         (
-            json!([{"U32":{"field":"label","filter":{"start":20,"end":20}}}]),
+            json!([{"Int":{"field":"label","filter":{"start":20,"end":20}}}]),
             vec![],
         ),
         (
-            json!([{"String16":{"field":"category","filter":["allowed"]}},
-            {"StringSet32":{"field":"tags","filter":["even"]}},
+            json!([{"String":{"field":"category","filter":["allowed"]}},
+            {"StringSet":{"field":"tags","filter":["even"]}},
             {"Timestamp":{"field":"date","filter":{"start":20,"end":24}}}]),
             vec![20, 22],
         ),
         // Multiple predicates for the same field are ANDed, rather than overwritten.
         (
-            json!([{"U32":{"field":"label","filter":{"start":16,"end":24}}},
-            {"U32":{"field":"label","filter":{"start":20,"end":22}}}]),
+            json!([{"Int":{"field":"label","filter":{"start":16,"end":24}}},
+            {"Int":{"field":"label","filter":{"start":20,"end":22}}}]),
             vec![20, 21],
         ),
     ];
-    for kind in ["U8", "U16", "U64", "I8", "I16", "I32", "I64", "F32"] {
+    for kind in ["Int", "Float"] {
         cases.push((
             json!([{kind:{"field":kind.to_lowercase(),"filter":{"start":20,"end":24}}}]),
             (20..24).collect(),
         ));
     }
     cases.push((
-        json!([{"StringSet32":{"field":"tags","filter":["all_even"]}}]),
+        json!([{"StringSet":{"field":"tags","filter":["all_even"]}}]),
         vec![],
     ));
     for (filter, eligible) in cases {
@@ -165,9 +165,9 @@ async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
         }
     }
     for bad in [
-        json!([{"U32":{"field":"absent","filter":{"start":0,"end":1}}}]),
-        json!([{"F64":{"field":"category","filter":{"start":0.,"end":1.}}}]),
-        json!([{"String16":{"field":"body","filter":["common"]}}]),
+        json!([{"Int":{"field":"absent","filter":{"start":0,"end":1}}}]),
+        json!([{"Float":{"field":"category","filter":{"start":0.,"end":1.}}}]),
+        json!([{"String":{"field":"body","filter":["common"]}}]),
         json!([{"Timestamp":{"field":"date","filter":{"start":2,"end":1}}}]),
     ] {
         for name in ["Lexical", "Vector", "Hybrid"] {
@@ -242,7 +242,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             let r = query(
                 &index,
                 name,
-                json!([{"U32":{"field":"label","filter":{"start":21,"end":24}}}]),
+                json!([{"Int":{"field":"label","filter":{"start":21,"end":24}}}]),
                 true,
                 30,
                 json!("All"),
@@ -252,7 +252,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             let r = query(
                 &index,
                 name,
-                json!([{"U32":{"field":"label","filter":{"start":25,"end":26}}}]),
+                json!([{"Int":{"field":"label","filter":{"start":25,"end":26}}}]),
                 false,
                 3,
                 json!("All"),
@@ -267,7 +267,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
             let r = query(
                 &index,
                 name,
-                json!([{"U32":{"field":"label","filter":{"start":25,"end":26}}}]),
+                json!([{"Int":{"field":"label","filter":{"start":25,"end":26}}}]),
                 false,
                 3,
                 json!("All"),
@@ -350,7 +350,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             }
             records::insert(&index, docs).await.unwrap();
             index.compact_journal().await.unwrap();
-            let predicate = json!([{"String16":{"field":"category","filter":["allowed"]}}]);
+            let predicate = json!([{"String":{"field":"category","filter":["allowed"]}}]);
             for name in ["Vector", "Hybrid"] {
                 for ann in [
                     json!("All"),
@@ -403,7 +403,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             records::insert(&index, vec![replacement]).await.unwrap();
             index.compact_journal().await.unwrap();
             // The set dictionary reuses ID 0 after clear; old memberships must not survive.
-            let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","filter":[{"StringSet32":{"field":"tags","filter":["even"]}}]})).unwrap();
+            let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","filter":[{"StringSet":{"field":"tags","filter":["even"]}}]})).unwrap();
             let result = index.query(RecordQuery {text:r.query_string.clone(),vector:None,query_type:r.query_type(),mode:r.search_mode(std::num::NonZeroUsize::new(anyseek::server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(),offset:0,length:10,result_type:r.result_type(),fields:vec![],filters:r.facet_filter,sort:vec![],temporal:None}).await.unwrap();
             assert!(labels(&index, &result, false).await.is_empty());
 

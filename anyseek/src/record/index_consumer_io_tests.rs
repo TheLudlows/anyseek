@@ -5,7 +5,7 @@ async fn fixture() -> (tempfile::TempDir, IndexArc, RecordConfig, Engine, crate:
     let root = tempfile::tempdir().unwrap();
     let mut config = crate::record::tests::config();
     config.schema.push(serde_json::from_value(serde_json::json!({
-        "field":"number", "field_type":"U64", "facet":true, "store":false, "index_lexical":false
+        "field":"number", "field_type":"Int", "facet":true, "store":false, "index_lexical":false
     })).unwrap());
     let (index, _) = build_at(root.path(), &root.path().join("cache"), &config, &State::default()).await.unwrap();
     let native = index.read().await.record_lexical[0].clone();

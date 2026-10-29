@@ -41,12 +41,75 @@ function resetSearch() {
     $('.switch-selector').css('left', 'calc(66.66% + 4px)');
     updateTitle(true);
 }
+// Keep original response spans for display/copy while business logic uses ordinary objects.
+// These are response snapshots, not serializers for subsequently mutated objects.
+const apiJsonSources = new WeakMap();
+function parseApiJson(source) {
+    const value = JSON.parse(source);
+    let offset = 0;
+    const space = () => { while (/\s/.test(source[offset] || '') && offset < source.length) offset++; };
+    const stringEnd = () => {
+        offset++;
+        while (offset < source.length) {
+            const ch = source[offset++];
+            if (ch === '\\') offset++;
+            else if (ch === '"') break;
+        }
+    };
+    function scan(node) {
+        space();
+        const start = offset, ch = source[offset];
+        const fields = new Map();
+        if (ch === '{' || ch === '[') {
+            const object = ch === '{', close = object ? '}' : ']';
+            offset++; space();
+            let index = 0;
+            while (source[offset] !== close) {
+                let key = String(index++);
+                if (object) {
+                    const keyStart = offset;
+                    stringEnd();
+                    key = JSON.parse(source.slice(keyStart, offset));
+                    space(); offset++; space();
+                }
+                const child = node && Object.hasOwn(node, key) ? node[key] : undefined;
+                const span = scan(child);
+                fields.set(key, span);
+                space();
+                if (source[offset] !== ',') break;
+                offset++; space();
+            }
+            offset++;
+        } else if (ch === '"') stringEnd();
+        else while (offset < source.length && !/[\s,}\]]/.test(source[offset])) offset++;
+        if (node !== null && typeof node === 'object')
+            apiJsonSources.set(node, {source, start, end:offset, fields});
+        return [start, offset];
+    }
+    scan(value);
+    return value;
+}
+function apiJsonText(value) {
+    const saved = value !== null && typeof value === 'object' ? apiJsonSources.get(value) : undefined;
+    return saved ? saved.source.slice(saved.start, saved.end) : JSON.stringify(value, null, 2);
+}
+function apiFieldText(parent, key) {
+    const value = parent[key];
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    const saved = apiJsonSources.get(parent), span = saved?.fields.get(String(key));
+    return span ? saved.source.slice(...span) : typeof value === 'object' ? apiJsonText(value) : String(value);
+}
 async function setupApi(method, path, key, body) {
+    return setupApiJson(method, path, key, body === undefined ? undefined : JSON.stringify(body));
+}
+// Accept already validated JSON text without rounding document number tokens.
+async function setupApiJson(method, path, key, body) {
     const response = await fetch(path, {
         method, headers: {apikey: key, 'Content-Type': 'application/json'},
-        ...(body === undefined ? {} : {body: JSON.stringify(body)}), cache: 'no-store'
+        ...(body === undefined ? {} : {body}), cache: 'no-store'
     });
-    const value = await response.json();
+    const value = parseApiJson(await response.text());
     if (!response.ok) {
         if (response.status === 401) throw Object.assign(new Error('Invalid API key. Check the key copied from the server logs.'), {status: response.status, code: value.code});
         throw Object.assign(new Error(value.message || `Request failed (${response.status}).`), {status: response.status, code: value.code});

@@ -353,7 +353,7 @@ pub(super) fn reserved(name: &str) -> bool {
 pub(super) fn schema(config: &RecordConfig) -> Vec<SchemaField> {
     let mut schema = config.schema.clone();
     for field in FIELDS {
-        schema.push(serde_json::from_value(serde_json::json!({"field":field,"field_type":"I64","store":false,"index_lexical":false,"facet":true})).expect("internal time schema"));
+        schema.push(serde_json::from_value(serde_json::json!({"field":field,"field_type":"Int","store":false,"index_lexical":false,"facet":true})).expect("internal time schema"));
     }
     schema
 }
@@ -380,7 +380,7 @@ pub(super) fn filters(filter: TemporalFilter) -> Result<Vec<FacetFilter>, Record
                     "time range must be nonempty [from_ms,to_ms) within supported UTC range".into(),
                 ));
             }
-            filters.push(FacetFilter::I64 {
+            filters.push(FacetFilter::Int {
                 field: field.into(),
                 filter: from..to,
             });
@@ -392,11 +392,11 @@ pub(super) fn filters(filter: TemporalFilter) -> Result<Vec<FacetFilter>, Record
                 "valid_at_ms outside supported UTC range".into(),
             ));
         }
-        filters.push(FacetFilter::I64 {
+        filters.push(FacetFilter::Int {
             field: FIELDS[2].into(),
             filter: MIN_TIME..at + 1,
         });
-        filters.push(FacetFilter::I64 {
+        filters.push(FacetFilter::Int {
             field: FIELDS[3].into(),
             filter: at + 1..MAX_TIME as i64 + 2,
         });

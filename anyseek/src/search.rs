@@ -223,57 +223,8 @@ pub struct ResultObject {
 /// string facet filter (vector of strings) at least one (boolean OR) must match.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum FacetFilter {
-    /// U8 range filter
-    U8 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        filter: Range<u8>,
-    },
-    /// U16 range filter
-    U16 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        filter: Range<u16>,
-    },
-    /// U32 range filter
-    U32 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        filter: Range<u32>,
-    },
-    /// U64 range filter
-    U64 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        filter: Range<u64>,
-    },
-    /// I8 range filter
-    I8 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        filter: Range<i8>,
-    },
-    /// I16 range filter
-    I16 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        filter: Range<i16>,
-    },
-    /// I32 range filter
-    I32 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        filter: Range<i32>,
-    },
-    /// I64 range filter
-    I64 {
+    /// Int range filter
+    Int {
         /// field name
         field: String,
         /// filter: range start, range end
@@ -286,43 +237,22 @@ pub enum FacetFilter {
         /// filter: range start, range end
         filter: Range<i64>,
     },
-    /// F32 range filter
-    F32 {
-        /// field name
-        field: String,
-        /// filter: range start, range end
-        filter: Range<f32>,
-    },
-    /// F64 range filter
-    F64 {
+    /// Float range filter
+    Float {
         /// field name
         field: String,
         /// filter: range start, range end
         filter: Range<f64>,
     },
-    /// String16 filter
-    String16 {
+    /// String filter
+    String {
         /// field name
         field: String,
         /// filter: array of facet string values
         filter: Vec<String>,
     },
-    /// StringSet16 filter
-    StringSet16 {
-        /// field name
-        field: String,
-        /// filter: array of facet string values
-        filter: Vec<String>,
-    },
-    /// String32 filter
-    String32 {
-        /// field name
-        field: String,
-        /// filter: array of facet string values
-        filter: Vec<String>,
-    },
-    /// StringSet32 filter
-    StringSet32 {
+    /// StringSet filter
+    StringSet {
         /// field name
         field: String,
         /// filter: array of facet string values

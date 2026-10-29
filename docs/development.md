@@ -17,6 +17,7 @@ cargo test --workspace --doc
 cargo doc --workspace --no-deps
 python3 scripts/check_core_boundary.py
 python3 scripts/check_docs_brand.py
+node --test scripts/document_precision.test.cjs
 ```
 
 核心默认启用 `zh`、`vb`。独立边界脚本验证核心可脱离 HTTP 依赖构建；不是新的 SDK 或模型运行时。`.cargo/config.toml` 使用本机 CPU 指令，不将这类产物跨不同 CPU runner 复用。
@@ -28,6 +29,7 @@ python3 scripts/check_docs_brand.py
 ```sh
 python3 -m pip install playwright
 python3 -m playwright install chromium
+python3 scripts/record_precision_browser.py --server target/debug/anyseek_server
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
 cargo build -p anyseek --features server,fault-injection
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser --faults

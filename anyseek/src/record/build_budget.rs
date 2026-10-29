@@ -73,8 +73,8 @@ pub(crate) fn document_estimate(
 }
 /// Retained vector/facet projection only. Canonical bodies belong to State/Payload;
 /// the full input Document has a distinct short-lived lease in component::append.
-/// 1024 bytes per row cover row metadata (<=64 x8 bytes), active-mask/address
-/// bookkeeping and conservative container overhead. Variable identity bytes
+/// 1024 bytes per row cover row metadata (<=64 x9 bytes including presence markers),
+/// active-mask/address bookkeeping and conservative container overhead. Variable identity bytes
 /// are admitted separately; ordinary Record identities have no256-byte cap.
 pub(crate) fn identity_estimate(id: &str) -> Result<u64,RecordError> {
     (id.len() as u64).checked_mul(3).ok_or_else(||storage("component identity estimate overflow"))

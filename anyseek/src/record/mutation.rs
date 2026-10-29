@@ -42,6 +42,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     }
     if let Some(document) = &request.document {
         validate_document_depth(document)?;
+        crate::index::validate_field_values(config.schema.iter(), document).map_err(RecordError::Rejected)?;
     }
     // Own temporary planner copies before cloning request/prior document data.
     // The caller's incoming request and the retained old value are separate owners.
@@ -101,6 +102,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     let next_document = enrichment::document(state.records.get(&request.record_id), &request)?;
     if let Some(document) = &next_document {
         validate_document_depth(document)?;
+        crate::index::validate_field_values(config.schema.iter(), document).map_err(RecordError::Rejected)?;
         if serde_json::to_vec(document).map_err(storage)?.len() > config.max_record_bytes {
             return Err(RecordError::Rejected("enriched record byte budget exceeded".into()));
         }

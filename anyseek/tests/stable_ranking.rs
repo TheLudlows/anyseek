@@ -55,7 +55,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
         assert!(!path.exists(), "test directory must be new");
         let schema: Vec<anyseek::index::SchemaField> = serde_json::from_value(json!([
             {"field":"body","field_type":"Text","store":false,"index_lexical":true},
-            {"field":"priority","field_type":"U64","store":false,"index_lexical":false,"facet":true},
+            {"field":"priority","field_type":"Int","store":false,"index_lexical":false,"facet":true},
             {"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}
         ])).unwrap();
         let meta = IndexMetaObject {

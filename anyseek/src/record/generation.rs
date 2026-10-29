@@ -164,6 +164,7 @@ pub(super) fn validate_stage(state: &State, config: &RecordConfig, stage: &Stage
         temporal::validate(&chunk.temporal.clone().unwrap_or_default(),evaluation)?;
         let body = write.document.as_ref().unwrap();
         validate_document_depth(body)?;
+        crate::index::validate_field_values(config.schema.iter(), body).map_err(rejected_owned)?;
         crate::vector::validate_vectors_in_schema(&config.index.inference, config.schema.iter(), body).map_err(rejected_owned)?;
         if serde_json::to_vec(&write).map_err(storage)?.len() > config.max_record_bytes { return Err(rejected("generation member exceeds record byte budget")); }
     }

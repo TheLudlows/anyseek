@@ -52,7 +52,7 @@ def exercise(base,master,call):
         expect(page.locator('#retryDocumentCommit')).to_be_visible()
         expect(page.locator('#documentJson')).to_be_disabled()
         saved=page.evaluate("JSON.parse(sessionStorage.getItem('seekpower.pendingWrites'))")
-        assert saved['requests']==writes and 'key' not in saved
+        assert [json.loads(request['body']) for request in saved['requests']]==writes and 'key' not in saved
         page.reload(wait_until="domcontentloaded");expect(page.locator('#indexName')).to_have_text('browser-records')
         page.locator('#writeDocuments').click();expect(page.locator('#retryDocumentCommit')).to_be_visible()
         # The first request really committed. A later admission rejection or
@@ -66,7 +66,7 @@ def exercise(base,master,call):
             expect(page.locator('#discardRejectedWrites')).to_be_hidden()
             expect(page.locator('#documentJson')).to_be_disabled()
             retained=page.evaluate("JSON.parse(sessionStorage.getItem('seekpower.pendingWrites'))")
-            assert retained['unresolved'] and retained['requests']==writes
+            assert retained['unresolved'] and [json.loads(request['body']) for request in retained['requests']]==writes
             page.reload(wait_until="domcontentloaded")
             expect(page.locator('#indexName')).to_have_text('browser-records')
             page.locator('#writeDocuments').click()

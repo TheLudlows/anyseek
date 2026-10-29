@@ -23,7 +23,7 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 
 `document_compression` 中的 None/Snappy 仅保留为配置序列化标记，不选择当前 Payload 或 Tantivy 包的编码，也不再构建 Snappy docstore。
 
-字段类型：U8/U16/U32/U64、I8/I16/I32/I64、Timestamp、F32/F64、Bool、String16/String32、StringSet16/StringSet32、Text、Json、Binary。类型存在不代表支持全部索引方式。向量使用 Json/Binary 加 index_vector；已配置向量字段可缺席，缺向量记录不参与该字段召回；后补向量须使用精确版本条件。过滤字段需显式 filterable:true。不提供分面统计聚合、直方图或字段 extrema。
+字段类型：String、StringSet、Int、Float、Text、Timestamp、Json、Binary。类型存在不代表支持全部索引方式。向量使用 Json/Binary 加 index_vector；已配置向量字段可缺席，缺向量记录不参与该字段召回；后补向量须使用精确版本条件。过滤字段需显式 filterable:true。不提供分面统计聚合、直方图或字段 extrema。
 
 ## 默认 HTTP 路由
 
@@ -81,3 +81,15 @@ collection backups 最多 32 个；service archives 每源根 4 个，生成恢�
 尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、通用任意历史读取、独立时间候选排名、管理型 Blob、真实 S3 服务验收、分布式。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
 
 当前接入以服务指南为准，不提供旧格式迁移。历史裁剪与验证通过 Git 历史和对应 PR/CI 查阅。
+
+### 字段数值与空值约定
+
+Int 是有符号 64 位整数（-9223372036854775808 至 9223372036854775807），Float 是有限的 64 位浮点数。Int 不接受小数、数字字符串或越界的原 UInt64 值；不会截断或静默转换。Timestamp 同样使用有符号 64 位 Unix 秒。旧的带宽度类型名及 Bool 均不再接受，不提供旧 schema/磁盘格式迁移兼容；需用新 schema 重建数据。Json 内嵌 true/false 不受影响，向量 F32/I8 精度配置不变。
+
+String 使用完整字符串进行精确过滤；StringSet 是字符串集合，按任一成员精确匹配，去重并以 32 位字典 ID 存储。Text 保留分词全文检索。Int/Float/Timestamp 范围过滤为左闭右开。null 和缺失字段保留原始 payload 表示，不匹配元数据过滤，升序和降序排序均置于有值字段之后。
+
+StringSet 排序以排序去重后的首个成员为键：升序空集合在非空集合之前，降序在非空集合之后；null/缺失字段始终排在有值字段（包括空集合）之后。相同键继续采用后续排序键或稳定记录身份排序。
+
+Web 文档编辑器保留输入 JSON 的原始数值文本，新增、条件更新信封及暂存重发均不会经过 JavaScript Number 重新编码；嵌套 Json、整数和小数保持原文。旧版客户端已经暂存并可能发送的请求只保留其已有内容与操作身份，无法恢复过去丢失的精度。
+
+Web 检查面板和搜索结果的 Document JSON 展开区保留服务器响应原文；搜索字段展示也保留原始数值，复制到编辑器可无损写回。业务逻辑仍使用普通 JavaScript 对象，原文仅用于响应展示和复制。
