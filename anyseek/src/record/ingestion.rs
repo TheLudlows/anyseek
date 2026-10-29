@@ -132,6 +132,7 @@ enum DurableLog {
     Remote(remote::Log),
 }
 impl DurableLog {
+    #[cfg(feature = "s3-object-store")]
     fn is_local(&self) -> bool { matches!(self, Self::Local(_)) }
     fn bytes(&self) -> u64 {
         match self {

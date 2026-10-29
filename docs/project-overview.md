@@ -57,7 +57,7 @@ flowchart TB
 | 本地 | 本地 PartitionJournal 的认证发布与提交见证 | 持久盘保存原始 Payload、Segment、检查点和 WAL；本机执行查询 | 认证检查点与完整已提交 tail；损坏时不静默回退旧状态 |
 | S3 | 本地持久 SQLite，唯一选择 head、manifest 和提交/索引水位 | S3 保存不可变日志和文件块；本机缓存、物化 Segment 并执行查询 | SQLite 所选检查点及完整 tail，所有对象验证长度和 hash |
 
-S3 写入先登记上传身份，再上传、远端读回校验，最后 SQLite 条件发布。上传成功本身不代表提交。SQLite 发布结果未知或发布后本地视图失败时保持输出封锁，恢复后以原 operation_id 查询或重试。
+S3 写入按「登记上传身份 → 上传 → 远端读回校验 → SQLite 条件发布」推进，上传成功本身不代表提交；完整流程与失败边界见[存储协议](storage.md)。
 
 S3 模式必须保留服务 catalog、SQLite 权威库及其 WAL、`s3-namespace`；collection 内日志、Payload、索引和 `*.object-cache` 是可重建缓存。不能仅保留 bucket 或在运行中直接复制 SQLite 文件来代替共同备份。
 
@@ -80,4 +80,4 @@ S3 模式必须保留服务 catalog、SQLite 权威库及其 WAL、`s3-namespace
 
 建议依次完成平台验收、账本持续 GC、State 容量设计、总缓存预算和组合资源隔离；具体完成标准统一见[路线](roadmap.md)，不在多份文档重复维护进度。
 
-生产全文已使用 Tantivy 0.27.0 原生格式，保留原正式 BM25F/邻近度、分词和活动统计契约，向量与元数据独立。只面向新库，无迁移、双写或旧引擎兼容层。设计取舍见[Tantivy 设计](tantivy-evaluation.md)，代码与验收依据见[#80 实施记录](issue80-implementation.md)。
+生产全文已使用 Tantivy 0.27.0 原生格式，保留原正式 BM25F/邻近度、分词和活动统计契约，向量与元数据独立。只面向新库，无迁移、双写或旧引擎兼容层。设计取舍见[Tantivy 设计](tantivy-evaluation.md)。

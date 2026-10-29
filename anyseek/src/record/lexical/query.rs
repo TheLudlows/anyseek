@@ -137,15 +137,6 @@ impl Analyzer {
             length,
         }
     }
-    pub(super) async fn query(
-        &self,
-        text: &str,
-        mode: QueryType,
-        fields: &[Field],
-        browse: bool,
-    ) -> Plan {
-        self.query_fields(text, mode, fields, fields, browse).await
-    }
     pub(super) async fn query_fields(
         &self,
         text: &str,

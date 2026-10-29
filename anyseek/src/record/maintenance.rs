@@ -2,27 +2,6 @@
 //! operation IDs, object paths, credentials, or serialized State.
 use std::time::Instant;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SealFallback {
-    PrivateCleanup,
-    MissingCapture,
-    PackageBound,
-    UnstableTail,
-}
-
-pub(super) fn seal_fallback(
-    private_cleanup: bool, captured: bool, selected: usize,
-    pending: usize, limit: usize, stable: bool,
-) -> Option<SealFallback> {
-    if private_cleanup { return Some(SealFallback::PrivateCleanup); }
-    if !captured { return Some(SealFallback::MissingCapture); }
-    if selected.checked_add(pending).and_then(|n|n.checked_add(1)).is_none_or(|n|n>=limit) {
-        return Some(SealFallback::PackageBound);
-    }
-    if !stable { return Some(SealFallback::UnstableTail); }
-    None
-}
-
 /// Exit timing includes errors/cancellation: it is not a success counter.
 /// Nested phases overlap and must not be summed into total elapsed time.
 pub(super) struct Phase {
@@ -66,12 +45,6 @@ mod tests {
     pub(super) fn trace_timings() {
         static LOGGER:Timings=Timings;
         if std::env::var_os("ANYSEEK_TEST_PHASE_TIMINGS").is_some() && log::set_logger(&LOGGER).is_ok() {log::set_max_level(log::LevelFilter::Info);}
-    }
-    #[test]
-    fn seal_bound_counts_successor_and_rejects_overflow() {
-        assert_eq!(seal_fallback(false,true,9,5,16,true),None);
-        assert_eq!(seal_fallback(false,true,9,6,16,true),Some(SealFallback::PackageBound));
-        assert_eq!(seal_fallback(false,true,usize::MAX,1,16,true),Some(SealFallback::PackageBound));
     }
     #[tokio::test]
     async fn native_hard_pressure_returns_busy_before_accepting_and_worker_makes_progress() {
@@ -153,13 +126,6 @@ mod tests {
         drop(p);std::fs::remove_dir_all(root).unwrap();
         }
     }
-    #[test]
-    fn seal_reason_preserves_private_and_capture_precedence() {
-        assert_eq!(seal_fallback(true,false,16,0,16,false),Some(SealFallback::PrivateCleanup));
-        assert_eq!(seal_fallback(false,false,16,0,16,false),Some(SealFallback::MissingCapture));
-        assert_eq!(seal_fallback(false,true,1,0,16,false),Some(SealFallback::UnstableTail));
-    }
-
     #[test]
     fn receipt_gc_preserves_feed_and_retry_window_and_persists_rollback_floor() {
         let settings=super::super::tests::config();
@@ -492,6 +458,7 @@ impl Intent {
         Ok(())
     }
     pub(super) fn rewrites_payloads(&self)->bool {self.private_cleanup}
+    #[cfg(feature="fault-injection")]
     pub(super) fn trims_feed(&self)->bool {self.trim.is_some()}
 }
 

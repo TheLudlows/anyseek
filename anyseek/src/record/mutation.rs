@@ -239,6 +239,7 @@ pub(super) fn snapshot_after(state: &State, before: usize, applied: &Applied, ne
     additions.into_iter().try_fold(before.checked_sub(old_bytes).ok_or_else(||storage("snapshot size underflow"))?, |sum,n|sum.checked_add(n).ok_or_else(||storage("snapshot size overflow")))
 }
 
+#[cfg(test)]
 pub(super) fn replay_checkpoint_size(state: &State, before: usize, applied: &Applied) -> Result<usize, RecordError> {
     if applied.request.generation.is_some() || state.seq.checked_add(1)!=Some(applied.receipt.seq) || applied.receipt.record_id!=applied.request.record_id || applied.observed_time_ms<state.time_watermark_ms {
         return Err(storage("invalid ordinary replay size transition"));

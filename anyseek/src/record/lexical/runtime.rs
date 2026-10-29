@@ -516,9 +516,6 @@ impl Runtime {
             self.asynchronous.store(true, std::sync::atomic::Ordering::Release);
             self.reserve_update();
         }
-        pub(crate) fn allows_lag(&self) -> bool {
-            self.asynchronous.load(std::sync::atomic::Ordering::Acquire)
-        }
         pub(crate) fn finish_consumption(&self) {
             self.asynchronous.store(false, std::sync::atomic::Ordering::Release);
         }

@@ -259,6 +259,7 @@ static CORE: LazyLock<Arc<Governor>> = LazyLock::new(|| Arc::new(Governor::defau
 pub(crate) fn io_scope(lane: Lane) -> Scope {
     Scope::current().unwrap_or_else(|| Scope { governor: CORE.clone(), subject: "core".into(), lane, _entry: None })
 }
+#[cfg(feature = "s3-object-store")]
 pub(crate) fn isolated_scope() -> Scope {
     Scope { governor: Arc::new(Governor::default()), subject: "core".into(), lane: Lane::Foreground, _entry: None }
 }
@@ -280,11 +281,17 @@ where F: Future + Send + 'static, F::Output: Send + 'static {
     crate::INDEX_RUNTIME.spawn(async move { match context { Some(scope) => scope.run(future).await, None => future.await } })
 }
 /// Verified bytes keep their charge until the caller has finished consuming them.
+#[cfg(feature = "s3-object-store")]
 pub(crate) struct Buffer { bytes: Vec<u8>, _lease: Lease }
+#[cfg(feature = "s3-object-store")]
 impl Buffer { pub(crate) fn new(bytes: Vec<u8>, lease: Lease) -> Self { Self { bytes, _lease: lease } } }
+#[cfg(feature = "s3-object-store")]
 impl std::ops::Deref for Buffer { type Target = [u8]; fn deref(&self) -> &[u8] { &self.bytes } }
+#[cfg(feature = "s3-object-store")]
 impl AsRef<[u8]> for Buffer { fn as_ref(&self) -> &[u8] { &self.bytes } }
+#[cfg(feature = "s3-object-store")]
 impl<T: AsRef<[u8]>> PartialEq<T> for Buffer { fn eq(&self, other: &T) -> bool { self.bytes == other.as_ref() } }
+#[cfg(feature = "s3-object-store")]
 impl std::fmt::Debug for Buffer { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_tuple("Buffer").field(&self.bytes.len()).finish() } }
 
 #[cfg(test)]
@@ -422,6 +429,10 @@ mod tests {
         drop(scope);
         assert!(governor.ledger.lock().unwrap().subjects.is_empty());
     }
+    #[cfg(feature = "s3-object-store")]
+    // The async block intentionally yields the spawned handle so the ledger can be
+    // asserted while the owner task still holds the buffer lease.
+    #[allow(clippy::async_yields_async)]
     #[tokio::test]
     async fn cancellation_keeps_admission_and_buffer_bytes_until_actual_owner_finishes() {
         let governor = Arc::new(Governor::default());

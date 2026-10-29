@@ -355,6 +355,7 @@ impl OpenOptions {
             append: false,
         }
     }
+    #[cfg(test)]
     pub(crate) fn append(&mut self, v: bool) -> &mut Self {
         self.append = v;
         self.inner.append(v);

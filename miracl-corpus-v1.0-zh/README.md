@@ -53,7 +53,7 @@ for path in sorted(Path("miracl-corpus-v1.0-zh").glob("docs-*.jsonl.gz")):
 
 解压产生的 `.jsonl` 和下载中间文件 `.part` 已加入根目录 `.gitignore`。
 
-## 校验与重新下载
+## 校验
 
 用清单校验当前分片（从文件流读取，不会把整个分片载入内存）：
 
@@ -74,20 +74,3 @@ for entry in manifest["files"]:
         raise ValueError(f"校验失败：{path}")
 print("全部分片校验通过")
 ```
-
-[下载脚本](../scripts/download_miracl_zh.py) 支持并发下载、断点续传和 SHA-256 校验；已存在且校验通过的文件会被跳过。使用清单记录的版本可重新取得相同文件：
-
-```python
-import json
-import subprocess
-import sys
-from pathlib import Path
-
-manifest = json.loads(Path("miracl-corpus-v1.0-zh/manifest.json").read_text(encoding="utf-8"))
-subprocess.run([
-    sys.executable, "scripts/download_miracl_zh.py",
-    "--revision", manifest["revision"], "--workers", "5",
-], check=True)
-```
-
-直接运行 `python scripts/download_miracl_zh.py --workers 5` 会使用执行时的上游 `main` 版本。脚本遇到已存在但校验失败的文件会停止该文件的下载，请先将其移走再重试。

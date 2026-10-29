@@ -194,6 +194,7 @@ pub(crate) async fn append_and_commit(
 /// Read exactly the committed, not-yet-indexed tail. Blocks are fetched backward
 /// from the authoritative tip, bounded by both block count and total bytes, then
 /// verified for partition identity, digest, contiguous sequence and chain linkage.
+#[cfg(test)]
 pub(crate) async fn load_committed_tail(
     store: &S3CompatibleStore,
     head: &PartitionHead,

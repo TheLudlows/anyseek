@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 `RecordPartition::query(RecordQuery)` 提供布尔/短语查询、字段限制、过滤、排序及分页。
 `fields` 是检索字段限制；metadata `filters` 在候选截断前执行。空查询用于浏览。
-筛选/排序定义见 [元数据文档](../FACETED_SEARCH.md)，查询错误通过 `Result<_, RecordError>` 返回。
+查询错误通过 `Result<_, RecordError>` 返回。
 
 外部向量使用 `Inference::External`，声明维数、精度、量化与距离，并提供稳定的
 `embedding_space_id`；schema 向量字段设 `index_vector:true`。文档可先只有正文，

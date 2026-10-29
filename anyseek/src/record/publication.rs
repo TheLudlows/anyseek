@@ -7,14 +7,6 @@
 use super::*;
 
 impl replay::Context<'_> {
-    pub(super) async fn publish(
-        &mut self,
-        applied: &Applied,
-        snapshot_bytes: usize,
-    ) -> Result<(), RecordError> {
-        let prepared=if applied.request.generation.is_none(){Some(state_memory::Prepared::new(&*self.state,applied)?)}else{None};
-        self.publish_prepared(applied,snapshot_bytes,prepared,None).await
-    }
     pub(super) async fn publish_prepared(&mut self,applied:&Applied,snapshot_bytes:usize,prepared:Option<state_memory::Prepared>,candidate:Option<State>)->Result<(),RecordError>{
         if applied.request.generation.is_some() { return self.publish_generation(applied, snapshot_bytes,candidate).await; }
         let receipt = &applied.receipt;
@@ -106,9 +98,6 @@ impl replay::Context<'_> {
 }
 
 impl Inner {
-    pub(super) async fn publish(&mut self,applied:&Applied,bytes:usize)->Result<(),RecordError>{
-        self.replay_context().publish(applied,bytes).await
-    }
     pub(super) async fn publish_prepared(&mut self,applied:&Applied,bytes:usize,prepared:Option<state_memory::Prepared>,candidate:Option<State>)->Result<(),RecordError>{
         self.replay_context().publish_prepared(applied,bytes,prepared,candidate).await
     }
