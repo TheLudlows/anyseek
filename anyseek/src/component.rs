@@ -11,7 +11,7 @@ use serde::{Serialize, Deserialize};
 use std::{collections::HashMap, fs, io::{Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, sync::Arc};
 use tokio::sync::RwLock;
 
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 const DESCRIPTOR: &str = "component.json";
 const VECTOR: &str = "vectors.bin";
 const FACETS: &str = "metadata.bin";
@@ -100,12 +100,10 @@ fn vector_settings(meta: &IndexMetaObject) -> (usize, Precision, Quantization, V
         Inference::None => (0, Precision::None, Quantization::None, VectorSimilarity::Cosine),
     }
 }
-fn field_width(field: &FieldType) -> usize {
+pub(crate) fn field_width(field: &FieldType) -> usize {
     match field {
-        FieldType::U8|FieldType::I8 => 1,
-        FieldType::U16|FieldType::I16|FieldType::String16|FieldType::StringSet16 => 2,
-        FieldType::U32|FieldType::I32|FieldType::F32|FieldType::String32|FieldType::StringSet32 => 4,
-        FieldType::U64|FieldType::I64|FieldType::F64|FieldType::Timestamp => 8,
+        FieldType::String | FieldType::StringSet => 5,
+        FieldType::Int | FieldType::Float | FieldType::Timestamp => 9,
         _ => 1,
     }
 }
@@ -234,7 +232,7 @@ impl Shard {
     pub(crate) fn string_set_to_single_term_id(&mut self) {
         self.string_set_to_single_term_id_vec=vec![AHashMap::new();self.facets.len()];
         for (i,facet) in self.facets.iter().enumerate() {
-            if matches!(facet.field_type,FieldType::StringSet16|FieldType::StringSet32) {
+            if matches!(facet.field_type,FieldType::StringSet) {
                 for (id,(_,terms)) in facet.values.iter().enumerate() {
                     for term in terms {self.string_set_to_single_term_id_vec[i].entry(term.clone()).or_default().insert(id as u32);}
                 }
@@ -298,6 +296,7 @@ impl Shard {
         }
     }
     async fn append_admitted(&mut self, document:Document)->Result<(),String>{
+        crate::index::validate_field_values(self.schema_map.values(), &document)?;
         let ordinal=self.indexed_doc_count;
         if ordinal>0 && ordinal.is_multiple_of(ROARING_BLOCK_SIZE) && self.uncommitted {self.commit_component().await.map_err(|e|e.to_string())?;}
         // The full input is consumed by this call, never stored in the component.
@@ -321,109 +320,37 @@ impl Shard {
             let facets_size_sum = self.facets_size_sum;
             for i in 0..self.facets.len() {
                 let facet = &mut self.facets[i];
-                if let Some(field_value) = document.get(&facet.name) {
+                if let Some(field_value) = document.get(&facet.name).filter(|v| !v.is_null()) {
                     let address = (facets_size_sum * docid_local) + facet.offset;
+                    self.facets_file_mmap[address + field_width(&facet.field_type) - 1] = 1;
 
                     match facet.field_type {
-                        FieldType::U8 => {
-                            let value = field_value.as_u64().unwrap_or_default() as u8;
-
-                            self.facets_file_mmap[address] = value
-                        }
-                        FieldType::U16 => {
-                            let value = field_value.as_u64().unwrap_or_default() as u16;
-
-                            write_u16(value, &mut self.facets_file_mmap, address)
-                        }
-                        FieldType::U32 => {
-                            let value = field_value.as_u64().unwrap_or_default() as u32;
-
-                            write_u32(value, &mut self.facets_file_mmap, address)
-                        }
-                        FieldType::U64 => {
-                            let value = field_value.as_u64().unwrap_or_default();
-
-                            write_u64(value, &mut self.facets_file_mmap, address)
-                        }
-                        FieldType::I8 => {
-                            let value = field_value.as_i64().unwrap_or_default() as i8;
-
-                            write_i8(value, &mut self.facets_file_mmap, address)
-                        }
-                        FieldType::I16 => {
-                            let value = field_value.as_i64().unwrap_or_default() as i16;
-
-                            write_i16(value, &mut self.facets_file_mmap, address)
-                        }
-                        FieldType::I32 => {
-                            let value = field_value.as_i64().unwrap_or_default() as i32;
-
-                            write_i32(value, &mut self.facets_file_mmap, address)
-                        }
-                        FieldType::I64 => {
-                            let value = field_value.as_i64().unwrap_or_default();
+                        FieldType::Int => {
+                            let value = field_value.as_i64().ok_or("metadata integer exceeds signed 64-bit range")?;
 
                             write_i64(value, &mut self.facets_file_mmap, address)
                         }
                         FieldType::Timestamp => {
-                            let value = field_value.as_i64().unwrap_or_default();
+                            let value = field_value.as_i64().ok_or("metadata integer exceeds signed 64-bit range")?;
 
                             write_i64(value, &mut self.facets_file_mmap, address);
                         }
-                        FieldType::F32 => {
-                            let value = field_value.as_f64().unwrap_or_default() as f32;
-
-                            write_f32(value, &mut self.facets_file_mmap, address)
-                        }
-                        FieldType::F64 => {
-                            let value = field_value.as_f64().unwrap_or_default();
+                        FieldType::Float => {
+                            let value = field_value.as_f64().filter(|v| v.is_finite()).ok_or("invalid metadata Float")?;
 
                             write_f64(value, &mut self.facets_file_mmap, address)
                         }
-                        FieldType::String16 if facet.values.len() < u16::MAX as usize => {
-                            let key = serde_json::from_value::<String>(field_value.clone())
-                                .unwrap_or(field_value.to_string());
+
+
+                        FieldType::String => {
+                            let key = field_value.as_str().ok_or("invalid metadata String")?.to_owned();
 
                             let key_string = key.clone();
                             let key = vec![key];
 
-                            facet.values.entry(key_string.clone()).or_insert(key);
-
-                            let facet_value_id =
-                                facet.values.get_index_of(&key_string).unwrap() as u16;
-                            write_u16(facet_value_id, &mut self.facets_file_mmap, address)
-                        }
-
-                        FieldType::StringSet16 if facet.values.len() < u16::MAX as usize => {
-                            let mut key: Vec<String> =
-                                serde_json::from_value(field_value.clone()).unwrap();
-                            key.sort();
-
-                            let key_string = key.join("_");
-                            let is_new = !facet.values.contains_key(&key_string);
-                            let terms = key.clone();
-                            facet.values.entry(key_string.clone()).or_insert(key);
-
-                            let facet_value_id =
-                                facet.values.get_index_of(&key_string).unwrap() as u16;
-                            if is_new {
-                                for term in terms {
-                                    self.string_set_to_single_term_id_vec[i]
-                                        .entry(term)
-                                        .or_default()
-                                        .insert(facet_value_id as u32);
-                                }
+                            if !facet.values.contains_key(&key_string) && facet.values.len() >= u32::MAX as usize {
+                                return Err("metadata dictionary capacity exceeded".into());
                             }
-                            write_u16(facet_value_id, &mut self.facets_file_mmap, address)
-                        }
-
-                        FieldType::String32 if facet.values.len() < u32::MAX as usize => {
-                            let key = serde_json::from_value::<String>(field_value.clone())
-                                .unwrap_or(field_value.to_string());
-
-                            let key_string = key.clone();
-                            let key = vec![key];
-
                             facet.values.entry(key_string.clone()).or_insert(key);
 
                             let facet_value_id =
@@ -431,14 +358,18 @@ impl Shard {
                             write_u32(facet_value_id, &mut self.facets_file_mmap, address)
                         }
 
-                        FieldType::StringSet32 if facet.values.len() < u32::MAX as usize => {
+                        FieldType::StringSet => {
                             let mut key: Vec<String> =
-                                serde_json::from_value(field_value.clone()).unwrap();
+                                serde_json::from_value(field_value.clone()).map_err(|e| e.to_string())?;
                             key.sort();
+                            key.dedup();
 
-                            let key_string = key.join("_");
+                            let key_string = serde_json::to_string(&key).map_err(|e| e.to_string())?;
                             let is_new = !facet.values.contains_key(&key_string);
                             let terms = key.clone();
+                            if !facet.values.contains_key(&key_string) && facet.values.len() >= u32::MAX as usize {
+                                return Err("metadata dictionary capacity exceeded".into());
+                            }
                             facet.values.entry(key_string.clone()).or_insert(key);
 
                             let facet_value_id =

@@ -70,8 +70,7 @@ impl NativePackage {
                         }
                         crate::index::FieldType::Text
                         | crate::index::FieldType::Json
-                        | crate::index::FieldType::String16
-                        | crate::index::FieldType::String32 => value
+                        | crate::index::FieldType::String => value
                             .as_str()
                             .map(str::to_owned)
                             .unwrap_or_else(|| value.to_string()),

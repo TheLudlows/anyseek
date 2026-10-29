@@ -3261,7 +3261,7 @@ mod tests {
         let mut cfg = config();
         cfg.schema.iter_mut().for_each(|field| field.index_lexical = false);
         cfg.schema.push(serde_json::from_value(serde_json::json!({
-            "field":"rank", "field_type":"U64", "facet":true, "store":false,
+            "field":"rank", "field_type":"Int", "facet":true, "store":false,
             "index_lexical":false
         })).unwrap());
         let mut p = RecordPartition::create(&location, cfg.clone()).await.unwrap();
@@ -3296,7 +3296,7 @@ mod tests {
             let result = p.query(q).await.unwrap();
             assert_eq!(result.count_total, 3); assert!(result.hits.is_empty());
             let mut q = options();
-            q.filters = vec![FacetFilter::U64 { field: "rank".into(), filter: 2..3 }];
+            q.filters = vec![FacetFilter::Int { field: "rank".into(), filter: 2..3 }];
             let result = p.query(q).await.unwrap();
             assert_eq!(ids(&result), ["a", "z"]); assert_eq!(result.count_total, 2);
             let mut q = options(); q.offset = 1; q.length = 1;
@@ -3995,7 +3995,7 @@ mod tests {
         let mut settings = config();
         settings.max_operations = 100_000;
         settings.max_journal_bytes = 128 * 1024 * 1024;
-        settings.schema.push(serde_json::from_value(serde_json::json!({"field":"region", "field_type":"String16", "store":false, "index_lexical":false, "facet":true})).unwrap());
+        settings.schema.push(serde_json::from_value(serde_json::json!({"field":"region", "field_type":"String", "store":false, "index_lexical":false, "facet":true})).unwrap());
         let partition = RecordPartition::create(&location, settings).await.unwrap();
         let mut original = write("first", "a", "alpha", ExpectedVersion::Absent);
         original

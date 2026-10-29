@@ -90,51 +90,25 @@ impl fmt::Display for TokenizerType {
     }
 }
 
-/// FieldType defines the type of a field in the document: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, point, string, stringset, text.
+/// The eight supported document field types.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Default)]
 pub enum FieldType {
-    /// Unsigned 8-bit integer
-    U8,
-    /// Unsigned 16-bit integer
-    U16,
-    /// Unsigned 32-bit integer
-    U32,
-    /// Unsigned 64-bit integer
-    U64,
-    /// Signed 8-bit integer
-    I8,
-    /// Signed 16-bit integer
-    I16,
-    /// Signed 32-bit integer
-    I32,
     /// Signed 64-bit integer
-    I64,
-    /// Timestamp is identical to I64, but to be used for Unix timestamps <https://en.wikipedia.org/wiki/Unix_time>.
-    /// The reason for a separate FieldType is to enable the UI to interpret I64 as timestamp without using the field name as indicator.
+    Int,
+    /// Timestamp is identical to Int, but to be used for Unix timestamps <https://en.wikipedia.org/wiki/Unix_time>.
+    /// The reason for a separate FieldType is to enable the UI to interpret Int as timestamp without using the field name as indicator.
     /// For date facets and filtering.
     Timestamp,
-    /// Floating point 32-bit
-    F32,
     /// Floating point 64-bit
-    F64,
-    /// Boolean
-    Bool,
-    /// String16
-    /// allows a maximum cardinality of 65_535 (16 bit) distinct values, is space-saving.
-    /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
-    String16,
-    /// String32
+    Float,
+    /// String
     /// allows a maximum cardinality of 4_294_967_295 (32 bit) distinct values
     /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
-    String32,
-    /// StringSet16 is a set of strings, e.g. tags, categories, keywords, authors, genres, etc.
-    /// allows a maximum cardinality of 65_535 (16 bit) distinct values, is space-saving.
-    /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
-    StringSet16,
-    /// StringSet32 is a set of strings, e.g. tags, categories, keywords, authors, genres, etc.
+    String,
+    /// StringSet is a set of strings, e.g. tags, categories, keywords, authors, genres, etc.
     /// allows a maximum cardinality of 4_294_967_295 (32 bit) distinct values
     /// For filtering and sorting with low cardinality fields, e.g. boolean fields, enum fields, country, language, status, category, tags, etc.
-    StringSet32,
+    StringSet,
     /// Text is a text field, that will be tokenized by the selected Tokenizer into string tokens.
     #[default]
     Text,
@@ -212,7 +186,7 @@ pub struct SchemaField {
 /// # Example
 /// ```rust
 /// use anyseek::index::{SchemaField, FieldType};
-/// let schema_field = SchemaField::new("title".to_string(), true, true, false, FieldType::String16, false, false, 1.0);
+/// let schema_field = SchemaField::new("title".to_string(), true, true, false, FieldType::String, false, false, 1.0);
 /// ```
 impl SchemaField {
     /// Creates a new SchemaField.
@@ -696,4 +670,32 @@ pub(crate) fn object_values_to_string_vec_recursive(value: &Value, out: &mut Vec
         }
         _ => {}
     }
+}
+
+/// Validate scalar fields without coercing the caller's original JSON values.
+pub(crate) fn validate_field_values<'a>(
+    fields: impl Iterator<Item = &'a SchemaField>,
+    document: &Document,
+) -> Result<(), String> {
+    for field in fields {
+        let Some(value) = document.get(&field.field).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let valid = match field.field_type {
+            FieldType::Int | FieldType::Timestamp => value.as_i64().is_some(),
+            FieldType::Float => value.as_f64().is_some_and(f64::is_finite),
+            FieldType::String => value.is_string(),
+            FieldType::StringSet => value
+                .as_array()
+                .is_some_and(|items| items.iter().all(serde_json::Value::is_string)),
+            _ => true,
+        };
+        if !valid {
+            return Err(format!(
+                "invalid {:?} field '{}': expected its declared type (Int/Timestamp must fit signed 64-bit)",
+                field.field_type, field.field
+            ));
+        }
+    }
+    Ok(())
 }

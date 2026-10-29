@@ -506,9 +506,9 @@ async fn test_15_filter_scope() {
     let _ = fs::remove_dir_all(index_path);
 
     let schema_json = r#"
-    [{"field":"id","field_type":"String32","store":true,"index_lexical":false},
+    [{"field":"id","field_type":"String","store":true,"index_lexical":false},
     {"field":"text","field_type":"Text","store":true,"index_lexical":true,"longest":true},
-    {"field":"kind","field_type":"String16","store":true,"index_lexical":false,"facet":true}]"#;
+    {"field":"kind","field_type":"String","store":true,"index_lexical":false,"facet":true}]"#;
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
 
     let meta = IndexMetaObject {
@@ -577,7 +577,7 @@ async fn test_15_filter_scope() {
         vec!["a".to_string(), "b".to_string(), "c".to_string()]
     );
 
-    let facet_filter = vec![FacetFilter::String16 {
+    let facet_filter = vec![FacetFilter::String {
         field: "kind".into(),
         filter: vec!["invoice".into()],
     }];
@@ -586,12 +586,12 @@ async fn test_15_filter_scope() {
     assert_eq!(facets, vec!["a".to_string(), "b".to_string()]);
 
     // Record always enables empty browsing; an unmatched filter still yields no hits.
-    let (count, ids) = kind_results(&index_arc, "", vec![FacetFilter::String16 {
+    let (count, ids) = kind_results(&index_arc, "", vec![FacetFilter::String {
         field: "kind".into(), filter: vec!["missing".into()],
     }]).await;
     assert_eq!(count, 0);
     assert!(ids.is_empty());
-    let page = index_arc.query(RecordQuery {text:"".into(),vector:None,query_type:QueryType::Intersection,mode:SearchMode::Lexical,offset:1,length:1,result_type:ResultType::TopkCount,fields:vec![],filters:vec![FacetFilter::String16 {field:"kind".into(),filter:vec!["invoice".into()]}],sort:vec![],temporal:None}).await.unwrap();
+    let page = index_arc.query(RecordQuery {text:"".into(),vector:None,query_type:QueryType::Intersection,mode:SearchMode::Lexical,offset:1,length:1,result_type:ResultType::TopkCount,fields:vec![],filters:vec![FacetFilter::String {field:"kind".into(),filter:vec!["invoice".into()]}],sort:vec![],temporal:None}).await.unwrap();
     assert_eq!(page.count_total, 2);
     assert_eq!(page.hits.len(), 1);
     assert_eq!(page.hits[0].record.document.as_ref().unwrap()["id"], "b");

@@ -71,7 +71,7 @@ success:function(data){
 if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;
 $('#welcome').hide();$('#version').text(data.version);$('#indexName').text(data.name);$('#indexedDocs').text(data.indexed_doc_count.toLocaleString());
 const schema=new Map(data.schema.map(field=>[field.field,field]));
-const textFields=[...schema].filter(([key,value])=>value.store&&value.field_type!=='Binary'&&value.field_type!=='Timestamp'&&value.field_type!=='U32').map(([key])=>key);
+const textFields=[...schema].filter(([key,value])=>value.store&&value.field_type!=='Binary'&&value.field_type!=='Timestamp'&&value.field_type!=='Int').map(([key])=>key);
 for(const target of ['title','body','url']){
 if(target==='title'&&!schema.has(TITLE_FIELD))TITLE_FIELD=textFields.shift()||TITLE_FIELD;
 if(target==='body'&&!schema.has(TEXT_FIELD))TEXT_FIELD=textFields.find(key=>key!==TITLE_FIELD)||TEXT_FIELD;
