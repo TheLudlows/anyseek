@@ -273,15 +273,15 @@ pub(crate) fn result_ordering_root(
                     .values
                     .get_index(facet_id_1 as usize)
                     .unwrap()
-                    .1[0]
-                    .clone();
+                    .1
+                    .first();
 
                 let facet_value_2 = shard2.facets[field.idx]
                     .values
                     .get_index(facet_id_2 as usize)
                     .unwrap()
-                    .1[0]
-                    .clone();
+                    .1
+                    .first();
 
                 let order = if field.order == SortOrder::Descending {
                     facet_value_1.cmp(&facet_value_2)

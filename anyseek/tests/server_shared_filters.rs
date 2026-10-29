@@ -28,9 +28,9 @@ fn schema() -> Vec<SchemaField> {
         {"field":"vector","field_type":"Json","store":true,"index_lexical":false,"index_vector":true},
         {"field":"label","field_type":"Int","store":true,"index_lexical":false,"facet":true},
         {"field":"category","field_type":"String","store":true,"index_lexical":false,"facet":true},
-        {"field":"category32","field_type":"String","store":false,"index_lexical":false,"facet":true},
+        {"field":"category_unstored","field_type":"String","store":false,"index_lexical":false,"facet":true},
         {"field":"tags","field_type":"StringSet","store":true,"index_lexical":false,"facet":true},
-        {"field":"tags16","field_type":"StringSet","store":false,"index_lexical":false,"facet":true},
+        {"field":"tags_unstored","field_type":"StringSet","store":false,"index_lexical":false,"facet":true},
         {"field":"price","field_type":"Float","store":false,"index_lexical":false,"facet":true},
         {"field":"date","field_type":"Timestamp","store":false,"index_lexical":false,"facet":true}
     ]);
@@ -43,8 +43,8 @@ fn doc(i: usize) -> Document {
     let category = if i < 16 { "blocked" } else { "allowed" };
     let mut value = json!({"body":if i%2==0 {"common alpha"} else {"common beta"},
         "vector":[1.0, i as f32 / 24.0, 0.0], "label":i, "category":category,
-        "category32":category,"tags":["all",if i%2==0 {"even"} else {"odd"}],
-        "tags16":["all",if i%2==0 {"even"} else {"odd"}],"price":i as f64,"date":i as i64});
+        "category_unstored":category,"tags":["all",if i%2==0 {"even"} else {"odd"}],
+        "tags_unstored":["all",if i%2==0 {"even"} else {"odd"}],"price":i as f64,"date":i as i64});
     for kind in ["int", "float"] {
         value[kind] = json!(i);
     }
@@ -85,7 +85,7 @@ async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
             (16..24).collect::<Vec<_>>(),
         ),
         (
-            json!([{"String":{"field":"category32","filter":["allowed"]}}]),
+            json!([{"String":{"field":"category_unstored","filter":["allowed"]}}]),
             (16..24).collect(),
         ),
         (
@@ -93,7 +93,7 @@ async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
             (0..24).filter(|i| i % 2 == 0).collect(),
         ),
         (
-            json!([{"StringSet":{"field":"tags16","filter":["even"]}}]),
+            json!([{"StringSet":{"field":"tags_unstored","filter":["even"]}}]),
             (0..24).filter(|i| i % 2 == 0).collect(),
         ),
         (

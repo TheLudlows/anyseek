@@ -42,9 +42,13 @@ function resetSearch() {
     updateTitle(true);
 }
 async function setupApi(method, path, key, body) {
+    return setupApiJson(method, path, key, body === undefined ? undefined : JSON.stringify(body));
+}
+// Accept already validated JSON text without rounding document number tokens.
+async function setupApiJson(method, path, key, body) {
     const response = await fetch(path, {
         method, headers: {apikey: key, 'Content-Type': 'application/json'},
-        ...(body === undefined ? {} : {body: JSON.stringify(body)}), cache: 'no-store'
+        ...(body === undefined ? {} : {body}), cache: 'no-store'
     });
     const value = await response.json();
     if (!response.ok) {

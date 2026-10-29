@@ -438,3 +438,68 @@ async fn scalar_boundaries_nulls_and_sets_survive_wal_and_checkpoint() {
         .unwrap();
     verify(&index).await;
 }
+
+#[tokio::test]
+async fn empty_string_sets_sort_with_nulls_after_wal_and_checkpoint_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("set_sort");
+    let index = create(&path, AccessType::Mmap).await;
+    for (rank, tags) in [
+        Some(json!([])),
+        Some(json!(["a"])),
+        Some(json!(["z", "a", "a"])),
+        Some(json!(["b"])),
+        Some(Value::Null),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut doc = json!({"body":"common", "rank":rank});
+        if let Some(tags) = tags {
+            doc["tags"] = tags;
+        }
+        records::insert(&index, vec![serde_json::from_value(doc).unwrap()])
+            .await
+            .unwrap();
+    }
+    async fn verify(index: &RecordPartition) {
+        for (order, expected) in [
+            ("Ascending", vec![0, 1, 2, 3, 4, 5]),
+            ("Descending", vec![3, 1, 2, 0, 4, 5]),
+        ] {
+            for query in ["common", ""] {
+                for length in [1, 3, 20] {
+                    let result = search(index, json!({"query":query,"length":length,"sort":[{"field":"tags","order":order},{"field":"rank","order":"Ascending"}]}), true).await;
+                    let ranks: Vec<_> = result
+                        .hits
+                        .iter()
+                        .map(|hit| {
+                            hit.record.document.as_ref().unwrap()["rank"]
+                                .as_i64()
+                                .unwrap()
+                        })
+                        .collect();
+                    assert_eq!(result.count_total, 6);
+                    assert_eq!(
+                        ranks,
+                        expected[..expected.len().min(length)],
+                        "{order} {query:?} length={length}"
+                    );
+                }
+            }
+        }
+    }
+    verify(&index).await;
+    drop(index);
+    let index = RecordPartition::open(&path, records::JOURNAL_LIMIT)
+        .await
+        .unwrap();
+    verify(&index).await;
+    index.compact_journal().await.unwrap();
+    drop(index);
+    let index = RecordPartition::open(&path, records::JOURNAL_LIMIT)
+        .await
+        .unwrap();
+    verify(&index).await;
+}

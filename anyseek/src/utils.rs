@@ -4,27 +4,7 @@ use std::{fs, io};
 use base64::Engine;
 use base64::engine::general_purpose;
 
-pub(crate) fn write_u16(value: u16, vec8: &mut [u8], pos: usize) {
-    vec8[pos..(pos + 2)].copy_from_slice(&value.to_le_bytes());
-}
-
 pub(crate) fn write_u32(value: u32, vec8: &mut [u8], pos: usize) {
-    vec8[pos..(pos + 4)].copy_from_slice(&value.to_le_bytes());
-}
-
-pub(crate) fn write_u64(value: u64, vec8: &mut [u8], pos: usize) {
-    vec8[pos..(pos + 8)].copy_from_slice(&value.to_le_bytes());
-}
-
-pub(crate) fn write_i8(value: i8, vec8: &mut [u8], pos: usize) {
-    vec8[pos..(pos + 1)].copy_from_slice(&value.to_le_bytes());
-}
-
-pub(crate) fn write_i16(value: i16, vec8: &mut [u8], pos: usize) {
-    vec8[pos..(pos + 2)].copy_from_slice(&value.to_le_bytes());
-}
-
-pub(crate) fn write_i32(value: i32, vec8: &mut [u8], pos: usize) {
     vec8[pos..(pos + 4)].copy_from_slice(&value.to_le_bytes());
 }
 
@@ -32,32 +12,8 @@ pub(crate) fn write_i64(value: i64, vec8: &mut [u8], pos: usize) {
     vec8[pos..(pos + 8)].copy_from_slice(&value.to_le_bytes());
 }
 
-pub(crate) fn write_f32(value: f32, vec8: &mut [u8], pos: usize) {
-    vec8[pos..(pos + 4)].copy_from_slice(&value.to_le_bytes());
-}
-
 pub(crate) fn write_f64(value: f64, vec8: &mut [u8], pos: usize) {
     vec8[pos..(pos + 8)].copy_from_slice(&value.to_le_bytes());
-}
-
-#[inline]
-pub(crate) fn read_u8(vec8: &[u8], pos: usize) -> u8 {
-    vec8[pos]
-}
-
-#[inline]
-pub(crate) fn read_i8(vec8: &[u8], pos: usize) -> i8 {
-    i8::from_le_bytes(vec8[pos..pos + 1].try_into().unwrap())
-}
-
-#[inline]
-pub(crate) fn read_u16(vec8: &[u8], pos: usize) -> u16 {
-    u16::from_le_bytes(vec8[pos..pos + 2].try_into().unwrap())
-}
-
-#[inline]
-pub(crate) fn read_i16(vec8: &[u8], pos: usize) -> i16 {
-    i16::from_le_bytes(vec8[pos..pos + 2].try_into().unwrap())
 }
 
 #[inline]
@@ -66,23 +22,8 @@ pub(crate) fn read_u32(vec8: &[u8], pos: usize) -> u32 {
 }
 
 #[inline]
-pub(crate) fn read_i32(vec8: &[u8], pos: usize) -> i32 {
-    i32::from_le_bytes(vec8[pos..pos + 4].try_into().unwrap())
-}
-
-#[inline]
-pub(crate) fn read_u64(vec8: &[u8], pos: usize) -> u64 {
-    u64::from_le_bytes(vec8[pos..pos + 8].try_into().unwrap())
-}
-
-#[inline]
 pub(crate) fn read_i64(vec8: &[u8], pos: usize) -> i64 {
     i64::from_le_bytes(vec8[pos..pos + 8].try_into().unwrap())
-}
-
-#[inline]
-pub(crate) fn read_f32(vec8: &[u8], pos: usize) -> f32 {
-    f32::from_le_bytes(vec8[pos..pos + 4].try_into().unwrap())
 }
 
 #[inline]

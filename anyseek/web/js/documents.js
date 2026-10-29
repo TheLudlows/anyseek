@@ -1,10 +1,66 @@
+// Parse only to validate shape; never serialize the parsed document. Numeric
+// tokens (including nested JSON and exponents) must reach the server unchanged.
+function documentJsonSlices(text, parsed) {
+    if (!Array.isArray(parsed)) return [text];
+    const slices = [];
+    let start = 1, depth = 0, quoted = false, escaped = false;
+    for (let i = 1; i < text.length; i++) {
+        const ch = text[i];
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (ch === '\\') escaped = true;
+            else if (ch === '"') quoted = false;
+        } else if (ch === '"') quoted = true;
+        else if (ch === '[' || ch === '{') depth++;
+        else if (ch === ']' && depth === 0) {
+            slices.push(text.slice(start, i).trim());
+            break;
+        } else if (ch === ']' || ch === '}') depth--;
+        else if (ch === ',' && depth === 0) {
+            slices.push(text.slice(start, i).trim());
+            start = i + 1;
+        }
+    }
+    return slices;
+}
+function isStagingRequest(request) {
+    return ['stage','begin','stage_batch','seal','renew'].includes(request.generation?.action);
+}
+function prepareDocumentRequests(source, envelopeMode) {
+    const text = source.replace(/^\uFEFF/, '').trim();
+    const parsed = JSON.parse(text);
+    const documents = Array.isArray(parsed) ? parsed : [parsed];
+    if (!documents.length || !documents.every(d => d && typeof d === 'object' && !Array.isArray(d)))
+        throw new Error('Enter one JSON object or a nonempty array of JSON objects.');
+    return documentJsonSlices(text, parsed).map((raw, i) => {
+        const document = documents[i];
+        if (envelopeMode) {
+            if ((!Object.hasOwn(document,'document') && !Object.hasOwn(document,'vector_patch') && !Object.hasOwn(document,'generation')) || !document.record_id || !document.routing_key || !document.expected)
+                throw new Error('Each envelope requires record_id, routing_key, expected and explicit document (null deletes) or vector_patch/generation.');
+            if (Object.hasOwn(document,'operation_id')) throw new Error('Operation IDs are managed by this editor.');
+            return {body: raw.slice(0, -1) + ',"operation_id":' + JSON.stringify(newOperationId()) + '}', staging: isStagingRequest(document)};
+        }
+        const id = newIdentity();
+        const header = JSON.stringify({operation_id:newOperationId(), record_id:id, routing_key:id, expected:'Absent'});
+        return {body: header.slice(0, -1) + ',"document":' + raw + '}', staging:false};
+    });
+}
+// Preserve the exact requests older clients already sent. Their lost precision
+// cannot be reconstructed; never regenerate operation identities on reload.
+function normalizePendingWrites(pending) {
+    if (pending && pending.format !== 2) {
+        pending.requests = pending.requests.map(request => ({body:JSON.stringify(request), staging:isStagingRequest(request)}));
+        pending.format = 2;
+    }
+    return pending;
+}
 // Each input object gets a stable identity before any request is sent. Pending
 // requests survive reload; retry uses exactly the same operation and content.
 let CURRENT_SCHEMA = {};
 let documentBusy = false;
 let pendingDocumentCommit = null;
 function loadPendingWrites() {
-    const pending = JSON.parse(sessionValue('seekpower.pendingWrites') || 'null');
+    const pending = normalizePendingWrites(JSON.parse(sessionValue('seekpower.pendingWrites') || 'null'));
     return pending && pending.collection === INDEX_ID ? pending : null;
 }
 function resetDocumentEditor() {
@@ -51,13 +107,13 @@ async function submitPendingWrites() {
             // A reload or disconnect during fetch must retain uncertainty. If
             // retaining this state fails, do not send another request.
             sessionStorage.setItem('seekpower.pendingWrites', JSON.stringify(pending));
-            await setupApi('POST', `api/v1/index/${encodeURIComponent(pending.collection)}/doc`, API_KEY, request);
+            await setupApiJson('POST', `api/v1/index/${encodeURIComponent(pending.collection)}/doc`, API_KEY, request.body);
             pending.completed = i + 1; pending.unresolved = false;
             sessionStorage.setItem('seekpower.pendingWrites', JSON.stringify(pending));
         }
         sessionStorage.removeItem('seekpower.pendingWrites');
         pendingDocumentCommit = null;
-        $('#documentStatus').text(pending.requests.some(r => ['stage','begin','stage_batch','seal','renew'].includes(r.generation?.action))
+        $('#documentStatus').text(pending.requests.some(r => r.staging)
             ? `Wrote ${pending.requests.length} record(s). Staging is durable, not searchable until an explicit publish succeeds.`
             : `Wrote ${pending.requests.length} record(s). All confirmed writes are durable and visible.`);
         $('#retryDocumentCommit,#discardRejectedWrites').prop('hidden', true);
@@ -85,19 +141,9 @@ $(function () {
         event.preventDefault(); if(documentBusy||pendingDocumentCommit)return;
         $('#documentError,#documentStatus').text('');
         try {
-            const input=JSON.parse($('#documentJson').val().replace(/^\uFEFF/,''));
-            const documents=Array.isArray(input)?input:[input];
-            if(!documents.length||!documents.every(d=>d&&typeof d==='object'&&!Array.isArray(d)))throw new Error('Enter one JSON object or a nonempty array of JSON objects.');
             if(sessionValue('seekpower.pendingWrites'))throw new Error('Resolve the retained writes in their original collection before submitting another batch.');
-            pendingDocumentCommit={collection:INDEX_ID,unresolved:false,requests:documents.map(document=>{
-                if ($('#recordEnvelopeMode').prop('checked')) {
-                    if ((!Object.hasOwn(document,'document') && !Object.hasOwn(document,'vector_patch') && !Object.hasOwn(document,'generation')) || !document.record_id || !document.routing_key || !document.expected)
-                        throw new Error('Each envelope requires record_id, routing_key, expected and explicit document (null deletes) or vector_patch/generation.');
-                    if (Object.hasOwn(document,'operation_id')) throw new Error('Operation IDs are managed by this editor.');
-                    return {...document, operation_id:newOperationId()};
-                }
-                const id=newIdentity(); return {operation_id:newOperationId(),record_id:id,routing_key:id,expected:'Absent',document};
-            })};
+            pendingDocumentCommit={format:2,collection:INDEX_ID,unresolved:false,
+                requests:prepareDocumentRequests($('#documentJson').val(), $('#recordEnvelopeMode').prop('checked'))};
             // Failure to retain identities must happen before any write is sent.
             sessionStorage.setItem('seekpower.pendingWrites',JSON.stringify(pendingDocumentCommit));
         } catch(error){pendingDocumentCommit=null;$('#documentError').text(error.message);return;}
