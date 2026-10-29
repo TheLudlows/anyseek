@@ -123,6 +123,7 @@ impl RecordPartition {
         if timeout.is_zero() || timeout>Duration::from_secs(300) {return Err(RecordError::Rejected("invalid cache merge deadline".into()));}
         let worker=indexer::WORKERS.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let admission=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
+        let writer=self.writer.clone();
         let owner=self.inner.clone();
         let id=rand::random::<u128>();
         let handle=crate::resources::spawn_background(async move {
@@ -130,6 +131,7 @@ impl RecordPartition {
             let started=Instant::now();
             let outcome=std::panic::AssertUnwindSafe(async {
                 let (root,config,snapshot,sources,base,selected,_disk,_resources)={
+                    let _writer=writer.lock().await;
                     let mut inner=owner.lock().await;
                     let _phase=maintenance::Phase::new("cache_merge_capture_locked",inner.state.seq);
                     if !inner.healthy {return Err(RecordError::RecoveryRequired);}
@@ -173,6 +175,7 @@ impl RecordPartition {
                 if root.join(".test-cache-merge-fail-before-install").exists(){return Err(storage("injected private cache candidate failure"));}
                 let cut=snapshot.seq;
                 {
+                    let _writer=writer.lock().await;
                     let mut inner=owner.lock().await;
                     let _phase=maintenance::Phase::new("cache_merge_install_locked",inner.state.seq);
                     if !inner.healthy {return Err(RecordError::RecoveryRequired);}
@@ -188,6 +191,7 @@ impl RecordPartition {
                 Ok(cut)
             }).catch_unwind().await;
             let result=match outcome {Ok(result)=>result,Err(_)=>Err(storage("cache merge candidate worker panicked"))};
+            let _writer=writer.lock().await;
             let mut inner=owner.lock().await;
             let _cleanup_phase=maintenance::Phase::new("cache_merge_cleanup_locked",inner.state.seq);
             if inner.background.as_ref().is_some_and(|tail|tail.id==id){inner.background=None;}

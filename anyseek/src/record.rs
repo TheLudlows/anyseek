@@ -470,9 +470,9 @@ impl RemotePersistence {
         })
     }
 
+    #[cfg(test)]
     async fn commit(&mut self, applied: &Applied, payload: &[u8]) -> Result<(), RemoteCommitError> {
-        let operation_id = format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce);
-        self.commit_entry(applied.receipt.seq, operation_id, payload).await
+        self.commit_entry(applied.receipt.seq,format!("{}:{}",applied.request.operation_id.epoch,applied.request.operation_id.nonce),payload).await
     }
 
     async fn commit_entry(&mut self, seq: u64, operation_id: String, payload: &[u8]) -> Result<(), RemoteCommitError> {
@@ -613,6 +613,7 @@ fn unix_time_ms_i64() -> i64 {
 /// retrieval run independently; results briefly reenter the Record guard for validation.
 #[derive(Clone)]
 pub struct RecordPartition {
+    writer: Arc<Mutex<()>>,
     inner: Arc<Mutex<Inner>>,
     admission: Arc<Semaphore>,
     output: Arc<std::sync::RwLock<output::OutputState>>,
@@ -1206,8 +1207,10 @@ impl RecordPartition {
         created_at_ms: i64,
         max_snapshot_bytes: usize,
     ) -> Result<(String, u64, String), RecordError> {
+        let writer=self.writer.clone();
         let owner=self.inner.clone();let backup_id=backup_id.to_owned();
         crate::resources::spawn(async move {
+        let _writer=writer.lock().await;
         let mut inner = owner.lock().await;
         if inner.background.is_some() { return Err(RecordError::Busy); }
         if !inner.healthy {
@@ -1227,8 +1230,10 @@ impl RecordPartition {
     /// Retry pending remote retirement/deletion under the single owner's guard.
     #[cfg(feature="s3-object-store")]
     pub async fn collect_s3_garbage(&self)->Result<usize,RecordError> {
+        let writer=self.writer.clone();
         let owner=self.inner.clone();
         crate::resources::spawn(async move {
+            let _writer=writer.lock().await;
             let mut inner=owner.lock().await;
         if inner.background.is_some() { return Err(RecordError::Busy); }
             if !inner.healthy {return Err(RecordError::RecoveryRequired);}
@@ -1378,6 +1383,7 @@ impl RecordPartition {
                 #[cfg(test)]
                 fail_publication_stage: 0,
             })),
+            writer: Arc::new(Mutex::new(())),
             admission: Arc::new(Semaphore::new(16)),
         })
     }
@@ -1489,7 +1495,7 @@ impl RecordPartition {
         inner.graph_cache=graph::Cache::rebuild(&inner.state)?;
         inner.reclaim_anchor_objects().await?;
         let indexes = index_consumers::Cursors::recovered(inner.state.seq);
-        Ok(Self {output,indexes,inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
+        Ok(Self {output,indexes,writer:Arc::new(Mutex::new(())),inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
     }
     /// Commit one Record operation and synchronously publish its index inputs.
     /// Dropping this future does not cancel an already spawned operation; query

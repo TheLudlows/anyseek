@@ -25,6 +25,184 @@ pub(super) enum IndexDelivery {
     Asynchronous,
 }
 
+struct PreparedBatch {
+    plans: Vec<mutation::PreparedWrite>,
+    publication: Vec<Option<state_memory::Prepared>>,
+    result: BatchResult,
+    base_seq: u64,
+    base_state: State,
+    expires_at: Option<u64>,
+}
+
+#[cfg(feature = "s3-object-store")]
+struct RemoteUpload {
+    store: crate::storage::s3_compatible::S3CompatibleStore,
+    path: std::path::PathBuf,
+    head: crate::storage::sqlite_authority::PartitionHead,
+    block: crate::storage::object_log::ObjectLogBlock,
+    max_bytes: usize,
+    #[cfg(test)]
+    root: std::path::PathBuf,
+}
+#[cfg(feature = "s3-object-store")]
+struct UploadedBatch {
+    head: crate::storage::sqlite_authority::PartitionHead,
+    block: crate::storage::object_log::ObjectLogBlock,
+    reference: crate::storage::sqlite_authority::ObjectRef,
+}
+#[cfg(feature = "s3-object-store")]
+impl RemoteUpload {
+    async fn upload(self) -> Result<UploadedBatch, RecordError> {
+        #[cfg(test)]
+        if self.root.join(".test-write-upload-pause").exists() {
+            std::fs::write(
+                self.root.join(".test-write-upload-started"),
+                b"outside state lock",
+            )
+            .map_err(storage)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while self.root.join(".test-write-upload-pause").exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(RecordError::Busy);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        let digest = checkpoint_codec::json_digest(&self.block)?;
+        let key = format!(
+            "partitions/{}/wal/{:020}-{}",
+            self.head.partition_id,
+            self.block.first_seq,
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        // Independent short SQLite transactions avoid holding the shared authority
+        // connection while awaiting network I/O. Retired objects cannot resurrect.
+        let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open(
+            &self.path,
+            std::time::Duration::from_secs(5),
+        )
+        .map_err(storage)?;
+        let reference = crate::storage::object_log::upload_log_block(
+            &self.store,
+            &mut authority,
+            &key,
+            &self.block,
+            unix_time_ms_i64(),
+            self.max_bytes,
+        )
+        .await
+        .map_err(|error| match RemoteCommitError::from(error) {
+            RemoteCommitError::Busy => RecordError::Busy,
+            RemoteCommitError::Unknown(error) => RecordError::OutcomeUnknown(error),
+        })?;
+        Ok(UploadedBatch {
+            head: self.head,
+            block: self.block,
+            reference,
+        })
+    }
+}
+#[cfg(feature = "s3-object-store")]
+impl UploadedBatch {
+    async fn publish(self, remote: &mut RemotePersistence) -> Result<(), RecordError> {
+        if remote.partition_id != self.head.partition_id
+            || remote.owner_epoch != self.head.owner_epoch
+        {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let operations: Vec<_> = self
+            .block
+            .entries
+            .iter()
+            .map(|entry| (entry.operation_id.as_str(), entry.request_sha256, entry.seq))
+            .collect();
+        let result = remote
+            .authority
+            .lock()
+            .await
+            .publish_batch(
+                &remote.partition_id,
+                self.head.head_version,
+                remote.owner_epoch,
+                &operations,
+                self.reference,
+                None,
+            )
+            .map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?;
+        match result {
+            crate::storage::sqlite_authority::PublishOutcome::Published(head)
+            | crate::storage::sqlite_authority::PublishOutcome::AlreadyPublished(head)
+                if head.committed_seq == self.block.last_seq =>
+            {
+                Ok(())
+            }
+            _ => Err(RecordError::OutcomeUnknown(
+                "remote batch head changed before publication".into(),
+            )),
+        }
+    }
+}
+#[cfg(feature = "s3-object-store")]
+impl Inner {
+    async fn prepare_remote_batch(
+        &self,
+        prepared: &PreparedBatch,
+    ) -> Result<Option<RemoteUpload>, RecordError> {
+        use sha2::{Digest, Sha256};
+        let Some(remote) = self.remote.as_ref() else {
+            return Ok(None);
+        };
+        if prepared.plans.is_empty() {
+            return Ok(None);
+        }
+        let authority = remote.authority.lock().await;
+        let head = authority
+            .read_head(&remote.partition_id)
+            .map_err(storage)?
+            .ok_or(RecordError::RecoveryRequired)?;
+        if head.owner_epoch != remote.owner_epoch || head.committed_seq != prepared.base_seq {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let entries: Vec<_> = prepared
+            .plans
+            .iter()
+            .map(|plan| match plan {
+                mutation::PreparedWrite::Append { applied, bytes, .. } => {
+                    crate::storage::object_log::ObjectLogEntry {
+                        seq: applied.receipt.seq,
+                        operation_id: format!(
+                            "{}:{}",
+                            applied.request.operation_id.epoch, applied.request.operation_id.nonce
+                        ),
+                        request_sha256: Sha256::digest(bytes).into(),
+                        payload: bytes.clone(),
+                    }
+                }
+                _ => unreachable!(),
+            })
+            .collect();
+        let block = crate::storage::object_log::ObjectLogBlock {
+            partition_id: remote.partition_id.clone(),
+            first_seq: entries.first().unwrap().seq,
+            last_seq: entries.last().unwrap().seq,
+            previous: head.wal_tip.clone(),
+            entries,
+        };
+        Ok(Some(RemoteUpload {
+            store: remote.store.clone(),
+            path: authority.database_path().to_path_buf(),
+            head,
+            block,
+            max_bytes: remote.max_object_bytes,
+            #[cfg(test)]
+            root: self.journal.root().to_path_buf(),
+        }))
+    }
+}
+
 impl RecordPartition {
     // Transitional adapter: retained intake still owns its Accept/Complete recovery.
     pub(super) async fn write_ingest_batch(
@@ -66,10 +244,12 @@ impl RecordPartition {
             let result = async {
                 let _permit = permit;
                 let _memory = memory;
+                let _writer = partition.writer.lock().await;
                 let mut inner = partition.inner.lock().await;
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
+                inner.advance_time().await?;
                 let asynchronous = matches!(delivery, IndexDelivery::Asynchronous);
                 if asynchronous {
                     inner
@@ -79,7 +259,44 @@ impl RecordPartition {
                 } else {
                     inner.index.drain_indexes().await?;
                 }
-                let result = inner.write_batch(requests).await;
+                let prepared = inner.prepare_batch(requests).await;
+                #[cfg(feature = "s3-object-store")]
+                let result = match prepared {
+                    Ok(prepared) => {
+                        let upload = inner.prepare_remote_batch(&prepared).await;
+                        match upload {
+                            Ok(Some(upload)) => {
+                                drop(inner);
+                                let uploaded = upload.upload().await;
+                                inner = partition.inner.lock().await;
+                                match uploaded {
+                                    Ok(uploaded) => {
+                                        inner.commit_batch(prepared, Some(uploaded)).await
+                                    }
+                                    Err(error) => {
+                                        if matches!(error, RecordError::OutcomeUnknown(_)) {
+                                            inner.healthy = false;
+                                            inner
+                                                .output
+                                                .write()
+                                                .map_err(|_| RecordError::RecoveryRequired)?
+                                                .fenced = true;
+                                        }
+                                        Err(error)
+                                    }
+                                }
+                            }
+                            Ok(None) => inner.commit_batch(prepared, None).await,
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                #[cfg(not(feature = "s3-object-store"))]
+                let result = match prepared {
+                    Ok(prepared) => inner.commit_batch(prepared).await,
+                    Err(error) => Err(error),
+                };
                 if !inner.healthy {
                     if asynchronous {
                         inner.index.abort_batch();
@@ -135,29 +352,11 @@ impl RecordPartition {
 }
 
 impl Inner {
-    async fn write_batch(
+    async fn prepare_batch(
         &mut self,
         requests: Vec<RecordWrite>,
-    ) -> Result<BatchResult, RecordError> {
-        if requests.len() == 1 {
-            let result = self.write_one(requests.into_iter().next().unwrap()).await;
-            return match result {
-                Ok(receipt) => Ok(BatchResult {
-                    results: vec![Ok(receipt)],
-                    stop: None,
-                }),
-                Err(error) if self.healthy && definite(&error) => Ok(BatchResult {
-                    results: vec![Err(error)],
-                    stop: None,
-                }),
-                Err(error) if self.healthy => Ok(BatchResult {
-                    results: vec![],
-                    stop: Some(error),
-                }),
-                Err(error) => Err(error),
-            };
-        }
-        self.advance_time().await?;
+    ) -> Result<PreparedBatch, RecordError> {
+        let base_state = self.state.try_clone()?;
         let mut shadow = self.state.try_clone()?;
         let mut snapshot = self.snapshot_bytes;
         let mut plans = Vec::new();
@@ -314,7 +513,14 @@ impl Inner {
             }
         }
         if plans.is_empty() {
-            return Ok(result);
+            return Ok(PreparedBatch {
+                plans,
+                publication: Vec::new(),
+                result,
+                base_seq: self.state.seq,
+                base_state,
+                expires_at: None,
+            });
         }
         // Admit live container growth before persistence. Values are separately owned.
         self.state.admit_containers(container_bound)?;
@@ -350,7 +556,55 @@ impl Inner {
             }
         }
         drop(prior);
+        let expires_at =
+            shadow
+                .records
+                .values()
+                .filter(|record| record.document.is_some())
+                .filter_map(|record| record.temporal.expire_at_ms)
+                .chain(shadow.generations.values().filter_map(|generation| {
+                    generation.staged.as_ref().map(|stage| stage.deadline_ms)
+                }))
+                .min();
         drop(shadow);
+        Ok(PreparedBatch {
+            plans,
+            publication,
+            result,
+            base_seq: self.state.seq,
+            base_state,
+            expires_at,
+        })
+    }
+
+    async fn commit_batch(
+        &mut self,
+        prepared: PreparedBatch,
+        #[cfg(feature = "s3-object-store")] uploaded: Option<UploadedBatch>,
+    ) -> Result<BatchResult, RecordError> {
+        if !self.healthy || self.state.seq != prepared.base_seq {
+            return Err(RecordError::RecoveryRequired);
+        }
+        // Wall time can move while uploading even though this task owns the writer.
+        // Apply due transitions before selecting the candidate, then discard any
+        // candidate whose business basis or own TTL/lease has become stale.
+        self.advance_time().await?;
+        if state_proof::verify(&self.config, &prepared.base_state, &self.state).is_err()
+            || prepared
+                .expires_at
+                .is_some_and(|deadline| deadline <= self.evaluation_time_ms)
+        {
+            return Err(RecordError::Busy);
+        }
+        let PreparedBatch {
+            plans,
+            publication,
+            result,
+            ..
+        } = prepared;
+        if plans.is_empty() {
+            return Ok(result);
+        }
         let payloads: Vec<_> = plans
             .iter()
             .map(|plan| match plan {
@@ -384,35 +638,9 @@ impl Inner {
                 .ok_or_else(|| storage("data barrier revision exhausted"))?;
         }
         #[cfg(feature = "s3-object-store")]
-        if let Some(remote) = self.remote.as_mut() {
-            let entries: Vec<_> = plans
-                .iter()
-                .map(|plan| match plan {
-                    mutation::PreparedWrite::Append { applied, bytes, .. } => (
-                        applied.receipt.seq,
-                        format!(
-                            "{}:{}",
-                            applied.request.operation_id.epoch, applied.request.operation_id.nonce
-                        ),
-                        bytes.as_slice(),
-                    ),
-                    _ => unreachable!(),
-                })
-                .collect();
-            match remote.commit_entries(&entries).await {
-                Ok(()) => {}
-                Err(RemoteCommitError::Busy) => {
-                    self.healthy = true;
-                    self.output
-                        .write()
-                        .map_err(|_| RecordError::RecoveryRequired)?
-                        .fenced = false;
-                    return Err(RecordError::Busy);
-                }
-                Err(RemoteCommitError::Unknown(error)) => {
-                    return Err(RecordError::OutcomeUnknown(error));
-                }
-            }
+        if let Some(uploaded) = uploaded {
+            let remote = self.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
+            uploaded.publish(remote).await?;
         }
         self.append_operations(&payloads, sequence).await?;
         #[cfg(feature = "fault-injection")]
@@ -447,190 +675,6 @@ impl Inner {
             .write()
             .map_err(|_| RecordError::RecoveryRequired)?
             .fenced = false;
-        Ok(result)
-    }
-
-    pub(super) async fn write_one(
-        &mut self,
-        request: RecordWrite,
-    ) -> Result<WriteReceipt, RecordError> {
-        if !self.healthy {
-            return Err(RecordError::RecoveryRequired);
-        }
-        // Known hard pressure must not repeatedly plan/copy a new
-        // request's State while the owned rebuild is already pending.
-        // Known identities still use the original epoch/fingerprint
-        // replay checks below (and required time maintenance).
-        if self.maintenance_requested.is_some()
-            && !self
-                .state
-                .operation_lookup
-                .contains_key(&request.operation_id)
-        {
-            return Err(RecordError::Busy);
-        }
-        self.advance_time().await?;
-        if !self
-            .state
-            .operation_lookup
-            .contains_key(&request.operation_id)
-            && maintenance::has_expired_operations(&self.state, current_epoch())?
-        {
-            return Err(self.request_checkpoint("expired_operation_receipts"));
-        }
-        let (applied, bytes, snapshot_bytes, reserve_bytes, mut candidate, _planning) =
-            match mutation::prepare_at(
-                &self.state,
-                &self.config,
-                self.snapshot_bytes,
-                request,
-                current_epoch(),
-                self.evaluation_time_ms,
-            )? {
-                mutation::PreparedWrite::Replay(receipt) => return Ok(receipt),
-                mutation::PreparedWrite::Append {
-                    applied,
-                    bytes,
-                    snapshot_bytes,
-                    reserve_bytes,
-                    candidate,
-                    planning,
-                } => (
-                    applied,
-                    bytes,
-                    snapshot_bytes,
-                    reserve_bytes,
-                    candidate,
-                    planning,
-                ),
-            };
-        if self.maintenance_requested.is_some() {
-            return Err(RecordError::Busy);
-        }
-        let (growth, native_updates) =
-            build_budget::write_estimate(&self.state, &self.config, &applied)?;
-        if growth > 0 {
-            let fresh_component = (self.config.schema.len() as u64)
-                .checked_mul(65536 * 32)
-                .and_then(|n| n.checked_add(growth))
-                .ok_or_else(|| storage("fresh component admission overflow"))?;
-            crate::storage::build_budget::validate_single(fresh_component)
-                .map_err(|e| RecordError::Rejected(e.to_string()))?;
-            if native_updates > 128 {
-                return Err(RecordError::Rejected(
-                    "operation exceeds mutable native update bound".into(),
-                ));
-            }
-        }
-        if growth > 0 && !self.index.can_admit(growth, native_updates).await {
-            // One bounded flush attempt before rejecting, never discard
-            // selected history to manufacture admission space.
-            self.maintain_index_tail().await?;
-            if !self.index.can_admit(growth, native_updates).await {
-                return Err(RecordError::Rejected(
-                    "record build admission budget exceeded".into(),
-                ));
-            }
-        }
-        let prepared = if applied.request.generation.is_none() {
-            Some(state_memory::Prepared::new(&self.state, &applied)?)
-        } else {
-            None
-        };
-        if let Some(prepared) = &prepared {
-            prepared.admit_containers(&mut self.state, snapshot_bytes)?;
-        } else if let Some(candidate) = candidate.as_mut() {
-            candidate.admit_bytes(snapshot_bytes)?;
-        }
-        self.ensure_journal_room(bytes.len(), reserve_bytes).await?;
-        #[cfg(feature = "s3-object-store")]
-        self.ensure_remote_tail_room(
-            applied.receipt.seq,
-            &format!(
-                "{}:{}",
-                applied.request.operation_id.epoch, applied.request.operation_id.nonce
-            ),
-            &bytes,
-        )
-        .await?;
-        self.validate_journal_room(bytes.len(), reserve_bytes)?;
-        let receipt = applied.receipt.clone();
-        #[cfg(feature = "fault-injection")]
-        let injected = std::env::var("ANYSEEK_RECORD_FAULT_NONCE")
-            .ok()
-            .filter(|nonce| nonce == &applied.request.operation_id.nonce)
-            .and_then(|_| std::env::var("ANYSEEK_RECORD_FAULT").ok());
-        #[cfg(feature = "fault-injection")]
-        if injected.as_deref() == Some("before_append") {
-            return Err(RecordError::Rejected("injected before append".into()));
-        }
-        let hides_evidence = matches!(
-            applied.request.generation,
-            Some(GenerationCommand::Publish { .. })
-        ) || (self
-            .state
-            .records
-            .get(&applied.request.record_id)
-            .is_some_and(|r| r.system.is_some())
-            || (applied.request.vector_patch.is_none()
-                && self.graph_cache.references(&applied.request.record_id)));
-        self.healthy = false;
-        {
-            let mut output = self
-                .output
-                .write()
-                .map_err(|_| RecordError::RecoveryRequired)?;
-            output.fenced = true;
-            if hides_evidence {
-                output.revision = output
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| storage("data barrier revision exhausted"))?;
-            }
-        }
-        #[cfg(feature = "s3-object-store")]
-        if let Some(remote) = self.remote.as_mut() {
-            match remote.commit(&applied, &bytes).await {
-                Ok(()) => {}
-                Err(RemoteCommitError::Busy) => {
-                    // Only the upload stage can produce this typed refusal;
-                    // SQLite publication has not been attempted. Orphan
-                    // objects remain registered for ordinary dependency GC.
-                    self.healthy = true;
-                    self.output
-                        .write()
-                        .map_err(|_| RecordError::RecoveryRequired)?
-                        .fenced = false;
-                    return Err(RecordError::Busy);
-                }
-                Err(RemoteCommitError::Unknown(error)) => {
-                    return Err(RecordError::OutcomeUnknown(error));
-                }
-            }
-        }
-        self.append_operation(&bytes, receipt.seq).await?;
-        #[cfg(feature = "fault-injection")]
-        match injected.as_deref() {
-            Some("after_append_unknown") => {
-                return Err(RecordError::OutcomeUnknown(
-                    "injected uncertain append outcome".into(),
-                ));
-            }
-            Some("after_durable") => return Err(RecordError::DurablePending(receipt.seq)),
-            Some("crash_after_durable") => std::process::exit(86),
-            _ => {}
-        }
-        #[cfg(test)]
-        if self.fail_after_durable {
-            return Err(RecordError::DurablePending(receipt.seq));
-        }
-        self.publish_prepared(&applied, snapshot_bytes, prepared, candidate)
-            .await?;
-        self.healthy = true;
-        self.output
-            .write()
-            .map_err(|_| RecordError::RecoveryRequired)?
-            .fenced = false;
         #[cfg(feature = "fault-injection")]
         if injected.as_deref() == Some("crash_after_visible") {
             std::process::exit(86);
@@ -639,7 +683,7 @@ impl Inner {
         if std::env::var("ANYSEEK_RECORD_CRASH").as_deref() == Ok("published") {
             std::process::exit(74);
         }
-        Ok(receipt)
+        Ok(result)
     }
 }
 

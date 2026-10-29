@@ -23,6 +23,14 @@
 
 本地帧和 S3 对象字段未新增格式，但本地提交见证现在允许一次跨越多个事件序号；旧程序的单事件恢复校验不能读取这种新提交，未提供降级兼容。S3 元数据每项回执指向同一最终提交 cut，业务逐项版本仍由 Record 回执保留。批规划期间暂保留私有状态和内存预算，锁缩短与更精细的内存优化留待后续小步。
 
+## 第三步：S3 上传释放状态锁
+
+独立的 partition writer 锁串行化业务提交、TTL 推进、checkpoint 安装及 GC。候选规划和本地 WAL 同步目前仍持有状态锁；S3 日志块编码、上传与验证使用独立元数据连接，期间释放状态锁。旧 operation 回执查询和索引消费者可以取得状态锁；需要推进 TTL 的数据读取仍遵守 writer 顺序，这一步不承诺所有查询都能绕过上传。
+
+发布前重新推进时间并核验完整候选基线，候选中的 TTL/租约已经过期则返回 Busy、留下未选中的上传对象，原请求可重新判定。SQLite 发布仍比较捕获的 head version 和 owner epoch；冲突或未知发布结果保持 fenced，恢复原 operation_id。checkpoint 安装与对象回收不越过正在执行的 writer。取消调用者等待不释放正在提交的 owned task。
+
+此步没有修改 HTTP 成功响应，也没有删除 Intake。旧版本无法读取第二步新增的跨多事件提交见证；不提供升级或降级迁移。
+
 ## API 契约
 
 `POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每批 1–64 条，累计编码请求最多 4 MiB，同时受 HTTP 2 MiB body 上限和 collection 单记录限制约束。每条必须显式提供 document（null 删除）、vector_patch 或 generation。
