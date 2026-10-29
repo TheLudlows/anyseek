@@ -97,7 +97,7 @@ def exercise(call, restart_with, directory, faults):
     # Retire fixtures before returning to the real clock; a large test jump is
     # deliberately not treated as an acceptable restart clock rollback.
     if faults:
-        for cid in ['temporal-next'] + ['ttl-' + stage.replace('_', '-') for stage in ['after_append_unknown', 'after_durable', 'crash_after_durable', 'crash_after_visible']]:
+        for cid in ['temporal'] + ['ttl-' + stage.replace('_', '-') for stage in ['after_append_unknown', 'after_durable', 'crash_after_durable', 'crash_after_visible']]:
             call('DELETE', '/api/v1/index/' + cid, {'operation_id': operation()})
     call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'temporal-reader'})
     call('DELETE', '/api/v1/backups/' + archive['backup_id'], {'operation_id': operation()})

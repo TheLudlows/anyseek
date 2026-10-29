@@ -18,16 +18,16 @@ fn captured_receipt_gc_does_not_expand_with_catchup_floor_or_epoch() {
     append(&mut source, &settings, "selected", 100, 1000);
     append(&mut source, &settings, "later-floor", 100, 1001);
     append(&mut source, &settings, "later-epoch", 101, 1002);
-    source.feed.floor = 1;
+    source.history.floor = 1;
     let intent = OperationGc::capture(&source, 102, 1).unwrap();
     let mut candidate = source.try_clone().unwrap();
     intent.apply(&mut candidate).unwrap();
-    // Catch-up can advance both the feed floor and the epoch watermark after
+    // Catch-up can advance both the history boundary and the epoch watermark after
     // the source snapshot was captured. This must not widen the selected set.
-    candidate.feed.floor = 3;
+    candidate.history.floor = 3;
     candidate.epoch_watermark = 103;
     let mut expected = source.try_clone().unwrap();
-    expected.feed.floor = 3;
+    expected.history.floor = 3;
     expected.epoch_watermark = 103;
     intent.apply(&mut expected).unwrap();
     assert_eq!(expected.operations.len(), 2);
@@ -42,7 +42,7 @@ fn captured_receipt_gc_does_not_expand_with_catchup_floor_or_epoch() {
 }
 
 #[tokio::test]
-async fn receipt_gc_background_catchup_keeps_newly_expired_feed_receipt() {
+async fn receipt_gc_background_catchup_keeps_newly_expired_history_receipt() {
     struct Clock(std::sync::atomic::AtomicU64);
     impl temporal::Clock for Clock {
         fn now_ms(&self) -> Result<u64, RecordError> {
@@ -61,7 +61,7 @@ async fn receipt_gc_background_catchup_keeps_newly_expired_feed_receipt() {
     append(&mut state, &settings, "selected", epoch - 2, now - 8 * day);
     append(&mut state, &settings, "later-floor", epoch - 2, now - 6 * day);
     append(&mut state, &settings, "current", epoch, now);
-    state.feed.floor = 1;
+    state.history.floor = 1;
     let bytes = encode_entry(&Entry::Checkpoint { config: settings.clone(), state }).unwrap();
     drop(PartitionJournal::create(&path, settings.max_journal_bytes, &bytes).unwrap());
     let p = RecordPartition::open(&path, settings.max_journal_bytes).await.unwrap();
@@ -74,13 +74,13 @@ async fn receipt_gc_background_catchup_keeps_newly_expired_feed_receipt() {
     }).await.unwrap();
     clock.0.store(now + 2 * day, std::sync::atomic::Ordering::SeqCst);
     p.inner.lock().await.advance_time().await.unwrap();
-    assert_eq!(p.inner.lock().await.state.feed.floor, 2);
+    assert_eq!(p.inner.lock().await.state.history.floor, 2);
     std::fs::remove_file(path.join(".test-indexer-pause")).unwrap();
     job.finish().await.unwrap();
     let inner = p.inner.lock().await;
     assert_eq!(inner.state.operations.len(), 2);
     assert_eq!(inner.state.operations[0].request.operation_id.nonce, "later-floor");
     assert_eq!(inner.state.retired_operation_prefix.as_ref().unwrap().seq, 1);
-    assert_eq!(inner.state.feed.floor, 2);
+    assert_eq!(inner.state.history.floor, 2);
     validate_restored_state(&settings, &inner.state).unwrap();
 }

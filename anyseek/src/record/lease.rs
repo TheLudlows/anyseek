@@ -174,7 +174,7 @@ mod gc_tests {
         }
         let mut state=p.inner.lock().await.state.try_clone().unwrap();
         let epoch=current_epoch()+2;
-        state.feed.floor=state.seq;
+        state.history.floor=state.seq;
         maintenance::collect_operations(&mut state,epoch).unwrap();
         assert_eq!(state.operations.len(),2,"only upload origin and latest renewal are evidence");
         assert_eq!(state.operations[0].request.operation_id.nonce,"stage");
@@ -195,7 +195,7 @@ mod gc_tests {
         let (root,p)=staged().await;
         p.write(generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish {generation_id:"g".into()})).await.unwrap();
         let mut state=p.inner.lock().await.state.try_clone().unwrap();
-        state.feed.floor=state.seq;
+        state.history.floor=state.seq;
         let epoch=current_epoch()+2;
         maintenance::collect_operations(&mut state,epoch).unwrap();
         assert!(state.operations.is_empty());
@@ -219,7 +219,7 @@ mod gc_tests {
                 p.write(generation_write("abort",ExpectedVersion::Match(1),GenerationCommand::Abort {generation_id:"g".into()})).await.unwrap();
             }
             let mut state=p.inner.lock().await.state.try_clone().unwrap();
-            state.feed.floor=state.seq;
+            state.history.floor=state.seq;
             maintenance::collect_operations(&mut state,current_epoch()+2).unwrap();
             assert_eq!(state.operations.len(),1);
             if expires {

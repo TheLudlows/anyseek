@@ -127,10 +127,10 @@ mod tests {
         }
     }
     #[test]
-    fn receipt_gc_preserves_feed_and_retry_window_and_persists_rollback_floor() {
+    fn receipt_gc_preserves_history_and_retry_window_and_persists_rollback_floor() {
         let settings=super::super::tests::config();
         let mut state=State::default();
-        for (nonce,epoch) in [("expired",100),("feed",100),("recent",101)] {
+        for (nonce,epoch) in [("expired",100),("retained-history",100),("recent",101)] {
             let mut request=super::super::tests::write(nonce,nonce,"alpha",ExpectedVersion::Absent);
             request.operation_id.epoch=epoch;
             let mutation::PreparedWrite::Append {applied,..}=mutation::prepare_at(
@@ -138,12 +138,12 @@ mod tests {
                 else {panic!("new operation")};
             apply(&mut state,&applied).unwrap();
         }
-        state.feed.floor=1;
+        state.history.floor=1;
         let before=state.operations.bytes();
         collect_operations(&mut state,102).unwrap();
         assert_eq!(state.operations.len(),2);
         assert!(state.operations.bytes()<before);
-        assert_eq!(state.operations[0].request.operation_id.nonce,"feed");
+        assert_eq!(state.operations[0].request.operation_id.nonce,"retained-history");
         assert_eq!(state.operations[1].request.operation_id.nonce,"recent");
         assert_eq!(state.epoch_watermark,102);
         let encoded=encode_entry(&Entry::Checkpoint {config:settings.clone(),state}).unwrap();
@@ -191,7 +191,7 @@ mod tests {
         let expiry=inner.state.time_watermark_ms+1_800_001;
         inner.expire_staging(expiry).await.unwrap();
         let mut state=inner.state.try_clone().unwrap();
-        state.feed.floor=state.seq;
+        state.history.floor=state.seq;
         collect_operations(&mut state,current_epoch()+2).unwrap();
         assert_eq!(state.operations.len(),1);
         assert!(state.operations[0].request.generation.is_some());
@@ -220,7 +220,7 @@ mod tests {
                     else {panic!("new operation")};
                 receipt=Some(applied.receipt.clone());apply(&mut state,&applied).unwrap();
             }
-            state.feed.floor=1;
+            state.history.floor=1;
             let path=root.path().join("partition");
             let bytes=encode_entry(&Entry::Checkpoint {config:settings.clone(),state}).unwrap();
             drop(PartitionJournal::create(&path,settings.max_journal_bytes,&bytes).unwrap());
@@ -278,7 +278,7 @@ mod tests {
                 format!("{}:{}",request.operation_id.epoch,request.operation_id.nonce),&bytes).await.unwrap();
             inner.append_operation(&bytes,applied.receipt.seq).await.unwrap();
             inner.replay_context().replay(Entry::Applied(applied)).await.unwrap();
-            inner.feed_cache=change_feed::Cache::rebuild(&inner.state,&inner.config.change_feed).unwrap();
+            history::validate_state(&inner.state).unwrap();
         }
         assert!(matches!(p.write(write("next","next","beta",ExpectedVersion::Absent)).await,Err(RecordError::Busy)));
         wait_maintenance_idle(&p).await;
@@ -407,7 +407,7 @@ impl SourceProof {
                 Entry::Applied(op)=>apply(state,&op)?,
                 Entry::Expired(event)=>temporal::apply(state,&event)?,
                 Entry::LeaseExpired(event)=>lease::apply(state,&event)?,
-                Entry::FeedTrim(event)=>change_feed::apply_trim(state,&config.change_feed,&event)?,
+                Entry::HistoryTrim(event)=>history::apply_trim(state,&config.history,&event)?,
                 _=>return Err(storage("unexpected captured source authority")),
             }
         }
@@ -441,7 +441,7 @@ impl RecordPartition {
 /// then installed with the new certificate, never applied to live State early.
 pub(super) struct Intent {
     private_cleanup:bool,
-    trim:Option<change_feed::Trim>,
+    trim:Option<history::Trim>,
     operations:Option<OperationGc>,
 }
 impl Intent {
@@ -449,33 +449,33 @@ impl Intent {
         Ok(Self{private_cleanup:automatic&&inner.state.private_cleanup_pending,
             trim:if automatic {inner.maintenance_trim.clone()}else{None},
             operations:if automatic {Some(OperationGc::capture(&inner.state,current_epoch(),
-                inner.maintenance_trim.as_ref().map_or(inner.state.feed.floor,|trim|trim.floor))?)}else{None}})
+                inner.maintenance_trim.as_ref().map_or(inner.state.history.floor,|trim|trim.floor))?)}else{None}})
     }
     pub(super) fn apply(&self,state:&mut State,config:&RecordConfig)->Result<(),RecordError> {
         if self.private_cleanup {state.private_cleanup_pending=false;}
-        if let Some(trim)=&self.trim {change_feed::apply_trim(state,&config.change_feed,trim)?;}
+        if let Some(trim)=&self.trim {history::apply_trim(state,&config.history,trim)?;}
         if let Some(operations)=&self.operations {operations.apply(state)?;}
         Ok(())
     }
     pub(super) fn rewrites_payloads(&self)->bool {self.private_cleanup}
     #[cfg(feature="fault-injection")]
-    pub(super) fn trims_feed(&self)->bool {self.trim.is_some()}
+    pub(super) fn trims_history(&self)->bool {self.trim.is_some()}
 }
 
-fn expired_operation(op:&Applied,feed_floor:u64,epoch:u64)->bool {
-    // Feed rows retain their source until its authenticated floor advances.
-    op.receipt.seq<=feed_floor
+fn expired_operation(op:&Applied,history_floor:u64,epoch:u64)->bool {
+    // Retain receipt history until its authenticated GC boundary advances.
+    op.receipt.seq<=history_floor
         && op.request.operation_id.epoch.saturating_add(1)<epoch
 }
 pub(super) fn has_expired_operations(state:&State,epoch:u64)->Result<bool,RecordError> {
     let epoch=epoch.max(state.epoch_watermark);
-    if !state.operations.iter().take_while(|op|op.receipt.seq<=state.feed.floor)
-        .any(|op|expired_operation(op,state.feed.floor,epoch)) {return Ok(false);}
+    if !state.operations.iter().take_while(|op|op.receipt.seq<=state.history.floor)
+        .any(|op|expired_operation(op,state.history.floor,epoch)) {return Ok(false);}
     let _memory=crate::storage::build_budget::reserve_memory((state.operations.len() as u64)
         .checked_mul(512).ok_or_else(||storage("receipt GC protection overflow"))?).map_err(storage)?;
     let protected=lease::protected_operation_sequences(state);
-    Ok(state.operations.iter().take_while(|op|op.receipt.seq<=state.feed.floor)
-        .any(|op|expired_operation(op,state.feed.floor,epoch)&&!protected.contains(&op.receipt.seq)))
+    Ok(state.operations.iter().take_while(|op|op.receipt.seq<=state.history.floor)
+        .any(|op|expired_operation(op,state.history.floor,epoch)&&!protected.contains(&op.receipt.seq)))
 }
 struct OperationGc {
     epoch:u64,
@@ -513,7 +513,7 @@ impl OperationGc {
 }
 #[cfg(test)]
 pub(super) fn collect_operations(state:&mut State,epoch:u64)->Result<(),RecordError> {
-    OperationGc::capture(state,epoch,state.feed.floor)?.apply(state)
+    OperationGc::capture(state,epoch,state.history.floor)?.apply(state)
 }
 
 #[cfg(test)]

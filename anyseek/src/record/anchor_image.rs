@@ -85,7 +85,7 @@ impl Image {
             match entry {
                 Entry::Applied(applied) => apply(state, &applied),
                 Entry::Expired(event) => temporal::apply(state, &event),
-                Entry::FeedTrim(event) => change_feed::apply_trim(state, &config.change_feed, &event),
+                Entry::HistoryTrim(event) => history::apply_trim(state, &config.history, &event),
                 Entry::LeaseExpired(event) => lease::apply(state, &event),
                 Entry::Anchor(_) | Entry::Checkpoint { .. } => Err(storage("authority in state delta")),
             }

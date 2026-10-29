@@ -895,7 +895,7 @@ mod tests {
         let dictionary=standard::StandardAnalyzer::new(TokenizerType::JiebaMixedV1).unwrap();
         let context=AnalysisContext { text_normalization:meta.text_normalization,stop_words:&stop_words,
             frequent_hashset:&frequent_hashset,standard:&dictionary };
-        let config=crate::record::RecordConfig {index:meta,schema,change_feed:Default::default(),embedding_space_id:None,
+        let config=crate::record::RecordConfig {index:meta,schema,history:Default::default(),embedding_space_id:None,
             max_records:32,max_record_bytes:4096,max_operations:100,max_journal_bytes:1024*1024,max_candidates:100};
         let index=crate::record::RecordPartition::create(&path,config).await.unwrap();
         {

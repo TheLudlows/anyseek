@@ -145,7 +145,7 @@ pub(super) struct ExpiredTarget {
     record_id: String,
     previous_version: u64,
 }
-/// A single committed expiration cause; future change feed can project this exact seq.
+/// A single committed expiration cause; replay validates this exact sequence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Expiration {
     pub(super) seq: u64,
@@ -212,7 +212,7 @@ impl Inner {
         }
         self.expire_staging(evaluation).await?;
         self.cleanup_private().await?;
-        self.trim_feed(evaluation).await?;
+        self.trim_history(evaluation).await?;
         let mut targets = Vec::new();
         self.state.records.visit_due_ttl(evaluation, |r| targets.push(ExpiredTarget {
             record_id: r.record_id.clone(),
@@ -234,8 +234,6 @@ impl Inner {
         let mut candidate = self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;
         apply(&mut candidate, &event)?;
         let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
-        let feed_point = change_feed::pending_expiry(&self.state,event.seq,event.evaluation_time_ms)?;
-        self.feed_cache.validate(&self.config.change_feed,Some(&feed_point),change_feed::reserve(&candidate))?;
         let reserve = generation::reserve_bytes(&candidate);
         checkpoint_codec::validate_size(snapshot_bytes, reserve, self.config.max_journal_bytes)
             .map_err(storage)?;
@@ -283,7 +281,6 @@ impl Inner {
             self.index.retire(ordinal).await.map_err(|_|RecordError::DurablePending(event.seq))?;
         }
         self.state = candidate;
-        self.feed_cache.push(Some(feed_point));
         self.snapshot_bytes = snapshot_bytes;
         self.evaluation_time_ms = evaluation;
         self.output
@@ -437,7 +434,7 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
         }
     }
     let (floor,mut previous_time)=if let Some(prefix)=&state.retired_operation_prefix {
-        if prefix.seq==0 || prefix.seq>state.feed.floor || prefix.seq>state.seq
+        if prefix.seq==0 || prefix.seq>state.history.floor || prefix.seq>state.seq
             || prefix.time_ms>state.time_watermark_ms {return Err(storage("invalid retired operation time prefix"));}
         let mut retained_time=0;
         for (_,time) in commits.range(..=prefix.seq) {

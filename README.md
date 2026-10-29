@@ -18,10 +18,10 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 | 来源与证据 | 精确来源版本、内联文本/页码定位、直接及间接依赖；来源删除立即隐藏，修订后的旧派生内容 stale 默认隐藏 |
 | 文档发布 | 有界多批 staging、租约和清理、完整 generation 原子发布；正文可先发布，向量按精确版本后补 |
 | 共同检索 | 全文 BM25F、外部向量、元数据/时间过滤、显式一跳关系融合、稳定排序和逐命中解释 |
-| 时间与同步 | 固定查询 evaluation_time、不可逆 TTL、至少七天变更流、bootstrap 与过期游标处理 |
+| 时间与生命周期 | 固定查询 evaluation_time、不可逆 TTL |
 | 授权与恢复 | 多个 API key 共享 collection；撤销立即阻断，身份与数据生命周期独立；WAL/checkpoint、备份与独立恢复 |
 
-Web UI 支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览，以及来源、关系、租约、feed 等检查入口。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。
+Web UI 支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览，以及来源、关系、租约等检查入口。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。
 
 ## 边界与后续路线
 

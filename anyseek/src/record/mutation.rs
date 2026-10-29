@@ -13,7 +13,6 @@ pub(super) enum PreparedWrite {
         bytes: Vec<u8>,
         snapshot_bytes: usize,
         reserve_bytes: usize,
-        feed_reserve: usize,
         candidate: Option<State>,
         planning: Vec<crate::storage::build_budget::MemoryLease>,
     },
@@ -121,7 +120,6 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     // journal frame overhead. No evidence edges are copied into delete requests.
     let previous_ttl=state.records.get(&request.record_id).is_some_and(temporal::live_ttl);
     let next_ttl=next_document.is_some() && temporal.expire_at_ms.is_some();
-    let feed_reserve = reserved_slots + state.records.live_ttl_count() + generation::staged_ttl_count(state) + usize::from(next_ttl) - usize::from(previous_ttl);
     let reserve_bytes = reserved_slots * 8192 + generation::reserved(state) * 32768
         + temporal::reserve_bytes(state) + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
@@ -181,7 +179,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     };
     if next_ttl && receipt.version == u64::MAX { return Err(RecordError::Rejected("TTL requires a reserved tombstone version".into())); }
     let applied = Applied { request_digest:None,
-        graph_invalidation:graph::invalidates(state,&request),
+        legacy_graph_invalidation:false,
         request,
         receipt: receipt.clone(),
         observed_epoch: epoch,
@@ -202,7 +200,6 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         bytes,
         snapshot_bytes,
         reserve_bytes,
-        feed_reserve,
         candidate: None,
         planning: vec![_request_plan,_prior_plan],
     })
@@ -262,7 +259,7 @@ mod replay_size_tests {
         for (i,epoch) in [100,99].into_iter().enumerate() {
             let mut request=super::super::tests::write(&format!("epoch-{i}"),"r","alpha",ExpectedVersion::Any);
             request.operation_id.epoch=epoch;
-            let applied=Applied{request_digest:None,graph_invalidation:false,
+            let applied=Applied{request_digest:None,legacy_graph_invalidation:false,
                 receipt:WriteReceipt{staged_only:false,seq:i as u64+1,version:i as u64+1,record_id:"r".into()},
                 request,observed_epoch:epoch,observed_time_ms:99+i as u64};
             let bytes=replay_checkpoint_size(&state,before,&applied).unwrap();
@@ -286,7 +283,7 @@ mod replay_size_tests {
             if i==0 {request.document.as_mut().unwrap().insert("opaque".into(),serde_json::json!("large\n繁體".repeat(8192)));}
             if i==102 {request.document=None;}
             let previous=state.records.get(&id);
-            let applied=Applied{request_digest:None,graph_invalidation:false,receipt:WriteReceipt{staged_only:false,seq:state.seq+1,version:previous.map_or(1,|r|r.version+1),record_id:id},request,observed_epoch:9+i/10,observed_time_ms:99+i};
+            let applied=Applied{request_digest:None,legacy_graph_invalidation:false,receipt:WriteReceipt{staged_only:false,seq:state.seq+1,version:previous.map_or(1,|r|r.version+1),record_id:id},request,observed_epoch:9+i/10,observed_time_ms:99+i};
             let bytes=replay_checkpoint_size(&state,before,&applied).unwrap();
             apply(&mut state,&applied).unwrap();
             let wire=encode_entry(&Entry::Checkpoint{config:config.clone(),state:state.clone()}).unwrap();
@@ -298,7 +295,7 @@ mod replay_size_tests {
     #[test]
     fn malformed_replay_sequence_and_size_fail_closed() {
         let mut state=State::default();let request=super::super::tests::write("op","id","alpha",ExpectedVersion::Any);
-        let mut applied=Applied{request_digest:None,graph_invalidation:false,receipt:WriteReceipt{staged_only:false,seq:1,version:1,record_id:"id".into()},request,observed_epoch:1,observed_time_ms:1};
+        let mut applied=Applied{request_digest:None,legacy_graph_invalidation:false,receipt:WriteReceipt{staged_only:false,seq:1,version:1,record_id:"id".into()},request,observed_epoch:1,observed_time_ms:1};
         apply(&mut state,&applied).unwrap();assert!(replay_checkpoint_size(&state,0,&applied).is_err());
         applied.receipt.seq=2;applied.receipt.version=2;applied.request.operation_id=OperationId::new("next".into());assert!(replay_checkpoint_size(&state,0,&applied).is_err());
     }

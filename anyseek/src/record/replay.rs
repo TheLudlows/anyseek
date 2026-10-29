@@ -58,7 +58,7 @@ impl Context<'_> {
 }
 impl Context<'_> {
     /// Replay certified tail decisions into the selected index view. Never
-    /// append WAL or generate another operation/feed identity during recovery.
+    /// append WAL or generate another operation/owner identity during recovery.
     pub(super) async fn replay(&mut self,entry:Entry)->Result<(),RecordError>{
         match entry {
             Entry::Applied(applied)=>{
@@ -93,7 +93,7 @@ impl Context<'_> {
                 self.state.admit_bytes(size)?;
                 lease::apply(&mut *self.state,&event)?;
             },
-            Entry::FeedTrim(event)=>change_feed::apply_trim(&mut *self.state,&self.config.change_feed,&event)?,
+            Entry::HistoryTrim(event)=>history::apply_trim(&mut *self.state,&self.config.history,&event)?,
             Entry::Checkpoint{..}|Entry::Anchor(_)=>return Err(storage("unexpected anchor in operation stream")),
         }
         *self.graph_cache=graph::Cache::rebuild(&*self.state)?;

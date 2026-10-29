@@ -64,7 +64,6 @@ function loadPendingWrites() {
     return pending && pending.collection === INDEX_ID ? pending : null;
 }
 function resetDocumentEditor() {
-    resetFeed();
     resetGraph();
     pendingDocumentCommit = null;
     CURRENT_SCHEMA = {};
@@ -163,79 +162,6 @@ $(function () {
         if(!pendingDocumentCommit||documentBusy)return;
         documentControls(true);$('#documentError').text('');await submitPendingWrites();documentControls(false);
     });
-});
-
-// Bounded inspection UI, not a background synchronizer. Never retain bodies or
-// credentials in storage; errors invalidate partial snapshots and continuations.
-let feedState = null;
-let feedBusy = false;
-function resetFeed() {
-    feedState = null;
-    $('#feedResult,#feedStatus').text('');
-    $('#feedNext').prop('disabled',true);
-}
-async function inspectFeed(action) {
-    if (feedBusy) return;
-    feedBusy=true;$('#feedBootstrap,#feedNext,#feedRead').prop('disabled',true);
-    const collection=INDEX_ID,key=API_KEY,base=`api/v1/index/${encodeURIComponent(collection)}`;
-    const current=()=>collection===INDEX_ID && key===API_KEY;
-    try {
-        if (!feedState || feedState.collection!==collection || feedState.key!==key) resetFeed();
-        if (action==='start') {
-            if(feedState?.id||feedState?.cleanup) await setupApi('DELETE',`${base}/bootstrap/${feedState.id||feedState.cleanup}`,key);
-            resetFeed();
-            const identity=await setupApi('GET',`${base}/bootstrap`,key);
-            if(!current())return;
-            feedState={collection,key,id:identity.request_id_prefix+newIdentity().replaceAll('-','').slice(0,16),after:null,cursor:null};
-        }
-        if(action==='start'||action==='next') {
-            if(!feedState?.id)throw new Error('Start a new snapshot.');
-            const page=await setupApi('POST',`${base}/bootstrap`,key,{request_id:feedState.id,after:feedState.after,length:10});
-            if(!current())return;
-            if(feedState.cut!==undefined && feedState.cut!==page.visible_seq)throw new Error('Snapshot cut changed; rebuild required.');
-            feedState.cut=page.visible_seq;feedState.after=page.next;feedState.retry=false;
-            $('#feedResult').text(apiJsonText(page));
-            if(!page.next) {
-                feedState.cursor=page.continuation;
-                const completedId=feedState.id;
-                feedState.id=null;
-                try {await setupApi('DELETE',`${base}/bootstrap/${completedId}`,key);}
-                catch(error) {
-                    if([401,403,410].includes(error.status))throw error;
-                    if(current())feedState.cleanup=completedId;
-                }
-                if(!current())return;
-            }
-            $('#feedStatus').text(page.next?'Snapshot page ready. Continue before its lease expires.':`Snapshot complete; continuation ready for changes.${feedState.cleanup?' Release unconfirmed; starting a new snapshot retries cleanup.':''}`);
-        } else {
-            const page=await setupApi('POST',`${base}/changes`,key,{after:feedState?.cursor||null,length:100});
-            if(!current())return;
-            if(!feedState)feedState={collection,key};
-            feedState.cursor=page.next;
-            $('#feedResult').text(apiJsonText(page));
-            $('#feedStatus').text(page.events.some(e=>e.rescan_required)?'Invalidation received: rebuild your effective view with a new snapshot.':'Change page ready.');
-        }
-    } catch(error) {
-        if(current()) {
-            $('#feedResult').text('');
-            if ([401,403,410].includes(error.status)) {
-                resetFeed();$('#feedStatus').text(`${error.message} Discard partial snapshot and start again.`);
-            } else {
-                // Preserve the exact snapshot request after transport loss.
-                // A retry cannot silently allocate a different snapshot cut.
-                if(feedState?.id)feedState.retry=true;
-                $('#feedStatus').text(`${error.message} Retry the snapshot page or read changes again.`);
-            }
-        }
-    } finally {
-        feedBusy=false;$('#feedBootstrap,#feedRead').prop('disabled',false);
-        $('#feedNext').prop('disabled',!feedState?.after && !feedState?.retry).text(feedState?.retry?'Retry snapshot page':'Next snapshot page');
-    }
-}
-$(function(){
-    $('#feedBootstrap').on('click',()=>inspectFeed('start'));
-    $('#feedNext').on('click',()=>inspectFeed('next'));
-    $('#feedRead').on('click',()=>inspectFeed('changes'));
 });
 
 let graphState=null;

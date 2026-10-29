@@ -14,7 +14,7 @@ pub async fn write(partition:&RecordPartition,request:RecordWrite)->Result<anyse
 pub const JOURNAL_LIMIT: u64 = 64 * 1024 * 1024;
 pub async fn create(path: &std::path::Path, index: IndexMetaObject, schema: Vec<SchemaField>) -> RecordPartition {
     RecordPartition::create(path, RecordConfig {
-        change_feed: Default::default(), embedding_space_id: if matches!(index.inference, anyseek::vector::Inference::External { .. }) {Some("test-space".into())} else {None}, index, schema,
+        history: Default::default(), embedding_space_id: if matches!(index.inference, anyseek::vector::Inference::External { .. }) {Some("test-space".into())} else {None}, index, schema,
         max_records: 10000, max_record_bytes: 64*1024, max_operations: 20000,
         max_journal_bytes: JOURNAL_LIMIT, max_candidates: 10000,
     }).await.unwrap()

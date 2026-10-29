@@ -58,6 +58,6 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
             restart_with(env);status=call('GET',endpoint+'/doc/doc/generation');assert status['staged_members']==0 and status['version']==2 and not status['private_cleanup_pending'], (fault, status)
             assert call('POST',endpoint+'/doc',request)['receipt']==receipt
             call('POST',endpoint+'/doc',command('renew',1),status=409)
-            assert [e['kind'] for e in call('POST',endpoint+'/changes',{})['events']]==['source_created']
+            assert call('GET',endpoint+'/doc/doc/generation')['visible_members']==0
     restart_with({})
     print('PASS staging leases HTTP: fencing, renewal/retry, private abort cleanup and retained receipts'+(' with controlled expiry/process faults' if faults else ''))

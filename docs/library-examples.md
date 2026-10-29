@@ -25,7 +25,7 @@ use std::{error::Error, path::Path};
 async fn main() -> Result<(), Box<dyn Error>> {
     let path = Path::new("records-new"); // 必须是新目录；不要覆盖已有部署数据。
     let config = RecordConfig {
-        change_feed: Default::default(),
+        history: Default::default(),
         index: IndexMetaObject {
             id: 0, name: "documents".into(),
             lexical_similarity: LexicalSimilarity::Bm25fProximity,

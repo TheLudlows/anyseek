@@ -451,7 +451,7 @@ impl RemotePersistence {
         if fault_partition && std::env::var("ANYSEEK_REMOTE_CHECKPOINT_FAULT").as_deref() == Ok("before_publish") {
             std::process::exit(91);
         }
-        // This CAS also certifies same-sequence maintenance such as feed trimming.
+        // This CAS also certifies same-sequence maintenance such as history trimming.
         // Never discard predecessor edges: retained backups still traverse them.
         let published = if restoring {
             authority.publish_restored_checkpoint(
@@ -687,7 +687,7 @@ impl RecordPartition {
             let mut next = inner.state.try_clone()?;
             next.independent_snapshot = true;
             next.evidence_quarantined |= next.records.values().any(temporal::protected);
-            next.feed.scope = Sha256::digest(format!("restore:{}", target.partition_id))
+            next.history.scope = Sha256::digest(format!("restore:{}", target.partition_id))
                 .iter()
                 .take(16)
                 .map(|b| format!("{b:02x}"))
@@ -695,8 +695,8 @@ impl RecordPartition {
             inner.publish_anchor_state(next, false).await?;
             let mut initial = State::default();
             initial.lineage = inner.state.lineage.clone();
-            initial.feed = change_feed::FeedState {
-                scope: inner.state.feed.scope.clone(),
+            initial.history = history::HistoryState {
+                scope: inner.state.history.scope.clone(),
                 floor: 0,
             };
             let bootstrap = encode_entry(&Entry::Checkpoint {
@@ -742,8 +742,7 @@ impl RecordPartition {
                 )
                 .await?;
             inner.remote = Some(target);
-            inner.feed_cache =
-                change_feed::Cache::rebuild(&inner.state, &inner.config.change_feed)?;
+            history::validate_state(&inner.state)?;
         }
         for file in [
             &source_path,
@@ -885,13 +884,13 @@ mod tests {
         assert_eq!(seq,2);
         {
             let mut inner=p.inner.lock().await;
-            let future=clock.0.load(Ordering::SeqCst)+inner.config.change_feed.retention_ms+1;
-            clock.0.store(future,Ordering::SeqCst);assert!(matches!(inner.trim_feed(future).await,Err(RecordError::Busy)));
+            let future=clock.0.load(Ordering::SeqCst)+inner.config.history.retention_ms+1;
+            clock.0.store(future,Ordering::SeqCst);assert!(matches!(inner.trim_history(future).await,Err(RecordError::Busy)));
         }
         p.kick_maintenance().await;super::super::tests::wait_maintenance_idle(&p).await;
         {
             let inner=p.inner.lock().await;
-            assert!(inner.state.feed.floor>0);
+            assert!(inner.state.history.floor>0);
             let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
             assert_eq!((head.log_base_seq,head.indexed_seq,head.committed_seq),(2,2,2));
             assert!(head.wal_tip.is_none());
@@ -941,24 +940,24 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn background_same_sequence_feed_trim_installs_and_cold_recovers() {
+    async fn background_same_sequence_history_trim_installs_and_cold_recovers() {
         let (p,_,root,_,clock)=source().await;
         let request=write("seed","seed","alpha",ExpectedVersion::Absent);
         let receipt=p.write(request.clone()).await.unwrap();
-        let future=clock.0.load(Ordering::SeqCst)+p.inner.lock().await.config.change_feed.retention_ms+1;
+        let future=clock.0.load(Ordering::SeqCst)+p.inner.lock().await.config.history.retention_ms+1;
         clock.0.store(future,Ordering::SeqCst);
         assert!(matches!(p.advance_time().await,Err(RecordError::Busy)));
         tokio::time::timeout(std::time::Duration::from_secs(20),async {
             while p.inner.lock().await.maintenance_scheduled {tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
         }).await.unwrap();
         {let inner=p.inner.lock().await;
-            assert_eq!(inner.state.seq,receipt.seq);assert_eq!(inner.state.feed.floor,receipt.seq);
+            assert_eq!(inner.state.seq,receipt.seq);assert_eq!(inner.state.history.floor,receipt.seq);
             assert!(inner.maintenance_trim.is_none());assert!(inner.maintenance_requested.is_none());
             let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();
             assert_eq!((head.log_base_seq,head.indexed_seq,head.committed_seq),(1,1,1));assert!(head.wal_tip.is_none());
         }
         let p=cold(p,&root,clock).await;
-        assert_eq!(p.inner.lock().await.state.feed.floor,receipt.seq);
+        assert_eq!(p.inner.lock().await.state.history.floor,receipt.seq);
         assert_eq!(p.write(request).await.unwrap(),receipt);
     }
     #[tokio::test]
@@ -1325,24 +1324,22 @@ mod tests {
         assert_eq!(scores(&p).await, expected);
     }
     #[tokio::test]
-    async fn remote_feed_floor_survives_cache_loss_and_reclaims_covered_wal() {
+    async fn remote_history_floor_survives_cache_loss_and_reclaims_covered_wal() {
         let (p, _, root, _, clock) = source().await;
         p.write(write("first", "a", "alpha", ExpectedVersion::Absent))
             .await
             .unwrap();
-        let page = p.changes(None, 10).await.unwrap();
-        let cursor = page.next;
         {
             let mut inner = p.inner.lock().await;
-            let future = clock.0.load(Ordering::SeqCst) + inner.config.change_feed.retention_ms + 1;
+            let future = clock.0.load(Ordering::SeqCst) + inner.config.history.retention_ms + 1;
             clock.0.store(future, Ordering::SeqCst);
-            assert!(matches!(inner.trim_feed(future).await, Err(RecordError::Busy)));
+            assert!(matches!(inner.trim_history(future).await, Err(RecordError::Busy)));
         }
         p.kick_maintenance().await;
         super::super::tests::settle_maintenance(&p).await;
         let (seq, floor) = {
             let inner = p.inner.lock().await;
-            assert!(inner.state.feed.floor > 0);
+            assert!(inner.state.history.floor > 0);
             let r = inner.remote.as_ref().unwrap();
             let h = r
                 .authority
@@ -1353,13 +1350,11 @@ mod tests {
                 .unwrap();
             assert_eq!(h.log_base_seq, inner.state.seq);
             assert!(h.wal_tip.is_none());
-            (inner.state.seq, inner.state.feed.floor)
+            (inner.state.seq, inner.state.history.floor)
         };
         let p = cold(p, &root, clock).await;
-        assert_eq!(p.inner.lock().await.state.feed.floor, floor);
+        assert_eq!(p.inner.lock().await.state.history.floor, floor);
         assert_eq!(p.statistics().await.unwrap().visible_seq, seq);
-        // A cursor at the retained floor remains valid; an earlier one is explicit expiry.
-        let _ = p.changes(Some(cursor), 10).await;
         p.write(write("next", "b", "alpha new", ExpectedVersion::Absent))
             .await
             .unwrap();
@@ -1717,7 +1712,7 @@ impl RecordPartition {
                     Entry::Checkpoint { state, .. }
                         if state.seq == 0 && state.lineage == inner.state.lineage =>
                     {
-                        inner.state.feed.scope = state.feed.scope;
+                        inner.state.history.scope = state.history.scope;
                     }
                     _ => return Err(RecordError::RecoveryRequired),
                 }
@@ -1725,8 +1720,8 @@ impl RecordPartition {
             inner.publish_anchor().await?;
             let mut initial = State::default();
             initial.lineage = inner.state.lineage.clone();
-            initial.feed = change_feed::FeedState {
-                scope: inner.state.feed.scope.clone(),
+            initial.history = history::HistoryState {
+                scope: inner.state.history.scope.clone(),
                 floor: 0,
             };
             let bytes = encode_entry(&Entry::Checkpoint {

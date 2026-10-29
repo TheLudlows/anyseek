@@ -127,7 +127,7 @@ impl Inner {
             && maintenance::has_expired_operations(&self.state,current_epoch())? {
             return Err(self.request_checkpoint("expired_operation_receipts"));
         }
-        let (applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, mut candidate, _planning) =
+        let (applied, bytes, snapshot_bytes, reserve_bytes, mut candidate, _planning) =
             match mutation::prepare_at(
                 &self.state,
                 &self.config,
@@ -142,7 +142,6 @@ impl Inner {
                     bytes,
                     snapshot_bytes,
                     reserve_bytes,
-                    feed_reserve,
                     candidate,
                     planning,
                 } => (
@@ -150,7 +149,6 @@ impl Inner {
                     bytes,
                     snapshot_bytes,
                     reserve_bytes,
-                    feed_reserve,
                     candidate,
                     planning,
                 ),
@@ -193,9 +191,6 @@ impl Inner {
         } else if let Some(candidate) = candidate.as_mut() {
             candidate.admit_bytes(snapshot_bytes)?;
         }
-        let feed_point = change_feed::pending(&self.state, &applied)?;
-        self.feed_cache
-            .validate(&self.config.change_feed, feed_point.as_ref(), feed_reserve)?;
         self.ensure_journal_room(bytes.len(), reserve_bytes).await?;
         #[cfg(feature = "s3-object-store")]
         self.ensure_remote_tail_room(
@@ -280,7 +275,6 @@ impl Inner {
         }
         self.publish_prepared(&applied, snapshot_bytes, prepared, candidate)
             .await?;
-        self.feed_cache.push(feed_point);
         self.healthy = true;
         self.output
             .write()

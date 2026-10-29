@@ -2,7 +2,7 @@
 
 轻量写入首批新增 `/api/v1/index/{id}/ingest`：接收批次持久化后返回 202，业务条件及索引异步处理；用 `/ingest/operation/{epoch}/{nonce}` 和 `GET /ingest` 查询终态与进度。后台按批物化，Record、全文与向量/元数据分别推进；成功 Record 回执不代表任一索引已追上，可检查 `lexical_seq`、`vector_seq` 和 `index_error`。现有 `/doc` 同步语义保留。接收、恢复、资源和备份边界见[异步写入实施](../../../docs/async-ingestion.md)。
 
-默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、feed、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -221,16 +221,6 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 `temporal` 是系统元数据，不放入自定义 `document`。业务有效期是半开区间 `[Record 语义](../../../docs/record-model.md)。
 
-
-## change feed 与快照续传
-
-使用 `POST /api/v1/index/{id}/changes`，请求 `{"after":null,"length":100}`。事件只包含已提交身份/版本/操作 ID 和失效原因，不提供历史正文。每 partition 有序、至少一次；使用 `(scope,seq,event_index)` 幂等消费，再保存响应 next。`rescan_required` 表示需重建有效视图，不能只删除事件中一个 ID。
-
-游标过期返回 410 `cursor_expired`，不自动跳到尾部。重建流程：GET 同路径前缀的 `/bootstrap` 取得 request_id_prefix，追加 16 个随机 hex；POST `/bootstrap`，传 `request_id,after:null,length`，使用返回 next 继续同切点分页。完整快照应用成功后保存 continuation，再 DELETE `/bootstrap/{request_id}` 释放 pin，随后从 continuation 消费 changes。重启/释放/到期/隐藏后旧 bootstrap 请求返回 410 `bootstrap_expired`，必须丢弃不完整页重新开始。每 partition 一份五分钟有界 pin，所有接口要求当前 collection 授权。
-
-创建 config 可携带 `change_feed:{retention_ms:604800000,max_events:100000,max_bytes:67108864}`。保留期至少七天；事件与紧急失效预留达到配额时新写入返回 429 `feed_full`，不会提前丢事件。既有 Record/journal 配额也继续有效。逻辑 feed 裁剪不删除原幂等账本，不等于 P3 物理历史回收。
-
-独立恢复会换 scope，旧 feed 游标不能直接复用；bootstrap 后重新接续。Web UI 的记录编辑页提供快照/feed 人工检查面板。详细协议、资源边界、审查及分平台证据见[Record 语义](../../../docs/record-model.md)。当前主干验证结论见 [STATUS](../../../STATUS.md)，历史分支结果不能代替本次源码验证。
 
 ## 实体与显式一跳关系
 
