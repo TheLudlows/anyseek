@@ -178,5 +178,13 @@
   "record::tests::record_uncertified_generation_cleanup_can_be_interrupted_again",
   "record::write::tests::committed_prefix_decides_versions_before_reply_without_waiting_for_indexes",
   "record::write::tests::committed_executor_retains_durable_unknown_outcome_for_original_retry",
-  "record::write::tests::committed_executor_bounds_and_cancelled_waiter_do_not_change_commit_contract"
+  "record::write::tests::committed_executor_bounds_and_cancelled_waiter_do_not_change_commit_contract",
+  "record::write::tests::durable_batch_unknown_reopens_all_decisions_and_replays_original_ids",
+  "record::tests::batch_source_generation_and_publication_recover_in_order",
+  "record::remote_checkpoint::tests::remote_batch_one_block_atomic_head_and_cold_replay",
+  "record::remote_checkpoint::tests::remote_batch_uploaded_but_unpublished_is_not_replayed",
+  "storage::journal::tests::batch_admission_is_before_first_write",
+  "storage::journal::tests::journal_batch_process_crash_selects_whole_range",
+  "storage::sqlite_authority::tests::batch_publication_rolls_back_all_receipts_and_fences_stale_owner",
+  "record::remote_checkpoint::tests::remote_batch_cache_failure_is_durable_and_cold_retry_resolves_every_item"
 ]

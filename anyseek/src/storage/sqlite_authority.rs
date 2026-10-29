@@ -304,16 +304,20 @@ impl SqliteAuthority {
         Ok(head.wal_tip)
     }
 
-    /// Exact retained WAL sizes from the immutable commit receipts. No payload
-    /// copies or remote GET are needed for pre-append recovery admission.
-    /// Record commits exactly one Entry per block; generic multi-entry blocks
-    /// must not use this receipt-based count as their recovery admission.
+    /// Exact retained WAL sizes from immutable commit receipts. A batch has
+    /// one receipt per event but shares one block: charge each object only once.
     pub(crate) fn retained_tail_size(&self, head:&PartitionHead)->rusqlite::Result<(u64,u64)> {
-        let (count,bytes):(i64,i64)=self.connection.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(json_extract(result_json,'$.wal_tip.length')),0) FROM operation_receipts WHERE partition_id=?1 AND committed_seq>?2 AND committed_seq<=?3",
+        let (events,count,bytes):(i64,i64,i64)=self.connection.query_row(
+            "WITH receipts AS (
+                SELECT result_json FROM operation_receipts
+                WHERE partition_id=?1 AND committed_seq>?2 AND committed_seq<=?3
+             ), blocks AS (
+                SELECT DISTINCT json_extract(result_json,'$.wal_tip') AS tip FROM receipts
+             ) SELECT (SELECT COUNT(*) FROM receipts), COUNT(*),
+                 COALESCE(SUM(json_extract(tip,'$.length')),0) FROM blocks",
             params![head.partition_id,to_i64(head.log_base_seq)?,to_i64(head.committed_seq)?],
-            |row|Ok((row.get(0)?,row.get(1)?)))?;
-        if count<0 || bytes<0 || count as u64!=head.committed_seq.checked_sub(head.log_base_seq).ok_or(rusqlite::Error::InvalidQuery)? {
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        if count<0 || bytes<0 || events<0 || events as u64!=head.committed_seq.checked_sub(head.log_base_seq).ok_or(rusqlite::Error::InvalidQuery)? {
             return Err(rusqlite::Error::InvalidQuery);
         }
         Ok((count as u64,bytes as u64))
@@ -550,20 +554,54 @@ impl SqliteAuthority {
         wal_tip: ObjectRef,
         manifest: Option<ObjectRef>,
     ) -> rusqlite::Result<PublishOutcome> {
-        if operation_id.is_empty() || partition_id.is_empty() {
-            return Err(rusqlite::Error::InvalidParameterName("empty identity".into()));
+        self.publish_batch(partition_id, expected_head_version, owner_epoch,
+            &[(operation_id, request_sha256, committed_seq)], wal_tip, manifest)
+    }
+
+    /// Select one immutable block and all its operation identities atomically.
+    /// Each receipt resolves to the same authoritative cut, not a partial block.
+    pub(crate) fn publish_batch(
+        &mut self,
+        partition_id: &str,
+        expected_head_version: u64,
+        owner_epoch: u64,
+        operations: &[(&str, [u8; 32], u64)],
+        wal_tip: ObjectRef,
+        manifest: Option<ObjectRef>,
+    ) -> rusqlite::Result<PublishOutcome> {
+        if operations.is_empty() || partition_id.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName("empty batch identity".into()));
         }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some((digest, result_json)) = read_receipt(&tx, partition_id, operation_id)? {
-            if digest != request_sha256 {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "operation ID reused with a different request digest".into()
-                ));
+        let mut identities = std::collections::HashSet::new();
+        for (index, (id, _, seq)) in operations.iter().enumerate() {
+            if id.is_empty() || !identities.insert(*id)
+                || (index > 0 && operations[index - 1].2.checked_add(1) != Some(*seq)) {
+                return Err(rusqlite::Error::InvalidParameterName("invalid batch identities or sequence".into()));
             }
-            let original_head: PartitionHead = serde_json::from_str(&result_json)
+        }
+        let committed_seq = operations.last().unwrap().2;
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut replay = None;
+        let mut found = 0;
+        for (id, digest, _) in operations {
+            if let Some((saved_digest, json)) = read_receipt(&tx, partition_id, id)? {
+                if saved_digest != *digest {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "operation ID reused with a different request digest".into()));
+                }
+                if replay.as_ref().is_some_and(|previous| previous != &json) {
+                    return Ok(PublishOutcome::Conflict);
+                }
+                replay = Some(json);
+                found += 1;
+            }
+        }
+        if found > 0 {
+            if found != operations.len() { return Ok(PublishOutcome::Conflict); }
+            let original: PartitionHead = serde_json::from_str(&replay.unwrap())
                 .map_err(|_| rusqlite::Error::InvalidQuery)?;
             tx.commit()?;
-            return Ok(PublishOutcome::AlreadyPublished(original_head));
+            return Ok(PublishOutcome::AlreadyPublished(original));
         }
         if retired_intake_key(&tx, &wal_tip.key)? { return Err(rusqlite::Error::InvalidQuery); }
         ensure_durable_object(&tx, &wal_tip)?;
@@ -573,7 +611,7 @@ impl SqliteAuthority {
         }
         let current = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         if current.head_version != expected_head_version || current.owner_epoch != owner_epoch
-            || committed_seq != current.committed_seq.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?
+            || operations[0].2 != current.committed_seq.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?
         {
             tx.commit()?;
             return Ok(PublishOutcome::Conflict);
@@ -602,11 +640,13 @@ impl SqliteAuthority {
         }
         let head = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let result_json = serde_json::to_string(&head).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        tx.execute(
-            "INSERT INTO operation_receipts(partition_id,operation_id,request_sha256,committed_seq,result_json)
-             VALUES(?1,?2,?3,?4,?5)",
-            params![partition_id,operation_id,request_sha256.as_slice(),to_i64(committed_seq)?,result_json],
-        )?;
+        for (id, digest, seq) in operations {
+            tx.execute(
+                "INSERT INTO operation_receipts(partition_id,operation_id,request_sha256,committed_seq,result_json)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![partition_id,id,digest.as_slice(),to_i64(*seq)?,result_json],
+            )?;
+        }
         tx.commit()?;
         Ok(PublishOutcome::Published(head))
     }
@@ -1617,6 +1657,27 @@ mod tests {
         let _=fs::remove_file(&path);
         let _=fs::remove_file(path.with_extension("sqlite-wal"));
         let _=fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn batch_publication_rolls_back_all_receipts_and_fences_stale_owner() {
+        let path=temp_db(); let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        let head=db.create_partition("batch",7).unwrap(); let wal=object("wal/batch",1);
+        db.register_durable_object(&wal,1).unwrap();
+        let operations=[("a",[1;32],1),("b",[2;32],2)];
+        assert!(matches!(db.publish_batch("batch",head.head_version,6,&operations,wal.clone(),None).unwrap(),PublishOutcome::Conflict));
+        db.connection.execute_batch("CREATE TRIGGER fail_second BEFORE INSERT ON operation_receipts WHEN NEW.operation_id='b' BEGIN SELECT RAISE(FAIL,'injected second receipt failure'); END;").unwrap();
+        assert!(db.publish_batch("batch",head.head_version,7,&operations,wal.clone(),None).is_err());
+        assert_eq!(db.read_head("batch").unwrap().unwrap().committed_seq,0);
+        assert!(db.resolve_operation("batch","a",[1;32]).unwrap().is_none());
+        db.connection.execute_batch("DROP TRIGGER fail_second;").unwrap();
+        assert!(matches!(db.publish_batch("batch",head.head_version,7,&operations,wal.clone(),None).unwrap(),PublishOutcome::Published(_)));
+        assert!(matches!(db.publish_batch("batch",head.head_version,7,&operations,wal.clone(),None).unwrap(),PublishOutcome::AlreadyPublished(_)));
+        assert!(matches!(db.publish_batch("batch",head.head_version,7,&[("a",[1;32],1),("new",[3;32],2)],wal,None).unwrap(),PublishOutcome::Conflict));
+        drop(db); let db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        let head=db.read_head("batch").unwrap().unwrap(); assert_eq!((head.committed_seq,head.indexed_seq),(2,0));
+        assert_eq!(db.retained_tail_size(&head).unwrap(),(1,object("wal/batch",1).length));
+        for (id,digest,_) in operations {assert_eq!(db.resolve_operation("batch",id,digest).unwrap().unwrap().committed_seq,2);}
     }
 
     #[test]

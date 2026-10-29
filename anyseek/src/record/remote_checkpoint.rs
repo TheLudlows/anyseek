@@ -190,14 +190,18 @@ impl RemotePersistence {
     }
 
     pub(super) async fn tail_needs_checkpoint(&self,seq:u64,operation_id:&str,payload:&[u8])->Result<bool,RecordError> {
+        self.batch_tail_needs_checkpoint(&[(seq,operation_id.to_owned(),payload)]).await
+    }
+    pub(super) async fn batch_tail_needs_checkpoint(&self,entries:&[(u64,String,&[u8])])->Result<bool,RecordError> {
+        let seq=entries.first().ok_or_else(||storage("empty remote batch"))?.0;
         #[derive(Serialize)]
         struct Entry<'a>{seq:u64,operation_id:&'a str,request_sha256:[u8;32],payload:&'a [u8]}
         #[derive(Serialize)]
-        struct Block<'a>{partition_id:&'a str,first_seq:u64,last_seq:u64,previous:Option<&'a ObjectRef>,entries:[Entry<'a>;1]}
+        struct Block<'a>{partition_id:&'a str,first_seq:u64,last_seq:u64,previous:Option<&'a ObjectRef>,entries:Vec<Entry<'a>>}
         let authority=self.authority.lock().await;
         let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
         if head.owner_epoch!=self.owner_epoch || head.committed_seq.checked_add(1)!=Some(seq) {return Err(RecordError::RecoveryRequired);}
-        let mut block=Block{partition_id:&self.partition_id,first_seq:seq,last_seq:seq,previous:head.wal_tip.as_ref(),entries:[Entry{seq,operation_id,request_sha256:Sha256::digest(payload).into(),payload}]};
+        let mut block=Block{partition_id:&self.partition_id,first_seq:seq,last_seq:entries.last().unwrap().0,previous:head.wal_tip.as_ref(),entries:entries.iter().map(|(seq,operation_id,payload)|Entry{seq:*seq,operation_id,request_sha256:Sha256::digest(payload).into(),payload}).collect()};
         let bytes=checkpoint_codec::json_length(&block)? as u64;
         let (count,total)=authority.retained_tail_size(&head).map_err(storage)?;
         if bytes<=self.max_object_bytes as u64 && count<self.max_tail_blocks as u64
@@ -822,6 +826,69 @@ mod tests {
         drop(inner);
         (p, store, root, db, clock)
     }
+    #[tokio::test]
+    async fn remote_batch_one_block_atomic_head_and_cold_replay() {
+        let (p,_store,root,_db,clock)=source().await;
+        let requests=vec![write("batch-a","r","alpha",ExpectedVersion::Absent),
+            write("batch-b","r","beta",ExpectedVersion::Match(1))];
+        let result=p.execute_writes(requests.clone(),write::IndexDelivery::Asynchronous).await.unwrap();
+        assert_eq!(result.results.len(),2);
+        {
+            let inner=p.inner.lock().await; let remote=inner.remote.as_ref().unwrap();
+            let authority=remote.authority.lock().await;
+            let head=authority.read_head("source").unwrap().unwrap();
+            assert_eq!(head.committed_seq,2);
+            let bytes=remote.store.get_verified(head.wal_tip.as_ref().unwrap()).await.unwrap();
+            let block:crate::storage::object_log::ObjectLogBlock=serde_json::from_slice(&bytes).unwrap();
+            assert_eq!((block.first_seq,block.last_seq,block.entries.len()),(1,2,2));
+            assert!(block.previous.is_none());
+            for entry in &block.entries {
+                assert_eq!(authority.resolve_operation("source",&entry.operation_id,entry.request_sha256).unwrap().unwrap().committed_seq,2);
+            }
+        }
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        let p=cold(p,&root,clock).await;
+        for (request,result) in requests.into_iter().zip(result.results) { assert_eq!(p.write(request).await.unwrap(),result.unwrap()); }
+        assert_eq!(p.get("r").await.unwrap().unwrap().version,2);
+    }
+
+    #[tokio::test]
+    async fn remote_batch_cache_failure_is_durable_and_cold_retry_resolves_every_item() {
+        let (p,_store,root,_db,clock)=source().await;
+        let requests=vec![write("batch-cache-a","r","alpha",ExpectedVersion::Absent),
+            write("batch-cache-b","r","beta",ExpectedVersion::Match(1))];
+        std::fs::write(root.join(".test-cache-append-failure"),b"fail").unwrap();
+        assert!(matches!(p.execute_writes(requests.clone(),write::IndexDelivery::Asynchronous).await,Err(RecordError::DurablePending(2))));
+        let p=cold(p,&root,clock).await;
+        assert_eq!(p.get("r").await.unwrap().unwrap().version,2);
+        let result=p.execute_writes(vec![requests[0].clone(),requests[0].clone(),requests[1].clone()],write::IndexDelivery::Asynchronous).await.unwrap();
+        assert_eq!(result.results.iter().map(|r|r.as_ref().unwrap().seq).collect::<Vec<_>>(),vec![1,1,2]);
+        assert_eq!(p.inner.lock().await.state.seq,2);
+    }
+
+    #[tokio::test]
+    async fn remote_batch_uploaded_but_unpublished_is_not_replayed() {
+        let (p,_store,root,db,clock)=source().await;
+        let connection=rusqlite::Connection::open(&db).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_batch BEFORE UPDATE OF committed_seq ON partition_heads BEGIN SELECT RAISE(FAIL, 'injected publication failure'); END;").unwrap();
+        let requests=vec![write("batch-fail-a","r","alpha",ExpectedVersion::Absent),
+            write("batch-fail-b","r","beta",ExpectedVersion::Match(1))];
+        assert!(matches!(p.execute_writes(requests.clone(),write::IndexDelivery::Asynchronous).await,Err(RecordError::OutcomeUnknown(_))));
+        {
+            let inner=p.inner.lock().await; let remote=inner.remote.as_ref().unwrap();
+            let authority=remote.authority.lock().await;
+            let head=authority.read_head("source").unwrap().unwrap();
+            assert_eq!(head.committed_seq,0); assert!(head.wal_tip.is_none());
+        }
+        let registered:i64=connection.query_row("SELECT COUNT(*) FROM object_uploads WHERE state=1",[],|r|r.get(0)).unwrap();
+        assert!(registered>=2,"bootstrap plus uploaded orphan remain registered");
+        connection.execute_batch("DROP TRIGGER fail_batch;").unwrap(); drop(connection);
+        let p=cold(p,&root,clock).await;
+        assert!(p.get("r").await.unwrap().is_none());
+        let retry=p.execute_writes(requests,write::IndexDelivery::Asynchronous).await.unwrap();
+        assert_eq!(retry.results.iter().map(|r|r.as_ref().unwrap().seq).collect::<Vec<_>>(),vec![1,2]);
+    }
+
     #[test]
     fn joint_closure_admits_once_and_rejects_duplicate_or_over_budget() {
         let root=path();

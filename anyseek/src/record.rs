@@ -476,38 +476,43 @@ impl RemotePersistence {
     }
 
     async fn commit_entry(&mut self, seq: u64, operation_id: String, payload: &[u8]) -> Result<(), RemoteCommitError> {
+        self.commit_entries(&[(seq, operation_id, payload)]).await
+    }
+
+    async fn commit_entries(&mut self, entries: &[(u64, String, &[u8])]) -> Result<(), RemoteCommitError> {
         use sha2::{Digest, Sha256};
+        let first = entries.first().ok_or_else(|| "empty remote batch".to_owned())?.0;
+        let last = entries.last().unwrap().0;
         let mut authority = self.authority.lock().await;
         let head = authority.read_head(&self.partition_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "remote partition authority is missing".to_owned())?;
-        if seq != head.committed_seq.saturating_add(1) {
-            return Err(format!("remote commit sequence conflict: local={seq}, remote={}", head.committed_seq).into());
+        if first != head.committed_seq.saturating_add(1) || head.owner_epoch != self.owner_epoch {
+            return Err("remote commit sequence or owner epoch conflict".into());
         }
-        if head.owner_epoch != self.owner_epoch {
-            return Err("remote owner epoch changed; this writer is fenced".into());
-        }
-        let digest: [u8; 32] = Sha256::digest(payload).into();
         let block = crate::storage::object_log::ObjectLogBlock {
-            partition_id: self.partition_id.clone(), first_seq: seq, last_seq: seq,
+            partition_id: self.partition_id.clone(), first_seq: first, last_seq: last,
             previous: head.wal_tip.clone(),
-            entries: vec![crate::storage::object_log::ObjectLogEntry {
-                seq, operation_id: operation_id.clone(), request_sha256: digest, payload: payload.to_vec(),
-            }],
+            entries: entries.iter().map(|(seq, id, payload)| crate::storage::object_log::ObjectLogEntry {
+                seq: *seq, operation_id: id.clone(), request_sha256: Sha256::digest(payload).into(), payload: payload.to_vec(),
+            }).collect(),
         };
-        let key = format!("partitions/{}/wal/{seq:020}-{}", self.partition_id,
+        // The object identity binds the complete range, including its predecessor.
+        let digest: [u8; 32] = checkpoint_codec::json_digest(&block).map_err(|e| format!("{e:?}"))?;
+        let key = format!("partitions/{}/wal/{first:020}-{}", self.partition_id,
             digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
         let reference = crate::storage::object_log::upload_log_block(
             &self.store, &mut authority, &key, &block,
             unix_time_ms_i64(), self.max_object_bytes,
         ).await.map_err(RemoteCommitError::from)?;
-        match authority.publish_commit(
-            &self.partition_id, head.head_version, self.owner_epoch, &operation_id,
-            digest, seq, reference, None,
+        let operations: Vec<_> = block.entries.iter().map(|entry|
+            (entry.operation_id.as_str(), entry.request_sha256, entry.seq)).collect();
+        match authority.publish_batch(
+            &self.partition_id, head.head_version, self.owner_epoch, &operations, reference, None,
         ).map_err(|error| error.to_string())? {
             crate::storage::sqlite_authority::PublishOutcome::Published(published)
             | crate::storage::sqlite_authority::PublishOutcome::AlreadyPublished(published)
-                if published.committed_seq == seq => Ok(()),
+                if published.committed_seq == last => Ok(()),
             crate::storage::sqlite_authority::PublishOutcome::Conflict =>
                 Err("remote SQLite commit conflicted; partition requires recovery".into()),
             _ => Err("remote operation receipt does not match committed sequence".into()),
@@ -730,6 +735,9 @@ impl Inner {
     // A cache append error cannot turn that known durable operation into an
     // unknown remote commit. The caller keeps health/output fenced until reopen.
     async fn append_operation(&mut self, bytes: &[u8], seq: u64) -> Result<(), RecordError> {
+        self.append_operations(&[bytes], seq).await
+    }
+    async fn append_operations(&mut self, payloads: &[&[u8]], seq: u64) -> Result<(), RecordError> {
         // Reserve the whole local frame before its first byte. File callbacks
         // borrow this permit through both redundant witnesses; no native or
         // remote work runs inside the synchronous loan.
@@ -746,7 +754,7 @@ impl Inner {
             if std::env::var("ANYSEEK_CACHE_APPEND_FAULT").as_deref()==Ok("1") {
                 return Err(std::io::Error::other("injected cache append failure"));
             }
-            self.journal.append(bytes)
+            self.journal.append_batch(payloads)
         };
         let result = match permit {
             Ok(Some(permit)) => permit.run(append),
@@ -759,6 +767,7 @@ impl Inner {
             let _ = seq;
             return Err(RecordError::OutcomeUnknown(error.to_string()));
         }
+        for bytes in payloads {
         if let Some(tail) = self.background.as_mut() {
             if let Some(revision)=tail.revision.checked_add(1) {tail.revision=revision;}
             else {tail.overflowed=true;}
@@ -772,6 +781,7 @@ impl Inner {
                     tail.entries.push(bytes.to_vec());tail.bytes=total;
                 } else {tail.overflowed=true;tail.entries.clear();}
             }
+        }
         }
         Ok(())
     }
@@ -2644,6 +2654,23 @@ mod tests {
         }
         drop(p); std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn batch_source_generation_and_publication_recover_in_order() {
+        let directory=tempfile::tempdir().unwrap(); let root=directory.path().join("record");
+        let p=RecordPartition::create(&root,config()).await.unwrap();
+        let requests=vec![source_write("s","s",&[]),
+            generation_write("stage",ExpectedVersion::Absent,stage_generation("g1",&["a","b"])),
+            generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g1".into()})];
+        let result=p.execute_writes(requests.clone(),write::IndexDelivery::Asynchronous).await.unwrap();
+        assert_eq!(result.results.len(),3);
+        assert!(result.results.iter().all(Result::is_ok));
+        assert!(p.get("a").await.unwrap().is_some());
+        p.inner.lock().await.index.drain_indexes().await.unwrap(); drop(p);
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        for (request,receipt) in requests.into_iter().zip(result.results) {assert_eq!(p.write(request).await.unwrap(),receipt.unwrap());}
+        assert!(p.get("b").await.unwrap().is_some());
+    }
+
     #[tokio::test]
     async fn generation_partial_publication_fences_and_recovers_whole_set() {
         let root = path(); let archive = path();

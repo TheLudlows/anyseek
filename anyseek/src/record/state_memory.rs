@@ -82,7 +82,7 @@ impl State {
         let needed = self.container_bytes(bytes)?;
         self.admit_containers(needed)
     }
-    fn admit_containers(&mut self, bytes:usize)->Result<(),RecordError>{
+    pub(super) fn admit_containers(&mut self, bytes:usize)->Result<(),RecordError>{
         let needed=(bytes as u64).checked_mul(32).ok_or_else(||storage("state metadata estimate overflow"))?;
         if let Some(charge) = self.residency.as_mut().and_then(Arc::get_mut) {
             if needed > charge.bytes {
@@ -110,7 +110,7 @@ impl State {
     pub(super) fn value_bytes(&self) -> Result<usize, RecordError> {
         self.records.bytes().checked_add(self.source_revisions.bytes()).and_then(|n|n.checked_add(self.operations.bytes())).ok_or_else(||storage("shared value total overflow"))
     }
-    fn container_bytes(&self, total: usize) -> Result<usize, RecordError> {
+    pub(super) fn container_bytes(&self, total: usize) -> Result<usize, RecordError> {
         let values = self.records.bytes().checked_add(self.source_revisions.bytes())
             .and_then(|n|n.checked_add(self.operations.bytes())).ok_or_else(||storage("shared value total overflow"))?;
         total.checked_sub(values).and_then(|n|n.checked_add(self.lookup_bytes))

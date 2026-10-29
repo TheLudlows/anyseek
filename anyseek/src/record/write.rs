@@ -36,7 +36,8 @@ impl RecordPartition {
     }
 
     /// Run an admitted prefix in order, deciding each command against preceding
-    /// committed state. This is not an atomic business batch or a batch WAL yet.
+    /// planned state. The admitted prefix shares a durable publication; it is
+    /// not an all-or-nothing business batch.
     /// A definite rejection ends the prefix; an unprocessed suffix has no result.
     pub(super) async fn execute_writes(
         &self,
@@ -78,34 +79,20 @@ impl RecordPartition {
                 } else {
                     inner.index.drain_indexes().await?;
                 }
-                let mut batch = BatchResult {
-                    results: Vec::new(),
-                    stop: None,
-                };
-                for request in requests {
-                    let result = inner.write_one(request).await;
-                    if !inner.healthy {
-                        // Incomplete publication cannot certify an index view.
-                        // Recovery resolves all original operation identities.
-                        if asynchronous {
-                            inner.index.abort_batch();
-                        }
-                        return Err(result.err().unwrap_or(RecordError::RecoveryRequired));
+                let result = inner.write_batch(requests).await;
+                if !inner.healthy {
+                    if asynchronous {
+                        inner.index.abort_batch();
                     }
-                    match result {
-                        Ok(receipt) => batch.results.push(Ok(receipt)),
-                        Err(error) if definite(&error) => {
-                            // Do not execute the suffix. The caller decides whether
-                            // to resubmit it; this executor adds no rejection ledger.
-                            batch.results.push(Err(error));
-                            break;
-                        }
-                        Err(error) => {
-                            batch.stop = Some(error);
-                            break;
-                        }
-                    }
+                    return Err(result.err().unwrap_or(RecordError::RecoveryRequired));
                 }
+                let batch = match result {
+                    Ok(batch) => batch,
+                    Err(error) => BatchResult {
+                        results: Vec::new(),
+                        stop: Some(error),
+                    },
+                };
                 if !asynchronous {
                     partition.indexes.immediate(inner.state.seq);
                     return Ok(batch);
@@ -148,6 +135,321 @@ impl RecordPartition {
 }
 
 impl Inner {
+    async fn write_batch(
+        &mut self,
+        requests: Vec<RecordWrite>,
+    ) -> Result<BatchResult, RecordError> {
+        if requests.len() == 1 {
+            let result = self.write_one(requests.into_iter().next().unwrap()).await;
+            return match result {
+                Ok(receipt) => Ok(BatchResult {
+                    results: vec![Ok(receipt)],
+                    stop: None,
+                }),
+                Err(error) if self.healthy && definite(&error) => Ok(BatchResult {
+                    results: vec![Err(error)],
+                    stop: None,
+                }),
+                Err(error) if self.healthy => Ok(BatchResult {
+                    results: vec![],
+                    stop: Some(error),
+                }),
+                Err(error) => Err(error),
+            };
+        }
+        self.advance_time().await?;
+        let mut shadow = self.state.try_clone()?;
+        let mut snapshot = self.snapshot_bytes;
+        let mut plans = Vec::new();
+        let mut result = BatchResult {
+            results: Vec::new(),
+            stop: None,
+        };
+        let mut growth_total = 0u64;
+        let mut updates_total = 0usize;
+        let mut journal_bytes = 0usize;
+        let mut container_bound = self.state.container_bytes(snapshot)?;
+        for request in requests {
+            let plan = async {
+                if !shadow.operation_lookup.contains_key(&request.operation_id) {
+                    if self.maintenance_requested.is_some() {
+                        return Err(RecordError::Busy);
+                    }
+                    if maintenance::has_expired_operations(&shadow, current_epoch())? {
+                        return Err(self.request_checkpoint("expired_operation_receipts"));
+                    }
+                }
+                let plan = mutation::prepare_at(
+                    &shadow,
+                    &self.config,
+                    snapshot,
+                    request,
+                    current_epoch(),
+                    self.evaluation_time_ms,
+                )?;
+                let mutation::PreparedWrite::Append {
+                    applied,
+                    bytes,
+                    snapshot_bytes,
+                    reserve_bytes,
+                    candidate,
+                    ..
+                } = &plan
+                else {
+                    return Ok(plan);
+                };
+                let (growth, updates) =
+                    build_budget::write_estimate(&shadow, &self.config, applied)?;
+                if growth > 0 {
+                    let fresh = (self.config.schema.len() as u64)
+                        .checked_mul(65536 * 32)
+                        .and_then(|n| n.checked_add(growth))
+                        .ok_or_else(|| storage("batch admission overflow"))?;
+                    crate::storage::build_budget::validate_single(fresh)
+                        .map_err(|e| RecordError::Rejected(e.to_string()))?;
+                    if updates > 128 {
+                        return Err(RecordError::Rejected(
+                            "operation exceeds mutable native update bound".into(),
+                        ));
+                    }
+                }
+                let total = growth_total
+                    .checked_add(growth)
+                    .ok_or_else(|| storage("batch growth overflow"))?;
+                let native = updates_total
+                    .checked_add(updates)
+                    .ok_or_else(|| storage("batch native bound overflow"))?;
+                if !self.index.can_admit(total, native).await {
+                    if plans.is_empty() {
+                        self.maintain_index_tail().await?;
+                    }
+                    if !self.index.can_admit(total, native).await {
+                        return Err(RecordError::Busy);
+                    }
+                }
+                // One physical frame per decision; account for every 24-byte header.
+                let physical = journal_bytes
+                    .checked_add(bytes.len())
+                    .and_then(|n| n.checked_add(24))
+                    .ok_or_else(|| storage("batch journal bound overflow"))?;
+                if let Err(error) = self
+                    .ensure_journal_room(physical - 24, *reserve_bytes)
+                    .await
+                {
+                    // Aggregate pressure must not durably reject a valid item.
+                    return Err(if plans.is_empty() {
+                        error
+                    } else {
+                        RecordError::Busy
+                    });
+                }
+                #[cfg(feature = "s3-object-store")]
+                if let Some(remote) = self.remote.as_ref() {
+                    let mut entries: Vec<_> = plans
+                        .iter()
+                        .filter_map(|plan| match plan {
+                            mutation::PreparedWrite::Append { applied, bytes, .. } => Some((
+                                applied.receipt.seq,
+                                format!(
+                                    "{}:{}",
+                                    applied.request.operation_id.epoch,
+                                    applied.request.operation_id.nonce
+                                ),
+                                bytes.as_slice(),
+                            )),
+                            _ => None,
+                        })
+                        .collect();
+                    entries.push((
+                        applied.receipt.seq,
+                        format!(
+                            "{}:{}",
+                            applied.request.operation_id.epoch, applied.request.operation_id.nonce
+                        ),
+                        bytes,
+                    ));
+                    match remote.batch_tail_needs_checkpoint(&entries).await {
+                        Ok(false) => {}
+                        Ok(true) => return Err(self.request_checkpoint("remote_tail_room")),
+                        Err(error) => {
+                            return Err(if plans.is_empty() {
+                                error
+                            } else {
+                                RecordError::Busy
+                            });
+                        }
+                    }
+                }
+                if let Some(candidate) = candidate {
+                    shadow = candidate.try_clone()?;
+                } else {
+                    let prepared = state_memory::Prepared::new(&shadow, applied)?;
+                    prepared.admit_containers(&mut shadow, *snapshot_bytes)?;
+                    apply_prepared(&mut shadow, applied, Some(prepared))?;
+                }
+                snapshot = *snapshot_bytes;
+                container_bound = container_bound.max(shadow.container_bytes(snapshot)?);
+                growth_total = total;
+                updates_total = native;
+                journal_bytes = physical;
+                Ok(plan)
+            }
+            .await;
+            match plan {
+                Ok(mutation::PreparedWrite::Replay(receipt)) => result.results.push(Ok(receipt)),
+                Ok(plan) => {
+                    if let mutation::PreparedWrite::Append { applied, .. } = &plan {
+                        result.results.push(Ok(applied.receipt.clone()));
+                    }
+                    plans.push(plan);
+                }
+                Err(error) if definite(&error) => {
+                    result.results.push(Err(error));
+                    break;
+                }
+                Err(error) => {
+                    result.stop = Some(error);
+                    break;
+                }
+            }
+        }
+        if plans.is_empty() {
+            return Ok(result);
+        }
+        // Admit live container growth before persistence. Values are separately owned.
+        self.state.admit_containers(container_bound)?;
+        // Retain all ordinary publication values before the first durable byte.
+        let mut publication = Vec::new();
+        let mut prior = self.state.try_clone()?;
+        for plan in &mut plans {
+            if let mutation::PreparedWrite::Append {
+                applied,
+                snapshot_bytes,
+                candidate,
+                ..
+            } = plan
+            {
+                let prepared = if let Some(candidate) = candidate {
+                    candidate.admit_containers(container_bound)?;
+                    prior = candidate.try_clone()?;
+                    None
+                } else {
+                    let prepared = state_memory::Prepared::new(&prior, applied)?;
+                    prepared.admit_containers(&mut prior, *snapshot_bytes)?;
+                    apply_prepared(
+                        &mut prior,
+                        applied,
+                        Some(state_memory::Prepared {
+                            record: prepared.record.clone(),
+                            operation: prepared.operation.clone(),
+                        }),
+                    )?;
+                    Some(prepared)
+                };
+                publication.push(prepared);
+            }
+        }
+        drop(prior);
+        drop(shadow);
+        let payloads: Vec<_> = plans
+            .iter()
+            .map(|plan| match plan {
+                mutation::PreparedWrite::Append { bytes, .. } => bytes.as_slice(),
+                _ => unreachable!(),
+            })
+            .collect();
+        let sequence = match plans.last().unwrap() {
+            mutation::PreparedWrite::Append { applied, .. } => applied.receipt.seq,
+            _ => unreachable!(),
+        };
+        #[cfg(feature="fault-injection")]
+        let injected = std::env::var("ANYSEEK_RECORD_FAULT_NONCE").ok().filter(|nonce| plans.iter().any(|plan|
+            matches!(plan, mutation::PreparedWrite::Append { applied, .. } if &applied.request.operation_id.nonce == nonce)))
+            .and_then(|_|std::env::var("ANYSEEK_RECORD_FAULT").ok());
+        #[cfg(feature = "fault-injection")]
+        if injected.as_deref() == Some("before_append") {
+            return Err(RecordError::Rejected("injected before append".into()));
+        }
+        self.healthy = false;
+        {
+            let mut output = self
+                .output
+                .write()
+                .map_err(|_| RecordError::RecoveryRequired)?;
+            output.fenced = true;
+            // A conservative barrier covers source, evidence and generation changes.
+            output.revision = output
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| storage("data barrier revision exhausted"))?;
+        }
+        #[cfg(feature = "s3-object-store")]
+        if let Some(remote) = self.remote.as_mut() {
+            let entries: Vec<_> = plans
+                .iter()
+                .map(|plan| match plan {
+                    mutation::PreparedWrite::Append { applied, bytes, .. } => (
+                        applied.receipt.seq,
+                        format!(
+                            "{}:{}",
+                            applied.request.operation_id.epoch, applied.request.operation_id.nonce
+                        ),
+                        bytes.as_slice(),
+                    ),
+                    _ => unreachable!(),
+                })
+                .collect();
+            match remote.commit_entries(&entries).await {
+                Ok(()) => {}
+                Err(RemoteCommitError::Busy) => {
+                    self.healthy = true;
+                    self.output
+                        .write()
+                        .map_err(|_| RecordError::RecoveryRequired)?
+                        .fenced = false;
+                    return Err(RecordError::Busy);
+                }
+                Err(RemoteCommitError::Unknown(error)) => {
+                    return Err(RecordError::OutcomeUnknown(error));
+                }
+            }
+        }
+        self.append_operations(&payloads, sequence).await?;
+        #[cfg(feature = "fault-injection")]
+        match injected.as_deref() {
+            Some("after_append_unknown") => {
+                return Err(RecordError::OutcomeUnknown(
+                    "injected uncertain batch append".into(),
+                ));
+            }
+            Some("after_durable") => return Err(RecordError::DurablePending(sequence)),
+            Some("crash_after_durable") => std::process::exit(86),
+            _ => {}
+        }
+        #[cfg(test)]
+        if self.fail_after_durable {
+            return Err(RecordError::DurablePending(sequence));
+        }
+        for (plan, prepared) in plans.into_iter().zip(publication) {
+            if let mutation::PreparedWrite::Append {
+                applied,
+                snapshot_bytes,
+                candidate,
+                ..
+            } = plan
+            {
+                self.publish_prepared(&applied, snapshot_bytes, prepared, candidate)
+                    .await?;
+            }
+        }
+        self.healthy = true;
+        self.output
+            .write()
+            .map_err(|_| RecordError::RecoveryRequired)?
+            .fenced = false;
+        Ok(result)
+    }
+
     pub(super) async fn write_one(
         &mut self,
         request: RecordWrite,
@@ -348,6 +650,45 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
+    async fn durable_batch_unknown_reopens_all_decisions_and_replays_original_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("records");
+        let settings = config();
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        let requests = vec![
+            write("batch-a", "r", "alpha", ExpectedVersion::Absent),
+            write("batch-b", "r", "beta", ExpectedVersion::Match(1)),
+        ];
+        p.inner.lock().await.fail_after_durable = true;
+        assert!(matches!(
+            p.execute_writes(requests.clone(), IndexDelivery::Asynchronous)
+                .await,
+            Err(RecordError::DurablePending(2))
+        ));
+        assert!(!p.inner.lock().await.healthy);
+        drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes)
+            .await
+            .unwrap();
+        assert_eq!(p.get("r").await.unwrap().unwrap().version, 2);
+        let retry = p
+            .execute_writes(requests, IndexDelivery::Asynchronous)
+            .await
+            .unwrap();
+        assert_eq!(
+            retry
+                .results
+                .iter()
+                .map(|r| r.as_ref().unwrap().seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(p.inner.lock().await.state.seq, 2);
+    }
+
+    #[tokio::test]
     async fn committed_prefix_decides_versions_before_reply_without_waiting_for_indexes() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("records");
@@ -467,7 +808,13 @@ mod tests {
         let command = request.clone();
         let task = tokio::spawn(async move {
             worker
-                .execute_writes(vec![command], IndexDelivery::Asynchronous)
+                .execute_writes(
+                    vec![
+                        command,
+                        write("kept-second", "r", "beta", ExpectedVersion::Match(1)),
+                    ],
+                    IndexDelivery::Asynchronous,
+                )
                 .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -489,5 +836,6 @@ mod tests {
         .unwrap();
         let receipt = p.operation(&request.operation_id).await.unwrap().unwrap();
         assert_eq!(p.write(request).await.unwrap(), receipt);
+        assert_eq!(p.get("r").await.unwrap().unwrap().version, 2);
     }
 }
