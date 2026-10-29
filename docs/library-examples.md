@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         index: IndexMetaObject {
             id: 0, name: "documents".into(),
             lexical_similarity: LexicalSimilarity::Bm25fProximity,
-            tokenizer: TokenizerType::UnicodeAlphanumeric,
+            tokenizer: TokenizerType::TantivySimpleV1,
             text_normalization: TextNormalization::None,
             field_length_normalization: FieldLengthNormalization::Shared,
             stop_words: StopwordType::None,

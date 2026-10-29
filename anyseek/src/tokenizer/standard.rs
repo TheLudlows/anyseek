@@ -12,7 +12,6 @@ pub(crate) fn identity(kind: TokenizerType) -> &'static str {
         TokenizerType::TantivySimpleV1 => {
             "tantivy-simple-v1;tantivy=0.27.0;lowercase;no-stopwords;no-length-filter"
         }
-        _ => "explicit-legacy-analysis-v1",
     }
 }
 
@@ -49,7 +48,7 @@ impl StandardAnalyzer {
                 tokenizer.set_hmm(false);
                 TextAnalyzer::builder(tokenizer).filter(LowerCaser).build()
             }
-            _ => TextAnalyzer::builder(SimpleTokenizer::default())
+            TokenizerType::TantivySimpleV1 => TextAnalyzer::builder(SimpleTokenizer::default())
                 .filter(LowerCaser)
                 .build(),
         };

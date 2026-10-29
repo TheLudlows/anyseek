@@ -29,7 +29,7 @@ fn schema() -> Vec<SchemaField> {
 async fn create(path: &Path, access_type: AccessType) -> RecordPartition {
     let _ = fs::remove_dir_all(path);
     let meta = IndexMetaObject { id:0, name:"metadata_contract".into(),
-        lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::UnicodeAlphanumeric,
+        lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
         stop_words:StopwordType::None, frequent_words:FrequentwordType::None,

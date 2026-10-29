@@ -1052,7 +1052,7 @@ mod tests {
         path
     }
     pub(super) fn config() -> RecordConfig {
-        serde_json::from_value(json!({"index":{"id":0,"name":"shared","lexical_similarity":"Bm25f","tokenizer":"UnicodeAlphanumeric","stop_words":"None","frequent_words":"None","ngram_indexing":0,"access_type":"Mmap","clustering":"None","inference":"None"},"schema":[{"field":"body","field_type":"Text","store":false,"index_lexical":true}],"embedding_space_id":null,"max_records":32,"max_record_bytes":4096,"max_operations":100,"max_journal_bytes":1048576,"max_candidates":100})).unwrap()
+        serde_json::from_value(json!({"index":{"id":0,"name":"shared","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1","stop_words":"None","frequent_words":"None","ngram_indexing":0,"access_type":"Mmap","clustering":"None","inference":"None"},"schema":[{"field":"body","field_type":"Text","store":false,"index_lexical":true}],"embedding_space_id":null,"max_records":32,"max_record_bytes":4096,"max_operations":100,"max_journal_bytes":1048576,"max_candidates":100})).unwrap()
     }
     pub(super) fn request(nonce: &str, command: CatalogCommand) -> CatalogRequest {
         CatalogRequest {

@@ -30,7 +30,7 @@ fn document(body: &str, vector: serde_json::Value) -> Document {
 }
 fn meta() -> IndexMetaObject {
     IndexMetaObject { id:0, name:"external_contract".into(), lexical_similarity:LexicalSimilarity::Bm25f,
-        tokenizer:TokenizerType::UnicodeAlphanumeric,
+        tokenizer:TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared, stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
         ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,

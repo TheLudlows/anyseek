@@ -2,7 +2,7 @@
 //! invoke Tantivy QueryParser: it would introduce syntax and retired features.
 use super::*;
 use crate::{
-    index::{IndexMetaObject, LexicalSimilarity, NgramType, TokenizerType},
+    index::{IndexMetaObject, LexicalSimilarity, NgramType},
     search::QueryType,
     tokenizer::{AnalysisContext, analyze},
 };
@@ -80,7 +80,7 @@ impl Analyzer {
             text_normalization: self.meta.text_normalization,
             stop_words: &self.stop_words,
             frequent_hashset: &self.frequent,
-            standard: Some(&self.standard),
+            standard: &self.standard,
         }
     }
     pub(super) async fn field(&self, input: &str) -> AnalyzedField {
@@ -91,7 +91,6 @@ impl Analyzer {
             input,
             &mut unique,
             &mut Vec::new(),
-            self.meta.tokenizer,
             0,
             &mut length,
             65536,
@@ -163,7 +162,6 @@ impl Analyzer {
             text,
             &mut AHashMap::new(),
             &mut tokens,
-            self.meta.tokenizer,
             0,
             &mut 0,
             65536,

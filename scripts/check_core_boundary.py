@@ -29,7 +29,7 @@ print('PASS core source/manifest have no HTTP DTO, schema or terminal output dep
 with tempfile.TemporaryDirectory(prefix='anyseek-core-') as directory:
     consumer = Path(directory)
     (consumer / 'src').mkdir()
-    (consumer / 'src/main.rs').write_text('fn main() { let _ = anyseek::index::TokenizerType::UnicodeAlphanumeric; }\n')
+    (consumer / 'src/main.rs').write_text('fn main() { let _ = anyseek::index::TokenizerType::TantivySimpleV1; }\n')
     (consumer / 'Cargo.toml').write_text(f'''[package]
 name = "anyseek-core-check"
 version = "0.0.0"

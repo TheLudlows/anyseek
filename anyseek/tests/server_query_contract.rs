@@ -49,7 +49,7 @@ async fn assert_query(index: &RecordPartition, text: &str, expected: usize) {
 async fn literal_queries_and_strict_metadata() {
     let path = Path::new("tests/index_query_contract"); let _ = fs::remove_dir_all(path);
     let meta = IndexMetaObject { id:0, name:"literal_queries".into(),
-        lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::UnicodeAlphanumeric,
+        lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
         stop_words:StopwordType::None, frequent_words:FrequentwordType::English,

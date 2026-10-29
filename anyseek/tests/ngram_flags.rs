@@ -92,7 +92,7 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
         id: 0,
         name: "ngram_flags".into(),
         lexical_similarity: similarity,
-        tokenizer: TokenizerType::UnicodeAlphanumeric,
+        tokenizer: TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
         stop_words: StopwordType::None,

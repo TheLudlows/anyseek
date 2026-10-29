@@ -1822,7 +1822,7 @@ mod tests {
     }
     pub(super) fn config() -> RecordConfig {
         RecordConfig {change_feed:FeedConfig::default(),index:IndexMetaObject{id:0,name:"records".into(),lexical_similarity:LexicalSimilarity::Bm25f,
-            tokenizer:TokenizerType::UnicodeAlphanumeric,text_normalization:TextNormalization::None,
+            tokenizer:TokenizerType::TantivySimpleV1,text_normalization:TextNormalization::None,
             field_length_normalization:FieldLengthNormalization::Shared,stop_words:StopwordType::None,
             frequent_words:FrequentwordType::None,ngram_indexing:0,document_compression:DocumentCompression::Snappy,
             access_type:AccessType::Mmap,clustering:Clustering::None,

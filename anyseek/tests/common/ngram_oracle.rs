@@ -101,7 +101,7 @@ pub async fn exercise(proximity: bool) {
                         } else {
                             LexicalSimilarity::Bm25f
                         },
-                        tokenizer: TokenizerType::UnicodeAlphanumeric,
+                        tokenizer: TokenizerType::TantivySimpleV1,
                         text_normalization: TextNormalization::None,
                         field_length_normalization: policy,
                         stop_words: StopwordType::None,
@@ -238,7 +238,7 @@ pub async fn exercise_quantized_df() {
             id: 0,
             name: label,
             lexical_similarity: LexicalSimilarity::Bm25f,
-            tokenizer: TokenizerType::UnicodeAlphanumeric,
+            tokenizer: TokenizerType::TantivySimpleV1,
             text_normalization: TextNormalization::None,
             field_length_normalization: policy,
             stop_words: StopwordType::None,
