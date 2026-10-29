@@ -34,16 +34,16 @@ const from=readTime('eventFrom'),to=readTime('eventTo'),at=readTime('validAt');
 if(from!==undefined&&to!==undefined&&from>=to)throw new Error('Event until must be after event from.');
 if(from!==undefined||to!==undefined||at!==undefined)temporal={event:from!==undefined||to!==undefined?{from_ms:from,to_ms:to}:undefined,valid_at_ms:at};
 }catch(error){$('#searchError').text(error.message);return;}
-$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:search_mode==="Vector"?undefined:query,query_vector:queryVector,offset:(page-1)*10,length:10,sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],filter:facetFilter,temporal:temporal}),traditional:true,cache:false,type:"POST",dataType:'json',success:function(data){if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;contentBox.empty();$("#evaluationTime").text("Evaluated at "+new Date(data.evaluation_time_ms).toISOString());
+$.ajax({url:QUERY_URL,contentType:"application/json",data:JSON.stringify({query:search_mode==="Vector"?undefined:query,query_vector:queryVector,offset:(page-1)*10,length:10,sort:sort=='score'?[]:sort=='new'?[{field:DATE_FIELD,order:"Descending"}]:[{field:DATE_FIELD,order:"Ascending"}],filter:facetFilter,temporal:temporal}),traditional:true,cache:false,type:"POST",dataType:'json',converters:{'text json':parseApiJson},success:function(data){if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;contentBox.empty();$("#evaluationTime").text("Evaluated at "+new Date(data.evaluation_time_ms).toISOString());
 data.hits.forEach(hit=>{const element=hit.record.document||{};
-const linkText=valid(element[URL_FIELD]);
+const linkText=apiFieldText(element,URL_FIELD);
 const linkUrl=httpUrl(linkText);
 const dateValue=element[DATE_FIELD];
 const dateText=dateValue!=null?" - "+(new Date(dateValue*1000)).toLocaleDateString("en-US",{year:'numeric',month:'numeric',day:'numeric'}):'';
-const titleText=valid(element[TITLE_FIELD])+dateText;
-const bodyText=valid(element[TEXT_FIELD]);
-const imageData=valid(element[IMAGE_FIELD]);
-const imageUrl=httpUrl(valid(element.iurl));
+const titleText=apiFieldText(element,TITLE_FIELD)+dateText;
+const bodyText=apiFieldText(element,TEXT_FIELD);
+const imageData=apiFieldText(element,IMAGE_FIELD);
+const imageUrl=httpUrl(apiFieldText(element,'iurl'));
 const newEntry=$('<div class="resultEntry col-xs-12"><div class="row"><div class="record"><h1 style="padding-bottom:4px;"><a></a></h1><p class="recordText"></p><p class="directLink"><a class="url"></a></p></div></div></div>');
 newEntry.find('.record').addClass(imageUrl?'col-xs-10':'col-xs-12');
 newEntry.find('h1 a').text(titleText);
@@ -53,6 +53,8 @@ if(linkUrl)newEntry.find('a').attr('href',linkUrl);
 if(imageUrl)$('<div class="col-xs-2 imgPrev"></div>').css('background-image','url('+JSON.stringify(imageUrl)+')').prependTo(newEntry.find('.row'));
 if(imageData.startsWith('data:image')){const image=new Image();image.src=imageData;image.height=100;newEntry.prepend(image);}
 if(hit.channels?.length){const details=$('<details class="hitExplanation"><summary>Retrieval explanation</summary><pre></pre></details>');details.find('pre').text(JSON.stringify({score:hit.score,channels:hit.channels},null,2));newEntry.find('.record').append(details);}
+const documentDetails=$('<details class="recordJson"><summary>Document JSON</summary><pre></pre></details>');
+documentDetails.find('pre').text(apiJsonText(element));newEntry.find('.record').append(documentDetails);
 contentBox.append(newEntry);
 newEntry.on('mouseenter',()=>{
 moveSplitter(newEntry[0].getBoundingClientRect().y);
@@ -62,11 +64,11 @@ else{prevText2.text(bodyText);}
 });
 });
 setPage(page,data.count,data.count_total,data.time);},error:function(xhr){if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;$("#contentBox").empty();$("#searchError").text(xhr.responseJSON?.message||"Search request failed.");},beforeSend:setHeader});}
-function valid(value){return value==null?'':typeof value==='object'?JSON.stringify(value):String(value);}
+
 function httpUrl(value){try{const url=new URL(value);return ['http:','https:'].includes(url.protocol)?url.href:null;}catch{return null;}}
 function showStatus(async=true){
 const requestKey=API_KEY,requestIndex=INDEX_ID;
-$.ajax({url:STATUS_URL,traditional:true,cache:false,type:'GET',async:async,dataType:'json',
+$.ajax({url:STATUS_URL,traditional:true,cache:false,type:'GET',async:async,dataType:'json',converters:{'text json':parseApiJson},
 success:function(data){
 if(setupOpen||API_KEY!==requestKey||INDEX_ID!==requestIndex)return;
 $('#welcome').hide();$('#version').text(data.version);$('#indexName').text(data.name);$('#indexedDocs').text(data.indexed_doc_count.toLocaleString());

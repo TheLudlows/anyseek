@@ -194,7 +194,7 @@ async function inspectFeed(action) {
             if(!current())return;
             if(feedState.cut!==undefined && feedState.cut!==page.visible_seq)throw new Error('Snapshot cut changed; rebuild required.');
             feedState.cut=page.visible_seq;feedState.after=page.next;feedState.retry=false;
-            $('#feedResult').text(JSON.stringify(page,null,2));
+            $('#feedResult').text(apiJsonText(page));
             if(!page.next) {
                 feedState.cursor=page.continuation;
                 const completedId=feedState.id;
@@ -212,7 +212,7 @@ async function inspectFeed(action) {
             if(!current())return;
             if(!feedState)feedState={collection,key};
             feedState.cursor=page.next;
-            $('#feedResult').text(JSON.stringify(page,null,2));
+            $('#feedResult').text(apiJsonText(page));
             $('#feedStatus').text(page.events.some(e=>e.rescan_required)?'Invalidation received: rebuild your effective view with a new snapshot.':'Change page ready.');
         }
     } catch(error) {
@@ -265,7 +265,7 @@ async function inspectGraph(action){
             graphState={collection,key,next:result.next};
             $('#relationStatus').text(`Entity page; view ${result.visible_seq}, evaluation ${result.evaluation_time_ms}.`);
         }
-        $('#relationResult').text(JSON.stringify(result,null,2));
+        $('#relationResult').text(apiJsonText(result));
     }catch(error){if(current()){resetGraph();$('#relationStatus').text(error.message);}}
     finally{graphBusy=false;$('#listEntities,#expandNeighbors,#fuseRelations').prop('disabled',false);$('#nextEntities').prop('disabled',!graphState?.next);}
 }
@@ -282,7 +282,7 @@ $(function(){
         $(this).prop('disabled',true);$('#evidenceResult').text('');
         try{
             const result=await setupApi('POST',`api/v1/index/${encodeURIComponent(collection)}/evidence`,key,JSON.parse($('#evidenceRef').val()));
-            if(current())$('#evidenceResult').text(JSON.stringify(result,null,2));
+            if(current())$('#evidenceResult').text(apiJsonText(result));
         }catch(error){if(current())$('#evidenceResult').text(error.message);}
         finally{$(this).prop('disabled',false);}
     });
@@ -294,7 +294,7 @@ $(function(){
         $(this).prop('disabled',true);$('#leaseResult').text('');
         try{
             const result=await setupApi('GET',`api/v1/index/${encodeURIComponent(collection)}/doc/${encodeURIComponent($('#leaseDocument').val())}/generation`,key);
-            if(current())$('#leaseResult').text(JSON.stringify(result,null,2));
+            if(current())$('#leaseResult').text(apiJsonText(result));
         }catch(error){if(current())$('#leaseResult').text(error.message);}
         finally{$(this).prop('disabled',false);}
     });

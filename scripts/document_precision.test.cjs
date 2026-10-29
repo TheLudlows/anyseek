@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function editor(storage = new Map(), send = async () => ({ok:true, json:async () => ({})})) {
+function editor(storage = new Map(), send = async () => ({ok:true, text:async () => '{}'})) {
     let identity = 0;
     const chain = new Proxy({}, {get: () => () => chain});
     const context = vm.createContext({
@@ -67,7 +67,7 @@ test('partial send, storage reload and retry preserve exact bytes and operation 
     const e = editor(storage,async (_,options) => {
         sent.push(options.body);
         if(sent.length===2)throw new Error('connection lost');
-        return {ok:true,json:async () => ({})};
+        return {ok:true,text:async () => '{}'};
     });
     e.context.requests = prepare(e,'[{"rank":9223372036854775807},{"rank":-9223372036854775808,"s":"9007199254740993"}]');
     e.run('pendingDocumentCommit={format:2,collection:INDEX_ID,unresolved:false,requests};');
@@ -79,7 +79,7 @@ test('partial send, storage reload and retry preserve exact bytes and operation 
     const retried = [];
     const reloaded = editor(storage,async (_,options) => {
         retried.push(options.body);
-        return {ok:true,json:async () => ({})};
+        return {ok:true,text:async () => '{}'};
     });
     reloaded.run('pendingDocumentCommit=loadPendingWrites();');
     await reloaded.run('submitPendingWrites()');
@@ -91,7 +91,7 @@ test('older pending requests retain their already-sent content and identities', 
     const old = {operation_id:{epoch:1,nonce:'retained'},record_id:'r',routing_key:'r',expected:'Any',document:{rank:42}};
     const storage = new Map([[pendingKey,JSON.stringify({collection:'collection',unresolved:true,requests:[old]})]]);
     const sent = [];
-    const e = editor(storage,async (_,options) => {sent.push(options.body);return {ok:true,json:async () => ({})};});
+    const e = editor(storage,async (_,options) => {sent.push(options.body);return {ok:true,text:async () => '{}'};});
     e.run('pendingDocumentCommit=loadPendingWrites();');
     await e.run('submitPendingWrites()');
     assert.deepEqual(sent,[JSON.stringify(old)]);
@@ -104,4 +104,34 @@ test('failure to persist retry state prevents sending a request', async () => {
     e.run('pendingDocumentCommit={format:2,collection:INDEX_ID,requests};sessionStorage.setItem=()=>{throw new Error("storage unavailable");};');
     await e.run('submitPendingWrites()');
     assert.equal(sent,0);
+});
+
+
+test('response display and copy into editor preserve exact integers and nested JSON', async () => {
+    const raw = String.raw`{"hits":[{"record":{"document":{"rank":9007199254740993,"data":{"min":-9223372036854775808,"max":9223372036854775807,"list":[1.2500e0,true,null]},"text":"\\ \" 9007199254740993","\u006b":9007199254740993}}}],"next":null}`;
+    const e = editor(new Map(), async () => ({ok:true,text:async () => raw}));
+    e.context.response = await e.run("setupApi('GET','/query','key')");
+    assert.equal(e.run('apiJsonText(response)'),raw);
+    assert.equal(e.run('response.hits.length'),1);
+    assert.equal(e.run('typeof response.hits[0].record.document.rank'),'number');
+    const doc = e.run('apiJsonText(response.hits[0].record.document)');
+    assert.ok(doc.includes('"rank":9007199254740993'));
+    assert.ok(doc.includes('"min":-9223372036854775808'));
+    assert.ok(doc.includes('"max":9223372036854775807'));
+    assert.equal(e.run("apiFieldText(response.hits[0].record.document,'rank')"),'9007199254740993');
+    assert.equal(e.run("apiFieldText(response.hits[0].record.document,'k')"),'9007199254740993');
+    assert.ok(e.run("apiFieldText(response.hits[0].record.document,'data')").includes('1.2500e0'));
+    assert.equal(e.run("apiFieldText(response.hits[0].record.document,'text')"),JSON.parse(raw).hits[0].record.document.text);
+    assert.ok(prepare(e,doc)[0].body.endsWith('"document":'+doc+'}'));
+});
+
+test('response source tracking handles empty containers, duplicate keys and prototype keys', () => {
+    const e = editor();
+    e.context.raw = '{"a":{},"b":[],"x":{"old":1},"x":{"n":9007199254740993},"__proto__":{"n":9223372036854775807}}';
+    e.run('response=parseApiJson(raw)');
+    assert.equal(e.run('apiJsonText(response.x)'),'{"n":9007199254740993}');
+    assert.equal(e.run('apiJsonText(response.__proto__)'),'{"n":9223372036854775807}');
+    assert.equal(e.run('apiJsonText(response.a)'),'{}');
+    assert.equal(e.run('apiJsonText(response.b)'),'[]');
+    assert.throws(() => e.run('parseApiJson("{broken}")'));
 });
