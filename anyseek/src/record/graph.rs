@@ -145,7 +145,7 @@ impl RecordPartition {
         self.advance_time().await?;
         let _admission=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let inner=self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
+        if !inner.healthy{return Err(RecordError::RecoveryRequired);}
         neighbors_view(&inner, request, |_| true)
     }
 
@@ -154,7 +154,7 @@ impl RecordPartition {
         self.advance_time().await?;
         let _admission=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let inner=self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some(){return Err(RecordError::RecoveryRequired);}
+        if !inner.healthy{return Err(RecordError::RecoveryRequired);}
         if length==0||length>1000{return Err(RecordError::Rejected("entity page length must be 1..1000".into()));}
         if cursor.as_ref().is_some_and(|c|c.visible_seq!=inner.state.seq){return Err(RecordError::Conflict("entity directory view changed".into()));}
         let mut rows=inner.graph_cache.entities.iter().filter(|id|cursor.as_ref().is_none_or(|c|id.as_str()>c.after.as_str())&&inner.locations.contains_key(*id));

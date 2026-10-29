@@ -1,35 +1,8 @@
-//! Persistent owner sealing. This module does not activate restored snapshots.
+//! Trusted recovery inspection, not a public document-reading bypass.
 //! A lineage identifies provenance, not a distributed ownership lease. Callers
 //! must own the service root and authorize recovery through its live catalog.
 use super::*;
-use sha2::{Digest, Sha256};
 
-/// Immutable binding for a future same-service takeover; no arbitrary path.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SealRequest {
-    /// SHA-256 identity of the authorized catalog takeover intent.
-    pub intent_id: String,
-    /// Intended new collection identity, never a filesystem path.
-    pub target_collection_id: String,
-    /// SHA-256 of the complete immutable backup input.
-    pub backup_digest: String,
-}
-/// Durable final Record waterline and exact takeover binding. A certificate is
-/// not a standalone authorization to activate a new owner or trust an archive.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SealCertificate {
-    /// Owner scope of the final source authority, bound by its content digest.
-    pub source_feed_scope: String,
-    /// Original partition lineage, retained through independent snapshots.
-    pub lineage: String,
-    /// Last committed record operation sequence before the permanent seal.
-    pub final_seq: u64,
-    /// Hash of the complete pre-seal authority, including operation receipts.
-    pub final_state_digest: String,
-    /// Only this intent may resume the seal operation.
-    pub request: SealRequest,
-}
 /// Trusted recovery inspection, not a public document-reading bypass.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecoveryIdentity {
@@ -45,26 +18,12 @@ pub struct RecoveryIdentity {
     pub quarantined: bool,
     /// Every independent snapshot is non-authoritative, including empty ones.
     pub independent_snapshot: bool,
-    /// Persistent terminal seal, if any.
-    pub seal: Option<SealCertificate>,
 }
 fn digest(config: &RecordConfig, state: &State) -> Result<String, RecordError> {
     Ok(checkpoint_codec::digest(config, state)?.iter().map(|b| format!("{b:02x}")).collect())
 }
-fn content_digest(config: &RecordConfig, state: &State) -> Result<String, RecordError> {
-    let mut content = state.try_clone()?;
-    content.sealed_for = None;
-    content.takeover_proof = None;
-    digest(config, &content)
-}
-fn successor_scope(scope:&str,intent:&str)->String {
-    Sha256::digest(format!("seekpower-feed-successor:{scope}:{intent}")).iter().take(16).map(|b|format!("{b:02x}")).collect()
-}
-fn hash_id(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
 impl RecordPartition {
-    /// Inspect a healthy owner's identity without clearing any restore/seal gate.
+    /// Inspect a healthy owner's identity without clearing any restore gate.
     /// The service must authenticate its trusted management caller separately.
     pub async fn recovery_identity(&self) -> Result<RecoveryIdentity, RecordError> {
         let inner = self.inner.lock().await;
@@ -74,144 +33,6 @@ impl RecordPartition {
             digest: digest(&inner.config, &inner.state)?,
             quarantined: inner.state.evidence_quarantined,
             independent_snapshot: inner.state.independent_snapshot,
-            seal: inner.state.sealed_for.clone(),
         })
-    }
-
-    /// Permanently stop ordinary reads/writes and output on this owner. Accepted
-    /// work is cancellation-safe. Retry the identical request after unknown
-    /// outcomes; opening the source never removes a durable seal. This does not
-    /// create or activate a successor, and has no unseal escape hatch.
-    pub async fn seal_for_takeover(&self, request: SealRequest) -> Result<SealCertificate, RecordError> {
-        let admission = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
-        let owner = self.inner.clone();
-        let partition=self.clone();
-        crate::resources::spawn(async move {
-            let result=async move {
-            let _admission = admission;
-            let mut inner = owner.lock().await;
-            if !inner.healthy { return Err(RecordError::RecoveryRequired); }
-            if !hash_id(&request.intent_id) || !hash_id(&request.backup_digest)
-                || request.target_collection_id.is_empty() || request.target_collection_id.len() > 256 {
-                return Err(RecordError::Rejected("invalid takeover binding".into()));
-            }
-            if inner.state.independent_snapshot || inner.state.evidence_quarantined {
-                return Err(RecordError::Rejected("independent snapshot is not current deletion authority".into()));
-            }
-            if let Some(seal) = &inner.state.sealed_for {
-                return if seal.request == request { Ok(seal.clone()) }
-                    else { Err(RecordError::Conflict("partition sealed for a different takeover".into())) };
-            }
-            if inner.background.is_some() { return Err(RecordError::Busy); }
-            inner.advance_time().await?;
-            let certificate = SealCertificate {
-                source_feed_scope: inner.state.history.scope.clone(),
-                lineage: inner.state.lineage.clone(), final_seq: inner.state.seq,
-                final_state_digest: content_digest(&inner.config, &inner.state)?, request,
-            };
-            let mut next = inner.state.try_clone()?;
-            next.sealed_for = Some(certificate.clone());
-            let length = checkpoint_codec::length(&inner.config, &next)?;
-            checkpoint_codec::validate_size(length,0,inner.config.max_journal_bytes)
-                .map_err(|e| RecordError::Rejected(e.to_string()))?;
-            // Close output before any fallible/awaited publication. The same
-            // anchor protocol handles local certificates and SQLite-selected
-            // remote manifests, including this same-sequence terminal state.
-            inner.healthy = false;
-            inner.output.write().map_err(|_| RecordError::RecoveryRequired)?.fenced = true;
-            inner.publish_anchor_state(next, true).await?;
-            #[cfg(test)]
-            if inner.fail_after_durable {
-                inner.healthy = false;
-                return Err(RecordError::DurablePending(inner.state.seq));
-            }
-            // Output stays fenced permanently, including after future compaction.
-            Ok(certificate)
-            }.await;
-            partition.kick_maintenance().await;
-            result
-        }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
-    }
-}
-
-impl RecordPartition {
-    /// Build a new successor from the complete final sealed authority, preserving
-    /// all acknowledged operations. The backup is an exact provenance input, not
-    /// a rollback point. The trusted catalog must keep the target inaccessible
-    /// until certification and its final activation command have completed.
-    pub async fn create_takeover_successor(
-        &self, backup: &Self, target: &Path, request: SealRequest,
-    ) -> Result<(), RecordError> {
-        if Arc::ptr_eq(&self.inner, &backup.inner) {
-            return Err(RecordError::Rejected("backup must be an independent snapshot".into()));
-        }
-        let source = self.inner.clone();
-        let backup = backup.inner.clone();
-        let target = target.to_owned();
-        crate::resources::spawn(async move {
-            let original = source.lock().await;
-            let snapshot = backup.lock().await;
-            if !original.healthy || !snapshot.healthy { return Err(RecordError::RecoveryRequired); }
-            let seal = original.state.sealed_for.as_ref()
-                .ok_or_else(|| RecordError::Conflict("source not sealed".into()))?;
-            if seal.request != request || seal.source_feed_scope != original.state.history.scope || original.state.independent_snapshot
-                || original.state.evidence_quarantined || !snapshot.state.independent_snapshot
-                || snapshot.state.lineage != original.state.lineage
-                || snapshot.state.seq > seal.final_seq
-                || digest(&snapshot.config, &snapshot.state)? != request.backup_digest
-                || content_digest(&original.config, &original.state)? != seal.final_state_digest {
-                return Err(RecordError::Conflict("untrusted or mismatched takeover authority".into()));
-            }
-            let mut state = original.state.try_clone()?;
-            state.sealed_for = None;
-            state.takeover_proof = Some(seal.clone());
-            state.history.scope = successor_scope(&seal.source_feed_scope,&seal.request.intent_id);
-            let config=original.config.clone();
-            drop(snapshot);drop(original);
-            super::snapshot::create(&target,config,state).await?;
-            Ok(())
-        }).await.map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
-    }
-
-    /// Verify a freshly rebuilt successor before catalog activation. This is
-    /// deliberately strict: later user writes make this preparation check fail.
-    pub async fn certify_takeover_successor(&self, expected: &SealCertificate) -> Result<(), RecordError> {
-        let inner = self.inner.lock().await;
-        if !inner.healthy { return Err(RecordError::RecoveryRequired); }
-        let mut normalized = inner.state.try_clone()?;
-        normalized.history.scope = expected.source_feed_scope.clone();
-        if inner.state.history.scope != successor_scope(&expected.source_feed_scope,&expected.request.intent_id)
-            || inner.state.sealed_for.is_some() || inner.state.independent_snapshot
-            || inner.state.evidence_quarantined || inner.state.takeover_proof.as_ref() != Some(expected)
-            || inner.state.lineage != expected.lineage || inner.state.seq != expected.final_seq
-            || content_digest(&inner.config, &normalized)? != expected.final_state_digest {
-            return Err(RecordError::Conflict("successor is not the certified final state".into()));
-        }
-        Ok(())
-    }
-}
-
-impl RecordPartition {
-    /// Called under the live catalog's authorization guard before its irreversible
-    /// Prepare. That guard excludes service writes until source grants are closed.
-    pub async fn validate_takeover_capacity(&self, request: &SealRequest, lineage: &str) -> Result<(), RecordError> {
-        let inner = self.inner.lock().await;
-        if !inner.healthy { return Err(RecordError::RecoveryRequired); }
-        if inner.state.lineage != lineage || inner.state.independent_snapshot || inner.state.evidence_quarantined
-            || inner.state.sealed_for.is_some() || !hash_id(&request.intent_id) || !hash_id(&request.backup_digest)
-            || request.target_collection_id.is_empty() || request.target_collection_id.len() > 256 {
-            return Err(RecordError::Rejected("source is not eligible for takeover".into()));
-        }
-        let seal = SealCertificate { source_feed_scope: inner.state.history.scope.clone(), lineage: lineage.into(), final_seq: inner.state.seq,
-            final_state_digest: content_digest(&inner.config, &inner.state)?, request: request.clone() };
-        let mut next = inner.state.try_clone()?;
-        next.sealed_for = Some(seal.clone());
-        for target in [false, true] {
-            if target { next.sealed_for = None; next.takeover_proof = Some(seal.clone()); }
-            let length = checkpoint_codec::length(&inner.config, &next)?;
-            checkpoint_codec::validate_size(length,0,inner.config.max_journal_bytes)
-                .map_err(|e| RecordError::Rejected(e.to_string()))?;
-        }
-        Ok(())
     }
 }

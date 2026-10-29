@@ -188,7 +188,7 @@ pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordE
 }
 impl Inner {
     pub(super) async fn advance_time(&mut self) -> Result<(), RecordError> {
-        if !self.healthy || self.state.sealed_for.is_some() {
+        if !self.healthy {
             return Err(RecordError::RecoveryRequired);
         }
         // A same-sequence maintenance intent pins its time/floor transition.
@@ -205,7 +205,7 @@ impl Inner {
             .max(self.evaluation_time_ms)
             .max(self.state.time_watermark_ms);
         // Archived authority is immutable. Protected bodies remain quarantined;
-        // only certified takeover creates a live owner that may expire them.
+        // only a live owner created from independent authority may expire them.
         if self.state.independent_snapshot {
             self.evaluation_time_ms = evaluation;
             return Ok(());

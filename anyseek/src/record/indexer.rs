@@ -114,7 +114,7 @@ impl RecordPartition {
             let plan = {
                 let mut inner = owner.lock().await;
                 let _capture_phase=maintenance::Phase::new("background_capture_locked",inner.state.seq);
-                if !inner.healthy || (mode!=JobMode::Compact && inner.state.sealed_for.is_some()) { return Err(RecordError::RecoveryRequired); }
+                if !inner.healthy { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
                 inner.index.drain_indexes().await?;
                 if mode==JobMode::Index {inner.advance_time().await?;}
@@ -182,7 +182,7 @@ impl RecordPartition {
             let result = async {
                 if started.elapsed() >= timeout { return Err(RecordError::Busy); }
                 let source=if let Some(source)=source {
-                    let source=source.collect(&owner,id,started+timeout,mode==JobMode::Compact).await?;
+                    let source=source.collect(&owner,id,started+timeout).await?;
                     source.verify(&root,&config,&snapshot).map_err(|error| {
                         if mode==JobMode::Compact && !matches!(error,RecordError::Busy) {
                             log::warn!("compact source authentication failed: {error}");
@@ -257,7 +257,7 @@ impl RecordPartition {
                     let (raw,mut expected,revision,entry_count,entry_bytes,_raw,_decoded)={
                         let inner=owner.lock().await;
                         let _capture_phase=maintenance::Phase::new("catchup_capture_locked",inner.state.seq);
-                        if !inner.healthy || (mode!=JobMode::Compact && inner.state.sealed_for.is_some()){return Err(RecordError::RecoveryRequired);}
+                        if !inner.healthy {return Err(RecordError::RecoveryRequired);}
                         let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
                         if serde_json::to_vec(&inner.anchor).map_err(storage)?!=base || consumed>tail.entries.len(){return Err(RecordError::Busy);}
                         let suffix=&tail.entries[consumed..];
@@ -285,7 +285,7 @@ impl RecordPartition {
                     pause_catchup(&root,timeout).await;
                     let inner=owner.lock().await;
                     let _check_phase=maintenance::Phase::new("candidate_recheck_locked",inner.state.seq);
-                    if !inner.healthy || (mode!=JobMode::Compact && inner.state.sealed_for.is_some()){return Err(RecordError::RecoveryRequired);}
+                    if !inner.healthy {return Err(RecordError::RecoveryRequired);}
                     if started.elapsed()>=timeout || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
                     let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
                     if tail.revision!=revision || tail.entries.len()!=entry_count || tail.bytes!=entry_bytes {continue;}

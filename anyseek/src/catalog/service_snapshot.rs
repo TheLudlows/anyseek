@@ -317,9 +317,6 @@ impl Catalog {
                 if !inner.is_healthy() {
                     return Err(CatalogError::RecoveryRequired);
                 }
-                if inner.state.collections.values().any(|c| c.takeover.as_ref().is_some_and(|t| t.completed.is_none())) {
-                    return Err(CatalogError::Conflict("unfinished takeover cannot be archived as recovery authority".into()));
-                }
                 if let Some(receipt) = finish_existing(&target, &identity).await? {
                     return Ok(receipt);
                 }

@@ -707,7 +707,7 @@ impl Inner {
         }
         // The partition guard pins the live State. Ordinary compaction borrows
         // it instead of cloning all retained history. Explicit replacement
-        // candidates (snapshot/takeover) still own their independent State.
+        // candidates (snapshot/restore) still own their independent State.
         let next=candidate.as_ref().unwrap_or(&self.state);
         let next_seq=next.seq;
         let encoded={let _phase=maintenance::Phase::new("state_measure_and_digest",next.seq);checkpoint_codec::StateEncoding::new(next)?};

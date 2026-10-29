@@ -55,7 +55,6 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | GET | `/api/v1/catalog/operation/{epoch}/{nonce}` | master 控制操作查询 |
 | POST | `/api/v1/index/{id}/backup` | 独立 collection 快照；同操作 ID 保留原快照 |
 | POST | `/api/v1/restore` | master 恢复到新 collection，不恢复历史 grants |
-| POST | `/api/v1/takeovers` | master 同服务封存源并激活最终水位的后继 collection；不是回退旧备份 |
 | GET | `/api/v1/backups` | master 查看 collection 备份及退役状态 |
 | DELETE | `/api/v1/backups/{id}` | master 退役备份；未完成 restore pin 来源 |
 | POST | `/api/v1/service-backups` | master 完整 catalog/数据/collection backups 快照 |
@@ -71,7 +70,7 @@ UI 增加实体目录/一跳关系检查；保留连接、创建/选择 collecti
 
 ## 资源与未完成项
 
-Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，key 撤销/接管/共同快照仍全局排空；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
+Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，key 撤销/共同快照仍全局排空；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 

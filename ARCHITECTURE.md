@@ -37,9 +37,9 @@ Record partition 的 mutex 覆盖候选检索和原始数据回表。同一个�
 
 ## 授权与生命周期
 
-API key 身份独立于 collection 数据目录。master 管理身份和 grants，普通 key 可访问其授权集合；撤销不删除数据。普通工作按全局快照共享屏障 → collection 共享执行屏障 → 短持 catalog 元数据锁的顺序捕获授权，在元数据锁外执行 Record future。单集合授权变更使用对应独占屏障；整 key 撤销、接管、完整服务快照等仍全局排空。分级资源准入在读 body 前按稳定 collection 身份计费，已接收 owned task 和传输缓冲保留额度至实际结束。OutputPermit 捕获 grant revision，在最终响应和 body frame 交付时复核，撤销再授权不能复活旧响应。
+API key 身份独立于 collection 数据目录。master 管理身份和 grants，普通 key 可访问其授权集合；撤销不删除数据。普通工作按全局快照共享屏障 → collection 共享执行屏障 → 短持 catalog 元数据锁的顺序捕获授权，在元数据锁外执行 Record future。单集合授权变更使用对应独占屏障；整 key 撤销、完整服务快照等仍全局排空。分级资源准入在读 body 前按稳定 collection 身份计费，已接收 owned task 和传输缓冲保留额度至实际结束。OutputPermit 捕获 grant revision，在最终响应和 body frame 交付时复核，撤销再授权不能复活旧响应。
 
-创建为持久 Prepare → 初始化 partition → Activate。删除 collection 保留墓碑并撤销 grants，物理回收后置。全服务备份在 catalog 屏障下取得一致切面。恢复发布到新未启动根，历史 key 禁用和 grants 清空，当前 master 获取初始访问，但独立恢复内容保持隔离，不等于正文立即可读。只有仍有完整可信历史的同服务受控接管可核验最终封存水位后激活新目标；无强制绕过或跨服务自动灾备。
+创建为持久 Prepare → 初始化 partition → Activate。删除 collection 保留墓碑并撤销 grants，物理回收后置。全服务备份在 catalog 屏障下取得一致切面。恢复发布到新未启动根，历史 key 禁用和 grants 清空，当前 master 获取初始访问，但独立恢复内容保持隔离，不等于正文立即可读。独立备份不能证明后续没有删除，因此 typed evidence 保持隔离；无解除隔离、强制绕过或跨服务自动灾备入口。
 
 ## 权威与派生文件
 

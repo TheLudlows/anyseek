@@ -27,12 +27,12 @@ Begin/StageBatch 只写私有成员；Seal 认证完整清单；Publish 原子�
 
 一次查询固定 `evaluation_time`，TTL 过期通过权威决定形成不可逆墓碑。响应期间单纯经过时间期限不要求改变固定视图；后续请求观察已提交的过期结果。
 
-## 授权、恢复与接管
+## 授权与恢复
 
 catalog 保存 key、collection、grants 与控制回执，身份生命周期独立于数据。全局授权屏障确定撤销和写入的顺序；OutputPermit 在响应及 body frame 交付复核 revision，撤销后重新授权不能复活旧响应。服务不能缓存授权决定作为永久许可。
 
 独立备份不证明备份后没有删除；恢复保留版本与回执、更新 generation 恢复隔离身份，并维持独立快照/证据隔离，不复活旧 grants。完整服务恢复仅开放当前 master，历史身份禁用。
 
-同服务受控接管必须认证当前源的完整最终状态，永久封存源，目标包含所有已确认后续操作，再由 catalog 激活。备份是来源证明而非回滚点。缺少最新可信删除历史、源仍能输出或权威状态无法认证时继续隔离；没有强制解锁或跨服务双活入口。
+独立 restore 只恢复备份时保存的数据，不自动追平备份后的写入或删除。typed evidence 持续隔离，没有强制解锁或跨服务双活入口；live WAL/在线 checkpoint 重启恢复不新增该隔离。
 
 每个 collection 一个 partition。没有跨 collection 事务、来源依赖、SQL/JOIN、完整图语言或旧格式迁移。Linux/Windows 进程故障回归不替代系统崩溃与断电验收。

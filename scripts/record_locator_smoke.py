@@ -50,8 +50,7 @@ def exercise(call,restart_with,faults):
     call('POST',endpoint+'/evidence',ref,status=409)
     call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'locators-copy','backup_id':archive['backup_id']})
     call('POST','/api/v1/index/locators-copy/evidence',ref,status=409)
-    assert call('POST','/api/v1/takeovers',{'operation_id':operation(),'source_collection_id':'locators','collection_id':'locators-next','backup_id':archive['backup_id']})['status']=='active'
-    restart_with({});call('POST','/api/v1/index/locators-next/evidence',ref,status=409)
+    restart_with({})
     call('DELETE','/api/v1/backups/'+archive['backup_id'],{'operation_id':operation()})
     call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'locator-reader'})
-    print('PASS locator HTTP: UTF-8/page bounds, exact history/hash, stale/delete/revoke, checkpoint, quarantine and takeover'+(' with process faults' if faults else ''))
+    print('PASS locator HTTP: UTF-8/page bounds, exact history/hash, stale/delete/revoke, checkpoint and quarantine'+(' with process faults' if faults else ''))

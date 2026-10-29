@@ -162,7 +162,7 @@ impl RecordPartition {
         let (handle, evaluation, barrier, root) = {
             let mut inner = self.inner.lock().await;
             inner.advance_time().await?;
-            if !inner.healthy || inner.state.sealed_for.is_some() || self.indexes.error().is_some()
+            if !inner.healthy || self.indexes.error().is_some()
             {
                 return Err(RecordError::RecoveryRequired);
             }
@@ -226,7 +226,7 @@ impl RecordPartition {
         pause(&root, ".test-query-candidates-pause").await?;
         let mut inner = self.inner.lock().await;
         inner.advance_time().await?;
-        if !inner.healthy || inner.state.sealed_for.is_some() || self.indexes.error().is_some() {
+        if !inner.healthy || self.indexes.error().is_some() {
             return Err(RecordError::RecoveryRequired);
         }
         let mut hits = Vec::with_capacity(candidates.len());

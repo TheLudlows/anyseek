@@ -390,40 +390,6 @@ def main():
                     call('GET','/api/v1/index/evidence/doc/'+did,status=404)
                 print('PASS source revision HTTP faults: unknown/durable pending/process loss preserve stale and exact retry')
 
-            # Same-service takeover catches up to the final authority, never rolls back writes.
-            import http.client
-            for stage in (['normal','prepared','sealed','target_created','certified','finalized'] if args.faults else ['normal']):
-                origin='take-'+stage;target=origin+'-next'
-                call('POST','/api/v1/index',{**ec,'operation_id':operation(),'collection_id':origin})
-                call('POST',f'/api/v1/index/{origin}/grants',{'operation_id':operation(),'key_id':'b','allow':True})
-                for w in [source,direct]:call('POST',f'/api/v1/index/{origin}/doc',{**w,'operation_id':operation()})
-                archive=call('POST',f'/api/v1/index/{origin}/backup',{'operation_id':operation()})
-                fresh={'operation_id':operation(),'record_id':'after-backup','routing_key':'route','expected':'Absent','document':{'body':'latest acknowledged'}}
-                final_receipt=call('POST',f'/api/v1/index/{origin}/doc',fresh)['receipt']
-                deletion={**delete,'operation_id':operation()};call('DELETE',f'/api/v1/index/{origin}/doc',deletion)
-                take={'operation_id':operation(),'source_collection_id':origin,'collection_id':target,'backup_id':archive['backup_id']}
-                call('POST','/api/v1/takeovers',take,key=keys['b'],status=403)
-                if stage!='normal':
-                    process.kill();process.wait(timeout=20);start({'ANYSEEK_TAKEOVER_FAULT':stage})
-                    try:call('POST','/api/v1/takeovers',take)
-                    except (OSError,http.client.HTTPException):pass
-                    else:raise AssertionError('expected takeover transport loss')
-                    process.wait(timeout=20);assert process.returncode==89
-                    start()
-                done=call('POST','/api/v1/takeovers',take)
-                assert done['status']=='active' and done['recovery']=='final_sealed_waterline'
-                assert call('POST','/api/v1/takeovers',take)==done
-                call('GET',f'/api/v1/index/{origin}',status=403)
-                call('GET',f'/api/v1/index/{origin}',key=keys['b'],status=403)
-                call('GET',f'/api/v1/index/{target}',key=keys['b'],status=403)
-                call('GET',f'/api/v1/index/{target}/doc/direct',status=404)
-                assert call('POST',f'/api/v1/index/{target}/doc',fresh)['receipt']==final_receipt
-                assert call('POST',f'/api/v1/index/{target}/query',{})['count_total']==1
-                call('POST','/api/v1/takeovers',{**take,'backup_id':'a'*64},status=400)
-                restart()
-                assert call('POST',f'/api/v1/index/{target}/doc',fresh)['receipt']==final_receipt
-                call('DELETE','/api/v1/backups/'+archive['backup_id'],{'operation_id':operation()})
-            print('PASS takeover HTTP: final-waterline writes/receipts, transitive deletion, no old grants, retry/restart and durable boundary faults')
             if args.faults:
                 import http.client
                 for stage in ['before_append','after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:

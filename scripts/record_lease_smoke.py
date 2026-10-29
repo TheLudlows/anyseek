@@ -30,17 +30,6 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
         renewal=command('renew',1);renewed=call('POST',endpoint+'/doc',renewal)['receipt'];assert renewed['staged_only']
         assert call('POST',endpoint+'/doc',renewal)['receipt']==renewed
         call('POST',endpoint+'/doc',command('publish',1),status=409)
-        archive=call('POST',endpoint+'/backup',{'operation_id':operation()})
-        take={'operation_id':operation(),'source_collection_id':'leases','collection_id':'leases-next','backup_id':archive['backup_id']}
-        assert call('POST','/api/v1/takeovers',take)['status']=='active';endpoint='/api/v1/index/leases-next'
-        assert call('GET',endpoint+'/doc/doc/generation')['lease_requires_renewal']
-        call('POST',endpoint+'/doc',command('publish',2),status=409)
-        call('POST',endpoint+'/doc',command('renew',2))
-        call('POST',endpoint+'/doc',command('abort',3))
-        assert call('POST',endpoint+'/doc',original)['receipt']==receipt
-        assert call('GET',endpoint+'/doc/doc/generation')['staged_members']==0
-        call('POST',endpoint+'/doc',stage('g',{'Match':4}),status=409)
-        call('DELETE','/api/v1/backups/'+archive['backup_id'],{'operation_id':operation()})
         restart_with(env);assert call('POST',endpoint+'/doc',original)['receipt']==receipt
     if faults:
         endpoint=create('lease-cleanup');request=stage();receipt=call('POST',endpoint+'/doc',request)['receipt']
@@ -71,4 +60,4 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
             call('POST',endpoint+'/doc',command('renew',1),status=409)
             assert call('GET',endpoint+'/doc/doc/generation')['visible_members']==0
     restart_with({})
-    print('PASS staging leases HTTP: fencing, renewal/retry, takeover requires renewal, private abort cleanup and retained receipts'+(' with controlled expiry/process faults' if faults else ''))
+    print('PASS staging leases HTTP: fencing, renewal/retry, private abort cleanup and retained receipts'+(' with controlled expiry/process faults' if faults else ''))

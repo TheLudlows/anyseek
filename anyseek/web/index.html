@@ -43,14 +43,6 @@
 <button id="restoreService" type="button">Restore to new stopped root / retry</button>
 <p id="serviceRecoveryStatus" role="status"></p>
 </details>
-<details id="takeoverRecovery"><summary>Take over a collection (master key)</summary>
-<p>Permanently close the original collection and recover all writes through its final sealed state into a new collection. The backup must belong to the live original. Old grants are not copied. Missing current history cannot be bypassed.</p>
-<label for="takeoverSource">Original collection ID</label><input id="takeoverSource" spellcheck="false">
-<label for="takeoverBackup">Collection backup ID</label><input id="takeoverBackup" spellcheck="false">
-<label for="takeoverTarget">New collection ID</label><input id="takeoverTarget" spellcheck="false">
-<button id="submitTakeover" type="button">Seal original and recover / retry</button>
-<p id="takeoverStatus" role="status"></p>
-</details>
 <form id="createIndexForm">
 <h2>Create index</h2>
 <label for="newIndexName">Index name</label><input id="newIndexName" required maxlength="200" placeholder="my-index">
