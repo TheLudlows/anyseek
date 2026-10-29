@@ -68,7 +68,6 @@ impl From<RecordError> for Error {
             RecordError::Busy => (StatusCode::TOO_MANY_REQUESTS, "busy"),
             RecordError::FeedFull => (StatusCode::TOO_MANY_REQUESTS, "feed_full"),
             RecordError::CursorExpired(_) => (StatusCode::GONE, "cursor_expired"),
-            RecordError::BootstrapExpired => (StatusCode::GONE, "bootstrap_expired"),
             RecordError::ClockUncertain => (StatusCode::SERVICE_UNAVAILABLE, "clock_uncertain"),
             RecordError::Rejected(_) => (StatusCode::BAD_REQUEST, "rejected"),
             RecordError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
@@ -1071,13 +1070,6 @@ struct ChangesRequest {
     #[serde(default)] after: Option<String>,
     #[serde(default = "page_length")] length: usize,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BootstrapRequest {
-    request_id: String,
-    #[serde(default)] after: Option<String>,
-    #[serde(default = "page_length")] length: usize,
-}
 async fn changes(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>, bytes: Bytes) -> Result<Response, Error> {
     let request: ChangesRequest = parse(&bytes)?;
     let key=s.authenticate(&headers).await?;
@@ -1085,26 +1077,6 @@ async fn changes(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pa
     let data=p.output_permit()?;
     let (result,permit)=s.catalog.authorized(key,id,move |_| async move {p.changes(request.after,request.length).await}).await?;
     protected_data(result.map_err(Into::into),permit,Some(data))
-}
-async fn bootstrap_identity(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, Error> {
-    let key=s.authenticate(&headers).await?;
-    let p=s.record(&key,&id).await?;
-    let (result,permit)=s.catalog.authorized(key,id,move |_| async move {p.bootstrap_identity().await}).await?;
-    protected(result.map(|prefix|json!({"request_id_prefix":prefix})).map_err(Into::into),permit)
-}
-async fn bootstrap(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>, bytes: Bytes) -> Result<Response, Error> {
-    let request: BootstrapRequest = parse(&bytes)?;
-    let key=s.authenticate(&headers).await?;
-    let p=s.record(&key,&id).await?;
-    let data=p.output_permit()?;
-    let (result,permit)=s.catalog.authorized(key,id,move |_| async move {p.bootstrap(request.request_id,request.after,request.length).await}).await?;
-    protected_data(result.map_err(Into::into),permit,Some(data))
-}
-async fn release_bootstrap(State(s): State<Arc<Service>>, headers: HeaderMap, Path((id,request_id)): Path<(String,String)>) -> Result<Response, Error> {
-    let key=s.authenticate(&headers).await?;
-    let p=s.record(&key,&id).await?;
-    let (result,permit)=s.catalog.authorized(key,id,move |_| async move {p.release_bootstrap(&request_id).await}).await?;
-    protected(result.map(|_|json!({"released":true})).map_err(Into::into),permit)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1849,8 +1821,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index/{id}/evidence",post(evidence_excerpt))
         .route("/api/v1/index/{id}/entities",post(entities))
         .route("/api/v1/index/{id}/neighbors",post(neighbors))
-        .route("/api/v1/index/{id}/bootstrap", get(bootstrap_identity).post(bootstrap))
-        .route("/api/v1/index/{id}/bootstrap/{request_id}", delete(release_bootstrap))
         .route("/api/v1/index/{id}/batch", post(batch))
         .route("/api/v1/index/{id}/delete-plan", post(deletion_plan))
         .route(
@@ -2469,8 +2439,7 @@ mod tests {
     }
 }
 
-/// Generate reference for the actually mounted router, never the legacy routes.
-pub(crate) fn generate_openapi() {
+fn openapi_document() -> Value {
     use utoipa::OpenApi;
     #[derive(utoipa::OpenApi)]
     #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject)))]
@@ -2592,10 +2561,7 @@ pub(crate) fn generate_openapi() {
         ("/api/v1/index/{id}/evidence","post","Exact inline source excerpt; current source visibility still required",Some(json!({"$ref":"#/components/schemas/EvidenceRef"}))),
         ("/api/v1/index/{id}/entities","post","Visible entity directory, stable ID paging in one view",Some(json!({"type":"object","properties":{"cursor":{"type":["object","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
         ("/api/v1/index/{id}/neighbors","post","Bounded exact-version one-hop; explicit partial counts are windows",Some(json!({"$ref":"#/components/schemas/NeighborRequest"}))),
-        ("/api/v1/index/{id}/changes", "post", "Ordered content-free notices; 410 requires bootstrap, never silently skip", Some(json!({"type":"object","additionalProperties":false,"properties":{"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
-        ("/api/v1/index/{id}/bootstrap", "get", "Get current bootstrap identity prefix; append 16 random hex digits for a new request", None),
-        ("/api/v1/index/{id}/bootstrap", "post", "Pinned effective snapshot and atomic feed cut; restart, expiry or hiding requires restart", Some(json!({"type":"object","additionalProperties":false,"required":["request_id"],"properties":{"request_id":{"type":"string","pattern":"^[0-9a-fA-F]{32}$"},"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
-        ("/api/v1/index/{id}/bootstrap/{request_id}", "delete", "Release bounded snapshot pin after consumption", None),
+        ("/api/v1/index/{id}/changes", "post", "Ordered content-free notices within retention; null starts at zero, expired/scope-mismatched cursors return 410; no automatic reset or full snapshot", Some(json!({"type":"object","additionalProperties":false,"properties":{"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
         (
             "/api/v1/index/{id}/iterator",
             "post",
@@ -2701,7 +2667,12 @@ pub(crate) fn generate_openapi() {
         paths.entry(path).or_insert(json!({}))[method] = operation;
     }
     doc["paths"] = Value::Object(paths);
-    let text = serde_json::to_string_pretty(&doc).unwrap();
+    doc
+}
+
+/// Generate reference for the actually mounted router, never the legacy routes.
+pub(crate) fn generate_openapi() {
+    let text = serde_json::to_string_pretty(&openapi_document()).unwrap();
     println!("{text}");
     let parent = std::env::current_exe()
         .unwrap()
@@ -2722,4 +2693,18 @@ fn unread_admission_refusal_closes_only_http1_connections() {
         assert_eq!(response.headers().get(axum::http::header::CONNECTION).map(|h| h.to_str().unwrap()),
             if version == axum::http::Version::HTTP_2 { None } else { Some("close") });
     }
+}
+
+#[cfg(test)]
+#[test]
+fn change_feed_schema_has_no_snapshot_endpoints() {
+    let doc = openapi_document();
+    let paths = doc["paths"].as_object().unwrap();
+    assert!(paths.keys().all(|path| !path.contains("/bootstrap")));
+    for path in ["/api/v1/index/{id}/changes", "/api/v1/index/{id}/iterator"] {
+        assert!(paths[path].get("post").is_some());
+    }
+    let error = Error::from(RecordError::CursorExpired(42));
+    assert_eq!(error.0, StatusCode::GONE);
+    assert_eq!(error.1, "cursor_expired");
 }

@@ -82,10 +82,8 @@
 <p id="documentStatus" role="status" aria-live="polite"></p>
 <button id="retryDocumentCommit" type="button" hidden>Retry original writes</button>
 <button id="discardRejectedWrites" type="button" hidden>Discard rejected remainder</button>
-<details><summary>Change feed and snapshot bootstrap</summary>
-<p>Notices contain identities, never historical bodies. Bootstrap pages share a fixed cut and return a feed continuation. A rescan notice or expired cursor requires a new bootstrap; do not combine pages from different cuts. One bounded five-minute snapshot is allowed per collection.</p>
-<button id="feedBootstrap" type="button">Start new snapshot</button>
-<button id="feedNext" type="button" disabled>Next snapshot page</button>
+<details><summary>Change feed</summary>
+<p>Notices contain identities, never historical bodies. Reads start at sequence zero and continue within retained history. An expired cursor returns 410; no full snapshot or automatic reset is provided. Rescan notices require external reconciliation. Iterator pages do not provide an atomic feed handoff.</p>
 <button id="feedRead" type="button">Read changes</button>
 <p id="feedStatus" role="status"></p><pre id="feedResult"></pre>
 </details>

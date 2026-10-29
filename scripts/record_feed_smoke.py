@@ -1,9 +1,8 @@
-"""Content-free feed, snapshot cut, scope and failure acceptance on temporary data."""
+"""Content-free feed, cursor continuity and failure acceptance on temporary data."""
 import base64
 import http.client
 import os
 import time
-import uuid
 from record_service_smoke import operation
 
 
@@ -21,30 +20,24 @@ def exercise(call, restart_with, directory, faults):
     event=call('POST',endpoint+'/changes',{},key=reader)
     assert len(event['events'])==1 and event['events'][0]['kind']=='source_created'
     assert 'private body' not in str(event)
-    identity=call('GET',endpoint+'/bootstrap',key=reader)['request_id_prefix']+uuid.uuid4().hex[:16]
-    request={'request_id':identity,'length':1}
-    snapshot=call('POST',endpoint+'/bootstrap',request,key=reader)
-    assert snapshot['visible_seq']==receipt['seq'] and snapshot['records'][0]['record_id']=='source'
-    assert call('POST',endpoint+'/bootstrap',request,key=reader)==snapshot
+    for method,suffix,body in [('GET','/bootstrap',None),('POST','/bootstrap',{}),('DELETE','/bootstrap/'+'a'*32,None)]:
+        assert call(method,endpoint+suffix,body,key=reader,status=404)['code']=='not_found'
+    assert call('POST',endpoint+'/changes',{'after':'invalid'},key=reader,status=400)['code']=='rejected'
     ordinary={'operation_id':operation(),'record_id':'normal','routing_key':'r','expected':'Absent','document':{'body':'later body'}}
     call('POST',endpoint+'/doc',ordinary)
-    assert call('POST',endpoint+'/bootstrap',request,key=reader)==snapshot
-    tail=call('POST',endpoint+'/changes',{'after':snapshot['continuation']},key=reader)
+    tail=call('POST',endpoint+'/changes',{'after':event['next']},key=reader)
     assert len(tail['events'])==1 and tail['events'][0]['record_id']=='normal'
     assert call('POST',endpoint+'/doc',{**ordinary,'operation_id':operation(),'record_id':'full'},status=429)['code']=='feed_full'
     deletion={**source,'operation_id':operation(),'expected':{'Match':1},'document':None}
     deletion.pop('system')
     call('POST',endpoint+'/doc',deletion)
-    assert call('POST',endpoint+'/bootstrap',request,key=reader,status=410)['code']=='bootstrap_expired'
     notices=call('POST',endpoint+'/changes',{'after':tail['next']},key=reader)
     assert notices['events'][0]['rescan_required'] and notices['events'][0]['kind']=='source_deleted'
     call('POST',endpoint+'/grants',{'operation_id':operation(),'key_id':'feed-reader','allow':False})
     call('POST',endpoint+'/changes',{},key=reader,status=403)
-    call('GET',endpoint+'/bootstrap',key=reader,status=403)
     restart_with({})
     assert call('POST',endpoint+'/changes',{})['events']==event['events']+tail['events']+notices['events']
-    assert call('POST',endpoint+'/bootstrap',request,status=410)['code']=='bootstrap_expired'
-    print('PASS feed HTTP: shared authorization, idempotent notices, stable snapshot cut/tail, capacity backpressure, reserved deletion, revoke, restart')
+    print('PASS feed HTTP: shared authorization, idempotent notices, cursor continuation, capacity backpressure, reserved deletion, revoke, restart')
     if not faults:
         return
     now=int(time.time()*1000)
@@ -77,8 +70,8 @@ def exercise(call, restart_with, directory, faults):
         assert call('POST',target+'/changes',{},status=410)['code']=='cursor_expired'
         assert call('POST',target+'/changes',{'after':page['next']})['events']==[]
         assert call('POST',target+'/doc',request)['receipt']==receipt
-        prefix=call('GET',target+'/bootstrap')['request_id_prefix']
-        rebuilt=call('POST',target+'/bootstrap',{'request_id':prefix+uuid.uuid4().hex[:16]})
-        assert rebuilt['visible_seq']==receipt['seq'] and len(rebuilt['records'])==1
+        # Missing history stays an explicit error even after another request.
+        assert call('POST',target+'/changes',{},status=410)['code']=='cursor_expired'
+        assert call('GET',target+'/doc/normal')['document']==ordinary['document']
     boundary='SQLite-confirmed durable pending/process exit' if os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3' else 'unknown/durable/process exit'
-    print('PASS feed trim faults: seven-day boundary, '+boundary+' recovery, expired cursor, retained retry receipt and bootstrap')
+    print('PASS feed trim faults: seven-day boundary, '+boundary+' recovery, expired cursor, retained retry receipt and current record')

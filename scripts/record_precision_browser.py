@@ -73,21 +73,11 @@ def exercise(base, master, call, chromium=None):
         for request, document in zip(requests, documents):
             stored = call('GET', f'/api/v1/index/{collection}/doc/'+request['record_id'])
             assert stored['document'] == document
-        # Inspect the real bootstrap response, including original nested integer tokens.
-        page.evaluate("inspectFeed('start')")
-        feed = page.locator('#feedResult').text_content()
-        def displayed_documents(value):
-            if isinstance(value, dict):
-                if 'rank' in value and 'data' in value:
-                    yield value
-                for child in value.values():
-                    yield from displayed_documents(child)
-            elif isinstance(value, list):
-                for child in value:
-                    yield from displayed_documents(child)
-        feed_documents = list(displayed_documents(json.loads(feed)))
-        assert sorted(doc['rank'] for doc in feed_documents) == sorted(values)
-        assert all(doc in documents for doc in feed_documents)
+        # Exercise setupApi's real response parser using current-record reads.
+        # Search below separately covers rendering original nested integer tokens.
+        for request,document in zip(requests,documents):
+            raw=page.evaluate("async id => apiJsonText(await setupApi('GET',`api/v1/index/${INDEX_ID}/doc/${id}`,API_KEY))",request['record_id'])
+            assert json.loads(raw)['document']==document
         # Search uses jQuery's JSON converter, not setupApi; exercise its actual DOM.
         page.locator('#backToSearch').click()
         page.evaluate("TITLE_FIELD='rank'; TEXT_FIELD='data'; query='precision'; loadResults(1,'score')")

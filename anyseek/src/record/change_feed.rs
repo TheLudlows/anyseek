@@ -105,7 +105,7 @@ pub struct ChangePage {
     pub events: Vec<ChangeEvent>,
     /// Save only after applying this page idempotently.
     pub next: String,
-    /// Last discarded event sequence; older consumers must bootstrap.
+    /// Last discarded event sequence; older cursors fail with CursorExpired.
     pub retention_floor: u64,
     /// Authoritative cut captured for this response.
     pub visible_seq: u64,
@@ -431,6 +431,8 @@ fn cursor(state: &State, seq: u64) -> Result<String, RecordError> {
 }
 impl RecordPartition {
     /// Ordered metadata-only notices. The opaque cursor is not authorization.
+    /// None starts at sequence zero and fails once that prefix has expired.
+    /// This API provides no full snapshot or automatic recovery after a gap.
     pub async fn changes(
         &self,
         after: Option<String>,
@@ -502,211 +504,6 @@ impl RecordPartition {
             visible_seq: inner.state.seq,
             evaluation_time_ms: inner.evaluation_time_ms,
         })
-    }
-}
-
-const BOOTSTRAP_LEASE_MS: u64 = 300_000;
-const PAGE_BYTES: usize = 4 * 1024 * 1024;
-pub(super) struct Bootstrap {
-    id: String,
-    seq: u64,
-    at: u64,
-    expires: u64,
-    records: Vec<Record>,
-    permit: DataOutputPermit,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BootstrapCursor {
-    version: u8,
-    scope: String,
-    id: String,
-    index: usize,
-}
-/// One page of a pinned effective snapshot, with an atomic snapshot-to-feed cut.
-#[derive(Clone, Debug, Serialize)]
-pub struct BootstrapPage {
-    /// Effective records in one bounded snapshot page.
-    pub records: Vec<Record>,
-    /// Opaque next-page token, or None after the complete snapshot.
-    pub next: Option<String>,
-    /// Feed cut; consume only after the entire snapshot has been installed.
-    pub continuation: String,
-    /// Authoritative cut captured for this response.
-    pub visible_seq: u64,
-    /// Fixed trusted UTC Unix milliseconds for this view.
-    pub evaluation_time_ms: u64,
-    /// Snapshot lease deadline in trusted UTC Unix milliseconds.
-    pub expires_at_ms: u64,
-}
-impl RecordPartition {
-    /// One bounded five-minute pin per partition. Retry the same request_id and
-    /// cursor after response loss. Restart/expiry/hiding invalidates the pin.
-    pub async fn bootstrap(
-        &self,
-        request_id: String,
-        after: Option<String>,
-        limit: usize,
-    ) -> Result<BootstrapPage, RecordError> {
-        if request_id.len() != 32
-            || !request_id.bytes().all(|b| b.is_ascii_hexdigit())
-            || limit == 0
-            || limit > 1000
-        {
-            return Err(RecordError::Rejected(
-                "bootstrap requires 32-hex request_id and limit 1..1000".into(),
-            ));
-        }
-        self.advance_time().await?;
-        let _admission = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
-        let mut inner = self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some() {
-            return Err(RecordError::RecoveryRequired);
-        }
-        let at = inner.evaluation_time_ms;
-        inner.refresh_bootstrap(at);
-        if !request_id.starts_with(&inner.bootstrap_epoch) {
-            return Err(RecordError::BootstrapExpired);
-        }
-        let index = if let Some(token) = after {
-            let token: BootstrapCursor = decode(&token)?;
-            if token.version != 1
-                || token.scope != inner.state.feed.scope
-                || token.id != request_id
-                || inner.bootstrap.as_ref().is_none_or(|p| p.id != request_id)
-            {
-                return Err(RecordError::BootstrapExpired);
-            }
-            token.index
-        } else {
-            if inner.bootstrap.as_ref().is_some_and(|p| p.id != request_id) {
-                return Err(RecordError::Busy);
-            }
-            if inner.bootstrap.is_none() {
-                let mut records = Vec::new();
-                let mut bytes = 0usize;
-                for record in inner
-                    .state
-                    .records
-                    .values()
-                    .filter(|r| inner.locations.contains_key(&r.record_id))
-                {
-                    bytes = bytes
-                        .checked_add(serde_json::to_vec(record).map_err(storage)?.len())
-                        .ok_or_else(|| {
-                            RecordError::Rejected("bootstrap byte budget exceeded".into())
-                        })?;
-                    if bytes as u64 > inner.config.max_journal_bytes {
-                        return Err(RecordError::Rejected(
-                            "bootstrap byte budget exceeded".into(),
-                        ));
-                    }
-                    records.push(record.clone());
-                }
-                let permit = DataOutputPermit::new(
-                    inner.output.clone(),
-                    inner
-                        .output
-                        .read()
-                        .map_err(|_| RecordError::RecoveryRequired)?
-                        .revision,
-                );
-                inner.bootstrap = Some(Bootstrap {
-                    id: request_id.clone(),
-                    seq: inner.state.seq,
-                    at,
-                    expires: at.saturating_add(BOOTSTRAP_LEASE_MS),
-                    records,
-                    permit,
-                });
-            }
-            0
-        };
-        let pin = inner
-            .bootstrap
-            .as_ref()
-            .ok_or(RecordError::BootstrapExpired)?;
-        pin.permit
-            .deliver(|| ())
-            .map_err(|_| RecordError::BootstrapExpired)?;
-        if index > pin.records.len() {
-            return Err(RecordError::Rejected(
-                "bootstrap cursor outside snapshot".into(),
-            ));
-        }
-        let mut bytes = 0;
-        let mut records = Vec::new();
-        for record in pin.records.iter().skip(index).take(limit) {
-            let size = serde_json::to_vec(record).map_err(storage)?.len();
-            if !records.is_empty() && bytes + size > PAGE_BYTES {
-                break;
-            }
-            bytes += size;
-            records.push(record.clone());
-        }
-        let end = index + records.len();
-        let next = if end < pin.records.len() {
-            Some(encode(&BootstrapCursor {
-                version: 1,
-                scope: inner.state.feed.scope.clone(),
-                id: request_id,
-                index: end,
-            })?)
-        } else {
-            None
-        };
-        Ok(BootstrapPage {
-            records,
-            next,
-            continuation: cursor(&inner.state, pin.seq)?,
-            visible_seq: pin.seq,
-            evaluation_time_ms: pin.at,
-            expires_at_ms: pin.expires,
-        })
-    }
-    /// Release a completed pin explicitly; the retained feed is unaffected.
-    pub async fn release_bootstrap(&self, request_id: &str) -> Result<(), RecordError> {
-        let mut inner = self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some() {
-            return Err(RecordError::RecoveryRequired);
-        }
-        if inner.bootstrap.as_ref().is_some_and(|p| p.id == request_id) {
-            inner.bootstrap = None;
-            inner.bootstrap_epoch = format!("{:016x}", rand::random::<u64>());
-        }
-        Ok(())
-    }
-}
-
-impl Inner {
-    fn refresh_bootstrap(&mut self, at: u64) {
-        if self.bootstrap.as_ref().is_some_and(|pin| {
-            pin.expires <= at
-                || pin.seq < self.state.feed.floor
-                || pin.permit.deliver(|| ()).is_err()
-        }) {
-            self.bootstrap = None;
-            self.bootstrap_epoch = format!("{:016x}", rand::random::<u64>());
-        }
-    }
-}
-impl RecordPartition {
-    /// Prefix for a new bootstrap request_id: append sixteen random hex digits.
-    /// Restart, release, expiry and hiding rotate this identity, so a lost first
-    /// response cannot silently become a different snapshot on retry.
-    pub async fn bootstrap_identity(&self) -> Result<String, RecordError> {
-        self.advance_time().await?;
-        let mut inner = self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some() {
-            return Err(RecordError::RecoveryRequired);
-        }
-        let at = inner.evaluation_time_ms;
-        inner.refresh_bootstrap(at);
-        Ok(inner.bootstrap_epoch.clone())
     }
 }
 

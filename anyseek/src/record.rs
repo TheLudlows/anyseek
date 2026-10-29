@@ -27,7 +27,7 @@ mod graph;
 mod fusion;
 pub use fusion::{RelationFusion, FusionWindow};
 pub use graph::{RelationMetadata, RelationDirection, NeighborRequest, NeighborPage, NeighborHit, RelationCount};
-pub use change_feed::{FeedConfig, ChangeKind, ChangeEvent, ChangePage, BootstrapPage};
+pub use change_feed::{FeedConfig, ChangeKind, ChangeEvent, ChangePage};
 pub use temporal::{TemporalMetadata, TemporalFilter, TimeRange};
 pub use generation::{GenerationChunk, GenerationCommand, GenerationMember, GenerationStatus};
 mod output;
@@ -80,8 +80,6 @@ pub enum RecordError {
     FeedFull,
     /// Cursor is outside retained history or belongs to another recovery scope.
     CursorExpired(u64),
-    /// Bootstrap pin is gone, expired, or invalidated; discard partial state.
-    BootstrapExpired,
     /// Admission refused before operation lookup; prior attempts may have succeeded.
     Busy,
     /// Invalid request or an exhausted resource budget; no write accepted.
@@ -369,8 +367,6 @@ struct Inner {
     evaluation_time_ms: u64,
     feed_cache: change_feed::Cache,
     graph_cache: graph::Cache,
-    bootstrap: Option<change_feed::Bootstrap>,
-    bootstrap_epoch: String,
     output: Arc<std::sync::RwLock<output::OutputState>>,
     #[cfg(feature = "s3-object-store")]
     remote: Option<RemotePersistence>,
@@ -1368,7 +1364,6 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 feed_cache: change_feed::Cache::default(),
                 graph_cache: graph::Cache::default(),
-                bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),
                 output,
                 #[cfg(feature = "s3-object-store")]
                 remote: None,
@@ -1469,7 +1464,7 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 feed_cache,
                 graph_cache,
-                bootstrap: None, bootstrap_epoch:format!("{:016x}",rand::random::<u64>()),                output:output.clone(),
+                output:output.clone(),
                 #[cfg(feature = "s3-object-store")]
                 remote: None,
                 #[cfg(test)]
@@ -2459,39 +2454,6 @@ mod tests {
         clock.set(now+7*86_400_000);p.advance_time().await.unwrap();
         let inner=p.inner.lock().await;assert!(inner.healthy);assert_eq!(inner.state.feed.floor,0);
         assert!(inner.state.records["t"].expired_at_ms.is_some());drop(inner);
-        drop(p);std::fs::remove_dir_all(root).unwrap();
-    }
-    #[tokio::test]
-    async fn feed_bootstrap_release_and_lease_rotate_retry_identity() {
-        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();let(clock,now)=test_clock(&p).await;
-        let id=format!("{}aaaaaaaaaaaaaaaa",p.bootstrap_identity().await.unwrap());
-        p.bootstrap(id.clone(),None,1).await.unwrap();p.release_bootstrap(&id).await.unwrap();
-        assert!(matches!(p.bootstrap(id,None,1).await,Err(RecordError::BootstrapExpired)));
-        let id=format!("{}bbbbbbbbbbbbbbbb",p.bootstrap_identity().await.unwrap());
-        p.bootstrap(id.clone(),None,1).await.unwrap();clock.set(now+300_000);
-        assert!(matches!(p.bootstrap(id,None,1).await,Err(RecordError::BootstrapExpired)));
-        drop(p);std::fs::remove_dir_all(root).unwrap();
-    }
-    #[tokio::test]
-    async fn feed_bootstrap_cut_concurrent_write_hiding_and_restart() {
-        let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
-        p.write(source_write("boot-source","s",&[])).await.unwrap();
-        p.write(source_write("boot-derived","d",&[("s",1)])).await.unwrap();
-        let id=format!("{}aaaaaaaaaaaaaaaa",p.bootstrap_identity().await.unwrap());
-        let first=p.bootstrap(id.clone(),None,1).await.unwrap();assert!(first.next.is_some());
-        p.write(write("boot-new","n","alpha",ExpectedVersion::Absent)).await.unwrap();
-        let retry=p.bootstrap(id.clone(),None,1).await.unwrap();assert_eq!(retry.visible_seq,first.visible_seq);
-        assert_eq!(retry.records[0].record_id,first.records[0].record_id);
-        let next=p.bootstrap(id.clone(),first.next.clone(),1).await.unwrap();assert_eq!(next.visible_seq,2);assert!(next.next.is_none());
-        let tail=p.changes(Some(first.continuation.clone()),10).await.unwrap();assert_eq!(tail.events.len(),1);assert_eq!(tail.events[0].record_id.as_deref(),Some("n"));
-        let mut delete=source_write("boot-delete","s",&[]);delete.document=None;delete.system=None;delete.expected=ExpectedVersion::Match(1);
-        p.write(delete).await.unwrap();
-        assert!(matches!(p.bootstrap(id.clone(),first.next.clone(),1).await,Err(RecordError::BootstrapExpired)));
-        assert!(matches!(p.bootstrap(id.clone(),None,1).await,Err(RecordError::BootstrapExpired)));
-        let fresh=format!("{}bbbbbbbbbbbbbbbb",p.bootstrap_identity().await.unwrap());
-        let current=p.bootstrap(fresh,None,1).await.unwrap();assert_eq!(current.records.len(),1);assert_eq!(current.records[0].record_id,"n");
-        drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
-        assert!(matches!(p.bootstrap(id,first.next,1).await,Err(RecordError::BootstrapExpired)));
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]

@@ -75,26 +75,20 @@ def exercise(base,master,call):
         expect(page.locator('#documentStatus')).to_contain_text('durable and visible')
         assert page.evaluate("sessionStorage.getItem('seekpower.pendingWrites')") is None
         assert call('GET',f'/api/v1/index/{collection}')['indexed_doc_count']==1
-        page.locator('summary').filter(has_text='Change feed and snapshot bootstrap').click()
-        def lose_bootstrap(route):
-            response=route.fetch();assert response.status==200
-            route.abort('failed')
-        page.route('**/api/v1/index/*/bootstrap',lambda route: lose_bootstrap(route) if route.request.method=='POST' else route.continue_())
-        page.locator('#feedBootstrap').click()
-        expect(page.locator('#feedStatus')).to_contain_text('Retry the snapshot page')
-        page.unroute('**/api/v1/index/*/bootstrap')
-        def lose_release(route):
-            response=route.fetch();assert response.status==200
-            route.abort('failed')
-        page.route('**/api/v1/index/*/bootstrap/*',lose_release,times=1)
-        page.locator('#feedNext').click()
-        expect(page.locator('#feedStatus')).to_contain_text('Snapshot complete')
-        expect(page.locator('#feedStatus')).to_contain_text('Release unconfirmed')
-        expect(page.locator('#feedNext')).to_be_disabled()
-        assert 'continuation' in page.locator('#feedResult').inner_text()
+        page.get_by_text('Change feed',exact=True).click()
         page.locator('#feedRead').click()
         expect(page.locator('#feedStatus')).to_contain_text('Change page ready')
-        print('PASS Chromium: real snapshot bootstrap and feed continuation')
+        assert 'record_changed' in page.locator('#feedResult').inner_text()
+        cursor=page.evaluate('feedState.cursor')
+        def expired_feed(route):
+            route.fulfill(status=410,content_type='application/json',body='{"code":"cursor_expired","message":"expired"}')
+        page.route('**/api/v1/index/*/changes',expired_feed,times=1)
+        page.locator('#feedRead').click()
+        expect(page.locator('#feedStatus')).to_contain_text('no automatic reset')
+        assert page.evaluate('feedState.cursor')==cursor
+        page.locator('#feedRead').click()
+        expect(page.locator('#feedStatus')).to_contain_text('Change page ready')
+        print('PASS Chromium: change feed continuation and explicit expiry without reset')
         graph_records=[{'record_id':rid,'routing_key':'graph-route','expected':'Absent','document':{'body':'graphnode'},'system':{'kind':'entity'}} for rid in ['graph-a','graph-b']]
         graph_records.append({'record_id':'graph-edge','routing_key':'graph-route','expected':'Absent','document':{'body':'graphlink'},'system':{'kind':'relation','relation':{'from':{'record_id':'graph-a','routing_key':'graph-route','version':1},'to':{'record_id':'graph-b','routing_key':'graph-route','version':1},'relation_type':'knows'}}})
         page.locator('#recordEnvelopeMode').check();page.locator('#documentJson').fill(json.dumps(graph_records));page.locator('#submitDocuments').click()
