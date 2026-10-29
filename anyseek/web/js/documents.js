@@ -64,7 +64,6 @@ function loadPendingWrites() {
     return pending && pending.collection === INDEX_ID ? pending : null;
 }
 function resetDocumentEditor() {
-    resetFeed();
     resetGraph();
     pendingDocumentCommit = null;
     CURRENT_SCHEMA = {};
@@ -163,45 +162,6 @@ $(function () {
         if(!pendingDocumentCommit||documentBusy)return;
         documentControls(true);$('#documentError').text('');await submitPendingWrites();documentControls(false);
     });
-});
-
-// Manual notice inspection. Keep the exact cursor on transport loss or expiry;
-// restarting at null cannot recover a missing retained prefix.
-let feedState = null;
-let feedBusy = false;
-function resetFeed() {
-    feedState = null;
-    $('#feedResult,#feedStatus').text('');
-}
-async function inspectFeed() {
-    if (feedBusy) return;
-    feedBusy=true;$('#feedRead').prop('disabled',true);
-    const collection=INDEX_ID,key=API_KEY,base=`api/v1/index/${encodeURIComponent(collection)}`;
-    const current=()=>collection===INDEX_ID && key===API_KEY;
-    try {
-        if (!feedState || feedState.collection!==collection || feedState.key!==key) resetFeed();
-        const page=await setupApi('POST',`${base}/changes`,key,{after:feedState?.cursor||null,length:100});
-        if(!current())return;
-        feedState={collection,key,cursor:page.next};
-        $('#feedResult').text(apiJsonText(page));
-        $('#feedStatus').text(page.events.some(e=>e.rescan_required)?'Invalidation received: reconcile affected state externally; notices do not enumerate all affected records.':'Change page ready.');
-    } catch(error) {
-        if(current()) {
-            $('#feedResult').text('');
-            if ([401,403].includes(error.status)) {
-                resetFeed();$('#feedStatus').text(error.message);
-            } else if(error.status===410) {
-                $('#feedStatus').text(`${error.message} Feed history is unavailable for this cursor. External reconciliation is required; no automatic reset or full snapshot is provided.`);
-            } else {
-                $('#feedStatus').text(`${error.message} Read changes again to retry the same cursor.`);
-            }
-        }
-    } finally {
-        feedBusy=false;$('#feedRead').prop('disabled',false);
-    }
-}
-$(function(){
-    $('#feedRead').on('click',()=>inspectFeed());
 });
 
 let graphState=null;

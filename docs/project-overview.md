@@ -13,7 +13,7 @@ flowchart TB
     App["知识库 / AI 记忆 / RAG / Agent"]
     Pipeline["上层处理：解析、切块、Embedding、抽取、Rerank"]
     API["Rust API / HTTP / Web UI"]
-    Record["记录与生命周期：版本、幂等、来源、整代发布、TTL、Feed"]
+    Record["记录与生命周期：版本、幂等、来源、整代发布、TTL"]
     Query["统一检索视图：全文、向量、混合、过滤、一跳关系"]
     Control["授权屏障与资源预算"]
     Storage["本地 Segment + WAL，或 SQLite + S3"]
@@ -33,10 +33,10 @@ flowchart TB
 | --- | --- | --- |
 | 检索 | BM25F 全文、IVF ANN、RRF 混合、多字段、中文、过滤、排序、分页、投影及逐命中解释 | ANN、有界融合及候选内字段重排不保证全库精确 Top-K |
 | 可靠记录 | 稳定 ID、条件版本、墓碑、防 ABA、操作幂等和回执查询 | batch 为独立操作，不提供跨记录或跨 collection 原子事务 |
-| 来源与证据 | 精确来源版本、字符/页码定位、直接和间接依赖、stale 与级联隐藏 | 来源和关系限定在同 collection；删除隐藏不依赖异步 Feed |
+| 来源与证据 | 精确来源版本、字符/页码定位、直接和间接依赖、stale 与级联隐藏 | 来源和关系限定在同 collection；删除立即阻断内容输出 |
 | 整文发布 | 多批私有 staging、租约、完整清单 Seal、整代 Publish 与清理 | staging 回执只证明持久，Publish 后成员才开放 |
 | 向量后补 | 正文先可见，向量按精确版本后补 | 缺向量不参与该字段向量召回，不填零向量 |
-| 时间与同步 | 固定 evaluation_time、时间过滤、不可逆 TTL、至少七天 Feed | 过期游标显式拒绝，无自动重置或全量衔接；容量不足背压，不丢弃窗口内事件 |
+| 时间与生命周期 | 固定 evaluation_time、时间过滤、不可逆 TTL | 过期结果持久化，不会因时钟回退复活 |
 | 实体关系 | 显式实体目录、有预算的一跳邻居及关系通道融合 | 不自动抽取或推断关系，不提供完整图语言 |
 | 共享授权 | 多 API key 共享 collection、grant revision、撤权及未交付输出复核 | 已发送字节无法撤回；整 key 撤销等操作仍有全局排空 |
 | 持久化 | 本地 WAL/发布见证/Segment，或 SQLite 协调与 S3 不可变对象 | 真实 S3 合同和系统断电尚未验收 |

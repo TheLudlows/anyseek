@@ -1,6 +1,6 @@
 # 当前功能与边界
 
-HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、generation、时间/TTL、feed、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续回收仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
+HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、generation、时间/TTL、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续回收仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
 
 ## 检索和数据
 
@@ -10,7 +10,7 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | 向量 | 外部 JSON/base64、多向量字段、F32/I8、三种距离、量化、IVF ANN；模型推理由调用方提供 |
 | 混合 | 全文/向量及可选关系通道共同视图 RRF，支持权重和候选预算、逐命中 rank/原始分数/贡献；候选窗口不当作全库精确并集 |
 | 来源与整文 | 精确来源版本、内联字符/页码定位、直接/间接证据；修订后 stale 默认隐藏，删除立即隐藏；多批 staging、租约、完整成员 Seal/Publish |
-| 时间与同步 | UTC 毫秒时间过滤、固定 evaluation_time、不可逆 TTL、七天 feed/背压、过期游标显式拒绝；同 collection 实体与一跳关系 |
+| 时间与生命周期 | UTC 毫秒时间过滤、固定 evaluation_time、不可逆 TTL；同 collection 实体与一跳关系 |
 | 过滤和排序 | 共享元数据谓词、字段排序、分页和投影；ANN/Hybrid 候选内重排不保证全库字段 Top-K |
 | 身份和写入 | 稳定 Record ID、不可变 routing key、版本条件、墓碑、防 ABA、原 operation_id 重试 |
 | 原始数据 | 权威状态保留完整 Document 和原始向量；schema.store 控制查询投影，不控制原始数据持久保存 |
@@ -49,7 +49,6 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | POST | `/api/v1/index/{id}/evidence` | 受保护精确来源版本的 UTF-8 区间/内联页摘录及摘要 |
 | POST | `/api/v1/index/{id}/entities` | 稳定 ID 实体目录，同视图分页 |
 | POST | `/api/v1/index/{id}/neighbors` | 精确版本 seeds、有预算一跳、exact/window 计数 |
-| POST | `/api/v1/index/{id}/changes` | 至少七天内容无关通知；过期游标明确要求重建 |
 | POST | `/api/v1/index/{id}/delete-plan` | all/ids/lexical query 选择；返回精确版本目标 |
 | POST | `/api/v1/index/{id}/batch` | `{writes:[...]}`，1..100 独立操作，非原子 |
 | GET | `/api/v1/index/{id}/operation/{epoch}/{nonce}` | 已授权数据回执查询，缺席不证明失败 |
@@ -66,7 +65,7 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 
 ## Web UI 和工具
 
-UI 增加实体目录/一跳关系检查及feed 通知检查与原游标重试；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、链接/原文/图片预览、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面支持 staging 租约检查和 renew 条件写入；未发布私有正文在 abort/到期后安全清理并保留摘要回执。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 key/grant 或逐条更新/删除管理页面。
+UI 增加实体目录/一跳关系检查；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、链接/原文/图片预览、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面支持 staging 租约检查和 renew 条件写入；未发布私有正文在 abort/到期后安全清理并保留摘要回执。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 key/grant 或逐条更新/删除管理页面。
 
 完整冒烟为 `scripts/record_service_smoke.py`，`--browser` 启用 Chromium，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 留在可选 `anyseek::server` 模块。
 

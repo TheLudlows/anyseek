@@ -67,7 +67,7 @@ pub(super) fn validate_request(
             }
             let stage = Staged {
                 deadline_ms: lease::deadline(evaluation)?,
-                scope: state.feed.scope.clone(),
+                scope: state.history.scope.clone(),
                 id: generation_id.clone(),
                 source: source.clone(),
                 members: members.clone(),
@@ -88,14 +88,14 @@ pub(super) fn validate_request(
                 .as_ref()
                 .filter(|s| &s.id == generation_id)
                 .ok_or_else(|| conflict("upload identity mismatch"))?;
-            if stage.deadline_ms <= evaluation || stage.scope != state.feed.scope {
+            if stage.deadline_ms <= evaluation || stage.scope != state.history.scope {
                 return Err(conflict("upload requires unexpired renewed owner lease"));
             }
             if stage.sealed {
                 return Err(conflict("sealed upload cannot change"));
             }
             let mut candidate = old.clone();
-            apply(&mut candidate, request, evaluation, &state.feed.scope)?;
+            apply(&mut candidate, request, evaluation, &state.history.scope)?;
             let stage = candidate.staged.as_ref().unwrap();
             validate_manifest(stage)?;
             generation::validate_stage(state, config, stage, request, evaluation)?;

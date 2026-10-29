@@ -6,7 +6,7 @@
 
 | 层 | 责任 |
 | --- | --- |
-| Record | 稳定身份/版本/幂等、来源隐藏、TTL、generation、Feed、关系和授权；业务提交与可见性权威 |
+| Record | 稳定身份/版本/幂等、来源隐藏、TTL、generation、关系和授权；业务提交与可见性权威 |
 | Payload | 唯一保存规范原始 Document 和原始向量；量化向量不能代替输入 |
 | Tantivy 0.27.0 | 全文倒排、词典、位置与固定 Searcher；不另存完整正文，不决定业务 head |
 | 向量/元数据 | 独立组件；与全文固定同一业务 cut 和 evaluation_time |

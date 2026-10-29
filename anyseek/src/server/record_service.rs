@@ -66,8 +66,6 @@ impl From<RecordError> for Error {
     fn from(e: RecordError) -> Self {
         let (status, code) = match &e {
             RecordError::Busy => (StatusCode::TOO_MANY_REQUESTS, "busy"),
-            RecordError::FeedFull => (StatusCode::TOO_MANY_REQUESTS, "feed_full"),
-            RecordError::CursorExpired(_) => (StatusCode::GONE, "cursor_expired"),
             RecordError::ClockUncertain => (StatusCode::SERVICE_UNAVAILABLE, "clock_uncertain"),
             RecordError::Rejected(_) => (StatusCode::BAD_REQUEST, "rejected"),
             RecordError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
@@ -666,7 +664,7 @@ fn record_config(
     let schema = request.schema.into_iter().map(Into::into).collect();
     let inference = request.vector.map(Inference::from).unwrap_or_default();
     Ok(RecordConfig {
-        change_feed: request.change_feed,
+        history: Default::default(),
         index: IndexMetaObject {
             id: 0,
             name: request.index_name,
@@ -1062,20 +1060,6 @@ async fn neighbors(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<
     let request:anyseek::record::NeighborRequest=parse(&bytes)?;
     let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
     let(result,permit)=s.catalog.authorized(key,id,move |_|async move {p.neighbors(request).await}).await?;
-    protected_data(result.map_err(Into::into),permit,Some(data))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChangesRequest {
-    #[serde(default)] after: Option<String>,
-    #[serde(default = "page_length")] length: usize,
-}
-async fn changes(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>, bytes: Bytes) -> Result<Response, Error> {
-    let request: ChangesRequest = parse(&bytes)?;
-    let key=s.authenticate(&headers).await?;
-    let p=s.record(&key,&id).await?;
-    let data=p.output_permit()?;
-    let (result,permit)=s.catalog.authorized(key,id,move |_| async move {p.changes(request.after,request.length).await}).await?;
     protected_data(result.map_err(Into::into),permit,Some(data))
 }
 #[derive(Deserialize)]
@@ -1817,7 +1801,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}", get(ingest_operation))
         .route("/api/v1/index/{id}/query", post(query))
         .route("/api/v1/index/{id}/iterator", post(iterate))
-        .route("/api/v1/index/{id}/changes", post(changes))
         .route("/api/v1/index/{id}/evidence",post(evidence_excerpt))
         .route("/api/v1/index/{id}/entities",post(entities))
         .route("/api/v1/index/{id}/neighbors",post(neighbors))
@@ -2446,7 +2429,7 @@ fn openapi_document() -> Value {
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
-    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, generation, temporal, feed and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root do not restore old grants. See docs/record-model.md for acceptance limits."});
+    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, generation, temporal and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root do not restore old grants. See docs/record-model.md for acceptance limits."});
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","routing_key","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"routing_key":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
@@ -2561,7 +2544,6 @@ fn openapi_document() -> Value {
         ("/api/v1/index/{id}/evidence","post","Exact inline source excerpt; current source visibility still required",Some(json!({"$ref":"#/components/schemas/EvidenceRef"}))),
         ("/api/v1/index/{id}/entities","post","Visible entity directory, stable ID paging in one view",Some(json!({"type":"object","properties":{"cursor":{"type":["object","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
         ("/api/v1/index/{id}/neighbors","post","Bounded exact-version one-hop; explicit partial counts are windows",Some(json!({"$ref":"#/components/schemas/NeighborRequest"}))),
-        ("/api/v1/index/{id}/changes", "post", "Ordered content-free notices within retention; null starts at zero, expired/scope-mismatched cursors return 410; no automatic reset or full snapshot", Some(json!({"type":"object","additionalProperties":false,"properties":{"after":{"type":["string","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
         (
             "/api/v1/index/{id}/iterator",
             "post",
@@ -2697,14 +2679,11 @@ fn unread_admission_refusal_closes_only_http1_connections() {
 
 #[cfg(test)]
 #[test]
-fn change_feed_schema_has_no_snapshot_endpoints() {
+fn external_sync_routes_are_absent_from_schema() {
     let doc = openapi_document();
     let paths = doc["paths"].as_object().unwrap();
-    assert!(paths.keys().all(|path| !path.contains("/bootstrap")));
-    for path in ["/api/v1/index/{id}/changes", "/api/v1/index/{id}/iterator"] {
-        assert!(paths[path].get("post").is_some());
+    assert!(paths.keys().all(|path| !path.contains("/bootstrap") && !path.ends_with("/changes")));
+    for path in ["/api/v1/index/{id}/iterator", "/api/v1/index/{id}/doc/{record_id}"] {
+        assert!(paths.contains_key(path));
     }
-    let error = Error::from(RecordError::CursorExpired(42));
-    assert_eq!(error.0, StatusCode::GONE);
-    assert_eq!(error.1, "cursor_expired");
 }

@@ -8,7 +8,7 @@ def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','feed','indexer','authorization']);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','history','indexer','authorization']);args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
     with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
@@ -72,7 +72,7 @@ def main():
         def section(name):
             import importlib
             exercise=importlib.import_module('record_'+name+'_smoke').exercise
-            if name in ['temporal','feed','indexer','authorization']:
+            if name in ['temporal','history','indexer','authorization']:
                 exercise(call,restart_with,root.parent,args.faults)
             elif name=='lease':
                 exercise(call,restart_with,root.parent,False)
@@ -605,8 +605,8 @@ def main():
                 from record_service_browser import exercise
                 exercise(base,master,call)
             if args.faults:lease_exercise(call,restart_with,root.parent,True,only_faults=True)
-            from record_feed_smoke import exercise as feed_exercise
-            feed_exercise(call,restart_with,root.parent,args.faults)
+            from record_history_smoke import exercise as history_exercise
+            history_exercise(call,restart_with,root.parent,args.faults)
         except Exception:
             log.flush();log.seek(0)
             print('SERVER LOG AT FAILURE:\n'+log.read()[-16384:],flush=True)

@@ -133,7 +133,6 @@ def main():
             config={'index_name':'S3','schema':[{'field':'body','field_type':'Text'},
                 {'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config})
-            feed_origin=call('POST','/api/v1/index/main/changes',{})['next']
             original=write('first','a','alpha old');receipt=call('POST','/api/v1/index/main/doc',original)['receipt']
             call('POST','/api/v1/index/main/doc',write('b','b','alpha beta'))
             call('PATCH','/api/v1/index/main')
@@ -214,10 +213,9 @@ def main():
                     call('DELETE',f'/api/v1/index/{target}',{'operation_id':operation()})
                 else:takeover_target=target
             clock.write_text(str(int(clock.read_text())+8*86400000))
-            call('POST','/api/v1/index/main/changes',{'after':feed_origin},status=410)
-            cold_restart();call('POST','/api/v1/index/main/changes',{'after':feed_origin},status=410)
             assert query()==expected
-            print('PASS remote feed floor, old cursor expiry and query views survive cache loss',flush=True)
+            cold_restart();assert query()==expected
+            print('PASS remote history maintenance and query views survive cache loss',flush=True)
             stages=['after_snapshot','after_inventory','after_upload','after_descriptor'] if args.faults else ['normal']
             for stage in stages:
                 print('S3 joint backup boundary: '+stage,flush=True)

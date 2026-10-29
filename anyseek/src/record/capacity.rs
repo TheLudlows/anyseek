@@ -37,7 +37,7 @@ mod tests {
         for i in 0..10_001 {
             let request=tests::write(&format!("op-{i}"),&format!("id-{i:05}"),if i==10_000{"alpha terminal"}else{"alpha"},ExpectedVersion::Absent);
             let receipt=WriteReceipt{staged_only:false,seq:i+1,version:1,record_id:request.record_id.clone()};
-            let applied=Applied{request_digest:None,graph_invalidation:false,observed_epoch:request.operation_id.epoch,observed_time_ms:0,request,receipt};
+            let applied=Applied{request_digest:None,legacy_graph_invalidation:false,observed_epoch:request.operation_id.epoch,observed_time_ms:0,request,receipt};
             apply(&mut state,&applied).unwrap();last=Some(applied);
         }
         let last=last.unwrap();

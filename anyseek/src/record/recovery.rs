@@ -19,7 +19,7 @@ pub struct SealRequest {
 /// not a standalone authorization to activate a new owner or trust an archive.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SealCertificate {
-    /// Feed scope of the final source authority, bound by its content digest.
+    /// Owner scope of the final source authority, bound by its content digest.
     pub source_feed_scope: String,
     /// Original partition lineage, retained through independent snapshots.
     pub lineage: String,
@@ -105,7 +105,7 @@ impl RecordPartition {
             if inner.background.is_some() { return Err(RecordError::Busy); }
             inner.advance_time().await?;
             let certificate = SealCertificate {
-                source_feed_scope: inner.state.feed.scope.clone(),
+                source_feed_scope: inner.state.history.scope.clone(),
                 lineage: inner.state.lineage.clone(), final_seq: inner.state.seq,
                 final_state_digest: content_digest(&inner.config, &inner.state)?, request,
             };
@@ -154,7 +154,7 @@ impl RecordPartition {
             if !original.healthy || !snapshot.healthy { return Err(RecordError::RecoveryRequired); }
             let seal = original.state.sealed_for.as_ref()
                 .ok_or_else(|| RecordError::Conflict("source not sealed".into()))?;
-            if seal.request != request || seal.source_feed_scope != original.state.feed.scope || original.state.independent_snapshot
+            if seal.request != request || seal.source_feed_scope != original.state.history.scope || original.state.independent_snapshot
                 || original.state.evidence_quarantined || !snapshot.state.independent_snapshot
                 || snapshot.state.lineage != original.state.lineage
                 || snapshot.state.seq > seal.final_seq
@@ -165,7 +165,7 @@ impl RecordPartition {
             let mut state = original.state.try_clone()?;
             state.sealed_for = None;
             state.takeover_proof = Some(seal.clone());
-            state.feed.scope = successor_scope(&seal.source_feed_scope,&seal.request.intent_id);
+            state.history.scope = successor_scope(&seal.source_feed_scope,&seal.request.intent_id);
             let config=original.config.clone();
             drop(snapshot);drop(original);
             super::snapshot::create(&target,config,state).await?;
@@ -179,8 +179,8 @@ impl RecordPartition {
         let inner = self.inner.lock().await;
         if !inner.healthy { return Err(RecordError::RecoveryRequired); }
         let mut normalized = inner.state.try_clone()?;
-        normalized.feed.scope = expected.source_feed_scope.clone();
-        if inner.state.feed.scope != successor_scope(&expected.source_feed_scope,&expected.request.intent_id)
+        normalized.history.scope = expected.source_feed_scope.clone();
+        if inner.state.history.scope != successor_scope(&expected.source_feed_scope,&expected.request.intent_id)
             || inner.state.sealed_for.is_some() || inner.state.independent_snapshot
             || inner.state.evidence_quarantined || inner.state.takeover_proof.as_ref() != Some(expected)
             || inner.state.lineage != expected.lineage || inner.state.seq != expected.final_seq
@@ -202,7 +202,7 @@ impl RecordPartition {
             || request.target_collection_id.is_empty() || request.target_collection_id.len() > 256 {
             return Err(RecordError::Rejected("source is not eligible for takeover".into()));
         }
-        let seal = SealCertificate { source_feed_scope: inner.state.feed.scope.clone(), lineage: lineage.into(), final_seq: inner.state.seq,
+        let seal = SealCertificate { source_feed_scope: inner.state.history.scope.clone(), lineage: lineage.into(), final_seq: inner.state.seq,
             final_state_digest: content_digest(&inner.config, &inner.state)?, request: request.clone() };
         let mut next = inner.state.try_clone()?;
         next.sealed_for = Some(seal.clone());

@@ -29,11 +29,11 @@ Record partition 的 mutex 覆盖候选检索和原始数据回表。同一个�
 
 ## 来源、整文和派生可见性
 
-`record/` 中的 mutation/publication/recovery 复用同一权威提交；evidence、generation、temporal、change_feed、graph 模块分别处理来源依赖、整代生命周期、时间逻辑、内容无关通知和显式一跳关系。HTTP/UI 只适配请求，不维护第二套业务权威。
+`record/` 中的 mutation/publication/recovery 复用同一权威提交；evidence、generation、temporal、history、graph 模块分别处理来源依赖、整代生命周期、时间逻辑、回执历史保留和显式一跳关系。HTTP/UI 只适配请求，不维护第二套业务权威。
 
 来源以精确版本引用。来源删除、stale 或 TTL 使派生内容隐藏，查询、回表和输出共用可见性屏障。generation Begin/StageBatch 仅持久私有成员，Seal 验证完整清单，Publish 原子切换整代及索引活动统计；可选向量后补使用条件版本。租约到期清理私有正文但保留幂等摘要回执。
 
-时间过滤固定一次 evaluation_time；不可逆过期通过权威提交形成墓碑。feed 与业务操作来自同一持久边界，至少保留七天，容量不足背压而非提前丢弃。关系双端精确版本及一跳候选受同一来源、generation、TTL 和授权集合约束；融合预算耗尽不伪称全量结果。
+时间过滤固定一次 evaluation_time；不可逆过期通过权威提交形成墓碑。关系双端精确版本及一跳候选受同一来源、generation、TTL 和授权集合约束；融合预算耗尽不伪称全量结果。
 
 ## 授权与生命周期
 
@@ -51,6 +51,6 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 ## 当前边界
 
-这是有界单机实现：Record 累计账本默认 10,000 项、完整 checkpoint 16 MiB 等限制见 [FEATURES](FEATURES.md)。checkpoint 回收旧 WAL 代，不等于持续账本/物理版本 GC。P2 的 source/evidence、generation、TTL、feed、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、服务总缓存预算和完整资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文替换的复用边界见 [Tantivy 评估](docs/tantivy-evaluation.md)。
+这是有界单机实现：Record 累计账本默认 10,000 项、完整 checkpoint 16 MiB 等限制见 [FEATURES](FEATURES.md)。checkpoint 回收旧 WAL 代，不等于持续账本/物理版本 GC。P2 的 source/evidence、generation、TTL、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、服务总缓存预算和完整资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文替换的复用边界见 [Tantivy 评估](docs/tantivy-evaluation.md)。
 
 [Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/src/server/README.md) · [许可](LICENSE)

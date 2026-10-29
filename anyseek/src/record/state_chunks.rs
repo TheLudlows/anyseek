@@ -83,7 +83,7 @@ impl Delta {
                         digest.push(&piece)?;
                         writer.push(&piece)?;
                     }
-                    Entry::Expired(_) | Entry::FeedTrim(_) | Entry::LeaseExpired(_) => {
+                    Entry::Expired(_) | Entry::HistoryTrim(_) | Entry::LeaseExpired(_) => {
                         let piece = BTreeMap::from([("event", &entry)]);
                         digest.push(&piece)?;
                         writer.push(&piece)?;
@@ -133,7 +133,7 @@ impl Delta {
             } else {
                 let entry: Entry = serde_json::from_value(object.remove("event")
                     .ok_or_else(|| invalid("missing delta event"))?).map_err(storage)?;
-                if !matches!(entry, Entry::Expired(_) | Entry::FeedTrim(_) | Entry::LeaseExpired(_)) {
+                if !matches!(entry, Entry::Expired(_) | Entry::HistoryTrim(_) | Entry::LeaseExpired(_)) {
                     return Err(invalid("invalid delta maintenance entry"));
                 }
                 entry
@@ -259,7 +259,7 @@ fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError>
         // Large history and staging collections are emitted separately below.
         let header = State {
             lineage: state.lineage.clone(),
-            feed: state.feed.clone(),
+            history: state.history.clone(),
             sealed_for: state.sealed_for.clone(),
             takeover_proof: state.takeover_proof.clone(),
             independent_snapshot: state.independent_snapshot,
@@ -736,13 +736,13 @@ mod tests {
         }
         let root=tempfile::tempdir().unwrap();let mut config=super::super::tests::config();
         config.max_records=256;config.max_operations=256;config.max_record_bytes=16*1024;config.max_journal_bytes=16*1024*1024;
-        let mut state=State{lineage:"0".repeat(32),feed:change_feed::FeedState{scope:"1".repeat(32),floor:0},..State::default()};
+        let mut state=State{lineage:"0".repeat(32),history:history::HistoryState{scope:"1".repeat(32),floor:0},..State::default()};
         state.admit_bytes(checkpoint_codec::json_length(&state).unwrap()).unwrap();
         let mut snapshot=checkpoint_codec::length(&config,&state).unwrap();
         for i in 0..128 {
             let request=super::super::tests::write(&format!("op-{i}"),&format!("id-{i}"),&"x".repeat(8192),ExpectedVersion::Absent);
             let receipt=WriteReceipt{staged_only:false,seq:i+1,version:1,record_id:request.record_id.clone()};
-            let applied=Applied{request_digest:None,graph_invalidation:false,observed_epoch:request.operation_id.epoch,observed_time_ms:0,request,receipt};
+            let applied=Applied{request_digest:None,legacy_graph_invalidation:false,observed_epoch:request.operation_id.epoch,observed_time_ms:0,request,receipt};
             let prepared=state_memory::Prepared::new(&state,&applied).unwrap();
             snapshot=mutation::snapshot_after(&state,snapshot,&applied,&prepared.record).unwrap();
             prepared.admit_containers(&mut state,snapshot).unwrap();apply_prepared(&mut state,&applied,Some(prepared)).unwrap();

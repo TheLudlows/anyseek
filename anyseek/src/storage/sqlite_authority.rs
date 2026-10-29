@@ -641,7 +641,7 @@ impl SqliteAuthority {
         Ok(Some(head))
     }
 
-    /// A complete checkpoint captures every logical component (including feed,
+    /// A complete checkpoint captures every logical component (including history,
     /// receipts, tombstones and staging) at the current commit. Detaching the old
     /// WAL tip only changes live roots; immutable predecessor edges stay intact
     /// for existing reader/build/backup pins. No sequence is consumed.

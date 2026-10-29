@@ -251,7 +251,7 @@ impl RecordPartition {
                 // without the foreground lock. A versioned recheck closes the gap.
                 let mut consumed=0usize;
                 let mut rounds=0usize;
-                let (mut inner,installed_feed)=loop {
+                let mut inner=loop {
                     rounds+=1;
                     if rounds>8 || started.elapsed()>=timeout {return Err(RecordError::Busy);}
                     let (raw,mut expected,revision,entry_count,entry_bytes,_raw,_decoded)={
@@ -279,7 +279,7 @@ impl RecordPartition {
                         intent.apply(&mut expected,&config)?;
                         state_proof::verify(&config,&expected,&candidate.state)?;
                     }
-                    let installed_feed=change_feed::Cache::rebuild(&candidate.state,&config.change_feed)?;
+                    history::validate_state(&candidate.state)?;
                     consumed=entry_count;
                     #[cfg(test)]
                     pause_catchup(&root,timeout).await;
@@ -289,7 +289,7 @@ impl RecordPartition {
                     if started.elapsed()>=timeout || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
                     let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
                     if tail.revision!=revision || tail.entries.len()!=entry_count || tail.bytes!=entry_bytes {continue;}
-                    break (inner,installed_feed);
+                    break inner;
                 };
                 let _install_phase=maintenance::Phase::new("candidate_install_locked",inner.state.seq);
                 let certificate = encode_entry(&Entry::Anchor(reference.clone()))?;
@@ -357,14 +357,13 @@ impl RecordPartition {
                 }
                 candidate.swap(&mut inner);
                 cursors.immediate(inner.state.seq);
-                inner.feed_cache=installed_feed;
                 inner.anchor = Some(reference);
                 inner.payloads = payloads;
                 inner.healthy = true;
                 inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced = fenced;
                 #[cfg(feature="fault-injection")]
-                if intent.trims_feed() {
-                    match std::env::var("ANYSEEK_FEED_TRIM_FAULT").ok().as_deref() {
+                if intent.trims_history() {
+                    match std::env::var("ANYSEEK_HISTORY_TRIM_FAULT").ok().as_deref() {
                         Some("after_append_unknown"|"after_durable")=>{
                             inner.healthy=false;
                             inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
@@ -633,13 +632,13 @@ mod tests {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         p.inner.lock().await.clock=Arc::new(Fixed(1_000));
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
-        p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().change_feed.retention_ms));
+        p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().history.retention_ms));
         std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
         let job=p.start_compact_job().unwrap();wait_started(&root).await;
-        {let inner=p.inner.lock().await;assert_eq!(inner.state.time_watermark_ms,1_000);assert_eq!(inner.state.feed.floor,0);}
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.time_watermark_ms,1_000);assert_eq!(inner.state.history.floor,0);}
         let request=write("second","b","beta",ExpectedVersion::Absent);
         let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
-        {let inner=p.inner.lock().await;assert_eq!(inner.state.feed.floor,1);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.history.floor,1);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
         let completion=job.handle.abort_handle();drop(job);drop(p);
         assert!(RecordPartition::open(&root,config().max_journal_bytes).await.is_err());
         std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
@@ -647,7 +646,7 @@ mod tests {
             while !completion.is_finished(){tokio::time::sleep(Duration::from_millis(5)).await;}
         }).await.unwrap();
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
-        {let inner=p.inner.lock().await;assert_eq!(inner.state.operations.len(),2);assert_eq!(inner.state.feed.floor,1);assert!(inner.anchor.is_some());}
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.operations.len(),2);assert_eq!(inner.state.history.floor,1);assert!(inner.anchor.is_some());}
         assert_eq!(p.write(request).await.unwrap(),receipt);drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -693,9 +692,9 @@ mod tests {
         }).await.unwrap();
         let request=write("second","b","beta",ExpectedVersion::Absent);
         let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
-        p.inner.lock().await.clock=Arc::new(Fixed(1_001+settings.change_feed.retention_ms));
+        p.inner.lock().await.clock=Arc::new(Fixed(1_001+settings.history.retention_ms));
         p.advance_time().await.unwrap();
-        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,2);assert_eq!(inner.state.feed.floor,2);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,2);assert_eq!(inner.state.history.floor,2);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
         let completion=job.handle.abort_handle();drop(job);drop(p);
         assert!(RecordPartition::open(&root,settings.max_journal_bytes).await.is_err());
         std::fs::remove_file(root.join(".test-source-chunk-pause")).unwrap();
@@ -703,7 +702,7 @@ mod tests {
             while !completion.is_finished(){tokio::time::sleep(Duration::from_millis(5)).await;}
         }).await.unwrap();
         let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
-        {let inner=p.inner.lock().await;assert!(inner.anchor.is_some());assert_eq!(inner.state.seq,2);assert_eq!(inner.state.feed.floor,2);}
+        {let inner=p.inner.lock().await;assert!(inner.anchor.is_some());assert_eq!(inner.state.seq,2);assert_eq!(inner.state.history.floor,2);}
         assert_eq!(p.write(request).await.unwrap(),receipt);assert!(p.get("a").await.unwrap().is_some());
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
@@ -728,7 +727,7 @@ mod tests {
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
-    async fn catchup_install_rechecks_same_sequence_feed_trim() {
+    async fn catchup_install_rechecks_same_sequence_history_trim() {
         struct Fixed(u64);
         impl temporal::Clock for Fixed {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0)}}
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
@@ -740,14 +739,14 @@ mod tests {
             while !root.join(".test-indexer-catchup-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
         }).await.unwrap();
         let seq=p.inner.lock().await.state.seq;
-        p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().change_feed.retention_ms));
+        p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().history.retention_ms));
         p.advance_time().await.unwrap();
-        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,seq);assert_eq!(inner.state.feed.floor,seq);assert_eq!(inner.background.as_ref().unwrap().revision,1);}
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,seq);assert_eq!(inner.state.history.floor,seq);assert_eq!(inner.background.as_ref().unwrap().revision,1);}
         std::fs::remove_file(root.join(".test-indexer-catchup-pause")).unwrap();
         assert_eq!(job.finish().await.unwrap(),seq);
-        assert_eq!(p.inner.lock().await.state.feed.floor,seq);
+        assert_eq!(p.inner.lock().await.state.history.floor,seq);
         drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
-        assert_eq!(p.inner.lock().await.state.feed.floor,seq);
+        assert_eq!(p.inner.lock().await.state.history.floor,seq);
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]

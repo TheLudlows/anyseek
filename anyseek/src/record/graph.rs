@@ -172,11 +172,6 @@ impl RecordPartition {
     }
 }
 
-pub(super) fn invalidates(state:&State,request:&RecordWrite)->bool {
-    request.system.as_ref().or_else(||state.records.get(&request.record_id).and_then(|r|r.system.as_ref())).is_some_and(|s|matches!(s.kind,EvidenceKind::Entity|EvidenceKind::Relation))
-    || (request.vector_patch.is_none() && state.records.values().any(|r|r.system.as_ref().is_some_and(|s|endpoints(s).any(|e|e.record_id==request.record_id))))
-}
-
 // Caller owns the partition view. Eligibility uses the same compiled metadata
 // predicate as text/vector retrieval and is applied before per-seed ranking.
 pub(super) fn neighbors_view(inner:&Inner,request:NeighborRequest,eligible:impl Fn(&str)->bool)->Result<NeighborPage,RecordError> {

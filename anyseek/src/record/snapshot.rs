@@ -32,7 +32,7 @@ impl RecordPartition {
             restore_operation_lookup(&mut state)?;
             validate_restored_state(&config,&state)?;
             if !state.independent_snapshot || state.seq!=expected_seq {return Err(storage("certified archive cut mismatch"));}
-            state.feed.scope=format!("{:032x}",rand::random::<u128>());
+            state.history.scope=format!("{:032x}",rand::random::<u128>());
             state.evidence_quarantined|=state.records.values().any(temporal::protected);
             create(&destination,config,state).await?;
             drop(journal);
@@ -64,7 +64,7 @@ pub(super) async fn create(
     let mut owned = false;
     let built: Result<(), RecordError> = async {
         validate_config(&config)?;
-        let empty=State {feed:change_feed::FeedState {scope:format!("{:032x}",rand::random::<u128>()),floor:0},lineage:format!("{:032x}",rand::random::<u128>()),..State::default()};
+        let empty=State {history:history::HistoryState {scope:format!("{:032x}",rand::random::<u128>()),floor:0},lineage:format!("{:032x}",rand::random::<u128>()),..State::default()};
         let initial_size=checkpoint_codec::length(&config,&empty)?;
         let initial_memory=crate::storage::build_budget::reserve_memory((initial_size as u64).checked_mul(32).ok_or_else(||storage("snapshot initial overflow"))?).map_err(storage)?;
         let initial=encode_entry(&Entry::Checkpoint {config:config.clone(),state:empty})?;
@@ -171,7 +171,7 @@ mod tests {
         let receipt=source.write(request.clone()).await.unwrap();
         let archive=root.path().join("archive");source.checkpoint(&archive).await.unwrap();
         let validated=RecordPartition::open(&archive,budget).await.unwrap();
-        let old_scope=validated.inner.lock().await.state.feed.scope.clone();drop(validated);
+        let old_scope=validated.inner.lock().await.state.history.scope.clone();drop(validated);
         let hash=archive_hash(&archive,budget);let target=root.path().join("target");
         assert!(RecordPartition::checkpoint_authenticated_archive(&archive,&target,budget,&"0".repeat(64),1).await.is_err());
         assert!(!target.exists());
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(caches(),before,"export must not construct a second source retrieval cache");
         let recovered=RecordPartition::open(&target,budget).await.unwrap();
         assert_eq!(recovered.write(request).await.unwrap(),receipt);
-        assert_ne!(recovered.inner.lock().await.state.feed.scope,old_scope);
+        assert_ne!(recovered.inner.lock().await.state.history.scope,old_scope);
         assert_eq!(archive_hash(&archive,budget),hash);
     }
     #[tokio::test]

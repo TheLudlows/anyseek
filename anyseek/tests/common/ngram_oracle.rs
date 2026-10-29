@@ -12,7 +12,7 @@ use anyseek::record::{RecordPartition, RecordConfig, RecordQuery, RecordWrite, E
 const JOURNAL_LIMIT: u64 = 64 * 1024 * 1024;
 async fn create_records(path: &std::path::Path, index: IndexMetaObject, schema: &[anyseek::index::SchemaField]) -> RecordPartition {
     RecordPartition::create(path, RecordConfig {
-        change_feed: Default::default(), index, schema: schema.to_vec(), embedding_space_id: None,
+        history: Default::default(), index, schema: schema.to_vec(), embedding_space_id: None,
         max_records: 1000, max_record_bytes: 64*1024, max_operations: 10000,
         max_journal_bytes: JOURNAL_LIMIT, max_candidates: 1000,
     }).await.unwrap()

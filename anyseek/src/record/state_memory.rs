@@ -133,7 +133,7 @@ impl State {
         }));
         Ok(Self {
             lineage: self.lineage.clone(),
-            feed: self.feed.clone(),
+            history: self.history.clone(),
             sealed_for: self.sealed_for.clone(),
             takeover_proof: self.takeover_proof.clone(),
             independent_snapshot: self.independent_snapshot,

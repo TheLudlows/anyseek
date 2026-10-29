@@ -193,7 +193,7 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
                 || chunks.iter().any(|c| !bounded(&c.record_id) || c.record_id == request.record_id || occupied(state, &c.record_id)) {
                 return Err(rejected("generation member manifest incomplete, duplicate or occupied"));
             }
-            validate_stage(state, config, &Staged { deadline_ms:lease::deadline(evaluation)?, scope:state.feed.scope.clone(), id:generation_id.clone(), source:source.clone(), chunks:chunks.clone(),members:members.clone(),sealed:true }, &request, evaluation)?;
+            validate_stage(state, config, &Staged { deadline_ms:lease::deadline(evaluation)?, scope:state.history.scope.clone(), id:generation_id.clone(), source:source.clone(), chunks:chunks.clone(),members:members.clone(),sealed:true }, &request, evaluation)?;
         }
         GenerationCommand::Begin{..}|GenerationCommand::StageBatch{..}|GenerationCommand::Seal{..} => {
             upload::validate_request(state,config,&request,evaluation)?;
@@ -204,14 +204,14 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
             if matches!(request.generation,Some(GenerationCommand::Renew{..})){lease::deadline(evaluation)?;}
             if matches!(request.generation, Some(GenerationCommand::Publish { .. })) {
                 if !stage.sealed{return Err(conflict("generation must be sealed before publication"));}
-                if stage.scope!=state.feed.scope{return Err(conflict("restored staging requires renewed fencing lease"));}
+                if stage.scope!=state.history.scope{return Err(conflict("restored staging requires renewed fencing lease"));}
                 validate_stage(state, config, stage, &request, evaluation)?;
             }
         }
     }
     let receipt = WriteReceipt { staged_only: matches!(request.generation, Some(GenerationCommand::Stage { .. }|GenerationCommand::Begin{..}|GenerationCommand::StageBatch{..}|GenerationCommand::Seal{..}|GenerationCommand::Renew { .. })), seq: state.seq.checked_add(1).ok_or_else(|| storage("sequence exhausted"))?,
         version: old.map_or(Some(1), |g| g.version.checked_add(1)).ok_or_else(|| storage("generation version exhausted"))?, record_id:request.record_id.clone() };
-    let applied = Applied { request_digest:None, graph_invalidation:false, request, receipt, observed_epoch:epoch, observed_time_ms:evaluation };
+    let applied = Applied { request_digest:None, legacy_graph_invalidation:false, request, receipt, observed_epoch:epoch, observed_time_ms:evaluation };
     let growth=checkpoint_codec::json_length(&applied)?.checked_mul(3).ok_or_else(|| storage("generation state growth overflow"))?;
     let mut candidate = state.try_clone_with_growth(growth)?; super::apply(&mut candidate, &applied)?;
     validate_state(&candidate, config)?;
@@ -223,11 +223,10 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
     }
     let reserve_bytes = reserve_bytes(&candidate);
     if candidate.operations.len() + reserve_slots(&candidate) > config.max_operations { return Err(rejected("generation operation reserve exceeded")); }
-    let feed_reserve = change_feed::reserve(&candidate);
     let snapshot_bytes = checkpoint_codec::length(config, &candidate)?;
     checkpoint_codec::validate_size(snapshot_bytes, reserve_bytes, config.max_journal_bytes).map_err(|_| rejected("generation checkpoint reserve exceeded"))?;
     let bytes = encode_entry(&Entry::Applied(applied.clone()))?;
-    Ok(mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, feed_reserve, candidate: Some(candidate), planning: Vec::new() })
+    Ok(mutation::PreparedWrite::Append { applied, bytes, snapshot_bytes, reserve_bytes, candidate: Some(candidate), planning: Vec::new() })
 }
 pub(super) fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordError> {
     let request = &applied.request;
@@ -240,10 +239,10 @@ pub(super) fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordEr
     match request.generation.as_ref().unwrap() {
         GenerationCommand::Stage { generation_id, source, chunks, members } => {
             if manifest.staged.is_some() || !manifest.used.insert(generation_id.clone()) { return Err(storage("inconsistent generation staging")); }
-            manifest.staged = Some(Staged { deadline_ms:lease::deadline(applied.observed_time_ms)?, scope:state.feed.scope.clone(), id:generation_id.clone(), source:source.clone(), chunks:chunks.clone(),members:members.clone(),sealed:true });
+            manifest.staged = Some(Staged { deadline_ms:lease::deadline(applied.observed_time_ms)?, scope:state.history.scope.clone(), id:generation_id.clone(), source:source.clone(), chunks:chunks.clone(),members:members.clone(),sealed:true });
         }
         GenerationCommand::Begin{..}|GenerationCommand::StageBatch{..}|GenerationCommand::Seal{..} => {
-            upload::apply(&mut manifest,request,applied.observed_time_ms,&state.feed.scope)?;
+            upload::apply(&mut manifest,request,applied.observed_time_ms,&state.history.scope)?;
         }
         GenerationCommand::Publish { generation_id } => {
             let stage = manifest.staged.take().filter(|s| &s.id == generation_id).ok_or_else(|| storage("missing published stage"))?;
@@ -259,7 +258,7 @@ pub(super) fn apply(state: &mut State, applied: &Applied) -> Result<(), RecordEr
         GenerationCommand::Renew { generation_id } => {
             let stage=manifest.staged.as_mut().filter(|s|&s.id==generation_id).ok_or_else(||storage("missing renewed stage"))?;
             if stage.deadline_ms<=applied.observed_time_ms{return Err(storage("renewed expired lease"));}
-            stage.deadline_ms=lease::deadline(applied.observed_time_ms)?;stage.scope=state.feed.scope.clone();
+            stage.deadline_ms=lease::deadline(applied.observed_time_ms)?;stage.scope=state.history.scope.clone();
         }
         GenerationCommand::Abort { generation_id } => {
             if manifest.staged.take().is_none_or(|s| &s.id != generation_id) { return Err(storage("missing aborted stage")); }
@@ -318,7 +317,7 @@ impl RecordPartition {
         let Some(g) = inner.state.generations.get(id) else { return Ok(None); };
         Ok(Some(GenerationStatus { record_id:id.into(), version:g.version, active_generation:g.active.clone(),
             visible_members:g.active_members.iter().filter(|id| inner.locations.contains_key(*id)).count(),
-            lease_expires_at_ms:g.staged.as_ref().map(|s|s.deadline_ms), lease_fence:g.staged.as_ref().map(|_|g.version), lease_requires_renewal:g.staged.as_ref().is_some_and(|s|s.scope!=inner.state.feed.scope), private_cleanup_pending:inner.state.private_cleanup_pending || inner.maintenance_gc_pending,
+            lease_expires_at_ms:g.staged.as_ref().map(|s|s.deadline_ms), lease_fence:g.staged.as_ref().map(|_|g.version), lease_requires_renewal:g.staged.as_ref().is_some_and(|s|s.scope!=inner.state.history.scope), private_cleanup_pending:inner.state.private_cleanup_pending || inner.maintenance_gc_pending,
             expected_members:g.staged.as_ref().map_or(0,|s|s.members.len()),sealed:g.staged.as_ref().is_some_and(|s|s.sealed),manifest_sha256:g.staged.as_ref().map(upload::manifest_digest).transpose()?,
             staged_generation:g.staged.as_ref().map(|s| s.id.clone()), staged_members:g.staged.as_ref().map_or(0, |s| s.chunks.len()), visible_seq:inner.state.seq }))
     }

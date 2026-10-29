@@ -58,13 +58,6 @@ impl<T: Serialize> Values<T> {
     pub(super) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
         self.values.iter().map(|v| &**v)
     }
-    pub(super) fn binary_search_by_key<B: Ord>(
-        &self,
-        key: &B,
-        mut f: impl FnMut(&T) -> B,
-    ) -> Result<usize, usize> {
-        self.values.binary_search_by_key(key, |v| f(v))
-    }
     pub(super) fn push(&mut self, value: T) -> Result<(), RecordError> {
         self.push_shared(Shared::admit(value)?)
     }
@@ -365,7 +358,7 @@ mod admission_count_tests {
             if i < 4 { request.temporal = Some(TemporalMetadata { expire_at_ms: Some(1000), ..Default::default() }); }
             if i >= 8 { request.document = None; }
             let version = state.records.get(&request.record_id).map_or(1, |r| r.version + 1);
-            let applied = Applied { request_digest: None, graph_invalidation: false,
+            let applied = Applied { request_digest: None, legacy_graph_invalidation: false,
                 receipt: WriteReceipt { staged_only: false, seq: i + 1, version, record_id: request.record_id.clone() },
                 request, observed_epoch: 1, observed_time_ms: 1 };
             apply(&mut state, &applied).unwrap();
@@ -390,7 +383,7 @@ mod admission_count_tests {
         let mut state = State::default();
         let mut request = super::super::tests::write("deadline", "id", "alpha", ExpectedVersion::Any);
         request.temporal = Some(TemporalMetadata { expire_at_ms: Some(1000), ..Default::default() });
-        let applied = Applied { request_digest: None, graph_invalidation: false,
+        let applied = Applied { request_digest: None, legacy_graph_invalidation: false,
             receipt: WriteReceipt { staged_only: false, seq: 1, version: 1, record_id: "id".into() },
             request, observed_epoch: 1, observed_time_ms: 1 };
         apply(&mut state, &applied).unwrap();

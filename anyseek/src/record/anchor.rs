@@ -431,7 +431,7 @@ impl Reference {
                     Entry::Applied(op)=>apply(&mut replayed,&op),
                     Entry::Expired(event)=>temporal::apply(&mut replayed,&event),
                     Entry::LeaseExpired(event)=>lease::apply(&mut replayed,&event),
-                    Entry::FeedTrim(event)=>change_feed::apply_trim(&mut replayed,&config.change_feed,&event),
+                    Entry::HistoryTrim(event)=>history::apply_trim(&mut replayed,&config.history,&event),
                     Entry::Anchor(_)|Entry::Checkpoint{..}=>Err(storage("authority in WAL suffix")),
                 }
             })();result.map_err(|e|std::io::Error::other(e.to_string()))
@@ -917,13 +917,13 @@ mod tests {
         let (sequence,floor,time)={
             let mut inner=p.inner.lock().await;
             let seq=inner.state.seq;
-            let future=inner.state.time_watermark_ms+inner.config.change_feed.retention_ms+1;
+            let future=inner.state.time_watermark_ms+inner.config.history.retention_ms+1;
             inner.clock=Arc::new(FixedClock(future));
-            inner.trim_feed(future).await.unwrap();
+            inner.trim_history(future).await.unwrap();
             inner.maintain_index_tail().await.unwrap();
             assert_eq!(inner.state.seq,seq);
-            assert!(inner.state.feed.floor>0);
-            (seq,inner.state.feed.floor,inner.state.time_watermark_ms)
+            assert!(inner.state.history.floor>0);
+            (seq,inner.state.history.floor,inner.state.time_watermark_ms)
         };
         p.compact_journal().await.unwrap();
         assert_eq!(p.inner.lock().await.anchor.as_ref().unwrap().state_blocks.len(),2);
@@ -932,7 +932,7 @@ mod tests {
         let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
         {
             let inner=p.inner.lock().await;
-            assert_eq!((inner.state.seq,inner.state.feed.floor,inner.state.time_watermark_ms),(sequence,floor,time));
+            assert_eq!((inner.state.seq,inner.state.history.floor,inner.state.time_watermark_ms),(sequence,floor,time));
             assert_eq!(inner.state.operations.len(),2);
         }
         drop(p);
@@ -1448,9 +1448,7 @@ mod tests {
         let mut deletion=write("delete","s","",ExpectedVersion::Match(1));deletion.document=None;
         let receipt=p.write(deletion.clone()).await.unwrap();
         for id in ["s","d","e"]{assert!(p.get(id).await.unwrap().is_none());}
-        let events=serde_json::to_vec(&p.changes(None,100).await.unwrap().events).unwrap();
         p.compact_journal().await.unwrap();
-        assert_eq!(serde_json::to_vec(&p.changes(None,100).await.unwrap().events).unwrap(),events);
         drop(p);let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
         for id in ["s","d","e"]{assert!(p.get(id).await.unwrap().is_none());}
         assert_eq!(p.write(deletion).await.unwrap(),receipt);
