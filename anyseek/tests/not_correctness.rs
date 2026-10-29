@@ -21,10 +21,10 @@ async fn fresh(label: &str, ngrams: u8) -> (RecordPartition, PathBuf) {
         id: 0,
         name: label.into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
-        tokenizer: if label.starts_with("unicode-") {
-            TokenizerType::UnicodeAlphanumeric
+        tokenizer: if label.starts_with("simple-") {
+            TokenizerType::TantivySimpleV1
         } else {
-            TokenizerType::JiebaMixedV1
+            TokenizerType::default()
         },
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
@@ -87,7 +87,11 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
         "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
     ];
     let mut failures = Vec::new();
-    for tokenizer in ["unicode", "zh"] {
+    #[cfg(not(feature = "zh"))]
+    let profiles = ["simple"];
+    #[cfg(feature = "zh")]
+    let profiles = ["simple", "zh"];
+    for tokenizer in profiles {
         for count_mode in [false, true] {
             for count in [2, 9] {
                 for negative in ["banned", "禁用"] {

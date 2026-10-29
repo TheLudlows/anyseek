@@ -62,42 +62,9 @@ impl fmt::Display for LexicalSimilarity {
     }
 }
 
-/// Defines tokenizer behavior:
-/// AsciiAlphabetic
-/// - Only ASCII alphabetic chars are recognized as token.
-///
-/// UnicodeAlphanumeric
-/// - All Unicode alphanumeric chars are recognized as token.
-/// - Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.
-///
-/// UnicodeAlphanumericFolded
-/// - All Unicode alphanumeric chars are recognized as token.
-/// - Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.
-/// - Diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters are converted into its basic representation.
-/// - Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. "s" in "someone's").
-/// - Tokenizing might be slower due to folding and apostroph processing.
-///
-/// JiebaMixedV1
-/// - Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
-/// - Supports mixed Latin and Chinese texts
-/// - Requires feature #[cfg(feature = "zh")]
+/// Versioned standard tokenizer profiles.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Copy)]
 pub enum TokenizerType {
-    /// Only ASCII alphabetic chars are recognized as token.
-    AsciiAlphabetic = 0,
-    /// All Unicode alphanumeric chars are recognized as token.
-    /// Allow '+' '-' '#' in middle or end of a token: c++, c#, block-max.
-    UnicodeAlphanumeric = 1,
-    /// All Unicode alphanumeric chars are recognized as token.
-    /// Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.
-    /// Diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters are converted into its basic representation.
-    /// Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. "s" in "someone's").
-    /// Tokenizing might be slower due to folding and apostroph processing.
-    UnicodeAlphanumericFolded = 2,
-    /// Tokens are separated by whitespace.
-    Whitespace = 3,
-    /// Tokens are separated by whitespace. Token are converted to lowercase.
-    WhitespaceLowercase = 4,
     /// Versioned Jieba Chinese/Latin analysis: exact dictionary 0.11.0, accurate mode,
     /// HMM disabled, Unicode lowercase, no long-token removal. Requires zh.
     #[cfg(feature = "zh")]
@@ -116,12 +83,7 @@ impl Default for TokenizerType {
 impl fmt::Display for TokenizerType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            TokenizerType::AsciiAlphabetic => write!(f, "AsciiAlphabetic"),
-            TokenizerType::UnicodeAlphanumeric => write!(f, "UnicodeAlphanumeric"),
-            TokenizerType::UnicodeAlphanumericFolded => write!(f, "UnicodeAlphanumericFolded"),
             TokenizerType::TantivySimpleV1 => write!(f, "TantivySimpleV1"),
-            TokenizerType::Whitespace => write!(f, "Whitespace"),
-            TokenizerType::WhitespaceLowercase => write!(f, "WhitespaceLowercase"),
             #[cfg(feature = "zh")]
             TokenizerType::JiebaMixedV1 => write!(f, "JiebaMixedV1"),
         }
@@ -400,7 +362,7 @@ pub struct IndexMetaObject {
     pub name: String,
     /// LexicalSimilarity defines the scoring and ranking of the search results: Bm25f or Bm25fProximity
     pub lexical_similarity: LexicalSimilarity,
-    /// TokenizerType defines the tokenizer behavior: AsciiAlphabetic, UnicodeAlphanumeric, UnicodeAlphanumericFolded, JiebaMixedV1
+    /// TokenizerType selects TantivySimpleV1 or JiebaMixedV1 (requires zh).
     pub tokenizer: TokenizerType,
     /// Pre-tokenization rule for this index and every query. Immutable after creation.
     #[serde(default)]

@@ -336,4 +336,10 @@ Tantivy 0.27 SimpleTokenizer + LowerCaser。二者都不使用默认40字节过�
 旧 `UnicodeAlphanumericZH` 不再被接受，不能以旧名称静默替换切词。新的算法、词典版本
 及词典摘要进入 native 包认证配置；不提供旧索引迁移/读取兼容链。原文不变，OpenCC仍由
 独立不可变配置控制。切词变化会改变词频、字段长度、命中和分数，即使评分公式不变。
-既有显式英文/折叠/空白配置保留其标点与折叠契约；新简单英文模式与旧模式不保证等价。
+仅接受上述两个标准分词器（`JiebaMixedV1` 需要 `zh`）。旧 `AsciiAlphabetic`、
+`UnicodeAlphanumeric`、`UnicodeAlphanumericFolded`、`Whitespace`、`WhitespaceLowercase`
+在 API 和持久化配置反序列化时明确拒绝，不提供兼容别名、静默映射或格式迁移。
+删除的能力包括仅 ASCII 字母切词、旧 Unicode 词边界及 `c++`/`c#`/连字符保留、
+自建重音/全角/连字/德语变音折叠及撇号处理、仅按空白切词和保留大小写。
+标准路径不保证这些语义等价；选择标准配置重新建索引后，命中、词频和排名可能改变。
+OpenCC、查询运算符/短语、停用词、frequent words 与 word N-gram 仍保留。

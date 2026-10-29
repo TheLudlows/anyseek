@@ -33,7 +33,7 @@ async fn frequent_terms_topk_returns_results() {
         id: 0,
         name: "repro".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
-        tokenizer: TokenizerType::UnicodeAlphanumeric,
+        tokenizer: TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
         stop_words: StopwordType::None,

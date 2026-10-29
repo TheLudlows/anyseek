@@ -1,120 +1,14 @@
 use std::cmp;
 
 use ahash::{AHashMap, AHashSet};
-use finl_unicode::categories::{CharacterCategories, MinorCategory};
 
 use crate::{
     index::{
         MAX_QUERY_TERM_NUMBER, NgramSet, NgramType, NonUniqueTermObject, TermObject,
-        TokenizerType, hash32, hash64,
+        hash32, hash64,
     },
     search::QueryType,
 };
-
-const APOSTROPH: [char; 2] = ['\u{2019}', '\u{0027}'];
-const ZALGO_CHAR_CATEGORIES: [MinorCategory; 2] = [MinorCategory::Mn, MinorCategory::Me];
-
-/// fold_diacritics_accents_zalgo_umlaut() (used by TokenizerType::UnicodeAlphanumericFolded):
-/// Converts text with diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters into its basic representation.
-/// Unicode UTF-8 has made life so much easier compared to the old code pages, but its endless possibilities also pose challenges in parsing and indexing.
-/// The challenge is that the same basic letter might be represented by different UTF8 characters if they contain diacritics, accents, or are bold, italic, or full-width.
-/// Sometimes, users can't search because the keyboard doesn't have these letters or they don't know how to enter, or they even don't know what that letter looks like.
-/// Sometimes the document to be ingested is already written without diacritics for the same reasons.
-/// We don't want to search for every variant separately, most often we even don't know that they exist in the index.
-/// We want to have all results, for every variant, no matter which variant is entered in the query,
-/// e.g. for indexing LinkedIn posts that make use of external bold/italic formatters or for indexing documents in accented languages.
-/// It is important that the search engine supports the character folding rather than external preprocessing, as we want to have both: enter the query in any character form, receive all results independent from their character form, but have them returned in their original, unaltered characters.
-pub fn fold_diacritics_accents_ligatures_zalgo_umlaut(string: &str) -> String {
-    string
-        .to_lowercase()
-        .chars()
-        .fold(String::with_capacity(string.len()), |mut folded, cc| {
-            let mut base_char = None;
-            let mut base_char2 = None;
-
-            match cc {
-                'ﬀ' => folded.push_str("ff"),
-                'ﬃ' => folded.push_str("ffi"),
-                'ﬄ' => folded.push_str("ffl"),
-                'ﬁ' => folded.push_str("fi"),
-                'ﬂ' => folded.push_str("fl"),
-                'ﬆ' => folded.push_str("st"),
-                'ﬅ' => folded.push_str("st"),
-
-                'ⅰ' => folded.push('i'),
-                'ⅱ' => folded.push_str("ii"),
-                'ⅲ' => folded.push_str("iii"),
-                'ⅳ' => folded.push_str("iv"),
-                'ⅴ' => folded.push('v'),
-                'ⅵ' => folded.push_str("vi"),
-                'ⅶ' => folded.push_str("vii"),
-                'ⅷ' => folded.push_str("viii"),
-                'ⅸ' => folded.push_str("ix"),
-                'ⅹ' => folded.push('x'),
-                'ⅺ' => folded.push_str("xi"),
-                'ⅻ' => folded.push_str("xii"),
-                'ⅼ' => folded.push('l'),
-                'ⅽ' => folded.push('c'),
-                'ⅾ' => folded.push('d'),
-                'ⅿ' => folded.push('m'),
-
-                'ä' => folded.push_str("ae"),
-                'ö' => folded.push_str("oe"),
-                'ü' => folded.push_str("ue"),
-                'ß' => folded.push_str("ss"),
-                'ł' => folded.push('l'),
-                'æ' => folded.push('a'),
-                'œ' => folded.push('o'),
-                'ø' => folded.push('o'),
-                'ð' => folded.push('d'),
-                'þ' => folded.push('t'),
-                'đ' => folded.push('d'),
-                'ɖ' => folded.push('d'),
-                'ħ' => folded.push('h'),
-                'ı' => folded.push('i'),
-                'ƿ' => folded.push('w'),
-                'ȝ' => folded.push('g'),
-                'Ƿ' => folded.push('w'),
-                'Ȝ' => folded.push('g'),
-
-                _ => {
-                    unicode_normalization::char::decompose_canonical(cc, |c| {
-                        base_char.get_or_insert(c);
-                    });
-                    unicode_normalization::char::decompose_compatible(base_char.unwrap(), |c| {
-                        if c.is_alphanumeric() {
-                            base_char2.get_or_insert(c);
-                        }
-                    });
-                    if base_char2.is_none() {
-                        base_char2 = base_char
-                    }
-
-                    if !ZALGO_CHAR_CATEGORIES.contains(&base_char2.unwrap().get_minor_category()) {
-                        match base_char2.unwrap() {
-                            'ł' => folded.push('l'),
-                            'æ' => folded.push('a'),
-                            'œ' => folded.push('o'),
-                            'ø' => folded.push('o'),
-                            'ð' => folded.push('d'),
-                            'þ' => folded.push('t'),
-                            'đ' => folded.push('d'),
-                            'ɖ' => folded.push('d'),
-                            'ħ' => folded.push('h'),
-                            'ı' => folded.push('i'),
-                            'ƿ' => folded.push('w'),
-                            'ȝ' => folded.push('g'),
-                            'Ƿ' => folded.push('w'),
-                            'Ȝ' => folded.push('g'),
-
-                            _ => folded.push(base_char2.unwrap()),
-                        }
-                    }
-                }
-            }
-            folded
-        })
-}
 
 pub(crate) mod standard;
 
@@ -125,7 +19,7 @@ pub(crate) struct AnalysisContext<'a> {
     pub text_normalization: crate::index::TextNormalization,
     pub stop_words: &'a AHashSet<String>,
     pub frequent_hashset: &'a AHashSet<u64>,
-    pub standard: Option<&'a standard::StandardAnalyzer>,
+    pub standard: &'a standard::StandardAnalyzer,
 }
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::assigning_clones)]
@@ -134,7 +28,6 @@ pub(crate) async fn analyze(
     text: &str,
     unique_terms: &mut AHashMap<String, TermObject>,
     non_unique_terms: &mut Vec<NonUniqueTermObject>,
-    tokenizer: TokenizerType,
     segment_number_mask1: u32,
     nonunique_terms_count: &mut u32,
     token_per_field_max: u32,
@@ -154,296 +47,8 @@ pub(crate) async fn analyze(
     let text = normalized.as_ref();
     let token_per_field_max_capped = cmp::max(token_per_field_max, 65_536);
 
-    let mut non_unique_terms_line: Vec<&str> = Vec::new();
-    let standard_terms;
-    let text_normalized;
-    let use_standard = tokenizer == TokenizerType::TantivySimpleV1;
-    #[cfg(feature = "zh")]
-    let use_standard = use_standard || tokenizer == TokenizerType::JiebaMixedV1;
-    if use_standard {
-        standard_terms = index.standard.expect("standard analyzer configured").terms(text, is_query);
-        non_unique_terms_line.extend(standard_terms.iter().map(String::as_str));
-    } else {
-    let mut start = false;
-    let mut start_pos = 0;
-    let mut first_part = &text[0..0];
-
-    if is_query {
-        match tokenizer {
-            TokenizerType::AsciiAlphabetic => {
-                text_normalized = text.to_ascii_lowercase();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        'a'..='z' | '"' | '+' | '-' => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        _ => {
-                            if start {
-                                non_unique_terms_line.push(&text_normalized[start_pos..char.0]);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
-            TokenizerType::UnicodeAlphanumeric => {
-                text_normalized = text.to_lowercase();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if regex_syntax::is_word_character(token) => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        '"' | '+' | '-' | '#' => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        _ => {
-                            if start {
-                                non_unique_terms_line.push(&text_normalized[start_pos..char.0]);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
-            TokenizerType::UnicodeAlphanumericFolded => {
-                text_normalized = fold_diacritics_accents_ligatures_zalgo_umlaut(text);
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if regex_syntax::is_word_character(token) => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        '"' | '+' | '-' | '#' => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        _ => {
-                            let apostroph = APOSTROPH.contains(&char.1);
-                            if start {
-                                if apostroph {
-                                    first_part = &text_normalized[start_pos..char.0];
-                                } else {
-                                    if first_part.len() >= 2 {
-                                        non_unique_terms_line.push(first_part)
-                                    } else {
-                                        non_unique_terms_line
-                                            .push(&text_normalized[start_pos..char.0]);
-                                    }
-                                    first_part = &text_normalized[0..0];
-                                }
-                            } else if !apostroph && !first_part.is_empty() {
-                                non_unique_terms_line.push(first_part);
-                                first_part = &text_normalized[0..0];
-                            }
-
-                            false
-                        }
-                    };
-                }
-            }
-
-            TokenizerType::Whitespace => {
-                text_normalized = text.to_owned();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if !token.is_whitespace() => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        _ => {
-                            if start {
-                                non_unique_terms_line.push(&text_normalized[start_pos..char.0]);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
-
-            TokenizerType::WhitespaceLowercase => {
-                text_normalized = text.to_ascii_lowercase();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if !token.is_whitespace() => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        _ => {
-                            if start {
-                                non_unique_terms_line.push(&text_normalized[start_pos..char.0]);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
-
-            _ => unreachable!("standard profiles are handled before legacy syntax"),
-        }
-    } else {
-        match tokenizer {
-            TokenizerType::AsciiAlphabetic => {
-                text_normalized = text.to_ascii_lowercase();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        'a'..='z' => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        _ => {
-                            if start {
-                                non_unique_terms_line.push(&text_normalized[start_pos..char.0]);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
-            TokenizerType::UnicodeAlphanumeric => {
-                text_normalized = text.to_lowercase();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if regex_syntax::is_word_character(token) => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-
-                        '+' | '-' | '#' => start,
-
-                        _ => {
-                            if start {
-                                non_unique_terms_line.push(&text_normalized[start_pos..char.0]);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
-
-            TokenizerType::UnicodeAlphanumericFolded => {
-                text_normalized = fold_diacritics_accents_ligatures_zalgo_umlaut(text);
-
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if regex_syntax::is_word_character(token) => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-
-                        '+' | '-' | '#' => start,
-
-                        _ => {
-                            let apostroph = APOSTROPH.contains(&char.1);
-                            if start {
-                                if apostroph {
-                                    first_part = &text_normalized[start_pos..char.0];
-                                } else {
-                                    if first_part.len() >= 2 {
-                                        non_unique_terms_line.push(first_part)
-                                    } else {
-                                        non_unique_terms_line
-                                            .push(&text_normalized[start_pos..char.0]);
-                                    }
-                                    first_part = &text_normalized[0..0];
-                                }
-                            } else if !apostroph && !first_part.is_empty() {
-                                non_unique_terms_line.push(first_part);
-                                first_part = &text_normalized[0..0];
-                            }
-
-                            false
-                        }
-                    };
-                }
-            }
-
-            TokenizerType::Whitespace => {
-                text_normalized = text.to_owned();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if !token.is_whitespace() => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        _ => {
-                            if start {
-                                non_unique_terms_line.push(&text_normalized[start_pos..char.0]);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
-
-            TokenizerType::WhitespaceLowercase => {
-                text_normalized = text.to_ascii_lowercase();
-                for char in text_normalized.char_indices() {
-                    start = match char.1 {
-                        token if !token.is_whitespace() => {
-                            if !start {
-                                start_pos = char.0;
-                            }
-                            true
-                        }
-                        _ => {
-                            if start {
-                                non_unique_terms_line.push(&text_normalized[start_pos..char.0]);
-                            }
-                            false
-                        }
-                    };
-                }
-            }
-
-            _ => unreachable!("standard profiles are handled before legacy syntax"),
-        }
-    }
-
-
-
-    if tokenizer == TokenizerType::AsciiAlphabetic
-        || tokenizer == TokenizerType::UnicodeAlphanumeric
-        || tokenizer == TokenizerType::UnicodeAlphanumericFolded
-        || tokenizer == TokenizerType::Whitespace
-        || tokenizer == TokenizerType::WhitespaceLowercase
-    {
-        if start {
-            if first_part.len() >= 2 {
-                non_unique_terms_line.push(first_part)
-            } else {
-                non_unique_terms_line.push(&text_normalized[start_pos..text_normalized.len()]);
-            }
-        } else if !first_part.is_empty() {
-            non_unique_terms_line.push(first_part)
-        }
-    }
-
-    }
+    let standard_terms = index.standard.terms(text, is_query);
+    let mut non_unique_terms_line: Vec<&str> = standard_terms.iter().map(String::as_str).collect();
 
     if is_query && non_unique_terms_line.len() > MAX_QUERY_TERM_NUMBER {
         non_unique_terms_line.truncate(MAX_QUERY_TERM_NUMBER);
@@ -1251,6 +856,7 @@ pub(crate) async fn analyze(
 #[cfg(all(test, feature = "zh"))]
 mod tests {
     use super::*;
+    use crate::index::TokenizerType;
     use crate::{
         index::{
             AccessType, Clustering, DocumentCompression, FrequentwordType,
@@ -1288,7 +894,7 @@ mod tests {
         let (stop_words,_,frequent_hashset)=crate::index::analysis_dictionaries(&meta);
         let dictionary=standard::StandardAnalyzer::new(TokenizerType::JiebaMixedV1).unwrap();
         let context=AnalysisContext { text_normalization:meta.text_normalization,stop_words:&stop_words,
-            frequent_hashset:&frequent_hashset,standard:Some(&dictionary) };
+            frequent_hashset:&frequent_hashset,standard:&dictionary };
         let config=crate::record::RecordConfig {index:meta,schema,change_feed:Default::default(),embedding_space_id:None,
             max_records:32,max_record_bytes:4096,max_operations:100,max_journal_bytes:1024*1024,max_candidates:100};
         let index=crate::record::RecordPartition::create(&path,config).await.unwrap();
@@ -1312,7 +918,6 @@ mod tests {
                             &input,
                             &mut terms,
                             &mut query_terms,
-                            TokenizerType::JiebaMixedV1,
                             0,
                             &mut count,
                             65_536,

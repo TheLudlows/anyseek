@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Minimal same-query rerun of the verified pre-change default; no Meili rerun."""
+"""Historical baseline replay only; retired profiles require the pinned old binary.
+Current binaries accept only the standard profiles; no compatibility mapping.
+"""
 import argparse, hashlib, json, os, pathlib
 from diagnose import run, sha
 from http_engine import doc, dump

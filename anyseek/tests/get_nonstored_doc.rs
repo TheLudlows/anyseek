@@ -8,7 +8,7 @@ fn meta(access_type: AccessType) -> IndexMetaObject {
         id: 0,
         name: "get_nonstored_doc".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
-        tokenizer: TokenizerType::UnicodeAlphanumeric,
+        tokenizer: TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
         stop_words: StopwordType::None,

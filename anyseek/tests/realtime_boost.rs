@@ -18,7 +18,7 @@ async fn boosted_single_term_matches_formula_in_every_state() {
         id: 0,
         name: "boost".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
-        tokenizer: TokenizerType::UnicodeAlphanumeric,
+        tokenizer: TokenizerType::TantivySimpleV1,
         text_normalization: TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
         stop_words: StopwordType::None,

@@ -34,7 +34,7 @@ async fn retired_disk_metadata_is_not_silently_reinterpreted() {
     .unwrap();
     let meta = serde_json::from_value(json!({
         "id":0,"name":"storage_contract", "access_type":"Mmap",
-        "lexical_similarity":"Bm25f", "tokenizer":"UnicodeAlphanumeric"
+        "lexical_similarity":"Bm25f", "tokenizer":"TantivySimpleV1"
     }))
     .unwrap();
     let index = Ok::<_, String>(records::create(path, meta, (&schema).to_vec()).await)
@@ -43,7 +43,7 @@ async fn retired_disk_metadata_is_not_silently_reinterpreted() {
     drop(index);
     // Unknown codecs/access types are rejected while decoding persisted configuration.
     // Record does not read the retired index.json format.
-    let valid: serde_json::Value=json!({"id":0,"name":"typed","access_type":"Mmap","lexical_similarity":"Bm25f","tokenizer":"UnicodeAlphanumeric"});
+    let valid: serde_json::Value=json!({"id":0,"name":"typed","access_type":"Mmap","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1"});
     for (field,value) in [("access_type","Ram"),("document_compression","Lz4"),("document_compression","Zstd")] {
         let mut invalid=valid.clone();invalid[field]=json!(value);
         assert!(serde_json::from_value::<anyseek::index::IndexMetaObject>(invalid).is_err());

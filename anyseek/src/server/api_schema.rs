@@ -362,43 +362,10 @@ pub enum StopwordType {
     },
 }
 
-/// Defines tokenizer behavior:
-/// AsciiAlphabetic
-/// - Only ASCII alphabetic chars are recognized as token.
-///
-/// UnicodeAlphanumeric
-/// - All Unicode alphanumeric chars are recognized as token.
-/// - Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.
-///
-/// UnicodeAlphanumericFolded
-/// - All Unicode alphanumeric chars are recognized as token.
-/// - Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.
-/// - Diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters are converted into its basic representation.
-/// - Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. "s" in "someone's").
-/// - Tokenizing might be slower due to folding and apostroph processing.
-///
-/// JiebaMixedV1
-/// - Implements Chinese word segmentation to segment continuous Chinese text into tokens for indexing and search.
-/// - Supports mixed Latin and Chinese texts
-/// - Requires feature #[cfg(feature = "zh")]
+/// Versioned standard tokenizer profiles.
 #[derive(ToSchema, Serialize)]
 #[serde(remote = "crate::index::TokenizerType")]
 pub enum TokenizerType {
-    /// Only ASCII alphabetic chars are recognized as token.
-    AsciiAlphabetic = 0,
-    /// All Unicode alphanumeric chars are recognized as token.
-    /// Allow '+' '-' '#' in middle or end of a token: c++, c#, block-max.
-    UnicodeAlphanumeric = 1,
-    /// All Unicode alphanumeric chars are recognized as token.
-    /// Allows '+' '-' '#' in middle or end of a token: c++, c#, block-max.
-    /// Diacritics, accents, zalgo text, umlaut, bold, italic, full-width UTF-8 characters are converted into its basic representation.
-    /// Apostroph handling prevents that short term parts preceding or following the apostroph get indexed (e.g. "s" in "someone's").
-    /// Tokenizing might be slower due to folding and apostroph processing.
-    UnicodeAlphanumericFolded = 2,
-    /// Tokens are separated by whitespace.
-    Whitespace = 3,
-    /// Tokens are separated by whitespace. Token are converted to lowercase.
-    WhitespaceLowercase = 4,
     /// Versioned Jieba Chinese/Latin analysis: exact dictionary 0.11.0, accurate mode,
     /// HMM disabled, Unicode lowercase, no long-token removal. Requires zh.
     #[cfg(feature = "zh")]

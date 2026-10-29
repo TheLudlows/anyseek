@@ -419,20 +419,10 @@ async fn existing_analysis_contract_feeds_native_positions_without_legacy_index(
     };
     let stop_words = ahash::AHashSet::new();
     let frequent_hashset = ahash::AHashSet::new();
-    #[cfg(feature = "zh")]
-    let chinese = crate::tokenizer::standard::StandardAnalyzer::new(TokenizerType::JiebaMixedV1).unwrap();
-    #[cfg(not(feature = "zh"))]
-    let chinese = crate::tokenizer::standard::StandardAnalyzer::new(TokenizerType::TantivySimpleV1).unwrap();
-    let context = AnalysisContext {
-        text_normalization: TextNormalization::OpenCcT2s1_1_9,
-        stop_words: &stop_words,
-        frequent_hashset: &frequent_hashset,
-        standard: Some(&chinese),
-    };
     let mut cases = vec![(
-        TokenizerType::UnicodeAlphanumericFolded,
+        TokenizerType::TantivySimpleV1,
         "Café ＡＢＣ",
-        "cafe abc",
+        "café ａｂｃ",
     )];
     #[cfg(feature = "zh")]
     cases.push((
@@ -441,6 +431,18 @@ async fn existing_analysis_contract_feeds_native_positions_without_legacy_index(
         "北京大学 欢迎学生",
     ));
     for (tokenizer, text, query) in cases {
+        let standard = crate::tokenizer::standard::StandardAnalyzer::new(tokenizer).unwrap();
+        if tokenizer == TokenizerType::TantivySimpleV1 {
+            // Lowercase is retained; the retired accent/full-width folding is not.
+            assert_eq!(standard.terms(text, false), vec!["café", "ａｂｃ"]);
+            assert_ne!(standard.terms(text, false), standard.terms("cafe abc", false));
+        }
+        let context = AnalysisContext {
+            text_normalization: TextNormalization::OpenCcT2s1_1_9,
+            stop_words: &stop_words,
+            frequent_hashset: &frequent_hashset,
+            standard: &standard,
+        };
         let mut terms = ahash::AHashMap::new();
         let mut count = 0;
         analyze(
@@ -448,7 +450,6 @@ async fn existing_analysis_contract_feeds_native_positions_without_legacy_index(
             text,
             &mut terms,
             &mut Vec::new(),
-            tokenizer,
             0,
             &mut count,
             65536,
@@ -489,7 +490,6 @@ async fn existing_analysis_contract_feeds_native_positions_without_legacy_index(
             query,
             &mut ahash::AHashMap::new(),
             &mut query_terms,
-            tokenizer,
             0,
             &mut 0,
             65536,
@@ -1127,10 +1127,10 @@ async fn standard_shared_dictionary_does_not_pin_collection_admission() {
 }
 
 #[tokio::test]
-async fn punctuation_adjacent_query_operators_match_legacy_boundaries() {
+async fn punctuation_adjacent_query_operators_preserve_boundaries() {
     use crate::{index::TokenizerType, record::{RecordPartition, ExpectedVersion, RecordQuery}, search::{QueryType, ResultType, SearchMode}};
     use crate::record::tests::{config, write};
-    let profiles=vec![TokenizerType::UnicodeAlphanumeric,TokenizerType::TantivySimpleV1];
+    let profiles=vec![TokenizerType::TantivySimpleV1];
     #[cfg(feature="zh")]
     let profiles={let mut p=profiles;p.push(TokenizerType::JiebaMixedV1);p};
     let mut outcomes=Vec::new();

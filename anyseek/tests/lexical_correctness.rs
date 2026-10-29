@@ -83,7 +83,7 @@ async fn fresh(
         id: 0,
         name: label.into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
-        tokenizer: TokenizerType::UnicodeAlphanumeric,
+        tokenizer: TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: policy,
         stop_words: StopwordType::None,
