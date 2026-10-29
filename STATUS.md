@@ -16,4 +16,4 @@
 
 SQLite 保存必要协调元数据，Payload 唯一保存原始正文与向量，Segment 保存派生检索数据；不增加重复正文、向量或倒排镜像。S3 模式必须保留 catalog、SQLite 权威库及其 WAL、`s3-namespace`，不能仅靠 bucket 恢复权威。
 
-下一步建议及完成标准集中在[路线](docs/roadmap.md)，能力与限制见[项目全貌](docs/project-overview.md)，使用见[服务指南](anyseek/server/README.md)。不实施旧格式迁移，不引入模型，性能验证仅使用本轮冻结最终版本；不承诺无限容量、跨主机 HA 或权威卷丢失零 RPO。[#57](https://github.com/TheLudlows/anyseek/issues/57) 仍开放。
+下一步建议及完成标准集中在[路线](docs/roadmap.md)，能力与限制见[项目全貌](docs/project-overview.md)，使用见[服务指南](anyseek/src/server/README.md)。不实施旧格式迁移，不引入模型，性能验证仅使用本轮冻结最终版本；不承诺无限容量、跨主机 HA 或权威卷丢失零 RPO。[#57](https://github.com/TheLudlows/anyseek/issues/57) 仍开放。

@@ -17,7 +17,7 @@ Rust 核心创建索引时可配置 `frequent_words` 和 `ngram_indexing`；HTTP
 
 多个选项按位或组合。N-gram 仍保留单词索引，查询执行根据已配置的组合利用相邻词项。更多组合增加索引空间与构建工作量，应使用实际数据测量，不能直接沿用上游旧版本 benchmark 数字。
 
-定义见 [NgramSet 与 FrequentwordType](anyseek/src/index.rs)、[CreateIndexRequest](anyseek/server/api_types.rs)，执行见 [tokenizer.rs](anyseek/src/tokenizer.rs) 和 [search.rs](anyseek/src/search.rs)。当前保留此功能；是否进一步裁剪需另行确认。
+定义见 [NgramSet 与 FrequentwordType](anyseek/src/index.rs)、[CreateIndexRequest](anyseek/src/server/api_types.rs)，执行见 [tokenizer.rs](anyseek/src/tokenizer.rs) 和 [search.rs](anyseek/src/search.rs)。当前保留此功能；是否进一步裁剪需另行确认。
 
 ## 独立开关与修复说明
 

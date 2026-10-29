@@ -12,6 +12,9 @@ manifest = tomllib.loads((core / 'Cargo.toml').read_text())
 assert not ({ 'num-format', 'tabled', 'chrono', 'colored', 'half', 'lz4_flex', 'zstd', 'snowball_stemmers_rs', 'gxhash'} & set(manifest['dependencies']))
 assert not {'api-schema', 'gxhash'} & manifest.get('features', {}).keys()
 for source in (core / 'src').rglob('*.rs'):
+    # The optional HTTP module lives alongside core sources but is not core.
+    if source.is_relative_to(core / 'src/server'):
+        continue
     text = source.read_text()
     assert not re.search(r'\b(?:e?println|e?print)!', text), f'direct core output: {source}'
     assert not re.search(r'\b(?:crate|anyseek)::server\b|\buse\s+.*\bserver\b', text), f'core depends on server: {source}'

@@ -4,7 +4,7 @@
 
 anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、切块、embedding、实体抽取及记忆反思/重算由上层应用完成。自定义内容保存在 `document`，引擎管理稳定身份和系统元数据，不引入 SQL/JOIN 或完整图查询语言。
 
-[服务指南](anyseek/server/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
+[服务指南](anyseek/src/server/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
 
 新增[异步接收入口](docs/async-ingestion.md)：`POST /api/v1/index/{id}/ingest` 批量持久化后返回 202，后台更新检索数据，状态接口区分待处理、物化成功和确定拒绝。它不承诺立即可搜索，现有 `/doc` 同步接口保留。本地与 S3 接收日志已接通，独立索引和合并的完整改造继续分批推进。
 
@@ -21,7 +21,7 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 | 时间与同步 | 固定查询 evaluation_time、不可逆 TTL、至少七天变更流、bootstrap 与过期游标处理 |
 | 授权与恢复 | 多个 API key 共享 collection；撤销立即阻断，身份与数据生命周期独立；WAL/checkpoint、备份及同服务受控接管 |
 
-Web UI 支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览，以及来源、关系、租约、feed 等检查入口。完整请求与操作限制见 [服务指南](anyseek/server/README.md)。
+Web UI 支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览，以及来源、关系、租约、feed 等检查入口。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。
 
 ## 边界与后续路线
 
@@ -43,13 +43,13 @@ export MASTER_KEY_SECRET='replace-with-your-private-secret'
 cargo run -p anyseek --features server --bin anyseek_server -- local_ip=127.0.0.1 local_port=8080
 ```
 
-打开 `http://127.0.0.1:8080/`，用启动日志中的 `Master API key` 连接，创建 collection 并写入 JSON。默认数据目录为可执行文件旁的 `anyseek_index`；首次目录必须不存在。重启保留原目录和 `MASTER_KEY_SECRET`；已有部署应显式设置原 `index_path`。Windows 启动及参数见 [服务指南](anyseek/server/README.md)。
+打开 `http://127.0.0.1:8080/`，用启动日志中的 `Master API key` 连接，创建 collection 并写入 JSON。默认数据目录为可执行文件旁的 `anyseek_index`；首次目录必须不存在。重启保留原目录和 `MASTER_KEY_SECRET`；已有部署应显式设置原 `index_path`。Windows 启动及参数见 [服务指南](anyseek/src/server/README.md)。
 
 ## API 与接入
 
 HTTP 使用 `/api/v1`、`apikey` 请求头和 JSON。创建 collection 时声明 schema；写入携带 `operation_id`、`record_id`、固定 `routing_key`、`expected` 和 `document`。发送前保存完整请求，未知结果重试原身份，不生成新的操作。
 
-- [HTTP 请求示例](anyseek/server/test_api.rest)与[服务契约](anyseek/server/README.md)：记录、generation、查询、授权、备份等完整流程。
+- [HTTP 请求示例](anyseek/src/server/test_api.rest)与[服务契约](anyseek/src/server/README.md)：记录、generation、查询、授权、备份等完整流程。
 - `POST /api/v1/index/{id}/query`：文本、向量或混合查询；空对象浏览可见记录。
 - `target/debug/anyseek_server generate_openapi=true`：在可执行文件旁生成 OpenAPI JSON/YAML。
 - [Rust 库示例](docs/library-examples.md)：从本仓库使用 path/git 依赖；统一使用 RecordPartition 访问数据；旧低层 Index API 已移除。

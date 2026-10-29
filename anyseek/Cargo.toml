@@ -27,7 +27,7 @@ server = ["dep:http-body", "dep:env_logger", "dep:axum", "dep:utoipa", "s3-objec
 
 [[bin]]
 name = "anyseek_server"
-path = "server/main.rs"
+path = "src/server/main.rs"
 required-features = ["server"]
 
 [lib]

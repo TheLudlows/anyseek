@@ -5,7 +5,7 @@ import re
 from urllib.parse import unquote
 
 root = Path(__file__).resolve().parents[1]
-docs = list(root.glob('*.md')) + list((root / 'docs').rglob('*.md')) + [root / 'anyseek/server/README.md']
+docs = list(root.glob('*.md')) + list((root / 'docs').rglob('*.md')) + [root / 'anyseek/src/server/README.md']
 errors = []
 def anchors(path):
     result, counts, fenced = set(), {}, False
@@ -32,7 +32,7 @@ for path in docs:
                 errors.append(f'{path.relative_to(root)}: missing anchor {match[1]}')
 
 # Current executable surfaces only; historical Markdown/third-party assets are not rebranded.
-paths = list((root / 'anyseek/src').rglob('*.rs')) + list((root / 'anyseek/server').rglob('*.rs'))
+paths = list((root / 'anyseek/src').rglob('*.rs'))
 paths += list((root / 'anyseek/web').rglob('*.js')) + list((root / 'anyseek/web').rglob('*.html')) + list((root / 'anyseek/web').rglob('*.svg'))
 paths += list((root / 'scripts').glob('*.py')) + list((root / '.github/workflows').glob('*.yml'))
 paths += [root / 'Dockerfile', root / 'Cargo.toml', root / 'anyseek/Cargo.toml']

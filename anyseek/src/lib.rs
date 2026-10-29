@@ -69,5 +69,4 @@ mod active;
 
 /// Optional HTTP contracts; the core never depends on this module.
 #[cfg(feature = "server")]
-#[path = "../server/mod.rs"]
 pub mod server;

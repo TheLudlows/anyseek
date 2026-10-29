@@ -1,6 +1,6 @@
 # anyseek 开发与验证
 
-仅有一个 `anyseek` Cargo package：核心库位于 `anyseek/src/`，服务实现及 HTTP 契约位于 `anyseek/server/`，Web UI 位于 `anyseek/web/`。默认关闭 `server` feature；嵌入库不引入 HTTP/OpenAPI/服务日志依赖。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端为 `TheLudlows/anyseek`。
+仅有一个 `anyseek` Cargo package：核心库位于 `anyseek/src/`，服务实现及 HTTP 契约位于 `anyseek/src/server/`，Web UI 位于 `anyseek/web/`。默认关闭 `server` feature；嵌入库不引入 HTTP/OpenAPI/服务日志依赖。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端为 `TheLudlows/anyseek`。
 
 ## 构建与测试
 
@@ -66,7 +66,7 @@ python3 scripts/s3_acceptance.py --backend real --suite all \
 target/debug/anyseek_server generate_openapi=true
 ```
 
-生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 归可选 `anyseek::server` 模块；Rust 数据访问统一使用 RecordPartition，旧低层 Index API 已移除。参见 [服务指南](../anyseek/server/README.md) 和 [Rust 示例](library-examples.md)。
+生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 归可选 `anyseek::server` 模块；Rust 数据访问统一使用 RecordPartition，旧低层 Index API 已移除。参见 [服务指南](../anyseek/src/server/README.md) 和 [Rust 示例](library-examples.md)。
 
 ## 验证边界
 
