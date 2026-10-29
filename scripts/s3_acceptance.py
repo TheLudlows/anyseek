@@ -89,7 +89,7 @@ def main():
             commands.append(('record_'+section+'_cold_cache', [sys.executable, '-u', str(root/'scripts/record_service_smoke.py'),
                              '--server', str(binary), '--cold-restarts', '--section', section] + (['--faults'] if args.faults else [])))
     if args.suite in ['storage', 'all']:
-        commands.append(('checkpoint_retention_backup_takeover', [sys.executable, '-u', str(root/'scripts/s3_storage_smoke.py'),
+        commands.append(('checkpoint_backup_restore', [sys.executable, '-u', str(root/'scripts/s3_storage_smoke.py'),
                          '--server', str(binary), '--backend', args.backend] + (['--faults'] if args.faults else [])))
     try:
         for name, command in commands:

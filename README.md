@@ -19,7 +19,7 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 | 文档发布 | 有界多批 staging、租约和清理、完整 generation 原子发布；正文可先发布，向量按精确版本后补 |
 | 共同检索 | 全文 BM25F、外部向量、元数据/时间过滤、显式一跳关系融合、稳定排序和逐命中解释 |
 | 时间与同步 | 固定查询 evaluation_time、不可逆 TTL、至少七天变更流、bootstrap 与过期游标处理 |
-| 授权与恢复 | 多个 API key 共享 collection；撤销立即阻断，身份与数据生命周期独立；WAL/checkpoint、备份及同服务受控接管 |
+| 授权与恢复 | 多个 API key 共享 collection；撤销立即阻断，身份与数据生命周期独立；WAL/checkpoint、备份与独立恢复 |
 
 Web UI 支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览，以及来源、关系、租约、feed 等检查入口。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。
 
@@ -28,7 +28,7 @@ Web UI 支持连接、collection 创建、JSON/Record 写入与原请求重试�
 - 当前每个 collection 一个持久 partition，不支持跨 collection 事务或来源依赖。
 - Record 身份、累计保留操作和候选各有 10,000 上限；单操作 1 MiB，checkpoint 单帧 16 MiB。多批 generation 累计正文最多 4 MiB、100 成员，仍受整体预算限制；不承诺无限写入或稳定磁盘占用。
 - ANN 与有界融合不等于全库精确召回；预算不足、未知写入、过期游标均有明确结果，不能将其当作完整成功。
-- 独立备份不证明后续没有删除；恢复隔离、授权重新建立和受控接管有不同条件，不提供强制绕过。保存 URL 不等于托管或备份外部文件。
+- 独立备份不证明后续没有删除；恢复隔离与授权重新建立是独立条件，不提供强制绕过。保存 URL 不等于托管或备份外部文件。
 - Linux/Windows 原生与进程故障测试不能替代系统崩溃或断电验收，后者仍未完成。各 SHA 的验证结论见 [当前状态](STATUS.md) 与阶段记录。
 - 不可变 Segment、compaction、SQLite/S3 提交、远端 checkpoint、安全回收和共同备份已合入。维护路径审计与真实 S3 后端验收仍在推进；Indexer/cache 与 collection 扩展见[后续路线](docs/roadmap.md)。
 - 不提供旧磁盘格式升级或迁移，不运行模型，不自动解析或抽取知识。

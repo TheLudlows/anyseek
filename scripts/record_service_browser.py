@@ -237,33 +237,6 @@ def exercise(base,master,call):
             page.locator('#discardRejectedWrites').click();expect(page.locator('#documentJson')).to_be_enabled()
             expect(page.locator('#documentStatus')).to_contain_text('Rejected and unsent requests discarded')
             page.locator('#backToSearch').click()
-        # Same-service takeover through real UI; response loss keeps the exact intent.
-        from record_service_smoke import operation
-        archive=call('POST',f'/api/v1/index/{collection}/backup',{'operation_id':operation()})
-        final_write={'operation_id':operation(),'record_id':'after-ui-backup','routing_key':'ui','expected':'Absent','document':{'body':'retained final UI write'}}
-        final_receipt=call('POST',f'/api/v1/index/{collection}/doc',final_write)['receipt']
-        page.locator('#manageIndexes').click()
-        page.locator('#takeoverRecovery summary').click()
-        page.locator('#takeoverSource').fill(collection)
-        page.locator('#takeoverBackup').fill(archive['backup_id'])
-        page.locator('#takeoverTarget').fill('browser-takeover')
-        takeover_requests=[]
-        def lose_takeover(route):
-            takeover_requests.append(route.request.post_data_json)
-            reply=route.fetch();assert reply.status==200
-            route.abort('failed')
-        page.route('**/api/v1/takeovers',lose_takeover,times=1)
-        page.locator('#submitTakeover').click()
-        expect(page.locator('#takeoverStatus')).to_contain_text('Retry preserves')
-        page.reload(wait_until='domcontentloaded');page.locator('#manageIndexes').click()
-        page.locator('#takeoverRecovery summary').click()
-        expect(page.locator('#takeoverSource')).to_be_disabled()
-        assert page.evaluate("JSON.parse(sessionStorage.getItem('seekpower.pendingTakeover'))")==takeover_requests[0]
-        page.locator('#submitTakeover').click()
-        expect(page.locator('#takeoverStatus')).to_contain_text('Recovery active: browser-takeover')
-        assert call('POST','/api/v1/index/browser-takeover/doc',final_write)['receipt']==final_receipt
-        call('GET',f'/api/v1/index/{collection}',status=403)
-        print('PASS Chromium: takeover final writes, original closed, exact retry after lost response and reload')
         # Observe without intercepting/retrying requests or widening deadlines.
         # Keep operation identities, never authorization headers or document bodies.
         recovery_events=[];recovery_started=time.monotonic()

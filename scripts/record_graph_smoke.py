@@ -78,12 +78,6 @@ def exercise(call,restart_with,faults):
     call('POST',endpoint+'/neighbors',query('a'),key=reader,status=403)
     call('POST',endpoint+'/entities',{},key=reader,status=403)
     call('POST',endpoint+'/query',fused(),key=reader,status=403)
-    takeover={'operation_id':operation(),'source_collection_id':'relations','collection_id':'relations-next','backup_id':archive['backup_id']}
-    assert call('POST','/api/v1/takeovers',takeover)['status']=='active'
-    endpoint='/api/v1/index/relations-next'
-    assert call('POST',endpoint+'/neighbors',query('a'))['count']['value']==0
-    call('POST',endpoint+'/entities',{},key=reader,status=403)
-    call('POST',endpoint+'/query',fused(),key=reader,status=403)
     if faults:
         for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
             request=edge('self-'+stage,'a','a')
@@ -105,4 +99,4 @@ def exercise(call,restart_with,faults):
             assert not any(h['record']['record_id']=='b' for h in fusion['hits'])
     call('DELETE','/api/v1/backups/'+archive['backup_id'],{'operation_id':operation()})
     call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'relation-reader'})
-    print('PASS relations HTTP: exact endpoints, cycles, bounded counts, update/delete hiding, revocation, quarantine, takeover and replay'+(' with process faults' if faults else ''))
+    print('PASS relations HTTP: exact endpoints, cycles, bounded counts, update/delete hiding, revocation, quarantine and replay'+(' with process faults' if faults else ''))

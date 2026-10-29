@@ -260,8 +260,6 @@ fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError>
         let header = State {
             lineage: state.lineage.clone(),
             feed: state.feed.clone(),
-            sealed_for: state.sealed_for.clone(),
-            takeover_proof: state.takeover_proof.clone(),
             independent_snapshot: state.independent_snapshot,
             seq: state.seq,
             epoch_watermark: state.epoch_watermark,

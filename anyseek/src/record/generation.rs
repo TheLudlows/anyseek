@@ -314,7 +314,7 @@ impl RecordPartition {
         self.advance_time().await?;
         let _permit = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let inner = self.inner.lock().await;
-        if !inner.healthy || inner.state.sealed_for.is_some() { return Err(RecordError::RecoveryRequired); }
+        if !inner.healthy { return Err(RecordError::RecoveryRequired); }
         let Some(g) = inner.state.generations.get(id) else { return Ok(None); };
         Ok(Some(GenerationStatus { record_id:id.into(), version:g.version, active_generation:g.active.clone(),
             visible_members:g.active_members.iter().filter(|id| inner.locations.contains_key(*id)).count(),

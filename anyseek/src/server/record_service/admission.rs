@@ -32,7 +32,7 @@ pub(super) fn encode<T: Serialize>(value: &T) -> serde_json::Result<Vec<u8>> {
 fn classify(path: &str, method: &Method) -> Lane {
     if !path.starts_with("/api/v1/") || path == "/api/v1/live" { return Lane::Public; }
     match (path, method) {
-        ("/api/v1/index", &Method::POST) | ("/api/v1/restore" | "/api/v1/takeovers" | "/api/v1/service-restores", &Method::POST) => Lane::Recovery,
+        ("/api/v1/index", &Method::POST) | ("/api/v1/restore" | "/api/v1/service-restores", &Method::POST) => Lane::Recovery,
         ("/api/v1/service-backups" | "/api/v1/index/{id}/backup", &Method::POST)
             | ("/api/v1/index/{id}", &Method::PATCH) | ("/api/v1/backups/{id}", &Method::DELETE) => Lane::Background,
         ("/api/v1/apikey", &Method::POST | &Method::DELETE) | ("/api/v1/index/{id}", &Method::DELETE)

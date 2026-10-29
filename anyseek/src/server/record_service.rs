@@ -1,5 +1,4 @@
 //! Default reliable service. No route delegates to the legacy per-key index map.
-mod takeover;
 mod admission;
 use crate::api_types::{CreateIndexRequest, FieldRequest, SearchRequestObject};
 use axum::{
@@ -344,7 +343,6 @@ impl Service {
             let name = row.file_name().to_string_lossy().into_owned();
             if name
                 .strip_prefix(".partition-prepare-")
-                .or_else(|| name.strip_prefix(".takeover-input-"))
                 .or_else(|| name.strip_prefix(".s3-service-export-"))
                 .is_some_and(|suffix| {
                     suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
@@ -431,11 +429,8 @@ impl Service {
     }
 
     async fn finish_collection(&self, entry: CollectionEntry) -> Result<(), Error> {
-        if entry.deleted || entry.takeover_target.is_some() {
+        if entry.deleted {
             return Ok(());
-        }
-        if entry.takeover.as_ref().is_some_and(|t| t.completed.is_none()) {
-            return self.finish_takeover(entry).await;
         }
         if self.records.read().await.contains_key(&entry.collection_id) {
             return Ok(());
@@ -1659,7 +1654,7 @@ async fn delete_collection(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission = admission;
-        // Keep deletion ordered with multi-phase restore/takeover workflows.
+        // Keep deletion ordered with multi-phase restore workflows.
         // Key/grant revocation uses its own catalog barriers and can bypass this.
         let _control = s.control.lock().await;
         let _intake = s.intake_gate.write().await;
@@ -1823,7 +1818,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         )
         .route("/api/v1/index", post(create_collection))
         .route("/api/v1/restore", post(restore))
-        .route("/api/v1/takeovers", post(takeover::takeover))
         .route("/api/v1/index/{id}/doc/{record_id}/status", get(record_status))
         .route("/api/v1/index/{id}/doc/{record_id}/generation", get(generation_status))
         .route("/api/v1/backups", get(list_backups))
@@ -2187,13 +2181,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_fenced_persistence_errors_keep_classification_but_not_revoked_output() {
+    async fn service_invalidated_persistence_errors_keep_classification_but_not_revoked_output() {
         use http_body::Body as _;
         for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
-            let (service,path,_)=setup().await;
+            let (service,path,headers)=setup().await;
+            let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
+            write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&source).unwrap().into()).await.unwrap();
             let record=service.record("a","c").await.unwrap(); let data=record.output_permit().unwrap();
             let (_,permit)=service.catalog.authorized("a".into(),"c".into(),|_|async{}).await.unwrap();
-            record.seal_for_takeover(anyseek::record::SealRequest{intent_id:"a".repeat(64),backup_digest:"b".repeat(64),target_collection_id:"next".into()}).await.unwrap();
+            // A real deletion invalidates the captured data permit without a public test hook.
+            let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null});
+            write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&deletion).unwrap().into()).await.unwrap();
             assert!(protected_data(Ok(json!({"body":"secret"})),permit.clone(),Some(data.clone())).is_err());
             assert!(protected_data::<Value>(Err(bad("other error")),permit.clone(),Some(data.clone())).is_err());
             let response=protected_data::<Value>(Err(error.clone().into()),permit.clone(),Some(data.clone())).unwrap();
@@ -2401,35 +2399,6 @@ mod tests {
         }
         drop(service);
         std::fs::remove_dir_all(path).unwrap();
-    }
-    #[tokio::test]
-    async fn service_takeover_blocks_old_body_and_supports_successive_recovery() {
-        let (service, path, headers) = setup().await;
-        let doc = json!({"operation_id":OperationId::new("initial".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"final acknowledged"}});
-        write(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&doc).unwrap().into()).await.unwrap();
-        let mut origin = "c".to_string();
-        for target in ["next", "next-again"] {
-            let response = backup(State(service.clone()), headers.clone(), Path(origin.clone()),
-                serde_json::to_vec(&json!({"operation_id":OperationId::new(format!("backup-{target}"))})).unwrap().into()).await.unwrap();
-            let archive: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), MAX_RESPONSE).await.unwrap()).unwrap();
-            let pending = read(State(service.clone()), headers.clone(), Path((origin.clone(), "r".into())), Query(ReadParams { fields: String::new() })).await.unwrap();
-            let old_owner = service.records.read().await[&origin].clone();
-            let request = json!({"operation_id":OperationId::new(format!("take-{target}")),"source_collection_id":origin,"collection_id":target,"backup_id":archive["backup_id"]});
-            takeover::takeover(State(service.clone()), headers.clone(), serde_json::to_vec(&request).unwrap().into()).await.unwrap();
-            assert!(axum::body::to_bytes(pending.into_body(), MAX_RESPONSE).await.is_err());
-            assert!(old_owner.output_permit().is_err());
-            assert!(old_owner.get("r").await.is_err());
-            assert!(service.record("a", target).await.is_err());
-            let next = service.record("master", target).await.unwrap();
-            assert_eq!(next.get("r").await.unwrap().unwrap().version, 1);
-            origin = target.into();
-        }
-        drop(service);
-        let service = Service::open(&path, std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
-        assert!(service.record("master", "c").await.is_err());
-        assert!(service.record("master", "next").await.is_err());
-        assert!(service.record("master", "next-again").await.unwrap().get("r").await.unwrap().is_some());
-        drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn service_internal_ids_cannot_be_reserved_by_clients_or_overflow() {
@@ -2641,11 +2610,6 @@ pub(crate) fn generate_openapi() {
             Some(
                 json!({"type":"object","required":["operation_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"}}}),
             ),
-        ),
-        (
-            "/api/v1/takeovers", "post",
-            "Master: seal current source and recover to its final waterline in a new collection; retry the same operation",
-            Some(json!({"type":"object","additionalProperties":false,"required":["operation_id","source_collection_id","collection_id","backup_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"source_collection_id":{"type":"string"},"collection_id":{"type":"string"},"backup_id":{"type":"string"}}})),
         ),
         (
             "/api/v1/restore",
