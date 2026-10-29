@@ -15,6 +15,12 @@
 接收日志不取得 Record 锁，物化等待期间可以继续接收，直到接收预算耗尽。全文与向量/元数据通过 `(record_id, version, revision)` 关联，不再要求相同行号、组件数量或排列。引擎内部仍使用物理地址。lexical_seq 领先 vector_seq 不保证相应记录已能按元数据过滤检索；向量写入与向量查询仍共享组件锁。候选跨缓存重建时可用版本及完整索引输入指纹复验，同版本向量补丁、删除、来源失效和组件故障仍被拦截。
 
 
+## 单层 Record WAL 收敛的第一步
+
+内部 `execute_writes` 已统一同步 Record 写入与 Intake 物化的执行路径：沿用 partition admission 和串行状态锁，按最多 64 条、编码请求 4 MiB 限制待执行批次，并在 owned task 完成前保留内存预算。每项成功结果均来自已有 Record 持久提交；异步索引模式不等待消费者追平。批内依次判定版本，首个明确拒绝结束本次已处理前缀，后缀不执行；执行器本身不新增拒绝账本。取消等待不取消已启动的提交，未知结果仍须以原 operation_id 查询或重试。
+
+此步仅统一内部执行，不改变下面的 HTTP 契约：`/ingest` 仍由现有 Intake 接收并恢复，`/doc` 和 `/batch` 仍沿用同步可见性。Record WAL 仍逐项持久化，尚无跨请求凑批或真正批量 WAL/S3 发布；也尚未移出状态锁内的上传。后续接口切换必须显式确定 committed 响应及逐项结果，不能把本次入口整理视为单层 WAL 已完成。
+
 ## API 契约
 
 `POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每批 1–64 条，累计编码请求最多 4 MiB，同时受 HTTP 2 MiB body 上限和 collection 单记录限制约束。每条必须显式提供 document（null 删除）、vector_patch 或 generation。

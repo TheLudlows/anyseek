@@ -175,5 +175,8 @@
   "record::ingestion::remote::tests::unlocked_snapshot_exact_chunk_boundary_never_emits_empty_extra_chunk",
   "record::tests::record_checkpoint_sync_failure_fences_and_recovery_failure_preserves_authority",
   "record::tests::record_online_checkpoint_process_crashes_recover_and_accept_new_writes",
-  "record::tests::record_uncertified_generation_cleanup_can_be_interrupted_again"
+  "record::tests::record_uncertified_generation_cleanup_can_be_interrupted_again",
+  "record::write::tests::committed_prefix_decides_versions_before_reply_without_waiting_for_indexes",
+  "record::write::tests::committed_executor_retains_durable_unknown_outcome_for_original_retry",
+  "record::write::tests::committed_executor_bounds_and_cancelled_waiter_do_not_change_commit_contract"
 ]

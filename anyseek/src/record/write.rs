@@ -1,4 +1,5 @@
-//! Shared durable Record decision path and bounded intake materialization.
+//! Shared bounded Record execution. Successful results are durable business decisions.
+//! Index publication can be synchronous or asynchronous; intake is only a caller.
 use super::*;
 
 /// Only the completed prefix may be recorded in intake. Busy and uncertain
@@ -15,16 +16,45 @@ pub(super) fn definite(error: &RecordError) -> bool {
     )
 }
 
+const MAX_BATCH_RECORDS: usize = 64;
+const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(super) enum IndexDelivery {
+    Synchronous,
+    Asynchronous,
+}
+
 impl RecordPartition {
+    // Transitional adapter: retained intake still owns its Accept/Complete recovery.
     pub(super) async fn write_ingest_batch(
         &self,
         requests: Vec<RecordWrite>,
     ) -> Result<BatchResult, RecordError> {
-        if requests.is_empty() || requests.len() > 64 {
-            return Err(RecordError::Rejected(
-                "invalid materialization batch size".into(),
-            ));
+        self.execute_writes(requests, IndexDelivery::Asynchronous)
+            .await
+    }
+
+    /// Run an admitted prefix in order, deciding each command against preceding
+    /// committed state. This is not an atomic business batch or a batch WAL yet.
+    /// A definite rejection ends the prefix; an unprocessed suffix has no result.
+    pub(super) async fn execute_writes(
+        &self,
+        requests: Vec<RecordWrite>,
+        delivery: IndexDelivery,
+    ) -> Result<BatchResult, RecordError> {
+        if requests.is_empty() || requests.len() > MAX_BATCH_RECORDS {
+            return Err(RecordError::Rejected("invalid Record batch size".into()));
         }
+        let bytes = requests.iter().try_fold(0usize, |total, request| {
+            total
+                .checked_add(checkpoint_codec::json_length(request)?)
+                .filter(|total| *total <= MAX_BATCH_BYTES)
+                .ok_or_else(|| RecordError::Rejected("Record batch byte budget exceeded".into()))
+        })?;
+        // Retain queue/planner ownership until the owned task finishes, even if
+        // the caller cancels. The existing admission semaphore bounds waiters.
+        let memory = crate::storage::build_budget::reserve_memory(bytes as u64).map_err(storage)?;
         let permit = self
             .admission
             .clone()
@@ -34,11 +64,20 @@ impl RecordPartition {
         crate::resources::spawn(async move {
             let result = async {
                 let _permit = permit;
+                let _memory = memory;
                 let mut inner = partition.inner.lock().await;
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
-                inner.index.begin_batch(partition.indexes.clone(),Arc::downgrade(&partition.inner)).await?;
+                let asynchronous = matches!(delivery, IndexDelivery::Asynchronous);
+                if asynchronous {
+                    inner
+                        .index
+                        .begin_batch(partition.indexes.clone(), Arc::downgrade(&partition.inner))
+                        .await?;
+                } else {
+                    inner.index.drain_indexes().await?;
+                }
                 let mut batch = BatchResult {
                     results: Vec::new(),
                     stop: None,
@@ -48,14 +87,16 @@ impl RecordPartition {
                     if !inner.healthy {
                         // Incomplete publication cannot certify an index view.
                         // Recovery resolves all original operation identities.
-                        inner.index.abort_batch();
+                        if asynchronous {
+                            inner.index.abort_batch();
+                        }
                         return Err(result.err().unwrap_or(RecordError::RecoveryRequired));
                     }
                     match result {
                         Ok(receipt) => batch.results.push(Ok(receipt)),
                         Err(error) if definite(&error) => {
-                            // Persist a rejection before executing later intake
-                            // commands; a batch is never a conditional transaction.
+                            // Do not execute the suffix. The caller decides whether
+                            // to resubmit it; this executor adds no rejection ledger.
                             batch.results.push(Err(error));
                             break;
                         }
@@ -64,6 +105,10 @@ impl RecordPartition {
                             break;
                         }
                     }
+                }
+                if !asynchronous {
+                    partition.indexes.immediate(inner.state.seq);
+                    return Ok(batch);
                 }
                 // Both index consumers proceed independently after canonical
                 // Record materialization releases its guard.
@@ -123,8 +168,12 @@ impl Inner {
             return Err(RecordError::Busy);
         }
         self.advance_time().await?;
-        if !self.state.operation_lookup.contains_key(&request.operation_id)
-            && maintenance::has_expired_operations(&self.state,current_epoch())? {
+        if !self
+            .state
+            .operation_lookup
+            .contains_key(&request.operation_id)
+            && maintenance::has_expired_operations(&self.state, current_epoch())?
+        {
             return Err(self.request_checkpoint("expired_operation_receipts"));
         }
         let (applied, bytes, snapshot_bytes, reserve_bytes, mut candidate, _planning) =
@@ -289,5 +338,156 @@ impl Inner {
             std::process::exit(74);
         }
         Ok(receipt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::tests::{config, write};
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn committed_prefix_decides_versions_before_reply_without_waiting_for_indexes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("records");
+        let settings = config();
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        for lane in ["lexical", "vector"] {
+            std::fs::write(root.join(format!(".test-{lane}-consumer-pause")), b"pause").unwrap();
+        }
+        let first = write("first", "r", "alpha", ExpectedVersion::Absent);
+        let second = write("second", "r", "beta", ExpectedVersion::Match(1));
+        let conflict = write("conflict", "r", "bad", ExpectedVersion::Match(1));
+        let suffix = write("suffix", "s", "suffix", ExpectedVersion::Absent);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            p.execute_writes(
+                vec![
+                    first.clone(),
+                    second.clone(),
+                    conflict.clone(),
+                    suffix.clone(),
+                ],
+                IndexDelivery::Asynchronous,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.results.len(), 3);
+        let receipts: Vec<_> = result.results[..2]
+            .iter()
+            .map(|r| r.clone().unwrap())
+            .collect();
+        assert_eq!((receipts[0].version, receipts[1].version), (1, 2));
+        assert!(matches!(result.results[2], Err(RecordError::Conflict(_))));
+        assert!(result.stop.is_none());
+        assert_eq!(p.indexes.lexical.load(Ordering::Acquire), 0);
+        assert_eq!(p.indexes.vector.load(Ordering::Acquire), 0);
+        assert_eq!(
+            p.get("r").await.unwrap().unwrap().document.unwrap()["body"],
+            "beta"
+        );
+        assert!(p.get("s").await.unwrap().is_none());
+        assert!(p.operation(&conflict.operation_id).await.unwrap().is_none());
+        assert!(p.operation(&suffix.operation_id).await.unwrap().is_none());
+        assert!(!root.join("intake").exists());
+        for lane in ["lexical", "vector"] {
+            std::fs::remove_file(root.join(format!(".test-{lane}-consumer-pause"))).unwrap();
+        }
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes)
+            .await
+            .unwrap();
+        for (request, receipt) in [first, second].into_iter().zip(receipts) {
+            assert_eq!(p.write(request).await.unwrap(), receipt);
+        }
+        assert!(matches!(
+            p.write(conflict).await,
+            Err(RecordError::Conflict(_))
+        ));
+        assert_eq!(p.get("r").await.unwrap().unwrap().version, 2);
+        assert!(p.get("s").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn committed_executor_retains_durable_unknown_outcome_for_original_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("records");
+        let settings = config();
+        let p = RecordPartition::create(&root, settings.clone())
+            .await
+            .unwrap();
+        let request = write("unknown", "r", "alpha", ExpectedVersion::Absent);
+        p.inner.lock().await.fail_after_durable = true;
+        let result = p
+            .execute_writes(vec![request.clone()], IndexDelivery::Asynchronous)
+            .await;
+        assert!(matches!(result, Err(RecordError::DurablePending(1))));
+        drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes)
+            .await
+            .unwrap();
+        let receipt = p.operation(&request.operation_id).await.unwrap().unwrap();
+        assert_eq!(p.write(request).await.unwrap(), receipt);
+        assert_eq!(p.get("r").await.unwrap().unwrap().version, 1);
+    }
+
+    #[tokio::test]
+    async fn committed_executor_bounds_and_cancelled_waiter_do_not_change_commit_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let p = RecordPartition::create(&directory.path().join("records"), config())
+            .await
+            .unwrap();
+        let request = write("kept", "r", "alpha", ExpectedVersion::Absent);
+        for requests in [
+            vec![],
+            vec![request.clone(); MAX_BATCH_RECORDS + 1],
+            vec![write(
+                "oversized",
+                "big",
+                &"x".repeat(MAX_BATCH_BYTES),
+                ExpectedVersion::Absent,
+            )],
+        ] {
+            assert!(matches!(
+                p.execute_writes(requests, IndexDelivery::Asynchronous)
+                    .await,
+                Err(RecordError::Rejected(_))
+            ));
+        }
+        assert_eq!(p.inner.lock().await.state.seq, 0);
+        let guard = p.inner.lock().await;
+        let available = p.admission.available_permits();
+        let worker = p.clone();
+        let command = request.clone();
+        let task = tokio::spawn(async move {
+            worker
+                .execute_writes(vec![command], IndexDelivery::Asynchronous)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while p.admission.available_permits() == available {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _ = task.await;
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while p.admission.available_permits() != available {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let receipt = p.operation(&request.operation_id).await.unwrap().unwrap();
+        assert_eq!(p.write(request).await.unwrap(), receipt);
     }
 }

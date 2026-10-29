@@ -1481,32 +1481,21 @@ impl RecordPartition {
         let indexes = index_consumers::Cursors::recovered(inner.state.seq);
         Ok(Self {output,indexes,inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
     }
-    /// A cancellation-safe accepted write: dropping this future does not cancel
-    /// an already spawned operation. Query its original operation ID afterward.
+    /// Commit one Record operation and synchronously publish its index inputs.
+    /// Dropping this future does not cancel an already spawned operation; query
+    /// its original operation ID after an uncertain result.
     pub async fn write(&self, request: RecordWrite) -> Result<WriteReceipt, RecordError> {
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
-        let inner = self.inner.clone();
-        let partition=self.clone();
-        let indexes=self.indexes.clone();
-        crate::resources::spawn(async move {
-            let result=async move {
-                let _permit = permit;
-                let mut inner = inner.lock().await;
-                inner.index.drain_indexes().await?;
-                let result = inner.write_one(request).await;
-                if inner.healthy { indexes.immediate(inner.state.seq); }
-                result
-            }.await;
-            partition.kick_maintenance().await;
-            result
-            })
-            .await
-            .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
+        let mut batch = self
+            .execute_writes(vec![request], write::IndexDelivery::Synchronous)
+            .await?;
+        if let Some(result) = batch.results.pop() {
+            return result;
+        }
+        Err(batch
+            .stop
+            .unwrap_or_else(|| storage("single write produced no decision")))
     }
+
     /// Lookup the confirmed result. None does not prove a timed-out write failed.
     pub async fn operation(&self, id: &OperationId) -> Result<Option<WriteReceipt>, RecordError> {
         let _permit = self
