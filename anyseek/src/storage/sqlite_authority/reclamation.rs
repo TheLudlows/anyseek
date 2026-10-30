@@ -70,10 +70,12 @@ impl SqliteAuthority {
     }
 
     pub(crate) fn collectible_object(&self, key: &str) -> rusqlite::Result<Option<ObjectRef>> {
-        let object = self.connection.query_row(
+        let tx = self.connection.unchecked_transaction()?;
+        let mut object = tx.query_row(
             "SELECT object_key,sha256,byte_length FROM object_uploads WHERE object_key=?1 AND state IN (2,4,5)",
             [key],registry_reference).optional()?;
-        if object.is_some() && object_is_reachable(&self.connection,key)? { return Ok(None); }
+        if object.is_some() && object_is_reachable(&tx,key)? { object = None; }
+        tx.commit()?;
         Ok(object)
     }
 }
@@ -179,6 +181,10 @@ mod tests {
         db.connection.execute("UPDATE partition_heads SET bootstrap_json=?1 WHERE partition_id='p'",[serde_json::to_string(&objects[0]).unwrap()]).unwrap();
         assert!(db.collectible_object("c").unwrap().is_none());
         assert!(!db.mark_object_deleted(&objects[2]).unwrap());
+        db.connection.execute("UPDATE partition_heads SET bootstrap_json=?1 WHERE partition_id='p'",[r#"{"key":"bad-missing-digest"}"#]).unwrap();
+        assert!(db.collectible_object("c").is_err());
+        assert!(db.mark_object_deleted(&objects[2]).is_err());
+        assert!(db.retire_object("a",0,1).is_err());
         db.connection.execute("UPDATE partition_heads SET bootstrap_json=NULL WHERE partition_id='p'",[]).unwrap();
         assert!(db.mark_object_deleted(&objects[2]).unwrap());
         assert!(db.collectible_object("c").unwrap().is_none());

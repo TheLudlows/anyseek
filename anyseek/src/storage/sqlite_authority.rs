@@ -1128,6 +1128,12 @@ fn registry_reference(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRef> {
 // Walk only this object's ancestors, using the reverse-edge index. UNION also
 // terminates malformed cycles. A root or pin protects every descendant.
 fn object_is_reachable(connection: &Connection, key: &str) -> rusqlite::Result<bool> {
+    // Keep the original fail-closed head decoding without materializing every
+    // live object. JSON extraction alone would silently ignore missing fields.
+    let mut heads = connection.prepare("SELECT partition_id FROM partition_heads WHERE retired=0")?;
+    for id in heads.query_map([],|r|r.get::<_,String>(0))? {
+        read_head(connection,&id?)?.ok_or(rusqlite::Error::InvalidQuery)?;
+    }
     connection.query_row(
         "WITH RECURSIVE ancestors(object_key) AS (
              SELECT ?1 UNION
