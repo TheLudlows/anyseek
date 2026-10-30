@@ -711,7 +711,8 @@ impl IngestPipeline {
             }
         })())
     }
-    /// Inspect an identity without acquiring the Record/index mutex.
+    /// Inspect legacy terminal fixtures; production operation lookup uses Record receipts.
+    #[cfg(test)]
     pub async fn operation(&self, id: &OperationId) -> Option<IngestStatus> {
         let spool = self.spool.lock().await;
         spool

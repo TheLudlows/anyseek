@@ -243,7 +243,8 @@ pub(crate) struct Service {
     catalog: Catalog,
     records: RwLock<BTreeMap<String, RecordPartition>>,
     intake: RwLock<BTreeMap<String, anyseek::record::IngestPipeline>>,
-    intake_gate: Arc<RwLock<()>>,
+    // Exclude management changes across the entire owned committed request.
+    write_gate: Arc<RwLock<()>>,
     control: Mutex<()>,
     control_admission: Arc<Semaphore>,
     resources: Arc<Governor>,
@@ -311,7 +312,7 @@ impl Service {
             catalog,
             records: RwLock::new(BTreeMap::new()),
             intake: RwLock::new(BTreeMap::new()),
-            intake_gate: Arc::new(RwLock::new(())),
+            write_gate: Arc::new(RwLock::new(())),
             control: Mutex::new(()),
             control_admission: Arc::new(Semaphore::new(16)),
             resources: Governor::from_env()?,
@@ -524,15 +525,6 @@ impl Service {
             .await
             .insert(entry.collection_id, partition);
         Ok(())
-    }
-    #[cfg(test)]
-    async fn intake(&self, key: &str, id: &str) -> Result<anyseek::record::IngestPipeline, Error> {
-        let partition = self.record(key, id).await?;
-        let mut intake = self.intake.write().await;
-        if let Some(pipeline) = intake.get(id) { return Ok(pipeline.clone()); }
-        let pipeline = anyseek::record::IngestPipeline::open(partition).await?;
-        intake.insert(id.into(), pipeline.clone());
-        Ok(pipeline)
     }
     async fn require_intake_drained(&self) -> Result<(), Error> {
         for pipeline in self.intake.read().await.values() { pipeline.require_drained().await?; }
@@ -794,7 +786,7 @@ async fn create_collection(
     owned(async move {
         let _admission = admission;
         let _control = s.control.lock().await;
-        let _intake = s.intake_gate.write().await;
+        let _writes = s.write_gate.write().await;
         s.require_intake_drained().await?;
         let key = s.authenticate(&headers).await?;
         // Creation grants only a new collection to its creator; existing grants
@@ -916,7 +908,7 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
     }
     let request: IngestRequest = serde_json::from_value(value).map_err(bad)?;
     let key = s.authenticate(&headers).await?;
-    let gate = s.intake_gate.clone().read_owned().await;
+    let gate = s.write_gate.clone().read_owned().await;
     let partition = s.record(&key, &id).await?;
     let legacy = s.intake.read().await.get(&id).cloned();
     let operations: Vec<_> = request.records.iter().map(|r| r.operation_id.clone()).collect();
@@ -1298,7 +1290,7 @@ async fn service_backup(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission=admission;let _control=s.control.lock().await;
-        let _intake = s.intake_gate.write().await;
+        let _writes = s.write_gate.write().await;
         s.require_intake_drained().await?;
         let key=s.admin(&headers).await?;
         s.catalog.operation(&request.operation_id).await?; // epoch admission, never infer absence = failure
@@ -1367,7 +1359,7 @@ async fn service_restore(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission=admission;let _control=s.control.lock().await;
-        let _intake = s.intake_gate.write().await;
+        let _writes = s.write_gate.write().await;
         s.require_intake_drained().await?;
         let key=s.admin(&headers).await?;s.catalog.operation(&request.operation_id).await?;
         let id=verifier(&serde_json::to_vec(&("service-restore",&request.operation_id)).map_err(bad)?);
@@ -1465,7 +1457,7 @@ async fn backup(
     owned(async move {
         let _admission = admission;
         let _control = s.control.lock().await;
-        let _intake = s.intake_gate.write().await;
+        let _writes = s.write_gate.write().await;
         s.require_intake_drained().await?;
         let key = s.authenticate(&headers).await?;
         let p = s.record(&key, &id).await?;
@@ -1508,7 +1500,7 @@ async fn list_backups(
 ) -> Result<Response, Error> {
     let key = s.admin(&headers).await?;
     let _control = s.control.lock().await;
-        let _intake = s.intake_gate.write().await;
+        let _writes = s.write_gate.write().await;
         s.require_intake_drained().await?;
     s.admin(&headers).await?;
     let retired = s.catalog.retired_backups().await?;
@@ -1573,7 +1565,7 @@ async fn retire_backup(
     owned(async move {
         let _admission=admission;
         let _control=s.control.lock().await;
-        let _intake = s.intake_gate.write().await;
+        let _writes = s.write_gate.write().await;
         s.require_intake_drained().await?;
         let key=s.admin(&headers).await?;
         let receipt=s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::RetireBackup { backup_id:id.clone() } }).await?;
@@ -1594,7 +1586,7 @@ async fn restore(
     owned(async move {
         let _admission = admission;
         let _control = s.control.lock().await;
-        let _intake = s.intake_gate.write().await;
+        let _writes = s.write_gate.write().await;
         s.require_intake_drained().await?;
         let key = s.admin(&headers).await?;
         let existing = s.catalog.collections().await?.into_iter().find(|e| e.collection_id==request.collection_id);
@@ -1652,7 +1644,7 @@ async fn delete_collection(
         // Keep deletion ordered with multi-phase restore workflows.
         // Key/grant revocation uses its own catalog barriers and can bypass this.
         let _control = s.control.lock().await;
-        let _intake = s.intake_gate.write().await;
+        let _writes = s.write_gate.write().await;
         s.require_intake_drained().await?;
         let key = s.admin(&headers).await?;
         let receipt = s
@@ -2011,22 +2003,27 @@ mod tests {
         assert_eq!(rejected["results"][0]["error"]["code"],"conflict");
         let mut missing=body.clone(); missing["records"][0].as_object_mut().unwrap().remove("document");
         let rejected=app.clone().oneshot(make(&missing)).await.unwrap(); assert_eq!(rejected.status(),StatusCode::BAD_REQUEST); drop(rejected);
-        let pipeline=service.intake("master","c").await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10),pipeline.finish()).await.unwrap().unwrap();
+        assert!(service.intake.read().await.is_empty());
+        let partition=service.record("master","c").await.unwrap();
+        // A synchronous exact replay joins the asynchronous consumers without creating Intake.
+        partition.write(serde_json::from_value(body["records"][0].clone()).unwrap()).await.unwrap();
+        drop(partition);
         let uri=format!("/api/v1/index/c/ingest/operation/{}/{}",operation.epoch,operation.nonce);
         let response=app.oneshot(axum::http::Request::builder().uri(uri).header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
         let status:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap(); assert_eq!(status["receipt"]["record_id"],"r");
-        drop(pipeline); drop(service); std::fs::remove_dir_all(path).unwrap();
+        drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
-    async fn intake_response_and_status_remain_subject_to_revocation() {
+    async fn committed_ingest_response_and_status_remain_subject_to_revocation() {
         let (service,path,_)=setup().await; let mut headers=HeaderMap::new(); headers.insert("apikey",STANDARD.encode([7;32]).parse().unwrap());
         let body=json!({"records":[{"operation_id":OperationId::new("intake-revoke".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha"}}]});
         let response=ingest(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&body).unwrap().into()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
         service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-intake".into()),command:CatalogCommand::RevokeGrant{collection_id:"c".into(),key_id:"a".into()}}).await.unwrap();
         assert!(axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.is_err()); assert!(ingest_progress(State(service.clone()),headers,Path("c".into())).await.is_err());
-        let pipeline=service.intake("master","c").await.unwrap(); tokio::time::timeout(std::time::Duration::from_secs(10),pipeline.finish()).await.unwrap().unwrap();
-        drop(pipeline); drop(service); std::fs::remove_dir_all(path).unwrap();
+        assert!(service.intake.read().await.is_empty());
+        let partition=service.record("master","c").await.unwrap();
+        partition.write(serde_json::from_value(body["records"][0].clone()).unwrap()).await.unwrap();
+        drop(partition); drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     async fn raw(address: std::net::SocketAddr, request: String) -> Vec<u8> {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();

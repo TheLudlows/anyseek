@@ -985,16 +985,30 @@ mod tests {
     async fn remote_committed_ingest_continues_rejections_and_cold_replays() {
         let (p,_store,root,_db,clock)=source().await;
         let requests=vec![write("committed-a","r","alpha",ExpectedVersion::Absent),
+            write("committed-a2","t","alpha",ExpectedVersion::Absent),
             write("committed-conflict","r","bad",ExpectedVersion::Absent),
             write("committed-b","s","beta",ExpectedVersion::Absent)];
         let result=p.commit_writes(requests.clone()).await.unwrap();
         assert!(result.stop.is_none());
-        assert!(matches!(&result.results[..],[CommittedItem::Committed(_),CommittedItem::Rejected(RecordError::Conflict(_)),CommittedItem::Committed(_)]));
+        assert!(matches!(&result.results[..],[CommittedItem::Committed(_),CommittedItem::Committed(_),CommittedItem::Rejected(RecordError::Conflict(_)),CommittedItem::Committed(_)]));
+        {
+            let inner=p.inner.lock().await; let remote=inner.remote.as_ref().unwrap();
+            let authority=remote.authority.lock().await;
+            let head=authority.read_head("source").unwrap().unwrap();
+            let last:crate::storage::object_log::ObjectLogBlock=serde_json::from_slice(&remote.store.get_verified(head.wal_tip.as_ref().unwrap()).await.unwrap()).unwrap();
+            assert_eq!((last.first_seq,last.last_seq,last.entries.len()),(3,3,1));
+            let first:crate::storage::object_log::ObjectLogBlock=serde_json::from_slice(&remote.store.get_verified(last.previous.as_ref().unwrap()).await.unwrap()).unwrap();
+            assert_eq!((first.first_seq,first.last_seq,first.entries.len()),(1,2,2));
+            assert!(first.previous.is_none());
+            for entry in &first.entries {
+                assert_eq!(authority.resolve_operation("source",&entry.operation_id,entry.request_sha256).unwrap().unwrap().committed_seq,2);
+            }
+        }
         p.inner.lock().await.index.drain_indexes().await.unwrap();
         let p=cold(p,&root,clock).await;
         let retry=p.commit_writes(requests).await.unwrap();
         assert!(retry.stop.is_none());
-        assert!(matches!(&retry.results[..],[CommittedItem::Committed(a),CommittedItem::Rejected(_),CommittedItem::Committed(b)] if a.seq==1 && b.seq==2));
+        assert!(matches!(&retry.results[..],[CommittedItem::Committed(a),CommittedItem::Committed(a2),CommittedItem::Rejected(_),CommittedItem::Committed(b)] if a.seq==1 && a2.seq==2 && b.seq==3));
         p.inner.lock().await.index.drain_indexes().await.unwrap();
     }
 
