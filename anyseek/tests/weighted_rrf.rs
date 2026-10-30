@@ -3,8 +3,7 @@ use anyseek::record::RecordSearch;
 use anyseek::record::{RecordPartition, RecordQuery};
 // External embedding contract: reject invalid inputs before writes or vector search.
 use anyseek::{
-    index::{AccessType, Clustering, Document, DocumentCompression,
-        FrequentwordType, IndexMetaObject, LexicalSimilarity,
+    index::{Clustering, Document, FrequentwordType, IndexMetaObject, LexicalSimilarity,
         NgramSet, SchemaField, StopwordType, TokenizerType},
     search::{RrfOptions, QueryType,  ResultType, SearchMode},
     vector::{Embedding, Inference, Precision, Quantization},
@@ -31,8 +30,7 @@ fn meta() -> IndexMetaObject {
         tokenizer:TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared, stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
-        ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,
-        access_type:AccessType::Mmap, clustering:Clustering::None, inference:inference() }
+        ngram_indexing:NgramSet::SingleTerm as u8, clustering:Clustering::None, inference:inference() }
 }
 async fn try_query(index: &RecordPartition, mode: SearchMode, vector: Option<Embedding>) -> Result<RecordSearch, anyseek::record::RecordError> {
     index.query(RecordQuery {text:"alpha".into(),vector:vector,query_type:QueryType::Union,mode:mode,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await
@@ -41,7 +39,7 @@ async fn try_query(index: &RecordPartition, mode: SearchMode, vector: Option<Emb
 async fn query(index: &RecordPartition, mode: SearchMode, vector: Option<Embedding>) -> RecordSearch { try_query(index,mode,vector).await.unwrap() }
 
 fn weighted(rrf: RrfOptions) -> SearchMode {
-    SearchMode::WeightedHybrid { similarity_threshold: None, ann_mode: AnnMode::All, rrf }
+    SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All, rrf }
 }
 #[test]
 fn invalid_rrf() {
@@ -67,7 +65,7 @@ async fn weighted_global_shards() {
     for shards in [1, 3] {
         let path = std::env::temp_dir().join(format!("rrf-{}-{shards}", std::process::id()));
         assert!(!path.exists());
-        let index = Ok::<_, String>(records::create(&path, meta(), (&schema()).to_vec()).await).unwrap();
+        let index = records::create(&path, meta(), (&schema()).to_vec()).await;
         // Build actual Record components instead of a discarded legacy shard argument.
         // Each component contains at most six candidates in the three-component case.
         for component in 0..shards {
@@ -84,10 +82,8 @@ async fn weighted_global_shards() {
         assert_eq!(realtime.hits.len(),3);
         index.compact_journal().await.unwrap();
         let vector = Some(Embedding::F32(vec![1.0,0.0,0.0]));
-        let old = query(&index, SearchMode::Hybrid { similarity_threshold:None, ann_mode:AnnMode::All }, vector.clone()).await;
-        let new = query(&index, weighted(RrfOptions::default()), vector.clone()).await;
-        assert_eq!(serde_json::to_value(&old.hits).unwrap(), serde_json::to_value(&new.hits).unwrap());
-        for hit in &old.hits {
+        let defaults = query(&index, weighted(RrfOptions::default()), vector.clone()).await;
+        for hit in &defaults.hits {
             let keyword = if hit.record.record_id.parse::<usize>().unwrap() % 2 == 0 { 1.0 / (0.6 + (hit.record.record_id.parse::<usize>().unwrap() / 2) as f32) } else { 0.0 };
             let vector = if hit.record.record_id.parse::<usize>().unwrap() < 10 { 1.0 / (0.6 + hit.record.record_id.parse::<usize>().unwrap() as f32) } else { 0.0 };
             assert_eq!(hit.score.to_bits(), (keyword + vector).to_bits());

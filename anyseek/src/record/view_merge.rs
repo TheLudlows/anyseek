@@ -29,12 +29,7 @@ impl RetrievalView {
             let shard = component.read().await;
             if shard.failed { return Err(RecordError::RecoveryRequired); }
             let active = shard.active.as_ref().ok_or_else(|| storage("merge statistics missing"))?;
-            // Legacy packages without fingerprints are rebuilt by the next
-            // authoritative checkpoint, never guessed by this cache optimizer.
-            if active.keys.len() <= max_rows && active.retired.is_some()
-                && active.revisions.len() == active.keys.len()
-                && active.keys.iter().enumerate().filter(|(i, _)| active.is_live(*i))
-                    .all(|(i, _)| active.fingerprints.get(i).copied().flatten().is_some()) {
+            if active.keys.len() <= max_rows && active.retired.is_some() {
                 choices.push((active.keys.len(), slot));
             }
         }
@@ -62,7 +57,7 @@ impl RetrievalView {
                 rows.insert(key.clone(), MergeRow {
                     component: component.clone(), local,
                     version: active.revisions[local].0,
-                    fingerprint: active.fingerprints[local].unwrap(),
+                    fingerprint: active.fingerprints[local],
                     token: active.retired.as_ref().unwrap().token(local).map_err(storage)?,
                 });
             }
@@ -103,7 +98,7 @@ impl RetrievalView {
         let mut shard = candidate.write().await;
         if shard.failed { return Err(RecordError::RecoveryRequired); }
         let active = shard.active.as_mut().ok_or_else(|| storage("merge replacement statistics missing"))?;
-        if active.keys.len() != sources.keys.len() || active.revisions.len() != active.keys.len() {
+        if active.keys.len() != sources.keys.len() {
             return Err(storage("merge replacement identity population mismatch"));
         }
         let address_bytes = (ordinals.len() as u64).checked_mul(128)
@@ -120,7 +115,7 @@ impl RetrievalView {
         for local in 0..active.keys.len() {
             let key = &active.keys[local];
             let source = sources.rows.get(key).ok_or_else(|| storage("merge replacement has unexpected identity"))?;
-            if active.revisions[local].0 != source.version || active.fingerprints.get(local).copied().flatten() != Some(source.fingerprint) {
+            if active.revisions[local].0 != source.version || active.fingerprints[local] != source.fingerprint {
                 return Err(storage("merge replacement changed source value"));
             }
             mask.share(local, source.token.clone()).map_err(storage)?;

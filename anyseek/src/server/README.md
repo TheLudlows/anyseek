@@ -19,7 +19,6 @@ target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 | `index_path` | `anyseek_index`；相对路径以可执行文件目录为基准 |
 | `local_ip` | `0.0.0.0` |
 | `local_port` | `8080` |
-| `force_shard_number` | 默认可靠服务固定为 1；显式值也必须为 1 |
 | `default_nprobe` | `200`；正整数，请求可覆盖 |
 | `generate_openapi` | `false`；`true` 输出实际路由的 JSON/YAML 后退出 |
 
@@ -283,7 +282,7 @@ Single commands remain limited to 1 MiB, received chunk JSON to 4 MiB per genera
 
 Every Record query hit contains `channels`, alongside the unchanged final `score` and original `record`. Each entry has `channel` (`lexical`, `vector`, `relation`, or `browse`), zero-based `rank`, `rank_basis`, `raw_score`, and `rrf_contribution`.
 
-Lexical/vector raw scores are the engine's unmodified channel scores before RRF, not calibrated probabilities; the vector metric/representation remains the collection's existing one. In Hybrid/WeightedHybrid and relation fusion, contributions use the actual weights and zero-based constant; absent or disabled channels contribute nothing and have no entry. Relation ranks follow stable adjacency order after deduplicating neighbors; `raw_score` is null because declared edge weights are not similarity scores. Browse likewise has no raw relevance score. Outside fusion, `rrf_contribution` is null.
+Lexical/vector raw scores are the engine's unmodified channel scores before RRF, not calibrated probabilities; the vector metric/representation remains the collection's existing one. In Hybrid and relation fusion, contributions use the actual weights and zero-based constant; absent or disabled channels contribute nothing and have no entry. Relation ranks follow stable adjacency order after deduplicating neighbors; `raw_score` is null because declared edge weights are not similarity scores. Browse likewise has no raw relevance score. Outside fusion, `rrf_contribution` is null.
 
 Hybrid channel ranks are assigned before final fusion sorting/pagination. A pure channel query reports its retrieval-window position (`offset + position`), marked `requested_order` when a field sort is requested; it is not then a relevance rank. Other bases are `score`, `stable_adjacency`, or `browse_order`. No rank implies full ANN recall. Explanation metadata does not change scoring, candidate budgets, visibility or authorization. UI displays this same evidence in a per-hit disclosure and the relation inspector. There is no new persistent state or disk format change in this explanation batch.
 

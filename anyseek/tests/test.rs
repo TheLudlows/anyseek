@@ -7,7 +7,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 
 
 use anyseek::index::{
-    AccessType, Clustering, DocumentCompression, FrequentwordType,
+    Clustering, FrequentwordType,
     IndexMetaObject, LexicalSimilarity, NgramSet,
     StopwordType, TokenizerType, };
 
@@ -27,7 +27,7 @@ async fn test_01_create_index() {
 
     let schema_json = r#"
     [{"field":"title","field_type":"Text","store":false,"index_lexical":false},
-    {"field":"body","field_type":"Text","store":true,"index_lexical":true,"longest":true},
+    {"field":"body","field_type":"Text","store":true,"index_lexical":true},
     {"field":"url","field_type":"Text","store":false,"index_lexical":false}]"#;
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
 
@@ -41,15 +41,12 @@ async fn test_01_create_index() {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::English,
         ngram_indexing: NgramSet::NgramFF as u8 | NgramSet::NgramFFF as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     };
 
     let segment_number_bits1 = 11;
-    let index_arc = Ok::<_, String>(records::create(index_path, meta, (&schema).to_vec()).await)
-    .unwrap();
+    let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
     let result = index_arc.configuration().await.unwrap().index.id;
     assert_eq!(result, 0);
 
@@ -325,8 +322,6 @@ async fn test_09_create_index_vector_supplied() {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::English,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::External {
             dimensions: 3,
@@ -337,8 +332,7 @@ async fn test_09_create_index_vector_supplied() {
     };
 
     let segment_number_bits1 = 11;
-    let index_arc = Ok::<_, String>(records::create(index_path, meta, (&schema).to_vec()).await)
-    .unwrap();
+    let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
     let result = index_arc.configuration().await.unwrap().index.id;
     assert_eq!(result, 0);
 
@@ -417,8 +411,6 @@ async fn test_12_create_index_vector_external() {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::English,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::External {
             dimensions: 128,
@@ -429,8 +421,7 @@ async fn test_12_create_index_vector_external() {
     };
 
     let segment_number_bits1 = 11;
-    let index_arc = Ok::<_, String>(records::create(index_path, meta, (&schema).to_vec()).await)
-    .unwrap();
+    let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
     let result = index_arc.configuration().await.unwrap().index.id;
     assert_eq!(result, 0);
 
@@ -507,7 +498,7 @@ async fn test_15_filter_scope() {
 
     let schema_json = r#"
     [{"field":"id","field_type":"String","store":true,"index_lexical":false},
-    {"field":"text","field_type":"Text","store":true,"index_lexical":true,"longest":true},
+    {"field":"text","field_type":"Text","store":true,"index_lexical":true},
     {"field":"kind","field_type":"String","store":true,"index_lexical":false,"facet":true}]"#;
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
 
@@ -521,15 +512,12 @@ async fn test_15_filter_scope() {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     };
 
     // Public Record fixture: three stable identities with two facet values.
-    let index_arc = Ok::<_, String>(records::create(index_path, meta, (&schema).to_vec()).await)
-        .unwrap();
+    let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
 
     let documents_json = r#"
     [{"id":"a","text":"alpha only","kind":"invoice"},

@@ -79,7 +79,7 @@ def main():
             nonlocal process,base
             base=f'http://127.0.0.1:{listen or port}'
             process=subprocess.Popen([binary,f'index_path={target or root}',f'local_port={listen or port}',
-                'local_ip=127.0.0.1','force_shard_number=1'],env={**env,**(extra or {})},stdout=log,stderr=log)
+                'local_ip=127.0.0.1'],env={**env,**(extra or {})},stdout=log,stderr=log)
             children.append(process)
             for _ in range(2400):
                 if process.poll() is not None:

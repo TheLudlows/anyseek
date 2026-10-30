@@ -11,11 +11,11 @@ pub(super) struct Handle {
 }
 pub(super) struct Candidate {
     identity: lexical::Identity,
-    fingerprint: Option<[u8; 32]>,
+    fingerprint: [u8; 32],
     hit: crate::min_heap::Result,
 }
 pub(super) struct Selection {
-    rows: BTreeMap<String, ((u64, u64), Option<[u8; 32]>)>,
+    rows: BTreeMap<String, ((u64, u64), [u8; 32])>,
     _pins: Vec<Arc<lexical::runtime::Runtime>>,
     _memory: crate::storage::build_budget::MemoryLease,
     _scope: Option<crate::resources::Lease>,
@@ -35,8 +35,7 @@ impl Selection {
             shards[ordinal % shards.len()].active.as_ref().is_some_and(|active| {
                 active.is_live(local) && active.keys.get(local) == Some(key)
                     && active.revisions.get(local).is_some_and(|&current| current.0 == revision.0
-                        && (current.1 == revision.1 || fingerprint.is_some()
-                            && active.fingerprints.get(local).copied().flatten() == *fingerprint))
+                        && (current.1 == revision.1 || active.fingerprints.get(local) == Some(fingerprint)))
             })
         });
         Ok(())
@@ -79,7 +78,7 @@ impl Handle {
                     && !crate::metadata_filter::is_facet_filter(shard, &filters, local)
                 {
                     let revision = *active.revisions.get(local).ok_or_else(|| storage("filter revision missing"))?;
-                    rows.insert(key.clone(), (revision, active.fingerprints.get(local).copied().flatten()));
+                    rows.insert(key.clone(), (revision, active.fingerprints[local]));
                 }
             }
         }
@@ -146,7 +145,7 @@ impl Handle {
                     version: active.revisions.get(local).ok_or_else(|| storage("candidate revision missing"))?.0,
                     revision: active.revisions[local].1,
                 },
-                fingerprint: active.fingerprints.get(local).copied().flatten(),
+                fingerprint: active.fingerprints[local],
                 hit,
             });
         }
@@ -288,7 +287,7 @@ fn validate(query: &RecordQuery, config: &RecordConfig) -> Result<(), RecordErro
     {
         return Err(RecordError::Rejected("candidate budget exceeded".into()));
     }
-    if let SearchMode::WeightedHybrid { rrf, .. } = &query.mode {
+    if let SearchMode::Hybrid { rrf, .. } = &query.mode {
         if rrf
             .keyword_candidates
             .is_some_and(|n| n > config.max_candidates)
@@ -344,7 +343,7 @@ mod tests {
         let components = inner.index.components().await;
         components[0].write().await.failed = true;
         let identity = lexical::Identity { id: "a".into(), version: 1, revision: 1 };
-        assert!(matches!(inner.index.matches_identity(0, &identity, None).await,
+        assert!(matches!(inner.index.matches_identity(0, &identity, [0; 32]).await,
             Err(RecordError::RecoveryRequired)));
         assert!(matches!(selection.revalidate(&inner.locations, &components).await,
             Err(RecordError::RecoveryRequired)));
@@ -373,7 +372,7 @@ mod tests {
         handle.index.write().await.record_lexical = vec![one, two];
         let result = lexical::runtime_query::search(&handle.index, "alpha".into(),
             Some(Embedding::F32(vec![1.0, 0.0])), SearchMode::Hybrid {
-                similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All },
+                similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All, rrf: Default::default() },
             QueryType::Intersection, 0, 10, ResultType::TopkCount, vec![], vec![], vec![],
             lexical::Cut { sequence: u64::MAX, evaluation_time_ms: u64::MAX }).await.unwrap();
         assert_eq!(result.result_count_total, 2);
@@ -455,6 +454,7 @@ mod tests {
                     SearchMode::Hybrid {
                         similarity_threshold: None,
                         ann_mode: crate::vector_similarity::AnnMode::All,
+                        rrf: Default::default(),
                     },
                     vec![],
                     10,

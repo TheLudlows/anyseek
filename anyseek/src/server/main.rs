@@ -84,7 +84,7 @@ fn parse_params(args: impl Iterator<Item = String>) -> Result<HashMap<String, St
             "index_path" if !value.is_empty() => {}
             "local_ip" if value.parse::<std::net::IpAddr>().is_ok() => {}
             "local_port" if value.parse::<u16>().is_ok() => {}
-            "force_shard_number" | "default_nprobe"
+            "default_nprobe"
                 if value.parse::<usize>().is_ok_and(|n| n > 0) => {}
             "generate_openapi" if value.parse::<bool>().is_ok() => {}
             _ => return Err(format!("unsupported or invalid parameter: {name}")),
@@ -111,8 +111,7 @@ mod tests {
             parse(&[
                 "index_path=a=b",
                 "local_port=0",
-                "local_ip=::1",
-                "force_shard_number=1"
+                "local_ip=::1"
             ])
             .unwrap()["index_path"],
             "a=b"
@@ -128,7 +127,7 @@ mod tests {
             vec!["default_nprobe=1.5"],
             vec!["default_nprobe=18446744073709551616"],
             vec!["local_ip=bad"],
-            vec!["force_shard_number=0"],
+            vec!["force_shard_number=1"],
             vec!["index_path="],
             vec!["generate_openapi=yes"],
             vec!["local_port=80", "local_port=81"],

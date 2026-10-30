@@ -143,16 +143,11 @@ impl SearchRequestObject {
                 similarity_threshold: self.similarity_threshold,
                 ann_mode,
             }
-        } else if let Some(rrf) = self.rrf {
-            SearchMode::WeightedHybrid {
-                similarity_threshold: self.similarity_threshold,
-                ann_mode,
-                rrf,
-            }
         } else {
             SearchMode::Hybrid {
                 similarity_threshold: self.similarity_threshold,
                 ann_mode,
+                rrf: self.rrf.unwrap_or_default(),
             }
         })
     }
@@ -274,7 +269,6 @@ impl From<FieldRequest> for SchemaField {
             field.index_vector,
             field.field_type,
             field.filterable,
-            false,
             field.boost,
         )
     }
@@ -524,8 +518,8 @@ mod rrf_tests {
             assert!(serde_json::from_value::<SearchRequestObject>(value).is_err());
         }
         let request: SearchRequestObject = serde_json::from_value(json!({"query":"alpha","query_vector":[1,0,0],"rrf":{"constant":5,"keyword_weight":0.5,"keyword_candidates":20,"vector_candidates":30}})).unwrap();
-        assert!(matches!(request.search_mode(default_probe).unwrap(),SearchMode::WeightedHybrid { rrf, .. } if rrf.constant == 5.0 && rrf.keyword_candidates == Some(20) && rrf.vector_candidates == Some(30)));
+        assert!(matches!(request.search_mode(default_probe).unwrap(),SearchMode::Hybrid { rrf, .. } if rrf.constant == 5.0 && rrf.keyword_candidates == Some(20) && rrf.vector_candidates == Some(30)));
         let request: SearchRequestObject = serde_json::from_value(json!({"query":"alpha","query_vector":[1,0,0]})).unwrap();
-        assert!(matches!(request.search_mode(default_probe).unwrap(),SearchMode::Hybrid { .. }));
+        assert!(matches!(request.search_mode(default_probe).unwrap(),SearchMode::Hybrid { rrf, .. } if rrf == crate::search::RrfOptions::default()));
     }
 }

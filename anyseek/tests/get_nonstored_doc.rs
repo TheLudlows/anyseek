@@ -1,9 +1,9 @@
 //! Payload retains original fields independently of derived index storage options.
 #[path = "common/records.rs"] mod records;
-use anyseek::index::{AccessType, Clustering, DocumentCompression, FrequentwordType,
+use anyseek::index::{Clustering, FrequentwordType,
     IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType};
 use anyseek::{record::RecordPartition, vector::Inference};
-fn meta(access_type: AccessType) -> IndexMetaObject {
+fn meta() -> IndexMetaObject {
     IndexMetaObject {
         id: 0,
         name: "get_nonstored_doc".into(),
@@ -14,8 +14,7 @@ fn meta(access_type: AccessType) -> IndexMetaObject {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type,
+
         clustering: Clustering::None,
         inference: Inference::None,
     }
@@ -32,7 +31,7 @@ fn schema() -> Vec<anyseek::index::SchemaField> {
 async fn check(document: serde_json::Value) {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("records");
-    let mut partition = records::create(&path, meta(AccessType::Mmap), schema()).await;
+    let mut partition = records::create(&path, meta(), schema()).await;
     records::append(&partition, vec![serde_json::from_value(document.clone()).unwrap()]).await;
     for stage in 0..3 {
         if stage == 1 { partition.compact_journal().await.unwrap(); }

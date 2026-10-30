@@ -1189,7 +1189,7 @@ impl Runtime {
             p.write(lexical_only).await.unwrap();
             p.compact_journal().await.unwrap();
             p.write(write("b", "b", "beta", ExpectedVersion::Absent)).await.unwrap();
-            let mode = SearchMode::Hybrid { similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All };
+            let mode = SearchMode::Hybrid { similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All, rrf: Default::default() };
             let result = query(&p, mode.clone()).await;
             assert_eq!(result.count_total, 2, "lexical-only frozen row plus vector-only tail row");
             assert_eq!(result.hits.len(), 2);
@@ -1206,7 +1206,7 @@ impl Runtime {
             for (id, body) in [("a", "alpha"), ("b", "beta")] {
                 p.write(write(id, id, body, ExpectedVersion::Absent)).await.unwrap();
             }
-            let mode = SearchMode::WeightedHybrid {
+            let mode = SearchMode::Hybrid {
                 similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All,
                 rrf: crate::search::RrfOptions { vector_weight: 0.0, ..Default::default() },
             };

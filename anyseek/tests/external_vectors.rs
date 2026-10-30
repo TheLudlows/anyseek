@@ -3,8 +3,7 @@ use anyseek::record::RecordSearch;
 use anyseek::record::{RecordPartition, RecordQuery};
 // External embedding contract: reject invalid inputs before writes or vector search.
 use anyseek::{
-    index::{AccessType, Clustering, Document, DocumentCompression,
-        FrequentwordType, IndexMetaObject,
+    index::{Clustering, Document, FrequentwordType, IndexMetaObject,
         LexicalSimilarity, NgramSet, SchemaField, StopwordType, TokenizerType},
     search::{QueryType,  ResultType, SearchMode},
     vector::{embedding_to_bytes_be, parse_external_embedding, validate_embedding, validate_vector_schema,
@@ -33,8 +32,7 @@ fn meta() -> IndexMetaObject {
         tokenizer:TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared, stop_words:StopwordType::None, frequent_words:FrequentwordType::None,
-        ngram_indexing:NgramSet::SingleTerm as u8, document_compression:DocumentCompression::Snappy,
-        access_type:AccessType::Mmap, clustering:Clustering::None, inference:inference() }
+        ngram_indexing:NgramSet::SingleTerm as u8, clustering:Clustering::None, inference:inference() }
 }
 async fn try_query(index: &RecordPartition, mode: SearchMode, vector: Option<Embedding>) -> Result<RecordSearch, anyseek::record::RecordError> {
     index.query(RecordQuery {text:"alpha".into(),vector:vector,query_type:QueryType::Union,mode:mode,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await
@@ -70,7 +68,7 @@ fn external_config_and_numeric_validation() {
 #[tokio::test]
 async fn external_write_query_reopen_contract() {
     let path = Path::new("tests/index_external_contract"); let _ = fs::remove_dir_all(path);
-    let index = Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await).unwrap();
+    let index = records::create(path, meta(), (&schema()).to_vec()).await;
     let missing: Document = serde_json::from_value(json!({"body":"invalid vector","vector":[1,2]})).unwrap();
     assert!(records::insert(&index, vec![missing.clone()]).await.is_err());
     // Record writes are individually atomic; no retired batch API emulation.
@@ -88,7 +86,7 @@ async fn external_write_query_reopen_contract() {
     index.compact_journal().await.unwrap();
     assert_eq!(query(&index,SearchMode::Lexical,None).await.hits.len(),1);
     for mode in [SearchMode::Vector { similarity_threshold:None, ann_mode:AnnMode::All },
-                 SearchMode::Hybrid { similarity_threshold:None, ann_mode:AnnMode::All }] {
+                 SearchMode::Hybrid { similarity_threshold:None, ann_mode:AnnMode::All, rrf: Default::default() }] {
         assert!(try_query(&index,mode.clone(),None).await.is_err());
         assert!(try_query(&index,mode.clone(),Some(Embedding::F32(vec![1.0]))).await.is_err());
         let result = query(&index,mode,Some(Embedding::F32(vec![1.0,0.0,0.0]))).await;
@@ -119,7 +117,7 @@ async fn external_f32_and_quantized_thresholds() {
         if let Inference::External { quantization: q, dimensions: d, similarity: metric, .. } = &mut config.inference { *q = quantization; *d = dimensions; *metric = similarity; }
         let mut alpha = vec![0.0; dimensions]; alpha[0] = 1.0;
         let mut beta = vec![0.0; dimensions]; beta[1] = 1.0;
-        let index = Ok::<_, String>(records::create(&path, config, (&schema()).to_vec()).await).unwrap();
+        let index = records::create(&path, config, (&schema()).to_vec()).await;
         records::insert(&index, vec![document("alpha",json!(alpha.clone())), document("beta",json!(beta))]).await.unwrap();
         index.compact_journal().await.unwrap();
         for ann_mode in [AnnMode::All, AnnMode::Nprobe(1)] {

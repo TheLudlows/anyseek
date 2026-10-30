@@ -38,7 +38,7 @@ impl RetrievalView {
     pub(super) async fn components(&self)->Vec<crate::component::ShardArc> {
         self.query.read().await.shard_vec.clone()
     }
-    pub(super) async fn matches_identity(&self, ordinal:usize, identity:&lexical::Identity, fingerprint:Option<[u8; 32]>)->Result<bool, RecordError> {
+    pub(super) async fn matches_identity(&self, ordinal:usize, identity:&lexical::Identity, fingerprint:[u8; 32])->Result<bool, RecordError> {
         let root=self.query.read().await;
         let shard=root.shard_vec[ordinal % root.shard_number].read().await;
         let local=ordinal / root.shard_number;
@@ -46,8 +46,7 @@ impl RetrievalView {
         Ok(shard.active.as_ref().is_some_and(|active| active.is_live(local)
             && active.keys.get(local)==Some(&identity.id)
             && active.revisions.get(local).is_some_and(|&(version, revision)| version == identity.version
-                && (revision == identity.revision || fingerprint.is_some()
-                    && active.fingerprints.get(local).copied().flatten() == fingerprint))))
+                && (revision == identity.revision || active.fingerprints.get(local) == Some(&fingerprint)))))
     }
     pub(super) async fn can_admit(&self,bytes:u64,native_updates:usize)->bool {
         let root=self.tail.read().await;
@@ -674,6 +673,7 @@ mod tests {
             SearchMode::Hybrid {
                 similarity_threshold: None,
                 ann_mode: crate::vector_similarity::AnnMode::All,
+                rrf: Default::default(),
             },
         ] {
             let actual = query(&partition, mode.clone()).await;

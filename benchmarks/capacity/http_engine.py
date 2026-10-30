@@ -47,7 +47,7 @@ class Engine:
             except (OSError,KeyError,ValueError):pass
     def start(self):
         self.local=threading.local();binary=pathlib.Path(os.environ['TOKENIZER_ANYSEEK_BINARY'] if self.name=='anyseek' else os.environ['TOKENIZER_MEILI_BINARY'])
-        args=[str(binary),f'index_path={self.data}',f'local_port={self.port}','local_ip=127.0.0.1','force_shard_number=1'] if self.name=='anyseek' else [str(binary),'--db-path',str(self.data),'--http-addr',f'127.0.0.1:{self.port}','--env','production','--master-key',MEILI_KEY,'--no-analytics','--max-indexing-threads','2']
+        args=[str(binary),f'index_path={self.data}',f'local_port={self.port}','local_ip=127.0.0.1'] if self.name=='anyseek' else [str(binary),'--db-path',str(self.data),'--http-addr',f'127.0.0.1:{self.port}','--env','production','--master-key',MEILI_KEY,'--no-analytics','--max-indexing-threads','2']
         env={**os.environ,'MASTER_KEY_SECRET':SECRET,'TOKIO_WORKER_THREADS':'2','RAYON_NUM_THREADS':'2'}
         # Shared available memory is identical; no product-specific RAM cap or cgroup edits.
         log=(self.out/'server.log').open('a');start=time.perf_counter();self.process=subprocess.Popen(['taskset','-c','0,1',*args],cwd=self.out,env=env,stdout=log,stderr=log);log.close()
