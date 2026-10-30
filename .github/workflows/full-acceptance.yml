@@ -153,7 +153,7 @@ jobs:
       - name: Native retained public Record integration contracts (Windows remainder)
         if: runner.os == 'Windows'
         # The four exact large cases run below on independent Windows runners.
-        run: cargo test -p anyseek --tests --features server,fault-injection -- --skip five_term_or_subsets_keep_all_pair_contributions_ --skip mixed_rle_array_bitmap_membership_scores_and_order_
+        run: cargo test -p anyseek --tests --features server,fault-injection -- --skip five_term_union_scores_and_topk_prefix_ --skip mixed_term_membership_scores_and_query_order_
       - name: Native standalone core
         run: cargo test -p anyseek --no-default-features --lib
       - name: Native standalone documentation
@@ -233,10 +233,10 @@ jobs:
       fail-fast: false
       matrix:
         test:
-          - five_term_or_subsets_keep_all_pair_contributions_shared
-          - five_term_or_subsets_keep_all_pair_contributions_per_field
-          - mixed_rle_array_bitmap_membership_scores_and_order_shared
-          - mixed_rle_array_bitmap_membership_scores_and_order_per_field
+          - five_term_union_scores_and_topk_prefix_shared
+          - five_term_union_scores_and_topk_prefix_per_field
+          - mixed_term_membership_scores_and_query_order_shared
+          - mixed_term_membership_scores_and_query_order_per_field
     runs-on: windows-latest
     timeout-minutes: 120
     steps:

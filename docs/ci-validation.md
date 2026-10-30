@@ -192,3 +192,50 @@ remain separate: their error classes and attempted-write scopes differ.
 Executor prefix-stop tests and committed-ingest continue-after-conflict tests
 also remain separate contracts. This extraction reduces duplicate source, not
 the number of executed scenarios or measured test runtime.
+
+## Lexical behavior contracts
+
+`lexical_correctness` names describe observable retrieval behavior rather than
+retired posting codecs, OR-subset enumeration or score-pruning internals:
+
+| Test family | Retained inputs and independent assertions |
+| --- | --- |
+| `mixed_term_membership_scores_and_query_order_{shared,per_field}` | Three literal term sets; exact OR membership, AND result 103, per-document BM25 sum, query-term permutations; immediate/checkpoint/reopen stages; implicit and explicit score order |
+| `five_term_union_scores_and_topk_prefix_{shared,per_field}` | Five overlapping sets; exact union, independent additive BM25, Top1/10/100 prefixes; checkpoint; both score-order paths |
+| `appended_documents_preserve_scores_and_top1` | 512 then 64 records with a checkpoint between and after; distinct Shared/PerField length formulas, membership 0/1/512, winner 1 and Top1; reopen; both policies |
+| `late_matching_document_remains_in_top2` | 522 records, eleven hits, independent scores, late ID 521 remains second to ID 0; Top2 agrees with complete ranking; both policies |
+
+The mixed and five-term populations remain 514 in small mode and 8194 in full
+mode. Their different term sets change document lengths and expected scores;
+they deliberately keep separate fixtures. Append checkpoints and mixed-stage
+reopen checks remain because they exercise different observable states.
+`common/scale.rs` retains its strict small/full selection and invalid-value error.
+
+Only identical input construction is shared between the term-set fixtures.
+The unused search `realtime` argument and an infallible Result wrapper were
+removed; they never selected a different query or persistence path. The common
+`append` helper now delegates to `insert`, retaining sequential IDs, operation
+identity, synchronous visibility, Busy-only retry and panic-on-error behavior.
+Windows matrix names and remainder exclusions are updated together and guarded
+by `check_lexical_partition.py`. No production algorithm or data scale changes.
+
+Local before/after observation for this cleanup (one run each, not a benchmark):
+Linux x86-64, rustc 1.99.1, native CPU debug/test profile, `--features server`,
+`ANYSEEK_TEST_SCALE=small`, `--test-threads=1 --nocapture`. Both runs passed all
+six tests; compilation is excluded. Existing progress logs give these summed
+phase times (rounded to milliseconds):
+
+| Phase | Before | After |
+| --- | ---: | ---: |
+| Fixture writes | 127.545s | 127.496s |
+| Checkpoint | 9.206s | 9.077s |
+| Reopen | 1.560s | 1.556s |
+| Queries | 1.302s | 1.279s |
+| Whole test target | 139.70s | 139.50s |
+
+Writes account for about 91% of execution. The 0.20s total difference is not
+credible evidence of a performance improvement; renaming also changes test
+execution order. The verified benefit is removing obsolete terminology and
+identical helper code without reducing cases or data. Full-scale and Windows
+execution were not repeated locally; their selection and unchanged fixtures
+were verified, not presented as executed acceptance.

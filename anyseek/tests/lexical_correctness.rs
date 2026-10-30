@@ -1,9 +1,10 @@
-#[path = "common/scale.rs"] mod scale;
+#[path = "common/scale.rs"]
+mod scale;
 // Retained literal membership/score corpora; both length policies run in full.
 #[path = "common/records.rs"]
 mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
-// Independent posting membership and BM25 formula regressions for #32.
+// Literal document membership and an independent BM25 formula are the oracles.
 // Explicit score sorting shares engine code: it is a consistency check, not an oracle.
 use anyseek::{
     index::{
@@ -94,10 +95,7 @@ async fn fresh(
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    (
-        Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await).unwrap(),
-        path,
-    )
+    (records::create(&path, meta, schema).await, path)
 }
 async fn search(
     index: &RecordPartition,
@@ -105,7 +103,6 @@ async fn search(
     and: bool,
     k: usize,
     explicit: bool,
-    _realtime: bool,
 ) -> Vec<(usize, f32)> {
     let started = Instant::now();
     eprintln!("[lexical-progress] query begin text={text:?} and={and} k={k} explicit={explicit}");
@@ -160,7 +157,7 @@ async fn add(
             (begin + 256).min(end)
         ));
         records::insert(
-            &index,
+            index,
             (begin..(begin + 256).min(end))
                 .map(|i| serde_json::from_value(doc(i)).unwrap())
                 .collect(),
@@ -181,6 +178,17 @@ async fn add(
     .unwrap();
     progress.log(format!("physical versions confirmed={end}"));
 }
+// Build literal input independently of index/query internals. Each corpus keeps
+// its own term sets and population; adding terms would change its score oracle.
+fn term_document(terms: &[&str], sets: &[BTreeSet<usize>], id: usize) -> serde_json::Value {
+    let words: Vec<_> = terms
+        .iter()
+        .zip(sets)
+        .filter(|(_, members)| members.contains(&id))
+        .map(|(term, _)| *term)
+        .collect();
+    json!({"title":"", "text":if words.is_empty() {"neutral".into()} else {words.join(" ")}})
+}
 fn contribution(n: usize, df: usize, dl: usize, avg: f64) -> f64 {
     (1.0 + (n as f64 - df as f64 + 0.5) / (df as f64 + 0.5)).ln() * 2.2
         / (1.0 + 1.2 * (0.25 + 0.75 * dl as f64 / avg))
@@ -191,7 +199,7 @@ fn close_score(actual: f32, expected: f64) {
         "{actual} != {expected}"
     );
 }
-async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLengthNormalization) {
+async fn mixed_term_membership_scores_and_query_order_case(policy: FieldLengthNormalization) {
     let population = scale::choose(514, 8194);
     assert!(population > 400 && population / 2 > 100);
     let progress = Progress::new("mixed", policy);
@@ -203,13 +211,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLe
     ];
     let terms = ["alpha", "beta", "gamma"];
     add(&index, 0, population, &progress, |i| {
-        let words: Vec<_> = terms
-            .iter()
-            .zip(&sets)
-            .filter(|(_, s)| s.contains(&i))
-            .map(|(t, _)| *t)
-            .collect();
-        json!({"title":"","text":if words.is_empty(){"neutral".into()}else{words.join(" ")}})
+        term_document(&terms, &sets, i)
     })
     .await;
     let union: BTreeSet<_> = sets.iter().flat_map(|s| s.iter().copied()).collect();
@@ -226,15 +228,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLe
             index = reopen(&path).await;
         }
         for explicit in [false, true] {
-            let rows = search(
-                &index,
-                "alpha beta gamma",
-                false,
-                population + 1,
-                explicit,
-                stage == 0,
-            )
-            .await;
+            let rows = search(&index, "alpha beta gamma", false, population + 1, explicit).await;
             assert_eq!(rows.iter().map(|r| r.0).collect::<BTreeSet<_>>(), union);
             for (id, score) in &rows {
                 let dl = sets.iter().filter(|s| s.contains(id)).count();
@@ -246,7 +240,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLe
                 close_score(*score, expected);
             }
             assert_eq!(
-                search(&index, "alpha beta gamma", true, population + 1, explicit, stage == 0)
+                search(&index, "alpha beta gamma", true, population + 1, explicit)
                     .await
                     .iter()
                     .map(|r| r.0)
@@ -256,7 +250,7 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLe
             for q in ["gamma alpha beta", "beta gamma alpha"] {
                 assert_eq!(
                     rows,
-                    search(&index, q, false, population + 1, explicit, stage == 0).await,
+                    search(&index, q, false, population + 1, explicit).await,
                     "stage {stage}, query {q}"
                 );
             }
@@ -268,13 +262,13 @@ async fn mixed_rle_array_bitmap_membership_scores_and_order_case(policy: FieldLe
     progress.log("fixture complete; all assertions passed");
 }
 #[tokio::test]
-async fn append_changes_representative_but_not_upper_bound_safety() {
+async fn appended_documents_preserve_scores_and_top1() {
     for policy in [
         anyseek::index::FieldLengthNormalization::Shared,
         anyseek::index::FieldLengthNormalization::PerField,
     ] {
-        let progress = Progress::new("bound", policy);
-        let (mut index, path) = fresh("bound", policy).await;
+        let progress = Progress::new("append", policy);
+        let (mut index, path) = fresh("append", policy).await;
         let doc = |i| match i {
             0 => json!({"title":"alpha","text":format!("alpha {}","neutral ".repeat(19))}),
             1 => json!({"title":"alpha neutral neutral","text":"alpha neutral neutral"}),
@@ -291,7 +285,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
                 index = reopen(&path).await;
             }
             let avg = (537 + 63 * 5 + 14) as f64 / 576.0;
-            let all = search(&index, "alpha", false, 4, false, false).await;
+            let all = search(&index, "alpha", false, 4, false).await;
             assert_eq!(
                 all.iter().map(|r| r.0).collect::<BTreeSet<_>>(),
                 [0, 1, 512].into_iter().collect(),
@@ -327,10 +321,7 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
             }
             assert_eq!(all[0].0, 1);
             for explicit in [false, true] {
-                assert_eq!(
-                    search(&index, "alpha", false, 1, explicit, false).await,
-                    all[..1]
-                );
+                assert_eq!(search(&index, "alpha", false, 1, explicit).await, all[..1]);
             }
         }
 
@@ -340,20 +331,20 @@ async fn append_changes_representative_but_not_upper_bound_safety() {
     }
 }
 #[tokio::test]
-async fn partial_heap_cannot_mask_later_two_term_winner() {
+async fn late_matching_document_remains_in_top2() {
     for policy in [
         anyseek::index::FieldLengthNormalization::Shared,
         anyseek::index::FieldLengthNormalization::PerField,
     ] {
-        let progress = Progress::new("mask", policy);
-        let (index, path) = fresh("mask", policy).await;
+        let progress = Progress::new("late-top2", policy);
+        let (index, path) = fresh("late-top2", policy).await;
         let terms = [
             "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
         ];
         add(&index,0,522,&progress,|i|json!({"title":"","text":if i==0 {terms.join(" ")}else if i<512 {"neutral ".repeat(10)}else if i<521 {terms[i-512].into()}else{"theta iota".into()}})).await;
         checkpoint(&index).await;
         let q = terms.join(" ");
-        let all = search(&index, &q, false, 523, false, false).await;
+        let all = search(&index, &q, false, 523, false).await;
         assert_eq!(all.len(), 11);
         for &(id, score) in &all {
             let present = if id == 0 {
@@ -383,10 +374,7 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
             vec![0, 521]
         );
         for explicit in [false, true] {
-            assert_eq!(
-                search(&index, &q, false, 2, explicit, false).await,
-                all[..2]
-            );
+            assert_eq!(search(&index, &q, false, 2, explicit).await, all[..2]);
         }
 
         drop(index);
@@ -395,13 +383,13 @@ async fn partial_heap_cannot_mask_later_two_term_winner() {
     }
 }
 
-/// Five terms force recursive OR subsets; literal posting sets and scores are
-/// independent of both the subset enumerator and the explicit-sort reference.
-async fn five_term_or_subsets_keep_all_pair_contributions_case(policy: FieldLengthNormalization) {
+/// Five overlapping term sets exercise additive union scores and Top-K prefixes.
+/// Expected membership and scores do not depend on the query implementation.
+async fn five_term_union_scores_and_topk_prefix_case(policy: FieldLengthNormalization) {
     let population = scale::choose(514, 8194);
     assert!(population > 400 && population / 2 > 100);
-    let progress = Progress::new("subsets", policy);
-    let (index, path) = fresh("subsets", policy).await;
+    let progress = Progress::new("five-term", policy);
+    let (index, path) = fresh("five-term", policy).await;
     let terms = ["alpha", "beta", "gamma", "delta", "epsilon"];
     let sets: Vec<BTreeSet<usize>> = vec![
         (100..104).collect(),
@@ -411,13 +399,7 @@ async fn five_term_or_subsets_keep_all_pair_contributions_case(policy: FieldLeng
         (0..population).step_by(7).collect(),
     ];
     add(&index, 0, population, &progress, |i| {
-        let words: Vec<_> = terms
-            .iter()
-            .zip(&sets)
-            .filter(|(_, s)| s.contains(&i))
-            .map(|(t, _)| *t)
-            .collect();
-        json!({"title":"", "text":if words.is_empty() {"neutral".into()} else {words.join(" ")}})
+        term_document(&terms, &sets, i)
     })
     .await;
     checkpoint(&index).await;
@@ -427,7 +409,7 @@ async fn five_term_or_subsets_keep_all_pair_contributions_case(policy: FieldLeng
         / population as f64;
     let union: BTreeSet<_> = sets.iter().flat_map(|s| s.iter().copied()).collect();
     for explicit in [false, true] {
-        let all = search(&index, &terms.join(" "), false, population + 1, explicit, false).await;
+        let all = search(&index, &terms.join(" "), false, population + 1, explicit).await;
         assert_eq!(all.iter().map(|r| r.0).collect::<BTreeSet<_>>(), union);
         for &(id, score) in &all {
             let dl = sets.iter().filter(|s| s.contains(&id)).count();
@@ -441,7 +423,7 @@ async fn five_term_or_subsets_keep_all_pair_contributions_case(policy: FieldLeng
         }
         for k in [1, 10, 100] {
             assert_eq!(
-                search(&index, &terms.join(" "), false, k, explicit, false).await,
+                search(&index, &terms.join(" "), false, k, explicit).await,
                 all[..k]
             );
         }
@@ -453,22 +435,21 @@ async fn five_term_or_subsets_keep_all_pair_contributions_case(policy: FieldLeng
 }
 
 #[tokio::test]
-async fn mixed_rle_array_bitmap_membership_scores_and_order_shared() {
-    mixed_rle_array_bitmap_membership_scores_and_order_case(FieldLengthNormalization::Shared).await;
+async fn mixed_term_membership_scores_and_query_order_shared() {
+    mixed_term_membership_scores_and_query_order_case(FieldLengthNormalization::Shared).await;
 }
 
 #[tokio::test]
-async fn mixed_rle_array_bitmap_membership_scores_and_order_per_field() {
-    mixed_rle_array_bitmap_membership_scores_and_order_case(FieldLengthNormalization::PerField)
-        .await;
+async fn mixed_term_membership_scores_and_query_order_per_field() {
+    mixed_term_membership_scores_and_query_order_case(FieldLengthNormalization::PerField).await;
 }
 
 #[tokio::test]
-async fn five_term_or_subsets_keep_all_pair_contributions_shared() {
-    five_term_or_subsets_keep_all_pair_contributions_case(FieldLengthNormalization::Shared).await;
+async fn five_term_union_scores_and_topk_prefix_shared() {
+    five_term_union_scores_and_topk_prefix_case(FieldLengthNormalization::Shared).await;
 }
 
 #[tokio::test]
-async fn five_term_or_subsets_keep_all_pair_contributions_per_field() {
-    five_term_or_subsets_keep_all_pair_contributions_case(FieldLengthNormalization::PerField).await;
+async fn five_term_union_scores_and_topk_prefix_per_field() {
+    five_term_union_scores_and_topk_prefix_case(FieldLengthNormalization::PerField).await;
 }
