@@ -1926,7 +1926,8 @@ mod tests {
         let mut request=write("expires-encoding","r","beta",ExpectedVersion::Absent);
         request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
         std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
-        let owner=p.clone();let command=request.clone();let task=tokio::spawn(async move {owner.write(command).await});
+        let owner=p.clone();let command=request.clone();let replay=seed.clone();
+        let task=tokio::spawn(async move {owner.commit_writes(vec![replay,command]).await});
         tokio::time::timeout(std::time::Duration::from_secs(5),async {
             while !root.join(".test-write-encode-started").exists(){tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
         }).await.unwrap();
@@ -1934,7 +1935,9 @@ mod tests {
         assert_eq!(p.committed_progress().await.committed_seq,Some(1));
         clock.set(now+101);
         std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
-        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
+        let result=task.await.unwrap().unwrap();
+        assert!(matches!(result.stop,Some(RecordError::Busy)));
+        assert!(matches!(&result.results[..],[CommittedItem::Committed(r),CommittedItem::NotAttempted] if r==&receipt));
         assert!(p.operation(&request.operation_id).await.unwrap().is_none());drop(p);
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(seed).await.unwrap(),receipt);

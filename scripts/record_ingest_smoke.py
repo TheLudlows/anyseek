@@ -96,6 +96,15 @@ def exercise(call, restart, directory, faults, base, master):
     assert client.ingest('committed', [unknown, tail])['results'][0]['code'] == 'committed'
     print('PASS cross-request HTTP batching: one durable publication, independent replies, conflicts and uncertain ranges', flush=True)
 
+    # A pre-publication Busy must preserve an already-known replay in the same request.
+    busy = write('busy-with-replay')
+    restart({'ANYSEEK_RECORD_FAULT': 'busy_before_append', 'ANYSEEK_RECORD_FAULT_NONCE': busy['operation_id']['nonce']})
+    interrupted = call('POST', path + '/ingest', {'records': [a, busy]}, status=429)
+    assert [row['code'] for row in interrupted['results']] == ['committed', 'not_attempted'], interrupted
+    restart({})
+    assert client.ingest('committed', [busy])['results'][0]['code'] == 'committed'
+    print('PASS Busy preserves the earlier replay receipt and original-ID retry', flush=True)
+
     # Authorization owns work even if the client drops the socket while waiting.
     pause = pathlib.Path(directory) / 'ingest-authorized-pause'
     pause.write_text('pause')

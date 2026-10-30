@@ -376,6 +376,9 @@ impl RecordPartition {
                         Ok(batch) => batch.stop.unwrap_or(RecordError::RecoveryRequired),
                     });
                 }
+                // Preserve sparse known replays when publication never starts (e.g.
+                // TTL revalidation or Busy). The scoped failure carries their receipts.
+                let interrupted = result.as_ref().err().cloned();
                 let batch = match result {
                     Ok(batch) => batch,
                     Err(error) => BatchResult {
@@ -385,7 +388,7 @@ impl RecordPartition {
                 };
                 if !asynchronous {
                     partition.indexes.immediate(inner.state.seq);
-                    return Ok(batch);
+                    return interrupted.map_or(Ok(batch), Err);
                 }
                 // Both index consumers proceed independently after canonical
                 // Record materialization releases its guard.
@@ -413,7 +416,7 @@ impl RecordPartition {
                     .write()
                     .map_err(|_| RecordError::RecoveryRequired)?
                     .fenced = false;
-                Ok(batch)
+                interrupted.map_or(Ok(batch), Err)
             })
             .catch_unwind()
             .await;
