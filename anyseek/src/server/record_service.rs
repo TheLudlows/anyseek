@@ -248,11 +248,71 @@ pub(crate) struct Service {
     preflight: Arc<Semaphore>,
     control_preflight: Arc<Semaphore>,
     request_timeout: std::time::Duration,
+    reclamation_started: std::sync::atomic::AtomicBool,
     default_nprobe: std::num::NonZeroUsize,
     // Drop after catalog, partitions and mappings: stable across root repair.
     _root_owner: std::fs::File,
 }
 impl Service {
+    // One bounded maintenance pass per tick. A weak owner releases the service
+    // root during idle waits; no per-deletion tasks or unbounded work queue.
+    fn start_reclamation(service: &Arc<Self>) {
+        if service.reclamation_started.swap(true, std::sync::atomic::Ordering::AcqRel) { return; }
+        let weak = Arc::downgrade(service);
+        tokio::spawn(async move {
+            let mut generation = 0;
+            let mut object_cursor = String::new();
+            let mut next_sweep = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let Some(service) = weak.upgrade() else { break; };
+                let scope = match service.resources.admit("collection-reclamation".into(), anyseek::resources::Lane::Background, 65536) {
+                    Ok(scope) => scope,
+                    Err(_) => continue,
+                };
+                let result = scope.run(async {
+                    let mut entries = service.catalog.collections().await?;
+                    entries.retain(|entry| entry.deleted);
+                    entries.sort_by_key(|entry| entry.generation);
+                    if let Some(entry) = entries.iter().find(|entry| entry.generation > generation).or(entries.first()).cloned() {
+                        generation = entry.generation;
+                        service.reclaim_collection(entry).await?;
+                    }
+                    if tokio::time::Instant::now() >= next_sweep {
+                        if let Some(config) = service.s3_config("reclamation".into(), 16 * 1024 * 1024)? {
+                            object_cursor = RecordPartition::retry_s3_deletions(config, object_cursor.clone()).await?;
+                        }
+                        next_sweep = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                    }
+                    Ok::<_,Error>(())
+                }).await;
+                if let Err(error) = result {
+                    if error.1 != "busy" { log::warn!("collection reclamation pending: {}", error.2); }
+                }
+            }
+        });
+    }
+
+    async fn reclaim_collection(&self, entry: CollectionEntry) -> Result<bool, Error> {
+        let path = self.root.join(entry.directory());
+        let remote = self.s3_record_config(&entry)?;
+        self.catalog.reclaim_deleted(entry, move |_| async move {
+            // A zero-entry pass only takes the owner lock and durably moves the
+            // root to trash. Old writers and fixed package readers must finish.
+            match RecordPartition::reclaim_deleted_files(&path, 0).await {
+                Ok(_) => {}, Err(RecordError::Busy) => { log::debug!("collection reclamation blocked by owner/pin: {}", path.display()); return Ok(false); },
+                Err(error) => return Err(error.to_string()),
+            }
+            if let Some(config) = remote {
+                match RecordPartition::reclaim_deleted_s3(config, 16).await {
+                    Ok(true) => {}, Ok(false) | Err(RecordError::Busy) => return Ok(false),
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            RecordPartition::reclaim_deleted_files(&path, 64).await.map_err(|e| e.to_string())
+        }).await.map_err(Into::into)
+    }
+
     pub(crate) async fn open(
         root: &FsPath,
         default_nprobe: std::num::NonZeroUsize,
@@ -315,6 +375,7 @@ impl Service {
             preflight: Arc::new(Semaphore::new(64)),
             control_preflight: Arc::new(Semaphore::new(16)),
             request_timeout: std::time::Duration::from_secs(30),
+            reclamation_started: std::sync::atomic::AtomicBool::new(false),
             default_nprobe,
             _root_owner: root_owner,
         });
@@ -362,6 +423,9 @@ impl Service {
         Ok(service)
     }
     fn s3_record_config(&self, entry: &CollectionEntry) -> Result<Option<S3CompatibleRecordConfig>, Error> {
+        self.s3_config(entry.scope(), entry.config.max_journal_bytes)
+    }
+    fn s3_config(&self, partition_id: String, journal_bytes: u64) -> Result<Option<S3CompatibleRecordConfig>, Error> {
         let backend = std::env::var("ANYSEEK_STORAGE_BACKEND").unwrap_or_else(|_| "local".into());
         if backend == "local" { return Ok(None); }
         if backend != "s3" {
@@ -384,9 +448,8 @@ impl Service {
             .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
         let max_tail_blocks = std::env::var("ANYSEEK_S3_MAX_TAIL_BLOCKS")
             .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(1_000_000);
-        let max_tail_bytes = usize::try_from(entry.config.max_journal_bytes)
+        let max_tail_bytes = usize::try_from(journal_bytes)
             .unwrap_or(usize::MAX).min(1024 * 1024 * 1024).max(1);
-        let partition_id = entry.scope();
         Ok(Some(S3CompatibleRecordConfig {
             authority_path: self.root.join("metadata.sqlite"),
             partition_id,
@@ -1256,7 +1319,7 @@ async fn service_backup(
             // a standalone journal or silently omit its authoritative state.
             for entry in &entries {
                 let path=s.root.join(&entry.directory());
-                if records.contains_key(&entry.scope()) || (!entry.initialized && !path.exists()) {continue;}
+                if entry.reclaiming || records.contains_key(&entry.scope()) || (!entry.initialized && !path.exists()) {continue;}
                 let config=s.s3_record_config(entry)?.ok_or_else(||storage("S3 configuration missing"))?;
                 let p=if let Some(proof)=restored.as_ref().filter(|r|r.record_seqs.contains_key(&entry.scope())) {
                     RecordPartition::adopt_s3_snapshot(&path,entry.config.clone(),config,&proof.identity).await?
@@ -1599,7 +1662,7 @@ async fn delete_collection(
         let mut records = s.records.write().await;
         for scope in deleted { records.remove(&scope); }
         response(
-            json!({"receipt":receipt,"deleted":true,"physical_reclamation":"deferred"}),
+            json!({"receipt":receipt,"deleted":true,"physical_reclamation":"pending"}),
         )
     })
     .await
@@ -1736,6 +1799,7 @@ async fn request_guard(
 }
 
 pub(crate) fn router(service: Arc<Service>) -> Router {
+    Service::start_reclamation(&service);
     let mut app = Router::new()
         .route("/api/v1/live", get(|| async { Json(crate::VERSION) }))
         .route(

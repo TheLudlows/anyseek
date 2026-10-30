@@ -63,6 +63,35 @@ async fn create(catalog: &Catalog, tenant: &str, id: &str) -> CatalogReceipt {
         .unwrap();
     receipt
 }
+
+#[tokio::test]
+async fn reclamation_keeps_backup_and_receipt_fences_and_resumes_after_restart() {
+    let parent = tempfile::tempdir().unwrap(); let root = parent.path().join("service");
+    let c = setup(&root).await; create(&c,"alpha","retired").await;
+    let old = c.listing("alpha").await.unwrap().remove(0);
+    let backup = "f".repeat(64);
+    c.execute(request("backup",CatalogCommand::RegisterBackup {tenant_id:"alpha".into(),collection_id:"retired".into(),backup_id:backup.clone()})).await.unwrap();
+    let delete = request("delete",CatalogCommand::DeleteCollection {tenant_id:"alpha".into(),collection_id:"retired".into()});
+    let receipt = c.execute(delete.clone()).await.unwrap();
+    assert!(!c.reclaim_deleted(old.clone(), |_| async { panic!("live backup protects the incarnation"); #[allow(unreachable_code)] Ok(true) }).await.unwrap());
+    c.execute(request("retire-backup",CatalogCommand::RetireBackup{backup_id:backup})).await.unwrap();
+    assert!(c.reclaim_deleted(old.clone(), |_| async { Err("injected cleanup interruption".into()) }).await.is_err());
+    assert!(c.collections().await.unwrap()[0].reclaiming);
+    drop(c);
+    let c = Catalog::open(&root).await.unwrap();
+    assert!(c.collections().await.unwrap()[0].reclaiming);
+    // New backups omit the in-progress deleted incarnation.
+    let archive = parent.path().join("archive");
+    let snapshot = c.backup_service(root.clone(),archive.clone(),"reclaim-archive".into(),BTreeMap::new()).await.unwrap();
+    assert!(snapshot.record_seqs.is_empty());
+    let restored = Catalog::open(&archive).await.unwrap(); assert!(restored.collections().await.unwrap().is_empty()); drop(restored);
+    let fresh = c.execute(request("recreate",CatalogCommand::PrepareCollection {tenant_id:"alpha".into(),collection_id:"retired".into(),config:config()})).await.unwrap();
+    assert!(c.reclaim_deleted(old.clone(), |_| async { Ok(true) }).await.unwrap());
+    assert_eq!(c.execute(delete).await.unwrap(), receipt);
+    assert_eq!(c.collections().await.unwrap().len(),1);
+    assert_eq!(c.collections().await.unwrap()[0].generation,fresh.seq);
+    assert!(c.reclaim_deleted(old, |_| async { panic!("already reclaimed"); #[allow(unreachable_code)] Ok(true) }).await.unwrap());
+}
 #[test]
 fn tenant_and_collection_names_reject_invalid_path_components() {
     for value in [

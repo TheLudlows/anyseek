@@ -455,7 +455,7 @@ impl S3CompatibleStore {
         }
         let snapshot: AuthorityBackupSnapshot = serde_json::from_slice(&snapshot_bytes)
             .map_err(BackupError::Decode)?;
-        if snapshot.format_version != 1 || snapshot.backup_id != descriptor.backup_id
+        if snapshot.format_version != 2 || snapshot.backup_id != descriptor.backup_id
             || snapshot.object_closure != descriptor.object_closure {
             return Err(BackupError::Invalid("descriptor and metadata snapshot disagree"));
         }

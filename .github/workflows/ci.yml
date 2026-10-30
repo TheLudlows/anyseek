@@ -164,6 +164,17 @@ jobs:
             target/debug/anyseek_server generate_openapi=true
           fi
 
+      - name: Deleted collection reclamation (local and S3 fixture)
+        if: matrix.lane == 'core'
+        shell: bash
+        run: |
+          server_binary=target/debug/anyseek_server
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            server_binary=target/debug/anyseek_server.exe
+          fi
+          python scripts/record_reclamation_smoke.py --server "$server_binary" --backend local
+          python scripts/record_reclamation_smoke.py --server "$server_binary" --backend fixture
+
   full-acceptance:
     if: github.event_name == 'workflow_dispatch' && inputs.full
     uses: ./.github/workflows/full-acceptance.yml

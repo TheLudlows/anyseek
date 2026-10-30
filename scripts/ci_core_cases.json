@@ -169,5 +169,8 @@
   "catalog::tests::complete_service_restore_retains_tenants_but_disables_historical_keys",
   "catalog::tests::sqlite_process_exit_preserves_key_and_receipt_atomicity",
   "catalog::tests::complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queued_writes",
-  "catalog::tests::collection_recreation_keeps_generations_receipts_and_backups_separate"
+  "catalog::tests::collection_recreation_keeps_generations_receipts_and_backups_separate",
+  "catalog::tests::reclamation_keeps_backup_and_receipt_fences_and_resumes_after_restart",
+  "record::reclamation::tests::bounded_retirement_waits_for_owner_and_child_pin_then_resumes",
+  "storage::sqlite_authority::reclamation::tests::retirement_waits_for_pins_fences_old_publish_and_survives_backup"
 ]
