@@ -4,6 +4,8 @@
 
 主干基线 `9c9e5d2` 已合入 #90/#98/#102：一层 Record WAL、持久业务结果与异步索引、Tenant/Collection 模型和 SQLite 协调元数据已生效。本分支实施 #103/#104/#105，后续代次回收、性能调查和向量组件整理分别见 #106/#107/#94；以下历史验证数字不代表本分支已通过。
 
+本分支已提交 [PR #108](https://github.com/TheLudlows/anyseek/pull/108)，尚未合入。本地通过 171 项有界核心回归、27 项相关集成测试、9 项 doctest、9 项 Node 回归、CLI 校验、真实 HTTP base/committed-ingest，以及默认/无默认特性的独立核心构建。server 全 targets 编译、文档/词法分区静态检查和改动 Python 语法检查通过。另行运行的 fingerprint、查询、合并/消费专项及连续 2305 次更新后恢复用例通过；跨 AES 手工测试仍 ignored。GitHub CI、Windows、真实云 S3 和系统断电未计为本地验收通过。
+
 当前接口以[服务指南](anyseek/src/server/README.md)和[异步写入](docs/async-ingestion.md)为准，后续优先级见[路线](docs/roadmap.md)。不提供旧格式迁移升级。
 
 ## 历史实施与验证记录
