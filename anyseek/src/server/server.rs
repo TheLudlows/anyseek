@@ -6,9 +6,6 @@ use std::{collections::HashMap, env::current_exe, path::Path};
 use crate::{MASTER_KEY_SECRET, VERSION};
 
 pub(crate) async fn initialize(params: HashMap<String, String>) {
-    let force_shard_number = params
-        .get("force_shard_number")
-        .and_then(|n| n.parse().ok());
     let default_nprobe = params
         .get("default_nprobe")
         .map(|n| {
@@ -55,12 +52,6 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
     log::info!("Web UI and REST API: http://{local_ip}:{local_port}; Ctrl-C to shut down");
     println!("Master API key: {master_apikey}");
 
-    if force_shard_number.is_some_and(|n: usize| n != 1) {
-        log::error!(
-            "Reliable P1 service supports exactly one partition; force_shard_number must be 1"
-        );
-        std::process::exit(1);
-    }
     let service = crate::record_service::Service::open(&index_path, default_nprobe)
         .await
         .unwrap_or_else(|error| {

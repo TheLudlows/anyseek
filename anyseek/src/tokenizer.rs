@@ -859,7 +859,7 @@ mod tests {
     use crate::index::TokenizerType;
     use crate::{
         index::{
-            AccessType, Clustering, DocumentCompression, FrequentwordType,
+            Clustering, FrequentwordType,
             IndexMetaObject, LexicalSimilarity, StopwordType,
         },
         search::{ResultType, SearchMode},
@@ -882,8 +882,6 @@ mod tests {
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::English,
             ngram_indexing: 9,
-            document_compression: DocumentCompression::Snappy,
-            access_type: AccessType::Mmap,
             clustering: Clustering::None,
             inference: Inference::None,
         };

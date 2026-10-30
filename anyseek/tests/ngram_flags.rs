@@ -1,7 +1,7 @@
 //! Independent N-gram flags must preserve literal phrase matches through persistence.
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FrequentwordType,
+        Clustering, FrequentwordType,
          IndexMetaObject, LexicalSimilarity, SchemaField, StopwordType,
         TokenizerType,
     },
@@ -78,9 +78,9 @@ async fn assert_phrases(index: &RecordPartition, _realtime: bool, context: &str)
     }
 }
 
-async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity) {
+async fn check_mask(mask: u8, similarity: LexicalSimilarity) {
     let path = std::env::temp_dir().join(format!(
-        "anyseek-ngram-{}-{mask}-{access:?}-{similarity:?}",
+        "anyseek-ngram-{}-{mask}-{similarity:?}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&path);
@@ -100,8 +100,6 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
             terms: vec!["of".into(), "the".into(), "and".into()],
         },
         ngram_indexing: mask,
-        document_compression: DocumentCompression::Snappy,
-        access_type: access,
         clustering: Clustering::None,
         inference: Inference::None,
     };
@@ -123,25 +121,23 @@ async fn check_mask(mask: u8, access: AccessType, similarity: LexicalSimilarity)
 
 #[tokio::test]
 async fn ffr_independent_flag_preserves_phrase_recall() {
-    for access in [AccessType::Mmap] {
-        for similarity in [LexicalSimilarity::Bm25f, LexicalSimilarity::Bm25fProximity] {
-            check_mask(32, access.clone(), similarity).await;
-        }
+    for similarity in [LexicalSimilarity::Bm25f, LexicalSimilarity::Bm25fProximity] {
+        check_mask(32, similarity).await;
     }
+
 }
 
 #[tokio::test]
 async fn frf_independent_flag_preserves_phrase_recall() {
-    for access in [AccessType::Mmap] {
-        for similarity in [LexicalSimilarity::Bm25f, LexicalSimilarity::Bm25fProximity] {
-            check_mask(64, access.clone(), similarity).await;
-        }
+    for similarity in [LexicalSimilarity::Bm25f, LexicalSimilarity::Bm25fProximity] {
+        check_mask(64, similarity).await;
     }
+
 }
 
 #[tokio::test]
 async fn remaining_flags_and_combinations_preserve_phrase_recall() {
     for mask in [0, 1, 2, 4, 8, 16, 9, 112, 127] {
-        check_mask(mask, AccessType::Mmap, LexicalSimilarity::Bm25f).await;
+        check_mask(mask, LexicalSimilarity::Bm25f).await;
     }
 }

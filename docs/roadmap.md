@@ -1,25 +1,24 @@
 # 下一步路线
 
-2026-10-27 已确认调整为轻量追加写入、异步索引和独立合并。持久接收和独立全文消费已由 #86 合入，独立向量消费和查询解锁由 #87 完成并随本批合入，代码 `bfd81fa` 的双平台 quick CI 已通过。下一步依次解除物理行号绑定、简化 State/checkpoint、持续回收日志和幂等账本、实现轻量独立合并；后续以[异步写入实施顺序](async-ingestion.md)为主线。下面保留旧架构的资源/验收问题，不再把严格共同视图作为新写入架构目标。
+以 2026-10-30 主干（已合入 #90、#98、#102）为基线：写入已收敛为一层 Record WAL，`/ingest` 返回持久业务结果，全文与向量异步消费；稳定记录身份、独立缓存合并和历史回收已有实现。完成状态与验证证据见 [STATUS](../STATUS.md)，接口语义见[异步写入](async-ingestion.md)。
 
-当前完成度见 [STATUS](../STATUS.md)，架构和容量边界见[项目全貌](project-overview.md)。以下是建议顺序，不表示已经实施或扩展本轮范围。
+## 当前优化任务
 
-| 顺序 | 核心工作 | 完成标准 |
+| 顺序 | Issue | 工作与完成标准 |
 | --- | --- | --- |
-| 1 | 审阅 #80 与安排外部验收 | 代码 `94d0a60` 的双平台 CI 已 9/9 通过；审阅实现，并单独安排真实 S3、系统故障/断电和跨 AES，不以 fixture 或进程退出替代 |
-| 2 | Record 操作账本持续安全 GC | 持久化重试/回收水位，窗口内原回执保持，过期请求不可复活；跨重启、checkpoint、备份恢复一致；其他预算允许时累计操作可超过账本容量 |
-| 3 | 按需加载 State 与容量边界 | 先明确身份/版本、原始 Payload、派生 Segment 的唯一归属，再设计有界加载；不把正文、原始向量或倒排复制到 SQLite；保留同一 cut、完整 tail 与即时隐藏 |
-| 4 | 全服务对象缓存总预算 | 多 authority 共享额度，删除失败不退额，在用查询、构建及备份继续受 pin 保护；清空缓存仍可恢复 |
-| 5 | 组合资源隔离与实际应用闭环 | 热点、冷恢复、慢 I/O、慢输出、取消和预算拒绝下其他集合及控制入口仍按契约推进；重复导入、更新、来源删除、TTL、备份恢复形成可核查容量目标 |
+| 1 | [#103](https://github.com/TheLudlows/anyseek/issues/103) | 有效记录 fingerprint 必需，加载统一检查，删除旧包特殊分支 |
+| 2 | [#104](https://github.com/TheLudlows/anyseek/issues/104) | 统一 Hybrid 与 RRF 参数入口，保留默认及加权行为 |
+| 3 | [#105](https://github.com/TheLudlows/anyseek/issues/105) | 清除无效配置、伪测试维度和当前文档中的旧架构表述 |
+| 4 | [#106](https://github.com/TheLudlows/anyseek/issues/106) | 在在途工作、pins、备份和回执约束释放后，有界回收已删除集合代次 |
+| 5 | [#107](https://github.com/TheLudlows/anyseek/issues/107) | 测量 Catalog/Generation 全量处理成本，以收益决定是否局部更新 |
+| 6 | [#94](https://github.com/TheLudlows/anyseek/issues/94) | 澄清逻辑向量索引与 tail/Segment 所有权，保留多组件查询和全局 Top-K |
 
-账本重试窗口为当前及前一 UTC 日，持久 epoch 防止时钟回退。GC 不能只删除旧回执或提高 `max_operations`：需审计结果引用、来源/证据、私有上传、备份和旧视图各自的保留要求。现有 WAL/对象 GC 不等于 Record 账本 GC；账本回收也不自动解除身份数量与完整快照限制。
+不预设统一内部水位、UUID 替换 Operation ID、统一资源框架、重建任务执行器或合并恢复文件。保留 Stage.members、routing_key 和必要一致性校验；各项实现与验收按对应 issue 推进，不以建单代表完成。
 
-SQLite 继续只负责 owner/head/水位、依赖、pin、退休及必要协调记录。规范原文/原向量归 Payload，Tantivy 负责派生全文格式，向量/元数据组件负责检索；避免为了按需加载另建一份 SQLite 内容库或 Segment 正文镜像。
+## 容量与外部验收
 
-必要诊断优先覆盖账本余量、提交/索引水位差、tail 字节、段数、缓存占用、pin/退休阻塞、资源拒绝、unknown 和恢复时间，不先建设产品看板或启动全面性能调优。
+完整逻辑 State 的驻内存与状态容量限制、全服务缓存总额度、热点/冷恢复/慢 I/O/慢输出下的组合隔离仍需按实际需求评估。真实云 S3、系统崩溃/断电和跨 AES 验证须独立记录，不以本地 fixture 或进程退出代替。
 
-## 延期与范围
+SQLite 仅保存协调元数据，规范原文/原向量归 Payload，Tantivy 与向量/元数据组件保存派生检索数据。幂等历史回收保留期限和持久 epoch 拒绝规则，不能简单删除旧回执或提高容量来解除重试边界。
 
-超大 collection 分片、可恢复 split/merge、跨主机 HA、直接远端 Directory、缓存预取与自动调度按实际容量需求后置。分片前须定义稳定路由、跨分片统计/一次全局融合以及来源/关系边界，不能按变化的 partition 数取模。
-
-保留 Rust/HTTP/Web UI 和既定数据语义；模型推理、解析切块、Embedding/Reflect、托管大文件、自动语义关系、SQL/JOIN、完整图语言、旧格式升级迁移不进入当前主线。
+超大 collection 分片、自动 split/merge、跨主机 HA、直接远端 Directory、预取与自动调度按容量需求后置。模型推理、解析切块、Embedding/Reflect、SQL/JOIN、完整图语言和旧格式迁移不进入本轮。

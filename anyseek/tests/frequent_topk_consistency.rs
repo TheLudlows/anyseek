@@ -6,7 +6,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 // Run: cargo test -p anyseek --test frequent_topk_consistency
 
 use anyseek::index::{
-    AccessType, Clustering, Document, DocumentCompression, FrequentwordType,
+    Clustering, Document, FrequentwordType,
     IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
     TokenizerType, };
 use anyseek::search::{QueryType, ResultType, SearchMode};
@@ -27,7 +27,7 @@ async fn frequent_terms_topk_returns_results() {
     let root = tempfile::tempdir().unwrap();
     let index_path = root.path().join("index");
     let schema_json = r#"
-    [{"field":"title","field_type":"Text","store":false,"index_lexical":true,"longest":true}]"#;
+    [{"field":"title","field_type":"Text","store":false,"index_lexical":true}]"#;
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
     let meta = IndexMetaObject {
         id: 0,
@@ -39,14 +39,11 @@ async fn frequent_terms_topk_returns_results() {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     };
     // Independent public Record fixture.
-    let index_arc = Ok::<_, String>(records::create(&index_path, meta, (&schema).to_vec()).await)
-        .unwrap();
+    let index_arc = records::create(&index_path, meta, (&schema).to_vec()).await;
 
     let population = scale::choose(256, 3000);
     assert!(population % 2 == 0 && population / 2 > 10);

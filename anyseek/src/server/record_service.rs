@@ -15,8 +15,8 @@ use anyseek::{
     catalog::{
         Catalog, CatalogCommand, CatalogError, CatalogRequest, CollectionEntry, MASTER,
     },
-    index::{AccessType, FrequentwordType, IndexMetaObject, LexicalSimilarity},
-    index::{Clustering, DocumentCompression},
+    index::{FrequentwordType, IndexMetaObject, LexicalSimilarity},
+    index::Clustering,
     record::{
         OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
         RecordWrite, DataOutputPermit, S3CompatibleRecordConfig,
@@ -637,8 +637,6 @@ fn record_config(
             stop_words: request.stop_words,
             frequent_words: FrequentwordType::English,
             ngram_indexing: 9,
-            document_compression: DocumentCompression::Snappy,
-            access_type: AccessType::Mmap,
             clustering: Clustering::Auto,
             inference,
         },

@@ -4,7 +4,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 // The retired custom Bitmap codec is not a current public contract.
 
 use anyseek::index::{
-    AccessType, Clustering, DocumentCompression, FrequentwordType,
+    Clustering, FrequentwordType,
     IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType,
     TokenizerType, };
 use anyseek::search::{QueryType, ResultType, SearchMode};
@@ -35,8 +35,6 @@ fn meta() -> IndexMetaObject {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     }
@@ -64,8 +62,7 @@ async fn setup() -> (RecordPartition, HashSet<u64>, HashSet<u64>) {
     let _ = fs::remove_dir_all(path);
     // Preserve seeded dense AND/OR membership and deletion oracles.
     // The deleted legacy Bitmap codec boundary is no longer a public contract.
-    let index = Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
-        .unwrap();
+    let index = records::create(path, meta(), (&schema()).to_vec()).await;
     let mut rng = Rng(0xabc);
     let mut set_x = HashSet::new();
     while set_x.len() < 768 {

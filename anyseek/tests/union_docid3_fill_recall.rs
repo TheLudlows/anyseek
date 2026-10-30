@@ -21,7 +21,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 
 
 use anyseek::index::{
-    AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
+    Clustering, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
     };
 use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
@@ -38,8 +38,6 @@ fn meta() -> IndexMetaObject {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     }
@@ -68,8 +66,7 @@ async fn search(
 async fn fresh(dir: &str) -> RecordPartition {
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
-    Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
-        .unwrap()
+    records::create(path, meta(), (&schema()).to_vec()).await
 }
 
 /// Check `topk` is a valid exact top-`k` of the full `score_table`

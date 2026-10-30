@@ -336,7 +336,7 @@ pub(crate) fn validate_query_vector(inference: &Inference, mode: &crate::search:
     use crate::search::SearchMode;
     match mode {
         SearchMode::Lexical => Ok(()),
-        SearchMode::Vector { similarity_threshold, .. } | SearchMode::Hybrid { similarity_threshold, .. } | SearchMode::WeightedHybrid { similarity_threshold, .. } => {
+        SearchMode::Vector { similarity_threshold, .. } | SearchMode::Hybrid { similarity_threshold, .. } => {
             if similarity_threshold.is_some_and(|v| !v.is_finite()) { return Err("similarity threshold must be finite".into()); }
             validate_embedding(inference, embedding.ok_or_else(|| "Vector and Hybrid search require query_vector".to_string())?)
         }

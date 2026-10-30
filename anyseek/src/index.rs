@@ -14,33 +14,6 @@ pub(crate) const MAX_QUERY_TERM_NUMBER: usize = 100;
 /// A document is a flattened, single level of key-value pairs, where key is an arbitrary string, and value represents any valid JSON value.
 pub type Document = IndexMap<String, Value>;
 
-/// Legacy configuration tag retained in serialized index settings.
-/// It does not select canonical Payload or native Tantivy package encoding.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-pub enum DocumentCompression {
-    /// Retained `None` configuration tag.
-    None,
-    /// Retained `Snappy` configuration tag (default); no Snappy docstore is built.
-    Snappy,
-}
-
-impl fmt::Display for DocumentCompression {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            DocumentCompression::None => write!(f, "None"),
-            DocumentCompression::Snappy => write!(f, "Snappy"),
-        }
-    }
-}
-
-/// Committed index data is accessed through memory-mapped files.
-/// Record publication, rather than an index commit, controls business visibility.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-pub enum AccessType {
-    /// Memory-map committed index data; the OS manages resident pages.
-    Mmap = 1,
-}
-
 /// Similarity type defines the scoring and ranking of the search results:
 /// - Bm25f: considers documents composed from several fields, with different field lengths and importance
 /// - Bm25fProximity: considers term proximity, e.g. for implicit phrase search with improved relevancy
@@ -153,12 +126,6 @@ pub struct SchemaField {
     #[serde(default = "default_false")]
     pub facet: bool,
 
-    /// Retained schema identity tag; does not select native Tantivy encoding.
-    /// Record creation marks the first lexical field when no lexical field is tagged.
-    #[serde(skip_serializing_if = "is_default_bool")]
-    #[serde(default = "default_false")]
-    pub longest: bool,
-
     /// optional custom weight factor for Bm25 ranking
     #[serde(skip_serializing_if = "is_default_f32")]
     #[serde(default = "default_1")]
@@ -178,19 +145,16 @@ pub struct SchemaField {
 /// - index_vector: index field into vector index, only indexed fields can be searched.
 /// - field_type: type of a field: u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, text, strings, JSON
 /// - facet: enable metadata filtering and sorting by field values
-/// - `longest`: retained schema identity tag. Record creation marks the first lexical
-///   field when none is tagged; this does not select native Tantivy encoding.
 /// - boost: optional custom weight factor for Bm25 ranking
 /// # Returns
 /// - SchemaField
 /// # Example
 /// ```rust
 /// use anyseek::index::{SchemaField, FieldType};
-/// let schema_field = SchemaField::new("title".to_string(), true, true, false, FieldType::String, false, false, 1.0);
+/// let schema_field = SchemaField::new("title".to_string(), true, true, false, FieldType::String, false, 1.0);
 /// ```
 impl SchemaField {
     /// Creates a new SchemaField.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         field: String,
         store: bool,
@@ -198,7 +162,6 @@ impl SchemaField {
         index_vector: bool,
         field_type: FieldType,
         facet: bool,
-        longest: bool,
         boost: f32,
     ) -> Self {
         SchemaField {
@@ -208,7 +171,6 @@ impl SchemaField {
             index_vector,
             field_type,
             facet,
-            longest,
             boost,
 
             indexed_field_id: 0,
@@ -324,7 +286,7 @@ pub enum TextNormalization {
     OpenCcT2s1_1_9,
 }
 
-/// Specifies LexicalSimilarity, TokenizerType and AccessType when creating an new index
+/// Specifies lexical analysis and vector settings when creating an new index
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndexMetaObject {
@@ -377,13 +339,6 @@ pub struct IndexMetaObject {
     #[serde(default = "ngram_indexing_default")]
     pub ngram_indexing: u8,
 
-    /// Retained configuration tag; does not change current Payload/native encoding.
-    #[serde(default = "doc_store_compression_default")]
-    pub document_compression: DocumentCompression,
-
-    /// AccessType defines where the index resides during search: Mmap
-    pub access_type: AccessType,
-
     /// clustering defines the clustering behavior for approximate nearest neighbor (ANN) search: None, Auto, Fixed(usize).
     #[serde(default)]
     pub clustering: Clustering,
@@ -395,10 +350,6 @@ pub struct IndexMetaObject {
 
 fn ngram_indexing_default() -> u8 {
     NgramSet::NgramFF as u8 | NgramSet::NgramFFF as u8
-}
-
-fn doc_store_compression_default() -> DocumentCompression {
-    DocumentCompression::Snappy
 }
 
 /// Metadata dictionary used by filtering and sorting. Value IDs retain insertion order.

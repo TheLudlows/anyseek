@@ -127,7 +127,7 @@ def main():
         secret = 'precision-isolated-test'
         master = base64.b64encode(hashlib.sha256(secret.encode()).digest()).decode()
         with open(Path(directory)/'server.log', 'w+') as log:
-            process = subprocess.Popen([str(Path(args.server).resolve()), f'index_path={directory}/data', f'local_port={port}', 'local_ip=127.0.0.1', 'force_shard_number=1'], env={**os.environ, 'MASTER_KEY_SECRET': secret}, stdout=log, stderr=log)
+            process = subprocess.Popen([str(Path(args.server).resolve()), f'index_path={directory}/data', f'local_port={port}', 'local_ip=127.0.0.1'], env={**os.environ, 'MASTER_KEY_SECRET': secret}, stdout=log, stderr=log)
             try:
                 deadline = time.monotonic()+30
                 while True:

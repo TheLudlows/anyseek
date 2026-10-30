@@ -91,7 +91,7 @@ impl RecordPartition {
                 "relation fusion requires positive bounded relevance window without field sort",
             ));
         }
-        if matches!(query.mode, SearchMode::WeightedHybrid { .. }) {
+        if matches!(&query.mode, SearchMode::Hybrid { rrf, .. } if *rrf != RrfOptions::default()) {
             return Err(reject("specify RRF once in relation_fusion"));
         }
         if query.vector.is_some() && matches!(query.mode, SearchMode::Lexical) {
@@ -172,6 +172,7 @@ impl RecordPartition {
                     | SearchMode::Hybrid {
                         similarity_threshold,
                         ann_mode,
+                        ..
                     } => SearchMode::Vector {
                         similarity_threshold: *similarity_threshold,
                         ann_mode: ann_mode.clone(),

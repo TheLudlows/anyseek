@@ -8,7 +8,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 use anyseek::server::api_types::{CreateIndexRequest, GetDocumentRequest, SearchRequestObject};
 use anyseek::{
     index::{
-        AccessType, Clustering, Document, DocumentCompression, FrequentwordType, IndexMetaObject,
+        Clustering, Document, FrequentwordType, IndexMetaObject,
         LexicalSimilarity, NgramSet, SchemaField, StopwordType, TokenizerType,
     },
     vector::Inference,
@@ -29,7 +29,7 @@ fn schema() -> Vec<SchemaField> {
     .unwrap()
 }
 
-async fn create(path: &Path, access_type: AccessType) -> RecordPartition {
+async fn create(path: &Path) -> RecordPartition {
     let _ = fs::remove_dir_all(path);
     let meta = IndexMetaObject {
         id: 0,
@@ -41,12 +41,11 @@ async fn create(path: &Path, access_type: AccessType) -> RecordPartition {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type,
+
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    Ok::<_, String>(records::create(path, meta, (&schema()).to_vec()).await).unwrap()
+    records::create(path, meta, (&schema()).to_vec()).await
 }
 
 async fn search(index: &RecordPartition, options: Value, realtime: bool) -> RecordSearch {
@@ -204,36 +203,35 @@ fn retired_geo_requests_are_rejected() {
 
 #[tokio::test]
 async fn ordinary_metadata_survives_aggregate_removal() {
-    for (name, access) in [("mmap", AccessType::Mmap)] {
-        let path_buf = format!("tests/index_metadata_{name}");
-        let path = Path::new(&path_buf);
-        let index = create(path, access).await;
-        for doc in [
-            json!({"body":"common alpha north","category":"a","tags":["green","blue"],"price":30.,"date":300}),
-            json!({"body":"common beta north","category":"b","tags":["red"],"price":20.,"date":200}),
-            json!({"body":"common alpha south","category":"a","tags":["red"],"price":10.,"date":100}),
-            json!({"body":"common beta south","category":"b","tags":["blue"],"price":40.,"date":400}),
-        ] {
-            let doc: Document = serde_json::from_value(doc).unwrap();
-            records::insert(&index, vec![doc]).await.unwrap();
-        }
-        for _ in 0..200 {
-            if search(&index, json!({}), true).await.count_total == 4 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        check_metadata(&index, true).await;
-        index.compact_journal().await.unwrap();
-        check_metadata(&index, false).await;
-        drop(index);
-        let reopened = RecordPartition::open(path, records::JOURNAL_LIMIT)
-            .await
-            .unwrap();
-        check_metadata(&reopened, false).await;
-        drop(reopened);
-        fs::remove_dir_all(path).unwrap();
+    let path_buf = "tests/index_metadata".to_string();
+    let path = Path::new(&path_buf);
+    let index = create(path).await;
+    for doc in [
+        json!({"body":"common alpha north","category":"a","tags":["green","blue"],"price":30.,"date":300}),
+        json!({"body":"common beta north","category":"b","tags":["red"],"price":20.,"date":200}),
+        json!({"body":"common alpha south","category":"a","tags":["red"],"price":10.,"date":100}),
+        json!({"body":"common beta south","category":"b","tags":["blue"],"price":40.,"date":400}),
+    ] {
+        let doc: Document = serde_json::from_value(doc).unwrap();
+        records::insert(&index, vec![doc]).await.unwrap();
     }
+    for _ in 0..200 {
+        if search(&index, json!({}), true).await.count_total == 4 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    check_metadata(&index, true).await;
+    index.compact_journal().await.unwrap();
+    check_metadata(&index, false).await;
+    drop(index);
+    let reopened = RecordPartition::open(path, records::JOURNAL_LIMIT)
+        .await
+        .unwrap();
+    check_metadata(&reopened, false).await;
+    drop(reopened);
+    fs::remove_dir_all(path).unwrap();
+
 }
 
 #[test]
@@ -340,7 +338,7 @@ fn only_eight_field_types_and_five_filter_types_are_accepted() {
 async fn scalar_boundaries_nulls_and_sets_survive_wal_and_checkpoint() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("fields");
-    let index = create(&path, AccessType::Mmap).await;
+    let index = create(&path).await;
     for bad in [
         json!(9223372036854775808u64),
         json!(u64::MAX),
@@ -443,7 +441,7 @@ async fn scalar_boundaries_nulls_and_sets_survive_wal_and_checkpoint() {
 async fn empty_string_sets_sort_with_nulls_after_wal_and_checkpoint_recovery() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("set_sort");
-    let index = create(&path, AccessType::Mmap).await;
+    let index = create(&path).await;
     for (rank, tags) in [
         Some(json!([])),
         Some(json!(["a"])),

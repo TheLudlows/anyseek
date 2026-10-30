@@ -4,7 +4,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 
 
 use anyseek::index::{
-    AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
+    Clustering, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
     };
 use anyseek::search::{QueryType, ResultType, SearchMode};
 use anyseek::vector::Inference;
@@ -21,8 +21,6 @@ fn meta() -> IndexMetaObject {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     }
@@ -52,8 +50,7 @@ async fn union_count_overlap_same_block() {
     let dir = "tests/index_union_plus_one/";
     let path = Path::new(dir);
     let _ = fs::remove_dir_all(path);
-    let index = Ok::<_, String>(records::create(path, meta(), (&schema()).to_vec()).await)
-        .unwrap();
+    let index = records::create(path, meta(), (&schema()).to_vec()).await;
 
     // Overlapping docs: doc2, doc4 contain BOTH alpha and beta.
     let docs = vec![

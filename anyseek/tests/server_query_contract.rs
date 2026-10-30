@@ -5,8 +5,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 
 use anyseek::server::api_types::{SearchRequestObject, CreateIndexRequest};
 use anyseek::{
-    index::{AccessType, Clustering, Document, DocumentCompression,
-        FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet,
+    index::{Clustering, Document, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet,
         SchemaField, StopwordType, TokenizerType},
     search::{QueryType, ResultType, SearchMode},
     vector::Inference,
@@ -50,9 +49,8 @@ async fn literal_queries_and_strict_metadata() {
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
         stop_words:StopwordType::None, frequent_words:FrequentwordType::English,
         ngram_indexing:NgramSet::NgramFF as u8 | NgramSet::NgramFFF as u8,
-        document_compression:DocumentCompression::Snappy, access_type:AccessType::Mmap,
         clustering:Clustering::None, inference:Inference::None };
-    let index = Ok::<_, String>(records::create(path, meta, (&schema()).to_vec()).await).unwrap();
+    let index = records::create(path, meta, (&schema()).to_vec()).await;
     for body in ["red apple the search engine ERR_CONNECTION_RESET 中文混合检索", "red green apple fishing car"] {
         let doc: Document = serde_json::from_value(json!({"body":body})).unwrap();
         records::insert(&index, vec![doc]).await.unwrap();

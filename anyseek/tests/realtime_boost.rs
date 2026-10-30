@@ -3,7 +3,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 // Independent formula for the realtime single-term multifield boost regression.
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, StopwordType, TextNormalization, TokenizerType,
+        Clustering, FrequentwordType, IndexMetaObject, LexicalSimilarity, StopwordType, TextNormalization, TokenizerType,
         },
     search::{QueryType, ResultType, SearchMode},
     vector::Inference,
@@ -24,14 +24,11 @@ async fn boosted_single_term_matches_formula_in_every_state() {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: 0,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     };
     let schema: Vec<anyseek::index::SchemaField>=serde_json::from_value(json!([{"field":"a","field_type":"Text","index_lexical":true,"store":true,"boost":2},{"field":"b","field_type":"Text","index_lexical":true,"store":true,"boost":4}])).unwrap();
-    let mut index = Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await)
-        .unwrap();
+    let mut index = records::create(&path, meta, (&schema).to_vec()).await;
     records::insert(&index, vec![
             serde_json::from_value(json!({"a":"alpha","b":"alpha"})).unwrap(),
             serde_json::from_value(json!({"a":"beta","b":"beta"})).unwrap(),

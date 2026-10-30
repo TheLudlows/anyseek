@@ -1,6 +1,6 @@
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FieldLengthNormalization,
+        Clustering, FieldLengthNormalization,
         FrequentwordType,  IndexMetaObject, LexicalSimilarity,
         StopwordType, TextNormalization, TokenizerType,
     },
@@ -107,8 +107,6 @@ pub async fn exercise(proximity: bool) {
                         stop_words: StopwordType::None,
                         frequent_words: FrequentwordType::English,
                         ngram_indexing: mask,
-                        document_compression: DocumentCompression::Snappy,
-                        access_type: AccessType::Mmap,
                         clustering: Clustering::None,
                         inference: Inference::None,
                     };
@@ -244,8 +242,6 @@ pub async fn exercise_quantized_df() {
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::English,
             ngram_indexing: 1,
-            document_compression: DocumentCompression::Snappy,
-            access_type: AccessType::Mmap,
             clustering: Clustering::None,
             inference: Inference::None,
         };
