@@ -310,20 +310,28 @@ impl Service {
             default_nprobe,
             _root_owner: root_owner,
         });
-        // Only unaddressable preparation names inside this exclusively owned
-        // service root are reclaimable. Never scan sibling service roots.
-        for row in std::fs::read_dir(root).map_err(|e| e.to_string())? {
-            let row = row.map_err(|e| e.to_string())?;
-            let name = row.file_name().to_string_lossy().into_owned();
-            if name
-                .strip_prefix(".partition-prepare-")
-                .or_else(|| name.strip_prefix(".s3-service-export-"))
-                .is_some_and(|suffix| {
-                    suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
-                })
-                && row.file_type().map_err(|e| e.to_string())?.is_dir()
-            {
-                std::fs::remove_dir_all(row.path()).map_err(|e| e.to_string())?;
+        // Only inspect this owned root and parents derived from known catalog entries.
+        // Unpublished partition preparations now live beside their generation directories.
+        let entries = service.catalog.collections().await.map_err(|e| e.to_string())?;
+        let mut parents = std::collections::BTreeSet::from([root.to_path_buf()]);
+        for entry in &entries {
+            parents.insert(root.join(entry.directory()).parent().unwrap().to_path_buf());
+        }
+        for parent in parents {
+            if !parent.exists() { continue; }
+            for row in std::fs::read_dir(&parent).map_err(|e| e.to_string())? {
+                let row = row.map_err(|e| e.to_string())?;
+                let name = row.file_name().to_string_lossy().into_owned();
+                if name
+                    .strip_prefix(".partition-prepare-")
+                    .or_else(|| name.strip_prefix(".s3-service-export-"))
+                    .is_some_and(|suffix| {
+                        suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                    && row.file_type().map_err(|e| e.to_string())?.is_dir()
+                {
+                    std::fs::remove_dir_all(row.path()).map_err(|e| e.to_string())?;
+                }
             }
         }
         for id in service
@@ -338,12 +346,7 @@ impl Service {
                 log::warn!("retired backup cleanup pending: {error}");
             }
         }
-        for entry in service
-            .catalog
-            .collections()
-            .await
-            .map_err(|e| e.to_string())?
-        {
+        for entry in entries {
             let scope = service.resources.admit(format!("collection:{}", entry.scope()), anyseek::resources::Lane::Recovery,
                 (MAX_BODY + MAX_RESPONSE) as u64).map_err(|e|e.to_string())?;
             scope.run(service.finish_collection(entry)).await.map_err(|e| e.2)?;
@@ -1843,9 +1846,15 @@ mod tests {
     }
     #[tokio::test]
     async fn service_reclaims_only_owned_abandoned_export_directories() {
-        let root=path();
-        let service=Service::open(&root,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let (service,root,_) = setup().await;
+        let entry = service.catalog.listing("tenant").await.unwrap().remove(0);
+        let parent = root.join(entry.directory()).parent().unwrap().to_path_buf();
         drop(service);
+        let prepared = parent.join(format!(".partition-prepare-{:032x}",3));
+        let unrelated = parent.join(".partition-prepare-unowned");
+        std::fs::create_dir(&prepared).unwrap();
+        std::fs::write(prepared.join("partial"),b"unpublished").unwrap();
+        std::fs::create_dir(&unrelated).unwrap();
         let owned=root.join(format!(".s3-service-export-{:032x}",1));
         let foreign=root.join(".s3-service-export-foreign");
         let file=root.join(format!(".s3-service-export-{:032x}",2));
@@ -1855,6 +1864,8 @@ mod tests {
         std::fs::write(&file,b"unowned file").unwrap();
         let service=Service::open(&root,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
         assert!(!owned.exists());assert!(foreign.exists());assert!(file.exists());
+        assert!(!prepared.exists()); assert!(unrelated.exists());
+        assert!(service.record("tenant","c").await.is_ok());
         drop(service);std::fs::remove_dir_all(root).unwrap();
     }
     fn master_headers()->HeaderMap{
