@@ -242,7 +242,6 @@ pub(crate) struct Service {
     root: PathBuf,
     catalog: Catalog,
     records: RwLock<BTreeMap<String, RecordPartition>>,
-    intake: RwLock<BTreeMap<String, anyseek::record::IngestPipeline>>,
     // Exclude management changes across the entire owned committed request.
     write_gate: Arc<RwLock<()>>,
     control: Mutex<()>,
@@ -311,7 +310,6 @@ impl Service {
             root: root.into(),
             catalog,
             records: RwLock::new(BTreeMap::new()),
-            intake: RwLock::new(BTreeMap::new()),
             write_gate: Arc::new(RwLock::new(())),
             control: Mutex::new(()),
             control_admission: Arc::new(Semaphore::new(16)),
@@ -515,19 +513,10 @@ impl Service {
                 })
                 .await?;
         }
-        let remote_intake = self.s3_record_config(&entry)?.is_some_and(|remote| remote.authority_path.with_extension("intake.sqlite").exists());
-        if path.join("intake").exists() || remote_intake {
-            let pipeline = anyseek::record::IngestPipeline::open(partition.clone()).await?;
-            self.intake.write().await.insert(entry.collection_id.clone(), pipeline);
-        }
         self.records
             .write()
             .await
             .insert(entry.collection_id, partition);
-        Ok(())
-    }
-    async fn require_intake_drained(&self) -> Result<(), Error> {
-        for pipeline in self.intake.read().await.values() { pipeline.require_drained().await?; }
         Ok(())
     }
     async fn authenticate(&self, headers: &HeaderMap) -> Result<String, Error> {
@@ -787,7 +776,6 @@ async fn create_collection(
         let _admission = admission;
         let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        s.require_intake_drained().await?;
         let key = s.authenticate(&headers).await?;
         // Creation grants only a new collection to its creator; existing grants
         // can be changed exclusively through the master control plane.
@@ -904,13 +892,12 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
     let value: Value = parse(&bytes)?;
     if !value.get("records").and_then(Value::as_array).is_some_and(|records| records.iter().all(|record|
         record.as_object().is_some_and(|r| r.contains_key("document") || r.get("vector_patch").is_some_and(Value::is_object) || r.get("generation").is_some_and(Value::is_object)))) {
-        return Err(bad("each intake record requires explicit document, vector_patch or generation"));
+        return Err(bad("each ingest record requires explicit document, vector_patch or generation"));
     }
     let request: IngestRequest = serde_json::from_value(value).map_err(bad)?;
     let key = s.authenticate(&headers).await?;
     let gate = s.write_gate.clone().read_owned().await;
     let partition = s.record(&key, &id).await?;
-    let legacy = s.intake.read().await.get(&id).cloned();
     let operations: Vec<_> = request.records.iter().map(|r| r.operation_id.clone()).collect();
     #[cfg(feature = "fault-injection")]
     let pause_collection = id.clone();
@@ -918,10 +905,7 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
         let _gate = gate;
         #[cfg(feature = "fault-injection")]
         pause_authorized_for_test(&pause_collection).await?;
-        match legacy {
-            Some(pipeline) => pipeline.commit_writes(request.records).await,
-            None => partition.commit_writes(request.records).await,
-        }
+        partition.commit_writes(request.records).await
     }).await?;
     use anyseek::record::{CommittedBatch, CommittedItem};
     let batch = match result {
@@ -953,14 +937,8 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
 async fn ingest_progress(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
     let partition = s.record(&key, &id).await?;
-    let legacy = s.intake.read().await.get(&id).cloned();
     let (progress, permit) = s.catalog.authorized(key, id, move |_| async move {
-        let mut progress = serde_json::to_value(partition.committed_progress().await).expect("progress serializes");
-        if let Some(legacy) = legacy {
-            let old = legacy.progress().await;
-            progress["legacy_intake"] = json!({"pending":old.pending,"blocked":old.blocked});
-        }
-        progress
+        partition.committed_progress().await
     }).await?;
     response(progress, permit)
 }
@@ -1291,7 +1269,6 @@ async fn service_backup(
     owned(async move {
         let _admission=admission;let _control=s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        s.require_intake_drained().await?;
         let key=s.admin(&headers).await?;
         s.catalog.operation(&request.operation_id).await?; // epoch admission, never infer absence = failure
         let id=verifier(&serde_json::to_vec(&("service-backup",&request.operation_id)).map_err(bad)?);
@@ -1360,7 +1337,6 @@ async fn service_restore(
     owned(async move {
         let _admission=admission;let _control=s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        s.require_intake_drained().await?;
         let key=s.admin(&headers).await?;s.catalog.operation(&request.operation_id).await?;
         let id=verifier(&serde_json::to_vec(&("service-restore",&request.operation_id)).map_err(bad)?);
         let parent=s.root.parent().ok_or_else(||bad("missing service parent"))?;
@@ -1458,7 +1434,6 @@ async fn backup(
         let _admission = admission;
         let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        s.require_intake_drained().await?;
         let key = s.authenticate(&headers).await?;
         let p = s.record(&key, &id).await?;
         let identity = serde_json::to_vec(&(id.clone(), &request.operation_id)).map_err(bad)?;
@@ -1501,7 +1476,6 @@ async fn list_backups(
     let key = s.admin(&headers).await?;
     let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        s.require_intake_drained().await?;
     s.admin(&headers).await?;
     let retired = s.catalog.retired_backups().await?;
     let mut ids = retired
@@ -1537,7 +1511,7 @@ async fn cleanup_retired_backup(root:&FsPath,id:&str)->Result<(),String> {
     let mut authorities=Vec::new();
     for row in std::fs::read_dir(root).map_err(|e|e.to_string())? {
         let path=row.map_err(|e|e.to_string())?.path();
-        if path.file_name().and_then(|n|n.to_str()).is_some_and(|n|n.starts_with(".authority-") && n.ends_with(".sqlite") && !n.ends_with(".intake.sqlite")) {
+        if path.file_name().and_then(|n|n.to_str()).is_some_and(|n|n.starts_with(".authority-") && n.ends_with(".sqlite")) {
             authorities.push(path);
         }
     }
@@ -1566,7 +1540,6 @@ async fn retire_backup(
         let _admission=admission;
         let _control=s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        s.require_intake_drained().await?;
         let key=s.admin(&headers).await?;
         let receipt=s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::RetireBackup { backup_id:id.clone() } }).await?;
         let cleanup=cleanup_retired_backup(&s.root,&id).await;
@@ -1587,7 +1560,6 @@ async fn restore(
         let _admission = admission;
         let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        s.require_intake_drained().await?;
         let key = s.admin(&headers).await?;
         let existing = s.catalog.collections().await?.into_iter().find(|e| e.collection_id==request.collection_id);
         let s3_mode = std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref() == Ok("s3");
@@ -1645,7 +1617,6 @@ async fn delete_collection(
         // Key/grant revocation uses its own catalog barriers and can bypass this.
         let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        s.require_intake_drained().await?;
         let key = s.admin(&headers).await?;
         let receipt = s
             .catalog
@@ -1990,7 +1961,7 @@ mod tests {
     async fn committed_ingest_http_receipts_rejections_and_lookup() {
         use tower::ServiceExt;
         let (service,path,headers)=setup().await; let app=router(service.clone());
-        let operation=OperationId::new("intake-http".into());
+        let operation=OperationId::new("committed-http".into());
         let body=json!({"records":[{"operation_id":operation,"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha async"}}]});
         let make=|value:&Value| axum::http::Request::builder().method("POST").uri("/api/v1/index/c/ingest")
             .header("apikey",headers["apikey"].clone()).header("content-type","application/json").body(Body::from(serde_json::to_vec(value).unwrap())).unwrap();
@@ -2003,9 +1974,8 @@ mod tests {
         assert_eq!(rejected["results"][0]["error"]["code"],"conflict");
         let mut missing=body.clone(); missing["records"][0].as_object_mut().unwrap().remove("document");
         let rejected=app.clone().oneshot(make(&missing)).await.unwrap(); assert_eq!(rejected.status(),StatusCode::BAD_REQUEST); drop(rejected);
-        assert!(service.intake.read().await.is_empty());
         let partition=service.record("master","c").await.unwrap();
-        // A synchronous exact replay joins the asynchronous consumers without creating Intake.
+        // A synchronous exact replay joins the asynchronous consumers without creating another durable log.
         partition.write(serde_json::from_value(body["records"][0].clone()).unwrap()).await.unwrap();
         drop(partition);
         let uri=format!("/api/v1/index/c/ingest/operation/{}/{}",operation.epoch,operation.nonce);
@@ -2016,11 +1986,10 @@ mod tests {
     #[tokio::test]
     async fn committed_ingest_response_and_status_remain_subject_to_revocation() {
         let (service,path,_)=setup().await; let mut headers=HeaderMap::new(); headers.insert("apikey",STANDARD.encode([7;32]).parse().unwrap());
-        let body=json!({"records":[{"operation_id":OperationId::new("intake-revoke".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha"}}]});
+        let body=json!({"records":[{"operation_id":OperationId::new("committed-revoke".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha"}}]});
         let response=ingest(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&body).unwrap().into()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
-        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-intake".into()),command:CatalogCommand::RevokeGrant{collection_id:"c".into(),key_id:"a".into()}}).await.unwrap();
+        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-committed".into()),command:CatalogCommand::RevokeGrant{collection_id:"c".into(),key_id:"a".into()}}).await.unwrap();
         assert!(axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.is_err()); assert!(ingest_progress(State(service.clone()),headers,Path("c".into())).await.is_err());
-        assert!(service.intake.read().await.is_empty());
         let partition=service.record("master","c").await.unwrap();
         partition.write(serde_json::from_value(body["records"][0].clone()).unwrap()).await.unwrap();
         drop(partition); drop(service); std::fs::remove_dir_all(path).unwrap();
@@ -2534,7 +2503,7 @@ fn openapi_document() -> Value {
         ),
         ("/api/v1/index/{id}/ingest", "post", "Commit 1..64 independent commands; continue after business rejection; indexes asynchronous",
             Some(json!({"type":"object","additionalProperties":false,"required":["records"],"properties":{"records":{"type":"array","minItems":1,"maxItems":64,"items":{"$ref":"#/components/schemas/RecordWrite"}}}}))),
-        ("/api/v1/index/{id}/ingest", "get", "Record committed_seq and asynchronous lexical_seq/vector_seq; optional legacy drain status", None),
+        ("/api/v1/index/{id}/ingest", "get", "Record committed_seq and asynchronous lexical_seq/vector_seq", None),
         ("/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}", "get", "Canonical Record receipt by original operation_id; absence does not prove failure", None),
         (
             "/api/v1/index/{id}/operation/{epoch}/{nonce}",
@@ -2659,7 +2628,7 @@ fn openapi_document() -> Value {
             operation["responses"]["200"]=json!({"description":"All sequence fields use Record sequence space; null committed_seq requires recovery",
                 "content":{"application/json":{"schema":{"type":"object","required":["committed_seq","lexical_seq","vector_seq","index_error","recovery_required"],"properties":{
                     "committed_seq":{"type":["integer","null"],"minimum":0},"lexical_seq":{"type":"integer","minimum":0},"vector_seq":{"type":"integer","minimum":0},
-                    "index_error":{"type":["string","null"]},"recovery_required":{"type":"boolean"},"legacy_intake":{"type":"object","properties":{"pending":{"type":"integer"},"blocked":{"type":["string","null"]}}}}}}}});
+                    "index_error":{"type":["string","null"]},"recovery_required":{"type":"boolean"}}}}}});
         }
         let mut params = vec![
             json!({"name":"apikey","in":"header","required":path!="/api/v1/live","schema":{"type":"string"}}),

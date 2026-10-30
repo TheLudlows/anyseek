@@ -51,8 +51,6 @@ def summarize_maintenance(log_text):
                  'locked' if name.endswith('_locked') else 'unclassified')
         grouped[group][name] = values
     required = [
-        'intake_snapshot_locked', 'intake_selection_locked',
-        'intake_local_prepare_unlocked', 'intake_local_release_unlocked',
         'cache_merge_capture_locked', 'cache_merge_build_unlocked',
         'cache_merge_install_locked', 'cache_merge_cleanup_locked',
     ]

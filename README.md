@@ -6,7 +6,7 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 
 [服务指南](anyseek/src/server/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
 
-[异步索引写入入口](docs/async-ingestion.md)：`POST /api/v1/index/{id}/ingest` 在业务判定及持久提交后返回逐项结果；200 不代表每项成功，只有带 Record 回执的项成功。明确拒绝后继续处理后续项，429／503 保留已有结果。索引仍异步，现有 `/doc` 同步接口保留；旧 Intake 待处理请求的恢复路径仍保留。
+[异步索引写入入口](docs/async-ingestion.md)：`POST /api/v1/index/{id}/ingest` 在业务判定及持久提交后返回逐项结果；200 不代表每项成功，只有带 Record 回执的项成功。明确拒绝后继续处理后续项，429／503 保留已有结果。索引仍异步，现有 `/doc` 同步接口保留；独立 Intake 日志已移除。
 
 ## 当前能力
 

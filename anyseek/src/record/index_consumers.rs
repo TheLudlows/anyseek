@@ -390,7 +390,7 @@ impl Consumer {
         }
     }
     /// Administrative/synchronous paths join owned work before sealing a tail
-    /// or relying on immediate visibility. Normal intake never joins this task.
+    /// or relying on immediate visibility. Normal committed execution never joins this task.
     pub async fn drain(&self) -> Result<(), RecordError> {
         let worker = self
             .queue

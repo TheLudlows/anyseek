@@ -286,12 +286,12 @@ mod tests {
     async fn abandoned_cache_job_retains_owner_and_management_returns_busy() {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
         let p=fixture(&root).await;
-        let pipeline=IngestPipeline::open(p.clone()).await.unwrap();
+
         std::fs::write(root.join(".test-cache-merge-pause"),b"pause").unwrap();
         let job=p.start_cache_merge_job(Duration::from_secs(20)).unwrap();started(&root).await;
-        pipeline.finish().await.unwrap();
-        assert!(matches!(pipeline.require_drained().await,Err(RecordError::Busy)));
-        drop(job);drop(pipeline);drop(p);
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        assert!(matches!(p.compact_journal().await,Err(RecordError::Busy)));
+        drop(job);drop(p);
         assert!(RecordPartition::open(&root,config().max_journal_bytes).await.is_err());
         std::fs::remove_file(root.join(".test-cache-merge-pause")).unwrap();
         let p=tokio::time::timeout(Duration::from_secs(10),async {
@@ -307,14 +307,14 @@ mod tests {
         let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
         p.compact_journal().await.unwrap();
         let certificate=p.inner.lock().await.anchor.as_ref().unwrap().identity().to_owned();
-        let pipeline=IngestPipeline::open(p.clone()).await.unwrap();
+
         for start in (0..2305).step_by(64) {
             let batch=(start..(start+64).min(2305)).map(|i|write(&format!("op-{i}"),"same",if i==2304{"terminal"}else{"alpha"},ExpectedVersion::Any)).collect();
-            pipeline.submit(batch).await.unwrap();pipeline.finish().await.unwrap();
+            crate::record::tests::commit_after_backpressure(&p,batch).await;p.inner.lock().await.index.drain_indexes().await.unwrap();
         }
         crate::record::tests::wait_maintenance_idle(&p).await;
         {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().identity(),certificate,"cache merges must not replace the checkpoint");assert!(inner.index.components().await.len()<=capacity::segments(&settings)+1);}
-        drop(pipeline);drop(p);
+        drop(p);
         let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
         assert_eq!(p.get("same").await.unwrap().unwrap().version,2305);
         assert_eq!(p.search("terminal".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,1);

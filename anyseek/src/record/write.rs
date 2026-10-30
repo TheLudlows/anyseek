@@ -1,9 +1,9 @@
 //! Shared bounded Record execution. Successful results are durable business decisions.
-//! Index publication can be synchronous or asynchronous; intake is only a caller.
+//! Index publication can be synchronous or asynchronous; both use the same canonical commit path.
 use super::*;
 use futures::FutureExt;
 
-/// Only the completed prefix may be recorded in intake. Busy and uncertain
+/// Only the completed prefix has definite outcomes. Busy and uncertain
 /// outcomes keep their original identity and leave the suffix pending.
 pub(super) struct BatchResult {
     pub results: Vec<Result<WriteReceipt, RecordError>>,
@@ -63,6 +63,7 @@ struct PreparedBatch {
     base_seq: u64,
     base_state: State,
     expires_at: Option<u64>,
+    hides_evidence: bool,
 }
 
 #[cfg(feature = "s3-object-store")]
@@ -239,15 +240,6 @@ impl Inner {
 }
 
 impl RecordPartition {
-    // Transitional adapter: retained intake still owns its Accept/Complete recovery.
-    pub(super) async fn write_ingest_batch(
-        &self,
-        requests: Vec<RecordWrite>,
-    ) -> Result<BatchResult, RecordError> {
-        self.execute_writes(requests, IndexDelivery::Asynchronous)
-            .await
-    }
-
     /// Run an admitted prefix in order, deciding each command against preceding
     /// planned state. The admitted prefix shares a durable publication; it is
     /// not an all-or-nothing business batch.
@@ -260,7 +252,7 @@ impl RecordPartition {
         self.execute_writes_detailed(requests, delivery)
             .await
             .map_err(|failure| {
-                // Legacy callers retain their recovery contract until HTTP switches.
+                // Single-write callers retain their existing recovery error contract.
                 let BatchFailure {
                     error,
                     scope: _scope,
@@ -624,6 +616,7 @@ impl Inner {
                 base_seq: self.state.seq,
                 base_state,
                 expires_at: None,
+                hides_evidence: false,
             });
         }
         // Admit live container growth before persistence. Values are separately owned.
@@ -631,6 +624,7 @@ impl Inner {
         // Retain all ordinary publication values before the first durable byte.
         let mut publication = Vec::new();
         let mut prior = self.state.try_clone()?;
+        let mut hides_evidence = false;
         for plan in &mut plans {
             if let mutation::PreparedWrite::Append {
                 applied,
@@ -639,6 +633,17 @@ impl Inner {
                 ..
             } = plan
             {
+                // Evaluate against each preceding planned state, including sources
+                // created earlier in this batch. Ordinary writes remain revalidatable.
+                hides_evidence |= matches!(
+                    applied.request.generation,
+                    Some(GenerationCommand::Publish { .. })
+                ) || prior
+                    .records
+                    .get(&applied.request.record_id)
+                    .is_some_and(|r| r.system.is_some())
+                    || (applied.request.vector_patch.is_none()
+                        && self.graph_cache.references(&applied.request.record_id));
                 let prepared = if let Some(candidate) = candidate {
                     candidate.admit_containers(container_bound)?;
                     prior = candidate.try_clone()?;
@@ -678,6 +683,7 @@ impl Inner {
             base_seq: self.state.seq,
             base_state,
             expires_at,
+            hides_evidence,
         })
     }
 
@@ -706,6 +712,7 @@ impl Inner {
             publication,
             result,
             base_seq,
+            hides_evidence,
             ..
         } = prepared;
         if plans.is_empty() {
@@ -741,11 +748,12 @@ impl Inner {
                 .write()
                 .map_err(|_| RecordError::RecoveryRequired)?;
             output.fenced = true;
-            // A conservative barrier covers source, evidence and generation changes.
-            output.revision = output
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| storage("data barrier revision exhausted"))?;
+            if hides_evidence {
+                output.revision = output
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| storage("data barrier revision exhausted"))?;
+            }
         }
         scope.persistence_attempted = result
             .results

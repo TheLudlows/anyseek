@@ -43,7 +43,7 @@ impl RecordPartition {
         &self,
         requests: Vec<RecordWrite>,
     ) -> Result<CommittedBatch, RecordError> {
-        enqueue(self.clone(), requests, None).await
+        enqueue(self.clone(), requests).await
     }
     /// Inspect progress without advancing time or waiting for indexes.
     pub async fn committed_progress(&self) -> CommittedProgress {
@@ -75,14 +75,12 @@ struct Queued {
     requests: Vec<RecordWrite>,
     count: usize,
     bytes: usize,
-    legacy: Option<IngestPipeline>,
     reply: tokio::sync::oneshot::Sender<Result<CommittedBatch, RecordError>>,
     _memory: crate::storage::build_budget::MemoryLease,
 }
 pub(super) async fn enqueue(
     partition: RecordPartition,
     requests: Vec<RecordWrite>,
-    legacy: Option<IngestPipeline>,
 ) -> Result<CommittedBatch, RecordError> {
     let bytes = request_bytes(&requests)?;
     let memory = crate::storage::build_budget::reserve_memory(bytes as u64)
@@ -103,7 +101,6 @@ pub(super) async fn enqueue(
             requests,
             count,
             bytes,
-            legacy,
             reply,
             _memory: memory,
         });
@@ -176,20 +173,17 @@ async fn run_queue(partition: RecordPartition) -> Vec<Delivery> {
                 queue.running = false;
                 return Vec::new();
             };
-            // Legacy retained identities stay on their existing recovery path.
-            let fresh = first.legacy.is_none();
             let mut group = vec![first];
-            while fresh && queue.pending.front().is_some_and(|r| r.legacy.is_none()) {
+            while !queue.pending.is_empty() {
                 group.push(queue.pending.pop_front().unwrap());
             }
             group
         };
-        let legacy = group[0].legacy.clone();
         let mut requests = Vec::new();
         for request in &mut group {
             requests.append(&mut request.requests);
         }
-        let result = execute(partition.clone(), requests, legacy).await;
+        let result = execute(partition.clone(), requests).await;
         let count = group.iter().map(|r| r.count).sum::<usize>();
         let bytes = group.iter().map(|r| r.bytes).sum::<usize>();
         let mut replies = Vec::new();
@@ -264,7 +258,6 @@ impl RecordPartition {
 pub(super) async fn execute(
     partition: RecordPartition,
     requests: Vec<RecordWrite>,
-    legacy: Option<IngestPipeline>,
 ) -> Result<CommittedBatch, RecordError> {
     let bytes = request_bytes(&requests)?;
     let memory = crate::storage::build_budget::reserve_memory(bytes as u64)
@@ -278,44 +271,9 @@ pub(super) async fn execute(
                 .collect(),
             stop: None,
         };
-        // Old durable Accepts must reach a terminal outcome before the new path.
-        let recovered = match &legacy {
-            Some(legacy) => legacy.require_completed().await,
-            None => Ok(()),
-        };
-        if let Err(error) = recovered {
-            batch.stop = Some(error);
-            return batch;
-        }
         let mut offset = 0;
-        'inputs: while offset < requests.len() {
-            // Retained legacy identities keep their digest and terminal outcome.
-            // A legacy entry splits the batch; fresh runs still share one commit.
-            let mut end = offset;
-            while end < requests.len() {
-                let retained = match &legacy {
-                    Some(legacy) => legacy.retained_result(&requests[end]).await,
-                    None => None,
-                };
-                if let Some(result) = retained {
-                    if end > offset {
-                        break;
-                    }
-                    match result {
-                        Ok(receipt) => batch.results[end] = CommittedItem::Committed(receipt),
-                        Err(error) if write::definite(&error) => {
-                            batch.results[end] = CommittedItem::Rejected(error)
-                        }
-                        Err(error) => {
-                            batch.stop = Some(error);
-                            return batch;
-                        }
-                    }
-                    offset += 1;
-                    continue 'inputs;
-                }
-                end += 1;
-            }
+        while offset < requests.len() {
+            let end = requests.len();
             match partition
                 .execute_writes_detailed(
                     requests[offset..end].to_vec(),

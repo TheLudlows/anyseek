@@ -47,9 +47,6 @@ mod replay;
 mod indexer;
 mod maintenance;
 mod cache_merge;
-mod ingest_log;
-mod ingestion;
-pub use ingestion::{IngestPipeline, IngestReceipt, IngestStatus, IngestProgress, IngestFailure};
 pub use indexer::IndexJob;
 mod segment_state;
 mod state_chunks;
@@ -1571,7 +1568,7 @@ impl RecordPartition {
         Ok(Some(RecordStatus { evaluation_time_ms: inner.evaluation_time_ms, record_id: id.into(), version: record.version, visibility, pending_vector_fields, visible_seq: inner.state.seq }))
     }
     /// Search published caches outside the Record guard and reconcile bounded
-    /// candidates with canonical records. Index progress may lag durable intake.
+    /// candidates with canonical records. Index progress may lag durable commits.
     pub async fn search(
         &self,
         text: String,
@@ -1920,6 +1917,41 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(20),async {
             while p.inner.lock().await.maintenance_scheduled {tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
         }).await.unwrap();
+    }
+    #[tokio::test]
+    async fn committed_batch_output_barrier_uses_preceding_source_state() {
+        let temporary=tempfile::tempdir().unwrap();
+        let p=RecordPartition::create(&temporary.path().join("records"),config()).await.unwrap();
+        let ordinary=p.output_permit().unwrap();
+        commit_after_backpressure(&p,vec![write("a","a","alpha",ExpectedVersion::Absent),write("b","b","beta",ExpectedVersion::Absent)]).await;
+        ordinary.deliver(||()).unwrap();
+        let before_source=p.output_permit().unwrap();
+        let source=source_write("source","s",&[]);
+        let mut delete=write("delete","s","",ExpectedVersion::Match(1));delete.document=None;
+        commit_after_backpressure(&p,vec![source,delete]).await;
+        assert!(matches!(before_source.deliver(||()),Err(RecordError::RecoveryRequired)));
+    }
+    pub(super) async fn commit_after_backpressure(p: &RecordPartition, requests: Vec<RecordWrite>) {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match p.commit_writes(requests.clone()).await {
+                    Ok(batch) => {
+                        assert!(batch.results.iter().all(|item| matches!(item, CommittedItem::Committed(_) | CommittedItem::NotAttempted)));
+                        match batch.stop {
+                            None => { assert!(batch.results.iter().all(|item| matches!(item, CommittedItem::Committed(_)))); break; }
+                            Some(RecordError::Busy) => {}
+                            other => panic!("unexpected commit stop: {other:?}"),
+                        }
+                    }
+                    Err(RecordError::Busy) => {}
+                    Err(error) => panic!("unexpected commit error: {error:?}"),
+                }
+                // Retry the same operation IDs: a committed prefix is replayed.
+                wait_maintenance_idle(p).await;
+                p.inner.lock().await.index.drain_indexes().await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.expect("bounded committed backpressure retry");
     }
     pub(super) async fn write_after_maintenance(p:&RecordPartition,request:RecordWrite)->Result<WriteReceipt,RecordError> {
         tokio::time::timeout(std::time::Duration::from_secs(20),async {

@@ -152,9 +152,9 @@ jobs:
       - name: Build service with the same feature set
         if: matrix.lane == 'core'
         run: cargo build -p anyseek --locked --features server
-      - name: Asynchronous intake HTTP and authorization regressions
+      - name: Committed asynchronous-index HTTP and authorization regressions
         if: matrix.lane == 'core'
-        run: cargo test -p anyseek --locked --features server --bin anyseek_server intake_
+        run: cargo test -p anyseek --locked --features server --bin anyseek_server committed_ingest_
       - name: Service configuration and OpenAPI smoke
         if: matrix.lane == 'core'
         shell: bash

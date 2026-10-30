@@ -101,13 +101,10 @@ async fn merge_keeps_unconsumed_tail_addresses_and_live_tokens() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("records");
     let p = seeded(&root).await;
-    let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
+
     let (sources, candidate) = prepare(&p).await;
     std::fs::write(root.join(".test-vector-consumer-pause"), b"pause").unwrap();
-    pipeline.submit(vec![write("queued", "queued", "alpha", ExpectedVersion::Absent)]).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while pipeline.progress().await.pending != 0 { tokio::task::yield_now().await; }
-    }).await.unwrap();
+    p.commit_writes(vec![write("queued", "queued", "alpha", ExpectedVersion::Absent)]).await.unwrap();
     {
         let inner = p.inner.lock().await;
         let components = inner.index.components().await;
@@ -116,7 +113,7 @@ async fn merge_keeps_unconsumed_tail_addresses_and_live_tokens() {
     }
     install(&p, &sources, candidate).await;
     std::fs::remove_file(root.join(".test-vector-consumer-pause")).unwrap();
-    pipeline.finish().await.unwrap();
+    p.inner.lock().await.index.drain_indexes().await.unwrap();
     let found = p.search("".into(), Some(Embedding::F32(vec![1.0, 0.0])), SearchMode::Vector {
         similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All,
     }, vec![], 10).await.unwrap();

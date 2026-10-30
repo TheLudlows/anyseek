@@ -438,12 +438,12 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("records");
         let p = RecordPartition::create(&root, config()).await.unwrap();
-        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
-        pipeline
-            .submit(vec![write("first", "a", "alpha", ExpectedVersion::Absent)])
+
+        p
+            .commit_writes(vec![write("first", "a", "alpha", ExpectedVersion::Absent)])
             .await
             .unwrap();
-        pipeline.finish().await.unwrap();
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
         let gate = ".test-query-scoring-pause";
         std::fs::write(root.join(gate), b"pause").unwrap();
         let pending = {
@@ -464,11 +464,11 @@ mod tests {
         };
         entered(&root, gate).await;
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            pipeline
-                .submit(vec![write("second", "b", "alpha", ExpectedVersion::Absent)])
+            p
+                .commit_writes(vec![write("second", "b", "alpha", ExpectedVersion::Absent)])
                 .await
                 .unwrap();
-            pipeline.finish().await.unwrap();
+            p.inner.lock().await.index.drain_indexes().await.unwrap();
         })
         .await
         .expect("scoring must not own the Record mutex");
@@ -482,15 +482,15 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("records");
         let p = RecordPartition::create(&root, config()).await.unwrap();
-        let pipeline = IngestPipeline::open(p.clone()).await.unwrap();
-        pipeline
-            .submit(vec![
+
+        p
+            .commit_writes(vec![
                 write("a", "a", "alpha", ExpectedVersion::Absent),
                 write("b", "b", "alpha", ExpectedVersion::Absent),
             ])
             .await
             .unwrap();
-        pipeline.finish().await.unwrap();
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
         let gate = ".test-query-candidates-pause";
         std::fs::write(root.join(gate), b"pause").unwrap();
         let pending = {
@@ -504,14 +504,14 @@ mod tests {
         let mut delete = write("delete", "b", "", ExpectedVersion::Match(1));
         delete.document = None;
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            pipeline
-                .submit(vec![
+            p
+                .commit_writes(vec![
                     write("update", "a", "beta", ExpectedVersion::Match(1)),
                     delete,
                 ])
                 .await
                 .unwrap();
-            pipeline.finish().await.unwrap();
+            p.inner.lock().await.index.drain_indexes().await.unwrap();
         })
         .await
         .unwrap();
