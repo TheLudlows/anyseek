@@ -20,7 +20,7 @@ struct Metadata {
     seq: u64,
     epoch_watermark: u64,
     retired_backups: std::collections::BTreeSet<String>,
-    historical_operations: Vec<OperationId>,
+    historical_operations: Vec<(String, OperationId)>,
     service_snapshot: Option<(String, bool)>,
     authority_history: Vec<serde_json::Value>,
 }
@@ -76,10 +76,11 @@ impl Store {
         store.connection.execute_batch(
             "BEGIN IMMEDIATE;
              CREATE TABLE catalog_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), format INTEGER NOT NULL, metadata TEXT NOT NULL);
-             CREATE TABLE catalog_keys (key_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
-             CREATE TABLE catalog_collections (collection_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
-             CREATE TABLE catalog_grants (collection_id TEXT NOT NULL, key_id TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(collection_id,key_id));
-             CREATE TABLE catalog_operations (epoch INTEGER NOT NULL, nonce TEXT NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(epoch,nonce));
+             CREATE TABLE catalog_tenants (tenant_id TEXT PRIMARY KEY);
+             CREATE TABLE catalog_keys (key_id TEXT PRIMARY KEY, tenant_id TEXT REFERENCES catalog_tenants(tenant_id), metadata TEXT NOT NULL);
+             CREATE TABLE catalog_collections (tenant_id TEXT NOT NULL REFERENCES catalog_tenants(tenant_id), collection_id TEXT NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(tenant_id,collection_id));
+             CREATE TABLE catalog_backups (backup_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
+             CREATE TABLE catalog_operations (scope TEXT NOT NULL, epoch INTEGER NOT NULL, nonce TEXT NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(scope,epoch,nonce));
              COMMIT;"
         ).map_err(storage)?;
         store.persist(&State::default(), state)?;
@@ -95,7 +96,7 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(storage)?;
-        if format != 1 {
+        if format != 2 {
             return Err(storage("unsupported catalog SQLite format"));
         }
         let metadata: Metadata = serde_json::from_str(&metadata).map_err(storage)?;
@@ -108,39 +109,33 @@ impl Store {
             authority_history: metadata.authority_history,
             ..State::default()
         };
+        for (id, _) in
+            store.rows("SELECT tenant_id,tenant_id FROM catalog_tenants ORDER BY tenant_id")?
+        {
+            validate_name(&id)?;
+            state.tenants.insert(id);
+        }
         for (id, value) in store.rows("SELECT key_id,metadata FROM catalog_keys ORDER BY key_id")? {
             state
                 .keys
                 .insert(id, serde_json::from_str(&value).map_err(storage)?);
         }
         for (id, value) in store
-            .rows("SELECT collection_id,metadata FROM catalog_collections ORDER BY collection_id")?
+            .rows("SELECT tenant_id || '/' || collection_id,metadata FROM catalog_collections ORDER BY tenant_id,collection_id")?
         {
             let entry: CollectionEntry = serde_json::from_str(&value).map_err(storage)?;
-            if entry.collection_id != id {
+            if entry.scope() != id {
                 return Err(storage("catalog collection identity mismatch"));
             }
             state.collections.insert(id, entry);
         }
-        let mut statement = store.connection.prepare("SELECT collection_id,key_id,revision FROM catalog_grants ORDER BY collection_id,key_id").map_err(storage)?;
-        for row in statement
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, u64>(2)?,
-                ))
-            })
-            .map_err(storage)?
+        for (id, value) in
+            store.rows("SELECT backup_id,metadata FROM catalog_backups ORDER BY backup_id")?
         {
-            let (collection, key, revision) = row.map_err(storage)?;
             state
-                .grants
-                .entry(collection)
-                .or_default()
-                .insert(key, revision);
+                .backups
+                .insert(id, serde_json::from_str(&value).map_err(storage)?);
         }
-        drop(statement);
         let mut statement = store
             .connection
             .prepare("SELECT metadata FROM catalog_operations ORDER BY epoch,nonce")
@@ -186,6 +181,11 @@ impl Store {
         }
         // Only changed catalog rows are written. Record authority connections
         // share this database but their tables are never replaced or cleared.
+        for tenant in next.tenants.difference(&old.tenants) {
+            transaction
+                .execute("INSERT INTO catalog_tenants VALUES(?1)", [tenant])
+                .map_err(storage)?;
+        }
         for (id, key) in &next.keys {
             let json = serde_json::to_string(key).map_err(storage)?;
             if old
@@ -197,7 +197,7 @@ impl Store {
                 .as_ref()
                 != Some(&json)
             {
-                transaction.execute("INSERT INTO catalog_keys VALUES(?1,?2) ON CONFLICT(key_id) DO UPDATE SET metadata=excluded.metadata", params![id,json]).map_err(storage)?;
+                transaction.execute("INSERT INTO catalog_keys VALUES(?1,?2,?3) ON CONFLICT(key_id) DO UPDATE SET metadata=excluded.metadata", params![id,key.tenant_id,json]).map_err(storage)?;
             }
         }
         for (id, collection) in &next.collections {
@@ -211,30 +211,17 @@ impl Store {
                 .as_ref()
                 != Some(&json)
             {
-                transaction.execute("INSERT INTO catalog_collections VALUES(?1,?2) ON CONFLICT(collection_id) DO UPDATE SET metadata=excluded.metadata", params![id,json]).map_err(storage)?;
+                transaction.execute("INSERT INTO catalog_collections VALUES(?1,?2,?3) ON CONFLICT(tenant_id,collection_id) DO UPDATE SET metadata=excluded.metadata", params![collection.tenant_id,collection.collection_id,json]).map_err(storage)?;
             }
         }
-        for (collection, grants) in &next.grants {
-            for (key, revision) in grants {
-                if old.grants.get(collection).and_then(|g| g.get(key)) != Some(revision) {
-                    transaction.execute("INSERT INTO catalog_grants VALUES(?1,?2,?3) ON CONFLICT(collection_id,key_id) DO UPDATE SET revision=excluded.revision", params![collection,key,revision]).map_err(storage)?;
-                }
-            }
-        }
-        for (collection, grants) in &old.grants {
-            for key in grants.keys() {
-                if !next
-                    .grants
-                    .get(collection)
-                    .is_some_and(|g| g.contains_key(key))
-                {
-                    transaction
-                        .execute(
-                            "DELETE FROM catalog_grants WHERE collection_id=?1 AND key_id=?2",
-                            params![collection, key],
-                        )
-                        .map_err(storage)?;
-                }
+        for (id, backup) in &next.backups {
+            if !old.backups.contains_key(id) {
+                transaction
+                    .execute(
+                        "INSERT INTO catalog_backups VALUES(?1,?2)",
+                        params![id, serde_json::to_string(backup).map_err(storage)?],
+                    )
+                    .map_err(storage)?;
             }
         }
         transaction
@@ -248,8 +235,9 @@ impl Store {
             if operation.receipt.seq > old_seq || current.is_none() {
                 transaction
                     .execute(
-                        "INSERT INTO catalog_operations VALUES(?1,?2,?3)",
+                        "INSERT INTO catalog_operations VALUES(?1,?2,?3,?4)",
                         params![
+                            operation.request.command.tenant(),
                             operation.request.operation_id.epoch,
                             operation.request.operation_id.nonce,
                             serde_json::to_string(operation).map_err(storage)?
@@ -258,7 +246,7 @@ impl Store {
                     .map_err(storage)?;
             }
         }
-        transaction.execute("INSERT INTO catalog_meta VALUES(1,1,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
+        transaction.execute("INSERT INTO catalog_meta VALUES(1,2,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
         #[cfg(test)]
         crash("before_commit");
         transaction
@@ -299,7 +287,9 @@ pub(super) fn resume(root: &Path) -> Result<(), CatalogError> {
     let (store, _) = Store::open(&stage)?;
     drop(store);
     crate::storage::partition::publish_bundle(&stage, root)
-        .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))
+        .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?;
+    initial_fault("root_published");
+    Ok(())
 }
 pub(super) fn create(root: &Path, state: &State) -> Result<Store, CatalogError> {
     validate_state(state)?;
@@ -309,9 +299,19 @@ pub(super) fn create(root: &Path, state: &State) -> Result<Store, CatalogError> 
     let stage = pending(root)?;
     std::fs::create_dir(&stage).map_err(storage)?;
     drop(Store::create(&stage, state)?);
+    initial_fault("metadata_committed");
     crate::storage::partition::publish_bundle(&stage, root)
         .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?;
+    initial_fault("root_published");
     Store::open(root).map(|(store, _)| store)
+}
+fn initial_fault(stage: &str) {
+    #[cfg(feature = "fault-injection")]
+    if std::env::var("ANYSEEK_CATALOG_INITIAL_FAULT").as_deref() == Ok(stage) {
+        std::process::exit(87);
+    }
+    #[cfg(not(feature = "fault-injection"))]
+    let _ = stage;
 }
 #[cfg(test)]
 fn crash(stage: &str) {
@@ -334,10 +334,19 @@ mod tests {
             .unwrap();
         catalog
             .execute(request(
+                "tenant",
+                CatalogCommand::AddTenant {
+                    tenant_id: "tenant".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        catalog
+            .execute(request(
                 "prepare",
                 CatalogCommand::PrepareCollection {
                     collection_id: "documents".into(),
-                    owner_key: "master".into(),
+                    tenant_id: "tenant".into(),
                     config: config(),
                 },
             ))
@@ -348,10 +357,7 @@ mod tests {
         assert!(Catalog::open(&root).await.is_err());
         drop(catalog);
         let catalog = Catalog::open(&root).await.unwrap();
-        assert_eq!(
-            catalog.authenticate(&"a".repeat(64)).await.unwrap(),
-            "master"
-        );
+        assert_eq!(catalog.authenticate(&"a".repeat(64)).await.unwrap(), MASTER);
         assert_eq!(
             catalog.collections().await.unwrap()[0].collection_id,
             "documents"
@@ -365,17 +371,24 @@ mod tests {
         let catalog = Catalog::create_with_key(&root, "master".into(), "a".repeat(64))
             .await
             .unwrap();
+        catalog
+            .execute(request(
+                "tenant",
+                CatalogCommand::AddTenant {
+                    tenant_id: "tenant".into(),
+                },
+            ))
+            .await
+            .unwrap();
         let db = Connection::open(root.join(DATABASE)).unwrap();
         db.execute_batch("CREATE TRIGGER refuse_meta BEFORE UPDATE ON catalog_meta BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
         assert!(catalog.compact().await.is_err());
-        assert_eq!(
-            catalog.authenticate(&"a".repeat(64)).await.unwrap(),
-            "master"
-        );
+        assert_eq!(catalog.authenticate(&"a".repeat(64)).await.unwrap(), MASTER);
         let change = request(
             "new-key",
             CatalogCommand::AddKey {
                 key_id: "new".into(),
+                tenant_id: "tenant".into(),
                 verifier: "b".repeat(64),
             },
         );
@@ -386,7 +399,10 @@ mod tests {
         assert!(catalog.authenticate(&"b".repeat(64)).await.is_err());
         assert_eq!(catalog.operation(&change.operation_id).await.unwrap(), None);
         catalog.execute(change).await.unwrap();
-        assert_eq!(catalog.authenticate(&"b".repeat(64)).await.unwrap(), "new");
+        assert_eq!(
+            catalog.authenticate(&"b".repeat(64)).await.unwrap(),
+            "tenant"
+        );
     }
 
     #[tokio::test]
@@ -431,6 +447,15 @@ mod tests {
         let catalog = Catalog::create_with_key(&root, "master".into(), "a".repeat(64))
             .await
             .unwrap();
+        catalog
+            .execute(request(
+                "tenant",
+                CatalogCommand::AddTenant {
+                    tenant_id: "tenant".into(),
+                },
+            ))
+            .await
+            .unwrap();
         let mut authority =
             SqliteAuthority::open(&root.join(DATABASE), Duration::from_secs(5)).unwrap();
         let original = authority.create_partition("p0", 7).unwrap();
@@ -439,6 +464,7 @@ mod tests {
                 "new-key",
                 CatalogCommand::AddKey {
                     key_id: "new".into(),
+                    tenant_id: "tenant".into(),
                     verifier: "b".repeat(64),
                 },
             ))
@@ -452,6 +478,9 @@ mod tests {
         let authority =
             SqliteAuthority::open(&root.join(DATABASE), Duration::from_secs(5)).unwrap();
         assert_eq!(authority.read_head("p0").unwrap(), Some(original));
-        assert_eq!(catalog.authenticate(&"b".repeat(64)).await.unwrap(), "new");
+        assert_eq!(
+            catalog.authenticate(&"b".repeat(64)).await.unwrap(),
+            "tenant"
+        );
     }
 }

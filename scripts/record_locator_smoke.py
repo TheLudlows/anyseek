@@ -41,9 +41,8 @@ def exercise(call,restart_with,faults):
     restart_with({});assert call('POST',endpoint+'/evidence',ref)['text']=='中é'
     reader=base64.b64encode(os.urandom(32)).decode()
     call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'locator-reader','apikey_base64':reader})
-    call('POST',endpoint+'/grants',{'operation_id':operation(),'key_id':'locator-reader','allow':True})
     assert call('POST',endpoint+'/evidence',ref,key=reader)['text']=='中é'
-    call('POST',endpoint+'/grants',{'operation_id':operation(),'key_id':'locator-reader','allow':False})
+    call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'locator-reader'})
     call('POST',endpoint+'/evidence',ref,key=reader,status=403)
     archive=call('POST',endpoint+'/backup',{'operation_id':operation()})
     call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','routing_key':'r','expected':{'Match':2},'document':None})

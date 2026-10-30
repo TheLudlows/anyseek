@@ -15,6 +15,8 @@ def main():
         sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
         base=f'http://127.0.0.1:{port}'
         master=base64.b64encode(hashlib.sha256(b'issue57-service-test').digest()).decode()
+        tenant_key=base64.b64encode(hashlib.sha256(b'issue98-tenant-test').digest()).decode()
+        default_key=object()
         log=open(pathlib.Path(tmp)/'server.log','w+')
         process=None
         def start(fault_env=None):
@@ -36,7 +38,12 @@ def main():
                     return
                 except (OSError,urllib.error.URLError):time.sleep(.05)
             log.seek(0);raise AssertionError('server startup timeout: '+log.read()[-8192:])
-        def call(method,path,body=None,key=master,status=200):
+        def call(method,path,body=None,key=default_key,status=200):
+            if key is default_key:
+                management=(path=='/api/v1/tenants' or path in ['/api/v1/service-backups','/api/v1/service-restores'] or path.startswith('/api/v1/catalog/') or (path=='/api/v1/apikey' and method in ['POST','DELETE']) or path.startswith('/api/v1/backups'))
+                key=master if management else tenant_key
+            if method=='POST' and path=='/api/v1/apikey' and body is not None:
+                body={'tenant_id':'test',**body}
             req=urllib.request.Request(base+path,data=None if body is None else json.dumps(body).encode(),headers={'apikey':key,'Content-Type':'application/json'},method=method)
             control_retry=status==200 and path in ['/api/v1/service-backups','/api/v1/service-restores']
             deadline=time.monotonic()+300
@@ -73,7 +80,7 @@ def main():
             import importlib
             exercise=importlib.import_module('record_'+name+'_smoke').exercise
             if name == 'ingest':
-                exercise(call,restart_with,root.parent,args.faults,base,master)
+                exercise(call,restart_with,root.parent,args.faults,base,tenant_key)
             elif name in ['temporal','history','indexer','authorization']:
                 exercise(call,restart_with,root.parent,args.faults)
             elif name=='lease':
@@ -82,13 +89,15 @@ def main():
             else:exercise(call,restart_with,args.faults)
         try:
             if args.faults:
-                for stage in ['published','retired']:
-                    child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','ANYSEEK_INITIAL_ROOT_PREFIX':'data','ANYSEEK_INITIAL_FAULT':stage},stdout=log,stderr=log)
+                for stage in ['metadata_committed','root_published']:
+                    child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','ANYSEEK_CATALOG_INITIAL_FAULT':stage},stdout=log,stderr=log)
                     try:
                         assert child.wait(timeout=30)==87,stage
                     finally:
                         if child.poll() is None:child.kill();child.wait(timeout=20)
             start()
+            call('POST','/api/v1/tenants',{'operation_id':operation(),'tenant_id':'test'})
+            call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'tenant-default','tenant_id':'test','apikey_base64':tenant_key})
             if args.section and args.section!='base':
                 section(args.section)
                 return
@@ -102,10 +111,7 @@ def main():
             create={'operation_id':operation(),'collection_id':'shared','config':{'index_name':'Shared records','schema':[{'field':'body','field_type':'Text','store':True},{'field':'title','field_type':'Text','store':True},{'field':'date','field_type':'Timestamp','store':True,'filterable':True}]}}
             assert call('POST','/api/v1/index',create,key=keys['a'])['collection_id']=='shared'
             assert call('POST','/api/v1/index',create,key=keys['a'])['collection_id']=='shared'
-            call('GET','/api/v1/index/shared',key=keys['b'],status=403)
-            grant={'operation_id':operation(),'key_id':'b','allow':True}
-            call('POST','/api/v1/index/shared/grants',grant,key=keys['a'],status=403)
-            call('POST','/api/v1/index/shared/grants',grant)
+            call('GET','/api/v1/index/shared',key=keys['b'])
             writes=[]
             for i,(body,date) in enumerate([('alpha beta',2),('alpha',1),('gamma',3)]):
                 w={'operation_id':operation(),'record_id':f'r{i}','routing_key':'route','expected':'Absent','document':{'body':body,'title':f'Title {i}','date':date,'unindexed':{'original':[1,2,3]}}}
@@ -146,7 +152,7 @@ def main():
             future={**writes[0],'operation_id':{'epoch':int(time.time()//86400)+1,'nonce':'future'}}
             assert call('POST','/api/v1/index/shared/doc',future,key=keys['b'],status=410)['code']=='operation_expired'
             # Unknown scopes must never resolve through legacy per-key indices.
-            call('GET','/api/v1/index/0',key=keys['b'],status=403)
+            call('GET','/api/v1/index/0',key=keys['b'],status=400)
             vc={'operation_id':operation(),'collection_id':'vectors','embedding_space_id':'fixture-f32-cosine','config':{'index_name':'Vectors','schema':[{'field':'body','field_type':'Text'},{'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}}
             call('POST','/api/v1/index',vc)
             vw={'operation_id':operation(),'record_id':'v','routing_key':'v','expected':'Absent','document':{'body':'alpha','vector':[2,0]}}
@@ -217,10 +223,10 @@ def main():
             backup=call('POST','/api/v1/index/shared/backup',backup_request,key=keys['b'])
             assert call('POST','/api/v1/index/shared/backup',backup_request,key=keys['b'])==backup
             restore={'operation_id':operation(),'collection_id':'restored','backup_id':backup['backup_id']}
-            call('POST','/api/v1/restore',restore,key=keys['b'],status=403)
+            call('POST','/api/v1/restore',restore,key=keys['b'])
             call('POST','/api/v1/restore',restore)
             call('POST','/api/v1/restore',restore)
-            call('GET','/api/v1/index/restored',key=keys['b'],status=403)
+            call('GET','/api/v1/index/restored',key=keys['b'])
             assert call('GET','/api/v1/index/restored/doc/r0')['version']==5
             oid=saved[-1]['operation_id']
             assert call('GET',f'/api/v1/index/restored/operation/{oid["epoch"]}/{oid["nonce"]}')['receipt']
@@ -233,7 +239,7 @@ def main():
             # Retrying backup after source changes still returns its original point.
             assert call('POST','/api/v1/index/shared/backup',backup_request,key=keys['b'])==backup
             deletion_request={'operation_id':operation()}
-            call('DELETE','/api/v1/index/shared',deletion_request,key=keys['b'],status=403)
+            call('DELETE','/api/v1/index/shared',deletion_request,key=keys['b'])
             call('DELETE','/api/v1/index/shared',deletion_request)
             call('DELETE','/api/v1/index/shared',deletion_request)
             restart()
@@ -244,7 +250,6 @@ def main():
             call('POST','/api/v1/restore',{**restore,'backup_id':'../escape'},status=400)
             # Source revisions preserve bodies while invalidating direct/indirect evidence.
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'revisions','config':{'index_name':'Revisions','schema':[{'field':'body','field_type':'Text','store':True}]}})
-            call('POST','/api/v1/index/revisions/grants',{'operation_id':operation(),'key_id':'b','allow':True})
             src={'operation_id':operation(),'record_id':'s','routing_key':'r','expected':'Absent','document':{'body':'revisionword old'},'system':{'kind':'source'}}
             call('POST','/api/v1/index/revisions/doc',src)
             for rid,parent in [('d','s'),('i','d')]:
@@ -264,13 +269,11 @@ def main():
             assert call('POST','/api/v1/index/revisions/doc',update)['receipt']==receipt
             call('DELETE','/api/v1/index/revisions/doc',{'operation_id':operation(),'record_id':'s','routing_key':'r','expected':{'Match':2},'document':None})
             assert call('GET','/api/v1/index/revisions/doc/i/status')['visibility']=='deleted'
-            call('POST','/api/v1/index/revisions/grants',{'operation_id':operation(),'key_id':'b','allow':False})
-            call('GET','/api/v1/index/revisions/doc/i/status',key=keys['b'],status=403)
+            assert call('GET','/api/v1/index/revisions/doc/i/status',key=keys['b'])['visibility']=='deleted'
             call('DELETE','/api/v1/index/revisions',{'operation_id':operation()})
             print('PASS source revisions HTTP: conditional update/retry, transitive stale, counts, restart, deletion and status authorization')
             # Real generation staging, whole-set replacement and delayed vectors.
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'generations','embedding_space_id':'generation-f32','config':{'index_name':'Generations','schema':[{'field':'body','field_type':'Text'},{'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}})
-            call('POST','/api/v1/index/generations/grants',{'operation_id':operation(),'key_id':'b','allow':True})
             call('POST','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'gs','routing_key':'gr','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
             def genstage(doc,gid,ids,expected,source='gs'):
                 return {'operation_id':operation(),'record_id':doc,'routing_key':'gr','expected':expected,'generation':{'action':'stage','generation_id':gid,'source':{'record_id':source,'routing_key':'gr','version':1},'members':ids,'chunks':[{'record_id':rid,'document':{'body':'generationword '+gid}} for rid in ids]}}
@@ -295,13 +298,11 @@ def main():
             call('POST','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'gc','routing_key':'gr','expected':{'Match':1},'vector_patch':{'vector':[1,0]}})
             assert len(call('POST','/api/v1/index/generations/query',{'query_vector':[1,0],'all':True})['hits'])==1
             call('POST','/api/v1/index/generations/doc',genstage('gd','g3',['ge','gf'],{'Match':4}))
-            call('POST','/api/v1/index/generations/grants',{'operation_id':operation(),'key_id':'b','allow':False})
-            call('GET','/api/v1/index/generations/doc/gd/generation',key=keys['b'],status=403)
-            call('POST','/api/v1/index/generations/doc',genpublish('gd','g3',5),key=keys['b'],status=403)
+            assert call('GET','/api/v1/index/generations/doc/gd/generation',key=keys['b'])['staged_members']==2
             call('DELETE','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'gs','routing_key':'gr','expected':{'Match':1},'document':None})
             assert call('POST','/api/v1/index/generations/query',{'query':'generationword'})['count_total']==0
             call('POST','/api/v1/index/generations/doc',genpublish('gd','g3',5),status=409)
-            print('PASS generation HTTP: durable hidden staging, whole-set switch, retry/restart, optional vectors, source delete and grant revocation')
+            print('PASS generation HTTP: durable hidden staging, whole-set switch, retry/restart, optional vectors, source delete and Tenant-scoped status')
             if args.faults:
                 import http.client
                 call('POST','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'fault-source','routing_key':'gr','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
@@ -328,7 +329,6 @@ def main():
             # P2 immutable source/evidence through the same authorized Record API.
             ec={'operation_id':operation(),'collection_id':'evidence','config':{'index_name':'Evidence','schema':[{'field':'body','field_type':'Text','store':True}]}}
             call('POST','/api/v1/index',ec)
-            call('POST','/api/v1/index/evidence/grants',{'operation_id':operation(),'key_id':'b','allow':True})
             source={'operation_id':operation(),'record_id':'source','routing_key':'route','expected':'Absent','document':{'body':'evidenceword original'},'system':{'kind':'source'}}
             direct={**source,'operation_id':operation(),'record_id':'direct','system':{'kind':'derived','evidence_refs':[{'record_id':'source','routing_key':'route','version':1}]}}
             indirect={**direct,'operation_id':operation(),'record_id':'indirect','system':{'kind':'derived','evidence_refs':[{'record_id':'direct','routing_key':'route','version':1}]}}
@@ -477,13 +477,12 @@ def main():
             restart()
             assert any(x['backup_id']==backup['backup_id'] and x['retired'] and not x['on_disk'] for x in call('GET','/api/v1/backups'))
             call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()})
-            print('PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, no revived grants, collection tombstone across restart')
-            print('PASS real HTTP: default Record/catalog, shared grants, conditional writes, retry/response loss, checkpoint, crash restart, revoked operation lookup, full query parameters, vectors')
+            print('PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, Tenant-scoped restore, collection tombstone across restart')
+            print('PASS real HTTP: default Record/catalog, same-Tenant keys, conditional writes, retry/response loss, checkpoint, crash restart, revoked operation lookup, full query parameters, vectors')
             # Whole service cut, including revoked authority and independent backups.
             ckey=base64.b64encode(os.urandom(32)).decode()
             add_key={'operation_id':operation(),'key_id':'snapshot-user','apikey_base64':ckey}
             call('POST','/api/v1/apikey',add_key)
-            call('POST','/api/v1/index/after-source-delete/grants',{'operation_id':operation(),'key_id':'snapshot-user','allow':True})
             whole_request={'operation_id':operation()}
             call('POST','/api/v1/service-backups',whole_request,key=ckey,status=403)
             whole=call('POST','/api/v1/service-backups',whole_request)
@@ -508,6 +507,10 @@ def main():
                     log.seek(0);raise AssertionError('restored service startup timeout: '+log.read()[-8192:])
                 call('GET','/api/v1/index/after-source-delete',key=ckey,status=403)
                 call('GET','/api/v1/index/after-source-delete',key=keys['b'],status=403)
+                original_tenant_key=tenant_key
+                restored_key=base64.b64encode(os.urandom(32)).decode()
+                call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'restored-access','tenant_id':'test','apikey_base64':restored_key})
+                tenant_key=restored_key
                 call('GET','/api/v1/index/after-source-delete')
                 call('GET','/api/v1/index/shared',status=403)
                 call('GET','/api/v1/index/evidence/doc/direct',status=404)
@@ -524,7 +527,7 @@ def main():
                 assert call('POST','/api/v1/service-restores',service_restore)==restored
                 base=restored_base
             finally:
-                restored_process.kill();restored_process.wait(timeout=20);base=original_base
+                restored_process.kill();restored_process.wait(timeout=20);base=original_base;tenant_key=original_tenant_key
             assert call('POST','/api/v1/service-restores',service_restore)==restored # Target was legitimately modified.
             if args.faults:
                 for kind in ([] if args.cold_restarts else ['backup','restore']):
@@ -553,8 +556,8 @@ def main():
             print('PASS complete service snapshot: common catalog cut, all retained collections/live backups, new-root recovery, no revived keys, historical control rejection, data retry preserved')
             from index_write_query_smoke import exercise as client_exercise
             client_requests=root.parent/'client-requests.json'
-            client_exercise(base,master,client_requests)
-            client_exercise(base,master,client_requests)
+            client_exercise(base,tenant_key,client_requests)
+            client_exercise(base,tenant_key,client_requests)
             call('DELETE','/api/v1/backups/'+early['backup_id'],{'operation_id':operation()})
             if args.section=='base':return
             section('ingest')
@@ -572,7 +575,7 @@ def main():
                 # The capacity test intentionally fills all 32 backup slots.
                 # Retire our completed evidence fixture before the UI creates its own.
                 from record_service_browser import exercise
-                exercise(base,master,call)
+                exercise(base,tenant_key,call)
             if args.faults:lease_exercise(call,restart_with,root.parent,True,only_faults=True)
             from record_history_smoke import exercise as history_exercise
             history_exercise(call,restart_with,root.parent,args.faults)

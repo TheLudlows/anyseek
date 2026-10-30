@@ -37,7 +37,7 @@ def exercise(base,master,call):
         page.locator('#createIndexForm button[type="submit"]').click()
         expect(page.locator('#indexName')).to_have_text('browser-records')
         collection=page.evaluate('INDEX_ID')
-        assert isinstance(collection,str) and len(collection)==32
+        assert collection=='browser-records'
         page.locator('#writeDocuments').click()
         documents=[{'title':'Browser title','body':'browser alpha beta','url':'https://example.com'}]
         page.locator('#documentJson').fill(json.dumps(documents))

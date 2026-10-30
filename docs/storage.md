@@ -2,7 +2,7 @@
 
 本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/src/server/README.md)。
 
-本次为 [#98](https://github.com/TheLudlows/anyseek/issues/98) 的 SQLite 持久化阶段；Tenant 模型、Grant 清理、同名重建与 namespace 删除尚未实施，不代表 #98 完成。旧 Catalog 日志及旧 SQLite authority schema 不提供迁移；新 authority schema 为 2。
+本次为 [#98](https://github.com/TheLudlows/anyseek/issues/98) 的 SQLite 持久化阶段；Tenant 模型和凭据边界已实施；同名重建与 namespace 删除尚未实施，不代表 #98 完成。旧 Catalog 日志及旧 SQLite authority schema 不提供迁移；新 authority schema 为 2。
 
 ## 本地 Segment 与共同视图
 
@@ -45,7 +45,7 @@ SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引�
 
 ### 有界后台 cut 发布（PR #75 已合入）
 
-`RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在 catalog 授权锁内只启动任务，锁外等待，交付仍验证原授权许可，因此构建等待不阻断普通写入或撤权。
+`RecordPartition::start_index_committed` 在准入后返回 owned job，`finish` 等待结果；丢弃句柄不取消已接受工作。`index_committed` 是等待式包装。HTTP PATCH 在集合生命周期屏障内启动任务，屏障外等待；已认证任务不因凭据撤销而中断，来源删除的数据有效性仍在输出时检查。
 
 当前进程最多两个构建，每 partition 一个，无额外等待队列；超额返回 Busy。期限由调用者指定，最大五分钟，HTTP 为三十秒。快照与新增 tail 分别使用既有共享内存准入；捕获 tail 上限为 journal 预算与 64 MiB 的较小值，超限取消本轮构建，保留前台已确认操作，构建文件及并发 WAL 使用同一个磁盘 scope；这是保守估算，继续不承诺 RSS 硬上限。完整 State 仍驻内存。此批按固定 cut 全量构建，增量后台构建与自动调度后置。
 
@@ -57,13 +57,11 @@ SQLite 新增每 partition 一行 `index_builds`，只保存单调 build epoch�
 
 [PR #75](https://github.com/TheLudlows/anyseek/pull/75) 已合入为 `09d30ae4`，最终提交 `96306e95` 的 [CI 五项全部成功](https://github.com/TheLudlows/anyseek/actions/runs/39891546462)。合入后主干 CI 单独记录。
 
-### collection 授权执行屏障（C3-1，PR #77 已合入）
+### collection 生命周期与快照执行屏障
 
-锁顺序为全局快照屏障 → collection 执行屏障 → catalog 元数据。普通已接收工作持前两层共享 guard，只在捕获当前 collection entry 与 grant revision 时持元数据锁；Record future 在锁外执行。单 collection 授权变更与删除先取得该 collection 独占 guard，排在它之后的工作取得共享 guard 后重新查授权。不得在持 catalog 元数据锁时等待执行屏障。
+锁顺序为全局快照屏障 → Tenant/Collection 执行屏障 → Catalog 元数据。普通工作在捕获租户所属集合后释放元数据锁，数据执行在锁外完成。集合创建、激活、删除按租户限定的集合键串行；完整服务快照和备份退休仍通过必要屏障协调。不得在持元数据锁时等待执行屏障。
 
-整 key 撤销、备份退休使用全局独占屏障；完整服务快照与显式 catalog compaction 也先排空普通工作。已接收但未完成的工作仍归 owned task 所有，调用方取消不能释放它的屏障；共同快照包含排空前的完整已接收操作，不混入快照之后排队的写入。全局操作仍是有意的停顿点。
-
-异常 guard 不依赖异步获取 catalog 锁即可同步关闭输出。共享的 sticky failure latch 在重开前不清除，其他 collection 即使正在持久发布或压缩，也不能重新开放旧授权输出；普通可证明未发布的 compaction 失败保留原有恢复语义。输出交付仍检查 grant revision 与 Record 数据屏障，已交付字节不可撤回。
+凭据撤销不排空已认证的数据工作，也不再维护 Grant revision 或 Catalog 输出授权许可。已接收的工作仍归 owned task 所有，调用方取消不提前释放屏障。异常工作只关闭后续 Catalog 操作，不建立新的角色/权限系统；Record 数据保护保持独立。
 
 C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级准入、共享/每集合显式缓冲与 I/O 额度；取消后的 owned task 和传输 Bytes 保留租约。S3 GET 的租约随返回缓冲，而非下载函数返回就结束；PUT 读后验证仍访问远端。能证明 SQLite 发布前的预算拒绝为 Busy，其他不确定错误继续 fenced；既有 reader/build/backup 保护与 GC 闭包不变。默认值与范围见[服务指南](../anyseek/src/server/README.md)。服务缓存总容量及完整 C3-3 隔离验收未完成。
 
@@ -103,9 +101,9 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 
 恢复到新 collection 时，不复制一份能独立 GC 的原对象引用权威。先用不服务、不运行 GC 的临时导入库重放原 cut，再把验证后的规范文件复制到**新对象命名空间**，发布目标独立 checkpoint。原库和恢复目标因此可以独立压缩、退休备份和回收；重复恢复不能回退恢复目标后续写入。
 
-恢复保留 Record 版本、tombstone、原始向量和操作回执。独立快照不自动获得当前删除历史权威：保留 `independent_snapshot`，隔离受保护证据并更换 generation 恢复隔离身份；不恢复原 collection 的 grants。
+恢复保留 Record 版本、tombstone、原始向量和操作回执。独立快照不自动获得当前删除历史权威：保留 `independent_snapshot`，隔离受保护证据并更换 generation 恢复隔离身份；不包含服务凭据。
 
-完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务只启用当前 master，历史 key/grant 不复活；在 S3 模式首次启动时，已认证的独立归档被发布到新的服务 namespace。归档中的 collection backup 仍可再次恢复。
+完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发 Key；在 S3 模式首次启动时，已认证的独立归档被发布到新的服务 namespace。归档中的 collection backup 仍可再次恢复。
 
 私有输入逐个物化为认证 journal 路径，随后由 catalog 逐个打开、预检和导出，每次释放其索引与预算租约；不同时持有所有 retained collection/备份的检索视图。私有工作目录在成功或失败后清理，现有共享内存与归档大小预算继续生效。
 
@@ -115,7 +113,7 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 
 checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包；S3 模式由 SQLite 选择远端 manifest，旧 owner epoch 和失败后的输出 fencing 继续防止陈旧写者或不可信响应。
 
-独立备份恢复校验源闭包，在目标独立 namespace 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新 generation 恢复隔离身份，不恢复历史 grants；typed evidence 保持隔离，不能据旧备份证明后续没有删除。
+独立备份恢复校验源闭包，在目标独立 namespace 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新 generation 恢复隔离身份，不自动恢复历史普通 Key；typed evidence 保持隔离，不能据旧备份证明后续没有删除。
 
 完整服务归档保留 collection 与其备份的恢复输入；普通 restore 的持久意图、备份 pin、私有目录清理和安全对象 GC 仍然有效。
 

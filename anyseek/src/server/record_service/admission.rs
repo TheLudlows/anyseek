@@ -36,7 +36,7 @@ fn classify(path: &str, method: &Method) -> Lane {
         ("/api/v1/service-backups" | "/api/v1/index/{id}/backup", &Method::POST)
             | ("/api/v1/index/{id}", &Method::PATCH) | ("/api/v1/backups/{id}", &Method::DELETE) => Lane::Background,
         ("/api/v1/apikey", &Method::POST | &Method::DELETE) | ("/api/v1/index/{id}", &Method::DELETE)
-            | ("/api/v1/index/{id}/grants", &Method::POST) | ("/api/v1/backups", &Method::GET)
+            | ("/api/v1/tenants", &Method::POST | &Method::GET) | ("/api/v1/backups", &Method::GET)
             | ("/api/v1/catalog/operation/{epoch}/{nonce}", &Method::GET) => Lane::Control,
         _ => Lane::Foreground,
     }
@@ -47,19 +47,27 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
     let lane = classify(&path, &parts.method);
     let preflight = if lane == Lane::Control { &service.control_preflight } else { &service.preflight };
     let _preflight = preflight.clone().try_acquire_owned().map_err(|_| Error::from(CatalogError::Busy))?;
+    let mut tenant=None;
     if lane != Lane::Public {
-        // Authenticate before granting reserved control capacity or allocating per-ID state.
-        // The handlers recheck current grants at their existing linearization points.
-        if lane == Lane::Control { service.admin(&parts.headers).await?; }
-        else { service.authenticate(&parts.headers).await?; }
+        let principal=service.authenticate(&parts.headers).await?;
+        let admin=matches!((path.as_str(),&parts.method),
+            ("/api/v1/apikey",&Method::POST|&Method::DELETE)
+            |("/api/v1/tenants",_)|("/api/v1/backups",&Method::GET)
+            |("/api/v1/backups/{id}",&Method::DELETE)
+            |("/api/v1/service-backups"|"/api/v1/service-restores",_)
+            |("/api/v1/catalog/operation/{epoch}/{nonce}",_));
+        if admin != (principal==MASTER) {return Err(Error(StatusCode::FORBIDDEN,"unauthorized","credential is not valid for this management/data endpoint".into()));}
+        if principal!=MASTER {tenant=Some(principal);}
     }
     let mut subject = "service".to_owned();
     if path.starts_with("/api/v1/index/{id}") {
         let Path(params) = Path::<BTreeMap<String, String>>::from_request_parts(&mut parts, &()).await.map_err(bad)?;
         if let Some(id) = params.get("id") {
+            anyseek::catalog::validate_name(id)?;
+            let id=format!("{}/{id}",tenant.as_deref().ok_or_else(||Error(StatusCode::FORBIDDEN,"unauthorized","Tenant credential required".into()))?);
             // Axum performs exactly the same percent decoding used by handlers.
             // Unknown/user supplied identities do not grow the resource registry.
-            if let Some((id, _)) = service.records.read().await.get_key_value(id) { subject = format!("collection:{id}"); }
+            if let Some((id, _)) = service.records.read().await.get_key_value(&id) { subject = format!("collection:{id}"); }
         }
     }
     let scope = service.resources.admit(subject, lane, (MAX_BODY + MAX_RESPONSE) as u64)

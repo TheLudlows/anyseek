@@ -29,9 +29,11 @@ Begin/StageBatch 只写私有成员；Seal 认证完整清单；Publish 原子�
 
 ## 授权与恢复
 
-catalog 保存 key、collection、grants 与控制回执，身份生命周期独立于数据。全局授权屏障确定撤销和写入的顺序；OutputPermit 在响应及 body frame 交付复核 revision，撤销后重新授权不能复活旧响应。服务不能缓存授权决定作为永久许可。
+Catalog 在 SQLite 保存 Tenant、租户 Key、Collection、备份归属与管理回执。普通 Key 只认证 Tenant；Tenant 内集合访问范围一致。master 管理 Tenant/凭据，不读取集合数据。没有 User、Project、Collection Grant 或角色模型。
 
-独立备份不证明备份后没有删除；恢复保留版本与回执、更新 generation 恢复隔离身份，并维持独立快照/证据隔离，不复活旧 grants。完整服务恢复仅开放当前 master，历史身份禁用。
+凭据撤销只影响后续认证；已认证工作和输出允许完成。保留集合生命周期与完整服务快照的执行屏障，以及来源/数据有效性的输出检查。租户和集合名称采用统一正则，服务端不信任客户端声明的 Tenant。
+
+独立备份恢复保留版本与回执、更新 generation 恢复隔离身份，并维持证据隔离；普通集合备份不包含凭据。完整服务恢复保留 Tenant，禁用历史普通 Key，由目标 master 重新签发租户凭据。
 
 独立 restore 只恢复备份时保存的数据，不自动追平备份后的写入或删除。typed evidence 持续隔离，没有强制解锁或跨服务双活入口；live WAL/在线 checkpoint 重启恢复不新增该隔离。
 

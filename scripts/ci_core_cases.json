@@ -163,5 +163,12 @@
   "catalog::sqlite::tests::sqlite_catalog_resumes_committed_private_initialization",
   "catalog::sqlite::tests::sqlite_catalog_missing_or_corrupt_database_never_becomes_empty_catalog",
   "catalog::sqlite::tests::sqlite_catalog_transactions_leave_shared_record_authority_tables_intact",
-  "record::remote_checkpoint::tests::shared_sqlite_collection_backup_excludes_other_heads_and_survives_global_gc"
+  "record::remote_checkpoint::tests::shared_sqlite_collection_backup_excludes_other_heads_and_survives_global_gc",
+  "catalog::tests::tenant_and_collection_names_reject_invalid_path_components",
+  "catalog::tests::tenant_keys_same_name_collections_and_scoped_retries_survive_reopen",
+  "catalog::tests::revoke_rejects_new_authentication_without_waiting_for_owned_work_or_deleting_data",
+  "catalog::tests::tenant_backup_ownership_and_restore_intents_survive_restart",
+  "catalog::tests::complete_service_restore_retains_tenants_but_disables_historical_keys",
+  "catalog::tests::sqlite_process_exit_preserves_key_and_receipt_atomicity",
+  "catalog::tests::complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queued_writes"
 ]

@@ -13,7 +13,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use anyseek::{
     resources::{Governor, Scope as ResourceScope},
     catalog::{
-        Catalog, CatalogCommand, CatalogError, CatalogRequest, CollectionEntry, OutputPermit,
+        Catalog, CatalogCommand, CatalogError, CatalogRequest, CollectionEntry, MASTER,
     },
     index::{AccessType, FrequentwordType, IndexMetaObject, LexicalSimilarity},
     index::{Clustering, DocumentCompression},
@@ -140,14 +140,12 @@ async fn owned<T: Send + 'static>(
     })?
 }
 
-/// The frame handoff, not JSON construction, is the authorization linearization
-/// boundary. Bytes already handed to the transport cannot be recalled.
-struct AuthorizedBody {
+/// Keep data-validity checks at the transport handoff; credentials are checked at admission.
+struct DataBody {
     bytes: Option<Bytes>,
-    permit: OutputPermit,
     data: Option<DataOutputPermit>,
 }
-impl http_body::Body for AuthorizedBody {
+impl http_body::Body for DataBody {
     type Data = Bytes;
     type Error = std::io::Error;
     fn poll_frame(
@@ -157,10 +155,9 @@ impl http_body::Body for AuthorizedBody {
         if self.bytes.is_none() {
             return Poll::Ready(None);
         }
-        let permit = self.permit.clone();
         let data = self.data.clone();
         Poll::Ready(
-            match deliver(&permit, data.as_ref(), || self.bytes.take().map(http_body::Frame::data)) {
+            match deliver( data.as_ref(), || self.bytes.take().map(http_body::Frame::data)) {
                 Ok(frame) => frame.map(Ok),
                 Err(e) => {
                     self.bytes = None;
@@ -173,25 +170,20 @@ impl http_body::Body for AuthorizedBody {
         )
     }
 }
-fn response<T: Serialize>(value: T, permit: OutputPermit) -> Result<Response, Error> {
-    protected(Ok(value), permit)
+fn response<T: Serialize>(value: T) -> Result<Response, Error> {
+    protected(Ok(value))
 }
-fn deliver<T>(permit: &OutputPermit, data: Option<&DataOutputPermit>, handoff: impl FnOnce() -> T) -> Result<T, Error> {
-    // Lock order is catalog output -> data output, never a partition mutex.
-    permit.deliver(|| match data {
-        Some(data) => data.deliver(handoff).map_err(Error::from),
-        None => Ok(handoff()),
-    }).map_err(Error::from)?
+fn deliver<T>(data: Option<&DataOutputPermit>, handoff: impl FnOnce() -> T) -> Result<T, Error> {
+    match data { Some(data)=>data.deliver(handoff).map_err(Error::from),None=>Ok(handoff()) }
 }
-fn protected<T: Serialize>(result: Result<T, Error>, permit: OutputPermit) -> Result<Response, Error> {
-    protected_data(result, permit, None)
+fn protected<T: Serialize>(result: Result<T, Error>) -> Result<Response, Error> {
+    protected_data(result, None)
 }
 fn protected_data<T: Serialize>(
-    result: Result<T, Error>, permit: OutputPermit, data: Option<DataOutputPermit>,
+    result: Result<T, Error>, data: Option<DataOutputPermit>,
 ) -> Result<Response, Error> {
     // Persistence outcome errors contain no result body. Preserve their retry
-    // classification after a data fence, while retaining every authorization
-    // handoff check. Successful data and other errors keep the data barrier.
+    // classification after a data fence. Successful data and other errors keep the data barrier.
     let data = if matches!(&result, Err(Error(_, "durable_pending" | "outcome_unknown", _))) { None } else { data };
     let encoded = match result {
         Ok(value) => admission::encode(&value)
@@ -215,7 +207,7 @@ fn protected_data<T: Serialize>(
                 .into_bytes(),
         ),
     };
-    deliver(&permit, data.as_ref(), || ())?;
+    deliver( data.as_ref(), || ())?;
     // The response may be produced by an owned task after the HTTP waiter has
     // gone away. Charge its bytes immediately, before the task-local is dropped.
     let bytes: Bytes = bytes.into();
@@ -227,13 +219,11 @@ fn protected_data<T: Serialize>(
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::CACHE_CONTROL, "no-store")
-        .body(Body::new(AuthorizedBody {
+        .body(Body::new(DataBody {
             bytes: Some(bytes),
-            permit: permit.clone(),
             data: data.clone(),
         }))
         .unwrap();
-    response.extensions_mut().insert(permit);
     if let Some(data) = data { response.extensions_mut().insert(data); }
     Ok(response)
 }
@@ -302,7 +292,7 @@ impl Service {
             .authenticate(&master_verifier())
             .await
             .map_err(|e| e.to_string())?
-            != "master"
+            != MASTER
         {
             return Err("master identity mismatch".into());
         }
@@ -366,7 +356,7 @@ impl Service {
             .await
             .map_err(|e| e.to_string())?
         {
-            let scope = service.resources.admit(format!("collection:{}", entry.collection_id), anyseek::resources::Lane::Recovery,
+            let scope = service.resources.admit(format!("collection:{}", entry.scope()), anyseek::resources::Lane::Recovery,
                 (MAX_BODY + MAX_RESPONSE) as u64).map_err(|e|e.to_string())?;
             scope.run(service.finish_collection(entry)).await.map_err(|e| e.2)?;
         }
@@ -401,7 +391,7 @@ impl Service {
         // Backup source identity is read from its authenticated descriptor.
         let namespace=std::fs::read_to_string(self.root.join("s3-namespace")).map_err(storage)?;
         if namespace.len()!=32 || !namespace.bytes().all(|b|b.is_ascii_hexdigit()) {return Err(storage("invalid S3 service namespace"));}
-        let partition_id = Sha256::digest(format!("{namespace}:{}",entry.collection_id).as_bytes())
+        let partition_id = Sha256::digest(format!("{namespace}:{}",entry.scope()).as_bytes())
             .iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         if partition_id.is_empty() || !partition_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(bad("invalid persisted S3 partition identity"));
@@ -426,7 +416,7 @@ impl Service {
         if entry.deleted {
             return Ok(());
         }
-        if self.records.read().await.contains_key(&entry.collection_id) {
+        if self.records.read().await.contains_key(&entry.scope()) {
             return Ok(());
         }
         let path = self.root.join(&entry.directory);
@@ -439,7 +429,7 @@ impl Service {
             let local_backup=entry.restore_from.as_ref().filter(|id| {
                 let root=self.root.join(format!("backup-{id}"));root.join("owner").exists() && !root.join("s3-backup.json").exists()
             });
-            let adopt=service_restore.as_ref().is_some_and(|r|r.record_seqs.contains_key(&entry.collection_id)) || local_backup.is_some();
+            let adopt=service_restore.as_ref().is_some_and(|r|r.record_seqs.contains_key(&entry.scope())) || local_backup.is_some();
             if adopt {
                 if !path.exists() && !entry.active {
                     let id=local_backup.ok_or_else(||storage("certified service restore collection missing"))?;
@@ -506,6 +496,7 @@ impl Service {
                 .execute(CatalogRequest {
                     operation_id: internal_id(format!("sys:activate:{}", entry.directory)),
                     command: CatalogCommand::ActivateCollection {
+                        tenant_id: entry.tenant_id.clone(),
                         collection_id: entry.collection_id.clone(),
                     },
                 })
@@ -514,7 +505,7 @@ impl Service {
         self.records
             .write()
             .await
-            .insert(entry.collection_id, partition);
+            .insert(entry.scope(), partition);
         Ok(())
     }
     async fn authenticate(&self, headers: &HeaderMap) -> Result<String, Error> {
@@ -535,7 +526,7 @@ impl Service {
     }
     async fn admin(&self, headers: &HeaderMap) -> Result<String, Error> {
         let key = self.authenticate(headers).await?;
-        if key != "master" {
+        if key != MASTER {
             return Err(Error(
                 StatusCode::FORBIDDEN,
                 "unauthorized",
@@ -572,18 +563,17 @@ impl Service {
         self.records
             .read()
             .await
-            .get(id)
+            .get(&format!("{key}/{id}"))
             .cloned()
             .ok_or_else(not_found)
     }
-    async fn permit(&self, key: &str) -> Result<OutputPermit, Error> {
-        Ok(self.catalog.listing(key).await?.1)
-    }
+
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeyCreate {
+    tenant_id: String,
     operation_id: OperationId,
     key_id: String,
     apikey_base64: String,
@@ -593,13 +583,6 @@ struct KeyCreate {
 struct KeyRevoke {
     operation_id: OperationId,
     key_id: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GrantChange {
-    operation_id: OperationId,
-    key_id: String,
-    allow: bool,
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all="snake_case")]
@@ -672,6 +655,19 @@ fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics)
         "limits":{"max_records":entry.config.max_records,"max_operations":entry.config.max_operations,"max_journal_bytes":entry.config.max_journal_bytes,"max_candidates":entry.config.max_candidates},
         "embedding_space_id":entry.config.embedding_space_id,"evidence_quarantined":stats.evidence_quarantined})
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TenantCreate { operation_id:OperationId, tenant_id:String }
+async fn tenants(State(s):State<Arc<Service>>,headers:HeaderMap)->Result<Response,Error>{
+    s.admin(&headers).await?;response(s.catalog.tenants().await?)
+}
+async fn create_tenant(State(s):State<Arc<Service>>,headers:HeaderMap,bytes:Bytes)->Result<Response,Error>{
+    let request:TenantCreate=parse(&bytes)?;control_id(&request.operation_id)?;
+    let admission=s.admit_control(&headers,true).await?;
+    owned(async move{let _admission=admission;s.admin(&headers).await?;
+        response(s.catalog.execute(CatalogRequest{operation_id:request.operation_id,command:CatalogCommand::AddTenant{tenant_id:request.tenant_id}}).await?)
+    }).await
+}
 async fn create_key(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -682,7 +678,7 @@ async fn create_key(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission = admission;
-        let key = s.admin(&headers).await?;
+        s.admin(&headers).await?;
         if request.key_id == "master" {
             return Err(bad("master identity is reserved"));
         }
@@ -691,12 +687,13 @@ async fn create_key(
             .execute(CatalogRequest {
                 operation_id: request.operation_id,
                 command: CatalogCommand::AddKey {
+                    tenant_id: request.tenant_id,
                     key_id: request.key_id,
                     verifier: verifier(&key_bytes(&request.apikey_base64)?),
                 },
             })
             .await?;
-        response(receipt, s.permit(&key).await?)
+        response(receipt)
     })
     .await
 }
@@ -710,7 +707,7 @@ async fn revoke_key(
     let admission = s.admit_control(&headers, true).await?;
     owned(async move {
         let _admission = admission;
-        let key = s.admin(&headers).await?;
+        s.admin(&headers).await?;
         if request.key_id == "master" {
             return Err(bad("master key cannot revoke itself"));
         }
@@ -723,44 +720,11 @@ async fn revoke_key(
                 },
             })
             .await?;
-        response(receipt, s.permit(&key).await?)
+        response(receipt)
     })
     .await
 }
-async fn grants(
-    State(s): State<Arc<Service>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    bytes: Bytes,
-) -> Result<Response, Error> {
-    let request: GrantChange = parse(&bytes)?;
-    control_id(&request.operation_id)?;
-    let admission = s.admit_control(&headers, true).await?;
-    owned(async move {
-        let _admission = admission;
-        let key = s.admin(&headers).await?;
-        let command = if request.allow {
-            CatalogCommand::Grant {
-                collection_id: id,
-                key_id: request.key_id,
-            }
-        } else {
-            CatalogCommand::RevokeGrant {
-                collection_id: id,
-                key_id: request.key_id,
-            }
-        };
-        let receipt = s
-            .catalog
-            .execute(CatalogRequest {
-                operation_id: request.operation_id,
-                command,
-            })
-            .await?;
-        response(receipt, s.permit(&key).await?)
-    })
-    .await
-}
+
 async fn create_collection(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
@@ -775,8 +739,7 @@ async fn create_collection(
         let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
         let key = s.authenticate(&headers).await?;
-        // Creation grants only a new collection to its creator; existing grants
-        // can be changed exclusively through the master control plane.
+        // The authenticated tenant owns the new collection independently of this key.
         let operation_id = request.operation_id.clone();
         let id = request.collection_id.clone();
         let config = record_config(request.config, request.embedding_space_id, request.capacity_profile)
@@ -788,7 +751,7 @@ async fn create_collection(
                 operation_id: request.operation_id,
                 command: CatalogCommand::PrepareCollection {
                     collection_id: id.clone(),
-                    owner_key: key.clone(),
+                    tenant_id: key.clone(),
                     config,
                 },
             })
@@ -798,13 +761,12 @@ async fn create_collection(
             .collections()
             .await?
             .into_iter()
-            .find(|e| e.collection_id == id)
+            .find(|e| e.tenant_id == key && e.collection_id == id)
             .ok_or_else(not_found)?;
         s.finish_collection(entry).await?;
-        let (_, permit) = s.catalog.authorized(key, id.clone(), |_| async {}).await?;
+        let _ = s.catalog.authorized(key, id.clone(), |_| async {}).await?;
         response(
             json!({"collection_id":id,"operation_id":operation_id}),
-            permit,
         )
     })
     .await
@@ -814,14 +776,14 @@ async fn list_collections(
     headers: HeaderMap,
 ) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
-    let (entries, permit) = s.catalog.listing(&key).await?;
+    let entries = s.catalog.listing(&key).await?;
     let mut info = vec![];
     let mut data = vec![];
     for entry in entries {
         let p = s.record(&key, &entry.collection_id).await?;
         data.push(p.output_permit()?);
         let id = entry.collection_id.clone();
-        let (value, _) = s
+        let value = s
             .catalog
             .authorized(
                 key.clone(),
@@ -831,10 +793,10 @@ async fn list_collections(
             .await?;
         match value {
             Ok(stats) => info.push(index_info(&entry, stats)),
-            Err(e) => return protected_data::<Value>(Err(e.into()), permit, Some(DataOutputPermit::combine(data))),
+            Err(e) => return protected_data::<Value>(Err(e.into()), Some(DataOutputPermit::combine(data))),
         }
     }
-    protected_data(Ok(info), permit, Some(DataOutputPermit::combine(data)))
+    protected_data(Ok(info), Some(DataOutputPermit::combine(data)))
 }
 async fn info(
     State(s): State<Arc<Service>>,
@@ -844,13 +806,13 @@ async fn info(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit()?;
-    let (value, permit) = s
+    let value = s
         .catalog
         .authorized(key, id, move |entry| async move {
             p.statistics().await.map(|stats| index_info(&entry, stats))
         })
         .await?;
-    protected_data(value.map_err(Into::into), permit, Some(data))
+    protected_data(value.map_err(Into::into), Some(data))
 }
 async fn write(
     State(s): State<Arc<Service>>,
@@ -871,7 +833,7 @@ async fn write(
     let operation_id = request.operation_id.clone();
     #[cfg(feature = "fault-injection")]
     let pause_collection = id.clone();
-    let (result, permit) = s
+    let result = s
         .catalog
         .authorized(key, id, move |_| async move {
             #[cfg(feature = "fault-injection")]
@@ -879,7 +841,7 @@ async fn write(
             p.write(request).await
         })
         .await?;
-    protected(result.map(|receipt|json!({"receipt":receipt,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()})).map_err(Into::into),permit)
+    protected(result.map(|receipt|json!({"receipt":receipt,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()})).map_err(Into::into))
 }
 
 // Committed non-atomic ingestion; derived indexes are asynchronous.
@@ -899,7 +861,7 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
     let operations: Vec<_> = request.records.iter().map(|r| r.operation_id.clone()).collect();
     #[cfg(feature = "fault-injection")]
     let pause_collection = id.clone();
-    let (result, permit) = s.catalog.authorized(key, id, move |_| async move {
+    let result = s.catalog.authorized(key, id, move |_| async move {
         let _gate = gate;
         #[cfg(feature = "fault-injection")]
         pause_authorized_for_test(&pause_collection).await?;
@@ -908,7 +870,7 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
     use anyseek::record::{CommittedBatch, CommittedItem};
     let batch = match result {
         Ok(batch) => batch,
-        Err(error @ (RecordError::Rejected(_) | RecordError::Conflict(_) | RecordError::OperationExpired)) => return protected(Err::<Value,_>(error.into()), permit),
+        Err(error @ (RecordError::Rejected(_) | RecordError::Conflict(_) | RecordError::OperationExpired)) => return protected(Err::<Value,_>(error.into())),
         Err(error) => {
             let unknown = matches!(error, RecordError::OutcomeUnknown(_));
             CommittedBatch { results: operations.iter().map(|_| if unknown {CommittedItem::OutcomeUnknown} else {CommittedItem::NotAttempted}).collect(), stop: Some(error) }
@@ -928,17 +890,17 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
     }).collect();
     let body=json!({"atomic":false,"searchability":"asynchronous","results":rows,
         "error":stop.map(|error|json!({"code":error.1,"message":error.2}))});
-    let mut response = response(body, permit)?;
+    let mut response = response(body)?;
     *response.status_mut() = status;
     Ok(response)
 }
 async fn ingest_progress(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
     let partition = s.record(&key, &id).await?;
-    let (progress, permit) = s.catalog.authorized(key, id, move |_| async move {
+    let progress = s.catalog.authorized(key, id, move |_| async move {
         partition.committed_progress().await
     }).await?;
-    response(progress, permit)
+    response(progress)
 }
 async fn ingest_operation(state: State<Arc<Service>>, headers: HeaderMap, path: Path<(String,u64,String)>) -> Result<Response, Error> {
     operation(state, headers, path).await
@@ -964,8 +926,8 @@ async fn generation_status(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit()?;
-    let (result, permit) = s.catalog.authorized(key, id, move |_| async move { p.generation_status(&record_id).await }).await?;
-    protected_data(result.map_err(Error::from).and_then(|status| status.ok_or_else(not_found)), permit, Some(data))
+    let result = s.catalog.authorized(key, id, move |_| async move { p.generation_status(&record_id).await }).await?;
+    protected_data(result.map_err(Error::from).and_then(|status| status.ok_or_else(not_found)), Some(data))
 }
 async fn record_status(
     State(s): State<Arc<Service>>, headers: HeaderMap, Path((id, record_id)): Path<(String, String)>,
@@ -973,8 +935,8 @@ async fn record_status(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit()?;
-    let (result, permit) = s.catalog.authorized(key, id, move |_| async move { p.record_status(&record_id).await }).await?;
-    protected_data(result.map_err(Error::from).and_then(|status| status.ok_or_else(not_found)), permit, Some(data))
+    let result = s.catalog.authorized(key, id, move |_| async move { p.record_status(&record_id).await }).await?;
+    protected_data(result.map_err(Error::from).and_then(|status| status.ok_or_else(not_found)), Some(data))
 }
 async fn read(
     State(s): State<Arc<Service>>,
@@ -985,7 +947,7 @@ async fn read(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit()?;
-    let (result, permit) = s
+    let result = s
         .catalog
         .authorized(key, id, move |_| async move { p.get(&record_id).await })
         .await?;
@@ -1001,7 +963,7 @@ async fn read(
             }
             record
         });
-    protected_data(value, permit, Some(data))
+    protected_data(value, Some(data))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1026,7 +988,7 @@ async fn iterate(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit()?;
-    let (result, permit) = s
+    let result = s
         .catalog
         .authorized(key, id, move |_| async move {
             let mut page = p.page(request.cursor, request.length).await?;
@@ -1040,29 +1002,29 @@ async fn iterate(
             Ok::<_, RecordError>(page)
         })
         .await?;
-    protected_data(result.map_err(Into::into), permit, Some(data))
+    protected_data(result.map_err(Into::into), Some(data))
 }
 async fn evidence_excerpt(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
     let reference:anyseek::record::EvidenceRef=parse(&bytes)?;
     let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
-    let(result,permit)=s.catalog.authorized(key,id,move |_|async move {p.evidence_excerpt(reference).await}).await?;
-    protected_data(result.map_err(Into::into),permit,Some(data))
+    let result =s.catalog.authorized(key,id,move |_|async move {p.evidence_excerpt(reference).await}).await?;
+    protected_data(result.map_err(Into::into),Some(data))
 }
 async fn entities(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
     let request:PageRequest=parse(&bytes)?;
     let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
-    let(result,permit)=s.catalog.authorized(key,id,move |_|async move {
+    let result =s.catalog.authorized(key,id,move |_|async move {
         let mut page=p.entities(request.cursor,request.length).await?;
         if !request.fields.is_empty(){for record in &mut page.records {if let Some(doc)=record.document.as_mut(){doc.retain(|field,_|request.fields.contains(field));}}}
         Ok::<_,RecordError>(page)
     }).await?;
-    protected_data(result.map_err(Into::into),permit,Some(data))
+    protected_data(result.map_err(Into::into),Some(data))
 }
 async fn neighbors(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
     let request:anyseek::record::NeighborRequest=parse(&bytes)?;
     let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
-    let(result,permit)=s.catalog.authorized(key,id,move |_|async move {p.neighbors(request).await}).await?;
-    protected_data(result.map_err(Into::into),permit,Some(data))
+    let result =s.catalog.authorized(key,id,move |_|async move {p.neighbors(request).await}).await?;
+    protected_data(result.map_err(Into::into),Some(data))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1093,7 +1055,7 @@ async fn batch(
     }
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
-    let (result, permit) = s.catalog.authorized(key, id, move |_| async move {
+    let result = s.catalog.authorized(key, id, move |_| async move {
         let mut rows = Vec::new();
         let mut stopped = false;
         for write in request.writes {
@@ -1110,7 +1072,7 @@ async fn batch(
         }
         json!({"atomic":false,"results":rows})
     }).await?;
-    response(result, permit)
+    response(result)
 }
 #[derive(Deserialize)]
 #[serde(tag = "select", rename_all = "snake_case", deny_unknown_fields)]
@@ -1130,7 +1092,7 @@ async fn deletion_plan(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit()?;
-    let (result, permit) = s.catalog.authorized(key, id, move |entry| async move {
+    let result = s.catalog.authorized(key, id, move |entry| async move {
         let (seq, records) = match selection {
             DeleteSelection::Query { query } => {
                 if query.relation_fusion.is_some() || query.query_vector.is_some() || query.similarity_threshold.is_some() || query.query_string.trim().is_empty() {
@@ -1157,7 +1119,7 @@ async fn deletion_plan(
         let targets: Vec<_> = records.into_iter().map(|r| json!({"record_id":r.record_id,"routing_key":r.routing_key,"expected":{"Match":r.version},"document":null})).collect();
         Ok::<_,Error>(json!({"visible_seq":seq,"targets":targets,"atomic":false,"instruction":"Persist targets with one original operation_id each before executing /batch; retries must reuse the saved requests, never regenerate the selection."}))
     }).await?;
-    protected_data(result, permit, Some(data))
+    protected_data(result, Some(data))
 }
 
 async fn operation(
@@ -1169,23 +1131,22 @@ async fn operation(
     let p = s.record(&key, &id).await?;
     let operation_id = OperationId { epoch, nonce };
     let lookup = operation_id.clone();
-    let (result, permit) = s
+    let result = s
         .catalog
         .authorized(key, id, move |_| async move { p.operation(&lookup).await })
         .await?;
-    protected(result.map(|receipt|json!({"operation_id":operation_id,"receipt":receipt,"expires_at":operation_id.expires_at_unix_seconds(),"absence_proves_failure":false})).map_err(Into::into),permit)
+    protected(result.map(|receipt|json!({"operation_id":operation_id,"receipt":receipt,"expires_at":operation_id.expires_at_unix_seconds(),"absence_proves_failure":false})).map_err(Into::into))
 }
 async fn catalog_operation(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
     Path((epoch, nonce)): Path<(u64, String)>,
 ) -> Result<Response, Error> {
-    let key = s.admin(&headers).await?;
+    s.admin(&headers).await?;
     let id = OperationId { epoch, nonce };
     let result = s.catalog.operation(&id).await?;
     response(
         json!({"receipt":result,"absence_proves_failure":false}),
-        s.permit(&key).await?,
     )
 }
 #[derive(Deserialize)]
@@ -1267,14 +1228,14 @@ async fn service_backup(
     owned(async move {
         let _admission=admission;let _control=s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        let key=s.admin(&headers).await?;
+        s.admin(&headers).await?;
         s.catalog.operation(&request.operation_id).await?; // epoch admission, never infer absence = failure
         let id=verifier(&serde_json::to_vec(&("service-backup",&request.operation_id)).map_err(bad)?);
         let target=s.root.join(format!("service-backup-{id}"));
         service_budget(&s.root,"service-backup-",&target)?;
         if let Some(receipt)=Catalog::completed_service_backup(&target)? {
             if receipt.identity!=id {return Err(bad("backup request identity reused"));}
-            return response(json!({"backup_id":id,"snapshot":receipt,"operation_id":request.operation_id,"scope":"catalog, all retained collections and live collection backups; no recursive service archives"}),s.permit(&key).await?);
+            return response(json!({"backup_id":id,"snapshot":receipt,"operation_id":request.operation_id,"scope":"catalog, all retained collections and live collection backups; no recursive service archives"}));
         }
         let records=s.records.read().await.clone();
         let temporary=s.root.join(format!(".s3-service-export-{:032x}",rand::random::<u128>()));
@@ -1290,9 +1251,9 @@ async fn service_backup(
             // a standalone journal or silently omit its authoritative state.
             for entry in &entries {
                 let path=s.root.join(&entry.directory);
-                if records.contains_key(&entry.collection_id) || (!entry.initialized && !path.exists()) {continue;}
+                if records.contains_key(&entry.scope()) || (!entry.initialized && !path.exists()) {continue;}
                 let config=s.s3_record_config(entry)?.ok_or_else(||storage("S3 configuration missing"))?;
-                let p=if let Some(proof)=restored.as_ref().filter(|r|r.record_seqs.contains_key(&entry.collection_id)) {
+                let p=if let Some(proof)=restored.as_ref().filter(|r|r.record_seqs.contains_key(&entry.scope())) {
                     RecordPartition::adopt_s3_snapshot(&path,entry.config.clone(),config,&proof.identity).await?
                 } else {RecordPartition::open_s3(&path,entry.config.clone(),config).await?};
                 let destination=temporary.join(&entry.directory);
@@ -1308,7 +1269,7 @@ async fn service_backup(
                 let marker_path=row.path().join("s3-backup.json");
                 if !marker_path.exists(){continue;}
                 let marker:S3BackupMarker=serde_json::from_slice(&std::fs::read(marker_path).map_err(storage)?).map_err(storage)?;
-                let entry=entries.iter().find(|e|e.collection_id==marker.collection_id).ok_or_else(||storage("backup collection missing"))?;
+                let entry=entries.iter().find(|e|s.s3_record_config(e).ok().flatten().is_some_and(|c|c.partition_id==marker.partition_id)).ok_or_else(||storage("backup collection missing"))?;
                 let mut config=s.s3_record_config(entry)?.ok_or_else(||storage("S3 configuration missing"))?;
                 config.authority_path=temporary.join(format!("{backup_id}.sqlite"));
                 let destination=temporary.join(backup_id);
@@ -1320,7 +1281,7 @@ async fn service_backup(
         }.await;
         if temporary.exists(){let _=std::fs::remove_dir_all(&temporary);}
         let receipt=result?;
-        response(json!({"backup_id":id,"snapshot":receipt,"operation_id":request.operation_id,"scope":"catalog, all retained collections and live collection backups; no recursive service archives"}),s.permit(&key).await?)
+        response(json!({"backup_id":id,"snapshot":receipt,"operation_id":request.operation_id,"scope":"catalog, all retained collections and live collection backups; no recursive service archives"}))
     }).await
 }
 async fn service_restore(
@@ -1335,20 +1296,20 @@ async fn service_restore(
     owned(async move {
         let _admission=admission;let _control=s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        let key=s.admin(&headers).await?;s.catalog.operation(&request.operation_id).await?;
+        s.admin(&headers).await?;s.catalog.operation(&request.operation_id).await?;
         let id=verifier(&serde_json::to_vec(&("service-restore",&request.operation_id)).map_err(bad)?);
         let parent=s.root.parent().ok_or_else(||bad("missing service parent"))?;
         let name=format!("restored-service-{id}");let target=parent.join(&name);
         service_budget(parent,"restored-service-",&target)?;
         if let Some(receipt)=Catalog::completed_service_restore(&target)? {
             if receipt.identity!=id || receipt.restored_from.as_ref()!=Some(&request.backup_id){return Err(bad("restore request identity reused"));}
-            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}),s.permit(&key).await?);
+            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}));
         }
 
         let guard=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(parent.join(format!(".seekpower-service-{name}.lock"))).map_err(storage)?;
         guard.try_lock().map_err(storage)?;
         let receipt=Catalog::restore_service(s.root.join(format!("service-backup-{}",request.backup_id)),target.clone(),id,master_verifier()).await?;
-        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}),s.permit(&key).await?)
+        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}))
     }).await
 }
 async fn create_s3_backup_pointer(
@@ -1434,17 +1395,21 @@ async fn backup(
         let _writes = s.write_gate.write().await;
         let key = s.authenticate(&headers).await?;
         let p = s.record(&key, &id).await?;
-        let identity = serde_json::to_vec(&(id.clone(), &request.operation_id)).map_err(bad)?;
+        let identity = serde_json::to_vec(&(key.clone(),id.clone(), &request.operation_id)).map_err(bad)?;
         let backup_id = verifier(&identity);
         if s.catalog.retired_backups().await?.contains(&backup_id) {
             return Err(Error(StatusCode::GONE,"backup_retired","backup identity was permanently retired".into()));
         }
+        s.catalog.execute(CatalogRequest{
+            operation_id:internal_id(format!("sys:backup:{backup_id}")),
+            command:CatalogCommand::RegisterBackup{tenant_id:key.clone(),collection_id:id.clone(),backup_id:backup_id.clone()},
+        }).await?;
         let path = s.root.join(format!("backup-{backup_id}"));
         let root = s.root.clone();
         let oid = request.operation_id.clone();
         let collection_id = id.clone();
         let s3_mode = std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref() == Ok("s3");
-        let (result, permit) = s.catalog.authorized(key, id, move |entry| async move {
+        let result = s.catalog.authorized(key, id, move |entry| async move {
             p.operation(&oid).await?;
             let seq = if s3_mode {
                 create_s3_backup_pointer(&p, &path, &root, &backup_id, &collection_id, &entry.config).await?
@@ -1462,16 +1427,16 @@ async fn backup(
                     p.checkpoint(&path).await?
                 }
             };
-            Ok::<_,Error>(json!({"backup_id":backup_id,"visible_seq":seq,"operation_id":request.operation_id,"expires_at":request.operation_id.expires_at_unix_seconds(),"scope":"collection data/configuration/versions/operation receipts; grants are not restored"}))
+            Ok::<_,Error>(json!({"backup_id":backup_id,"visible_seq":seq,"operation_id":request.operation_id,"expires_at":request.operation_id.expires_at_unix_seconds(),"scope":"collection data/configuration/versions/operation receipts; credentials are not restored"}))
         }).await?;
-        protected(result, permit)
+        protected(result)
     }).await
 }
 async fn list_backups(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
 ) -> Result<Response, Error> {
-    let key = s.admin(&headers).await?;
+    s.admin(&headers).await?;
     let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
     s.admin(&headers).await?;
@@ -1489,7 +1454,7 @@ async fn list_backups(
             }
         }
     }
-    response(ids.into_iter().map(|id|json!({"backup_id":id,"retired":retired.contains(&id),"on_disk":s.root.join(format!("backup-{id}")).exists()})).collect::<Vec<_>>(),s.permit(&key).await?)
+    response(ids.into_iter().map(|id|json!({"backup_id":id,"retired":retired.contains(&id),"on_disk":s.root.join(format!("backup-{id}")).exists()})).collect::<Vec<_>>())
 }
 // Catalog retirement has already fenced restores/readers before this helper.
 // A pointer is metadata, not a PartitionJournal; absent/partial pointer directories
@@ -1532,10 +1497,10 @@ async fn retire_backup(
         let _admission=admission;
         let _control=s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        let key=s.admin(&headers).await?;
+        s.admin(&headers).await?;
         let receipt=s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::RetireBackup { backup_id:id.clone() } }).await?;
         let cleanup=cleanup_retired_backup(&s.root,&id).await;
-        response(json!({"receipt":receipt,"backup_id":id,"retired":true,"cleanup_pending":cleanup.is_err(),"cleanup_error":cleanup.err()}),s.permit(&key).await?)
+        response(json!({"receipt":receipt,"backup_id":id,"retired":true,"cleanup_pending":cleanup.is_err(),"cleanup_error":cleanup.err()}))
     }).await
 }
 
@@ -1547,16 +1512,17 @@ async fn restore(
     let request: RestoreRequest = parse(&bytes)?;
     control_id(&request.operation_id)?;
     validate_backup_id(&request.backup_id)?;
-    let admission = s.admit_control(&headers, true).await?;
+    let admission = s.admit_control(&headers, false).await?;
     owned(async move {
         let _admission = admission;
         let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        let key = s.admin(&headers).await?;
-        let existing = s.catalog.collections().await?.into_iter().find(|e| e.collection_id==request.collection_id);
+        let key = s.authenticate(&headers).await?;
+        s.catalog.require_backup(&key,&request.backup_id).await?;
+        let existing = s.catalog.collections().await?.into_iter().find(|e| e.tenant_id==key && e.collection_id==request.collection_id);
         let s3_mode = std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref() == Ok("s3");
         let config = if let Some(entry) = existing {
-            if entry.owner_key!=key || entry.restore_from.as_ref()!=Some(&request.backup_id) { return Err(bad("collection identity belongs to another creation intent")); }
+            if entry.tenant_id!=key || entry.restore_from.as_ref()!=Some(&request.backup_id) { return Err(bad("collection identity belongs to another creation intent")); }
             entry.config
         } else {
             if s.catalog.retired_backups().await?.contains(&request.backup_id) { return Err(Error(StatusCode::GONE,"backup_retired","backup identity was retired".into())); }
@@ -1578,14 +1544,14 @@ async fn restore(
         let operation_id = request.operation_id.clone();
         let id = request.collection_id;
         s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::PrepareRestore {
-            collection_id:id.clone(), owner_key:key.clone(), config, backup_id:request.backup_id,
+            collection_id:id.clone(), tenant_id:key.clone(), config, backup_id:request.backup_id,
         }}).await?;
-        let entry = s.catalog.collections().await?.into_iter().find(|e|e.collection_id==id).ok_or_else(not_found)?;
+        let entry = s.catalog.collections().await?.into_iter().find(|e|e.tenant_id==key && e.collection_id==id).ok_or_else(not_found)?;
         if entry.deleted { return Err(bad("restored collection has since been deleted")); }
         s.finish_collection(entry).await?;
-        let (_, permit) = s.catalog.authorized(key.clone(), id.clone(), |_|async {}).await?;
+        let _ = s.catalog.authorized(key.clone(), id.clone(), |_|async {}).await?;
         let stats = s.record(&key, &id).await?.statistics().await?;
-        response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds(),"evidence_quarantined":stats.evidence_quarantined}), permit)
+        response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds(),"evidence_quarantined":stats.evidence_quarantined}))
     }).await
 }
 
@@ -1602,29 +1568,29 @@ async fn delete_collection(
 ) -> Result<Response, Error> {
     let request: DeleteCollectionRequest = parse(&bytes)?;
     control_id(&request.operation_id)?;
-    let admission = s.admit_control(&headers, true).await?;
+    let admission = s.admit_control(&headers, false).await?;
     owned(async move {
         let _admission = admission;
         // Keep deletion ordered with multi-phase restore workflows.
-        // Key/grant revocation uses its own catalog barriers and can bypass this.
+        // Credential revocation does not wait for this lifecycle workflow.
         let _control = s.control.lock().await;
         let _writes = s.write_gate.write().await;
-        let key = s.admin(&headers).await?;
+        let key = s.authenticate(&headers).await?;
         let receipt = s
             .catalog
             .execute(CatalogRequest {
                 operation_id: request.operation_id,
                 command: CatalogCommand::DeleteCollection {
+                    tenant_id: key.clone(),
                     collection_id: id.clone(),
                 },
             })
             .await?;
         // No physical deletion while mmap owners may remain. The durable catalog
         // tombstone prevents serving or reopening this identity after a restart.
-        s.records.write().await.remove(&id);
+        s.records.write().await.remove(&format!("{key}/{id}"));
         response(
             json!({"receipt":receipt,"deleted":true,"physical_reclamation":"deferred"}),
-            s.permit(&key).await?,
         )
     })
     .await
@@ -1638,21 +1604,21 @@ async fn checkpoint(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let current = p.clone();
-    let (result, permit) = s
+    let result = s
         .catalog
         .authorized(key, id, move |_| async move {
             p.start_index_committed(std::time::Duration::from_secs(30))
         })
         .await?;
-    // Authorization protects admission and delivery. Waiting outside the catalog
-    // guard permits foreground writes and immediate grant revocation during build.
+    // Lifecycle coordination protects admission. Waiting outside the catalog
+    // guard permits foreground writes during build.
     let result = match result { Ok(job) => job.finish().await, Err(error) => Err(error) };
     let result = match result {
         Ok(indexed_seq) => current.statistics().await.map(|statistics|
             json!({"visible_seq":statistics.visible_seq,"indexed_seq":indexed_seq})),
         Err(error) => Err(error),
     };
-    protected(result.map_err(Into::into),permit)
+    protected(result.map_err(Into::into))
 }
 async fn query(
     State(s): State<Arc<Service>>,
@@ -1668,7 +1634,7 @@ async fn query(
     if request.query_vector.is_none() && request.similarity_threshold.is_some() {
         return Err(bad("similarity_threshold requires query_vector"));
     }
-    let (result,permit)=s.catalog.authorized(key,id,move|entry|async move{
+    let result =s.catalog.authorized(key,id,move|entry|async move{
         let start=std::time::Instant::now();
         let vector=request.query_vector.as_ref().map(|value|anyseek::vector::parse_external_embedding(value,&entry.config.index.inference)).transpose().map_err(bad)?;
         let query=RecordQuery{temporal:request.temporal.clone(),text:request.query_string.clone(),vector,mode,query_type:request.query_type(),offset:request.offset,length:request.length,result_type:request.result_type(),fields:request.field_filter,filters:request.facet_filter,sort:request.result_sort};
@@ -1676,21 +1642,15 @@ async fn query(
         let hits:Vec<_>=result.hits.into_iter().map(|mut hit|{if let Some(doc)=hit.record.document.as_mut(){doc.retain(|field,_|entry.config.schema.iter().any(|f|f.field==*field&&f.store)&&(request.fields.is_empty()||request.fields.contains(field)));}hit}).collect();
         Ok::<_,Error>(json!({"original_query":request.query_string,"query":request.query_string,"time":start.elapsed().as_nanos(),"offset":request.offset,"length":request.length,"count":hits.len(),"count_total":request.count.then_some(result.count_total),"query_terms":result.query_terms,"hits":hits,"visible_seq":result.visible_seq,"evaluation_time_ms":result.evaluation_time_ms,"statistics":result.statistics,"fusion":result.fusion}))
     }).await?;
-    protected_data(result, permit, Some(data))
+    protected_data(result, Some(data))
 }
 
-// Last application handoff, covering status/headers as well as the later body
-// frame handoff. No await is permitted after the final authorization check.
+// Keep source/data validity checks at headers and body handoff; no credential recheck.
 async fn delivery_gate(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let response = next.run(request).await;
     let data = response.extensions().get::<DataOutputPermit>().cloned();
-    match response.extensions().get::<OutputPermit>().cloned() {
-        Some(permit) => match deliver(&permit, data.as_ref(), || response) {
-            Ok(response) => response,
-            Err(e) => e.into_response(),
-        },
-        None => response,
-    }
+    match deliver(data.as_ref(), || response) { Ok(response)=>response, Err(error)=>error.into_response() }
+
 }
 struct AdmissionBody {
     inner: Body,
@@ -1766,6 +1726,7 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
             "/api/v1/apikey",
             get(list_collections).post(create_key).delete(revoke_key),
         )
+        .route("/api/v1/tenants",get(tenants).post(create_tenant))
         .route("/api/v1/index", post(create_collection))
         .route("/api/v1/restore", post(restore))
         .route("/api/v1/index/{id}/doc/{record_id}/status", get(record_status))
@@ -1779,7 +1740,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
             "/api/v1/index/{id}",
             get(info).patch(checkpoint).delete(delete_collection),
         )
-        .route("/api/v1/index/{id}/grants", post(grants))
         .route(
             "/api/v1/index/{id}/doc",
             post(write).patch(write).delete(write),
@@ -1904,50 +1864,57 @@ mod tests {
         assert!(!owned.exists());assert!(foreign.exists());assert!(file.exists());
         drop(service);std::fs::remove_dir_all(root).unwrap();
     }
-    async fn setup() -> (Arc<Service>, PathBuf, HeaderMap) {
-        let path = path();
-        let service = Service::open(&path, std::num::NonZeroUsize::new(200).unwrap())
-            .await
-            .unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "apikey",
-            STANDARD
-                .encode(Sha256::digest(crate::MASTER_KEY_SECRET.as_bytes()))
-                .parse()
-                .unwrap(),
-        );
-        let create = json!({"operation_id":OperationId::new("create".into()),"collection_id":"c","config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
-        create_collection(
-            State(service.clone()),
-            headers.clone(),
-            serde_json::to_vec(&create).unwrap().into(),
-        )
-        .await
-        .unwrap();
-        service
-            .catalog
-            .execute(CatalogRequest {
-                operation_id: OperationId::new("key".into()),
-                command: CatalogCommand::AddKey {
-                    key_id: "a".into(),
-                    verifier: verifier(&[7; 32]),
-                },
-            })
-            .await
-            .unwrap();
-        service
-            .catalog
-            .execute(CatalogRequest {
-                operation_id: OperationId::new("grant".into()),
-                command: CatalogCommand::Grant {
-                    collection_id: "c".into(),
-                    key_id: "a".into(),
-                },
-            })
-            .await
-            .unwrap();
-        (service, path, headers)
+    fn master_headers()->HeaderMap{
+        let mut headers=HeaderMap::new();headers.insert("apikey",STANDARD.encode(Sha256::digest(crate::MASTER_KEY_SECRET.as_bytes())).parse().unwrap());headers
+    }
+    async fn setup() -> (Arc<Service>,PathBuf,HeaderMap) {
+        let path=path();let service=Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("tenant".into()),command:CatalogCommand::AddTenant{tenant_id:"tenant".into()}}).await.unwrap();
+        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("key".into()),command:CatalogCommand::AddKey{key_id:"a".into(),tenant_id:"tenant".into(),verifier:verifier(&[7;32])}}).await.unwrap();
+        let mut headers=HeaderMap::new();headers.insert("apikey",STANDARD.encode([7;32]).parse().unwrap());
+        let create=json!({"operation_id":OperationId::new("create".into()),"collection_id":"c","config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
+        create_collection(State(service.clone()),headers.clone(),serde_json::to_vec(&create).unwrap().into()).await.unwrap();
+        (service,path,headers)
+    }
+    async fn tenant_api(app:&Router,method:&str,path:&str,key:&str,value:Option<Value>)->(StatusCode,Value){
+        use tower::ServiceExt;
+        let body=value.map(|v|serde_json::to_vec(&v).unwrap()).unwrap_or_default();
+        let request=axum::http::Request::builder().method(method).uri(path).header("apikey",key).header("content-type","application/json").body(Body::from(body)).unwrap();
+        let response=app.clone().oneshot(request).await.unwrap();let status=response.status();
+        let value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();(status,value)
+    }
+    #[tokio::test]
+    async fn tenant_http_boundaries_same_names_backup_ownership_and_master_management_only(){
+        let(service,path,headers)=setup().await;let app=router(service.clone());
+        let tenant=headers["apikey"].to_str().unwrap();let master=master_headers();let master=master["apikey"].to_str().unwrap();
+        let op=|n:&str|OperationId::new(n.into());
+        assert_eq!(tenant_api(&app,"POST","/api/v1/tenants",master,Some(json!({"tenant_id":"other","operation_id":op("other")}))).await.0,StatusCode::OK);
+        let other=STANDARD.encode([8;32]);
+        let key=json!({"tenant_id":"other","key_id":"other","apikey_base64":other,"operation_id":op("other-key")});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/apikey",master,Some(key.clone())).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/apikey",tenant,Some(key)).await.0,StatusCode::FORBIDDEN);
+        assert_eq!(tenant_api(&app,"GET","/api/v1/tenants",tenant,None).await.0,StatusCode::FORBIDDEN);
+        for endpoint in ["/api/v1/apikey","/api/v1/index/c","/api/v1/index/c/doc/r"]{
+            assert_eq!(tenant_api(&app,"GET",endpoint,master,None).await.0,StatusCode::FORBIDDEN);
+        }
+        assert_eq!(tenant_api(&app,"GET","/api/v1/index/c",&other,None).await.0,StatusCode::FORBIDDEN);
+        let create=json!({"collection_id":"c","config":{"index_name":"other","schema":[{"field":"body","field_type":"Text"}]},"operation_id":op("create")});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index",&other,Some(create)).await.0,StatusCode::OK);
+        let write=json!({"operation_id":op("write"),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"tenant private"}});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",tenant,Some(write.clone())).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"GET","/api/v1/index/c/doc/r",&other,None).await.0,StatusCode::NOT_FOUND);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",&other,Some(write)).await.0,StatusCode::OK);
+        let (status,backup)=tenant_api(&app,"POST","/api/v1/index/c/backup",tenant,Some(json!({"operation_id":op("backup")}))).await;
+        assert_eq!(status,StatusCode::OK);
+        let restore=json!({"collection_id":"copy","backup_id":backup["backup_id"],"operation_id":op("restore")});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/restore",&other,Some(restore.clone())).await.0,StatusCode::FORBIDDEN);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/restore",tenant,Some(restore)).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"GET","/api/v1/index/copy/doc/r",tenant,None).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"GET","/api/v1/index/copy/doc/r",&other,None).await.0,StatusCode::FORBIDDEN);
+        let unknown=json!({"tenant_id":"absent","key_id":"invalid","apikey_base64":STANDARD.encode([9;32]),"operation_id":op("invalid-key")});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/apikey",master,Some(unknown)).await.0,StatusCode::BAD_REQUEST);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/grants",master,Some(json!({}))).await.0,StatusCode::NOT_FOUND);
+        drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn committed_ingest_http_receipts_rejections_and_lookup() {
@@ -1966,7 +1933,7 @@ mod tests {
         assert_eq!(rejected["results"][0]["error"]["code"],"conflict");
         let mut missing=body.clone(); missing["records"][0].as_object_mut().unwrap().remove("document");
         let rejected=app.clone().oneshot(make(&missing)).await.unwrap(); assert_eq!(rejected.status(),StatusCode::BAD_REQUEST); drop(rejected);
-        let partition=service.record("master","c").await.unwrap();
+        let partition=service.record("tenant","c").await.unwrap();
         // A synchronous exact replay joins the asynchronous consumers without creating another durable log.
         partition.write(serde_json::from_value(body["records"][0].clone()).unwrap()).await.unwrap();
         drop(partition);
@@ -1976,13 +1943,13 @@ mod tests {
         drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
-    async fn committed_ingest_response_and_status_remain_subject_to_revocation() {
+    async fn committed_response_survives_revoke_but_new_requests_fail() {
         let (service,path,_)=setup().await; let mut headers=HeaderMap::new(); headers.insert("apikey",STANDARD.encode([7;32]).parse().unwrap());
         let body=json!({"records":[{"operation_id":OperationId::new("committed-revoke".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha"}}]});
         let response=ingest(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&body).unwrap().into()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
-        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-committed".into()),command:CatalogCommand::RevokeGrant{collection_id:"c".into(),key_id:"a".into()}}).await.unwrap();
-        assert!(axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.is_err()); assert!(ingest_progress(State(service.clone()),headers,Path("c".into())).await.is_err());
-        let partition=service.record("master","c").await.unwrap();
+        service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-committed".into()),command:CatalogCommand::RevokeKey{key_id:"a".into()}}).await.unwrap();
+        assert!(axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.is_ok()); assert!(ingest_progress(State(service.clone()),headers,Path("c".into())).await.is_err());
+        let partition=service.record("tenant","c").await.unwrap();
         partition.write(serde_json::from_value(body["records"][0].clone()).unwrap()).await.unwrap();
         drop(partition); drop(service); std::fs::remove_dir_all(path).unwrap();
     }
@@ -1993,69 +1960,7 @@ mod tests {
         let _ = stream.read_to_end(&mut bytes).await;
         bytes
     }
-    #[tokio::test]
-    async fn service_real_http_revocation_blocks_prepared_error_and_success_bodies() {
-        for missing in [false, true] {
-            let (service, path, headers) = setup().await;
-            let doc = json!({"operation_id":OperationId::new("write".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"secret-original"}});
-            write(
-                State(service.clone()),
-                headers.clone(),
-                Path("c".into()),
-                serde_json::to_vec(&doc).unwrap().into(),
-            )
-            .await
-            .unwrap();
-            let entered = Arc::new(tokio::sync::Notify::new());
-            let release = Arc::new(tokio::sync::Notify::new());
-            let e = entered.clone();
-            let r = release.clone();
-            let app = router(service.clone())
-                .layer(axum::middleware::from_fn(
-                    move |request: axum::extract::Request, next: axum::middleware::Next| {
-                        let e = e.clone();
-                        let r = r.clone();
-                        async move {
-                            let hold = request.headers().contains_key("x-test-hold");
-                            let result = next.run(request).await;
-                            if hold {
-                                e.notify_one();
-                                r.notified().await;
-                            }
-                            result
-                        }
-                    },
-                ))
-                .layer(axum::middleware::from_fn(delivery_gate));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let record = if missing { "missing" } else { "r" };
-            let key = STANDARD.encode([7; 32]);
-            let pending = tokio::spawn(raw(
-                address,
-                format!(
-                    "GET /api/v1/index/c/doc/{record} HTTP/1.1\r\nHost: localhost\r\napikey: {key}\r\nx-test-hold: yes\r\nConnection: close\r\n\r\n"
-                ),
-            ));
-            entered.notified().await;
-            let body =
-                json!({"operation_id":OperationId::new("revoke".into()),"key_id":"a"}).to_string();
-            let acknowledgment=raw(address,format!("DELETE /api/v1/apikey HTTP/1.1\r\nHost: localhost\r\napikey: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",headers["apikey"].to_str().unwrap(),body.len())).await;
-            assert!(String::from_utf8_lossy(&acknowledgment).starts_with("HTTP/1.1 200"));
-            release.notify_one();
-            let received = pending.await.unwrap();
-            let text = String::from_utf8_lossy(&received);
-            assert!(
-                !text.contains("secret-original") && !text.contains("not_found"),
-                "protected body escaped revoke: {text}"
-            );
-            server.abort();
-            let _ = server.await;
-            drop(service);
-            std::fs::remove_dir_all(path).unwrap();
-        }
-    }
+
     #[tokio::test]
     async fn service_real_http_source_delete_blocks_prepared_error_and_success_bodies() {
         for target in ["r", "missing", "listing"] {
@@ -2133,27 +2038,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_invalidated_persistence_errors_keep_classification_but_not_revoked_output() {
+    async fn service_data_fence_preserves_persistence_errors_and_key_revoke_does_not_cancel_output() {
         use http_body::Body as _;
         for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
             let (service,path,headers)=setup().await;
             let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
             write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&source).unwrap().into()).await.unwrap();
-            let record=service.record("a","c").await.unwrap(); let data=record.output_permit().unwrap();
-            let (_,permit)=service.catalog.authorized("a".into(),"c".into(),|_|async{}).await.unwrap();
+            let record=service.record("tenant","c").await.unwrap(); let data=record.output_permit().unwrap();
+            let _ =service.catalog.authorized("tenant".into(),"c".into(),|_|async{}).await.unwrap();
             // A real deletion invalidates the captured data permit without a public test hook.
             let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null});
             write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&deletion).unwrap().into()).await.unwrap();
-            assert!(protected_data(Ok(json!({"body":"secret"})),permit.clone(),Some(data.clone())).is_err());
-            assert!(protected_data::<Value>(Err(bad("other error")),permit.clone(),Some(data.clone())).is_err());
-            let response=protected_data::<Value>(Err(error.clone().into()),permit.clone(),Some(data.clone())).unwrap();
+            assert!(protected_data(Ok(json!({"body":"secret"})),Some(data.clone())).is_err());
+            assert!(protected_data::<Value>(Err(bad("other error")),Some(data.clone())).is_err());
+            let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
             let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
             assert_eq!(value["code"],Error::from(error.clone()).1); assert_eq!(value.as_object().unwrap().len(),2);
-            let mut body=protected_data::<Value>(Err(error.into()),permit.clone(),Some(data)).unwrap().into_body();
+            let mut body=protected_data::<Value>(Err(error.into()),Some(data)).unwrap().into_body();
             service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-output".into()),command:CatalogCommand::RevokeKey{key_id:"a".into()}}).await.unwrap();
-            assert!(deliver(&permit,None,||()).is_err());
-            assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Err(_))));
+            assert!(deliver(None,||()).is_ok());
+            assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Ok(_))));
             drop(body);drop(record);drop(service);std::fs::remove_dir_all(path).unwrap();
         }
     }
@@ -2211,9 +2116,10 @@ mod tests {
     async fn service_hot_collection_aliases_share_quota_and_control_bypasses_workflow_lock() {
         use tower::ServiceExt;
         use http_body::Body as _;
-        let (service, path, master) = setup().await;
+        let (service, path, tenant) = setup().await;
+        let master=master_headers();
         let create = json!({"operation_id":OperationId::new("create-d".into()),"collection_id":"d","config":{"index_name":"other","schema":[{"field":"body","field_type":"Text"}]}});
-        drop(create_collection(State(service.clone()), master.clone(), serde_json::to_vec(&create).unwrap().into()).await.unwrap());
+        drop(create_collection(State(service.clone()), tenant.clone(), serde_json::to_vec(&create).unwrap().into()).await.unwrap());
         let app = router(service.clone());
         let key = STANDARD.encode([7;32]);
         let mut slow = Vec::new();
@@ -2233,7 +2139,7 @@ mod tests {
             .uri("/api/v1/index/%63/doc").header("apikey", &key).body(Body::new(NeverRead)).unwrap()).await.unwrap();
         assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
         let other = app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/index/d")
-            .header("apikey", master["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap();
+            .header("apikey", tenant["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(other.status(), StatusCode::OK); drop(other);
         // A long restore/backup workflow must not occupy the revoke workflow lock.
         let workflow = service.control.lock().await;
@@ -2244,9 +2150,9 @@ mod tests {
         assert_eq!(revoked.status(), StatusCode::OK); drop(revoked); drop(workflow);
         for response in slow {
             let mut body = response.into_body();
-            assert!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().is_err());
+            assert!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().is_ok());
         }
-        assert_eq!(service.records.read().await["c"].statistics().await.unwrap().visible_seq, 0);
+        assert_eq!(service.records.read().await["tenant/c"].statistics().await.unwrap().visible_seq, 0);
         drop(app); drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
@@ -2274,10 +2180,10 @@ mod tests {
     async fn service_owned_response_retains_scope_before_middleware_handoff() {
         use http_body::Body as _;
         let (service,path,_) = setup().await;
-        let (_,permit) = service.catalog.authorized("a".into(),"c".into(),|_|async{}).await.unwrap();
+        let _ = service.catalog.authorized("tenant".into(),"c".into(),|_|async{}).await.unwrap();
         let governor = Arc::new(Governor::default());
         let scope = governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap();
-        let response = scope.run(async { protected(Ok("pending output"), permit).unwrap() }).await;
+        let response = scope.run(async { protected(Ok("pending output")).unwrap() }).await;
         let mut others = Vec::new();
         for _ in 0..15 { others.push(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap()); }
         assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_err());
@@ -2312,52 +2218,16 @@ mod tests {
             .header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(),StatusCode::OK);drop(response);
-        assert_eq!(service.records.read().await["c"].statistics().await.unwrap().visible_seq,0);
+        assert_eq!(service.records.read().await["tenant/c"].statistics().await.unwrap().visible_seq,0);
         drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
-    #[tokio::test]
-    async fn service_oversize_and_serialization_errors_retain_output_barrier() {
-        struct Unserializable;
-        impl Serialize for Unserializable {
-            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("injected"))
-            }
-        }
-        use http_body::Body as _;
-        let (service, path, _) = setup().await;
-        let (_, permit) = service
-            .catalog
-            .authorized("a".into(), "c".into(), |_| async {})
-            .await
-            .unwrap();
-        let mut responses = vec![
-            protected(Ok("x".repeat(MAX_RESPONSE + 1)), permit.clone()).unwrap(),
-            protected(Ok(Unserializable), permit).unwrap(),
-        ];
-        assert_eq!(responses[0].status(), StatusCode::BAD_REQUEST);
-        service
-            .catalog
-            .execute(CatalogRequest {
-                operation_id: OperationId::new("revoke-errors".into()),
-                command: CatalogCommand::RevokeKey { key_id: "a".into() },
-            })
-            .await
-            .unwrap();
-        for response in responses.drain(..) {
-            assert!(response.extensions().get::<OutputPermit>().is_some());
-            let mut body = response.into_body();
-            let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await;
-            assert!(frame.unwrap().is_err());
-        }
-        drop(service);
-        std::fs::remove_dir_all(path).unwrap();
-    }
+
     #[tokio::test]
     async fn service_internal_ids_cannot_be_reserved_by_clients_or_overflow() {
         let (service, path, headers) = setup().await;
         for (id, nonce) in [
             ("victim".to_string(), "activate:victim"),
-            ("x".repeat(256), "long-id"),
+            ("x".repeat(63), "long-id"),
         ] {
             let body = json!({"operation_id":OperationId::new(nonce.into()),"collection_id":id,"config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
             create_collection(
@@ -2397,7 +2267,7 @@ fn openapi_document() -> Value {
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
-    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, generation, temporal and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root do not restore old grants. See docs/record-model.md for acceptance limits."});
+    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, generation, temporal and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root keep historical credentials disabled. See docs/record-model.md for acceptance limits."});
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","routing_key","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"routing_key":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
@@ -2420,18 +2290,21 @@ fn openapi_document() -> Value {
     schemas.get_mut("EvidenceRef").unwrap()["properties"]["locator"]=json!({"anyOf":[{"$ref":"#/components/schemas/EvidenceLocator"},{"type":"null"}]});
     schemas.insert("EvidenceMetadata".into(), json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["source","derived","entity","relation"]},"evidence_refs":{"type":"array","maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}}}}));
     schemas.insert("CollectionCreate".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","collection_id","config"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"collection_id":{"type":"string"},"config":{"$ref":"#/components/schemas/CreateIndexRequest"},"embedding_space_id":{"type":["string","null"]}}}));
+    schemas.get_mut("CollectionCreate").unwrap()["properties"]["collection_id"]=json!({"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$","minLength":1,"maxLength":63});
     schemas.get_mut("EvidenceMetadata").unwrap()["properties"]["relation"]=json!({"anyOf":[{"$ref":"#/components/schemas/RelationMetadata"},{"type":"null"}]});
     let mut paths = serde_json::Map::new();
     for (path, method, summary, schema) in [
         ("/api/v1/live", "get", "Server version", None),
+        ("/api/v1/tenants","get","Master: list Tenant IDs",None),
+        ("/api/v1/tenants","post","Master: create Tenant",Some(json!({"type":"object","additionalProperties":false,"required":["tenant_id","operation_id"],"properties":{"tenant_id":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$"},"operation_id":{"$ref":"#/components/schemas/OperationId"}}}))),
         ("/api/v1/index/{id}/doc/{record_id}/generation", "get", "Protected generation control version and staged/visible member counts; never staged bodies", None),
         ("/api/v1/index/{id}/doc/{record_id}/status", "get", "Content-free visibility reason and exact current version; stale bodies remain hidden", None),
-        ("/api/v1/apikey", "get", "List granted collections", None),
+        ("/api/v1/apikey", "get", "List collections of the authenticated Tenant", None),
         (
             "/api/v1/apikey",
             "post",
             "Master: register a client-generated 32-byte API key",
-            Some(json!({"type":"object","required":["operation_id","key_id","apikey_base64"]})),
+            Some(json!({"type":"object","additionalProperties":false,"required":["operation_id","key_id","tenant_id","apikey_base64"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"key_id":{"type":"string","minLength":1,"maxLength":256},"tenant_id":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$"},"apikey_base64":{"type":"string"}}})),
         ),
         (
             "/api/v1/apikey",
@@ -2457,12 +2330,7 @@ fn openapi_document() -> Value {
             "Bounded background checkpoint with concurrent committed tail",
             None,
         ),
-        (
-            "/api/v1/index/{id}/grants",
-            "post",
-            "Master: grant/revoke unified access",
-            Some(json!({"type":"object","required":["operation_id","key_id","allow"]})),
-        ),
+
         (
             "/api/v1/index/{id}/doc",
             "post",
@@ -2561,7 +2429,7 @@ fn openapi_document() -> Value {
         (
             "/api/v1/restore",
             "post",
-            "Master: restore local backup into new collection; grants are not restored",
+            "Restore own Tenant backup into a new collection",
             Some(
                 json!({"type":"object","required":["operation_id","backup_id","collection_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"backup_id":{"type":"string"},"collection_id":{"type":"string"}}}),
             ),
@@ -2569,7 +2437,7 @@ fn openapi_document() -> Value {
         (
             "/api/v1/index/{id}",
             "delete",
-            "Master: permanently retire collection identity and revoke all grants; physical reclamation deferred",
+            "Delete collection of the authenticated Tenant; physical reclamation deferred",
             Some(
                 json!({"type":"object","required":["operation_id"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"}}}),
             ),

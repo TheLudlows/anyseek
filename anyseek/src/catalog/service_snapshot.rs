@@ -126,7 +126,7 @@ async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
         names.insert("authority-at-backup".into());
     }
     for entry in entries {
-        if manifest.absent_collections.contains(&entry.collection_id) {
+        if manifest.absent_collections.contains(&entry.scope()) {
             if !entry.deleted || entry.initialized || root.join(&entry.directory).exists() {
                 return Err(storage("invalid absent collection proof"));
             }
@@ -143,7 +143,7 @@ async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
         if partition.recovery_identity().await.map_err(storage)?.seq
             != *manifest
                 .record_seqs
-                .get(&entry.collection_id)
+                .get(&entry.scope())
                 .ok_or_else(|| storage("missing partition"))?
         {
             return Err(storage("record cut mismatch"));
@@ -347,7 +347,7 @@ impl Catalog {
                     {
                         continue;
                     }
-                    let p = match records.get(&entry.collection_id) {
+                    let p = match records.get(&entry.scope()) {
                         Some(p) => p.clone(),
                         None => RecordPartition::open(
                             &archives.get(&entry.directory).cloned().unwrap_or_else(||source_root.join(&entry.directory)),
@@ -395,10 +395,10 @@ impl Catalog {
                         && !entry.initialized
                         && !source_root.join(&entry.directory).exists()
                     {
-                        absent_collections.insert(entry.collection_id.clone());
+                        absent_collections.insert(entry.scope());
                         continue;
                     }
-                    let partition = match records.get(&entry.collection_id) {
+                    let partition = match records.get(&entry.scope()) {
                         Some(p) => p.clone(),
                         None => RecordPartition::open(
                             &archives.get(&entry.directory).cloned().unwrap_or_else(||source_root.join(&entry.directory)),
@@ -411,7 +411,7 @@ impl Catalog {
                         .checkpoint(&stage.join(&entry.directory))
                         .await
                         .map_err(storage)?;
-                    record_seqs.insert(entry.collection_id.clone(), seq);
+                    record_seqs.insert(entry.scope(), seq);
                     objects.insert(
                         entry.directory.clone(),
                         object_hash(&stage.join(&entry.directory))?,
@@ -469,8 +469,7 @@ impl Catalog {
             .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?
     }
     /// Restore a complete archive into a new, non-serving root. All historical
-    /// keys remain as disabled tombstones; grants are rebuilt for current master
-    /// only. Original authority is retained separately for audit, never loaded
+    /// ordinary keys remain disabled; the target master issues fresh tenant keys. Original authority is retained separately for audit, never loaded
     /// by normal Service::open. Caller owns target's external service-root lock.
     pub async fn restore_service(
         archive: PathBuf,
@@ -519,18 +518,17 @@ impl Catalog {
                 }
                 state
                     .historical_operations
-                    .retain(|id| id.epoch.saturating_add(1) >= epoch());
+                    .retain(|(_,id)| id.epoch.saturating_add(1) >= epoch());
                 state.historical_operations.extend(
                     state
                         .operations
                         .iter()
-                        .map(|e| e.request.operation_id.clone()),
+                        .map(|e| (e.request.command.tenant().to_owned(),e.request.operation_id.clone())),
                 );
                 state.operations.clear();
                 for key in state.keys.values_mut() {
                     key.active = false;
                 }
-                state.grants.clear();
                 state.seq = state
                     .seq
                     .checked_add(1)
@@ -541,29 +539,20 @@ impl Catalog {
                     Key {
                         verifier: current_master,
                         active: true,
+                        tenant_id: None,
                     },
                 );
-                for entry in state
-                    .collections
-                    .values()
-                    .filter(|e| e.active && !e.deleted)
-                {
-                    state.grants.insert(
-                        entry.collection_id.clone(),
-                        BTreeMap::from([("master".into(), state.seq)]),
-                    );
-                }
                 let stage = staging(&target)?;
                 drop(Catalog::create_state(&stage, state.clone()).await?);
                 drop(Catalog::create_state(&stage.join("authority-at-backup"), audit).await?);
                 for entry in state.collections.values() {
-                    if input.absent_collections.contains(&entry.collection_id) {
+                    if input.absent_collections.contains(&entry.scope()) {
                         continue;
                     }
                     RecordPartition::checkpoint_authenticated_archive(
                         &archive.join(&entry.directory), &stage.join(&entry.directory), entry.config.max_journal_bytes,
                         input.objects.get(&entry.directory).ok_or_else(||storage("missing authenticated child"))?,
-                        *input.record_seqs.get(&entry.collection_id).ok_or_else(||storage("missing authenticated cut"))?,
+                        *input.record_seqs.get(&entry.scope()).ok_or_else(||storage("missing authenticated cut"))?,
                     ).await.map_err(storage)?;
                     #[cfg(feature = "fault-injection")]
                     log::info!("service restore child complete elapsed_ms={} child={}", restore_started.elapsed().as_millis(), entry.directory);

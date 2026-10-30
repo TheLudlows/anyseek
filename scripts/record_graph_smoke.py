@@ -11,7 +11,6 @@ def exercise(call,restart_with,faults):
     call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'relations','config':config})
     reader=base64.b64encode(os.urandom(32)).decode()
     call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'relation-reader','apikey_base64':reader})
-    call('POST',endpoint+'/grants',{'operation_id':operation(),'key_id':'relation-reader','allow':True})
     def write(rid,system,body='relation body'):
         return {'operation_id':operation(),'record_id':rid,'routing_key':'r','expected':'Absent','document':{'body':body},'system':system}
     def ref(rid):
@@ -74,7 +73,7 @@ def exercise(call,restart_with,faults):
     call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'relations-copy','backup_id':archive['backup_id']})
     assert call('POST','/api/v1/index/relations-copy/entities',{})['records']==[]
     call('GET','/api/v1/index/relations-copy/doc/new-ab',status=404)
-    call('POST',endpoint+'/grants',{'operation_id':operation(),'key_id':'relation-reader','allow':False})
+    call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'relation-reader'})
     call('POST',endpoint+'/neighbors',query('a'),key=reader,status=403)
     call('POST',endpoint+'/entities',{},key=reader,status=403)
     call('POST',endpoint+'/query',fused(),key=reader,status=403)

@@ -10,7 +10,7 @@
 
 两个索引消费任务都不取得 Record 状态锁，水位可以互相领先。Record 物化先分配稳定的组件内行号并投递输入；向量慢时，Record 与全文仍可推进。退休掩码独立于组件读写锁，旧行和尚未消费的旧版本在查询 TopK 前被排除；序列化及封存会把掩码固化成有效成员集合。
 
-普通全文、向量、混合查询及关系融合在检索和元数据过滤期间释放 Record 锁。查询只固定组件拓扑与文件 pin，不克隆完整 State 或所有原文；取得有界候选后短暂重新进入 Record 锁，核对当前可见位置并读取原文。并发更新、删除、checkpoint 替换可让候选被丢弃，结果可能不足请求长度；count_total 描述检索时观察的候选，visible_seq 描述返回前的原文状态，不构成严格共同视图。来源删除、撤权和故障输出屏障继续生效。
+普通全文、向量、混合查询及关系融合在检索和元数据过滤期间释放 Record 锁。查询只固定组件拓扑与文件 pin，不克隆完整 State 或所有原文；取得有界候选后短暂重新进入 Record 锁，核对当前可见位置并读取原文。并发更新、删除、checkpoint 替换可让候选被丢弃，结果可能不足请求长度；count_total 描述检索时观察的候选，visible_seq 描述返回前的原文状态，不构成严格共同视图。来源删除和故障数据输出屏障继续生效；凭据撤销只影响后续认证。
 
 新 HTTP 写入直接提交 Record WAL。全文与向量/元数据通过 `(record_id, version, revision)` 关联，不再要求相同行号、组件数量或排列。引擎内部仍使用物理地址。lexical_seq 领先 vector_seq 不保证相应记录已能按元数据过滤检索；向量写入与向量查询仍共享组件锁。候选跨缓存重建时可用版本及完整索引输入指纹复验，同版本向量补丁、删除、来源失效和组件故障仍被拦截。
 
@@ -48,7 +48,7 @@ HTTP 200 表示批处理获得逐项确定结果，不表示每项成功。响�
 
 `GET /api/v1/index/{id}/ingest/operation/{epoch}/{nonce}` 与普通 `/operation/{epoch}/{nonce}` 一样查询 Record 回执，返回 `operation_id/receipt/expires_at/absence_proves_failure:false`。receipt 为 null 不证明失败，不再返回 Intake accepted／终态对象。拒绝不新增持久账本。
 
-发送前保存完整请求。相同身份和内容重试返回原提交回执；身份复用但内容变化是项级 conflict 拒绝。索引滞后不影响成功回执。所有接口保留 collection 授权与交付时撤权检查；取消等待或断线不取消已启动的有界执行。
+发送前保存完整请求。相同身份和内容重试返回原提交回执；身份复用但内容变化是项级 conflict 拒绝。索引滞后不影响成功回执。所有接口通过认证确定 Tenant 并验证集合归属；不在交付时重复检查凭据撤销；取消等待或断线不取消已启动的有界执行。
 
 `GET /api/v1/index/{id}/ingest` 返回 `committed_seq`、`lexical_seq`、`vector_seq`，三者均为 Record 序号，不再混用 Intake 序号。`committed_seq` 是当前恢复可信的持久业务状态位置，需恢复时为 null 并设置 `recovery_required:true`；`index_error` 表示派生索引故障。该查询短暂取得状态锁，不等待消费者。
 

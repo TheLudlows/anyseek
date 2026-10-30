@@ -1,6 +1,6 @@
 # anyseek 当前状态
 
-2026-10-30，本分支实施 [#98](https://github.com/TheLudlows/anyseek/issues/98) 第一阶段：基于 #97 合入后的 `22ba8b0`，Catalog 改用 `metadata.sqlite`，与 S3 Record authority 共库；删除 Catalog 自管日志，备份内容、恢复绑定、owner 锁和 GC 按分区隔离。此阶段保持现有 API 和授权模型，Tenant 模型、Grant 删除、集合同名重建及 namespace 清理仍待后续实施；不能将本阶段视为 #98 完成。新库格式不提供旧数据迁移。下文为历史记录。
+2026-10-30，本分支继续实施 [#98](https://github.com/TheLudlows/anyseek/issues/98)：Catalog 与 S3 authority 共用 SQLite；新增最小 Tenant 创建/查询和 Key 绑定；集合按 Tenant + Collection 定位，删除 Grant/revision/纯凭据撤销输出屏障，保留生命周期与 Record 数据有效性保护。普通 Key 可操作本租户集合和备份，master 不进入集合数据接口；恢复后历史普通 Key 禁用。集合同名重建、内部代次及 namespace/对象路径清理仍待后续实施，不能宣称 #98 完成。不提供旧格式迁移。下文为历史记录。
 
 2026-10-28：#86/#87 已合入 master `50f8839`。本轮已实现稳定索引身份、认证时间前缀与接收日志持续回收、有界对象登记，以及脱离权威 checkpoint 的全文/向量派生缓存合并。202 只表示命令持久接收；业务回执和两类索引水位分别核验。已按用户要求发布 [Draft PR #88](https://github.com/TheLudlows/anyseek/pull/88)，随后小步完成增量计数、TTL 下界、固定 cut 来源捕获、owned Compact/原生包复用及本地、远端锁外接收快照。远端首次 stale 后使用新命令背压及 pending 排空保障维护机会；普通远端追加仍持 Spool 锁跨网络。两次基准暴露的共享 I/O 配额问题已按 Journal、checkpoint、索引、接收/终态和回收分步修复并通过专项；最终冻结 `adc15e2` 已完成 35 targets，556 通过、0 失败、13 忽略；独立 core 双配置与 9 项 doctest 通过。最新 `1359d7e` 固定产物的同数据同资源 Meilisearch 对比已完成双方 2305 文档、393 查询及重启核验，必需维护阶段覆盖完整；AnySeek 索引水位 p99 929 ms 的长尾仍明确保留，小规模串行结果不代表饱和吞吐或相关性质量，结果统一记录在[异步写入实施](docs/async-ingestion.md)。真实 S3 和硬断电尚未验收。下方保留历史验收记录，不代表本轮结果。
 

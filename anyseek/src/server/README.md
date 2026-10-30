@@ -12,7 +12,7 @@ export MASTER_KEY_SECRET='replace-with-your-private-secret'
 target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 ```
 
-打开 `http://127.0.0.1:8080/`，使用启动日志中的 `Master API key` 连接。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
+启动日志中的 `Master API key` 只用于管理 Tenant 和普通 API Key，以及现有服务备份管理；不能用于集合数据接口。先 POST `/api/v1/tenants` 提交 `{operation_id,tenant_id}`，再由 master POST `/api/v1/apikey` 提交 `{operation_id,tenant_id,key_id,apikey_base64}`，签发普通 Key。打开 `http://127.0.0.1:8080/` 后使用该 Tenant Key 连接。Tenant ID 与 Collection ID 均须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写，Tenant 不支持改名或删除。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
 
 | 参数 | 默认值与约束 |
 | --- | --- |
@@ -42,7 +42,7 @@ export ANYSEEK_S3_SECRET_ACCESS_KEY='your-secret-key'
 
 Catalog 与 S3 协调元数据共用服务根目录下的 `metadata.sqlite`；保留该数据库、SQLite WAL、owner 锁文件及当前的 `s3-namespace`。这些是持久协调状态，不能作为缓存删除或在运行中复制 SQLite 文件作备份。collection 内的本地日志/payload/索引可从权威检查点及 tail 重建。C2 另在每个权威库旁的 `*.object-cache` 保存校验对象块（256 MiB / 4096 块，损坏或丢失回源）；旁边的 `*.object-cache.lock` 仅用于本机缓存操作协调，运行中清空缓存目录时保留该锁文件。缓存不包含凭据，也不决定当前 head 或权限；备份应使用服务 API，以同时固定元数据和对象闭包。
 
-PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到独立对象命名空间，不恢复原 grants，受保护证据保持隔离。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到新的服务 namespace。
+PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到独立对象命名空间，不包含服务凭据，受保护证据保持隔离。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到新的服务 namespace。
 
 该后端已合入；真实目标服务的条件写/读后可见性认证与其余维护路径审计仍待完成，见[存储协议](../../../docs/storage.md)。SQLite 首版是单主机协调，不提供跨主机 HA。
 
@@ -75,7 +75,7 @@ UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响�
 
 ```sh
 BASE='http://127.0.0.1:8080'
-API_KEY='paste-master-key'
+API_KEY='paste-tenant-key'
 mkdir requests
 python3 - <<'PY'
 import json, time, uuid
@@ -107,11 +107,13 @@ Vector/Hybrid 默认每 level 探测最多 `default_nprobe` 个簇，`nprobe` �
 
 POST `iterator` 接收 `{cursor?,length?,fields?}`，按稳定 ID 正向分页；写入改变 visible_seq 后继续旧 cursor 返回 409。旧 skip/take 双向 HTTP 协议不再支持，低层 Rust iterator 另有自己的 API。
 
-## 共享授权、删除与批量
+## Tenant 认证、删除与批量
 
-master 注册调用方生成的 32 字节 key：POST `/api/v1/apikey`，body 为 `{operation_id,key_id,apikey_base64}`。master 在 `/api/v1/index/{id}/grants` POST `{operation_id,key_id,allow}` 管理授权。普通 key 可创建新 collection，访问已获授权的 collection，但不能管理其他身份或扩大授权。首版不区分读写角色。
+Tenant 由 master 创建和查询（POST/GET `/api/v1/tenants`），普通 Key 只能由 master 签发或撤销。普通 Key 认证成功后由服务端确定 Tenant，不接受客户端声明的 Tenant 作为数据访问身份。同 Tenant 的有效 Key 对其所有集合拥有相同访问范围，不提供 User、Project、Collection Grant、角色或共享授权。
 
-DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销身份；不会删除 collection，也不影响其他已授权 key。删除 collection 是独立的 master 操作，需 `{operation_id}`；保留身份墓碑，物理回收后置。撤销与写入发布有确定顺序，响应状态/头和 body 交付均复核 grant revision；已交给传输层的字节不能收回。
+DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销凭据；不会删除 Tenant 或集合，也不影响本租户其他有效 Key。撤销后新请求认证失败，已经通过认证开始执行的操作和响应允许完成；不再进行凭据撤销的 body frame 复核。来源删除等数据有效性保护仍在输出时检查。
+
+普通 Tenant Key 可 DELETE `/api/v1/index/{id}`（`{operation_id}`）删除自己的集合。当前阶段仍保留删除后的名称墓碑；同名重建及内部代次将在 #98 后续阶段实施。
 
 `delete-plan` 接收 `{select:"all"}`、`{select:"ids",record_ids:[...]}` 或 `{select:"query",query:{query:"text"}}`。保存返回的 targets，为每项分配并保存 operation_id，再用 `/batch` 的 `{writes:[...]}` 提交。每批 1..100 个独立操作，返回逐项结果，**不是原子事务**。未知/待恢复错误停止未尝试尾部；重试不能重新生成删除选择条件。
 
@@ -119,11 +121,11 @@ DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销身份；不会删�
 
 独立备份恢复只恢复保存的数据，不证明备份之后没有删除：恢复 partition 保持 evidence quarantine，typed 内容不可读且没有强制解禁入口；普通记录也不能把该副本当成可信删除历史来源。当前没有解除 typed evidence 隔离的入口；授权恢复和内容可见性是两道独立条件。
 
-Collection backup 使用 POST `/api/v1/index/{id}/backup` 和 `{operation_id}`；原 ID 重试保留同一快照。master POST `/api/v1/restore`，body 为 `{operation_id,collection_id,backup_id}`，恢复到新身份，不恢复旧 grants。master 可 GET `/api/v1/backups`，或 DELETE `/api/v1/backups/{id}`（`{operation_id}`）持久退役备份；未完成 restore 会 pin 来源。`cleanup_pending:true` 表示逻辑退役已完成，物理清理还需重试。
+Collection backup 使用 POST `/api/v1/index/{id}/backup` 和 `{operation_id}`；原 ID 重试保留同一快照。本 Tenant 的普通 Key POST `/api/v1/restore`，body 为 `{operation_id,collection_id,backup_id}`，恢复到新身份，归属于当前认证 Tenant；其他 Tenant 的备份 ID 不可访问。master 可 GET `/api/v1/backups`，或 DELETE `/api/v1/backups/{id}`（`{operation_id}`）持久退役备份；未完成 restore 会 pin 来源。`cleanup_pending:true` 表示逻辑退役已完成，物理清理还需重试。
 
 master POST `/api/v1/service-backups`（`{operation_id}`）冻结 catalog、所有保留 collection 数据和未退役 collection backups。manifest 校验权威对象内容，外层发布有完成见证，不递归包含旧 service archives。
 
-master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**新的、未启动的 target_root**，不覆盖运行根。用当前 MASTER_KEY_SECRET 单独启动新根；历史 key 禁用、历史 grants 清空，当前 master 获得初始访问。历史控制请求显式冲突；Record 数据版本和回执保留。共享访问需注册新 key 并重新授权。来源备份及恢复 ID 必须使用返回的小写 hex。
+master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**新的、未启动的 target_root**，不覆盖运行根。用当前 MASTER_KEY_SECRET 单独启动新根；历史普通 Key 全部禁用；使用目标 master 为已有 Tenant 重新签发 Key 后才能访问数据。历史控制请求显式冲突；Record 数据版本和回执保留。不需要重建 Collection 授权关系。来源备份及恢复 ID 必须使用返回的小写 hex。
 
 ## 当前资源和验收边界
 
