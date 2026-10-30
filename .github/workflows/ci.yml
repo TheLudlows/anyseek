@@ -113,8 +113,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         lane: [core, lexical]
     runs-on: ${{ matrix.os }}
-    # Windows took 734s for the local long-suffix case; the remote case
-    # was still running at the 30m job limit. Keep test data and timeouts.
+    # Keep the existing job budget; long-suffix recovery runs in manual acceptance.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && matrix.lane == 'core' && 45 || 30 }}
     env:
       # Generic CPU makes target artifacts portable across runners of this OS.

@@ -859,9 +859,9 @@ mod tests {
         assert!(matches!(p.write(write("after-panic","s","beta",ExpectedVersion::Absent)).await,Err(RecordError::RecoveryRequired)));
     }
 
-    async fn wait_encoding(root:&Path) {
+    async fn wait_write_phase(root:&Path,phase:&str) {
         tokio::time::timeout(Duration::from_secs(5),async {
-            while !root.join(".test-write-encode-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
+            while !root.join(format!(".test-write-{phase}-started")).exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
         }).await.unwrap();
     }
     #[tokio::test]
@@ -871,7 +871,7 @@ mod tests {
             std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
             let owner=p.clone();
             let task=tokio::spawn(async move {owner.execute_writes_detailed(vec![write("stale-encoding","r","alpha",ExpectedVersion::Absent)],write::IndexDelivery::Asynchronous).await});
-            wait_encoding(&root).await;
+            wait_write_phase(&root,"encode").await;
             let connection=rusqlite::Connection::open(&db).unwrap();
             connection.execute_batch(&format!("UPDATE partition_heads SET {column}={column}+1 WHERE partition_id='source';")).unwrap();
             std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
@@ -884,14 +884,17 @@ mod tests {
     }
     #[tokio::test]
     async fn unlocked_encoding_preserves_reads_writer_order_checkpoint_and_cancellation() {
+        assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("encode").await;
+    }
+    async fn assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation(phase:&str) {
         let (p,_store,root,_db,clock)=source().await;
         let seed=write("seed","seed","seed",ExpectedVersion::Absent);
         let receipt=p.write(seed.clone()).await.unwrap();
-        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        std::fs::write(root.join(format!(".test-write-{phase}-pause")),b"pause").unwrap();
         let first=write("off-lock-a","r","alpha",ExpectedVersion::Absent);
         let owner=p.clone();let request=first.clone();
         let waiter=tokio::spawn(async move {owner.write(request).await});
-        wait_encoding(&root).await;
+        wait_write_phase(&root,phase).await;
         assert_eq!(tokio::time::timeout(Duration::from_secs(1),p.operation(&seed.operation_id)).await.unwrap().unwrap(),Some(receipt));
         assert!(p.operation(&first.operation_id).await.unwrap().is_none());
         let second=write("off-lock-b","r","beta",ExpectedVersion::Match(1));
@@ -902,7 +905,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!second_task.is_finished());assert!(!checkpoint.is_finished());
         waiter.abort();let _=waiter.await;
-        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         let second_receipt=tokio::time::timeout(Duration::from_secs(30),second_task).await.unwrap().unwrap().unwrap();
         assert_eq!(second_receipt.version,2);
         tokio::time::timeout(Duration::from_secs(30),checkpoint).await.unwrap().unwrap().unwrap();
@@ -913,16 +916,19 @@ mod tests {
     }
     #[tokio::test]
     async fn unlocked_encoding_discards_candidate_after_ttl_passes() {
+        assert_unlocked_discards_candidate_after_ttl_passes("encode").await;
+    }
+    async fn assert_unlocked_discards_candidate_after_ttl_passes(phase:&str) {
         let (p,_store,root,_db,clock)=source().await;
         let now=clock.0.load(Ordering::SeqCst);
         let mut request=write("expires-in-upload","r","alpha",ExpectedVersion::Absent);
         request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
-        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        std::fs::write(root.join(format!(".test-write-{phase}-pause")),b"pause").unwrap();
         let owner=p.clone();let command=request.clone();
         let task=tokio::spawn(async move {owner.write(command).await});
-        wait_encoding(&root).await;
+        wait_write_phase(&root,phase).await;
         clock.0.store(now+101,Ordering::SeqCst);
-        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
         assert!(p.operation(&request.operation_id).await.unwrap().is_none());
         let inner=p.inner.lock().await;
@@ -934,18 +940,21 @@ mod tests {
     }
     #[tokio::test]
     async fn unlocked_encoding_applies_due_source_expiry_before_selecting_candidate() {
+        assert_unlocked_applies_due_source_expiry_before_selecting_candidate("encode").await;
+    }
+    async fn assert_unlocked_applies_due_source_expiry_before_selecting_candidate(phase:&str) {
         let (p,_store,root,_db,clock)=source().await;
         let now=clock.0.load(Ordering::SeqCst);
         let mut original=write("ttl-original","r","alpha",ExpectedVersion::Absent);
         original.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
         p.write(original).await.unwrap();
         let replacement=write("ttl-replace","r","beta",ExpectedVersion::Match(1));
-        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        std::fs::write(root.join(format!(".test-write-{phase}-pause")),b"pause").unwrap();
         let owner=p.clone();let command=replacement.clone();
         let task=tokio::spawn(async move {owner.write(command).await});
-        wait_encoding(&root).await;
+        wait_write_phase(&root,phase).await;
         clock.0.store(now+101,Ordering::SeqCst);
-        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
         assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
         assert!(p.get("r").await.unwrap().is_none());
@@ -957,18 +966,21 @@ mod tests {
 
     #[tokio::test]
     async fn unlocked_encoding_expired_generation_lease_cannot_publish() {
+        assert_unlocked_expired_generation_lease_cannot_publish("encode").await;
+    }
+    async fn assert_unlocked_expired_generation_lease_cannot_publish(phase:&str) {
         use crate::record::tests::{source_write,generation_write,stage_generation};
         let (p,_store,root,_db,clock)=source().await;
         let now=clock.0.load(Ordering::SeqCst);
         p.write(source_write("lease-source","s",&[])).await.unwrap();
         p.write(generation_write("lease-stage",ExpectedVersion::Absent,stage_generation("g1",&["a","b"]))).await.unwrap();
         let publish=generation_write("late-publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g1".into()});
-        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        std::fs::write(root.join(format!(".test-write-{phase}-pause")),b"pause").unwrap();
         let owner=p.clone();let command=publish.clone();
         let task=tokio::spawn(async move {owner.write(command).await});
-        wait_encoding(&root).await;
+        wait_write_phase(&root,phase).await;
         clock.0.store(lease::deadline(now).unwrap()+1,Ordering::SeqCst);
-        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
         assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
         crate::record::tests::settle_maintenance(&p).await;
@@ -978,105 +990,22 @@ mod tests {
         assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
     }
 
-    async fn wait_upload(root:&Path) {
-        tokio::time::timeout(Duration::from_secs(5),async {
-            while !root.join(".test-write-upload-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
-        }).await.unwrap();
-    }
     #[tokio::test]
     async fn unlocked_upload_preserves_reads_writer_order_checkpoint_and_cancellation() {
-        let (p,_store,root,_db,clock)=source().await;
-        let seed=write("seed","seed","seed",ExpectedVersion::Absent);
-        let receipt=p.write(seed.clone()).await.unwrap();
-        std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
-        let first=write("off-lock-a","r","alpha",ExpectedVersion::Absent);
-        let owner=p.clone();let request=first.clone();
-        let waiter=tokio::spawn(async move {owner.write(request).await});
-        wait_upload(&root).await;
-        assert_eq!(tokio::time::timeout(Duration::from_secs(1),p.operation(&seed.operation_id)).await.unwrap().unwrap(),Some(receipt));
-        assert!(p.operation(&first.operation_id).await.unwrap().is_none());
-        let second=write("off-lock-b","r","beta",ExpectedVersion::Match(1));
-        let owner=p.clone();let request=second.clone();
-        let second_task=tokio::spawn(async move {owner.write(request).await});
-        let owner=p.clone();
-        let checkpoint=tokio::spawn(async move {owner.compact_journal().await});
-        tokio::task::yield_now().await;
-        assert!(!second_task.is_finished());assert!(!checkpoint.is_finished());
-        waiter.abort();let _=waiter.await;
-        std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
-        let second_receipt=tokio::time::timeout(Duration::from_secs(30),second_task).await.unwrap().unwrap().unwrap();
-        assert_eq!(second_receipt.version,2);
-        tokio::time::timeout(Duration::from_secs(30),checkpoint).await.unwrap().unwrap().unwrap();
-        let first_receipt=p.operation(&first.operation_id).await.unwrap().unwrap();
-        let p=cold(p,&root,clock).await;
-        assert_eq!(p.write(first).await.unwrap(),first_receipt);
-        assert_eq!(p.write(second).await.unwrap(),second_receipt);
+        assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("upload").await;
     }
     #[tokio::test]
     async fn unlocked_upload_discards_candidate_after_ttl_passes() {
-        let (p,_store,root,_db,clock)=source().await;
-        let now=clock.0.load(Ordering::SeqCst);
-        let mut request=write("expires-in-upload","r","alpha",ExpectedVersion::Absent);
-        request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
-        std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
-        let owner=p.clone();let command=request.clone();
-        let task=tokio::spawn(async move {owner.write(command).await});
-        wait_upload(&root).await;
-        clock.0.store(now+101,Ordering::SeqCst);
-        std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
-        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
-        assert!(p.operation(&request.operation_id).await.unwrap().is_none());
-        let inner=p.inner.lock().await;
-        assert_eq!(inner.state.seq,0);assert!(inner.healthy);
-        let remote=inner.remote.as_ref().unwrap();
-        assert_eq!(remote.authority.lock().await.read_head("source").unwrap().unwrap().committed_seq,0);
-        drop(inner);
-        assert!(matches!(p.write(request).await,Err(RecordError::Rejected(_))));
+        assert_unlocked_discards_candidate_after_ttl_passes("upload").await;
     }
     #[tokio::test]
     async fn unlocked_upload_applies_due_source_expiry_before_selecting_candidate() {
-        let (p,_store,root,_db,clock)=source().await;
-        let now=clock.0.load(Ordering::SeqCst);
-        let mut original=write("ttl-original","r","alpha",ExpectedVersion::Absent);
-        original.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
-        p.write(original).await.unwrap();
-        let replacement=write("ttl-replace","r","beta",ExpectedVersion::Match(1));
-        std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
-        let owner=p.clone();let command=replacement.clone();
-        let task=tokio::spawn(async move {owner.write(command).await});
-        wait_upload(&root).await;
-        clock.0.store(now+101,Ordering::SeqCst);
-        std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
-        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
-        assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
-        assert!(p.get("r").await.unwrap().is_none());
-        let p=cold(p,&root,clock).await;
-        assert!(p.get("r").await.unwrap().is_none());
-        assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
-        assert!(matches!(p.write(replacement).await,Err(RecordError::Rejected(_)|RecordError::Conflict(_))));
+        assert_unlocked_applies_due_source_expiry_before_selecting_candidate("upload").await;
     }
 
     #[tokio::test]
     async fn unlocked_upload_expired_generation_lease_cannot_publish() {
-        use crate::record::tests::{source_write,generation_write,stage_generation};
-        let (p,_store,root,_db,clock)=source().await;
-        let now=clock.0.load(Ordering::SeqCst);
-        p.write(source_write("lease-source","s",&[])).await.unwrap();
-        p.write(generation_write("lease-stage",ExpectedVersion::Absent,stage_generation("g1",&["a","b"]))).await.unwrap();
-        let publish=generation_write("late-publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g1".into()});
-        std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
-        let owner=p.clone();let command=publish.clone();
-        let task=tokio::spawn(async move {owner.write(command).await});
-        wait_upload(&root).await;
-        clock.0.store(lease::deadline(now).unwrap()+1,Ordering::SeqCst);
-        std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
-        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
-        assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
-        crate::record::tests::settle_maintenance(&p).await;
-        assert!(p.get("a").await.unwrap().is_none());
-        let p=cold(p,&root,clock).await;
-        assert!(p.get("b").await.unwrap().is_none());
-        assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
+        assert_unlocked_expired_generation_lease_cannot_publish("upload").await;
     }
 
     #[tokio::test]
@@ -1087,7 +1016,7 @@ mod tests {
             let request=write("stale-upload","r","alpha",ExpectedVersion::Absent);
             let owner=p.clone();let command=request.clone();
             let task=tokio::spawn(async move {owner.execute_writes_detailed(vec![command],write::IndexDelivery::Asynchronous).await});
-            wait_upload(&root).await;
+            wait_write_phase(&root,"upload").await;
             let connection=rusqlite::Connection::open(&db).unwrap();
             connection.execute_batch(if owner_changed {"UPDATE partition_heads SET owner_epoch=owner_epoch+1;"}
                 else {"UPDATE partition_heads SET head_version=head_version+1;"}).unwrap();
