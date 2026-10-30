@@ -7,13 +7,13 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFIXES = (
-    'five_term_or_subsets_keep_all_pair_contributions_',
-    'mixed_rle_array_bitmap_membership_scores_and_order_',
+    'five_term_union_scores_and_topk_prefix_',
+    'mixed_term_membership_scores_and_query_order_',
 )
 LARGE = {prefix + policy for prefix in PREFIXES for policy in ('shared', 'per_field')}
 SMALL = {
-    'append_changes_representative_but_not_upper_bound_safety',
-    'partial_heap_cannot_mask_later_two_term_winner',
+    'appended_documents_preserve_scores_and_top1',
+    'late_matching_document_remains_in_top2',
 }
 COMMAND = ['cargo', 'test', '-p', 'anyseek', '--test', 'lexical_correctness',
            '--features', 'server,fault-injection']

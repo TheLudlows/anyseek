@@ -20,16 +20,9 @@ pub async fn create(path: &std::path::Path, index: IndexMetaObject, schema: Vec<
     }).await.unwrap()
 }
 pub async fn append(partition: &RecordPartition, docs: Vec<Document>) {
-    let start = partition.statistics().await.unwrap().retained_identities;
-    for (ordinal, document) in docs.into_iter().enumerate() {
-        let id = format!("{:020}", start + ordinal);
-        write(partition,RecordWrite {
-            operation_id: OperationId::new(format!("insert-{id}")), record_id: id,
-            routing_key: "fixture".into(), expected: ExpectedVersion::Absent,
-            document: Some(document), vector_patch: None, generation: None, temporal: None, system: None,
-        }).await.unwrap();
-    }
+    insert(partition, docs).await.unwrap();
 }
+
 pub async fn insert(partition: &RecordPartition, docs: Vec<Document>) -> Result<(), anyseek::record::RecordError> {
     let start = partition.statistics().await?.retained_identities;
     for (ordinal, document) in docs.into_iter().enumerate() {
