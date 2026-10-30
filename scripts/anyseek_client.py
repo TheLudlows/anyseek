@@ -48,7 +48,7 @@ class anyseekClient:
             response = error
         with response:
             body = response.read()
-            check(response.status == expected,
+            check(response.status in (expected if isinstance(expected, tuple) else (expected,)),
                   f'{method} {path}: expected {expected}, got {response.status}: {body!r}')
             return body
 
@@ -79,18 +79,18 @@ class anyseekClient:
         return self.api('POST', self.collection_path(collection_id) + '/batch', request, key)
 
     def ingest(self, collection_id, requests, key=_DEFAULT):
-        """Durably accept saved commands; 202 does not confirm conditional success."""
+        """Return per-item results, including 429/503 envelopes; only receipts confirm success."""
         return json.loads(self.request('POST', self.collection_path(collection_id) + '/ingest',
-                                       {'records': requests}, key, expected=202))
+                                       {'records': requests}, key, expected=(200, 429, 503)))
 
     def ingest_status(self, collection_id, operation, key=_DEFAULT):
-        """Inspect pending/materialized/rejected using the original identity."""
+        """Look up the canonical receipt; absence never proves a failed write."""
         path = self.collection_path(collection_id) + '/ingest/operation/'
         path += str(operation['epoch']) + '/' + quote(operation['nonce'], safe='')
         return self.api('GET', path, key=key)
 
     def ingest_progress(self, collection_id, key=_DEFAULT):
-        """Read separate durable/completed/materialized watermarks."""
+        """Read committed_seq, lexical_seq and vector_seq in Record sequence space."""
         return self.api('GET', self.collection_path(collection_id) + '/ingest', key=key)
 
     def checkpoint(self, collection_id, key=_DEFAULT):

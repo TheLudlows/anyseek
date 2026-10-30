@@ -2,8 +2,8 @@
 """Bounded final-build asynchronous comparison; outputs raw evidence outside git.
 
 Both services run sequentially on CPU 0–1, client on 2–3. This measures small
-batch completion latency, not saturated ingestion throughput. 202 is acceptance
-only. Successful terminal receipts and published indexes are checked separately.
+batch completion latency, not saturated ingestion throughput. AnySeek replies
+with committed receipts; Meili 202 is acceptance only. Indexes are checked separately.
 """
 import argparse
 import hashlib
@@ -16,7 +16,7 @@ from http_engine import Engine, doc, dump, op, stats, disk
 
 
 def request_with_busy_wait(e, method, path, body=None, timeout=180):
-    """Retry only explicit pre-admission Busy, preserving the exact request.
+    """Retry explicit Busy, preserving all original identities and request bodies.
 
     Every attempt remains in the raw log. Unknown/transport outcomes are never
     retried. Returned wall time includes rejected attempts and their backoff.
@@ -31,7 +31,7 @@ def request_with_busy_wait(e, method, path, body=None, timeout=180):
         e.event('http_attempt', method=method, path=path, attempt=len(attempts), **attempt)
         if 200 <= code < 300:
             return code, result, (time.perf_counter() - started) * 1000, attempts
-        if (e.name != 'anyseek' or code != 429 or result.get('code') != 'busy'
+        if (e.name != 'anyseek' or code != 429 or result.get('code', (result.get('error') or {}).get('code')) != 'busy'
                 or time.monotonic() >= deadline):
             raise RuntimeError(('request failed; no unknown-outcome retry', method, path, attempts))
         time.sleep(min(.05, max(0, deadline - time.monotonic())))
@@ -87,12 +87,12 @@ def run(engine, rows, queries, out, batch_size):
     submits, completes, http_submits, business_completes = [], [], [], []
     summary['submit_attempts'] = 0
     summary['submit_busy_rejections'] = 0
-    summary['durably_accepted_records'] = 0
+    summary['write_ack_contract'] = 'committed_receipts' if engine == 'anyseek' else 'accepted_task'
+    summary['acknowledged_records'] = 0
     summary['verified_business_receipts'] = 0
     summary['verified_meili_tasks'] = 0
     summary['completion_observation_model'] = (
-        'First poll with completed_seq >= batch durable cut and pending=0; terminal prefix includes '
-        'rejections, so business success additionally requires every receipt check. Separate index '
+        'HTTP response with a committed receipt for every item. Separate index '
         'timing observes lexical/vector watermarks; search is validated by later queries.'
         if engine == 'anyseek' else
         'Successful Meili task is the shared business/index-completion observation; no independently '
@@ -119,29 +119,25 @@ def run(engine, rows, queries, out, batch_size):
                                    'routing_key': 'benchmark', 'expected': 'Any', 'document': d})
                 code, result, ms, attempts = request_with_busy_wait(e, 'POST', '/api/v1/index/bench/ingest', {'records': writes})
                 e.event('accept', offset=offset, code=code, result=result, ms=ms)
-                assert code == 202 and len(result['receipts']) == len(writes), result
-                summary['durably_accepted_records'] += len(writes)
+                assert code == 200 and len(result['results']) == len(writes), result
+                assert all(r['code'] == 'committed' and r.get('receipt') for r in result['results']), result
+                summary['acknowledged_records'] += len(writes)
                 summary['submit_attempts'] += len(attempts)
                 summary['submit_busy_rejections'] += len(attempts) - 1
                 http_submits.append(attempts[-1]['http_ms'])
                 submits.append(ms)
-                batch_cut = max(receipt['durable_seq'] for receipt in result['receipts'])
-                business_ms = None
+                batch_cut = max(r['receipt']['seq'] for r in result['results'])
+                business_ms = (time.perf_counter() - batch_started) * 1000
+                business_completes.append(business_ms)
+                e.event('business_completion_observed', offset=offset, committed_cut=batch_cut, elapsed_ms=business_ms)
                 until = time.monotonic() + 180
                 while True:
                     progress = e.request('GET', '/api/v1/index/bench/ingest')[1]
                     summary['last_ingest_progress'] = progress
-                    if (business_ms is None and progress['completed_seq'] >= batch_cut
-                            and progress['pending'] == 0):
-                        business_ms = (time.perf_counter() - batch_started) * 1000
-                        business_completes.append(business_ms)
-                        e.event('business_completion_observed', offset=offset, durable_cut=batch_cut,
-                                elapsed_ms=business_ms, progress=progress)
-                    if progress['blocked'] or progress['index_error']:
+                    if progress['recovery_required'] or progress['index_error']:
                         raise RuntimeError(progress)
-                    if (business_ms is not None
-                            and progress['lexical_seq'] >= progress['materialized_seq']
-                            and progress['vector_seq'] >= progress['materialized_seq']):
+                    if (progress['lexical_seq'] >= batch_cut
+                            and progress['vector_seq'] >= batch_cut):
                         break
                     if time.monotonic() >= until:
                         raise RuntimeError(('completion timeout', progress))
@@ -153,15 +149,15 @@ def run(engine, rows, queries, out, batch_size):
                         elapsed_ms=complete_ms, progress=progress)
                 for w in writes:
                     oid = w['operation_id']
-                    status = e.request('GET', f"/api/v1/index/bench/ingest/operation/{oid['epoch']}/{oid['nonce']}")[1]['status']
-                    assert status and status['receipt'] and status['error'] is None, status
+                    status = e.request('GET', f"/api/v1/index/bench/ingest/operation/{oid['epoch']}/{oid['nonce']}")[1]
+                    assert status and status['receipt'], status
                     summary['verified_business_receipts'] += 1
                 e.event('published', progress=progress, business_elapsed_ms=business_ms,
                         index_watermarks_elapsed_ms=complete_ms)
             else:
                 code, result, ms, attempts = request_with_busy_wait(e, 'POST', '/indexes/bench/documents', docs)
                 assert code == 202, result
-                summary['durably_accepted_records'] += len(docs)
+                summary['acknowledged_records'] += len(docs)
                 summary['submit_attempts'] += len(attempts)
                 summary['submit_busy_rejections'] += len(attempts) - 1
                 http_submits.append(attempts[-1]['http_ms'])
@@ -175,8 +171,8 @@ def run(engine, rows, queries, out, batch_size):
             completes.append(complete_ms)
             print(engine, 'completed', offset + len(docs), flush=True)
         summary['load_wall_seconds_including_validation'] = time.perf_counter() - started
-        summary['batch_acceptance_including_busy_wait'] = stats(submits)
-        summary['successful_acceptance_http_only'] = stats(http_submits)
+        summary['batch_acknowledgement_including_busy_wait'] = stats(submits)
+        summary['successful_acknowledgement_http_only'] = stats(http_submits)
         summary['batch_business_completion_observed'] = stats(business_completes)
         summary['batch_index_watermarks_observed'] = stats(completes)
         summary['batch_published_completion'] = stats(completes)
@@ -239,8 +235,8 @@ def run(engine, rows, queries, out, batch_size):
         raise
     finally:
         e.close()
-        summary['batch_acceptance_including_busy_wait'] = stats(submits)
-        summary['successful_acceptance_http_only'] = stats(http_submits)
+        summary['batch_acknowledgement_including_busy_wait'] = stats(submits)
+        summary['successful_acknowledgement_http_only'] = stats(http_submits)
         summary['batch_business_completion_observed'] = stats(business_completes)
         summary['batch_index_watermarks_observed'] = stats(completes)
         summary['batch_published_completion'] = stats(completes)

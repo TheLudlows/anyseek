@@ -18,16 +18,15 @@ require observed intake compaction and cache-merge capture/build/install/cleanup
 phase events before claiming maintenance coverage. Missing events are a validation
 gap, not a zero-cost maintenance result. This remains a small finite workload.
 
-Submit identical documents in batches of 16. For anyseek, measure HTTP 202
-acceptance, business completion and index-watermark completion separately.
-Business timing is the first poll observing `completed_seq >= batch_durable_cut`
-and `pending == 0`. The cut comes from that batch's returned acceptance receipts.
-The completion prefix includes rejected operations, so the timing becomes evidence
-of successful business completion only after every operation's successful receipt
-has been verified. Index timing is recorded separately when both lexical/vector
-watermarks reach the materialized sequence after the business prefix completes.
-Both elapsed intervals start at the original batch submission and include Busy
-waits. They are polling observations, not exact internal transition timestamps. Check every operation has a successful business receipt, then query
+Submit identical documents in batches of 16. For anyseek, business completion is
+observed in the HTTP 200 response only when every result carries a committed
+Record receipt. Measure acknowledgement (including Busy waits) and subsequent
+index-watermark completion separately. The batch cut is the highest returned
+Record receipt sequence; both lexical/vector watermarks must reach it. Explicit
+429 retry preserves every original identity, including already committed items.
+Unknown results fail the run rather than silently allocating new identities.
+Index timing is a polling observation, not an exact internal timestamp. Check
+original operation lookups retain every receipt, then query
 representative titles and verify visible document count. For Meilisearch, likewise
 measure HTTP 202 acceptance separately from successful task completion and check
 visible count and representative searches. A 202 response is never counted as

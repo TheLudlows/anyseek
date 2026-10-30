@@ -96,8 +96,10 @@ struct Spool {
     completed_since_compaction: usize,
     materialized_seq: u64,
     completion_reserve: u64,
+    #[cfg(test)]
     max_pending: usize,
     max_operations: usize,
+    #[cfg(test)]
     max_record_bytes: usize,
     blocked: Option<String>,
 }
@@ -169,6 +171,7 @@ impl DurableLog {
             Self::Remote(log) => { log.compact(events, completion_slots, completion_headroom(completion_reserve, 5)?).await?; Ok(true) },
         }
     }
+    #[cfg(test)]
     fn admit_accept(&self, bytes: u64, completion_reserve: u64, completion_slots: u64) -> Result<(), RecordError> {
         let (available, factor) = match self {
             Self::Local(log) => (log.lock().map(|log| log.available()).unwrap_or(0), 1),
@@ -475,8 +478,10 @@ impl IngestPipeline {
             completed_since_compaction: 0,
             materialized_seq: 0,
             completion_reserve: 0,
+            #[cfg(test)]
             max_pending: config.max_operations.min(1024),
             max_operations: config.max_operations,
+            #[cfg(test)]
             max_record_bytes: config.max_record_bytes,
             blocked: None,
         };
@@ -512,6 +517,7 @@ impl IngestPipeline {
     }
     /// Append up to 64 commands with one WAL commit. Same-identity retries
     /// return the original receipt without enqueueing the command again.
+    #[cfg(test)] // Generate legacy Accept fixtures only; production no longer accepts into Intake.
     pub async fn submit(
         &self,
         requests: Vec<RecordWrite>,
@@ -531,6 +537,7 @@ impl IngestPipeline {
         .await
         .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
     }
+    #[cfg(test)]
     async fn submit_owned(
         &self,
         requests: Vec<RecordWrite>,
@@ -672,6 +679,37 @@ impl IngestPipeline {
         }
         spool.revision = revision;
         Ok(receipts)
+    }
+    /// Commit new commands without adding Accept records, preserving retained legacy identities.
+    pub async fn commit_writes(&self, requests: Vec<RecordWrite>) -> Result<CommittedBatch, RecordError> {
+        committed::execute(self.partition.clone(), requests, Some(self.clone())).await
+    }
+    pub(super) async fn require_completed(&self) -> Result<(), RecordError> {
+        let spool = self.spool.lock().await;
+        if spool.blocked.is_some() { Err(RecordError::RecoveryRequired) }
+        else if spool.completed != spool.rows.len() { Err(RecordError::Busy) }
+        else { Ok(()) }
+    }
+    pub(super) async fn retained_result(&self, request: &RecordWrite) -> Option<Result<WriteReceipt, RecordError>> {
+        let spool = self.spool.lock().await;
+        if request.operation_id.epoch < spool.epoch_floor { return Some(Err(RecordError::OperationExpired)); }
+        let &position = spool.operations.get(&request.operation_id)?;
+        let row = &spool.rows[position];
+        Some((|| {
+            if row.digest != request_digest(request)? {
+                return Err(RecordError::Conflict("operation identity reused with another request".into()));
+            }
+            if let Some(receipt) = &row.status.receipt { return Ok(receipt.clone()); }
+            match row.status.error.as_ref() {
+                Some(error) => Err(match error.code.as_str() {
+                    "conflict" => RecordError::Conflict(error.message.clone()),
+                    "operation_expired" => RecordError::OperationExpired,
+                    "rejected" => RecordError::Rejected(error.message.clone()),
+                    _ => RecordError::RecoveryRequired,
+                }),
+                None => Err(RecordError::Busy),
+            }
+        })())
     }
     /// Inspect an identity without acquiring the Record/index mutex.
     pub async fn operation(&self, id: &OperationId) -> Option<IngestStatus> {
@@ -1335,6 +1373,32 @@ mod tests {
         durable.append(&complete).await.unwrap();
         drop(durable);
         assert_eq!(ingest_log::Log::open::<Event>(&root, "config", 4096, 16384).unwrap().1.len(), 2);
+    }
+    #[tokio::test]
+    async fn committed_ingest_preserves_legacy_pending_and_retained_rejections() {
+        let dir=tempfile::tempdir().unwrap(); let root=dir.path().join("records");
+        let p=RecordPartition::create(&root,config()).await.unwrap();
+        let pipeline=paused(p.clone()).await;
+        let old=write("legacy","r","alpha",ExpectedVersion::Match(99));
+        pipeline.submit(vec![old.clone()]).await.unwrap();
+        let fresh=write("fresh","s","beta",ExpectedVersion::Absent);
+        let result=pipeline.commit_writes(vec![fresh.clone()]).await.unwrap();
+        assert!(matches!(result.stop,Some(RecordError::Busy)));
+        assert!(matches!(result.results[0],CommittedItem::NotAttempted));
+        // Joining optional GC releases its owned partition without consuming pending commands.
+        let gc=pipeline.gc_worker.lock().unwrap().take();
+        if let Some(gc)=gc {gc.await.unwrap();}
+        drop(pipeline);drop(p);
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        let pipeline=IngestPipeline::open(p.clone()).await.unwrap();
+        pipeline.finish().await.unwrap();
+        let durable=pipeline.progress().await.durable_seq;
+        let mut changed=old.clone();changed.expected=ExpectedVersion::Absent;
+        let result=pipeline.commit_writes(vec![old,changed,fresh]).await.unwrap();
+        assert!(result.stop.is_none());
+        assert!(matches!(&result.results[..],[CommittedItem::Rejected(RecordError::Conflict(_)),CommittedItem::Rejected(RecordError::Conflict(_)),CommittedItem::Committed(_)]));
+        assert_eq!(pipeline.progress().await.durable_seq,durable);
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
     }
     #[tokio::test]
     async fn compacted_terminal_digest_preserves_json_equality_and_original_receipt() {
@@ -2091,6 +2155,9 @@ mod tests {
             pipeline.require_drained().await,
             Err(RecordError::Busy)
         ));
+        // submit() may leave a GC task holding the owner even while materialization is paused.
+        let gc = pipeline.gc_worker.lock().unwrap().take();
+        if let Some(gc) = gc { gc.await.unwrap(); }
         drop(pipeline);
         drop(p);
         let p = RecordPartition::open(&root, settings.max_journal_bytes)

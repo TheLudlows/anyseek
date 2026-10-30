@@ -194,5 +194,9 @@
   "record::remote_checkpoint::tests::unlocked_upload_expired_generation_lease_cannot_publish",
   "record::write::tests::failed_batch_retains_only_attempted_prefix_and_prior_replays",
   "record::remote_checkpoint::tests::write_preflight_authority_mismatch_fences_existing_output",
-  "record::remote_checkpoint::tests::write_upload_unwind_fences_before_the_next_writer"
+  "record::remote_checkpoint::tests::write_upload_unwind_fences_before_the_next_writer",
+  "record::committed::tests::committed_ingest_continues_after_conflict_without_waiting_for_indexes",
+  "record::committed::tests::committed_ingest_unknown_preserves_scope_and_recovers_original_ids",
+  "record::ingestion::tests::committed_ingest_preserves_legacy_pending_and_retained_rejections",
+  "record::remote_checkpoint::tests::remote_committed_ingest_continues_rejections_and_cold_replays"
 ]

@@ -982,6 +982,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_committed_ingest_continues_rejections_and_cold_replays() {
+        let (p,_store,root,_db,clock)=source().await;
+        let requests=vec![write("committed-a","r","alpha",ExpectedVersion::Absent),
+            write("committed-conflict","r","bad",ExpectedVersion::Absent),
+            write("committed-b","s","beta",ExpectedVersion::Absent)];
+        let result=p.commit_writes(requests.clone()).await.unwrap();
+        assert!(result.stop.is_none());
+        assert!(matches!(&result.results[..],[CommittedItem::Committed(_),CommittedItem::Rejected(RecordError::Conflict(_)),CommittedItem::Committed(_)]));
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        let p=cold(p,&root,clock).await;
+        let retry=p.commit_writes(requests).await.unwrap();
+        assert!(retry.stop.is_none());
+        assert!(matches!(&retry.results[..],[CommittedItem::Committed(a),CommittedItem::Rejected(_),CommittedItem::Committed(b)] if a.seq==1 && b.seq==2));
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn remote_batch_one_block_atomic_head_and_cold_replay() {
         let (p,_store,root,_db,clock)=source().await;
         let requests=vec![write("batch-a","r","alpha",ExpectedVersion::Absent),

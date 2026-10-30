@@ -357,6 +357,7 @@ impl Log {
     pub(super) fn bytes(&self) -> u64 {
         self.retained_bytes + self.base_control.as_ref().map_or(0, Journal::physical_bytes)
     }
+    #[cfg(test)]
     pub(super) fn available(&self) -> u64 {
         self.max_bytes.saturating_sub(self.bytes())
     }

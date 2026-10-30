@@ -236,7 +236,7 @@ pub(super) struct Consumer {
     owner: std::sync::Weak<Mutex<Inner>>,
     cursors: Arc<Cursors>,
     queue: Arc<std::sync::Mutex<Queue>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     root: PathBuf,
 }
 impl Consumer {
@@ -251,7 +251,7 @@ impl Consumer {
             owner,
             cursors,
             queue: Default::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fault-injection"))]
             root: _root,
         }
     }
@@ -270,7 +270,7 @@ impl Consumer {
             owner,
             cursors,
             queue: Default::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fault-injection"))]
             root: _root,
         }
     }
@@ -333,7 +333,7 @@ impl Consumer {
                 }
             };
             let result = async {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "fault-injection"))]
                 {
                     let pause = self
                         .root

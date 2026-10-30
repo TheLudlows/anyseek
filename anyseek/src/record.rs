@@ -38,6 +38,8 @@ mod locator;
 pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
 mod write;
+mod committed;
+pub use committed::{CommittedBatch, CommittedItem, CommittedProgress};
 mod index_consumers;
 mod publication;
 mod query;

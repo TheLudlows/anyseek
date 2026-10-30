@@ -285,7 +285,8 @@ impl RecordPartition {
         })?;
         // Retain queue/planner ownership until the owned task finishes, even if
         // the caller cancels. The existing admission semaphore bounds waiters.
-        let memory = crate::storage::build_budget::reserve_memory(bytes as u64).map_err(storage)?;
+        let memory = crate::storage::build_budget::reserve_memory(bytes as u64)
+            .map_err(|_| RecordError::Busy)?;
         let permit = self
             .admission
             .clone()
@@ -725,6 +726,10 @@ impl Inner {
         let injected = std::env::var("ANYSEEK_RECORD_FAULT_NONCE").ok().filter(|nonce| plans.iter().any(|plan|
             matches!(plan, mutation::PreparedWrite::Append { applied, .. } if &applied.request.operation_id.nonce == nonce)))
             .and_then(|_|std::env::var("ANYSEEK_RECORD_FAULT").ok());
+        #[cfg(feature = "fault-injection")]
+        if injected.as_deref() == Some("busy_before_append") {
+            return Err(RecordError::Busy);
+        }
         #[cfg(feature = "fault-injection")]
         if injected.as_deref() == Some("before_append") {
             return Err(RecordError::Rejected("injected before append".into()));

@@ -525,6 +525,7 @@ impl Service {
             .insert(entry.collection_id, partition);
         Ok(())
     }
+    #[cfg(test)]
     async fn intake(&self, key: &str, id: &str) -> Result<anyseek::record::IngestPipeline, Error> {
         let partition = self.record(key, id).await?;
         let mut intake = self.intake.write().await;
@@ -903,7 +904,7 @@ async fn write(
     protected(result.map(|receipt|json!({"receipt":receipt,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()})).map_err(Into::into),permit)
 }
 
-// Durable intake is separate from the existing synchronous /doc path.
+// Committed non-atomic ingestion; derived indexes are asynchronous.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IngestRequest { records: Vec<RecordWrite> }
@@ -916,25 +917,63 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
     let request: IngestRequest = serde_json::from_value(value).map_err(bad)?;
     let key = s.authenticate(&headers).await?;
     let gate = s.intake_gate.clone().read_owned().await;
-    let pipeline = s.intake(&key, &id).await?;
-    let (result, permit) = s.catalog.authorized(key, id, move |_| async move { let _gate = gate; pipeline.submit(request.records).await }).await?;
-    let mut response = protected(result.map(|receipts| json!({"state":"durable", "searchability":"asynchronous", "receipts":receipts,
-        "completion":"Poll /ingest/operation/{epoch}/{nonce}; conditions are evaluated asynchronously."})).map_err(Into::into), permit)?;
-    if response.status().is_success() { *response.status_mut() = StatusCode::ACCEPTED; }
+    let partition = s.record(&key, &id).await?;
+    let legacy = s.intake.read().await.get(&id).cloned();
+    let operations: Vec<_> = request.records.iter().map(|r| r.operation_id.clone()).collect();
+    #[cfg(feature = "fault-injection")]
+    let pause_collection = id.clone();
+    let (result, permit) = s.catalog.authorized(key, id, move |_| async move {
+        let _gate = gate;
+        #[cfg(feature = "fault-injection")]
+        pause_authorized_for_test(&pause_collection).await?;
+        match legacy {
+            Some(pipeline) => pipeline.commit_writes(request.records).await,
+            None => partition.commit_writes(request.records).await,
+        }
+    }).await?;
+    use anyseek::record::{CommittedBatch, CommittedItem};
+    let batch = match result {
+        Ok(batch) => batch,
+        Err(error @ (RecordError::Rejected(_) | RecordError::Conflict(_) | RecordError::OperationExpired)) => return protected(Err::<Value,_>(error.into()), permit),
+        Err(error) => {
+            let unknown = matches!(error, RecordError::OutcomeUnknown(_));
+            CommittedBatch { results: operations.iter().map(|_| if unknown {CommittedItem::OutcomeUnknown} else {CommittedItem::NotAttempted}).collect(), stop: Some(error) }
+        }
+    };
+    let stop = batch.stop.map(Error::from);
+    let status = stop.as_ref().map_or(StatusCode::OK, |e| e.0);
+    let rows: Vec<_> = operations.into_iter().zip(batch.results).map(|(operation_id, item)| {
+        let mut row = json!({"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()});
+        match item {
+            CommittedItem::Committed(receipt) => { row["code"]=json!("committed"); row["receipt"]=json!(receipt); }
+            CommittedItem::Rejected(error) => { let error=Error::from(error); row["code"]=json!("rejected"); row["error"]=json!({"code":error.1,"message":error.2}); }
+            CommittedItem::OutcomeUnknown => row["code"]=json!("outcome_unknown"),
+            CommittedItem::NotAttempted => row["code"]=json!("not_attempted"),
+        }
+        row
+    }).collect();
+    let body=json!({"atomic":false,"searchability":"asynchronous","results":rows,
+        "error":stop.map(|error|json!({"code":error.1,"message":error.2}))});
+    let mut response = response(body, permit)?;
+    *response.status_mut() = status;
     Ok(response)
 }
 async fn ingest_progress(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
-    let pipeline = s.intake(&key, &id).await?;
-    let (progress, permit) = s.catalog.authorized(key, id, move |_| async move { pipeline.progress().await }).await?;
+    let partition = s.record(&key, &id).await?;
+    let legacy = s.intake.read().await.get(&id).cloned();
+    let (progress, permit) = s.catalog.authorized(key, id, move |_| async move {
+        let mut progress = serde_json::to_value(partition.committed_progress().await).expect("progress serializes");
+        if let Some(legacy) = legacy {
+            let old = legacy.progress().await;
+            progress["legacy_intake"] = json!({"pending":old.pending,"blocked":old.blocked});
+        }
+        progress
+    }).await?;
     response(progress, permit)
 }
-async fn ingest_operation(State(s): State<Arc<Service>>, headers: HeaderMap, Path((id, epoch, nonce)): Path<(String,u64,String)>) -> Result<Response, Error> {
-    let key = s.authenticate(&headers).await?;
-    let pipeline = s.intake(&key, &id).await?;
-    let operation = OperationId { epoch, nonce };
-    let (status, permit) = s.catalog.authorized(key, id, move |_| async move { pipeline.operation(&operation).await }).await?;
-    response(json!({"status":status,"absence_proves_failure":false}), permit)
+async fn ingest_operation(state: State<Arc<Service>>, headers: HeaderMap, path: Path<(String,u64,String)>) -> Result<Response, Error> {
+    operation(state, headers, path).await
 }
 
 // Explicit fault binary only, no remote activation path. Pause inside accepted
@@ -1956,32 +1995,34 @@ mod tests {
         (service, path, headers)
     }
     #[tokio::test]
-    async fn intake_http_acceptance_completion_and_errors_have_distinct_statuses() {
+    async fn committed_ingest_http_receipts_rejections_and_lookup() {
         use tower::ServiceExt;
         let (service,path,headers)=setup().await; let app=router(service.clone());
         let operation=OperationId::new("intake-http".into());
         let body=json!({"records":[{"operation_id":operation,"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha async"}}]});
         let make=|value:&Value| axum::http::Request::builder().method("POST").uri("/api/v1/index/c/ingest")
             .header("apikey",headers["apikey"].clone()).header("content-type","application/json").body(Body::from(serde_json::to_vec(value).unwrap())).unwrap();
-        let response=app.clone().oneshot(make(&body)).await.unwrap(); assert_eq!(response.status(),StatusCode::ACCEPTED);
+        let response=app.clone().oneshot(make(&body)).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
         let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();
-        assert_eq!(value["state"],"durable"); assert_eq!(value["receipts"][0]["durable_seq"],1);
+        assert_eq!(value["results"][0]["code"],"committed"); assert_eq!(value["results"][0]["receipt"]["seq"],1);
         let mut changed=body.clone(); changed["records"][0]["document"]["body"]=json!("other");
-        let conflict=app.clone().oneshot(make(&changed)).await.unwrap(); assert_eq!(conflict.status(),StatusCode::CONFLICT); drop(conflict);
+        let conflict=app.clone().oneshot(make(&changed)).await.unwrap(); assert_eq!(conflict.status(),StatusCode::OK);
+        let rejected:Value=serde_json::from_slice(&axum::body::to_bytes(conflict.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();
+        assert_eq!(rejected["results"][0]["error"]["code"],"conflict");
         let mut missing=body.clone(); missing["records"][0].as_object_mut().unwrap().remove("document");
         let rejected=app.clone().oneshot(make(&missing)).await.unwrap(); assert_eq!(rejected.status(),StatusCode::BAD_REQUEST); drop(rejected);
         let pipeline=service.intake("master","c").await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10),pipeline.finish()).await.unwrap().unwrap();
         let uri=format!("/api/v1/index/c/ingest/operation/{}/{}",operation.epoch,operation.nonce);
         let response=app.oneshot(axum::http::Request::builder().uri(uri).header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
-        let status:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap(); assert_eq!(status["status"]["receipt"]["record_id"],"r");
+        let status:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap(); assert_eq!(status["receipt"]["record_id"],"r");
         drop(pipeline); drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn intake_response_and_status_remain_subject_to_revocation() {
         let (service,path,_)=setup().await; let mut headers=HeaderMap::new(); headers.insert("apikey",STANDARD.encode([7;32]).parse().unwrap());
         let body=json!({"records":[{"operation_id":OperationId::new("intake-revoke".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha"}}]});
-        let response=ingest(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&body).unwrap().into()).await.unwrap(); assert_eq!(response.status(),StatusCode::ACCEPTED);
+        let response=ingest(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&body).unwrap().into()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
         service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-intake".into()),command:CatalogCommand::RevokeGrant{collection_id:"c".into(),key_id:"a".into()}}).await.unwrap();
         assert!(axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.is_err()); assert!(ingest_progress(State(service.clone()),headers,Path("c".into())).await.is_err());
         let pipeline=service.intake("master","c").await.unwrap(); tokio::time::timeout(std::time::Duration::from_secs(10),pipeline.finish()).await.unwrap().unwrap();
@@ -2494,10 +2535,10 @@ fn openapi_document() -> Value {
             "Retrieve records and statistics from one view",
             Some(json!({"$ref":"#/components/schemas/SearchRequestObject"})),
         ),
-        ("/api/v1/index/{id}/ingest", "post", "Durably accept 1..64 commands; conditional/indexing outcome is asynchronous",
+        ("/api/v1/index/{id}/ingest", "post", "Commit 1..64 independent commands; continue after business rejection; indexes asynchronous",
             Some(json!({"type":"object","additionalProperties":false,"required":["records"],"properties":{"records":{"type":"array","minItems":1,"maxItems":64,"items":{"$ref":"#/components/schemas/RecordWrite"}}}}))),
-        ("/api/v1/index/{id}/ingest", "get", "Independent durable/completed intake watermarks", None),
-        ("/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}", "get", "Accepted, materialized or rejected intake command", None),
+        ("/api/v1/index/{id}/ingest", "get", "Record committed_seq and asynchronous lexical_seq/vector_seq; optional legacy drain status", None),
+        ("/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}", "get", "Canonical Record receipt by original operation_id; absence does not prove failure", None),
         (
             "/api/v1/index/{id}/operation/{epoch}/{nonce}",
             "get",
@@ -2594,8 +2635,34 @@ fn openapi_document() -> Value {
     ] {
         let mut operation = json!({"summary":summary,"responses":{"200":{"description":"Success; JSON response"},"default":{"description":"JSON code/message error; 409 conflict, 410 expired, 429 busy (admission before operation lookup; earlier attempts remain unresolved), 503 durable_pending/outcome_unknown/recovery_required"}}});
         if path.ends_with("/ingest") && method == "post" {
-            operation["responses"].as_object_mut().unwrap().remove("200");
-            operation["responses"]["202"] = json!({"description":"Batch is durable; inspect per-operation status for indexing or conditional rejection"});
+            let item = json!({"type":"object","required":["operation_id","code"],
+                "oneOf":[{"properties":{"code":{"const":"committed"}},"required":["receipt"]},
+                    {"properties":{"code":{"const":"rejected"}},"required":["error"],"not":{"required":["receipt"]}},
+                    {"properties":{"code":{"enum":["outcome_unknown","not_attempted"]}},"not":{"required":["receipt"]}}],"properties":{
+                "operation_id":{"$ref":"#/components/schemas/OperationId"},
+                "code":{"enum":["committed","rejected","outcome_unknown","not_attempted"]},
+                "receipt":{"type":"object","required":["staged_only","seq","version","record_id"],"properties":{
+                    "staged_only":{"type":"boolean"},"seq":{"type":"integer","minimum":0},"version":{"type":"integer","minimum":0},"record_id":{"type":"string"}},
+                    "description":"Present only for committed items: durable Record WriteReceipt"},
+                "error":{"type":"object","description":"Definite business rejection code and message"}}});
+            let schema=json!({"type":"object","required":["atomic","searchability","results","error"],"properties":{
+                "atomic":{"const":false},"searchability":{"const":"asynchronous"},"results":{"type":"array","items":item},
+                "error":{"type":["object","null"]}}});
+            for (code,description) in [("200","All items have definite results; only receipt-bearing items succeeded"),
+                ("429","Backpressure: preserve committed results; remaining inputs not_attempted this invocation"),
+                ("503","Interrupted: preserve receipts; outcome_unknown may have committed; not_attempted did not enter publication this invocation")] {
+                let response_schema = if code == "200" { schema.clone() } else {
+                    json!({"oneOf":[schema,{"type":"object","required":["code","message"],"properties":{"code":{"type":"string"},"message":{"type":"string"}},
+                        "description":"Request-level admission or authorization/storage failure before an item result envelope is available"}]})
+                };
+                operation["responses"][code]=json!({"description":description,"content":{"application/json":{"schema":response_schema}}});
+            }
+        }
+        if path.ends_with("/ingest") && method == "get" {
+            operation["responses"]["200"]=json!({"description":"All sequence fields use Record sequence space; null committed_seq requires recovery",
+                "content":{"application/json":{"schema":{"type":"object","required":["committed_seq","lexical_seq","vector_seq","index_error","recovery_required"],"properties":{
+                    "committed_seq":{"type":["integer","null"],"minimum":0},"lexical_seq":{"type":"integer","minimum":0},"vector_seq":{"type":"integer","minimum":0},
+                    "index_error":{"type":["string","null"]},"recovery_required":{"type":"boolean"},"legacy_intake":{"type":"object","properties":{"pending":{"type":"integer"},"blocked":{"type":["string","null"]}}}}}}}});
         }
         let mut params = vec![
             json!({"name":"apikey","in":"header","required":path!="/api/v1/live","schema":{"type":"string"}}),
@@ -2649,5 +2716,20 @@ fn external_sync_routes_are_absent_from_schema() {
     assert!(paths.keys().all(|path| !path.contains("/bootstrap") && !path.ends_with("/changes")));
     for path in ["/api/v1/index/{id}/iterator", "/api/v1/index/{id}/doc/{record_id}"] {
         assert!(paths.contains_key(path));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn committed_ingest_schema_has_receipts_and_interrupted_envelopes() {
+    let doc=openapi_document();
+    let post=&doc["paths"]["/api/v1/index/{id}/ingest"]["post"]["responses"];
+    assert!(post.get("202").is_none());
+    for code in ["200","429","503"] {
+        let schema=&post[code]["content"]["application/json"]["schema"];
+        let envelope=if code=="200" {schema} else {&schema["oneOf"][0]};
+        let item=&envelope["properties"]["results"]["items"];
+        assert_eq!(item["oneOf"][0]["required"],json!(["receipt"]));
+        assert_eq!(item["properties"]["code"]["enum"],json!(["committed","rejected","outcome_unknown","not_attempted"]));
     }
 }

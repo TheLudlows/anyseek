@@ -393,6 +393,7 @@ impl Log {
     pub(super) fn bytes(&self) -> u64 {
         self.bytes
     }
+    #[cfg(test)]
     pub(super) fn available(&self) -> u64 {
         self.max_bytes.saturating_sub(self.bytes)
     }
