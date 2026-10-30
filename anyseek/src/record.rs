@@ -1923,6 +1923,10 @@ mod tests {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
         let p=RecordPartition::create(&root,config()).await.unwrap();let (clock,now)=test_clock(&p).await;
         let seed=write("seed","seed","alpha",ExpectedVersion::Absent);let receipt=p.write(seed.clone()).await.unwrap();
+        // Hold both asynchronous consumers to make their owner lifetime observable.
+        for lane in ["lexical","vector"] {
+            std::fs::write(root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();
+        }
         let mut request=write("expires-encoding","r","beta",ExpectedVersion::Absent);
         request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
         std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
@@ -1938,7 +1942,19 @@ mod tests {
         let result=task.await.unwrap().unwrap();
         assert!(matches!(result.stop,Some(RecordError::Busy)));
         assert!(matches!(&result.results[..],[CommittedItem::Committed(r),CommittedItem::NotAttempted] if r==&receipt));
-        assert!(p.operation(&request.operation_id).await.unwrap().is_none());drop(p);
+        assert!(p.operation(&request.operation_id).await.unwrap().is_none());
+        {let inner=p.inner.lock().await;assert!(inner.background.is_none());assert!(!inner.maintenance_scheduled);assert!(inner.maintenance_requested.is_none());}
+        assert_eq!(Arc::strong_count(&p.inner),3,"partition plus the two paused consumers");
+        // A committed response does not join index workers, even for an empty
+        // publication. Explicitly finish owned consumers before testing reopen.
+        for lane in ["lexical","vector"] {
+            std::fs::remove_file(root.join(format!(".test-{lane}-consumer-pause"))).unwrap();
+        }
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        assert_eq!(Arc::strong_count(&p.inner),1,"consumer joins must release both owners");
+        let owner=Arc::downgrade(&p.inner);
+        drop(p);
+        assert!(owner.upgrade().is_none(),"no partition owner remains before reopen");
         let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(seed).await.unwrap(),receipt);
         assert!(p.operation(&request.operation_id).await.unwrap().is_none());
