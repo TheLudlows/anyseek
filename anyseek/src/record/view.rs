@@ -15,7 +15,7 @@ pub(super) struct RetrievalView {
     pub(super) detached_cache: bool,
     merge_address_memory: Option<crate::storage::build_budget::MemoryLease>,
     merge_address_scope: Option<crate::resources::Lease>,
-    // Intake buffers native inputs while Record/vector materialization owns
+    // Committed execution buffers native inputs while Record/vector materialization owns
     // the partition guard; publication then runs in an independent consumer.
     batch: bool,
     batch_inputs: Vec<index_consumers::Input>,

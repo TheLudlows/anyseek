@@ -10,31 +10,24 @@ fn planned(key: &str, bytes: &[u8]) -> ObjectRef {
 }
 
 #[tokio::test]
-async fn io_refusal_precedes_registered_put_and_preserves_reserved_candidate() {
+async fn io_refusal_precedes_registered_put_and_preserves_head() {
     let directory = tempfile::tempdir().unwrap();
     let mut authority = SqliteAuthority::open(&directory.path().join("authority.sqlite"), Duration::from_secs(1)).unwrap();
-    let head = authority.create_partition("test-intake", 1).unwrap();
-    authority.enable_intake_gc("test-intake", 1).unwrap();
+    let head = authority.create_partition("test", 1).unwrap();
     let backend = Arc::new(object_store::memory::InMemory::new());
     let store = S3CompatibleStore::from_store(backend.clone(), 4096);
-    let key = format!("partitions/test-intake/snapshot/{:020}-build/manifest", head.head_version + 1);
+    let key = format!("partitions/test/snapshot/{:020}-build/manifest", head.head_version + 1);
     let reference = planned(&key, b"candidate");
     let scope = scope();
     scope.clone().run(async {
         let held = scope.io().unwrap();
         assert!(matches!(store.put_and_register(&mut authority, &key, b"candidate", 0).await, Err(UploadRegisterError::Admission(_))));
-        assert_eq!(authority.intake_inventory_count("test-intake", 1).unwrap(), 0);
         assert!(matches!(backend.get(&ObjectPath::from(key.clone())).await, Err(object_store::Error::NotFound { .. })));
-        assert_eq!(authority.read_head("test-intake").unwrap().unwrap(), head);
-        assert!(authority.reserve_intake_snapshot_uploads("test-intake", 1, head.head_version, "build", &[reference.clone()], 0, 3, 1).unwrap());
-        assert!(matches!(store.put_and_register(&mut authority, &key, b"candidate", 0).await, Err(UploadRegisterError::Admission(_))));
-        assert_eq!(authority.intake_inventory_count("test-intake", 1).unwrap(), 1);
+        assert_eq!(authority.read_head("test").unwrap().unwrap(), head);
+        // Refused work has not started an upload or mutated the authoritative head.
         assert!(!authority.is_durable_object(&reference).unwrap());
-        assert!(!authority.retire_object(&key, 0, i64::MAX).unwrap());
-        assert!(matches!(backend.get(&ObjectPath::from(key.clone())).await, Err(object_store::Error::NotFound { .. })));
         drop(held);
         assert_eq!(store.put_and_register(&mut authority, &key, b"candidate", 1).await.unwrap(), reference);
-        assert_eq!(authority.release_intake_snapshot_uploads("test-intake", 1, "build").unwrap(), 1);
     }).await;
 }
 
@@ -115,16 +108,14 @@ async fn http_put_success_then_readback_failure_is_not_admission_refusal() {
     let store = S3CompatibleStore::from_store(Arc::new(backend), 4096);
     let directory = tempfile::tempdir().unwrap();
     let mut authority = SqliteAuthority::open(&directory.path().join("authority.sqlite"), Duration::from_secs(1)).unwrap();
-    let head = authority.create_partition("test-intake", 1).unwrap();
-    authority.enable_intake_gc("test-intake", 1).unwrap();
-    let key = "partitions/test-intake/wal/00000000000000000001-fixture";
+    let head = authority.create_partition("test", 1).unwrap();
+    let key = "partitions/test/wal/00000000000000000001-fixture";
     let reference = planned(key, b"accepted remote bytes");
     let error = store.put_and_register(&mut authority, key, b"accepted remote bytes", 0).await.unwrap_err();
     assert!(matches!(error, UploadRegisterError::ObjectStore(ref error) if !is_resource_error(error)));
     assert!(matches!(crate::storage::object_log::TailError::from(error), crate::storage::object_log::TailError::ObjectStore(_)));
     assert_eq!(server.join().unwrap(), ["PUT", "GET"]);
-    assert_eq!(authority.read_head("test-intake").unwrap().unwrap(), head);
-    assert_eq!(authority.intake_inventory_count("test-intake", 1).unwrap(), 1);
+    assert_eq!(authority.read_head("test").unwrap().unwrap(), head);
     assert!(!authority.is_durable_object(&reference).unwrap());
     assert!(authority.retire_object(key, 0, 1).unwrap());
     assert!(authority.mark_object_deleted(&reference).unwrap());

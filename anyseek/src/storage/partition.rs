@@ -409,6 +409,9 @@ impl PartitionJournal {
     pub(crate) fn append(&mut self, payload: &[u8]) -> io::Result<u64> {
         self.journal.append(payload)
     }
+    pub(crate) fn append_batch(&mut self, payloads: &[&[u8]]) -> io::Result<u64> {
+        self.journal.append_batch(payloads)
+    }
     pub(crate) fn capture_cut(&self)->io::Result<CommittedCut> {
         Ok(CommittedCut{generation:self.generation,journal:self.journal.capture_cut(&generation_path(&self.path,self.generation))?})
     }

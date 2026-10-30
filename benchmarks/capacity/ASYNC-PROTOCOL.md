@@ -14,20 +14,19 @@ benchmark may overlap measurement. Keep at least 4 GiB of free disk space.
 There are 145 batches (144 of 16, one of 1). This exceeds sixteen 128-update
 mutable-tail boundaries and is intended to exercise automatic derived-cache
 merge. Tail/checkpoint policy can change, so document count alone is not evidence:
-require observed intake compaction and cache-merge capture/build/install/cleanup
+require observed cache-merge capture/build/install/cleanup
 phase events before claiming maintenance coverage. Missing events are a validation
 gap, not a zero-cost maintenance result. This remains a small finite workload.
 
-Submit identical documents in batches of 16. For anyseek, measure HTTP 202
-acceptance, business completion and index-watermark completion separately.
-Business timing is the first poll observing `completed_seq >= batch_durable_cut`
-and `pending == 0`. The cut comes from that batch's returned acceptance receipts.
-The completion prefix includes rejected operations, so the timing becomes evidence
-of successful business completion only after every operation's successful receipt
-has been verified. Index timing is recorded separately when both lexical/vector
-watermarks reach the materialized sequence after the business prefix completes.
-Both elapsed intervals start at the original batch submission and include Busy
-waits. They are polling observations, not exact internal transition timestamps. Check every operation has a successful business receipt, then query
+Submit identical documents in batches of 16. For anyseek, business completion is
+observed in the HTTP 200 response only when every result carries a committed
+Record receipt. Measure acknowledgement (including Busy waits) and subsequent
+index-watermark completion separately. The batch cut is the highest returned
+Record receipt sequence; both lexical/vector watermarks must reach it. Explicit
+429 retry preserves every original identity, including already committed items.
+Unknown results fail the run rather than silently allocating new identities.
+Index timing is a polling observation, not an exact internal timestamp. Check
+original operation lookups retain every receipt, then query
 representative titles and verify visible document count. For Meilisearch, likewise
 measure HTTP 202 acceptance separately from successful task completion and check
 visible count and representative searches. A 202 response is never counted as
@@ -110,9 +109,6 @@ completion alone does not prove maintenance coverage: inspect
 `maintenance_coverage` entry in the anyseek summary. The default local workload
 requires these observed info-log intervals:
 
-- Spool lock: `intake_snapshot_locked` and `intake_selection_locked`.
-- Outside the Spool lock: `intake_local_prepare_unlocked` and
-  `intake_local_release_unlocked`.
 - Record lock: `cache_merge_capture_locked`, `cache_merge_install_locked` and
   `cache_merge_cleanup_locked`.
 - Outside the Record lock: `cache_merge_build_unlocked`.
@@ -122,11 +118,7 @@ phase statistics; the latter makes no lock-scope claim. Missing required coverag
 is `null`, is listed explicitly, and has no latency statistics: it is never a
 zero-duration sample. All intervals can overlap, and an exit log also occurs on
 errors/cancellation; observing a phase does not itself prove a successful merge.
-The prepare interval wraps candidate file preparation, not the earlier complete
-snapshot serialization, so it must not be presented as all lock-free GC work.
-
-The prior `intake_compaction_locked` belongs to a test-only reclaim helper and
-is not required for the production local GC path. Explicit journal Compact may
+Explicit journal Compact may
 emit `compact_tail_handoff_locked` and `compact_native_membership_capture_locked`;
 these are reported in `optional_explicit_compact_coverage` with `null` for absent
 events. This harness's HTTP PATCH invokes `JobMode::Index`, so those conditional
@@ -139,5 +131,5 @@ The harness explicitly sets `RUST_LOG=error,anyseek::record::maintenance=info`
 for the services: the execution environment's inherited error-only filter would
 otherwise suppress maintenance evidence. This is logging configuration only.
 Failed runs retain partial acceptance/completion latency, accepted-record counts,
-verified receipt/batch counts and the last observed intake progress; partial
+verified receipt/batch counts and the last observed committed/index progress; partial
 measurements must not be presented as a completed paired comparison.

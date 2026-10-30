@@ -190,14 +190,18 @@ impl RemotePersistence {
     }
 
     pub(super) async fn tail_needs_checkpoint(&self,seq:u64,operation_id:&str,payload:&[u8])->Result<bool,RecordError> {
+        self.batch_tail_needs_checkpoint(&[(seq,operation_id.to_owned(),payload)]).await
+    }
+    pub(super) async fn batch_tail_needs_checkpoint(&self,entries:&[(u64,String,&[u8])])->Result<bool,RecordError> {
+        let seq=entries.first().ok_or_else(||storage("empty remote batch"))?.0;
         #[derive(Serialize)]
         struct Entry<'a>{seq:u64,operation_id:&'a str,request_sha256:[u8;32],payload:&'a [u8]}
         #[derive(Serialize)]
-        struct Block<'a>{partition_id:&'a str,first_seq:u64,last_seq:u64,previous:Option<&'a ObjectRef>,entries:[Entry<'a>;1]}
+        struct Block<'a>{partition_id:&'a str,first_seq:u64,last_seq:u64,previous:Option<&'a ObjectRef>,entries:Vec<Entry<'a>>}
         let authority=self.authority.lock().await;
         let head=authority.read_head(&self.partition_id).map_err(storage)?.ok_or(RecordError::RecoveryRequired)?;
         if head.owner_epoch!=self.owner_epoch || head.committed_seq.checked_add(1)!=Some(seq) {return Err(RecordError::RecoveryRequired);}
-        let mut block=Block{partition_id:&self.partition_id,first_seq:seq,last_seq:seq,previous:head.wal_tip.as_ref(),entries:[Entry{seq,operation_id,request_sha256:Sha256::digest(payload).into(),payload}]};
+        let mut block=Block{partition_id:&self.partition_id,first_seq:seq,last_seq:entries.last().unwrap().0,previous:head.wal_tip.as_ref(),entries:entries.iter().map(|(seq,operation_id,payload)|Entry{seq:*seq,operation_id,request_sha256:Sha256::digest(payload).into(),payload}).collect()};
         let bytes=checkpoint_codec::json_length(&block)? as u64;
         let (count,total)=authority.retained_tail_size(&head).map_err(storage)?;
         if bytes<=self.max_object_bytes as u64 && count<self.max_tail_blocks as u64
@@ -772,6 +776,7 @@ mod tests {
     use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
     use object_store::memory::InMemory;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     struct Clock(AtomicU64);
     impl temporal::Clock for Clock {
@@ -822,6 +827,375 @@ mod tests {
         drop(inner);
         (p, store, root, db, clock)
     }
+    #[tokio::test]
+    async fn write_preflight_authority_mismatch_fences_existing_output() {
+        for delivery in [write::IndexDelivery::Synchronous, write::IndexDelivery::Asynchronous] {
+            for column in ["owner_epoch", "committed_seq"] {
+                let (p, _store, _root, db, _clock) = source().await;
+                let seed = write("preflight-seed", "old", "alpha", ExpectedVersion::Absent);
+                p.write(seed).await.unwrap();
+                let connection = rusqlite::Connection::open(&db).unwrap();
+                connection.execute_batch(&format!("UPDATE partition_heads SET {column}={column}+1 WHERE partition_id='source';")).unwrap();
+                let request = write("preflight-next", "new", "beta", ExpectedVersion::Absent);
+                let failure = p.execute_writes_detailed(vec![request], delivery).await.err().unwrap();
+                assert!(matches!(failure.error, RecordError::RecoveryRequired));
+                assert!(failure.scope.unwrap().persistence_attempted.is_empty());
+                assert!(!p.inner.lock().await.healthy, "detected {column} mismatch must fence the owner");
+                assert!(p.output_permit().is_err());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn write_upload_unwind_fences_before_the_next_writer() {
+        let (p,_store,root,_db,_clock)=source().await;
+        std::fs::write(root.join(".test-write-upload-panic"),b"panic").unwrap();
+        let result=p.execute_writes_detailed(vec![write("panic-first","r","alpha",ExpectedVersion::Absent)],write::IndexDelivery::Asynchronous).await;
+        let failure=result.err().unwrap();
+        assert!(matches!(failure.error,RecordError::OutcomeUnknown(_)));
+        assert!(failure.scope.unwrap().persistence_attempted.is_empty());
+        assert!(!p.inner.lock().await.healthy,"unwind must not leave a live async batch");
+        assert!(p.output_permit().is_err());
+        std::fs::remove_file(root.join(".test-write-upload-panic")).unwrap();
+        assert!(matches!(p.write(write("after-panic","s","beta",ExpectedVersion::Absent)).await,Err(RecordError::RecoveryRequired)));
+    }
+
+    async fn wait_encoding(root:&Path) {
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while !root.join(".test-write-encode-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+    }
+    #[tokio::test]
+    async fn unlocked_encoding_owner_or_sequence_change_fences_before_persistence() {
+        for column in ["owner_epoch", "committed_seq"] {
+            let (p,_store,root,db,_clock)=source().await;
+            std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+            let owner=p.clone();
+            let task=tokio::spawn(async move {owner.execute_writes_detailed(vec![write("stale-encoding","r","alpha",ExpectedVersion::Absent)],write::IndexDelivery::Asynchronous).await});
+            wait_encoding(&root).await;
+            let connection=rusqlite::Connection::open(&db).unwrap();
+            connection.execute_batch(&format!("UPDATE partition_heads SET {column}={column}+1 WHERE partition_id='source';")).unwrap();
+            std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+            let failure=task.await.unwrap().err().unwrap();
+            assert!(matches!(failure.error,RecordError::RecoveryRequired));
+            assert!(failure.scope.unwrap().persistence_attempted.is_empty());
+            assert!(!p.inner.lock().await.healthy);
+            assert!(p.output_permit().is_err());
+        }
+    }
+    #[tokio::test]
+    async fn unlocked_encoding_preserves_reads_writer_order_checkpoint_and_cancellation() {
+        let (p,_store,root,_db,clock)=source().await;
+        let seed=write("seed","seed","seed",ExpectedVersion::Absent);
+        let receipt=p.write(seed.clone()).await.unwrap();
+        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        let first=write("off-lock-a","r","alpha",ExpectedVersion::Absent);
+        let owner=p.clone();let request=first.clone();
+        let waiter=tokio::spawn(async move {owner.write(request).await});
+        wait_encoding(&root).await;
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1),p.operation(&seed.operation_id)).await.unwrap().unwrap(),Some(receipt));
+        assert!(p.operation(&first.operation_id).await.unwrap().is_none());
+        let second=write("off-lock-b","r","beta",ExpectedVersion::Match(1));
+        let owner=p.clone();let request=second.clone();
+        let second_task=tokio::spawn(async move {owner.write(request).await});
+        let owner=p.clone();
+        let checkpoint=tokio::spawn(async move {owner.compact_journal().await});
+        tokio::task::yield_now().await;
+        assert!(!second_task.is_finished());assert!(!checkpoint.is_finished());
+        waiter.abort();let _=waiter.await;
+        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        let second_receipt=tokio::time::timeout(Duration::from_secs(30),second_task).await.unwrap().unwrap().unwrap();
+        assert_eq!(second_receipt.version,2);
+        tokio::time::timeout(Duration::from_secs(30),checkpoint).await.unwrap().unwrap().unwrap();
+        let first_receipt=p.operation(&first.operation_id).await.unwrap().unwrap();
+        let p=cold(p,&root,clock).await;
+        assert_eq!(p.write(first).await.unwrap(),first_receipt);
+        assert_eq!(p.write(second).await.unwrap(),second_receipt);
+    }
+    #[tokio::test]
+    async fn unlocked_encoding_discards_candidate_after_ttl_passes() {
+        let (p,_store,root,_db,clock)=source().await;
+        let now=clock.0.load(Ordering::SeqCst);
+        let mut request=write("expires-in-upload","r","alpha",ExpectedVersion::Absent);
+        request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
+        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        let owner=p.clone();let command=request.clone();
+        let task=tokio::spawn(async move {owner.write(command).await});
+        wait_encoding(&root).await;
+        clock.0.store(now+101,Ordering::SeqCst);
+        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
+        assert!(p.operation(&request.operation_id).await.unwrap().is_none());
+        let inner=p.inner.lock().await;
+        assert_eq!(inner.state.seq,0);assert!(inner.healthy);
+        let remote=inner.remote.as_ref().unwrap();
+        assert_eq!(remote.authority.lock().await.read_head("source").unwrap().unwrap().committed_seq,0);
+        drop(inner);
+        assert!(matches!(p.write(request).await,Err(RecordError::Rejected(_))));
+    }
+    #[tokio::test]
+    async fn unlocked_encoding_applies_due_source_expiry_before_selecting_candidate() {
+        let (p,_store,root,_db,clock)=source().await;
+        let now=clock.0.load(Ordering::SeqCst);
+        let mut original=write("ttl-original","r","alpha",ExpectedVersion::Absent);
+        original.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
+        p.write(original).await.unwrap();
+        let replacement=write("ttl-replace","r","beta",ExpectedVersion::Match(1));
+        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        let owner=p.clone();let command=replacement.clone();
+        let task=tokio::spawn(async move {owner.write(command).await});
+        wait_encoding(&root).await;
+        clock.0.store(now+101,Ordering::SeqCst);
+        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
+        assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
+        assert!(p.get("r").await.unwrap().is_none());
+        let p=cold(p,&root,clock).await;
+        assert!(p.get("r").await.unwrap().is_none());
+        assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
+        assert!(matches!(p.write(replacement).await,Err(RecordError::Rejected(_)|RecordError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn unlocked_encoding_expired_generation_lease_cannot_publish() {
+        use crate::record::tests::{source_write,generation_write,stage_generation};
+        let (p,_store,root,_db,clock)=source().await;
+        let now=clock.0.load(Ordering::SeqCst);
+        p.write(source_write("lease-source","s",&[])).await.unwrap();
+        p.write(generation_write("lease-stage",ExpectedVersion::Absent,stage_generation("g1",&["a","b"]))).await.unwrap();
+        let publish=generation_write("late-publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g1".into()});
+        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        let owner=p.clone();let command=publish.clone();
+        let task=tokio::spawn(async move {owner.write(command).await});
+        wait_encoding(&root).await;
+        clock.0.store(lease::deadline(now).unwrap()+1,Ordering::SeqCst);
+        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
+        assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
+        crate::record::tests::settle_maintenance(&p).await;
+        assert!(p.get("a").await.unwrap().is_none());
+        let p=cold(p,&root,clock).await;
+        assert!(p.get("b").await.unwrap().is_none());
+        assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
+    }
+
+    async fn wait_upload(root:&Path) {
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while !root.join(".test-write-upload-started").exists(){tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
+    }
+    #[tokio::test]
+    async fn unlocked_upload_preserves_reads_writer_order_checkpoint_and_cancellation() {
+        let (p,_store,root,_db,clock)=source().await;
+        let seed=write("seed","seed","seed",ExpectedVersion::Absent);
+        let receipt=p.write(seed.clone()).await.unwrap();
+        std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
+        let first=write("off-lock-a","r","alpha",ExpectedVersion::Absent);
+        let owner=p.clone();let request=first.clone();
+        let waiter=tokio::spawn(async move {owner.write(request).await});
+        wait_upload(&root).await;
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1),p.operation(&seed.operation_id)).await.unwrap().unwrap(),Some(receipt));
+        assert!(p.operation(&first.operation_id).await.unwrap().is_none());
+        let second=write("off-lock-b","r","beta",ExpectedVersion::Match(1));
+        let owner=p.clone();let request=second.clone();
+        let second_task=tokio::spawn(async move {owner.write(request).await});
+        let owner=p.clone();
+        let checkpoint=tokio::spawn(async move {owner.compact_journal().await});
+        tokio::task::yield_now().await;
+        assert!(!second_task.is_finished());assert!(!checkpoint.is_finished());
+        waiter.abort();let _=waiter.await;
+        std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
+        let second_receipt=tokio::time::timeout(Duration::from_secs(30),second_task).await.unwrap().unwrap().unwrap();
+        assert_eq!(second_receipt.version,2);
+        tokio::time::timeout(Duration::from_secs(30),checkpoint).await.unwrap().unwrap().unwrap();
+        let first_receipt=p.operation(&first.operation_id).await.unwrap().unwrap();
+        let p=cold(p,&root,clock).await;
+        assert_eq!(p.write(first).await.unwrap(),first_receipt);
+        assert_eq!(p.write(second).await.unwrap(),second_receipt);
+    }
+    #[tokio::test]
+    async fn unlocked_upload_discards_candidate_after_ttl_passes() {
+        let (p,_store,root,_db,clock)=source().await;
+        let now=clock.0.load(Ordering::SeqCst);
+        let mut request=write("expires-in-upload","r","alpha",ExpectedVersion::Absent);
+        request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
+        std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
+        let owner=p.clone();let command=request.clone();
+        let task=tokio::spawn(async move {owner.write(command).await});
+        wait_upload(&root).await;
+        clock.0.store(now+101,Ordering::SeqCst);
+        std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
+        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
+        assert!(p.operation(&request.operation_id).await.unwrap().is_none());
+        let inner=p.inner.lock().await;
+        assert_eq!(inner.state.seq,0);assert!(inner.healthy);
+        let remote=inner.remote.as_ref().unwrap();
+        assert_eq!(remote.authority.lock().await.read_head("source").unwrap().unwrap().committed_seq,0);
+        drop(inner);
+        assert!(matches!(p.write(request).await,Err(RecordError::Rejected(_))));
+    }
+    #[tokio::test]
+    async fn unlocked_upload_applies_due_source_expiry_before_selecting_candidate() {
+        let (p,_store,root,_db,clock)=source().await;
+        let now=clock.0.load(Ordering::SeqCst);
+        let mut original=write("ttl-original","r","alpha",ExpectedVersion::Absent);
+        original.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
+        p.write(original).await.unwrap();
+        let replacement=write("ttl-replace","r","beta",ExpectedVersion::Match(1));
+        std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
+        let owner=p.clone();let command=replacement.clone();
+        let task=tokio::spawn(async move {owner.write(command).await});
+        wait_upload(&root).await;
+        clock.0.store(now+101,Ordering::SeqCst);
+        std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
+        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
+        assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
+        assert!(p.get("r").await.unwrap().is_none());
+        let p=cold(p,&root,clock).await;
+        assert!(p.get("r").await.unwrap().is_none());
+        assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
+        assert!(matches!(p.write(replacement).await,Err(RecordError::Rejected(_)|RecordError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn unlocked_upload_expired_generation_lease_cannot_publish() {
+        use crate::record::tests::{source_write,generation_write,stage_generation};
+        let (p,_store,root,_db,clock)=source().await;
+        let now=clock.0.load(Ordering::SeqCst);
+        p.write(source_write("lease-source","s",&[])).await.unwrap();
+        p.write(generation_write("lease-stage",ExpectedVersion::Absent,stage_generation("g1",&["a","b"]))).await.unwrap();
+        let publish=generation_write("late-publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g1".into()});
+        std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
+        let owner=p.clone();let command=publish.clone();
+        let task=tokio::spawn(async move {owner.write(command).await});
+        wait_upload(&root).await;
+        clock.0.store(lease::deadline(now).unwrap()+1,Ordering::SeqCst);
+        std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
+        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
+        assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
+        crate::record::tests::settle_maintenance(&p).await;
+        assert!(p.get("a").await.unwrap().is_none());
+        let p=cold(p,&root,clock).await;
+        assert!(p.get("b").await.unwrap().is_none());
+        assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn unlocked_upload_owner_or_head_change_never_acknowledges() {
+        for owner_changed in [false,true] {
+            let (p,_store,root,db,_clock)=source().await;
+            std::fs::write(root.join(".test-write-upload-pause"),b"pause").unwrap();
+            let request=write("stale-upload","r","alpha",ExpectedVersion::Absent);
+            let owner=p.clone();let command=request.clone();
+            let task=tokio::spawn(async move {owner.execute_writes_detailed(vec![command],write::IndexDelivery::Asynchronous).await});
+            wait_upload(&root).await;
+            let connection=rusqlite::Connection::open(&db).unwrap();
+            connection.execute_batch(if owner_changed {"UPDATE partition_heads SET owner_epoch=owner_epoch+1;"}
+                else {"UPDATE partition_heads SET head_version=head_version+1;"}).unwrap();
+            std::fs::remove_file(root.join(".test-write-upload-pause")).unwrap();
+            let failure=task.await.unwrap().err().unwrap();
+            assert!(matches!(failure.error,RecordError::OutcomeUnknown(_)));
+            assert_eq!(failure.scope.unwrap().persistence_attempted,vec![0]);
+            let committed:i64=connection.query_row("SELECT committed_seq FROM partition_heads WHERE partition_id='source'",[],|row|row.get(0)).unwrap();
+            assert_eq!(committed,0);assert!(!p.inner.lock().await.healthy);
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_committed_ingest_continues_rejections_and_cold_replays() {
+        let (p,_store,root,_db,clock)=source().await;
+        let requests=vec![write("committed-a","r","alpha",ExpectedVersion::Absent),
+            write("committed-a2","t","alpha",ExpectedVersion::Absent),
+            write("committed-conflict","r","bad",ExpectedVersion::Absent),
+            write("committed-b","s","beta",ExpectedVersion::Absent)];
+        let result=p.commit_writes(requests.clone()).await.unwrap();
+        assert!(result.stop.is_none());
+        assert!(matches!(&result.results[..],[CommittedItem::Committed(_),CommittedItem::Committed(_),CommittedItem::Rejected(RecordError::Conflict(_)),CommittedItem::Committed(_)]));
+        {
+            let inner=p.inner.lock().await; let remote=inner.remote.as_ref().unwrap();
+            let authority=remote.authority.lock().await;
+            let head=authority.read_head("source").unwrap().unwrap();
+            let last:crate::storage::object_log::ObjectLogBlock=serde_json::from_slice(&remote.store.get_verified(head.wal_tip.as_ref().unwrap()).await.unwrap()).unwrap();
+            assert_eq!((last.first_seq,last.last_seq,last.entries.len()),(3,3,1));
+            let first:crate::storage::object_log::ObjectLogBlock=serde_json::from_slice(&remote.store.get_verified(last.previous.as_ref().unwrap()).await.unwrap()).unwrap();
+            assert_eq!((first.first_seq,first.last_seq,first.entries.len()),(1,2,2));
+            assert!(first.previous.is_none());
+            for entry in &first.entries {
+                assert_eq!(authority.resolve_operation("source",&entry.operation_id,entry.request_sha256).unwrap().unwrap().committed_seq,2);
+            }
+        }
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        let p=cold(p,&root,clock).await;
+        let retry=p.commit_writes(requests).await.unwrap();
+        assert!(retry.stop.is_none());
+        assert!(matches!(&retry.results[..],[CommittedItem::Committed(a),CommittedItem::Committed(a2),CommittedItem::Rejected(_),CommittedItem::Committed(b)] if a.seq==1 && a2.seq==2 && b.seq==3));
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_batch_one_block_atomic_head_and_cold_replay() {
+        let (p,_store,root,_db,clock)=source().await;
+        let requests=vec![write("batch-a","r","alpha",ExpectedVersion::Absent),
+            write("batch-b","r","beta",ExpectedVersion::Match(1))];
+        let result=p.execute_writes(requests.clone(),write::IndexDelivery::Asynchronous).await.unwrap();
+        assert_eq!(result.results.len(),2);
+        {
+            let inner=p.inner.lock().await; let remote=inner.remote.as_ref().unwrap();
+            let authority=remote.authority.lock().await;
+            let head=authority.read_head("source").unwrap().unwrap();
+            assert_eq!(head.committed_seq,2);
+            let bytes=remote.store.get_verified(head.wal_tip.as_ref().unwrap()).await.unwrap();
+            let block:crate::storage::object_log::ObjectLogBlock=serde_json::from_slice(&bytes).unwrap();
+            assert_eq!((block.first_seq,block.last_seq,block.entries.len()),(1,2,2));
+            assert!(block.previous.is_none());
+            for entry in &block.entries {
+                assert_eq!(authority.resolve_operation("source",&entry.operation_id,entry.request_sha256).unwrap().unwrap().committed_seq,2);
+            }
+        }
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        let p=cold(p,&root,clock).await;
+        for (request,result) in requests.into_iter().zip(result.results) { assert_eq!(p.write(request).await.unwrap(),result.unwrap()); }
+        assert_eq!(p.get("r").await.unwrap().unwrap().version,2);
+    }
+
+    #[tokio::test]
+    async fn remote_batch_cache_failure_is_durable_and_cold_retry_resolves_every_item() {
+        let (p,_store,root,_db,clock)=source().await;
+        let requests=vec![write("batch-cache-a","r","alpha",ExpectedVersion::Absent),
+            write("batch-cache-b","r","beta",ExpectedVersion::Match(1))];
+        std::fs::write(root.join(".test-cache-append-failure"),b"fail").unwrap();
+        assert!(matches!(p.execute_writes(requests.clone(),write::IndexDelivery::Asynchronous).await,Err(RecordError::DurablePending(2))));
+        let p=cold(p,&root,clock).await;
+        assert_eq!(p.get("r").await.unwrap().unwrap().version,2);
+        let result=p.execute_writes(vec![requests[0].clone(),requests[0].clone(),requests[1].clone()],write::IndexDelivery::Asynchronous).await.unwrap();
+        assert_eq!(result.results.iter().map(|r|r.as_ref().unwrap().seq).collect::<Vec<_>>(),vec![1,1,2]);
+        assert_eq!(p.inner.lock().await.state.seq,2);
+    }
+
+    #[tokio::test]
+    async fn remote_batch_uploaded_but_unpublished_is_not_replayed() {
+        let (p,_store,root,db,clock)=source().await;
+        let connection=rusqlite::Connection::open(&db).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_batch BEFORE UPDATE OF committed_seq ON partition_heads BEGIN SELECT RAISE(FAIL, 'injected publication failure'); END;").unwrap();
+        let requests=vec![write("batch-fail-a","r","alpha",ExpectedVersion::Absent),
+            write("batch-fail-b","r","beta",ExpectedVersion::Match(1))];
+        let failure=p.execute_writes_detailed(requests.clone(),write::IndexDelivery::Asynchronous).await.err().unwrap();
+        assert!(matches!(failure.error,RecordError::OutcomeUnknown(_)));
+        assert_eq!(failure.scope.unwrap().persistence_attempted,vec![0,1]);
+        {
+            let inner=p.inner.lock().await; let remote=inner.remote.as_ref().unwrap();
+            let authority=remote.authority.lock().await;
+            let head=authority.read_head("source").unwrap().unwrap();
+            assert_eq!(head.committed_seq,0); assert!(head.wal_tip.is_none());
+        }
+        let registered:i64=connection.query_row("SELECT COUNT(*) FROM object_uploads WHERE state=1",[],|r|r.get(0)).unwrap();
+        assert!(registered>=2,"bootstrap plus uploaded orphan remain registered");
+        connection.execute_batch("DROP TRIGGER fail_batch;").unwrap(); drop(connection);
+        let p=cold(p,&root,clock).await;
+        assert!(p.get("r").await.unwrap().is_none());
+        let retry=p.execute_writes(requests,write::IndexDelivery::Asynchronous).await.unwrap();
+        assert_eq!(retry.results.iter().map(|r|r.as_ref().unwrap().seq).collect::<Vec<_>>(),vec![1,2]);
+    }
+
     #[test]
     fn joint_closure_admits_once_and_rejects_duplicate_or_over_budget() {
         let root=path();

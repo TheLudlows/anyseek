@@ -306,9 +306,10 @@ impl RecordPartition {
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
         let owner = self.inner.clone();
+        let writer = self.writer.clone();
         let partition=self.clone();
         crate::resources::spawn(async move {
-                let result={let _permit=admission;owner.lock().await.advance_time().await};
+                let result={let _permit=admission;let _writer=writer.lock().await;owner.lock().await.advance_time().await};
                 partition.kick_maintenance().await;
                 result
             })

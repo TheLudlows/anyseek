@@ -38,6 +38,8 @@ mod locator;
 pub use locator::{EvidenceLocator, EvidenceExcerpt};
 mod mutation;
 mod write;
+mod committed;
+pub use committed::{CommittedBatch, CommittedItem, CommittedProgress};
 mod index_consumers;
 mod publication;
 mod query;
@@ -45,9 +47,6 @@ mod replay;
 mod indexer;
 mod maintenance;
 mod cache_merge;
-mod ingest_log;
-mod ingestion;
-pub use ingestion::{IngestPipeline, IngestReceipt, IngestStatus, IngestProgress, IngestFailure};
 pub use indexer::IndexJob;
 mod segment_state;
 mod state_chunks;
@@ -470,44 +469,49 @@ impl RemotePersistence {
         })
     }
 
+    #[cfg(test)]
     async fn commit(&mut self, applied: &Applied, payload: &[u8]) -> Result<(), RemoteCommitError> {
-        let operation_id = format!("{}:{}", applied.request.operation_id.epoch, applied.request.operation_id.nonce);
-        self.commit_entry(applied.receipt.seq, operation_id, payload).await
+        self.commit_entry(applied.receipt.seq,format!("{}:{}",applied.request.operation_id.epoch,applied.request.operation_id.nonce),payload).await
     }
 
     async fn commit_entry(&mut self, seq: u64, operation_id: String, payload: &[u8]) -> Result<(), RemoteCommitError> {
+        self.commit_entries(&[(seq, operation_id, payload)]).await
+    }
+
+    async fn commit_entries(&mut self, entries: &[(u64, String, &[u8])]) -> Result<(), RemoteCommitError> {
         use sha2::{Digest, Sha256};
+        let first = entries.first().ok_or_else(|| "empty remote batch".to_owned())?.0;
+        let last = entries.last().unwrap().0;
         let mut authority = self.authority.lock().await;
         let head = authority.read_head(&self.partition_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "remote partition authority is missing".to_owned())?;
-        if seq != head.committed_seq.saturating_add(1) {
-            return Err(format!("remote commit sequence conflict: local={seq}, remote={}", head.committed_seq).into());
+        if first != head.committed_seq.saturating_add(1) || head.owner_epoch != self.owner_epoch {
+            return Err("remote commit sequence or owner epoch conflict".into());
         }
-        if head.owner_epoch != self.owner_epoch {
-            return Err("remote owner epoch changed; this writer is fenced".into());
-        }
-        let digest: [u8; 32] = Sha256::digest(payload).into();
         let block = crate::storage::object_log::ObjectLogBlock {
-            partition_id: self.partition_id.clone(), first_seq: seq, last_seq: seq,
+            partition_id: self.partition_id.clone(), first_seq: first, last_seq: last,
             previous: head.wal_tip.clone(),
-            entries: vec![crate::storage::object_log::ObjectLogEntry {
-                seq, operation_id: operation_id.clone(), request_sha256: digest, payload: payload.to_vec(),
-            }],
+            entries: entries.iter().map(|(seq, id, payload)| crate::storage::object_log::ObjectLogEntry {
+                seq: *seq, operation_id: id.clone(), request_sha256: Sha256::digest(payload).into(), payload: payload.to_vec(),
+            }).collect(),
         };
-        let key = format!("partitions/{}/wal/{seq:020}-{}", self.partition_id,
+        // The object identity binds the complete range, including its predecessor.
+        let digest: [u8; 32] = checkpoint_codec::json_digest(&block).map_err(|e| format!("{e:?}"))?;
+        let key = format!("partitions/{}/wal/{first:020}-{}", self.partition_id,
             digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
         let reference = crate::storage::object_log::upload_log_block(
             &self.store, &mut authority, &key, &block,
             unix_time_ms_i64(), self.max_object_bytes,
         ).await.map_err(RemoteCommitError::from)?;
-        match authority.publish_commit(
-            &self.partition_id, head.head_version, self.owner_epoch, &operation_id,
-            digest, seq, reference, None,
+        let operations: Vec<_> = block.entries.iter().map(|entry|
+            (entry.operation_id.as_str(), entry.request_sha256, entry.seq)).collect();
+        match authority.publish_batch(
+            &self.partition_id, head.head_version, self.owner_epoch, &operations, reference, None,
         ).map_err(|error| error.to_string())? {
             crate::storage::sqlite_authority::PublishOutcome::Published(published)
             | crate::storage::sqlite_authority::PublishOutcome::AlreadyPublished(published)
-                if published.committed_seq == seq => Ok(()),
+                if published.committed_seq == last => Ok(()),
             crate::storage::sqlite_authority::PublishOutcome::Conflict =>
                 Err("remote SQLite commit conflicted; partition requires recovery".into()),
             _ => Err("remote operation receipt does not match committed sequence".into()),
@@ -608,6 +612,8 @@ fn unix_time_ms_i64() -> i64 {
 /// retrieval run independently; results briefly reenter the Record guard for validation.
 #[derive(Clone)]
 pub struct RecordPartition {
+    writer: Arc<Mutex<()>>,
+    committed_queue: Arc<std::sync::Mutex<committed::Queue>>,
     inner: Arc<Mutex<Inner>>,
     admission: Arc<Semaphore>,
     output: Arc<std::sync::RwLock<output::OutputState>>,
@@ -730,6 +736,9 @@ impl Inner {
     // A cache append error cannot turn that known durable operation into an
     // unknown remote commit. The caller keeps health/output fenced until reopen.
     async fn append_operation(&mut self, bytes: &[u8], seq: u64) -> Result<(), RecordError> {
+        self.append_operations(&[bytes], seq).await
+    }
+    async fn append_operations(&mut self, payloads: &[&[u8]], seq: u64) -> Result<(), RecordError> {
         // Reserve the whole local frame before its first byte. File callbacks
         // borrow this permit through both redundant witnesses; no native or
         // remote work runs inside the synchronous loan.
@@ -746,7 +755,7 @@ impl Inner {
             if std::env::var("ANYSEEK_CACHE_APPEND_FAULT").as_deref()==Ok("1") {
                 return Err(std::io::Error::other("injected cache append failure"));
             }
-            self.journal.append(bytes)
+            self.journal.append_batch(payloads)
         };
         let result = match permit {
             Ok(Some(permit)) => permit.run(append),
@@ -759,6 +768,7 @@ impl Inner {
             let _ = seq;
             return Err(RecordError::OutcomeUnknown(error.to_string()));
         }
+        for bytes in payloads {
         if let Some(tail) = self.background.as_mut() {
             if let Some(revision)=tail.revision.checked_add(1) {tail.revision=revision;}
             else {tail.overflowed=true;}
@@ -772,6 +782,7 @@ impl Inner {
                     tail.entries.push(bytes.to_vec());tail.bytes=total;
                 } else {tail.overflowed=true;tail.entries.clear();}
             }
+        }
         }
         Ok(())
     }
@@ -1196,8 +1207,10 @@ impl RecordPartition {
         created_at_ms: i64,
         max_snapshot_bytes: usize,
     ) -> Result<(String, u64, String), RecordError> {
+        let writer=self.writer.clone();
         let owner=self.inner.clone();let backup_id=backup_id.to_owned();
         crate::resources::spawn(async move {
+        let _writer=writer.lock().await;
         let mut inner = owner.lock().await;
         if inner.background.is_some() { return Err(RecordError::Busy); }
         if !inner.healthy {
@@ -1217,8 +1230,10 @@ impl RecordPartition {
     /// Retry pending remote retirement/deletion under the single owner's guard.
     #[cfg(feature="s3-object-store")]
     pub async fn collect_s3_garbage(&self)->Result<usize,RecordError> {
+        let writer=self.writer.clone();
         let owner=self.inner.clone();
         crate::resources::spawn(async move {
+            let _writer=writer.lock().await;
             let mut inner=owner.lock().await;
         if inner.background.is_some() { return Err(RecordError::Busy); }
             if !inner.healthy {return Err(RecordError::RecoveryRequired);}
@@ -1368,6 +1383,8 @@ impl RecordPartition {
                 #[cfg(test)]
                 fail_publication_stage: 0,
             })),
+            writer: Arc::new(Mutex::new(())),
+            committed_queue: Arc::default(),
             admission: Arc::new(Semaphore::new(16)),
         })
     }
@@ -1479,34 +1496,23 @@ impl RecordPartition {
         inner.graph_cache=graph::Cache::rebuild(&inner.state)?;
         inner.reclaim_anchor_objects().await?;
         let indexes = index_consumers::Cursors::recovered(inner.state.seq);
-        Ok(Self {output,indexes,inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
+        Ok(Self {output,indexes,committed_queue:Arc::default(),writer:Arc::new(Mutex::new(())),inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
     }
-    /// A cancellation-safe accepted write: dropping this future does not cancel
-    /// an already spawned operation. Query its original operation ID afterward.
+    /// Commit one Record operation and synchronously publish its index inputs.
+    /// Dropping this future does not cancel an already spawned operation; query
+    /// its original operation ID after an uncertain result.
     pub async fn write(&self, request: RecordWrite) -> Result<WriteReceipt, RecordError> {
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
-        let inner = self.inner.clone();
-        let partition=self.clone();
-        let indexes=self.indexes.clone();
-        crate::resources::spawn(async move {
-            let result=async move {
-                let _permit = permit;
-                let mut inner = inner.lock().await;
-                inner.index.drain_indexes().await?;
-                let result = inner.write_one(request).await;
-                if inner.healthy { indexes.immediate(inner.state.seq); }
-                result
-            }.await;
-            partition.kick_maintenance().await;
-            result
-            })
-            .await
-            .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
+        let mut batch = self
+            .execute_writes(vec![request], write::IndexDelivery::Synchronous)
+            .await?;
+        if let Some(result) = batch.results.pop() {
+            return result;
+        }
+        Err(batch
+            .stop
+            .unwrap_or_else(|| storage("single write produced no decision")))
     }
+
     /// Lookup the confirmed result. None does not prove a timed-out write failed.
     pub async fn operation(&self, id: &OperationId) -> Result<Option<WriteReceipt>, RecordError> {
         let _permit = self
@@ -1562,7 +1568,7 @@ impl RecordPartition {
         Ok(Some(RecordStatus { evaluation_time_ms: inner.evaluation_time_ms, record_id: id.into(), version: record.version, visibility, pending_vector_fields, visible_seq: inner.state.seq }))
     }
     /// Search published caches outside the Record guard and reconcile bounded
-    /// candidates with canonical records. Index progress may lag durable intake.
+    /// candidates with canonical records. Index progress may lag durable commits.
     pub async fn search(
         &self,
         text: String,
@@ -1911,6 +1917,82 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(20),async {
             while p.inner.lock().await.maintenance_scheduled {tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
         }).await.unwrap();
+    }
+    #[tokio::test]
+    async fn unlocked_encoding_local_ttl_revalidation_and_wal_recovery() {
+        let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
+        let p=RecordPartition::create(&root,config()).await.unwrap();let (clock,now)=test_clock(&p).await;
+        let seed=write("seed","seed","alpha",ExpectedVersion::Absent);let receipt=p.write(seed.clone()).await.unwrap();
+        // Hold both asynchronous consumers to make their owner lifetime observable.
+        for lane in ["lexical","vector"] {
+            std::fs::write(root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();
+        }
+        let mut request=write("expires-encoding","r","beta",ExpectedVersion::Absent);
+        request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
+        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        let owner=p.clone();let command=request.clone();let replay=seed.clone();
+        let task=tokio::spawn(async move {owner.commit_writes(vec![replay,command]).await});
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !root.join(".test-write-encode-started").exists(){tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1),p.operation(&seed.operation_id)).await.unwrap().unwrap(),Some(receipt.clone()));
+        assert_eq!(p.committed_progress().await.committed_seq,Some(1));
+        clock.set(now+101);
+        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        let result=task.await.unwrap().unwrap();
+        assert!(matches!(result.stop,Some(RecordError::Busy)));
+        assert!(matches!(&result.results[..],[CommittedItem::Committed(r),CommittedItem::NotAttempted] if r==&receipt));
+        assert!(p.operation(&request.operation_id).await.unwrap().is_none());
+        {let inner=p.inner.lock().await;assert!(inner.background.is_none());assert!(!inner.maintenance_scheduled);assert!(inner.maintenance_requested.is_none());}
+        assert_eq!(Arc::strong_count(&p.inner),3,"partition plus the two paused consumers");
+        // A committed response does not join index workers, even for an empty
+        // publication. Explicitly finish owned consumers before testing reopen.
+        for lane in ["lexical","vector"] {
+            std::fs::remove_file(root.join(format!(".test-{lane}-consumer-pause"))).unwrap();
+        }
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        assert_eq!(Arc::strong_count(&p.inner),1,"consumer joins must release both owners");
+        let owner=Arc::downgrade(&p.inner);
+        drop(p);
+        assert!(owner.upgrade().is_none(),"no partition owner remains before reopen");
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(seed).await.unwrap(),receipt);
+        assert!(p.operation(&request.operation_id).await.unwrap().is_none());
+    }
+    #[tokio::test]
+    async fn committed_batch_output_barrier_uses_preceding_source_state() {
+        let temporary=tempfile::tempdir().unwrap();
+        let p=RecordPartition::create(&temporary.path().join("records"),config()).await.unwrap();
+        let ordinary=p.output_permit().unwrap();
+        commit_after_backpressure(&p,vec![write("a","a","alpha",ExpectedVersion::Absent),write("b","b","beta",ExpectedVersion::Absent)]).await;
+        ordinary.deliver(||()).unwrap();
+        let before_source=p.output_permit().unwrap();
+        let source=source_write("source","s",&[]);
+        let mut delete=write("delete","s","",ExpectedVersion::Match(1));delete.document=None;
+        commit_after_backpressure(&p,vec![source,delete]).await;
+        assert!(matches!(before_source.deliver(||()),Err(RecordError::RecoveryRequired)));
+    }
+    pub(super) async fn commit_after_backpressure(p: &RecordPartition, requests: Vec<RecordWrite>) {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match p.commit_writes(requests.clone()).await {
+                    Ok(batch) => {
+                        assert!(batch.results.iter().all(|item| matches!(item, CommittedItem::Committed(_) | CommittedItem::NotAttempted)));
+                        match batch.stop {
+                            None => { assert!(batch.results.iter().all(|item| matches!(item, CommittedItem::Committed(_)))); break; }
+                            Some(RecordError::Busy) => {}
+                            other => panic!("unexpected commit stop: {other:?}"),
+                        }
+                    }
+                    Err(RecordError::Busy) => {}
+                    Err(error) => panic!("unexpected commit error: {error:?}"),
+                }
+                // Retry the same operation IDs: a committed prefix is replayed.
+                wait_maintenance_idle(p).await;
+                p.inner.lock().await.index.drain_indexes().await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.expect("bounded committed backpressure retry");
     }
     pub(super) async fn write_after_maintenance(p:&RecordPartition,request:RecordWrite)->Result<WriteReceipt,RecordError> {
         tokio::time::timeout(std::time::Duration::from_secs(20),async {
@@ -2655,6 +2737,23 @@ mod tests {
         }
         drop(p); std::fs::remove_dir_all(root).unwrap();
     }
+    #[tokio::test]
+    async fn batch_source_generation_and_publication_recover_in_order() {
+        let directory=tempfile::tempdir().unwrap(); let root=directory.path().join("record");
+        let p=RecordPartition::create(&root,config()).await.unwrap();
+        let requests=vec![source_write("s","s",&[]),
+            generation_write("stage",ExpectedVersion::Absent,stage_generation("g1",&["a","b"])),
+            generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g1".into()})];
+        let result=p.execute_writes(requests.clone(),write::IndexDelivery::Asynchronous).await.unwrap();
+        assert_eq!(result.results.len(),3);
+        assert!(result.results.iter().all(Result::is_ok));
+        assert!(p.get("a").await.unwrap().is_some());
+        p.inner.lock().await.index.drain_indexes().await.unwrap(); drop(p);
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        for (request,receipt) in requests.into_iter().zip(result.results) {assert_eq!(p.write(request).await.unwrap(),receipt.unwrap());}
+        assert!(p.get("b").await.unwrap().is_some());
+    }
+
     #[tokio::test]
     async fn generation_partial_publication_fences_and_recovers_whole_set() {
         let root = path(); let archive = path();

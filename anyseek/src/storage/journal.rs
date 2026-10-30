@@ -146,16 +146,6 @@ impl<S: Seek> Drop for RestoreCursor<'_, S> {
 }
 
 impl Journal {
-    /// Inject a durable uncommitted suffix through the owning handle. Reopening
-    /// the locked WAL by path is not portable to Windows sharing modes.
-    #[cfg(test)]
-    pub(crate) fn inject_partial_tail_for_test(&mut self) -> io::Result<()> {
-        self.needs_recovery = true;
-        self.log.seek(SeekFrom::Start(self.end))?;
-        self.log.write_all(b"partial-intake-frame")?;
-        self.log.sync_all()
-    }
-
     pub(crate) fn capture_cut(&self,path:&Path)->io::Result<CommittedCut> {
         if self.needs_recovery {return Err(io::Error::other("journal requires recovery"));}
         if !fs::symlink_metadata(path.join("wal"))?.file_type().is_file() {return Err(corrupt("journal is not a regular file"));}
@@ -355,7 +345,7 @@ impl Journal {
         let (seq, end) = *valid.iter().max().unwrap();
         if valid
             .iter()
-            .any(|&(s, e)| seq - s > 1 || (s == seq && e != end) || (s < seq && e >= end))
+            .any(|&(s, e)| (s == seq && e != end) || (s < seq && e >= end))
         {
             return Err(corrupt("inconsistent commit witnesses"));
         }
@@ -368,6 +358,12 @@ impl Journal {
         log.read_exact(&mut magic)?;
         if &magic != MAGIC {
             return Err(corrupt("unsupported journal format"));
+        }
+        // Witness ordinals can differ by an entire batch. Authenticate every
+        // surviving position against an actual contiguous frame boundary.
+        if valid.iter().any(|&(s,e)| s == 0 && e != MAGIC.len() as u64)
+            || valid.iter().map(|&(s,_)|s).collect::<std::collections::BTreeSet<_>>().len() > 2 {
+            return Err(corrupt("inconsistent commit witness ranges"));
         }
         let mut entries = Vec::new();
         let mut offset = MAGIC.len() as u64;
@@ -394,6 +390,9 @@ impl Journal {
             }
             entries.push(payload);
             offset += FRAME_HEADER as u64 + length;
+            if valid.iter().any(|&(s,e)| s == next && e != offset) {
+                return Err(corrupt("commit witness is not a frame boundary"));
+            }
             next += 1;
         }
         if next - 1 != seq {
@@ -506,31 +505,37 @@ impl Journal {
     /// I/O errors after entering this method's write phase have unknown outcome.
     /// The caller must fence publication and recover; never continue appending.
     pub(crate) fn append(&mut self, payload: &[u8]) -> io::Result<u64> {
-        self.validate_append(payload.len())?;
-        let seq = self
-            .seq
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("sequence exhausted"))?;
-        let end = self
-            .end
-            .checked_add(FRAME_HEADER as u64 + payload.len() as u64)
-            .ok_or_else(|| io::Error::other("journal extent overflow"))?;
-        if payload.len() > MAX_FRAME || end > self.max_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "journal resource budget exceeded",
-            ));
+        self.append_batch(&[payload])
+    }
+
+    /// Publish all frames with one log sync and one redundant witness update.
+    /// Recovery selects the entire range or its preceding committed position.
+    pub(crate) fn append_batch(&mut self, payloads: &[&[u8]]) -> io::Result<u64> {
+        if payloads.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty journal batch"));
         }
-        let mut checked = Vec::with_capacity(16 + payload.len());
-        checked.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        checked.extend_from_slice(&seq.to_le_bytes());
-        checked.extend_from_slice(payload);
-        let checksum = hash(&checked);
-        // Set before the first write, including before cancellation/panic.
+        let mut seq = self.seq;
+        let mut end = self.end;
+        for payload in payloads {
+            self.validate_append(payload.len())?;
+            seq = seq.checked_add(1).ok_or_else(|| io::Error::other("sequence exhausted"))?;
+            end = end.checked_add(FRAME_HEADER as u64 + payload.len() as u64)
+                .filter(|end| *end <= self.max_bytes)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "journal batch budget exceeded"))?;
+        }
+        // Fence before any bytes are written. A failed write never permits reuse.
         self.needs_recovery = true;
-        self.log.write_all(&checked[..16])?;
-        self.log.write_all(&checksum.to_le_bytes())?;
-        self.log.write_all(payload)?;
+        for (offset, payload) in payloads.iter().enumerate() {
+            let ordinal = self.seq + offset as u64 + 1;
+            let mut checked = Vec::with_capacity(16 + payload.len());
+            checked.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            checked.extend_from_slice(&ordinal.to_le_bytes());
+            checked.extend_from_slice(payload);
+            let checksum = hash(&checked);
+            self.log.write_all(&checked[..16])?;
+            self.log.write_all(&checksum.to_le_bytes())?;
+            self.log.write_all(payload)?;
+        }
         #[cfg(test)]
         crash_boundary("log_written");
         self.log.sync_all()?;
@@ -585,6 +590,16 @@ fn crash_boundary(stage: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_admission_is_before_first_write() {
+        let root=path(); let mut journal=Journal::create(&root,128).unwrap();
+        journal.append(b"old").unwrap();
+        assert!(journal.append_batch(&[&[1;40], &[2;40]]).is_err());
+        assert!(!journal.needs_recovery);
+        journal.append_batch(&[b"a",b"b"]).unwrap(); drop(journal);
+        assert_eq!(Journal::open(&root,128).unwrap().1,vec![b"old".to_vec(),b"a".to_vec(),b"b".to_vec()]);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn committed_stream_preserves_lock_and_cursor_on_unwind() {
         let root=path();let mut journal=Journal::create(&root,4096).unwrap();
@@ -792,7 +807,9 @@ mod tests {
     fn journal_crash_worker() {
         let path = std::env::var_os("ANYSEEK_JOURNAL_PATH").expect("worker path");
         let (mut journal, _) = Journal::open(Path::new(&path), 1024).unwrap();
-        journal.append(b"possibly acknowledged").unwrap();
+        if std::env::var_os("ANYSEEK_JOURNAL_BATCH").is_some() {
+            journal.append_batch(&[b"possibly acknowledged",b"second",b"third"]).unwrap();
+        } else { journal.append(b"possibly acknowledged").unwrap(); }
         panic!("crash hook was not reached");
     }
     #[test]
@@ -828,6 +845,46 @@ mod tests {
                 1
             } else {
                 2
+            };
+            assert_eq!(entries.len(), expected, "{stage}");
+            drop(journal);
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+    #[test]
+    fn journal_batch_process_crash_selects_whole_range() {
+        for stage in [
+            "log_written",
+            "log_synced",
+            "first_witness_torn",
+            "first_witness_written",
+            "first_witness_synced",
+            "second_witness_torn",
+            "second_witness_written",
+            "second_witness_synced",
+        ] {
+            let path = path();
+            let mut journal = Journal::create(&path, 1024).unwrap();
+            journal.append(b"previously acknowledged").unwrap();
+            drop(journal);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "storage::journal::tests::journal_crash_worker",
+                ])
+                .env("ANYSEEK_JOURNAL_BATCH", "1")
+                .env("ANYSEEK_JOURNAL_PATH", &path)
+                .env("ANYSEEK_JOURNAL_CRASH", stage)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(73), "{stage}: {output:?}");
+            let (journal, entries) = Journal::open(&path, 1024).unwrap();
+            assert_eq!(entries[0], b"previously acknowledged");
+            let expected = if stage.starts_with("log") || stage == "first_witness_torn" {
+                1
+            } else {
+                4
             };
             assert_eq!(entries.len(), expected, "{stage}");
             drop(journal);

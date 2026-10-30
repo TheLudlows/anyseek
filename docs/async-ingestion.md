@@ -1,95 +1,72 @@
-# 轻量写入：持久接收、独立索引消费与查询解锁
+# 轻量写入：持久提交、独立索引消费与查询解锁
 
 2026-10-27 确认的新目标是轻量追加写入、异步索引与独立合并，不再要求跨全文、向量和原文的严格共同视图。当前完成度见 [STATUS](../STATUS.md)，后续以[路线](roadmap.md)为准；本文只保留稳定契约与最终实测，历史阶段验证通过对应 PR/CI 查阅。
 
 ## 本批范围
 
-打通持久化接收、独立后台物化和终态查询。Rust 入口是 `IngestPipeline`，HTTP 入口是 `/ingest`。现有 RecordPartition 暂作为物化器；`/doc`、`/batch` 和 `RecordPartition::write` 仍提供同步结果，没有悄悄改变旧接口的成功含义。
+#90 当前步骤将 `/ingest` 切换为业务判定成立且可靠持久化后的逐项结果，索引仍异步。Rust 新入口为 `RecordPartition::commit_writes`；独立持久 Intake、Accept/Complete、专属恢复与回收已删除。没有旧存储检测、迁移或兼容逻辑；代码变更不清除任何外部数据。`/doc`、`/batch` 和 `RecordPartition::write` 的同步语义保留。
 
-后台按最多 64 条、累计编码请求 4 MiB 聚合物化。Record 决策由物化任务推进；全文与向量/元数据分别由独立的有界消费任务推进。全文复用长期 Tantivy writer，每批一次提交、reload 与清单发布。条件拒绝先持久记录，再处理后续命令。Record 的业务 WAL 暂仍逐条提交，不将整批变成业务事务。
+新入口每批最多 64 条、累计编码请求 4 MiB。连续有效前缀共享一次本地 WAL 同步／S3 对象及 SQLite 事务发布；遇到明确业务拒绝后继续处理后续输入，整批不是事务。拒绝结果直接返回，不新增持久拒绝账本。全文与向量/元数据分别由独立有界消费任务推进。
 
 两个索引消费任务都不取得 Record 状态锁，水位可以互相领先。Record 物化先分配稳定的组件内行号并投递输入；向量慢时，Record 与全文仍可推进。退休掩码独立于组件读写锁，旧行和尚未消费的旧版本在查询 TopK 前被排除；序列化及封存会把掩码固化成有效成员集合。
 
 普通全文、向量、混合查询及关系融合在检索和元数据过滤期间释放 Record 锁。查询只固定组件拓扑与文件 pin，不克隆完整 State 或所有原文；取得有界候选后短暂重新进入 Record 锁，核对当前可见位置并读取原文。并发更新、删除、checkpoint 替换可让候选被丢弃，结果可能不足请求长度；count_total 描述检索时观察的候选，visible_seq 描述返回前的原文状态，不构成严格共同视图。来源删除、撤权和故障输出屏障继续生效。
 
-接收日志不取得 Record 锁，物化等待期间可以继续接收，直到接收预算耗尽。全文与向量/元数据通过 `(record_id, version, revision)` 关联，不再要求相同行号、组件数量或排列。引擎内部仍使用物理地址。lexical_seq 领先 vector_seq 不保证相应记录已能按元数据过滤检索；向量写入与向量查询仍共享组件锁。候选跨缓存重建时可用版本及完整索引输入指纹复验，同版本向量补丁、删除、来源失效和组件故障仍被拦截。
+新 HTTP 写入直接提交 Record WAL。全文与向量/元数据通过 `(record_id, version, revision)` 关联，不再要求相同行号、组件数量或排列。引擎内部仍使用物理地址。lexical_seq 领先 vector_seq 不保证相应记录已能按元数据过滤检索；向量写入与向量查询仍共享组件锁。候选跨缓存重建时可用版本及完整索引输入指纹复验，同版本向量补丁、删除、来源失效和组件故障仍被拦截。
 
+
+## 单层 Record WAL 收敛进度
+
+内部 `execute_writes` 已统一同步 Record 写入与异步索引 committed 写入的执行路径：沿用 partition admission 和独立串行 writer，按最多 64 条、编码请求 4 MiB 限制待执行批次，并在 owned task 完成前保留内存预算。每项成功结果均来自已有 Record 持久提交；异步索引模式不等待消费者追平。批内依次判定版本，首个明确拒绝结束当前物理提交前缀，committed 执行器继续处理后续输入；执行器本身不新增拒绝账本。取消等待不取消已启动的提交，未知结果仍须以原 operation_id 查询或重试。
+
+前三步先保持旧 HTTP 契约，本步按下文切换 `/ingest`；`/doc` 和 `/batch` 仍沿用同步可见性。内部多项执行现在先在私有状态顺序规划有效前缀，再做一次真正的批持久化：本地 WAL 保留逐事件帧，但只同步一次日志并更新一组冗余提交见证；S3 使用一个多事件不可变对象，SQLite 在一个事务内选择最终水位并插入全部操作回执。批次内的重复操作不新增事件，冲突结束前缀，资源压力保留后缀待重试。见证恢复校验完整帧范围，S3 上传但未被元数据选择的对象不会重放。committed 入口已有分区内有界队列，累计在途与排队输入最多 64 项／4 MiB；立即合并已排队的新请求，无等待窗口。每个请求分别获得自己的逐项结果，取消等待不撤销已入队执行。业务校验、逐事件编码和 S3 上传已在独立串行写入所有权保护下移出状态锁。独立 Intake 日志和 authority 已移除，新写入只有一条权威持久提交路径。
+
+本地帧和 S3 对象字段未新增格式，但本地提交见证现在允许一次跨越多个事件序号；旧程序的单事件恢复校验不能读取这种新提交，未提供降级兼容。S3 元数据每项回执指向同一最终提交 cut，业务逐项版本仍由 Record 回执保留。批规划期间保留私有状态和内存预算；S3 上传缩锁见下一节，更精细的内存优化仍留待后续小步。
+
+## 第三步：S3 上传释放状态锁
+
+独立的 partition writer 锁串行化业务提交、TTL 推进、checkpoint 安装及 GC。业务规划和逐事件编码基于私有候选状态，在状态锁外执行；资源准入、候选容器安装和本地 WAL 同步仍持有状态锁；S3 日志块编码、上传与验证使用独立元数据连接，期间释放状态锁。旧 operation 回执查询和索引消费者可以取得状态锁；需要推进 TTL 的数据读取仍遵守 writer 顺序，这一步不承诺所有查询都能绕过上传。
+
+发布前重新推进时间并核验完整候选基线，候选中的 TTL/租约已经过期则返回 Busy、留下未选中的上传对象，原请求可重新判定。SQLite 发布仍比较捕获的 head version 和 owner epoch；冲突或未知发布结果保持 fenced，恢复原 operation_id。checkpoint 安装与对象回收不越过正在执行的 writer。取消调用者等待不释放正在提交的 owned task。
+
+第三步提交当时保持 HTTP 和 Intake 不变；后续步骤已切换 HTTP 并删除 Intake。旧版本无法读取第二步新增的跨多事件提交见证；不提供升级或降级迁移。
 
 ## API 契约
 
 `POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每批 1–64 条，累计编码请求最多 4 MiB，同时受 HTTP 2 MiB body 上限和 collection 单记录限制约束。每条必须显式提供 document（null 删除）、vector_patch 或 generation。
 
-202 返回 `state=durable`、`searchability=asynchronous` 及每条命令的 `durable_seq/operation_id`。它只表示命令已持久接收；条件版本、来源和 generation 等业务检查由后台按序执行。不能将 202 解释为条件成功或立即可搜索，接收批次也不是业务事务。
+HTTP 200 表示批处理获得逐项确定结果，不表示每项成功。响应为 `{"atomic":false,"searchability":"asynchronous","results":[...],"error":null}`。结果按输入顺序排列，包含原 `operation_id`：
 
-`GET /api/v1/index/{id}/ingest/operation/{epoch}/{nonce}` 返回 status：
-
-| 字段 | 含义 |
+| code | 含义 |
 | --- | --- |
-| accepted 非空，receipt/error 为空 | 已接收，仍待处理或需要恢复 |
-| receipt 非空 | Record 物化成功，含原 Record 回执；全文与向量/元数据都可能滞后 |
-| error 非空 | 确定的条件冲突、无效内容或过期拒绝；终态也已持久化 |
-| status 为 null | 当前流未查到，不能证明未知提交没有发生 |
+| committed | 唯一成功状态，必须带持久化的 Record `receipt`；包括原身份精确重试 |
+| rejected | 明确业务拒绝，`error.code/message` 描述冲突、无效内容或过期；继续执行后续项 |
+| outcome_unknown | 已尝试发布，可能已经提交；以原 operation_id 查询／重试 |
+| not_attempted | 本次调用未进入该项的权威发布；不证明同一身份的较早请求未提交 |
 
-发送前保存整个请求。原身份及相同内容重试返回原接收回执，不再次入队；同一身份修改内容返回 409。进度/终态查询不取得 Record/index 互斥锁。所有接口保留 collection 授权及交付时撤权检查。已授权持久接收的命令继续处理，撤权不撤销已接收命令。
+资源不足返回 429，未知结果或恢复／存储问题返回 503。进入批执行后的两者保留同样的逐项结果信封和已有回执，顶层 `error` 描述中断。解析前的限流／请求级故障仍可返回原 `code/message` 错误，没有逐项结果；这也不能证明较早的同身份请求未提交。不能把 HTTP 状态码作为每项结果。整批结构无效、数量／字节上限等请求级错误仍返回 400；认证授权错误沿用原接口。
 
-`GET /api/v1/index/{id}/ingest` 返回以下进度，不取得 Record/index 锁：
+`GET /api/v1/index/{id}/ingest/operation/{epoch}/{nonce}` 与普通 `/operation/{epoch}/{nonce}` 一样查询 Record 回执，返回 `operation_id/receipt/expires_at/absence_proves_failure:false`。receipt 为 null 不证明失败，不再返回 Intake accepted／终态对象。拒绝不新增持久账本。
 
-| 字段 | 序号空间与含义 |
-| --- | --- |
-| durable_seq / completed_seq | 接收流序号；完成前缀包含确定拒绝 |
-| materialized_seq | 最近成功命令的 Record 回执序号 |
-| vector_seq | 向量/元数据消费任务已处理的 Record 序号，包含无索引变化的命令 |
-| lexical_seq | 全文消费任务已经发布的 Record 序号，可领先或滞后 vector_seq |
-| pending / retained_bytes / blocked | 待物化命令数、接收 WAL 占用、物化或持久化阻塞 |
-| index_error | 派生索引消费失败，需要重新打开以重建；不撤销已持久的命令和 Record 回执 |
+发送前保存完整请求。相同身份和内容重试返回原提交回执；身份复用但内容变化是项级 conflict 拒绝。索引滞后不影响成功回执。所有接口保留 collection 授权与交付时撤权检查；取消等待或断线不取消已启动的有界执行。
 
-lexical_seq、vector_seq 是可重建缓存的内存消费水位，不是另一个持久提交头。打开时从权威 Record 日志/证书恢复索引后初始化；后台故障不能把未处理批次跳过去。搜索响应的 visible_seq 表示原文状态位置，不保证每个索引已追到该位置。
+`GET /api/v1/index/{id}/ingest` 返回 `committed_seq`、`lexical_seq`、`vector_seq`，三者均为 Record 序号，不再混用 Intake 序号。`committed_seq` 是当前恢复可信的持久业务状态位置，需恢复时为 null 并设置 `recovery_required:true`；`index_error` 表示派生索引故障。该查询短暂取得状态锁，不等待消费者。
 
-Python 客户端新增 `ingest(collection_id, requests)`、`ingest_status(collection_id, operation_id)` 和 `ingest_progress(collection_id)`；客户端不隐式重试或分配新身份。
+lexical_seq、vector_seq 是可重建缓存的内存消费水位，不是另一个持久提交头。搜索响应的 visible_seq 不保证每个索引已追到该位置。
+
+Python 客户端 `ingest` 原样返回 200／429／503 JSON（包含可用的完整逐项结果，或执行前请求级错误），调用方必须检查每项 receipt；客户端不隐式重试或分配新身份。`ingest_status` 查询 Record 回执，`ingest_progress` 查询上述 Record 水位。
 
 ## 日志、恢复与管理
 
-本地接收流位于 collection 的 `intake/`。一批共享一次底层 WAL 同步提交，文件 I/O 在 blocking worker 上执行。默认段大小为 8 MiB，不小于最大批次所需空间；总预算为 collection journal 预算的八倍，稳定 control journal 预算为 1 MiB。段满后先持久创建下一段，再向 control journal 追加段引用，随后切换写入；不构建 Record checkpoint 或索引。恢复只读 control 选择的有序段链，缺段报错，未选准备段不作为最新数据。
+本地以一次批追加和持久化屏障选择完整已提交帧范围；S3 先上传并校验不可变日志对象，再由 Record SQLite authority 事务发布引用、提交头与逐项回执。未发布对象不参与业务重放。恢复从被选中的 checkpoint 和已提交 WAL 进行，不重新判定已提交业务。
 
-S3 每批先上传并校验不可变命令对象，再由 intake SQLite 发布引用和提交水位。SQLite 不保存正文、向量或命令正文。intake authority 为原 authority 同级的 `*.intake.sqlite`，稳定锁为 `*.intake.owner`，对象 namespace 为原 partition namespace 加 `-intake`。这些是持久权威元数据，不能当作 collection 缓存删除。恢复从 SQLite 所选完整远端事件链读取命令与终态，不依赖本地缓存。
+备份、恢复和删除保持写入管理屏障，与整个 owned committed 请求互斥；通用 owner fencing、操作回执窗口、备份与读者 pin、对象退休及未知 PUT 防复活规则保留。同步写入、checkpoint 和后台安装继续按原要求协调派生索引。全文与向量消费者持有 owner 到完成，索引故障不能撤销已提交业务，也不能跳过消费水位。
 
-每个流至多一个活跃 Record 物化任务，每个可变尾段各至多一个活跃全文和向量消费任务；按批投递，不为每条命令派生 detached task。两类临时输入只复制各自所需的全文或向量/元数据字段，持有独立内存/资源额度；可变尾段的 128 次更新上限在入队时计算，两条队列各有 128 批上限。物化不持接收日志锁。Busy 在有界时间内重试原身份；未知结果或持久后应用失败保持 pending/blocked，重新打开后解析原回执。接收前预留终态日志空间，避免接收后无法记录结果。
-
-备份、恢复和删除等串行管理流程持接收管理屏障；有待处理命令或任一索引未追上 materialized_seq 时返回 Busy，有 blocked/index_error 返回 RecoveryRequired。当前保守检查全部已打开接收流，避免成功备份遗漏接收数据。guard 由 owned task 持有，不随 HTTP 等待取消提前释放。同步旧写入、尾段封存、checkpoint 和后台重建安装先排空两条索引队列；普通异步物化不等待索引批次完成。两个消费任务持有源 owner 到结束，关闭公开句柄不能提前释放 journal 锁或映射文件。向量任务在组件写锁内标记失败，正在执行及后续查询拒绝访问失败的组件；重新打开从权威日志重建。Rust 的 finish() 显式等待物化和索引消费，普通提交不调用它。
-
-成功物化后的备份保留 Record 数据和成功回执；恢复到新 collection/服务权威时建立新 intake 流，不继承原接收序号或独立拒绝账本。本批不提供接收流迁移。
-
-## 验证与后续
-
-测试覆盖物化锁被持有时接收、原身份重试、确定拒绝、未知结果后恢复、段滚动、缺段/准备段、预算拒绝、S3 缓存丢失后的 pending/终态恢复、HTTP 202/409/400 和撤权输出。
-
-本轮实施与最终验收结果见下文[最终结果与剩余验收](#最终结果与剩余验收)。已加入稳定索引身份、有界全文段合并、接收日志快照回收和认证的过期操作账本裁剪。State/checkpoint 长度计量复用不可变共享值，退休历史用认证时间前缀表示；完整 State 驻内存和维护来源重放证明仍保留，不能把局部简化称为该协议已移除。接收日志与 Record 恢复日志仍有过渡重叠。
-
-本批仍受 max_operations、最多 1024 条待处理命令及日志总预算限制。回收只释放已过重试/历史 GC 保留范围且不承担业务证据的操作；generation 身份精确拒绝复用集合仍受 max_records 限制。真实 S3 和硬断电需单独验收，不宣称无限容量或合并零成本。
-
-## 回收与独立合并契约
-
-接收终态持久化后，内存只保留规范化请求摘要和状态，不再持有命令正文。规范化保留原 JSON 相等比较语义。重试窗口内仍返回原接收回执；已被回收的旧身份受到持久 epoch floor 拒绝，不能在时钟回退后重新执行。durable_seq/completed_seq 是绝对序号，不因裁剪归零。状态查询为空仍不能证明旧提交未发生。
-
-本地回收先完整写入并同步新 generation，再原子选择它，最后清理旧代；原 control 所有权锁贯穿切换。选择结果未知时阻塞接收，重开只使用持久选择的完整链。远端先写入校验过的快照分块，再由 SQLite CAS 选择，随后退休旧对象和内部事件回执。已确认删除对象的元数据可由持久 WAL/快照代次水位保护后裁剪，旧对象注册和发布不能让水位回退。未知 PUT 不能以一次 DELETE 成功证明不会晚到，因此保留其防复活和重复删除记录。
-
-Record 维护捕获固定的退休集合，先验证来源，再把时间前缀和 epoch 水位随 checkpoint 一起认证发布。后台 catch-up 不能因后来历史切点/epoch 前进而扩大该集合。当前私有上传的来源、最新续租、到期前置回执和仍需证明的撤销保留；已关闭世代的过期控制可回收。旧 RecordFeedTrimV12 日志按原规则恢复，新事件带显式策略标记，以完整提交时间证明推进保留范围，包含私有 generation 命令。
-
-独立全文合并最多选择 8 个小段、合计不超过 128 文档，按实际不可变输入大小预留资源。它不取得 Record 锁、不构建 State checkpoint，也不改变逻辑消费水位；旧 Searcher 保留原视图。失败或调用取消隔离不确定 writer，后台工作保有资源直到结束。另外，两份冻结全文/向量组件可独立合并为派生缓存：最多捕获 16384 条记录，输入预算 32 MiB、可选构建分析预算 256 MiB；锁外构建后短锁复验来源并安装。共享失效 token 保证更新、删除和来源级联继续影响旧读句柄，reader pin 保护仍在使用的文件。普通 tail 轮转不再每 128 次更新生成权威 checkpoint；合并不推进业务或索引消费水位，也不修改权威 WAL/certificate。冷恢复遇到可选合并预算不足时从已验证 State 重建私有缓存，不拒绝已提交日志。完整权威 checkpoint 仍验证来源证明。并发磁盘扫描保留旧 ledger 的逐路径高水位，避免遗漏正在写入的预收费；串行恢复/权威构建可重新扫描回收保守额度。
-
-写入预留复用 Records 的 live TTL/Source/typed 增量计数与 generation staged 统计缓存。非持久化最早 TTL 下界跳过尚未到期的 Records 扫描；下界到达时仍完整检查，恢复重新构建并验证缓存，不能以缓存放松租约或撤权规则。
-
-后台 checkpoint 固定物理 WAL cut 与 generation，以每段不超过 64 KiB 的持锁读取保留原句柄所有权和 cursor；帧组装、校验与来源重放在锁外执行。显式 Compact 使用 owned 后台任务，保留 State delta/payload 复用，并在冻结 membership 后锁外复用不可变原生包。完整 State 仍驻内存，初始 State/索引元数据捕获仍与规模相关；有界 mutable tail handoff、最终权威安装的部分 I/O 仍在 Record 锁内。读取字节上限不保证设备等待时长上限。
-
-接收快照按 Spool revision 捕获 Arc<Row> 与固定 cut，编码和本地新 generation 写入在锁外进行，短锁复验后选择 CURRENT。远端在短锁内原子预登记候选全部对象及无过期 staging pins，PUT 在锁外执行，只有原 cut/head 未变才 CAS 选择；迟到候选弃选重试。未知选择保留 pins 并隔离写入，重新取得稳定 owner 且解析选中 head 后才取消遗留 build pins。旧行释放、对象退休、DELETE 和回执裁剪在锁外进行。pending 终态字节与对象预留仍需复验；未知 PUT 登记不会按时间遗忘。finish/admin 等待 owned GC，慢上传或删除不再占用 Spool 锁。
-
-远端首次乐观候选预留下一完整快照的对象名额，该预留持续计入 Accept/Complete 的准入；若不能预留，直接进入排空模式而不先注册候选。候选首次失效后，新身份返回 Busy，原身份重试仍返回已有回执，既有 pending 可继续完成；排空后构建稳定快照，成功选择即解除门控。资源 Busy 会清除临时门控/备用名额，保留后续重试途径；unknown 仍隔离。资源可用且既有物化最终完成时，此路径避免持续新写入造成无限上传弃选；不保证外部资源或持久化故障下仍能推进。
-
-捕获仍遍历保留行，远端预登记事务和选择时的可达性扫描仍在 Spool 锁内。本地快照仍可能反复弃选，但弃选会清理自身准备文件。普通远端 append 网络操作仍持 Spool 锁，因此期间进度查询和终态持久化需要等待；向量发布的组件写锁也保留。相关维护临界区和接收长尾必须实测，不把“异步”解释为无阻塞。
+本步不支持旧 Intake 存储，也不建立检测或迁移流程。全量跨平台、真实 S3、硬断电和性能验收须分别记录；不能以局部测试宣称完整 issue #90 已完成。逐事件业务编码已移出状态锁；这不表示所有大小计算、状态复制或磁盘同步都不持锁。
 
 ## 最终结果与剩余验收
 
-最终冻结产物 `1359d7e`（release SHA-256 `07c27055f7baa0e9e99d5761b29331f5ca539c8653c4b92fc5e76321aeb07d0f`）完成全部 35 targets：556 通过、0 失败、13 忽略；独立 core 双配置与 9 项 doctest 通过。精确发布 SHA 的 CI 终态以 Draft PR #88 检查及描述为准。以下保留最终实测与仍未闭环的边界。
+以下为 #90 改造前的历史结果，**不代表当前提交验证或性能**。历史冻结产物 `1359d7e`（release SHA-256 `07c27055f7baa0e9e99d5761b29331f5ca539c8653c4b92fc5e76321aeb07d0f`）完成全部 35 targets：556 通过、0 失败、13 忽略；独立 core 双配置与 9 项 doctest 通过。精确发布 SHA 的 CI 终态以 Draft PR #88 检查及描述为准。以下保留最终实测与仍未闭环的边界。
 
 ### 同数据同资源成对测量（Meilisearch Community v1.56.0）
 
@@ -126,4 +103,8 @@ AnySeek 2305 条成功业务回执、145 批双水位全部验证，最终 pendi
 
 ### 仍未闭环
 
-通用 Record checkpoint、内容寻址对象和备份的 SQLite `retired_objects`／`object_uploads` 墓碑仍保留，尚无持续有界裁剪；删除墓碑可能使迟到上传或旧引用重新注册已退休键，破坏"退休后永不重新发布或 pin"的不变量。generation 的精确拒绝复用 `used` 集合仍永久保留，由全局 `max_records` 上限反压。完整 State 仍驻内存，普通远端 append 仍持 Spool 锁跨网络。这些是明确的容量契约，不承诺无限容量。
+通用 Record checkpoint、内容寻址对象和备份的 SQLite `retired_objects`／`object_uploads` 墓碑仍保留，尚无持续有界裁剪；删除墓碑可能使迟到上传或旧引用重新注册已退休键，破坏"退休后永不重新发布或 pin"的不变量。generation 的精确拒绝复用 `used` 集合仍永久保留，由全局 `max_records` 上限反压。完整 State 仍驻内存；资源准入、状态安装和本地 WAL 同步仍持 Record 状态锁，逐事件业务判定与编码在私有候选上执行。这些是明确的容量契约，不承诺无限容量。
+
+## 发布次数对照
+
+可重复运行 `python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --section ingest --faults`（先以 `server,fault-injection` 构建）。测试使用门控产生两个独立请求的确定积压，追踪实际 WAL 批追加：两个新命令共享一次发布；串行提交两个新命令则产生两次发布。两组各提交两条成功命令，冲突不计入已发布命令。门控是测试注入，不是生产等待窗口；此对照不测量或声称吞吐／延迟收益。

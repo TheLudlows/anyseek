@@ -1,7 +1,8 @@
 //! Validate a Record command without touching authority or derived indexes.
 //!
 //! This is the single live-write planner. It runs under the partition executor's
-//! guard; a plan must never be retained across another state transition. Recovery
+//! writer ownership against a private captured state, without the state mutex.
+//! Publication revalidates the captured basis and deadlines. Recovery
 //! consumes Applied decisions, not this admission path (wall time and current
 //! retry windows must not reinterpret previously durable commands).
 use super::*;

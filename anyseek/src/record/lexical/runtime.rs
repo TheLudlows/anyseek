@@ -232,7 +232,7 @@ impl Runtime {
     ) -> Result<(), RecordError> {
         self.append_inner(identity, document, publish, publish).await
     }
-    /// Intake queues documents on the retained writer and publishes once at the
+    /// Committed execution queues documents on the retained writer and publishes once at the
     /// batch boundary. Count them before publication so rotation cannot overrun
     /// the mutable-tail admission bound.
     pub(crate) async fn append_queued(

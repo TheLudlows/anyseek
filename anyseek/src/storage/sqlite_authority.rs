@@ -54,8 +54,6 @@ pub(crate) struct AuthorityBackupSnapshot {
     pub retired: Vec<RetiredSnapshot>,
     pub edges: Vec<ObjectEdgeSnapshot>,
     pub object_closure: Vec<ObjectRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub intake_namespaces: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -149,7 +147,6 @@ impl SqliteAuthority {
                  log_base_seq INTEGER NOT NULL CHECK(log_base_seq>=0 AND log_base_seq<=committed_seq),
                  log_anchor_json TEXT
              );
-             CREATE TABLE IF NOT EXISTS intake_namespaces (partition_id TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS operation_receipts (
                  partition_id TEXT NOT NULL,
                  operation_id TEXT NOT NULL,
@@ -304,178 +301,23 @@ impl SqliteAuthority {
         Ok(head.wal_tip)
     }
 
-    /// Exact retained WAL sizes from the immutable commit receipts. No payload
-    /// copies or remote GET are needed for pre-append recovery admission.
-    /// Record commits exactly one Entry per block; generic multi-entry blocks
-    /// must not use this receipt-based count as their recovery admission.
+    /// Exact retained WAL sizes from immutable commit receipts. A batch has
+    /// one receipt per event but shares one block: charge each object only once.
     pub(crate) fn retained_tail_size(&self, head:&PartitionHead)->rusqlite::Result<(u64,u64)> {
-        let (count,bytes):(i64,i64)=self.connection.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(json_extract(result_json,'$.wal_tip.length')),0) FROM operation_receipts WHERE partition_id=?1 AND committed_seq>?2 AND committed_seq<=?3",
+        let (events,count,bytes):(i64,i64,i64)=self.connection.query_row(
+            "WITH receipts AS (
+                SELECT result_json FROM operation_receipts
+                WHERE partition_id=?1 AND committed_seq>?2 AND committed_seq<=?3
+             ), blocks AS (
+                SELECT DISTINCT json_extract(result_json,'$.wal_tip') AS tip FROM receipts
+             ) SELECT (SELECT COUNT(*) FROM receipts), COUNT(*),
+                 COALESCE(SUM(json_extract(tip,'$.length')),0) FROM blocks",
             params![head.partition_id,to_i64(head.log_base_seq)?,to_i64(head.committed_seq)?],
-            |row|Ok((row.get(0)?,row.get(1)?)))?;
-        if count<0 || bytes<0 || count as u64!=head.committed_seq.checked_sub(head.log_base_seq).ok_or(rusqlite::Error::InvalidQuery)? {
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        if count<0 || bytes<0 || events<0 || events as u64!=head.committed_seq.checked_sub(head.log_base_seq).ok_or(rusqlite::Error::InvalidQuery)? {
             return Err(rusqlite::Error::InvalidQuery);
         }
         Ok((count as u64,bytes as u64))
-    }
-
-    /// Mark the dedicated intake authority explicitly; a user's Record partition
-    /// ending in "-intake" must not inherit internal intake GC semantics.
-    pub(crate) fn enable_intake_gc(&mut self, partition: &str, epoch: u64) -> rusqlite::Result<()> {
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let head = read_head(&tx, partition)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        if !partition.ends_with("-intake") || head.owner_epoch != epoch { return Err(rusqlite::Error::InvalidQuery); }
-        tx.execute("INSERT OR IGNORE INTO intake_namespaces(partition_id) VALUES(?1)", [partition])?;
-        tx.commit()
-    }
-
-    /// Count all registered intake objects, including live objects, interrupted
-    /// uploads and deletion tombstones. No row materialization is needed for admission.
-    pub(crate) fn intake_inventory_count(&self, partition: &str, epoch: u64) -> rusqlite::Result<u64> {
-        if !is_intake_namespace(&self.connection, partition)? { return Err(rusqlite::Error::InvalidQuery); }
-        let head = self.read_head(partition)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        if head.owner_epoch != epoch { return Err(rusqlite::Error::InvalidQuery); }
-        let prefix = format!("partitions/{partition}/");
-        let count: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM object_uploads WHERE substr(object_key,1,length(?1))=?1",
-            [prefix], |row| row.get(0))?;
-        u64::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)
-    }
-
-    /// Atomically reserve a complete intake snapshot candidate before any PUT.
-    /// False means the captured head or inventory budget no longer permits it.
-    /// Pins have no expiry: cancellation requires the stable intake owner to
-    /// explicitly release this build, including after process recovery.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn reserve_intake_snapshot_uploads(
-        &mut self, partition: &str, epoch: u64, expected_head_version: u64,
-        build_id: &str, objects: &[ObjectRef], at: i64, max_objects: u64,
-        completion_slots: u64,
-    ) -> rusqlite::Result<bool> {
-        if build_id.is_empty() || !build_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-            || objects.is_empty() { return Err(rusqlite::Error::InvalidQuery); }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !is_intake_namespace(&tx, partition)? { return Err(rusqlite::Error::InvalidQuery); }
-        let head = read_head(&tx, partition)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        if head.owner_epoch != epoch { return Err(rusqlite::Error::InvalidQuery); }
-        if head.head_version != expected_head_version { return Ok(false); }
-        let version = expected_head_version.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
-        let prefix = format!("partitions/{partition}/snapshot/{version:020}-{build_id}/");
-        let inventory_prefix = format!("partitions/{partition}/");
-        let pin_prefix = intake_build_pin_prefix(partition, epoch, build_id)?;
-        let mut keys = std::collections::BTreeSet::new();
-        let mut additional = 0u64;
-        for object in objects {
-            if !object.key.starts_with(&prefix) || object.key.len() == prefix.len()
-                || !keys.insert(&object.key) || retired_intake_key(&tx, &object.key)? {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            ensure_intake_manifest_advances(&tx, partition, object)?;
-            let row: Option<(Vec<u8>, i64, i64)> = tx.query_row(
-                "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
-                [&object.key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-            match row {
-                Some((digest, length, state)) if digest.as_slice() == object.sha256
-                    && length == to_i64(object.length)? && matches!(state, 0 | 1) => {},
-                Some(_) => return Err(rusqlite::Error::InvalidQuery),
-                None => { to_i64(object.length)?; additional += 1; },
-            }
-        }
-        let prior = {
-            let mut query = tx.prepare("SELECT object_key FROM object_pins WHERE partition_id=?1 AND pin_kind='staging'
-                AND substr(pin_id,1,length(?2))=?2")?;
-            query.query_map(params![partition, pin_prefix], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?
-        };
-        if !prior.is_empty() && (prior.len() != keys.len() || prior.iter().any(|key| !keys.contains(key))) {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM object_uploads WHERE substr(object_key,1,length(?1))=?1",
-            [&inventory_prefix], |r| r.get(0))?;
-        let count = u64::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if count.checked_add(additional).and_then(|n| n.checked_add(completion_slots))
-            .is_none_or(|n| n > max_objects) { return Ok(false); }
-        for object in objects {
-            tx.execute("INSERT OR IGNORE INTO object_uploads VALUES(?1,?2,?3,0,?4)",
-                params![object.key, object.sha256.as_slice(), to_i64(object.length)?, at])?;
-            tx.execute("INSERT OR IGNORE INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms)
-                VALUES(?1,?2,?3,'staging',NULL)",
-                params![format!("{pin_prefix}{}", object.key), partition, object.key])?;
-        }
-        tx.commit()?;
-        Ok(true)
-    }
-
-    /// Release only this build's pins. The caller must hold the stable intake
-    /// owner lock, and must first resolve any uncertain publication. Never call
-    /// this merely because a pin is old; unknown PUT inventory remains durable.
-    pub(crate) fn release_intake_snapshot_uploads(
-        &mut self, partition: &str, epoch: u64, build_id: &str,
-    ) -> rusqlite::Result<usize> {
-        let prefix = intake_build_pin_prefix(partition, epoch, build_id)?;
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !is_intake_namespace(&tx, partition)?
-            || read_head(&tx, partition)?.is_none_or(|head| head.owner_epoch != epoch) {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let deleted = tx.execute("DELETE FROM object_pins WHERE partition_id=?1 AND pin_kind='staging'
-            AND substr(pin_id,1,length(?2))=?2", params![partition, prefix])?;
-        tx.commit()?;
-        Ok(deleted)
-    }
-
-    /// Recovery only: caller must have reacquired the exclusive stable intake
-    /// owner file and resolved the selected head before cancelling old builds.
-    pub(crate) fn cancel_intake_snapshot_uploads(&mut self, partition: &str, epoch: u64) -> rusqlite::Result<usize> {
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !is_intake_namespace(&tx, partition)? || read_head(&tx, partition)?.is_none_or(|h| h.owner_epoch != epoch) {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let n = tx.execute("DELETE FROM object_pins WHERE partition_id=?1 AND pin_kind='staging'
-            AND substr(pin_id,1,15)='intake-staging:'", [partition])?;
-        tx.commit()?;
-        Ok(n)
-    }
-
-    /// Internal intake event identities are monotonic and never submitted by clients.
-    /// Their publication receipts may be removed only behind a selected checkpoint.
-    pub(crate) fn prune_intake_receipts(&mut self, partition: &str, epoch: u64, seq: u64) -> rusqlite::Result<()> {
-        if !is_intake_namespace(&self.connection, partition)? { return Err(rusqlite::Error::InvalidQuery); }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let head = read_head(&tx, partition)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        if head.owner_epoch != epoch || head.log_base_seq < seq || head.manifest.is_none() {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        tx.execute("DELETE FROM operation_receipts WHERE partition_id=?1 AND committed_seq<=?2",
-            params![partition, to_i64(seq)?])?;
-        tx.commit()
-    }
-
-    /// Compact confirmed-delete tombstones only when the durable intake head
-    /// itself rejects any future registration of these internal monotonic keys.
-    /// Unknown PUT tombstones (state 5) remain for repeated remote deletion.
-    pub(crate) fn prune_intake_deleted_objects(&mut self, partition: &str, epoch: u64) -> rusqlite::Result<usize> {
-        if !is_intake_namespace(&self.connection, partition)? { return Err(rusqlite::Error::InvalidQuery); }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let head = read_head(&tx, partition)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        if head.owner_epoch != epoch { return Err(rusqlite::Error::InvalidQuery); }
-        let live = reachable_keys(&tx)?;
-        let keys = {
-            let mut statement = tx.prepare("SELECT object_key FROM object_uploads WHERE state=3")?;
-            statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let prefix = format!("partitions/{partition}/");
-        let mut deleted = 0;
-        for key in keys {
-            if key.starts_with(&prefix) && !live.contains(&key) && retired_intake_key(&tx, &key)? {
-                tx.execute("DELETE FROM object_edges WHERE parent_key=?1 OR child_key=?1", [&key])?;
-                tx.execute("DELETE FROM retired_objects WHERE object_key=?1", [&key])?;
-                deleted += tx.execute("DELETE FROM object_uploads WHERE object_key=?1 AND state=3", [&key])?;
-            }
-        }
-        tx.commit()?;
-        Ok(deleted)
     }
 
     pub(crate) fn is_durable_object(&self, object: &ObjectRef) -> rusqlite::Result<bool> {
@@ -496,7 +338,6 @@ impl SqliteAuthority {
         created_at_ms: i64,
     ) -> rusqlite::Result<()> {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if retired_intake_key(&tx, &object.key)? { return Err(rusqlite::Error::InvalidQuery); }
         let existing: Option<(Vec<u8>, i64)> = tx.query_row(
             "SELECT sha256,byte_length FROM object_uploads WHERE object_key=?1",
             [&object.key],
@@ -550,30 +391,62 @@ impl SqliteAuthority {
         wal_tip: ObjectRef,
         manifest: Option<ObjectRef>,
     ) -> rusqlite::Result<PublishOutcome> {
-        if operation_id.is_empty() || partition_id.is_empty() {
-            return Err(rusqlite::Error::InvalidParameterName("empty identity".into()));
+        self.publish_batch(partition_id, expected_head_version, owner_epoch,
+            &[(operation_id, request_sha256, committed_seq)], wal_tip, manifest)
+    }
+
+    /// Select one immutable block and all its operation identities atomically.
+    /// Each receipt resolves to the same authoritative cut, not a partial block.
+    pub(crate) fn publish_batch(
+        &mut self,
+        partition_id: &str,
+        expected_head_version: u64,
+        owner_epoch: u64,
+        operations: &[(&str, [u8; 32], u64)],
+        wal_tip: ObjectRef,
+        manifest: Option<ObjectRef>,
+    ) -> rusqlite::Result<PublishOutcome> {
+        if operations.is_empty() || partition_id.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName("empty batch identity".into()));
         }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some((digest, result_json)) = read_receipt(&tx, partition_id, operation_id)? {
-            if digest != request_sha256 {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "operation ID reused with a different request digest".into()
-                ));
+        let mut identities = std::collections::HashSet::new();
+        for (index, (id, _, seq)) in operations.iter().enumerate() {
+            if id.is_empty() || !identities.insert(*id)
+                || (index > 0 && operations[index - 1].2.checked_add(1) != Some(*seq)) {
+                return Err(rusqlite::Error::InvalidParameterName("invalid batch identities or sequence".into()));
             }
-            let original_head: PartitionHead = serde_json::from_str(&result_json)
+        }
+        let committed_seq = operations.last().unwrap().2;
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut replay = None;
+        let mut found = 0;
+        for (id, digest, _) in operations {
+            if let Some((saved_digest, json)) = read_receipt(&tx, partition_id, id)? {
+                if saved_digest != *digest {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "operation ID reused with a different request digest".into()));
+                }
+                if replay.as_ref().is_some_and(|previous| previous != &json) {
+                    return Ok(PublishOutcome::Conflict);
+                }
+                replay = Some(json);
+                found += 1;
+            }
+        }
+        if found > 0 {
+            if found != operations.len() { return Ok(PublishOutcome::Conflict); }
+            let original: PartitionHead = serde_json::from_str(&replay.unwrap())
                 .map_err(|_| rusqlite::Error::InvalidQuery)?;
             tx.commit()?;
-            return Ok(PublishOutcome::AlreadyPublished(original_head));
+            return Ok(PublishOutcome::AlreadyPublished(original));
         }
-        if retired_intake_key(&tx, &wal_tip.key)? { return Err(rusqlite::Error::InvalidQuery); }
         ensure_durable_object(&tx, &wal_tip)?;
         if let Some(reference) = manifest.as_ref() {
-            ensure_intake_manifest_advances(&tx, partition_id, reference)?;
             ensure_durable_object(&tx, reference)?;
         }
         let current = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         if current.head_version != expected_head_version || current.owner_epoch != owner_epoch
-            || committed_seq != current.committed_seq.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?
+            || operations[0].2 != current.committed_seq.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?
         {
             tx.commit()?;
             return Ok(PublishOutcome::Conflict);
@@ -602,11 +475,13 @@ impl SqliteAuthority {
         }
         let head = read_head(&tx, partition_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let result_json = serde_json::to_string(&head).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        tx.execute(
-            "INSERT INTO operation_receipts(partition_id,operation_id,request_sha256,committed_seq,result_json)
-             VALUES(?1,?2,?3,?4,?5)",
-            params![partition_id,operation_id,request_sha256.as_slice(),to_i64(committed_seq)?,result_json],
-        )?;
+        for (id, digest, seq) in operations {
+            tx.execute(
+                "INSERT INTO operation_receipts(partition_id,operation_id,request_sha256,committed_seq,result_json)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![partition_id,id,digest.as_slice(),to_i64(*seq)?,result_json],
+            )?;
+        }
         tx.commit()?;
         Ok(PublishOutcome::Published(head))
     }
@@ -623,7 +498,6 @@ impl SqliteAuthority {
             tx.commit()?;
             return Ok(None);
         }
-        ensure_intake_manifest_advances(&tx, partition_id, &manifest)?;
         ensure_durable_object(&tx, &manifest)?;
         let manifest_json = serde_json::to_string(&manifest).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let changed = tx.execute(
@@ -655,7 +529,6 @@ impl SqliteAuthority {
             || current.committed_seq != seq {
             return Ok(None);
         }
-        ensure_intake_manifest_advances(&tx, partition_id, &manifest)?;
         ensure_durable_object(&tx, &manifest)?;
         let json = serde_json::to_string(&manifest).map_err(|_| rusqlite::Error::InvalidQuery)?;
         tx.execute(
@@ -689,7 +562,6 @@ impl SqliteAuthority {
         let bound:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM restore_receipts)",[],|r|r.get(0))?;
         if !bound || h.head_version!=expected_head_version || h.owner_epoch!=owner_epoch
             || h.committed_seq!=0 || h.manifest.is_some() || h.bootstrap.is_none() {return Ok(None);}
-        ensure_intake_manifest_advances(&tx, partition_id, &manifest)?;
         ensure_durable_object(&tx,&manifest)?;
         let json=serde_json::to_string(&manifest).map_err(|_|rusqlite::Error::InvalidQuery)?;
         tx.execute("UPDATE partition_heads SET head_version=head_version+1,committed_seq=?1,indexed_seq=?1,
@@ -708,7 +580,6 @@ impl SqliteAuthority {
     /// exist in the snapshot they describe. Reservation and pin are atomic.
     pub(crate) fn reserve_backup_upload(&mut self, object:&ObjectRef,at:i64,backup_id:Option<&str>)->rusqlite::Result<()> {
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if retired_intake_key(&tx, &object.key)? { return Err(rusqlite::Error::InvalidQuery); }
         let row: Option<(Vec<u8>,i64,i64)> = tx.query_row(
             "SELECT sha256,byte_length,state FROM object_uploads WHERE object_key=?1",
             [&object.key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
@@ -894,10 +765,6 @@ impl SqliteAuthority {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let intake_namespaces = {
-            let mut statement = tx.prepare("SELECT partition_id FROM intake_namespaces ORDER BY partition_id")?;
-            statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
-        };
         let snapshot = AuthorityBackupSnapshot {
             format_version: 1,
             backup_id: backup_id.to_owned(),
@@ -909,7 +776,6 @@ impl SqliteAuthority {
             retired,
             edges,
             object_closure: closure,
-            intake_namespaces,
         };
         let bytes = serde_json::to_vec(&snapshot).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if bytes.len() > max_snapshot_bytes {
@@ -1010,10 +876,6 @@ impl SqliteAuthority {
                     to_i64(head.indexed_seq)?,to_i64(head.log_base_seq)?,
                     head.log_anchor.as_ref().map(serde_json::to_string).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?],
             )?;
-        }
-        for partition in &snapshot.intake_namespaces {
-            if !partition.ends_with("-intake") || read_head(&tx, partition)?.is_none() { return Err(rusqlite::Error::InvalidQuery); }
-            tx.execute("INSERT INTO intake_namespaces(partition_id) VALUES(?1)", [partition])?;
         }
         for receipt in &snapshot.receipts {
             let _: PartitionHead = serde_json::from_str(&receipt.result_json)
@@ -1235,51 +1097,6 @@ fn registry_reference(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRef> {
 
 /// Walk immutable dependency metadata. All callers making lifecycle decisions
 /// execute this under their publication transaction; pins are roots, not clocks.
-fn intake_build_pin_prefix(partition: &str, epoch: u64, build_id: &str) -> rusqlite::Result<String> {
-    if build_id.is_empty() { return Err(rusqlite::Error::InvalidQuery); }
-    Ok(format!("intake-staging:{}:", serde_json::to_string(&(partition, epoch, build_id))
-        .map_err(|_| rusqlite::Error::InvalidQuery)?))
-}
-
-fn is_intake_namespace(connection: &Connection, partition: &str) -> rusqlite::Result<bool> {
-    connection.query_row("SELECT EXISTS(SELECT 1 FROM intake_namespaces WHERE partition_id=?1)", [partition], |row| row.get(0))
-}
-
-fn ensure_intake_manifest_advances(connection: &Connection, partition: &str, manifest: &ObjectRef) -> rusqlite::Result<()> {
-    if !is_intake_namespace(connection, partition)? { return Ok(()); }
-    let Some(head) = read_head(connection, partition)? else { return Ok(()); };
-    let prefix = format!("partitions/{partition}/snapshot/");
-    let version = |key: &str| -> Option<u64> {
-        let (digits, _) = key.strip_prefix(&prefix)?.split_once('-')?;
-        if digits.len() != 20 || !digits.bytes().all(|b| b.is_ascii_digit()) { return None; }
-        digits.parse().ok()
-    };
-    if let Some(floor) = head.manifest.as_ref().and_then(|m| version(&m.key)) {
-        if version(&manifest.key).is_none_or(|next| next <= floor) { return Err(rusqlite::Error::InvalidQuery); }
-    }
-    Ok(())
-}
-
-// Names without a certified monotonic component (including historical snapshot
-// UUID-only names) retain their tombstones. A parse failure must never authorize GC.
-fn retired_intake_key(connection: &Connection, key: &str) -> rusqlite::Result<bool> {
-    let Some((partition, relative)) = key.strip_prefix("partitions/").and_then(|s| s.split_once('/')) else { return Ok(false); };
-    if !is_intake_namespace(connection, partition)? { return Ok(false); }
-    let Some(head) = read_head(connection, partition)? else { return Ok(false); };
-    let ordinal = |value: &str| -> Option<u64> {
-        let (number, _) = value.split_once('-')?;
-        if number.len() != 20 || !number.bytes().all(|b| b.is_ascii_digit()) { return None; }
-        number.parse().ok()
-    };
-    if let Some(seq) = relative.strip_prefix("wal/").and_then(ordinal) {
-        return Ok(seq <= head.log_base_seq && head.manifest.is_some());
-    }
-    let prefix = format!("partitions/{partition}/snapshot/");
-    let selected = head.manifest.as_ref().and_then(|m| m.key.strip_prefix(&prefix)).and_then(ordinal);
-    Ok(matches!((relative.strip_prefix("snapshot/").and_then(ordinal), selected),
-        (Some(version), Some(floor)) if version < floor))
-}
-
 fn reachable_keys(connection: &Connection) -> rusqlite::Result<std::collections::BTreeSet<String>> {
     let mut result = std::collections::BTreeSet::new();
     let mut heads = connection.prepare("SELECT partition_id FROM partition_heads")?;
@@ -1379,156 +1196,6 @@ mod tests {
         ObjectRef { key:key.to_owned(),sha256:[byte;32],length:128 }
     }
     #[test]
-    fn intake_staging_reservation_is_atomic_bounded_and_pins_unknown_uploads() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut db = SqliteAuthority::open(&temporary.path().join("source.sqlite"), Duration::from_secs(1)).unwrap();
-        let partition = "stage-intake";
-        let head = db.create_partition(partition, 1).unwrap();
-        let refs = vec![object(&format!("partitions/{partition}/snapshot/{:020}-build/chunk", head.head_version + 1), 1),
-            object(&format!("partitions/{partition}/snapshot/{:020}-build/manifest", head.head_version + 1), 2)];
-        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 3, 1).is_err());
-        db.enable_intake_gc(partition, 1).unwrap();
-        assert!(!db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 2, 1).unwrap());
-        assert_eq!(db.intake_inventory_count(partition, 1).unwrap(), 0);
-        assert!(!db.reserve_intake_snapshot_uploads(partition, 1, head.head_version + 1, "build", &refs, 0, 3, 1).unwrap());
-        assert!(db.reserve_intake_snapshot_uploads(partition, 2, head.head_version, "build", &refs, 0, 3, 1).is_err());
-        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 3, 1).unwrap());
-        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 3, 1).unwrap());
-        assert_eq!(db.intake_inventory_count(partition, 1).unwrap(), 2);
-        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs[..1], 0, 3, 1).is_err());
-        let mut bad = refs.clone(); bad[1].sha256 = [9; 32];
-        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &bad, 0, 3, 1).is_err());
-        for reference in &refs { assert!(!db.retire_object(&reference.key, 0, i64::MAX).unwrap()); }
-        assert!(db.release_intake_snapshot_uploads(partition, 2, "build").is_err());
-        assert_eq!(db.release_intake_snapshot_uploads(partition, 1, "other").unwrap(), 0);
-        assert_eq!(db.release_intake_snapshot_uploads(partition, 1, "build").unwrap(), 2);
-        for reference in &refs {
-            assert!(db.retire_object(&reference.key, 0, 2).unwrap());
-            assert!(db.mark_object_deleted(reference).unwrap());
-            assert!(db.mark_object_deleted(reference).unwrap());
-            assert!(db.collectible_objects(3).unwrap().contains(reference));
-        }
-        assert_eq!(db.intake_inventory_count(partition, 1).unwrap(), 2);
-        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 3, 1).is_err());
-    }
-
-    #[test]
-    fn intake_staging_reservation_pins_survive_verified_backup_restore() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut db = SqliteAuthority::open(&temporary.path().join("source.sqlite"), Duration::from_secs(1)).unwrap();
-        let partition = "stage-intake";
-        let head = db.create_partition(partition, 1).unwrap();
-        db.enable_intake_gc(partition, 1).unwrap();
-        let refs = [object(&format!("partitions/{partition}/snapshot/{:020}-build/manifest", head.head_version + 1), 1)];
-        assert!(db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "build", &refs, 0, 1, 0).unwrap());
-        // In-flight unknown bytes cannot be certified by a backup.
-        assert!(db.prepare_backup_snapshot("staging-backup", &refs, 1, 1024 * 1024).is_err());
-        db.register_durable_object(&refs[0], 1).unwrap();
-        let snapshot = db.prepare_backup_snapshot("staging-backup", &refs, 1, 1024 * 1024).unwrap();
-        let decoded: AuthorityBackupSnapshot = serde_json::from_slice(&snapshot).unwrap();
-        assert_eq!(decoded.pins.iter().filter(|pin| pin.pin_kind == "staging" && pin.expires_at_ms.is_none()).count(), 1);
-        let mut restored = SqliteAuthority::open(&temporary.path().join("restore.sqlite"), Duration::from_secs(1)).unwrap();
-        restored.restore_backup_snapshot(&snapshot, 1024 * 1024).unwrap();
-        restored.release_backup_pins("staging-backup").unwrap();
-        assert!(!restored.retire_object(&refs[0].key, 0, i64::MAX).unwrap());
-        assert_eq!(restored.release_intake_snapshot_uploads(partition, 1, "build").unwrap(), 1);
-        assert!(restored.retire_object(&refs[0].key, 0, i64::MAX).unwrap());
-    }
-
-    #[test]
-    fn intake_staging_recovery_cancel_preserves_other_pin_kinds_and_unknown_inventory() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut db = SqliteAuthority::open(&temporary.path().join("source.sqlite"), Duration::from_secs(1)).unwrap();
-        let head = db.create_partition("stage-intake", 1).unwrap();
-        db.enable_intake_gc("stage-intake", 1).unwrap();
-        let refs = [object(&format!("partitions/stage-intake/snapshot/{:020}-build/manifest", head.head_version + 1), 1)];
-        assert!(db.reserve_intake_snapshot_uploads("stage-intake", 1, head.head_version, "build", &refs, 0, 2, 0).unwrap());
-        let other = object("ordinary", 2);
-        db.register_durable_object(&other, 0).unwrap();
-        db.pin_object("ordinary-staging", "stage-intake", &other.key, "staging", None).unwrap();
-        assert!(db.cancel_intake_snapshot_uploads("stage-intake", 2).is_err());
-        assert!(!db.retire_object(&refs[0].key, 0, i64::MAX).unwrap());
-        assert_eq!(db.cancel_intake_snapshot_uploads("stage-intake", 1).unwrap(), 1);
-        assert!(!db.retire_object(&other.key, 0, i64::MAX).unwrap());
-        assert_eq!(db.intake_inventory_count("stage-intake", 1).unwrap(), 1);
-        assert!(db.retire_object(&refs[0].key, 0, 1).unwrap());
-        assert!(db.mark_object_deleted(&refs[0]).unwrap());
-        assert!(db.collectible_objects(2).unwrap().contains(&refs[0]));
-    }
-
-    #[test]
-    fn intake_staging_reservation_rejects_old_snapshot_watermarks() {
-        let temporary = tempfile::tempdir().unwrap();
-        let mut db = SqliteAuthority::open(&temporary.path().join("source.sqlite"), Duration::from_secs(1)).unwrap();
-        let partition = "stage-intake";
-        let head = db.create_partition(partition, 1).unwrap();
-        db.enable_intake_gc(partition, 1).unwrap();
-        let selected = object("partitions/stage-intake/snapshot/00000000000000000100-selected/manifest", 1);
-        db.register_durable_object(&selected, 0).unwrap();
-        let next = db.publish_checkpoint(partition, head.head_version, 1, 0, selected).unwrap().unwrap();
-        let refs = [object(&format!("partitions/{partition}/snapshot/{:020}-old/chunk", next.head_version + 1), 2)];
-        assert!(db.reserve_intake_snapshot_uploads(partition, 1, next.head_version, "old", &refs, 1, 4, 0).is_err());
-        assert_eq!(db.intake_inventory_count(partition, 1).unwrap(), 1);
-        assert!(!db.reserve_intake_snapshot_uploads(partition, 1, head.head_version, "old", &refs, 1, 4, 0).unwrap());
-    }
-
-    #[test]
-    fn intake_deleted_metadata_uses_persisted_floors_and_keeps_unknown_put_tombstones() {
-        let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("authority.sqlite");
-        let mut db = SqliteAuthority::open(&path, Duration::from_secs(1)).unwrap();
-        let partition = "p-intake";
-        let head = db.create_partition(partition, 1).unwrap();
-        db.enable_intake_gc(partition, 1).unwrap();
-        let wal = object("partitions/p-intake/wal/00000000000000000001-first.json", 1);
-        let unknown = object("partitions/p-intake/snapshot/00000000000000000001-unknown/chunk", 2);
-        let historical = object("partitions/p-intake/snapshot/abcdef0123456789abcdef0123456789/chunk", 3);
-        let first = object("partitions/p-intake/snapshot/00000000000000000002-first/manifest", 4);
-        let next = object("partitions/p-intake/snapshot/00000000000000000003-next/manifest", 5);
-        db.reserve_upload(&unknown, 0).unwrap();
-        for value in [&wal, &historical, &first, &next] { db.register_durable_object(value, 0).unwrap(); }
-        let head = match db.publish_commit(partition, head.head_version, 1, "intake-event-1", [9;32], 1, wal.clone(), None).unwrap() {
-            PublishOutcome::Published(head) => head, other => panic!("{other:?}"),
-        };
-        let head = db.publish_checkpoint(partition, head.head_version, 1, 1, first.clone()).unwrap().unwrap();
-        for value in [&wal, &unknown, &historical] {
-            assert!(db.retire_object(&value.key, 1, 1).unwrap());
-            assert!(db.mark_object_deleted(value).unwrap());
-        }
-        assert_eq!(db.prune_intake_deleted_objects(partition, 1).unwrap(), 1);
-        assert!(db.reserve_upload(&wal, 2).is_err());
-        assert!(db.register_durable_object(&wal, 2).is_err());
-        assert!(db.publish_commit(partition, head.head_version, 1, "resurrection", [8;32], 2, wal.clone(), None).is_err());
-        // Same intake sequence, newer snapshot publication version.
-        let head = db.publish_checkpoint(partition, head.head_version, 1, 1, next.clone()).unwrap().unwrap();
-        assert!(db.retire_object(&first.key, 2, 2).unwrap());
-        assert!(db.mark_object_deleted(&first).unwrap());
-        assert_eq!(db.prune_intake_deleted_objects(partition, 1).unwrap(), 1);
-        assert!(db.reserve_upload(&first, 3).is_err());
-        assert!(db.register_durable_object(&first, 3).is_err());
-        assert!(db.publish_checkpoint(partition, head.head_version, 1, 1, first.clone()).is_err());
-        assert!(db.publish_index(partition, head.head_version, 1, 1, first.clone()).is_err());
-        assert!(db.publish_index(partition, head.head_version, 1, 1, historical.clone()).is_err());
-        let state: i64 = db.connection.query_row("SELECT state FROM object_uploads WHERE object_key=?1", [&unknown.key], |r| r.get(0)).unwrap();
-        assert_eq!(state, 5);
-        assert!(db.collectible_objects(3).unwrap().contains(&unknown));
-        assert!(db.mark_object_deleted(&unknown).unwrap());
-        assert!(db.connection.query_row("SELECT state FROM object_uploads WHERE object_key=?1", [&historical.key], |r| r.get::<_, i64>(0)).is_ok());
-        drop(db);
-        let mut db = SqliteAuthority::open(&path, Duration::from_secs(1)).unwrap();
-        assert!(db.reserve_upload(&wal, 4).is_err());
-        assert!(db.register_durable_object(&first, 4).is_err());
-        let snapshot = db.prepare_backup_snapshot("gc-floors", &[next], 4, 1024 * 1024).unwrap();
-        let mut restored = SqliteAuthority::open(&temporary.path().join("restored.sqlite"), Duration::from_secs(1)).unwrap();
-        restored.restore_backup_snapshot(&snapshot, 1024 * 1024).unwrap();
-        assert!(restored.reserve_upload(&wal, 4).is_err());
-        assert!(restored.register_durable_object(&first, 4).is_err());
-        let ordinary = object("partitions/ordinary-intake/wal/00000000000000000001-first.json", 6);
-        db.create_partition("ordinary-intake", 1).unwrap();
-        db.register_durable_object(&ordinary, 4).unwrap();
-        assert!(db.is_durable_object(&ordinary).unwrap());
-    }
-    #[test]
     fn complete_manifest_commit_advances_indexed_watermark_atomically() {
         let path=temp_db();
         let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
@@ -1617,6 +1284,27 @@ mod tests {
         let _=fs::remove_file(&path);
         let _=fs::remove_file(path.with_extension("sqlite-wal"));
         let _=fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn batch_publication_rolls_back_all_receipts_and_fences_stale_owner() {
+        let path=temp_db(); let mut db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        let head=db.create_partition("batch",7).unwrap(); let wal=object("wal/batch",1);
+        db.register_durable_object(&wal,1).unwrap();
+        let operations=[("a",[1;32],1),("b",[2;32],2)];
+        assert!(matches!(db.publish_batch("batch",head.head_version,6,&operations,wal.clone(),None).unwrap(),PublishOutcome::Conflict));
+        db.connection.execute_batch("CREATE TRIGGER fail_second BEFORE INSERT ON operation_receipts WHEN NEW.operation_id='b' BEGIN SELECT RAISE(FAIL,'injected second receipt failure'); END;").unwrap();
+        assert!(db.publish_batch("batch",head.head_version,7,&operations,wal.clone(),None).is_err());
+        assert_eq!(db.read_head("batch").unwrap().unwrap().committed_seq,0);
+        assert!(db.resolve_operation("batch","a",[1;32]).unwrap().is_none());
+        db.connection.execute_batch("DROP TRIGGER fail_second;").unwrap();
+        assert!(matches!(db.publish_batch("batch",head.head_version,7,&operations,wal.clone(),None).unwrap(),PublishOutcome::Published(_)));
+        assert!(matches!(db.publish_batch("batch",head.head_version,7,&operations,wal.clone(),None).unwrap(),PublishOutcome::AlreadyPublished(_)));
+        assert!(matches!(db.publish_batch("batch",head.head_version,7,&[("a",[1;32],1),("new",[3;32],2)],wal,None).unwrap(),PublishOutcome::Conflict));
+        drop(db); let db=SqliteAuthority::open(&path,Duration::from_secs(1)).unwrap();
+        let head=db.read_head("batch").unwrap().unwrap(); assert_eq!((head.committed_seq,head.indexed_seq),(2,0));
+        assert_eq!(db.retained_tail_size(&head).unwrap(),(1,object("wal/batch",1).length));
+        for (id,digest,_) in operations {assert_eq!(db.resolve_operation("batch",id,digest).unwrap().unwrap().committed_seq,2);}
     }
 
     #[test]

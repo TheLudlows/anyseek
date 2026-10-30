@@ -102,6 +102,8 @@ impl RecordPartition {
         }
         let worker = WORKERS.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let admission = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
+        let writer = self.writer.clone();
+        let recovery_writer = writer.clone();
         let owner = self.inner.clone();
         let recovery = owner.clone();
         let cursors = self.indexes.clone();
@@ -112,6 +114,7 @@ impl RecordPartition {
             let started = Instant::now();
             let id = rand::random::<u128>();
             let plan = {
+                let _writer = writer.lock().await;
                 let mut inner = owner.lock().await;
                 let _capture_phase=maintenance::Phase::new("background_capture_locked",inner.state.seq);
                 if !inner.healthy { return Err(RecordError::RecoveryRequired); }
@@ -251,7 +254,7 @@ impl RecordPartition {
                 // without the foreground lock. A versioned recheck closes the gap.
                 let mut consumed=0usize;
                 let mut rounds=0usize;
-                let mut inner=loop {
+                let (_writer,mut inner)=loop {
                     rounds+=1;
                     if rounds>8 || started.elapsed()>=timeout {return Err(RecordError::Busy);}
                     let (raw,mut expected,revision,entry_count,entry_bytes,_raw,_decoded)={
@@ -283,13 +286,14 @@ impl RecordPartition {
                     consumed=entry_count;
                     #[cfg(test)]
                     pause_catchup(&root,timeout).await;
+                    let writer_guard=writer.lock().await;
                     let inner=owner.lock().await;
                     let _check_phase=maintenance::Phase::new("candidate_recheck_locked",inner.state.seq);
                     if !inner.healthy {return Err(RecordError::RecoveryRequired);}
                     if started.elapsed()>=timeout || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
                     let tail=inner.background.as_ref().filter(|t|t.id==id && !t.overflowed).ok_or(RecordError::Busy)?;
                     if tail.revision!=revision || tail.entries.len()!=entry_count || tail.bytes!=entry_bytes {continue;}
-                    break inner;
+                    break (writer_guard,inner);
                 };
                 let _install_phase=maintenance::Phase::new("candidate_install_locked",inner.state.seq);
                 let certificate = encode_entry(&Entry::Anchor(reference.clone()))?;
@@ -377,6 +381,7 @@ impl RecordPartition {
             }.await;
             // Drop construction accounting before rescanning/removing orphans.
             drop(disk); drop(memory);
+            let _writer = writer.lock().await;
             let mut inner = owner.lock().await;
             if matches!(&result,Err(RecordError::RecoveryRequired)) {
                 inner.healthy=false;
@@ -426,6 +431,7 @@ impl RecordPartition {
             // This also covers ownership rejection during initial admission,
             // before a Plan/background pin exists and normal cleanup is reached.
             _ => {
+                let _writer = recovery_writer.lock().await;
                 let mut inner = recovery.lock().await;
                 inner.healthy = false;
                 if let Ok(mut output) = inner.output.write() { output.fenced = true; }
@@ -433,6 +439,7 @@ impl RecordPartition {
             }
           };
           if automatic {
+              let _writer = recovery_writer.lock().await;
               let mut inner=recovery.lock().await;
               let outcome=match &result {Ok(_)=>"installed",Err(RecordError::Busy)=>"busy",Err(RecordError::RecoveryRequired)=>"recovery_required",Err(RecordError::DurablePending(_))=>"durable_pending",Err(RecordError::OutcomeUnknown(_))=>"outcome_unknown",Err(_)=>"failed"};
               log::info!("record_maintenance event=worker_finished outcome={} seq={}",outcome,inner.state.seq);

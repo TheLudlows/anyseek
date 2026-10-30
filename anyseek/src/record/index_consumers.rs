@@ -236,7 +236,7 @@ pub(super) struct Consumer {
     owner: std::sync::Weak<Mutex<Inner>>,
     cursors: Arc<Cursors>,
     queue: Arc<std::sync::Mutex<Queue>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     root: PathBuf,
 }
 impl Consumer {
@@ -251,7 +251,7 @@ impl Consumer {
             owner,
             cursors,
             queue: Default::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fault-injection"))]
             root: _root,
         }
     }
@@ -270,7 +270,7 @@ impl Consumer {
             owner,
             cursors,
             queue: Default::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "fault-injection"))]
             root: _root,
         }
     }
@@ -333,7 +333,7 @@ impl Consumer {
                 }
             };
             let result = async {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "fault-injection"))]
                 {
                     let pause = self
                         .root
@@ -390,7 +390,7 @@ impl Consumer {
         }
     }
     /// Administrative/synchronous paths join owned work before sealing a tail
-    /// or relying on immediate visibility. Normal intake never joins this task.
+    /// or relying on immediate visibility. Normal committed execution never joins this task.
     pub async fn drain(&self) -> Result<(), RecordError> {
         let worker = self
             .queue
