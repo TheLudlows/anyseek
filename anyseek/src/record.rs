@@ -4839,3 +4839,6 @@ impl Inner {
                 })
     }
 }
+
+#[cfg(test)]
+mod performance;

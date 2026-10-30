@@ -1,0 +1,5418 @@
+{
+  "date": "2026-10-30",
+  "baseline": "9c9e5d2dc8125bea355f4f43694639fdabba9b46",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "profile": "release opt-level=3, lto=false, target-cpu=native, no-default-features",
+  "cpu_max": "800000 100000",
+  "memory_max": "8589934592",
+  "samples_per_case_per_process": 25,
+  "warmups": 5,
+  "runs": [
+    {
+      "catalog": [
+        {
+          "collections": 16,
+          "operations": 64,
+          "state_bytes_before": 28053,
+          "state_bytes_after": 32724,
+          "samples": [
+            {
+              "clone_us": 11,
+              "apply_us": 1,
+              "validate_us": 135,
+              "persist_us": 316,
+              "total_us": 465
+            },
+            {
+              "clone_us": 11,
+              "apply_us": 1,
+              "validate_us": 247,
+              "persist_us": 475,
+              "total_us": 736
+            },
+            {
+              "clone_us": 14,
+              "apply_us": 1,
+              "validate_us": 140,
+              "persist_us": 446,
+              "total_us": 603
+            },
+            {
+              "clone_us": 13,
+              "apply_us": 1,
+              "validate_us": 126,
+              "persist_us": 341,
+              "total_us": 483
+            },
+            {
+              "clone_us": 14,
+              "apply_us": 1,
+              "validate_us": 130,
+              "persist_us": 475,
+              "total_us": 622
+            },
+            {
+              "clone_us": 11,
+              "apply_us": 1,
+              "validate_us": 133,
+              "persist_us": 337,
+              "total_us": 484
+            },
+            {
+              "clone_us": 14,
+              "apply_us": 1,
+              "validate_us": 247,
+              "persist_us": 435,
+              "total_us": 698
+            },
+            {
+              "clone_us": 14,
+              "apply_us": 1,
+              "validate_us": 129,
+              "persist_us": 542,
+              "total_us": 687
+            },
+            {
+              "clone_us": 14,
+              "apply_us": 2,
+              "validate_us": 172,
+              "persist_us": 483,
+              "total_us": 673
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 191,
+              "persist_us": 514,
+              "total_us": 716
+            },
+            {
+              "clone_us": 12,
+              "apply_us": 1,
+              "validate_us": 144,
+              "persist_us": 434,
+              "total_us": 593
+            },
+            {
+              "clone_us": 14,
+              "apply_us": 1,
+              "validate_us": 131,
+              "persist_us": 402,
+              "total_us": 550
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 183,
+              "persist_us": 434,
+              "total_us": 629
+            },
+            {
+              "clone_us": 14,
+              "apply_us": 1,
+              "validate_us": 137,
+              "persist_us": 335,
+              "total_us": 489
+            },
+            {
+              "clone_us": 70,
+              "apply_us": 8,
+              "validate_us": 143,
+              "persist_us": 721,
+              "total_us": 943
+            },
+            {
+              "clone_us": 23,
+              "apply_us": 28,
+              "validate_us": 184,
+              "persist_us": 491,
+              "total_us": 727
+            },
+            {
+              "clone_us": 11,
+              "apply_us": 8,
+              "validate_us": 152,
+              "persist_us": 408,
+              "total_us": 580
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 13,
+              "validate_us": 142,
+              "persist_us": 321,
+              "total_us": 487
+            },
+            {
+              "clone_us": 10,
+              "apply_us": 2,
+              "validate_us": 138,
+              "persist_us": 448,
+              "total_us": 599
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 138,
+              "persist_us": 322,
+              "total_us": 472
+            },
+            {
+              "clone_us": 15,
+              "apply_us": 10,
+              "validate_us": 182,
+              "persist_us": 472,
+              "total_us": 681
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 136,
+              "persist_us": 481,
+              "total_us": 628
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 144,
+              "persist_us": 298,
+              "total_us": 455
+            },
+            {
+              "clone_us": 16,
+              "apply_us": 9,
+              "validate_us": 147,
+              "persist_us": 372,
+              "total_us": 544
+            },
+            {
+              "clone_us": 10,
+              "apply_us": 1,
+              "validate_us": 148,
+              "persist_us": 375,
+              "total_us": 535
+            }
+          ]
+        },
+        {
+          "collections": 128,
+          "operations": 288,
+          "state_bytes_before": 220419,
+          "state_bytes_after": 225120,
+          "samples": [
+            {
+              "clone_us": 81,
+              "apply_us": 5,
+              "validate_us": 1364,
+              "persist_us": 949,
+              "total_us": 2400
+            },
+            {
+              "clone_us": 77,
+              "apply_us": 8,
+              "validate_us": 1528,
+              "persist_us": 829,
+              "total_us": 2443
+            },
+            {
+              "clone_us": 80,
+              "apply_us": 4,
+              "validate_us": 1467,
+              "persist_us": 865,
+              "total_us": 2418
+            },
+            {
+              "clone_us": 75,
+              "apply_us": 5,
+              "validate_us": 1399,
+              "persist_us": 1189,
+              "total_us": 2668
+            },
+            {
+              "clone_us": 77,
+              "apply_us": 5,
+              "validate_us": 1462,
+              "persist_us": 880,
+              "total_us": 2425
+            },
+            {
+              "clone_us": 77,
+              "apply_us": 4,
+              "validate_us": 1510,
+              "persist_us": 946,
+              "total_us": 2538
+            },
+            {
+              "clone_us": 82,
+              "apply_us": 5,
+              "validate_us": 1541,
+              "persist_us": 983,
+              "total_us": 2612
+            },
+            {
+              "clone_us": 105,
+              "apply_us": 5,
+              "validate_us": 1424,
+              "persist_us": 914,
+              "total_us": 2449
+            },
+            {
+              "clone_us": 81,
+              "apply_us": 1,
+              "validate_us": 1420,
+              "persist_us": 937,
+              "total_us": 2442
+            },
+            {
+              "clone_us": 77,
+              "apply_us": 5,
+              "validate_us": 1495,
+              "persist_us": 904,
+              "total_us": 2482
+            },
+            {
+              "clone_us": 106,
+              "apply_us": 5,
+              "validate_us": 1491,
+              "persist_us": 4022,
+              "total_us": 5626
+            },
+            {
+              "clone_us": 65,
+              "apply_us": 1,
+              "validate_us": 912,
+              "persist_us": 936,
+              "total_us": 1916
+            },
+            {
+              "clone_us": 52,
+              "apply_us": 4,
+              "validate_us": 968,
+              "persist_us": 744,
+              "total_us": 1769
+            },
+            {
+              "clone_us": 48,
+              "apply_us": 3,
+              "validate_us": 864,
+              "persist_us": 619,
+              "total_us": 1537
+            },
+            {
+              "clone_us": 68,
+              "apply_us": 1,
+              "validate_us": 862,
+              "persist_us": 655,
+              "total_us": 1587
+            },
+            {
+              "clone_us": 48,
+              "apply_us": 4,
+              "validate_us": 922,
+              "persist_us": 667,
+              "total_us": 1642
+            },
+            {
+              "clone_us": 50,
+              "apply_us": 3,
+              "validate_us": 1002,
+              "persist_us": 660,
+              "total_us": 1716
+            },
+            {
+              "clone_us": 48,
+              "apply_us": 1,
+              "validate_us": 999,
+              "persist_us": 774,
+              "total_us": 1823
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 5,
+              "validate_us": 1017,
+              "persist_us": 1493,
+              "total_us": 2567
+            },
+            {
+              "clone_us": 47,
+              "apply_us": 3,
+              "validate_us": 863,
+              "persist_us": 655,
+              "total_us": 1570
+            },
+            {
+              "clone_us": 50,
+              "apply_us": 1,
+              "validate_us": 882,
+              "persist_us": 712,
+              "total_us": 1646
+            },
+            {
+              "clone_us": 50,
+              "apply_us": 4,
+              "validate_us": 976,
+              "persist_us": 657,
+              "total_us": 1689
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 3,
+              "validate_us": 871,
+              "persist_us": 691,
+              "total_us": 1618
+            },
+            {
+              "clone_us": 47,
+              "apply_us": 1,
+              "validate_us": 900,
+              "persist_us": 695,
+              "total_us": 1645
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 4,
+              "validate_us": 941,
+              "persist_us": 674,
+              "total_us": 1671
+            }
+          ]
+        },
+        {
+          "collections": 1024,
+          "operations": 2080,
+          "state_bytes_before": 1766055,
+          "state_bytes_after": 1770786,
+          "samples": [
+            {
+              "clone_us": 491,
+              "apply_us": 92,
+              "validate_us": 8194,
+              "persist_us": 3389,
+              "total_us": 12168
+            },
+            {
+              "clone_us": 381,
+              "apply_us": 43,
+              "validate_us": 8181,
+              "persist_us": 2971,
+              "total_us": 11578
+            },
+            {
+              "clone_us": 541,
+              "apply_us": 6,
+              "validate_us": 7701,
+              "persist_us": 2804,
+              "total_us": 11053
+            },
+            {
+              "clone_us": 359,
+              "apply_us": 30,
+              "validate_us": 7111,
+              "persist_us": 2849,
+              "total_us": 10351
+            },
+            {
+              "clone_us": 503,
+              "apply_us": 34,
+              "validate_us": 6966,
+              "persist_us": 3295,
+              "total_us": 10800
+            },
+            {
+              "clone_us": 453,
+              "apply_us": 40,
+              "validate_us": 6812,
+              "persist_us": 2874,
+              "total_us": 10180
+            },
+            {
+              "clone_us": 402,
+              "apply_us": 40,
+              "validate_us": 8044,
+              "persist_us": 3199,
+              "total_us": 11685
+            },
+            {
+              "clone_us": 663,
+              "apply_us": 53,
+              "validate_us": 11393,
+              "persist_us": 4251,
+              "total_us": 16361
+            },
+            {
+              "clone_us": 550,
+              "apply_us": 33,
+              "validate_us": 8978,
+              "persist_us": 4312,
+              "total_us": 13875
+            },
+            {
+              "clone_us": 740,
+              "apply_us": 49,
+              "validate_us": 9939,
+              "persist_us": 3151,
+              "total_us": 13880
+            },
+            {
+              "clone_us": 406,
+              "apply_us": 36,
+              "validate_us": 6996,
+              "persist_us": 2742,
+              "total_us": 10183
+            },
+            {
+              "clone_us": 514,
+              "apply_us": 50,
+              "validate_us": 7078,
+              "persist_us": 3016,
+              "total_us": 10659
+            },
+            {
+              "clone_us": 362,
+              "apply_us": 55,
+              "validate_us": 6851,
+              "persist_us": 2721,
+              "total_us": 9991
+            },
+            {
+              "clone_us": 375,
+              "apply_us": 66,
+              "validate_us": 6491,
+              "persist_us": 2807,
+              "total_us": 9741
+            },
+            {
+              "clone_us": 366,
+              "apply_us": 26,
+              "validate_us": 7243,
+              "persist_us": 3030,
+              "total_us": 10666
+            },
+            {
+              "clone_us": 496,
+              "apply_us": 32,
+              "validate_us": 7064,
+              "persist_us": 3066,
+              "total_us": 10659
+            },
+            {
+              "clone_us": 373,
+              "apply_us": 32,
+              "validate_us": 6508,
+              "persist_us": 2699,
+              "total_us": 9613
+            },
+            {
+              "clone_us": 351,
+              "apply_us": 26,
+              "validate_us": 7766,
+              "persist_us": 2963,
+              "total_us": 11108
+            },
+            {
+              "clone_us": 407,
+              "apply_us": 4,
+              "validate_us": 9818,
+              "persist_us": 3224,
+              "total_us": 13454
+            },
+            {
+              "clone_us": 513,
+              "apply_us": 35,
+              "validate_us": 7611,
+              "persist_us": 2981,
+              "total_us": 11141
+            },
+            {
+              "clone_us": 470,
+              "apply_us": 4,
+              "validate_us": 7487,
+              "persist_us": 3001,
+              "total_us": 10963
+            },
+            {
+              "clone_us": 383,
+              "apply_us": 53,
+              "validate_us": 6838,
+              "persist_us": 2523,
+              "total_us": 9799
+            },
+            {
+              "clone_us": 424,
+              "apply_us": 27,
+              "validate_us": 6765,
+              "persist_us": 2526,
+              "total_us": 9744
+            },
+            {
+              "clone_us": 571,
+              "apply_us": 33,
+              "validate_us": 7802,
+              "persist_us": 3101,
+              "total_us": 11509
+            },
+            {
+              "clone_us": 366,
+              "apply_us": 37,
+              "validate_us": 6877,
+              "persist_us": 2751,
+              "total_us": 10032
+            }
+          ]
+        },
+        {
+          "collections": 4096,
+          "operations": 8224,
+          "state_bytes_before": 7083687,
+          "state_bytes_after": 7088418,
+          "samples": [
+            {
+              "clone_us": 1790,
+              "apply_us": 12,
+              "validate_us": 31207,
+              "persist_us": 11195,
+              "total_us": 44206
+            },
+            {
+              "clone_us": 2094,
+              "apply_us": 1058,
+              "validate_us": 30534,
+              "persist_us": 9921,
+              "total_us": 43609
+            },
+            {
+              "clone_us": 1750,
+              "apply_us": 179,
+              "validate_us": 32166,
+              "persist_us": 10546,
+              "total_us": 44642
+            },
+            {
+              "clone_us": 1951,
+              "apply_us": 205,
+              "validate_us": 29937,
+              "persist_us": 10192,
+              "total_us": 42286
+            },
+            {
+              "clone_us": 2104,
+              "apply_us": 173,
+              "validate_us": 30197,
+              "persist_us": 10467,
+              "total_us": 42942
+            },
+            {
+              "clone_us": 1886,
+              "apply_us": 174,
+              "validate_us": 30892,
+              "persist_us": 12919,
+              "total_us": 45871
+            },
+            {
+              "clone_us": 3080,
+              "apply_us": 212,
+              "validate_us": 40588,
+              "persist_us": 14716,
+              "total_us": 58597
+            },
+            {
+              "clone_us": 2992,
+              "apply_us": 191,
+              "validate_us": 40697,
+              "persist_us": 14099,
+              "total_us": 57980
+            },
+            {
+              "clone_us": 2925,
+              "apply_us": 195,
+              "validate_us": 41658,
+              "persist_us": 9674,
+              "total_us": 54453
+            },
+            {
+              "clone_us": 1762,
+              "apply_us": 330,
+              "validate_us": 34703,
+              "persist_us": 12782,
+              "total_us": 49578
+            },
+            {
+              "clone_us": 2561,
+              "apply_us": 198,
+              "validate_us": 31476,
+              "persist_us": 12430,
+              "total_us": 46666
+            },
+            {
+              "clone_us": 2744,
+              "apply_us": 229,
+              "validate_us": 35021,
+              "persist_us": 13311,
+              "total_us": 51307
+            },
+            {
+              "clone_us": 2118,
+              "apply_us": 210,
+              "validate_us": 36494,
+              "persist_us": 11756,
+              "total_us": 50580
+            },
+            {
+              "clone_us": 1837,
+              "apply_us": 175,
+              "validate_us": 32240,
+              "persist_us": 11584,
+              "total_us": 45836
+            },
+            {
+              "clone_us": 2472,
+              "apply_us": 181,
+              "validate_us": 37545,
+              "persist_us": 10293,
+              "total_us": 50492
+            },
+            {
+              "clone_us": 2582,
+              "apply_us": 274,
+              "validate_us": 34386,
+              "persist_us": 15321,
+              "total_us": 52565
+            },
+            {
+              "clone_us": 3102,
+              "apply_us": 253,
+              "validate_us": 41936,
+              "persist_us": 15140,
+              "total_us": 60433
+            },
+            {
+              "clone_us": 3084,
+              "apply_us": 205,
+              "validate_us": 39279,
+              "persist_us": 15165,
+              "total_us": 57735
+            },
+            {
+              "clone_us": 2034,
+              "apply_us": 269,
+              "validate_us": 37983,
+              "persist_us": 9276,
+              "total_us": 49564
+            },
+            {
+              "clone_us": 1901,
+              "apply_us": 208,
+              "validate_us": 30284,
+              "persist_us": 9874,
+              "total_us": 42268
+            },
+            {
+              "clone_us": 1885,
+              "apply_us": 172,
+              "validate_us": 37749,
+              "persist_us": 13535,
+              "total_us": 53341
+            },
+            {
+              "clone_us": 2000,
+              "apply_us": 203,
+              "validate_us": 38803,
+              "persist_us": 15415,
+              "total_us": 56423
+            },
+            {
+              "clone_us": 2004,
+              "apply_us": 170,
+              "validate_us": 31805,
+              "persist_us": 10214,
+              "total_us": 44194
+            },
+            {
+              "clone_us": 1860,
+              "apply_us": 166,
+              "validate_us": 30128,
+              "persist_us": 10580,
+              "total_us": 42736
+            },
+            {
+              "clone_us": 1810,
+              "apply_us": 203,
+              "validate_us": 39962,
+              "persist_us": 10713,
+              "total_us": 52688
+            }
+          ]
+        }
+      ],
+      "generation": [
+        {
+          "records": 101,
+          "operations": 102,
+          "generations": 1,
+          "state_bytes": 68763,
+          "samples": [
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 9,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 135
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 20
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1002,
+          "generations": 1,
+          "state_bytes": 675367,
+          "samples": [
+            {
+              "clone_us": 69,
+              "validate_us": 12,
+              "prepare_us": 112
+            },
+            {
+              "clone_us": 69,
+              "validate_us": 16,
+              "prepare_us": 122
+            },
+            {
+              "clone_us": 95,
+              "validate_us": 275,
+              "prepare_us": 127
+            },
+            {
+              "clone_us": 89,
+              "validate_us": 20,
+              "prepare_us": 126
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 14,
+              "prepare_us": 368
+            },
+            {
+              "clone_us": 63,
+              "validate_us": 14,
+              "prepare_us": 232
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 113
+            },
+            {
+              "clone_us": 73,
+              "validate_us": 15,
+              "prepare_us": 184
+            },
+            {
+              "clone_us": 103,
+              "validate_us": 12,
+              "prepare_us": 181
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 12,
+              "prepare_us": 105
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 104
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 12,
+              "prepare_us": 149
+            },
+            {
+              "clone_us": 72,
+              "validate_us": 14,
+              "prepare_us": 108
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 276
+            },
+            {
+              "clone_us": 70,
+              "validate_us": 12,
+              "prepare_us": 103
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 14,
+              "prepare_us": 101
+            },
+            {
+              "clone_us": 69,
+              "validate_us": 20,
+              "prepare_us": 171
+            },
+            {
+              "clone_us": 91,
+              "validate_us": 12,
+              "prepare_us": 105
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 12,
+              "prepare_us": 239
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 11,
+              "prepare_us": 107
+            },
+            {
+              "clone_us": 63,
+              "validate_us": 43,
+              "prepare_us": 124
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 104
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 105
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 11,
+              "prepare_us": 102
+            },
+            {
+              "clone_us": 69,
+              "validate_us": 12,
+              "prepare_us": 107
+            }
+          ]
+        },
+        {
+          "records": 5001,
+          "operations": 5002,
+          "generations": 1,
+          "state_bytes": 3395367,
+          "samples": [
+            {
+              "clone_us": 634,
+              "validate_us": 119,
+              "prepare_us": 670
+            },
+            {
+              "clone_us": 690,
+              "validate_us": 166,
+              "prepare_us": 848
+            },
+            {
+              "clone_us": 490,
+              "validate_us": 138,
+              "prepare_us": 708
+            },
+            {
+              "clone_us": 535,
+              "validate_us": 129,
+              "prepare_us": 575
+            },
+            {
+              "clone_us": 465,
+              "validate_us": 123,
+              "prepare_us": 529
+            },
+            {
+              "clone_us": 358,
+              "validate_us": 123,
+              "prepare_us": 550
+            },
+            {
+              "clone_us": 445,
+              "validate_us": 122,
+              "prepare_us": 539
+            },
+            {
+              "clone_us": 443,
+              "validate_us": 125,
+              "prepare_us": 791
+            },
+            {
+              "clone_us": 647,
+              "validate_us": 156,
+              "prepare_us": 558
+            },
+            {
+              "clone_us": 539,
+              "validate_us": 130,
+              "prepare_us": 561
+            },
+            {
+              "clone_us": 637,
+              "validate_us": 135,
+              "prepare_us": 517
+            },
+            {
+              "clone_us": 603,
+              "validate_us": 184,
+              "prepare_us": 626
+            },
+            {
+              "clone_us": 434,
+              "validate_us": 133,
+              "prepare_us": 571
+            },
+            {
+              "clone_us": 604,
+              "validate_us": 156,
+              "prepare_us": 739
+            },
+            {
+              "clone_us": 427,
+              "validate_us": 122,
+              "prepare_us": 511
+            },
+            {
+              "clone_us": 430,
+              "validate_us": 124,
+              "prepare_us": 563
+            },
+            {
+              "clone_us": 559,
+              "validate_us": 150,
+              "prepare_us": 650
+            },
+            {
+              "clone_us": 447,
+              "validate_us": 150,
+              "prepare_us": 581
+            },
+            {
+              "clone_us": 431,
+              "validate_us": 108,
+              "prepare_us": 700
+            },
+            {
+              "clone_us": 433,
+              "validate_us": 169,
+              "prepare_us": 603
+            },
+            {
+              "clone_us": 431,
+              "validate_us": 106,
+              "prepare_us": 534
+            },
+            {
+              "clone_us": 435,
+              "validate_us": 141,
+              "prepare_us": 538
+            },
+            {
+              "clone_us": 451,
+              "validate_us": 125,
+              "prepare_us": 525
+            },
+            {
+              "clone_us": 480,
+              "validate_us": 105,
+              "prepare_us": 565
+            },
+            {
+              "clone_us": 601,
+              "validate_us": 156,
+              "prepare_us": 857
+            }
+          ]
+        },
+        {
+          "records": 10001,
+          "operations": 10002,
+          "generations": 1,
+          "state_bytes": 6795371,
+          "samples": [
+            {
+              "clone_us": 1024,
+              "validate_us": 283,
+              "prepare_us": 1371
+            },
+            {
+              "clone_us": 1026,
+              "validate_us": 317,
+              "prepare_us": 1274
+            },
+            {
+              "clone_us": 991,
+              "validate_us": 288,
+              "prepare_us": 1305
+            },
+            {
+              "clone_us": 979,
+              "validate_us": 283,
+              "prepare_us": 1286
+            },
+            {
+              "clone_us": 965,
+              "validate_us": 267,
+              "prepare_us": 1269
+            },
+            {
+              "clone_us": 896,
+              "validate_us": 279,
+              "prepare_us": 1463
+            },
+            {
+              "clone_us": 997,
+              "validate_us": 293,
+              "prepare_us": 1320
+            },
+            {
+              "clone_us": 1187,
+              "validate_us": 296,
+              "prepare_us": 1307
+            },
+            {
+              "clone_us": 1420,
+              "validate_us": 303,
+              "prepare_us": 1441
+            },
+            {
+              "clone_us": 889,
+              "validate_us": 309,
+              "prepare_us": 1335
+            },
+            {
+              "clone_us": 996,
+              "validate_us": 273,
+              "prepare_us": 1410
+            },
+            {
+              "clone_us": 1003,
+              "validate_us": 280,
+              "prepare_us": 1260
+            },
+            {
+              "clone_us": 1145,
+              "validate_us": 305,
+              "prepare_us": 1273
+            },
+            {
+              "clone_us": 981,
+              "validate_us": 274,
+              "prepare_us": 1267
+            },
+            {
+              "clone_us": 978,
+              "validate_us": 336,
+              "prepare_us": 1885
+            },
+            {
+              "clone_us": 1347,
+              "validate_us": 322,
+              "prepare_us": 1459
+            },
+            {
+              "clone_us": 1149,
+              "validate_us": 431,
+              "prepare_us": 1437
+            },
+            {
+              "clone_us": 935,
+              "validate_us": 298,
+              "prepare_us": 1315
+            },
+            {
+              "clone_us": 1004,
+              "validate_us": 292,
+              "prepare_us": 1291
+            },
+            {
+              "clone_us": 1001,
+              "validate_us": 300,
+              "prepare_us": 1333
+            },
+            {
+              "clone_us": 989,
+              "validate_us": 397,
+              "prepare_us": 1486
+            },
+            {
+              "clone_us": 971,
+              "validate_us": 293,
+              "prepare_us": 1261
+            },
+            {
+              "clone_us": 1017,
+              "validate_us": 287,
+              "prepare_us": 1271
+            },
+            {
+              "clone_us": 1088,
+              "validate_us": 316,
+              "prepare_us": 1269
+            },
+            {
+              "clone_us": 988,
+              "validate_us": 285,
+              "prepare_us": 1395
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1017,
+          "generations": 16,
+          "state_bytes": 689350,
+          "samples": [
+            {
+              "clone_us": 99,
+              "validate_us": 96,
+              "prepare_us": 243
+            },
+            {
+              "clone_us": 96,
+              "validate_us": 94,
+              "prepare_us": 235
+            },
+            {
+              "clone_us": 169,
+              "validate_us": 128,
+              "prepare_us": 498
+            },
+            {
+              "clone_us": 102,
+              "validate_us": 97,
+              "prepare_us": 267
+            },
+            {
+              "clone_us": 100,
+              "validate_us": 117,
+              "prepare_us": 229
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 95,
+              "prepare_us": 257
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 95,
+              "prepare_us": 225
+            },
+            {
+              "clone_us": 98,
+              "validate_us": 96,
+              "prepare_us": 262
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 94,
+              "prepare_us": 223
+            },
+            {
+              "clone_us": 91,
+              "validate_us": 142,
+              "prepare_us": 235
+            },
+            {
+              "clone_us": 98,
+              "validate_us": 96,
+              "prepare_us": 279
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 96,
+              "prepare_us": 225
+            },
+            {
+              "clone_us": 105,
+              "validate_us": 96,
+              "prepare_us": 222
+            },
+            {
+              "clone_us": 127,
+              "validate_us": 104,
+              "prepare_us": 330
+            },
+            {
+              "clone_us": 102,
+              "validate_us": 98,
+              "prepare_us": 264
+            },
+            {
+              "clone_us": 99,
+              "validate_us": 95,
+              "prepare_us": 223
+            },
+            {
+              "clone_us": 99,
+              "validate_us": 95,
+              "prepare_us": 265
+            },
+            {
+              "clone_us": 86,
+              "validate_us": 95,
+              "prepare_us": 228
+            },
+            {
+              "clone_us": 100,
+              "validate_us": 97,
+              "prepare_us": 273
+            },
+            {
+              "clone_us": 100,
+              "validate_us": 95,
+              "prepare_us": 224
+            },
+            {
+              "clone_us": 98,
+              "validate_us": 143,
+              "prepare_us": 226
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 95,
+              "prepare_us": 365
+            },
+            {
+              "clone_us": 149,
+              "validate_us": 100,
+              "prepare_us": 230
+            },
+            {
+              "clone_us": 99,
+              "validate_us": 101,
+              "prepare_us": 264
+            },
+            {
+              "clone_us": 100,
+              "validate_us": 95,
+              "prepare_us": 223
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1065,
+          "generations": 64,
+          "state_bytes": 734326,
+          "samples": [
+            {
+              "clone_us": 205,
+              "validate_us": 321,
+              "prepare_us": 553
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 337,
+              "prepare_us": 532
+            },
+            {
+              "clone_us": 156,
+              "validate_us": 334,
+              "prepare_us": 526
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 322,
+              "prepare_us": 560
+            },
+            {
+              "clone_us": 237,
+              "validate_us": 468,
+              "prepare_us": 601
+            },
+            {
+              "clone_us": 154,
+              "validate_us": 406,
+              "prepare_us": 691
+            },
+            {
+              "clone_us": 230,
+              "validate_us": 381,
+              "prepare_us": 597
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 321,
+              "prepare_us": 543
+            },
+            {
+              "clone_us": 183,
+              "validate_us": 470,
+              "prepare_us": 791
+            },
+            {
+              "clone_us": 177,
+              "validate_us": 465,
+              "prepare_us": 711
+            },
+            {
+              "clone_us": 234,
+              "validate_us": 356,
+              "prepare_us": 531
+            },
+            {
+              "clone_us": 156,
+              "validate_us": 339,
+              "prepare_us": 533
+            },
+            {
+              "clone_us": 153,
+              "validate_us": 321,
+              "prepare_us": 550
+            },
+            {
+              "clone_us": 169,
+              "validate_us": 323,
+              "prepare_us": 538
+            },
+            {
+              "clone_us": 156,
+              "validate_us": 322,
+              "prepare_us": 549
+            },
+            {
+              "clone_us": 156,
+              "validate_us": 320,
+              "prepare_us": 698
+            },
+            {
+              "clone_us": 162,
+              "validate_us": 362,
+              "prepare_us": 545
+            },
+            {
+              "clone_us": 218,
+              "validate_us": 493,
+              "prepare_us": 760
+            },
+            {
+              "clone_us": 230,
+              "validate_us": 502,
+              "prepare_us": 854
+            },
+            {
+              "clone_us": 179,
+              "validate_us": 327,
+              "prepare_us": 761
+            },
+            {
+              "clone_us": 211,
+              "validate_us": 355,
+              "prepare_us": 538
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 340,
+              "prepare_us": 688
+            },
+            {
+              "clone_us": 222,
+              "validate_us": 466,
+              "prepare_us": 665
+            },
+            {
+              "clone_us": 196,
+              "validate_us": 447,
+              "prepare_us": 537
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 350,
+              "prepare_us": 608
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1257,
+          "generations": 256,
+          "state_bytes": 915478,
+          "samples": [
+            {
+              "clone_us": 612,
+              "validate_us": 1459,
+              "prepare_us": 2286
+            },
+            {
+              "clone_us": 403,
+              "validate_us": 1417,
+              "prepare_us": 2450
+            },
+            {
+              "clone_us": 403,
+              "validate_us": 1330,
+              "prepare_us": 2418
+            },
+            {
+              "clone_us": 499,
+              "validate_us": 1791,
+              "prepare_us": 2024
+            },
+            {
+              "clone_us": 396,
+              "validate_us": 1427,
+              "prepare_us": 1875
+            },
+            {
+              "clone_us": 386,
+              "validate_us": 1354,
+              "prepare_us": 2328
+            },
+            {
+              "clone_us": 612,
+              "validate_us": 1945,
+              "prepare_us": 1938
+            },
+            {
+              "clone_us": 655,
+              "validate_us": 1413,
+              "prepare_us": 2321
+            },
+            {
+              "clone_us": 402,
+              "validate_us": 1553,
+              "prepare_us": 1988
+            },
+            {
+              "clone_us": 376,
+              "validate_us": 1718,
+              "prepare_us": 2393
+            },
+            {
+              "clone_us": 591,
+              "validate_us": 1359,
+              "prepare_us": 1977
+            },
+            {
+              "clone_us": 396,
+              "validate_us": 1331,
+              "prepare_us": 1956
+            },
+            {
+              "clone_us": 395,
+              "validate_us": 1435,
+              "prepare_us": 2708
+            },
+            {
+              "clone_us": 555,
+              "validate_us": 1701,
+              "prepare_us": 2158
+            },
+            {
+              "clone_us": 440,
+              "validate_us": 1553,
+              "prepare_us": 2424
+            },
+            {
+              "clone_us": 440,
+              "validate_us": 1469,
+              "prepare_us": 2465
+            },
+            {
+              "clone_us": 407,
+              "validate_us": 1746,
+              "prepare_us": 2088
+            },
+            {
+              "clone_us": 586,
+              "validate_us": 1340,
+              "prepare_us": 1977
+            },
+            {
+              "clone_us": 521,
+              "validate_us": 1429,
+              "prepare_us": 1946
+            },
+            {
+              "clone_us": 520,
+              "validate_us": 1618,
+              "prepare_us": 2816
+            },
+            {
+              "clone_us": 477,
+              "validate_us": 1474,
+              "prepare_us": 2291
+            },
+            {
+              "clone_us": 430,
+              "validate_us": 1754,
+              "prepare_us": 2461
+            },
+            {
+              "clone_us": 444,
+              "validate_us": 1529,
+              "prepare_us": 2367
+            },
+            {
+              "clone_us": 403,
+              "validate_us": 1333,
+              "prepare_us": 1960
+            },
+            {
+              "clone_us": 402,
+              "validate_us": 1317,
+              "prepare_us": 1888
+            }
+          ]
+        },
+        {
+          "records": 10001,
+          "operations": 10129,
+          "generations": 128,
+          "state_bytes": 6914649,
+          "samples": [
+            {
+              "clone_us": 3963,
+              "validate_us": 9688,
+              "prepare_us": 16309
+            },
+            {
+              "clone_us": 3946,
+              "validate_us": 12208,
+              "prepare_us": 16785
+            },
+            {
+              "clone_us": 3391,
+              "validate_us": 14330,
+              "prepare_us": 15186
+            },
+            {
+              "clone_us": 4760,
+              "validate_us": 11541,
+              "prepare_us": 13864
+            },
+            {
+              "clone_us": 3864,
+              "validate_us": 9976,
+              "prepare_us": 14350
+            },
+            {
+              "clone_us": 3486,
+              "validate_us": 10002,
+              "prepare_us": 14546
+            },
+            {
+              "clone_us": 3776,
+              "validate_us": 10151,
+              "prepare_us": 19206
+            },
+            {
+              "clone_us": 3701,
+              "validate_us": 10247,
+              "prepare_us": 13497
+            },
+            {
+              "clone_us": 3101,
+              "validate_us": 12023,
+              "prepare_us": 18282
+            },
+            {
+              "clone_us": 3251,
+              "validate_us": 9474,
+              "prepare_us": 12491
+            },
+            {
+              "clone_us": 3174,
+              "validate_us": 9579,
+              "prepare_us": 15090
+            },
+            {
+              "clone_us": 3383,
+              "validate_us": 11944,
+              "prepare_us": 17644
+            },
+            {
+              "clone_us": 3406,
+              "validate_us": 12506,
+              "prepare_us": 16562
+            },
+            {
+              "clone_us": 3583,
+              "validate_us": 12847,
+              "prepare_us": 17858
+            },
+            {
+              "clone_us": 4047,
+              "validate_us": 13377,
+              "prepare_us": 15126
+            },
+            {
+              "clone_us": 2314,
+              "validate_us": 9197,
+              "prepare_us": 14747
+            },
+            {
+              "clone_us": 6978,
+              "validate_us": 13704,
+              "prepare_us": 17582
+            },
+            {
+              "clone_us": 4011,
+              "validate_us": 13565,
+              "prepare_us": 13927
+            },
+            {
+              "clone_us": 2844,
+              "validate_us": 9817,
+              "prepare_us": 13193
+            },
+            {
+              "clone_us": 2918,
+              "validate_us": 9743,
+              "prepare_us": 14095
+            },
+            {
+              "clone_us": 3839,
+              "validate_us": 10373,
+              "prepare_us": 14259
+            },
+            {
+              "clone_us": 2970,
+              "validate_us": 14769,
+              "prepare_us": 17682
+            },
+            {
+              "clone_us": 3652,
+              "validate_us": 12238,
+              "prepare_us": 16296
+            },
+            {
+              "clone_us": 3980,
+              "validate_us": 9538,
+              "prepare_us": 16327
+            },
+            {
+              "clone_us": 3827,
+              "validate_us": 9981,
+              "prepare_us": 13276
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "catalog": [
+        {
+          "collections": 16,
+          "operations": 64,
+          "state_bytes_before": 28053,
+          "state_bytes_after": 32724,
+          "samples": [
+            {
+              "clone_us": 12,
+              "apply_us": 1,
+              "validate_us": 136,
+              "persist_us": 446,
+              "total_us": 596
+            },
+            {
+              "clone_us": 11,
+              "apply_us": 1,
+              "validate_us": 133,
+              "persist_us": 466,
+              "total_us": 613
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 135,
+              "persist_us": 566,
+              "total_us": 713
+            },
+            {
+              "clone_us": 13,
+              "apply_us": 2,
+              "validate_us": 203,
+              "persist_us": 510,
+              "total_us": 730
+            },
+            {
+              "clone_us": 14,
+              "apply_us": 1,
+              "validate_us": 237,
+              "persist_us": 445,
+              "total_us": 698
+            },
+            {
+              "clone_us": 14,
+              "apply_us": 1,
+              "validate_us": 137,
+              "persist_us": 691,
+              "total_us": 845
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 263,
+              "persist_us": 484,
+              "total_us": 759
+            },
+            {
+              "clone_us": 12,
+              "apply_us": 1,
+              "validate_us": 142,
+              "persist_us": 560,
+              "total_us": 716
+            },
+            {
+              "clone_us": 16,
+              "apply_us": 1,
+              "validate_us": 286,
+              "persist_us": 645,
+              "total_us": 950
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 2,
+              "validate_us": 173,
+              "persist_us": 423,
+              "total_us": 608
+            },
+            {
+              "clone_us": 20,
+              "apply_us": 22,
+              "validate_us": 209,
+              "persist_us": 535,
+              "total_us": 787
+            },
+            {
+              "clone_us": 17,
+              "apply_us": 1,
+              "validate_us": 235,
+              "persist_us": 777,
+              "total_us": 1032
+            },
+            {
+              "clone_us": 10,
+              "apply_us": 1,
+              "validate_us": 150,
+              "persist_us": 508,
+              "total_us": 671
+            },
+            {
+              "clone_us": 15,
+              "apply_us": 1,
+              "validate_us": 137,
+              "persist_us": 331,
+              "total_us": 486
+            },
+            {
+              "clone_us": 15,
+              "apply_us": 8,
+              "validate_us": 137,
+              "persist_us": 564,
+              "total_us": 725
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 144,
+              "persist_us": 525,
+              "total_us": 681
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 155,
+              "persist_us": 504,
+              "total_us": 671
+            },
+            {
+              "clone_us": 10,
+              "apply_us": 8,
+              "validate_us": 137,
+              "persist_us": 429,
+              "total_us": 584
+            },
+            {
+              "clone_us": 10,
+              "apply_us": 1,
+              "validate_us": 142,
+              "persist_us": 676,
+              "total_us": 830
+            },
+            {
+              "clone_us": 10,
+              "apply_us": 1,
+              "validate_us": 155,
+              "persist_us": 364,
+              "total_us": 531
+            },
+            {
+              "clone_us": 15,
+              "apply_us": 7,
+              "validate_us": 138,
+              "persist_us": 495,
+              "total_us": 656
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 2,
+              "validate_us": 137,
+              "persist_us": 553,
+              "total_us": 702
+            },
+            {
+              "clone_us": 13,
+              "apply_us": 1,
+              "validate_us": 162,
+              "persist_us": 426,
+              "total_us": 603
+            },
+            {
+              "clone_us": 13,
+              "apply_us": 8,
+              "validate_us": 151,
+              "persist_us": 394,
+              "total_us": 567
+            },
+            {
+              "clone_us": 15,
+              "apply_us": 1,
+              "validate_us": 144,
+              "persist_us": 489,
+              "total_us": 651
+            }
+          ]
+        },
+        {
+          "collections": 128,
+          "operations": 288,
+          "state_bytes_before": 220419,
+          "state_bytes_after": 225120,
+          "samples": [
+            {
+              "clone_us": 51,
+              "apply_us": 4,
+              "validate_us": 957,
+              "persist_us": 789,
+              "total_us": 1803
+            },
+            {
+              "clone_us": 46,
+              "apply_us": 7,
+              "validate_us": 897,
+              "persist_us": 758,
+              "total_us": 1708
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 3,
+              "validate_us": 836,
+              "persist_us": 679,
+              "total_us": 1571
+            },
+            {
+              "clone_us": 45,
+              "apply_us": 3,
+              "validate_us": 836,
+              "persist_us": 873,
+              "total_us": 1759
+            },
+            {
+              "clone_us": 53,
+              "apply_us": 4,
+              "validate_us": 873,
+              "persist_us": 697,
+              "total_us": 1629
+            },
+            {
+              "clone_us": 46,
+              "apply_us": 1,
+              "validate_us": 875,
+              "persist_us": 633,
+              "total_us": 1556
+            },
+            {
+              "clone_us": 52,
+              "apply_us": 4,
+              "validate_us": 945,
+              "persist_us": 711,
+              "total_us": 1713
+            },
+            {
+              "clone_us": 46,
+              "apply_us": 3,
+              "validate_us": 1013,
+              "persist_us": 939,
+              "total_us": 2002
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 1,
+              "validate_us": 922,
+              "persist_us": 796,
+              "total_us": 1771
+            },
+            {
+              "clone_us": 47,
+              "apply_us": 6,
+              "validate_us": 1946,
+              "persist_us": 1293,
+              "total_us": 3294
+            },
+            {
+              "clone_us": 82,
+              "apply_us": 5,
+              "validate_us": 1591,
+              "persist_us": 1448,
+              "total_us": 3128
+            },
+            {
+              "clone_us": 102,
+              "apply_us": 6,
+              "validate_us": 1457,
+              "persist_us": 1178,
+              "total_us": 2746
+            },
+            {
+              "clone_us": 80,
+              "apply_us": 7,
+              "validate_us": 1432,
+              "persist_us": 1056,
+              "total_us": 2577
+            },
+            {
+              "clone_us": 48,
+              "apply_us": 4,
+              "validate_us": 1129,
+              "persist_us": 959,
+              "total_us": 2141
+            },
+            {
+              "clone_us": 79,
+              "apply_us": 9,
+              "validate_us": 1359,
+              "persist_us": 795,
+              "total_us": 2244
+            },
+            {
+              "clone_us": 75,
+              "apply_us": 4,
+              "validate_us": 1012,
+              "persist_us": 665,
+              "total_us": 1757
+            },
+            {
+              "clone_us": 50,
+              "apply_us": 4,
+              "validate_us": 1136,
+              "persist_us": 726,
+              "total_us": 1918
+            },
+            {
+              "clone_us": 48,
+              "apply_us": 8,
+              "validate_us": 999,
+              "persist_us": 683,
+              "total_us": 1739
+            },
+            {
+              "clone_us": 50,
+              "apply_us": 1,
+              "validate_us": 902,
+              "persist_us": 860,
+              "total_us": 1814
+            },
+            {
+              "clone_us": 48,
+              "apply_us": 5,
+              "validate_us": 1032,
+              "persist_us": 717,
+              "total_us": 1804
+            },
+            {
+              "clone_us": 50,
+              "apply_us": 4,
+              "validate_us": 923,
+              "persist_us": 666,
+              "total_us": 1645
+            },
+            {
+              "clone_us": 119,
+              "apply_us": 4,
+              "validate_us": 954,
+              "persist_us": 699,
+              "total_us": 1777
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 3,
+              "validate_us": 1284,
+              "persist_us": 798,
+              "total_us": 2138
+            },
+            {
+              "clone_us": 81,
+              "apply_us": 7,
+              "validate_us": 909,
+              "persist_us": 629,
+              "total_us": 1627
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 6,
+              "validate_us": 1132,
+              "persist_us": 776,
+              "total_us": 1966
+            }
+          ]
+        },
+        {
+          "collections": 1024,
+          "operations": 2080,
+          "state_bytes_before": 1766055,
+          "state_bytes_after": 1770786,
+          "samples": [
+            {
+              "clone_us": 610,
+              "apply_us": 42,
+              "validate_us": 9655,
+              "persist_us": 3126,
+              "total_us": 13435
+            },
+            {
+              "clone_us": 500,
+              "apply_us": 49,
+              "validate_us": 7744,
+              "persist_us": 3185,
+              "total_us": 11480
+            },
+            {
+              "clone_us": 410,
+              "apply_us": 74,
+              "validate_us": 6800,
+              "persist_us": 2689,
+              "total_us": 9975
+            },
+            {
+              "clone_us": 350,
+              "apply_us": 44,
+              "validate_us": 6907,
+              "persist_us": 4871,
+              "total_us": 12173
+            },
+            {
+              "clone_us": 394,
+              "apply_us": 46,
+              "validate_us": 12516,
+              "persist_us": 3377,
+              "total_us": 16334
+            },
+            {
+              "clone_us": 663,
+              "apply_us": 43,
+              "validate_us": 11301,
+              "persist_us": 3703,
+              "total_us": 15712
+            },
+            {
+              "clone_us": 602,
+              "apply_us": 6,
+              "validate_us": 9405,
+              "persist_us": 7158,
+              "total_us": 17172
+            },
+            {
+              "clone_us": 508,
+              "apply_us": 92,
+              "validate_us": 10443,
+              "persist_us": 3059,
+              "total_us": 14103
+            },
+            {
+              "clone_us": 674,
+              "apply_us": 4,
+              "validate_us": 11678,
+              "persist_us": 3511,
+              "total_us": 15868
+            },
+            {
+              "clone_us": 637,
+              "apply_us": 186,
+              "validate_us": 9218,
+              "persist_us": 3369,
+              "total_us": 13411
+            },
+            {
+              "clone_us": 887,
+              "apply_us": 42,
+              "validate_us": 8367,
+              "persist_us": 2637,
+              "total_us": 11935
+            },
+            {
+              "clone_us": 393,
+              "apply_us": 40,
+              "validate_us": 8713,
+              "persist_us": 2943,
+              "total_us": 12091
+            },
+            {
+              "clone_us": 381,
+              "apply_us": 207,
+              "validate_us": 8592,
+              "persist_us": 3127,
+              "total_us": 12308
+            },
+            {
+              "clone_us": 367,
+              "apply_us": 43,
+              "validate_us": 7315,
+              "persist_us": 2882,
+              "total_us": 10609
+            },
+            {
+              "clone_us": 367,
+              "apply_us": 50,
+              "validate_us": 7920,
+              "persist_us": 3134,
+              "total_us": 11472
+            },
+            {
+              "clone_us": 455,
+              "apply_us": 36,
+              "validate_us": 17361,
+              "persist_us": 2714,
+              "total_us": 20568
+            },
+            {
+              "clone_us": 356,
+              "apply_us": 34,
+              "validate_us": 6533,
+              "persist_us": 2519,
+              "total_us": 9444
+            },
+            {
+              "clone_us": 392,
+              "apply_us": 41,
+              "validate_us": 6897,
+              "persist_us": 3182,
+              "total_us": 10513
+            },
+            {
+              "clone_us": 512,
+              "apply_us": 47,
+              "validate_us": 7815,
+              "persist_us": 2849,
+              "total_us": 11224
+            },
+            {
+              "clone_us": 360,
+              "apply_us": 33,
+              "validate_us": 7673,
+              "persist_us": 4130,
+              "total_us": 12196
+            },
+            {
+              "clone_us": 668,
+              "apply_us": 49,
+              "validate_us": 11292,
+              "persist_us": 3709,
+              "total_us": 15720
+            },
+            {
+              "clone_us": 380,
+              "apply_us": 65,
+              "validate_us": 9330,
+              "persist_us": 3330,
+              "total_us": 13106
+            },
+            {
+              "clone_us": 420,
+              "apply_us": 55,
+              "validate_us": 7134,
+              "persist_us": 2637,
+              "total_us": 10247
+            },
+            {
+              "clone_us": 439,
+              "apply_us": 34,
+              "validate_us": 6682,
+              "persist_us": 3690,
+              "total_us": 10846
+            },
+            {
+              "clone_us": 624,
+              "apply_us": 51,
+              "validate_us": 7005,
+              "persist_us": 3428,
+              "total_us": 11109
+            }
+          ]
+        },
+        {
+          "collections": 4096,
+          "operations": 8224,
+          "state_bytes_before": 7083687,
+          "state_bytes_after": 7088418,
+          "samples": [
+            {
+              "clone_us": 1979,
+              "apply_us": 12,
+              "validate_us": 37025,
+              "persist_us": 10356,
+              "total_us": 49374
+            },
+            {
+              "clone_us": 1773,
+              "apply_us": 1033,
+              "validate_us": 28409,
+              "persist_us": 10293,
+              "total_us": 41510
+            },
+            {
+              "clone_us": 1703,
+              "apply_us": 237,
+              "validate_us": 28626,
+              "persist_us": 10392,
+              "total_us": 40959
+            },
+            {
+              "clone_us": 1726,
+              "apply_us": 232,
+              "validate_us": 26735,
+              "persist_us": 10371,
+              "total_us": 39066
+            },
+            {
+              "clone_us": 2534,
+              "apply_us": 262,
+              "validate_us": 35147,
+              "persist_us": 17670,
+              "total_us": 55614
+            },
+            {
+              "clone_us": 2928,
+              "apply_us": 229,
+              "validate_us": 47215,
+              "persist_us": 17593,
+              "total_us": 67968
+            },
+            {
+              "clone_us": 2996,
+              "apply_us": 252,
+              "validate_us": 29425,
+              "persist_us": 10415,
+              "total_us": 43091
+            },
+            {
+              "clone_us": 1785,
+              "apply_us": 226,
+              "validate_us": 27729,
+              "persist_us": 11178,
+              "total_us": 40919
+            },
+            {
+              "clone_us": 1900,
+              "apply_us": 251,
+              "validate_us": 31047,
+              "persist_us": 11507,
+              "total_us": 44707
+            },
+            {
+              "clone_us": 1874,
+              "apply_us": 243,
+              "validate_us": 28243,
+              "persist_us": 10913,
+              "total_us": 41275
+            },
+            {
+              "clone_us": 1752,
+              "apply_us": 216,
+              "validate_us": 28324,
+              "persist_us": 10244,
+              "total_us": 40538
+            },
+            {
+              "clone_us": 1920,
+              "apply_us": 245,
+              "validate_us": 28723,
+              "persist_us": 11616,
+              "total_us": 42505
+            },
+            {
+              "clone_us": 1762,
+              "apply_us": 258,
+              "validate_us": 29943,
+              "persist_us": 12694,
+              "total_us": 44659
+            },
+            {
+              "clone_us": 2038,
+              "apply_us": 273,
+              "validate_us": 29954,
+              "persist_us": 11355,
+              "total_us": 43622
+            },
+            {
+              "clone_us": 1966,
+              "apply_us": 223,
+              "validate_us": 29935,
+              "persist_us": 10451,
+              "total_us": 42577
+            },
+            {
+              "clone_us": 1844,
+              "apply_us": 238,
+              "validate_us": 31014,
+              "persist_us": 13531,
+              "total_us": 46628
+            },
+            {
+              "clone_us": 2908,
+              "apply_us": 227,
+              "validate_us": 33234,
+              "persist_us": 13222,
+              "total_us": 49592
+            },
+            {
+              "clone_us": 1934,
+              "apply_us": 236,
+              "validate_us": 33232,
+              "persist_us": 10483,
+              "total_us": 45887
+            },
+            {
+              "clone_us": 3097,
+              "apply_us": 253,
+              "validate_us": 34613,
+              "persist_us": 10959,
+              "total_us": 48924
+            },
+            {
+              "clone_us": 2002,
+              "apply_us": 248,
+              "validate_us": 30273,
+              "persist_us": 13728,
+              "total_us": 46253
+            },
+            {
+              "clone_us": 3003,
+              "apply_us": 224,
+              "validate_us": 31162,
+              "persist_us": 12985,
+              "total_us": 47376
+            },
+            {
+              "clone_us": 3643,
+              "apply_us": 245,
+              "validate_us": 28898,
+              "persist_us": 11918,
+              "total_us": 44706
+            },
+            {
+              "clone_us": 1880,
+              "apply_us": 229,
+              "validate_us": 28857,
+              "persist_us": 10131,
+              "total_us": 41099
+            },
+            {
+              "clone_us": 1881,
+              "apply_us": 223,
+              "validate_us": 27993,
+              "persist_us": 10846,
+              "total_us": 40945
+            },
+            {
+              "clone_us": 1834,
+              "apply_us": 239,
+              "validate_us": 29134,
+              "persist_us": 10535,
+              "total_us": 41743
+            }
+          ]
+        }
+      ],
+      "generation": [
+        {
+          "records": 101,
+          "operations": 102,
+          "generations": 1,
+          "state_bytes": 68763,
+          "samples": [
+            {
+              "clone_us": 26,
+              "validate_us": 4,
+              "prepare_us": 22
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 9,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 22
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 47
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 18,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 23
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 6,
+              "prepare_us": 28
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 22
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1002,
+          "generations": 1,
+          "state_bytes": 675367,
+          "samples": [
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 114
+            },
+            {
+              "clone_us": 70,
+              "validate_us": 12,
+              "prepare_us": 125
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 14,
+              "prepare_us": 102
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 12,
+              "prepare_us": 104
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 12,
+              "prepare_us": 106
+            },
+            {
+              "clone_us": 62,
+              "validate_us": 14,
+              "prepare_us": 110
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 12,
+              "prepare_us": 128
+            },
+            {
+              "clone_us": 62,
+              "validate_us": 11,
+              "prepare_us": 105
+            },
+            {
+              "clone_us": 69,
+              "validate_us": 12,
+              "prepare_us": 104
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 15,
+              "prepare_us": 111
+            },
+            {
+              "clone_us": 69,
+              "validate_us": 13,
+              "prepare_us": 111
+            },
+            {
+              "clone_us": 69,
+              "validate_us": 12,
+              "prepare_us": 136
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 107
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 11,
+              "prepare_us": 122
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 12,
+              "prepare_us": 104
+            },
+            {
+              "clone_us": 193,
+              "validate_us": 15,
+              "prepare_us": 114
+            },
+            {
+              "clone_us": 69,
+              "validate_us": 12,
+              "prepare_us": 105
+            },
+            {
+              "clone_us": 63,
+              "validate_us": 11,
+              "prepare_us": 104
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 11,
+              "prepare_us": 125
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 104
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 103
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 12,
+              "prepare_us": 106
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 108
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 12,
+              "prepare_us": 106
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 13,
+              "prepare_us": 104
+            }
+          ]
+        },
+        {
+          "records": 5001,
+          "operations": 5002,
+          "generations": 1,
+          "state_bytes": 3395367,
+          "samples": [
+            {
+              "clone_us": 591,
+              "validate_us": 122,
+              "prepare_us": 787
+            },
+            {
+              "clone_us": 511,
+              "validate_us": 125,
+              "prepare_us": 661
+            },
+            {
+              "clone_us": 500,
+              "validate_us": 139,
+              "prepare_us": 693
+            },
+            {
+              "clone_us": 459,
+              "validate_us": 119,
+              "prepare_us": 610
+            },
+            {
+              "clone_us": 588,
+              "validate_us": 239,
+              "prepare_us": 590
+            },
+            {
+              "clone_us": 383,
+              "validate_us": 519,
+              "prepare_us": 714
+            },
+            {
+              "clone_us": 656,
+              "validate_us": 144,
+              "prepare_us": 650
+            },
+            {
+              "clone_us": 459,
+              "validate_us": 248,
+              "prepare_us": 600
+            },
+            {
+              "clone_us": 668,
+              "validate_us": 287,
+              "prepare_us": 978
+            },
+            {
+              "clone_us": 381,
+              "validate_us": 140,
+              "prepare_us": 784
+            },
+            {
+              "clone_us": 467,
+              "validate_us": 142,
+              "prepare_us": 548
+            },
+            {
+              "clone_us": 457,
+              "validate_us": 118,
+              "prepare_us": 601
+            },
+            {
+              "clone_us": 467,
+              "validate_us": 177,
+              "prepare_us": 949
+            },
+            {
+              "clone_us": 706,
+              "validate_us": 150,
+              "prepare_us": 677
+            },
+            {
+              "clone_us": 505,
+              "validate_us": 144,
+              "prepare_us": 793
+            },
+            {
+              "clone_us": 605,
+              "validate_us": 203,
+              "prepare_us": 636
+            },
+            {
+              "clone_us": 656,
+              "validate_us": 125,
+              "prepare_us": 825
+            },
+            {
+              "clone_us": 432,
+              "validate_us": 214,
+              "prepare_us": 700
+            },
+            {
+              "clone_us": 509,
+              "validate_us": 205,
+              "prepare_us": 554
+            },
+            {
+              "clone_us": 574,
+              "validate_us": 160,
+              "prepare_us": 774
+            },
+            {
+              "clone_us": 649,
+              "validate_us": 225,
+              "prepare_us": 669
+            },
+            {
+              "clone_us": 466,
+              "validate_us": 135,
+              "prepare_us": 605
+            },
+            {
+              "clone_us": 478,
+              "validate_us": 150,
+              "prepare_us": 652
+            },
+            {
+              "clone_us": 569,
+              "validate_us": 176,
+              "prepare_us": 578
+            },
+            {
+              "clone_us": 626,
+              "validate_us": 156,
+              "prepare_us": 647
+            }
+          ]
+        },
+        {
+          "records": 10001,
+          "operations": 10002,
+          "generations": 1,
+          "state_bytes": 6795371,
+          "samples": [
+            {
+              "clone_us": 985,
+              "validate_us": 266,
+              "prepare_us": 1371
+            },
+            {
+              "clone_us": 1457,
+              "validate_us": 503,
+              "prepare_us": 2634
+            },
+            {
+              "clone_us": 1871,
+              "validate_us": 457,
+              "prepare_us": 1990
+            },
+            {
+              "clone_us": 1476,
+              "validate_us": 465,
+              "prepare_us": 1983
+            },
+            {
+              "clone_us": 1257,
+              "validate_us": 448,
+              "prepare_us": 1802
+            },
+            {
+              "clone_us": 1514,
+              "validate_us": 452,
+              "prepare_us": 1650
+            },
+            {
+              "clone_us": 1066,
+              "validate_us": 349,
+              "prepare_us": 1898
+            },
+            {
+              "clone_us": 1228,
+              "validate_us": 477,
+              "prepare_us": 1405
+            },
+            {
+              "clone_us": 1048,
+              "validate_us": 457,
+              "prepare_us": 2012
+            },
+            {
+              "clone_us": 1184,
+              "validate_us": 629,
+              "prepare_us": 1615
+            },
+            {
+              "clone_us": 1334,
+              "validate_us": 302,
+              "prepare_us": 1558
+            },
+            {
+              "clone_us": 1434,
+              "validate_us": 417,
+              "prepare_us": 2490
+            },
+            {
+              "clone_us": 1420,
+              "validate_us": 576,
+              "prepare_us": 1649
+            },
+            {
+              "clone_us": 1214,
+              "validate_us": 347,
+              "prepare_us": 1753
+            },
+            {
+              "clone_us": 1182,
+              "validate_us": 323,
+              "prepare_us": 1615
+            },
+            {
+              "clone_us": 1184,
+              "validate_us": 351,
+              "prepare_us": 2000
+            },
+            {
+              "clone_us": 1236,
+              "validate_us": 339,
+              "prepare_us": 2328
+            },
+            {
+              "clone_us": 1376,
+              "validate_us": 352,
+              "prepare_us": 1624
+            },
+            {
+              "clone_us": 1077,
+              "validate_us": 294,
+              "prepare_us": 1576
+            },
+            {
+              "clone_us": 1004,
+              "validate_us": 261,
+              "prepare_us": 1494
+            },
+            {
+              "clone_us": 990,
+              "validate_us": 321,
+              "prepare_us": 1560
+            },
+            {
+              "clone_us": 1493,
+              "validate_us": 479,
+              "prepare_us": 1751
+            },
+            {
+              "clone_us": 1354,
+              "validate_us": 453,
+              "prepare_us": 2184
+            },
+            {
+              "clone_us": 1281,
+              "validate_us": 367,
+              "prepare_us": 2000
+            },
+            {
+              "clone_us": 1452,
+              "validate_us": 380,
+              "prepare_us": 1708
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1017,
+          "generations": 16,
+          "state_bytes": 689350,
+          "samples": [
+            {
+              "clone_us": 94,
+              "validate_us": 95,
+              "prepare_us": 223
+            },
+            {
+              "clone_us": 94,
+              "validate_us": 97,
+              "prepare_us": 227
+            },
+            {
+              "clone_us": 95,
+              "validate_us": 95,
+              "prepare_us": 222
+            },
+            {
+              "clone_us": 124,
+              "validate_us": 97,
+              "prepare_us": 226
+            },
+            {
+              "clone_us": 113,
+              "validate_us": 101,
+              "prepare_us": 246
+            },
+            {
+              "clone_us": 312,
+              "validate_us": 234,
+              "prepare_us": 523
+            },
+            {
+              "clone_us": 185,
+              "validate_us": 231,
+              "prepare_us": 379
+            },
+            {
+              "clone_us": 415,
+              "validate_us": 430,
+              "prepare_us": 377
+            },
+            {
+              "clone_us": 358,
+              "validate_us": 126,
+              "prepare_us": 299
+            },
+            {
+              "clone_us": 146,
+              "validate_us": 160,
+              "prepare_us": 417
+            },
+            {
+              "clone_us": 152,
+              "validate_us": 143,
+              "prepare_us": 370
+            },
+            {
+              "clone_us": 171,
+              "validate_us": 102,
+              "prepare_us": 232
+            },
+            {
+              "clone_us": 117,
+              "validate_us": 145,
+              "prepare_us": 354
+            },
+            {
+              "clone_us": 116,
+              "validate_us": 216,
+              "prepare_us": 261
+            },
+            {
+              "clone_us": 98,
+              "validate_us": 96,
+              "prepare_us": 413
+            },
+            {
+              "clone_us": 125,
+              "validate_us": 96,
+              "prepare_us": 308
+            },
+            {
+              "clone_us": 157,
+              "validate_us": 124,
+              "prepare_us": 326
+            },
+            {
+              "clone_us": 103,
+              "validate_us": 120,
+              "prepare_us": 228
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 97,
+              "prepare_us": 225
+            },
+            {
+              "clone_us": 120,
+              "validate_us": 97,
+              "prepare_us": 226
+            },
+            {
+              "clone_us": 142,
+              "validate_us": 117,
+              "prepare_us": 290
+            },
+            {
+              "clone_us": 133,
+              "validate_us": 141,
+              "prepare_us": 358
+            },
+            {
+              "clone_us": 143,
+              "validate_us": 151,
+              "prepare_us": 398
+            },
+            {
+              "clone_us": 140,
+              "validate_us": 142,
+              "prepare_us": 363
+            },
+            {
+              "clone_us": 171,
+              "validate_us": 144,
+              "prepare_us": 337
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1065,
+          "generations": 64,
+          "state_bytes": 734326,
+          "samples": [
+            {
+              "clone_us": 156,
+              "validate_us": 323,
+              "prepare_us": 548
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 400,
+              "prepare_us": 565
+            },
+            {
+              "clone_us": 160,
+              "validate_us": 536,
+              "prepare_us": 587
+            },
+            {
+              "clone_us": 157,
+              "validate_us": 323,
+              "prepare_us": 708
+            },
+            {
+              "clone_us": 238,
+              "validate_us": 484,
+              "prepare_us": 694
+            },
+            {
+              "clone_us": 199,
+              "validate_us": 327,
+              "prepare_us": 756
+            },
+            {
+              "clone_us": 219,
+              "validate_us": 349,
+              "prepare_us": 538
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 341,
+              "prepare_us": 558
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 344,
+              "prepare_us": 609
+            },
+            {
+              "clone_us": 197,
+              "validate_us": 446,
+              "prepare_us": 848
+            },
+            {
+              "clone_us": 232,
+              "validate_us": 528,
+              "prepare_us": 834
+            },
+            {
+              "clone_us": 159,
+              "validate_us": 491,
+              "prepare_us": 564
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 456,
+              "prepare_us": 594
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 396,
+              "prepare_us": 641
+            },
+            {
+              "clone_us": 156,
+              "validate_us": 322,
+              "prepare_us": 661
+            },
+            {
+              "clone_us": 237,
+              "validate_us": 485,
+              "prepare_us": 633
+            },
+            {
+              "clone_us": 177,
+              "validate_us": 324,
+              "prepare_us": 635
+            },
+            {
+              "clone_us": 140,
+              "validate_us": 414,
+              "prepare_us": 685
+            },
+            {
+              "clone_us": 256,
+              "validate_us": 360,
+              "prepare_us": 661
+            },
+            {
+              "clone_us": 181,
+              "validate_us": 323,
+              "prepare_us": 574
+            },
+            {
+              "clone_us": 157,
+              "validate_us": 342,
+              "prepare_us": 617
+            },
+            {
+              "clone_us": 156,
+              "validate_us": 360,
+              "prepare_us": 602
+            },
+            {
+              "clone_us": 187,
+              "validate_us": 346,
+              "prepare_us": 554
+            },
+            {
+              "clone_us": 153,
+              "validate_us": 322,
+              "prepare_us": 664
+            },
+            {
+              "clone_us": 156,
+              "validate_us": 324,
+              "prepare_us": 578
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1257,
+          "generations": 256,
+          "state_bytes": 915478,
+          "samples": [
+            {
+              "clone_us": 375,
+              "validate_us": 1717,
+              "prepare_us": 2838
+            },
+            {
+              "clone_us": 523,
+              "validate_us": 1618,
+              "prepare_us": 2748
+            },
+            {
+              "clone_us": 444,
+              "validate_us": 1650,
+              "prepare_us": 2139
+            },
+            {
+              "clone_us": 368,
+              "validate_us": 1324,
+              "prepare_us": 1896
+            },
+            {
+              "clone_us": 351,
+              "validate_us": 1332,
+              "prepare_us": 2250
+            },
+            {
+              "clone_us": 536,
+              "validate_us": 1610,
+              "prepare_us": 1931
+            },
+            {
+              "clone_us": 350,
+              "validate_us": 1706,
+              "prepare_us": 2924
+            },
+            {
+              "clone_us": 362,
+              "validate_us": 1501,
+              "prepare_us": 1969
+            },
+            {
+              "clone_us": 493,
+              "validate_us": 1602,
+              "prepare_us": 2231
+            },
+            {
+              "clone_us": 373,
+              "validate_us": 1427,
+              "prepare_us": 1866
+            },
+            {
+              "clone_us": 370,
+              "validate_us": 1331,
+              "prepare_us": 2084
+            },
+            {
+              "clone_us": 543,
+              "validate_us": 1538,
+              "prepare_us": 1871
+            },
+            {
+              "clone_us": 348,
+              "validate_us": 1575,
+              "prepare_us": 2817
+            },
+            {
+              "clone_us": 503,
+              "validate_us": 1494,
+              "prepare_us": 2019
+            },
+            {
+              "clone_us": 452,
+              "validate_us": 1515,
+              "prepare_us": 2229
+            },
+            {
+              "clone_us": 388,
+              "validate_us": 1367,
+              "prepare_us": 1915
+            },
+            {
+              "clone_us": 364,
+              "validate_us": 1349,
+              "prepare_us": 1935
+            },
+            {
+              "clone_us": 583,
+              "validate_us": 1617,
+              "prepare_us": 2187
+            },
+            {
+              "clone_us": 351,
+              "validate_us": 1362,
+              "prepare_us": 2117
+            },
+            {
+              "clone_us": 516,
+              "validate_us": 2024,
+              "prepare_us": 2436
+            },
+            {
+              "clone_us": 398,
+              "validate_us": 1425,
+              "prepare_us": 2330
+            },
+            {
+              "clone_us": 465,
+              "validate_us": 1726,
+              "prepare_us": 1876
+            },
+            {
+              "clone_us": 365,
+              "validate_us": 1326,
+              "prepare_us": 1853
+            },
+            {
+              "clone_us": 395,
+              "validate_us": 1363,
+              "prepare_us": 2482
+            },
+            {
+              "clone_us": 557,
+              "validate_us": 1348,
+              "prepare_us": 2115
+            }
+          ]
+        },
+        {
+          "records": 10001,
+          "operations": 10129,
+          "generations": 128,
+          "state_bytes": 6914649,
+          "samples": [
+            {
+              "clone_us": 2805,
+              "validate_us": 10696,
+              "prepare_us": 13519
+            },
+            {
+              "clone_us": 2787,
+              "validate_us": 10247,
+              "prepare_us": 15142
+            },
+            {
+              "clone_us": 3335,
+              "validate_us": 11723,
+              "prepare_us": 14008
+            },
+            {
+              "clone_us": 2977,
+              "validate_us": 9698,
+              "prepare_us": 13460
+            },
+            {
+              "clone_us": 2882,
+              "validate_us": 10114,
+              "prepare_us": 13035
+            },
+            {
+              "clone_us": 3461,
+              "validate_us": 10328,
+              "prepare_us": 13479
+            },
+            {
+              "clone_us": 3039,
+              "validate_us": 9671,
+              "prepare_us": 11781
+            },
+            {
+              "clone_us": 2840,
+              "validate_us": 11053,
+              "prepare_us": 15101
+            },
+            {
+              "clone_us": 3414,
+              "validate_us": 11662,
+              "prepare_us": 17251
+            },
+            {
+              "clone_us": 3512,
+              "validate_us": 10413,
+              "prepare_us": 15647
+            },
+            {
+              "clone_us": 3408,
+              "validate_us": 12384,
+              "prepare_us": 15146
+            },
+            {
+              "clone_us": 4719,
+              "validate_us": 11112,
+              "prepare_us": 16560
+            },
+            {
+              "clone_us": 4323,
+              "validate_us": 10725,
+              "prepare_us": 14410
+            },
+            {
+              "clone_us": 3746,
+              "validate_us": 10802,
+              "prepare_us": 15482
+            },
+            {
+              "clone_us": 3900,
+              "validate_us": 10388,
+              "prepare_us": 16187
+            },
+            {
+              "clone_us": 4540,
+              "validate_us": 9190,
+              "prepare_us": 14125
+            },
+            {
+              "clone_us": 3551,
+              "validate_us": 10108,
+              "prepare_us": 12300
+            },
+            {
+              "clone_us": 2341,
+              "validate_us": 9216,
+              "prepare_us": 12285
+            },
+            {
+              "clone_us": 3019,
+              "validate_us": 10015,
+              "prepare_us": 13342
+            },
+            {
+              "clone_us": 2929,
+              "validate_us": 12793,
+              "prepare_us": 16964
+            },
+            {
+              "clone_us": 3985,
+              "validate_us": 10642,
+              "prepare_us": 14588
+            },
+            {
+              "clone_us": 4102,
+              "validate_us": 10923,
+              "prepare_us": 14452
+            },
+            {
+              "clone_us": 3797,
+              "validate_us": 10253,
+              "prepare_us": 17732
+            },
+            {
+              "clone_us": 4356,
+              "validate_us": 10081,
+              "prepare_us": 14349
+            },
+            {
+              "clone_us": 5215,
+              "validate_us": 14027,
+              "prepare_us": 18454
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "catalog": [
+        {
+          "collections": 16,
+          "operations": 64,
+          "state_bytes_before": 28053,
+          "state_bytes_after": 32724,
+          "samples": [
+            {
+              "clone_us": 17,
+              "apply_us": 1,
+              "validate_us": 218,
+              "persist_us": 488,
+              "total_us": 726
+            },
+            {
+              "clone_us": 17,
+              "apply_us": 1,
+              "validate_us": 201,
+              "persist_us": 516,
+              "total_us": 736
+            },
+            {
+              "clone_us": 13,
+              "apply_us": 1,
+              "validate_us": 204,
+              "persist_us": 379,
+              "total_us": 599
+            },
+            {
+              "clone_us": 17,
+              "apply_us": 2,
+              "validate_us": 220,
+              "persist_us": 472,
+              "total_us": 711
+            },
+            {
+              "clone_us": 19,
+              "apply_us": 1,
+              "validate_us": 206,
+              "persist_us": 949,
+              "total_us": 1176
+            },
+            {
+              "clone_us": 19,
+              "apply_us": 2,
+              "validate_us": 221,
+              "persist_us": 451,
+              "total_us": 695
+            },
+            {
+              "clone_us": 13,
+              "apply_us": 2,
+              "validate_us": 185,
+              "persist_us": 402,
+              "total_us": 603
+            },
+            {
+              "clone_us": 16,
+              "apply_us": 1,
+              "validate_us": 186,
+              "persist_us": 359,
+              "total_us": 563
+            },
+            {
+              "clone_us": 20,
+              "apply_us": 2,
+              "validate_us": 163,
+              "persist_us": 479,
+              "total_us": 665
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 230,
+              "persist_us": 418,
+              "total_us": 661
+            },
+            {
+              "clone_us": 16,
+              "apply_us": 1,
+              "validate_us": 143,
+              "persist_us": 507,
+              "total_us": 668
+            },
+            {
+              "clone_us": 12,
+              "apply_us": 1,
+              "validate_us": 136,
+              "persist_us": 660,
+              "total_us": 811
+            },
+            {
+              "clone_us": 10,
+              "apply_us": 1,
+              "validate_us": 134,
+              "persist_us": 338,
+              "total_us": 485
+            },
+            {
+              "clone_us": 15,
+              "apply_us": 1,
+              "validate_us": 131,
+              "persist_us": 474,
+              "total_us": 621
+            },
+            {
+              "clone_us": 16,
+              "apply_us": 8,
+              "validate_us": 135,
+              "persist_us": 475,
+              "total_us": 635
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 267,
+              "persist_us": 419,
+              "total_us": 698
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 135,
+              "persist_us": 675,
+              "total_us": 821
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 8,
+              "validate_us": 162,
+              "persist_us": 454,
+              "total_us": 635
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 143,
+              "persist_us": 356,
+              "total_us": 510
+            },
+            {
+              "clone_us": 67,
+              "apply_us": 2,
+              "validate_us": 147,
+              "persist_us": 621,
+              "total_us": 838
+            },
+            {
+              "clone_us": 15,
+              "apply_us": 8,
+              "validate_us": 189,
+              "persist_us": 433,
+              "total_us": 646
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 140,
+              "persist_us": 350,
+              "total_us": 502
+            },
+            {
+              "clone_us": 9,
+              "apply_us": 1,
+              "validate_us": 144,
+              "persist_us": 692,
+              "total_us": 848
+            },
+            {
+              "clone_us": 13,
+              "apply_us": 9,
+              "validate_us": 198,
+              "persist_us": 418,
+              "total_us": 639
+            },
+            {
+              "clone_us": 15,
+              "apply_us": 1,
+              "validate_us": 142,
+              "persist_us": 505,
+              "total_us": 665
+            }
+          ]
+        },
+        {
+          "collections": 128,
+          "operations": 288,
+          "state_bytes_before": 220419,
+          "state_bytes_after": 225120,
+          "samples": [
+            {
+              "clone_us": 133,
+              "apply_us": 3,
+              "validate_us": 896,
+              "persist_us": 765,
+              "total_us": 1799
+            },
+            {
+              "clone_us": 46,
+              "apply_us": 7,
+              "validate_us": 925,
+              "persist_us": 885,
+              "total_us": 1864
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 4,
+              "validate_us": 1045,
+              "persist_us": 763,
+              "total_us": 1864
+            },
+            {
+              "clone_us": 46,
+              "apply_us": 3,
+              "validate_us": 866,
+              "persist_us": 1008,
+              "total_us": 1924
+            },
+            {
+              "clone_us": 52,
+              "apply_us": 3,
+              "validate_us": 881,
+              "persist_us": 523,
+              "total_us": 1461
+            },
+            {
+              "clone_us": 159,
+              "apply_us": 3,
+              "validate_us": 844,
+              "persist_us": 624,
+              "total_us": 1632
+            },
+            {
+              "clone_us": 52,
+              "apply_us": 5,
+              "validate_us": 997,
+              "persist_us": 714,
+              "total_us": 1769
+            },
+            {
+              "clone_us": 46,
+              "apply_us": 3,
+              "validate_us": 841,
+              "persist_us": 574,
+              "total_us": 1466
+            },
+            {
+              "clone_us": 63,
+              "apply_us": 72,
+              "validate_us": 858,
+              "persist_us": 644,
+              "total_us": 1638
+            },
+            {
+              "clone_us": 47,
+              "apply_us": 4,
+              "validate_us": 990,
+              "persist_us": 606,
+              "total_us": 1649
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 3,
+              "validate_us": 893,
+              "persist_us": 622,
+              "total_us": 1571
+            },
+            {
+              "clone_us": 74,
+              "apply_us": 1,
+              "validate_us": 840,
+              "persist_us": 638,
+              "total_us": 1555
+            },
+            {
+              "clone_us": 53,
+              "apply_us": 5,
+              "validate_us": 1058,
+              "persist_us": 745,
+              "total_us": 1862
+            },
+            {
+              "clone_us": 47,
+              "apply_us": 4,
+              "validate_us": 886,
+              "persist_us": 694,
+              "total_us": 1632
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 1,
+              "validate_us": 1094,
+              "persist_us": 695,
+              "total_us": 1843
+            },
+            {
+              "clone_us": 49,
+              "apply_us": 4,
+              "validate_us": 959,
+              "persist_us": 1161,
+              "total_us": 2175
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 3,
+              "validate_us": 906,
+              "persist_us": 1432,
+              "total_us": 2394
+            },
+            {
+              "clone_us": 77,
+              "apply_us": 1,
+              "validate_us": 865,
+              "persist_us": 794,
+              "total_us": 1739
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 3,
+              "validate_us": 921,
+              "persist_us": 713,
+              "total_us": 1689
+            },
+            {
+              "clone_us": 48,
+              "apply_us": 1,
+              "validate_us": 895,
+              "persist_us": 506,
+              "total_us": 1452
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 3,
+              "validate_us": 1019,
+              "persist_us": 726,
+              "total_us": 1800
+            },
+            {
+              "clone_us": 82,
+              "apply_us": 1,
+              "validate_us": 847,
+              "persist_us": 627,
+              "total_us": 1558
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 3,
+              "validate_us": 954,
+              "persist_us": 685,
+              "total_us": 1694
+            },
+            {
+              "clone_us": 47,
+              "apply_us": 15,
+              "validate_us": 973,
+              "persist_us": 634,
+              "total_us": 1671
+            },
+            {
+              "clone_us": 51,
+              "apply_us": 3,
+              "validate_us": 833,
+              "persist_us": 614,
+              "total_us": 1502
+            }
+          ]
+        },
+        {
+          "collections": 1024,
+          "operations": 2080,
+          "state_bytes_before": 1766055,
+          "state_bytes_after": 1770786,
+          "samples": [
+            {
+              "clone_us": 417,
+              "apply_us": 53,
+              "validate_us": 8878,
+              "persist_us": 2987,
+              "total_us": 12336
+            },
+            {
+              "clone_us": 430,
+              "apply_us": 62,
+              "validate_us": 8239,
+              "persist_us": 3326,
+              "total_us": 12060
+            },
+            {
+              "clone_us": 641,
+              "apply_us": 71,
+              "validate_us": 10283,
+              "persist_us": 4609,
+              "total_us": 15605
+            },
+            {
+              "clone_us": 759,
+              "apply_us": 54,
+              "validate_us": 8014,
+              "persist_us": 4062,
+              "total_us": 12890
+            },
+            {
+              "clone_us": 416,
+              "apply_us": 45,
+              "validate_us": 9256,
+              "persist_us": 3294,
+              "total_us": 13012
+            },
+            {
+              "clone_us": 365,
+              "apply_us": 35,
+              "validate_us": 8504,
+              "persist_us": 3197,
+              "total_us": 12103
+            },
+            {
+              "clone_us": 531,
+              "apply_us": 6,
+              "validate_us": 16562,
+              "persist_us": 3329,
+              "total_us": 20430
+            },
+            {
+              "clone_us": 451,
+              "apply_us": 35,
+              "validate_us": 7889,
+              "persist_us": 2723,
+              "total_us": 11100
+            },
+            {
+              "clone_us": 398,
+              "apply_us": 3,
+              "validate_us": 7371,
+              "persist_us": 2848,
+              "total_us": 10622
+            },
+            {
+              "clone_us": 545,
+              "apply_us": 182,
+              "validate_us": 7940,
+              "persist_us": 2737,
+              "total_us": 11405
+            },
+            {
+              "clone_us": 342,
+              "apply_us": 25,
+              "validate_us": 6798,
+              "persist_us": 2374,
+              "total_us": 9540
+            },
+            {
+              "clone_us": 352,
+              "apply_us": 25,
+              "validate_us": 7030,
+              "persist_us": 2525,
+              "total_us": 9934
+            },
+            {
+              "clone_us": 455,
+              "apply_us": 148,
+              "validate_us": 8313,
+              "persist_us": 3826,
+              "total_us": 12742
+            },
+            {
+              "clone_us": 649,
+              "apply_us": 33,
+              "validate_us": 10268,
+              "persist_us": 3715,
+              "total_us": 14667
+            },
+            {
+              "clone_us": 549,
+              "apply_us": 36,
+              "validate_us": 10011,
+              "persist_us": 3526,
+              "total_us": 14123
+            },
+            {
+              "clone_us": 561,
+              "apply_us": 28,
+              "validate_us": 9814,
+              "persist_us": 3621,
+              "total_us": 14026
+            },
+            {
+              "clone_us": 575,
+              "apply_us": 28,
+              "validate_us": 7444,
+              "persist_us": 2447,
+              "total_us": 10496
+            },
+            {
+              "clone_us": 368,
+              "apply_us": 37,
+              "validate_us": 7272,
+              "persist_us": 2443,
+              "total_us": 10121
+            },
+            {
+              "clone_us": 342,
+              "apply_us": 26,
+              "validate_us": 6719,
+              "persist_us": 2566,
+              "total_us": 9655
+            },
+            {
+              "clone_us": 341,
+              "apply_us": 25,
+              "validate_us": 6853,
+              "persist_us": 2315,
+              "total_us": 9536
+            },
+            {
+              "clone_us": 341,
+              "apply_us": 28,
+              "validate_us": 7347,
+              "persist_us": 2414,
+              "total_us": 10132
+            },
+            {
+              "clone_us": 373,
+              "apply_us": 53,
+              "validate_us": 6768,
+              "persist_us": 2445,
+              "total_us": 9641
+            },
+            {
+              "clone_us": 375,
+              "apply_us": 55,
+              "validate_us": 6762,
+              "persist_us": 2390,
+              "total_us": 9583
+            },
+            {
+              "clone_us": 381,
+              "apply_us": 25,
+              "validate_us": 6953,
+              "persist_us": 2363,
+              "total_us": 9723
+            },
+            {
+              "clone_us": 354,
+              "apply_us": 50,
+              "validate_us": 6735,
+              "persist_us": 2328,
+              "total_us": 9469
+            }
+          ]
+        },
+        {
+          "collections": 4096,
+          "operations": 8224,
+          "state_bytes_before": 7083687,
+          "state_bytes_after": 7088418,
+          "samples": [
+            {
+              "clone_us": 1822,
+              "apply_us": 6,
+              "validate_us": 30271,
+              "persist_us": 15311,
+              "total_us": 47412
+            },
+            {
+              "clone_us": 2651,
+              "apply_us": 1040,
+              "validate_us": 29311,
+              "persist_us": 15874,
+              "total_us": 48877
+            },
+            {
+              "clone_us": 2753,
+              "apply_us": 241,
+              "validate_us": 35133,
+              "persist_us": 12646,
+              "total_us": 50774
+            },
+            {
+              "clone_us": 1816,
+              "apply_us": 237,
+              "validate_us": 34134,
+              "persist_us": 11402,
+              "total_us": 47591
+            },
+            {
+              "clone_us": 1886,
+              "apply_us": 246,
+              "validate_us": 31265,
+              "persist_us": 13539,
+              "total_us": 46938
+            },
+            {
+              "clone_us": 2066,
+              "apply_us": 227,
+              "validate_us": 31265,
+              "persist_us": 11975,
+              "total_us": 45535
+            },
+            {
+              "clone_us": 2840,
+              "apply_us": 253,
+              "validate_us": 31960,
+              "persist_us": 11093,
+              "total_us": 46147
+            },
+            {
+              "clone_us": 2465,
+              "apply_us": 281,
+              "validate_us": 31609,
+              "persist_us": 12424,
+              "total_us": 46781
+            },
+            {
+              "clone_us": 2349,
+              "apply_us": 277,
+              "validate_us": 31404,
+              "persist_us": 11225,
+              "total_us": 45257
+            },
+            {
+              "clone_us": 2779,
+              "apply_us": 269,
+              "validate_us": 30343,
+              "persist_us": 10428,
+              "total_us": 43822
+            },
+            {
+              "clone_us": 1773,
+              "apply_us": 294,
+              "validate_us": 33681,
+              "persist_us": 11489,
+              "total_us": 47239
+            },
+            {
+              "clone_us": 3026,
+              "apply_us": 247,
+              "validate_us": 30891,
+              "persist_us": 12190,
+              "total_us": 46356
+            },
+            {
+              "clone_us": 2062,
+              "apply_us": 231,
+              "validate_us": 34071,
+              "persist_us": 13001,
+              "total_us": 49365
+            },
+            {
+              "clone_us": 1854,
+              "apply_us": 238,
+              "validate_us": 32848,
+              "persist_us": 10968,
+              "total_us": 45910
+            },
+            {
+              "clone_us": 3016,
+              "apply_us": 7,
+              "validate_us": 32859,
+              "persist_us": 12006,
+              "total_us": 47889
+            },
+            {
+              "clone_us": 1767,
+              "apply_us": 236,
+              "validate_us": 31942,
+              "persist_us": 12404,
+              "total_us": 46350
+            },
+            {
+              "clone_us": 1752,
+              "apply_us": 25,
+              "validate_us": 31717,
+              "persist_us": 12052,
+              "total_us": 45546
+            },
+            {
+              "clone_us": 1808,
+              "apply_us": 231,
+              "validate_us": 31294,
+              "persist_us": 11076,
+              "total_us": 44411
+            },
+            {
+              "clone_us": 2696,
+              "apply_us": 227,
+              "validate_us": 32459,
+              "persist_us": 17649,
+              "total_us": 53033
+            },
+            {
+              "clone_us": 3101,
+              "apply_us": 262,
+              "validate_us": 30519,
+              "persist_us": 11697,
+              "total_us": 45581
+            },
+            {
+              "clone_us": 1753,
+              "apply_us": 5,
+              "validate_us": 28354,
+              "persist_us": 11172,
+              "total_us": 41285
+            },
+            {
+              "clone_us": 1773,
+              "apply_us": 226,
+              "validate_us": 29487,
+              "persist_us": 10229,
+              "total_us": 41717
+            },
+            {
+              "clone_us": 1718,
+              "apply_us": 6,
+              "validate_us": 28099,
+              "persist_us": 10569,
+              "total_us": 40393
+            },
+            {
+              "clone_us": 2306,
+              "apply_us": 249,
+              "validate_us": 28911,
+              "persist_us": 10517,
+              "total_us": 41985
+            },
+            {
+              "clone_us": 1775,
+              "apply_us": 212,
+              "validate_us": 29502,
+              "persist_us": 10658,
+              "total_us": 42148
+            }
+          ]
+        }
+      ],
+      "generation": [
+        {
+          "records": 101,
+          "operations": 102,
+          "generations": 1,
+          "state_bytes": 68763,
+          "samples": [
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 42
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 23,
+              "validate_us": 4,
+              "prepare_us": 22
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 4,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 8,
+              "validate_us": 3,
+              "prepare_us": 20
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 3,
+              "prepare_us": 21
+            },
+            {
+              "clone_us": 7,
+              "validate_us": 4,
+              "prepare_us": 20
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1002,
+          "generations": 1,
+          "state_bytes": 675367,
+          "samples": [
+            {
+              "clone_us": 66,
+              "validate_us": 16,
+              "prepare_us": 125
+            },
+            {
+              "clone_us": 70,
+              "validate_us": 17,
+              "prepare_us": 100
+            },
+            {
+              "clone_us": 66,
+              "validate_us": 16,
+              "prepare_us": 95
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 16,
+              "prepare_us": 97
+            },
+            {
+              "clone_us": 69,
+              "validate_us": 17,
+              "prepare_us": 99
+            },
+            {
+              "clone_us": 63,
+              "validate_us": 16,
+              "prepare_us": 97
+            },
+            {
+              "clone_us": 66,
+              "validate_us": 16,
+              "prepare_us": 96
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 17,
+              "prepare_us": 97
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 15,
+              "prepare_us": 154
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 16,
+              "prepare_us": 97
+            },
+            {
+              "clone_us": 66,
+              "validate_us": 16,
+              "prepare_us": 125
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 17,
+              "prepare_us": 117
+            },
+            {
+              "clone_us": 70,
+              "validate_us": 17,
+              "prepare_us": 100
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 15,
+              "prepare_us": 149
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 16,
+              "prepare_us": 94
+            },
+            {
+              "clone_us": 64,
+              "validate_us": 16,
+              "prepare_us": 159
+            },
+            {
+              "clone_us": 68,
+              "validate_us": 18,
+              "prepare_us": 118
+            },
+            {
+              "clone_us": 66,
+              "validate_us": 17,
+              "prepare_us": 96
+            },
+            {
+              "clone_us": 63,
+              "validate_us": 16,
+              "prepare_us": 95
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 19,
+              "prepare_us": 100
+            },
+            {
+              "clone_us": 103,
+              "validate_us": 17,
+              "prepare_us": 96
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 20,
+              "prepare_us": 100
+            },
+            {
+              "clone_us": 65,
+              "validate_us": 17,
+              "prepare_us": 95
+            },
+            {
+              "clone_us": 67,
+              "validate_us": 19,
+              "prepare_us": 99
+            },
+            {
+              "clone_us": 66,
+              "validate_us": 17,
+              "prepare_us": 97
+            }
+          ]
+        },
+        {
+          "records": 5001,
+          "operations": 5002,
+          "generations": 1,
+          "state_bytes": 3395367,
+          "samples": [
+            {
+              "clone_us": 597,
+              "validate_us": 125,
+              "prepare_us": 682
+            },
+            {
+              "clone_us": 500,
+              "validate_us": 119,
+              "prepare_us": 598
+            },
+            {
+              "clone_us": 503,
+              "validate_us": 139,
+              "prepare_us": 567
+            },
+            {
+              "clone_us": 458,
+              "validate_us": 170,
+              "prepare_us": 574
+            },
+            {
+              "clone_us": 554,
+              "validate_us": 144,
+              "prepare_us": 759
+            },
+            {
+              "clone_us": 401,
+              "validate_us": 142,
+              "prepare_us": 652
+            },
+            {
+              "clone_us": 644,
+              "validate_us": 127,
+              "prepare_us": 620
+            },
+            {
+              "clone_us": 633,
+              "validate_us": 149,
+              "prepare_us": 629
+            },
+            {
+              "clone_us": 561,
+              "validate_us": 241,
+              "prepare_us": 652
+            },
+            {
+              "clone_us": 476,
+              "validate_us": 152,
+              "prepare_us": 566
+            },
+            {
+              "clone_us": 476,
+              "validate_us": 152,
+              "prepare_us": 567
+            },
+            {
+              "clone_us": 495,
+              "validate_us": 150,
+              "prepare_us": 557
+            },
+            {
+              "clone_us": 557,
+              "validate_us": 131,
+              "prepare_us": 656
+            },
+            {
+              "clone_us": 622,
+              "validate_us": 133,
+              "prepare_us": 683
+            },
+            {
+              "clone_us": 475,
+              "validate_us": 146,
+              "prepare_us": 579
+            },
+            {
+              "clone_us": 467,
+              "validate_us": 144,
+              "prepare_us": 564
+            },
+            {
+              "clone_us": 469,
+              "validate_us": 150,
+              "prepare_us": 552
+            },
+            {
+              "clone_us": 382,
+              "validate_us": 148,
+              "prepare_us": 642
+            },
+            {
+              "clone_us": 474,
+              "validate_us": 149,
+              "prepare_us": 561
+            },
+            {
+              "clone_us": 495,
+              "validate_us": 151,
+              "prepare_us": 557
+            },
+            {
+              "clone_us": 469,
+              "validate_us": 338,
+              "prepare_us": 576
+            },
+            {
+              "clone_us": 475,
+              "validate_us": 149,
+              "prepare_us": 607
+            },
+            {
+              "clone_us": 615,
+              "validate_us": 148,
+              "prepare_us": 584
+            },
+            {
+              "clone_us": 498,
+              "validate_us": 122,
+              "prepare_us": 633
+            },
+            {
+              "clone_us": 507,
+              "validate_us": 219,
+              "prepare_us": 928
+            }
+          ]
+        },
+        {
+          "records": 10001,
+          "operations": 10002,
+          "generations": 1,
+          "state_bytes": 6795371,
+          "samples": [
+            {
+              "clone_us": 1019,
+              "validate_us": 278,
+              "prepare_us": 1391
+            },
+            {
+              "clone_us": 1082,
+              "validate_us": 311,
+              "prepare_us": 1471
+            },
+            {
+              "clone_us": 1116,
+              "validate_us": 339,
+              "prepare_us": 1540
+            },
+            {
+              "clone_us": 1029,
+              "validate_us": 316,
+              "prepare_us": 1494
+            },
+            {
+              "clone_us": 1227,
+              "validate_us": 311,
+              "prepare_us": 1518
+            },
+            {
+              "clone_us": 1136,
+              "validate_us": 312,
+              "prepare_us": 1527
+            },
+            {
+              "clone_us": 1260,
+              "validate_us": 357,
+              "prepare_us": 1437
+            },
+            {
+              "clone_us": 1139,
+              "validate_us": 333,
+              "prepare_us": 1537
+            },
+            {
+              "clone_us": 1241,
+              "validate_us": 324,
+              "prepare_us": 1463
+            },
+            {
+              "clone_us": 964,
+              "validate_us": 323,
+              "prepare_us": 1476
+            },
+            {
+              "clone_us": 1147,
+              "validate_us": 363,
+              "prepare_us": 1519
+            },
+            {
+              "clone_us": 1309,
+              "validate_us": 381,
+              "prepare_us": 1484
+            },
+            {
+              "clone_us": 1222,
+              "validate_us": 292,
+              "prepare_us": 1307
+            },
+            {
+              "clone_us": 1118,
+              "validate_us": 343,
+              "prepare_us": 1335
+            },
+            {
+              "clone_us": 1019,
+              "validate_us": 297,
+              "prepare_us": 1302
+            },
+            {
+              "clone_us": 998,
+              "validate_us": 361,
+              "prepare_us": 2003
+            },
+            {
+              "clone_us": 1556,
+              "validate_us": 320,
+              "prepare_us": 1354
+            },
+            {
+              "clone_us": 955,
+              "validate_us": 310,
+              "prepare_us": 1604
+            },
+            {
+              "clone_us": 1606,
+              "validate_us": 498,
+              "prepare_us": 1947
+            },
+            {
+              "clone_us": 1154,
+              "validate_us": 304,
+              "prepare_us": 1517
+            },
+            {
+              "clone_us": 1099,
+              "validate_us": 286,
+              "prepare_us": 1422
+            },
+            {
+              "clone_us": 1083,
+              "validate_us": 317,
+              "prepare_us": 1645
+            },
+            {
+              "clone_us": 1546,
+              "validate_us": 425,
+              "prepare_us": 1781
+            },
+            {
+              "clone_us": 1077,
+              "validate_us": 279,
+              "prepare_us": 1533
+            },
+            {
+              "clone_us": 1553,
+              "validate_us": 408,
+              "prepare_us": 1974
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1017,
+          "generations": 16,
+          "state_bytes": 689350,
+          "samples": [
+            {
+              "clone_us": 96,
+              "validate_us": 96,
+              "prepare_us": 223
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 118,
+              "prepare_us": 229
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 96,
+              "prepare_us": 309
+            },
+            {
+              "clone_us": 143,
+              "validate_us": 96,
+              "prepare_us": 227
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 97,
+              "prepare_us": 223
+            },
+            {
+              "clone_us": 125,
+              "validate_us": 98,
+              "prepare_us": 265
+            },
+            {
+              "clone_us": 98,
+              "validate_us": 96,
+              "prepare_us": 223
+            },
+            {
+              "clone_us": 100,
+              "validate_us": 95,
+              "prepare_us": 226
+            },
+            {
+              "clone_us": 95,
+              "validate_us": 97,
+              "prepare_us": 224
+            },
+            {
+              "clone_us": 162,
+              "validate_us": 100,
+              "prepare_us": 225
+            },
+            {
+              "clone_us": 101,
+              "validate_us": 95,
+              "prepare_us": 299
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 95,
+              "prepare_us": 223
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 96,
+              "prepare_us": 250
+            },
+            {
+              "clone_us": 98,
+              "validate_us": 98,
+              "prepare_us": 224
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 95,
+              "prepare_us": 258
+            },
+            {
+              "clone_us": 97,
+              "validate_us": 95,
+              "prepare_us": 303
+            },
+            {
+              "clone_us": 99,
+              "validate_us": 149,
+              "prepare_us": 226
+            },
+            {
+              "clone_us": 85,
+              "validate_us": 152,
+              "prepare_us": 230
+            },
+            {
+              "clone_us": 136,
+              "validate_us": 96,
+              "prepare_us": 223
+            },
+            {
+              "clone_us": 99,
+              "validate_us": 95,
+              "prepare_us": 401
+            },
+            {
+              "clone_us": 98,
+              "validate_us": 343,
+              "prepare_us": 242
+            },
+            {
+              "clone_us": 130,
+              "validate_us": 97,
+              "prepare_us": 225
+            },
+            {
+              "clone_us": 99,
+              "validate_us": 95,
+              "prepare_us": 223
+            },
+            {
+              "clone_us": 117,
+              "validate_us": 97,
+              "prepare_us": 226
+            },
+            {
+              "clone_us": 168,
+              "validate_us": 98,
+              "prepare_us": 263
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1065,
+          "generations": 64,
+          "state_bytes": 734326,
+          "samples": [
+            {
+              "clone_us": 157,
+              "validate_us": 323,
+              "prepare_us": 577
+            },
+            {
+              "clone_us": 160,
+              "validate_us": 327,
+              "prepare_us": 715
+            },
+            {
+              "clone_us": 161,
+              "validate_us": 347,
+              "prepare_us": 539
+            },
+            {
+              "clone_us": 187,
+              "validate_us": 324,
+              "prepare_us": 633
+            },
+            {
+              "clone_us": 196,
+              "validate_us": 332,
+              "prepare_us": 576
+            },
+            {
+              "clone_us": 152,
+              "validate_us": 321,
+              "prepare_us": 616
+            },
+            {
+              "clone_us": 158,
+              "validate_us": 383,
+              "prepare_us": 553
+            },
+            {
+              "clone_us": 155,
+              "validate_us": 368,
+              "prepare_us": 550
+            },
+            {
+              "clone_us": 170,
+              "validate_us": 409,
+              "prepare_us": 668
+            },
+            {
+              "clone_us": 150,
+              "validate_us": 368,
+              "prepare_us": 606
+            },
+            {
+              "clone_us": 154,
+              "validate_us": 377,
+              "prepare_us": 588
+            },
+            {
+              "clone_us": 183,
+              "validate_us": 323,
+              "prepare_us": 555
+            },
+            {
+              "clone_us": 136,
+              "validate_us": 375,
+              "prepare_us": 683
+            },
+            {
+              "clone_us": 204,
+              "validate_us": 376,
+              "prepare_us": 696
+            },
+            {
+              "clone_us": 181,
+              "validate_us": 566,
+              "prepare_us": 597
+            },
+            {
+              "clone_us": 141,
+              "validate_us": 323,
+              "prepare_us": 643
+            },
+            {
+              "clone_us": 224,
+              "validate_us": 356,
+              "prepare_us": 637
+            },
+            {
+              "clone_us": 143,
+              "validate_us": 412,
+              "prepare_us": 575
+            },
+            {
+              "clone_us": 137,
+              "validate_us": 384,
+              "prepare_us": 578
+            },
+            {
+              "clone_us": 136,
+              "validate_us": 337,
+              "prepare_us": 577
+            },
+            {
+              "clone_us": 137,
+              "validate_us": 371,
+              "prepare_us": 602
+            },
+            {
+              "clone_us": 176,
+              "validate_us": 320,
+              "prepare_us": 548
+            },
+            {
+              "clone_us": 154,
+              "validate_us": 322,
+              "prepare_us": 551
+            },
+            {
+              "clone_us": 182,
+              "validate_us": 326,
+              "prepare_us": 999
+            },
+            {
+              "clone_us": 3467,
+              "validate_us": 358,
+              "prepare_us": 621
+            }
+          ]
+        },
+        {
+          "records": 1001,
+          "operations": 1257,
+          "generations": 256,
+          "state_bytes": 915478,
+          "samples": [
+            {
+              "clone_us": 412,
+              "validate_us": 1324,
+              "prepare_us": 1987
+            },
+            {
+              "clone_us": 405,
+              "validate_us": 1361,
+              "prepare_us": 1960
+            },
+            {
+              "clone_us": 450,
+              "validate_us": 1433,
+              "prepare_us": 2045
+            },
+            {
+              "clone_us": 376,
+              "validate_us": 1319,
+              "prepare_us": 1999
+            },
+            {
+              "clone_us": 413,
+              "validate_us": 1317,
+              "prepare_us": 2010
+            },
+            {
+              "clone_us": 487,
+              "validate_us": 1366,
+              "prepare_us": 2216
+            },
+            {
+              "clone_us": 353,
+              "validate_us": 1595,
+              "prepare_us": 3144
+            },
+            {
+              "clone_us": 679,
+              "validate_us": 2126,
+              "prepare_us": 2180
+            },
+            {
+              "clone_us": 457,
+              "validate_us": 1373,
+              "prepare_us": 2089
+            },
+            {
+              "clone_us": 353,
+              "validate_us": 1340,
+              "prepare_us": 1890
+            },
+            {
+              "clone_us": 391,
+              "validate_us": 1380,
+              "prepare_us": 2147
+            },
+            {
+              "clone_us": 352,
+              "validate_us": 1504,
+              "prepare_us": 2078
+            },
+            {
+              "clone_us": 365,
+              "validate_us": 1469,
+              "prepare_us": 1980
+            },
+            {
+              "clone_us": 367,
+              "validate_us": 1572,
+              "prepare_us": 1971
+            },
+            {
+              "clone_us": 375,
+              "validate_us": 1417,
+              "prepare_us": 2065
+            },
+            {
+              "clone_us": 375,
+              "validate_us": 1314,
+              "prepare_us": 2099
+            },
+            {
+              "clone_us": 362,
+              "validate_us": 1508,
+              "prepare_us": 1996
+            },
+            {
+              "clone_us": 345,
+              "validate_us": 1360,
+              "prepare_us": 2640
+            },
+            {
+              "clone_us": 589,
+              "validate_us": 2298,
+              "prepare_us": 2596
+            },
+            {
+              "clone_us": 399,
+              "validate_us": 1326,
+              "prepare_us": 2111
+            },
+            {
+              "clone_us": 394,
+              "validate_us": 1383,
+              "prepare_us": 1902
+            },
+            {
+              "clone_us": 410,
+              "validate_us": 1344,
+              "prepare_us": 1928
+            },
+            {
+              "clone_us": 416,
+              "validate_us": 1773,
+              "prepare_us": 3167
+            },
+            {
+              "clone_us": 608,
+              "validate_us": 2164,
+              "prepare_us": 3142
+            },
+            {
+              "clone_us": 622,
+              "validate_us": 2198,
+              "prepare_us": 2343
+            }
+          ]
+        },
+        {
+          "records": 10001,
+          "operations": 10129,
+          "generations": 128,
+          "state_bytes": 6914649,
+          "samples": [
+            {
+              "clone_us": 3768,
+              "validate_us": 10347,
+              "prepare_us": 20402
+            },
+            {
+              "clone_us": 3928,
+              "validate_us": 9747,
+              "prepare_us": 14325
+            },
+            {
+              "clone_us": 3785,
+              "validate_us": 9996,
+              "prepare_us": 13319
+            },
+            {
+              "clone_us": 3785,
+              "validate_us": 9335,
+              "prepare_us": 15372
+            },
+            {
+              "clone_us": 3362,
+              "validate_us": 11245,
+              "prepare_us": 15377
+            },
+            {
+              "clone_us": 3071,
+              "validate_us": 13760,
+              "prepare_us": 17724
+            },
+            {
+              "clone_us": 4364,
+              "validate_us": 15571,
+              "prepare_us": 15273
+            },
+            {
+              "clone_us": 4092,
+              "validate_us": 9830,
+              "prepare_us": 15157
+            },
+            {
+              "clone_us": 3657,
+              "validate_us": 11561,
+              "prepare_us": 15378
+            },
+            {
+              "clone_us": 4438,
+              "validate_us": 10352,
+              "prepare_us": 14557
+            },
+            {
+              "clone_us": 3597,
+              "validate_us": 10190,
+              "prepare_us": 15261
+            },
+            {
+              "clone_us": 4246,
+              "validate_us": 10707,
+              "prepare_us": 17597
+            },
+            {
+              "clone_us": 4619,
+              "validate_us": 10768,
+              "prepare_us": 15594
+            },
+            {
+              "clone_us": 3653,
+              "validate_us": 9423,
+              "prepare_us": 12270
+            },
+            {
+              "clone_us": 2551,
+              "validate_us": 9786,
+              "prepare_us": 12084
+            },
+            {
+              "clone_us": 2209,
+              "validate_us": 9404,
+              "prepare_us": 11561
+            },
+            {
+              "clone_us": 2461,
+              "validate_us": 9086,
+              "prepare_us": 15988
+            },
+            {
+              "clone_us": 2952,
+              "validate_us": 9200,
+              "prepare_us": 11867
+            },
+            {
+              "clone_us": 2442,
+              "validate_us": 9137,
+              "prepare_us": 12359
+            },
+            {
+              "clone_us": 2445,
+              "validate_us": 9045,
+              "prepare_us": 11421
+            },
+            {
+              "clone_us": 2265,
+              "validate_us": 9070,
+              "prepare_us": 11524
+            },
+            {
+              "clone_us": 2198,
+              "validate_us": 9423,
+              "prepare_us": 11780
+            },
+            {
+              "clone_us": 2511,
+              "validate_us": 10389,
+              "prepare_us": 12254
+            },
+            {
+              "clone_us": 2348,
+              "validate_us": 8954,
+              "prepare_us": 11808
+            },
+            {
+              "clone_us": 2360,
+              "validate_us": 9514,
+              "prepare_us": 12210
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

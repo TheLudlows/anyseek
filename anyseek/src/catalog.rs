@@ -942,3 +942,6 @@ impl Catalog {
             .map(|op| op.receipt.clone()))
     }
 }
+
+#[cfg(test)]
+mod performance;
