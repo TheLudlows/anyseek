@@ -527,11 +527,10 @@ impl S3CompatibleStore {
         &self,
         authority: &mut SqliteAuthority,
         key: &str,
-        now_ms: i64,
+        _now_ms: i64,
     ) -> Result<bool, UploadRegisterError> {
-        let collectible = authority.collectible_objects(now_ms)
-            .map_err(UploadRegisterError::Metadata)?;
-        let Some(reference) = collectible.iter().find(|reference| reference.key == key) else {
+        let Some(reference) = authority.collectible_object(key)
+            .map_err(UploadRegisterError::Metadata)? else {
             return Ok(false);
         };
         let location = Self::object_path(&reference.key)
@@ -544,7 +543,7 @@ impl S3CompatibleStore {
         // Record completion only after a fresh atomic reachability check. If this
         // loses a race with a pin/reference, leave the tombstone in state=2 and
         // retry conservatively rather than claiming physical deletion is complete.
-        authority.mark_object_deleted(reference)
+        authority.mark_object_deleted(&reference)
             .map_err(UploadRegisterError::Metadata)?;
         Ok(true)
     }

@@ -7,11 +7,11 @@
 不再是应用接口；新库不提供旧格式读取或升级迁移。schema、评分、分词和向量配置类型继续使用。
 
 下面是新目录上的纯文本库。Payload 保留规范原文，Tantivy 只持有派生 postings；
-`store:false` 不会删除规范原文。成功写入已满足 durable + visible，无需另行 commit 才能搜索。
+`store:false` 不会删除规范原文。示例使用同步 `write`；异步 `commit_writes` 的业务回执与索引进度分别核验。
 
 ```rust,no_run
 use anyseek::{
-    index::{AccessType, Clustering, DocumentCompression, FieldLengthNormalization,
+    index::{Clustering, FieldLengthNormalization,
         FrequentwordType, IndexMetaObject, LexicalSimilarity, StopwordType,
         TextNormalization, TokenizerType},
     record::{ExpectedVersion, OperationId, RecordConfig, RecordPartition, RecordWrite},
@@ -35,8 +35,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::None,
             ngram_indexing: 0,
-            document_compression: DocumentCompression::Snappy,
-            access_type: AccessType::Mmap,
             clustering: Clustering::None,
             inference: Inference::None,
         },
@@ -86,7 +84,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 外部向量使用 `Inference::External`，声明维数、精度、量化与距离，并提供稳定的
 `embedding_space_id`；schema 向量字段设 `index_vector:true`。文档可先只有正文，
 稍后对精确正文版本使用 `vector_patch` 补充向量。库不下载模型或生成 embedding。
-`SearchMode::Vector`、`Hybrid` 和 `WeightedHybrid` 的查询向量必须符合该空间配置。
+`SearchMode::Vector` 和 `Hybrid` 的查询向量必须符合该空间配置。
 
 混合检索按全局通道排名进行一次 RRF；权重为零只排除排名贡献，不省略该通道验证或计数。
 混合总数保留各组件通道计数取最大后求和的启发式，不是精确并集；ANN 计数也不保证精确。

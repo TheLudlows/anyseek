@@ -41,7 +41,7 @@ pub(crate) async fn search(
             )
             .await);
     }
-    let rrf = if let SearchMode::WeightedHybrid { rrf, .. } = &mode {
+    let rrf = if let SearchMode::Hybrid { rrf, .. } = &mode {
         *rrf
     } else {
         RrfOptions::default()
@@ -54,10 +54,6 @@ pub(crate) async fn search(
     if hybrid {
         let vector_mode = match &mode {
             SearchMode::Hybrid {
-                similarity_threshold,
-                ann_mode,
-            }
-            | SearchMode::WeightedHybrid {
                 similarity_threshold,
                 ann_mode,
                 ..

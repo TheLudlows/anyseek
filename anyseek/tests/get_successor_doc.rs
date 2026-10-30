@@ -1,14 +1,13 @@
 //! Canonical payload reads cannot depend on neighboring derived storage slots.
 #[path = "common/records.rs"] mod records;
-use anyseek::index::{AccessType, Clustering, Document, DocumentCompression, FrequentwordType,
+use anyseek::index::{Clustering, Document, FrequentwordType,
     IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType};
 use anyseek::{record::RecordPartition, vector::Inference};
 #[tokio::test]
 async fn mixed_stored_and_nonstored_payloads_roundtrip() {
     let root=tempfile::tempdir().unwrap();let path=root.path().join("records");
-    let access=AccessType::Mmap;let compression=DocumentCompression::Snappy;
     let schema_json = r#"
-    [{"field":"title","field_type":"Text","store":true,"index_lexical":true,"longest":true},
+    [{"field":"title","field_type":"Text","store":true,"index_lexical":true},
     {"field":"tag","field_type":"Text","store":false,"index_lexical":true}]"#;
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
     let meta = IndexMetaObject {
@@ -21,8 +20,6 @@ async fn mixed_stored_and_nonstored_payloads_roundtrip() {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: compression,
-        access_type: access,
         clustering: Clustering::None,
         inference: Inference::None,
     };

@@ -2,6 +2,7 @@
 """Deleted incarnation reclamation over real HTTP, local or in-memory S3 fixture."""
 import argparse
 import base64
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -77,7 +78,7 @@ def main():
             wait(ready)
 
         def metadata():
-            with sqlite3.connect(root / 'metadata.sqlite') as db:
+            with closing(sqlite3.connect(root / 'metadata.sqlite')) as db:
                 return [json.loads(row[0]) for row in db.execute('SELECT metadata FROM catalog_collections')]
 
         try:
@@ -107,7 +108,7 @@ def main():
                 # Fault injection: an accepted PUT whose completion is unknown.
                 late_key = f'anyseek/test/c/records/{generation}-late-put'
                 late_body = b'late remote arrival'
-                with sqlite3.connect(root / 'metadata.sqlite') as db:
+                with closing(sqlite3.connect(root / 'metadata.sqlite')) as db, db:
                     db.execute('INSERT INTO object_uploads VALUES(?,?,?,?,?)',
                                (late_key, hashlib.sha256(late_body).digest(), len(late_body), 0, 0))
             call('DELETE', '/api/v1/backups/' + backup, {'operation_id': operation()}, master)
@@ -141,6 +142,7 @@ def main():
             log.close()
             if fixture:
                 fixture.shutdown()
+                fixture.server_close()
 
 
 if __name__ == '__main__':

@@ -3,6 +3,14 @@
 use super::*;
 
 impl Catalog {
+    /// Round-robin selection without copying every collection configuration.
+    pub async fn next_deleted_collection(&self, after: u64) -> Result<Option<CollectionEntry>, CatalogError> {
+        let inner = self.inner.lock().await;
+        if !inner.is_healthy() { return Err(CatalogError::RecoveryRequired); }
+        Ok(inner.state.collections.values().filter(|entry| entry.deleted)
+            .min_by_key(|entry| (entry.generation <= after, entry.generation)).cloned())
+    }
+
     /// Reclaim one exact deleted incarnation under its collection and snapshot
     /// barriers. The caller owns the service root and performs bounded, retryable
     /// cleanup; `true` means all physical resources have been released.

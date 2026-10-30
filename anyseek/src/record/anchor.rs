@@ -187,7 +187,7 @@ impl Frozen {
     }
     async fn load(&self,root:&Path,config:&RecordConfig,mut active:crate::active::ActiveStatistics)->Result<IndexArc,RecordError>{
         let path=self.verify(root,closure_limit(config.max_journal_bytes)?)?;
-        active.validate_sparse(retrieval_schema(config).iter().filter(|f|f.index_lexical||f.index_vector).count()).map_err(storage)?;
+        active.validate().map_err(storage)?;
         let schema:Vec<SchemaField>=serde_json::from_slice(&read_bounded(&path.join("schema.json"),config.max_journal_bytes)?).map_err(storage)?;
         if serde_json::to_vec(&schema).map_err(storage)?!=serde_json::to_vec(&retrieval_schema(config)).map_err(storage)?{return Err(storage("frozen segment schema mismatch"));}
         let mapped=self.files.iter().try_fold(0u64,|n,f|n.checked_add(f.bytes)).ok_or_else(||storage("loaded segment estimate overflow"))?;
@@ -196,9 +196,6 @@ impl Frozen {
         reservation.grow(estimate).map_err(storage)?;
         let index=crate::index::open_index(&path).await.map_err(storage)?;
         index.write().await.record_lexical.push(lexical::runtime::Runtime::open_owned(&path.join("native"),config).await?);
-        if active.revisions.len() != active.keys.len() {
-            return Err(storage("frozen segment revision identities missing"));
-        }
         index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
         {
             let index=index.read().await;
@@ -818,18 +815,26 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn missing_revision_identities_are_rejected_on_package_open() {
+    async fn incomplete_identities_are_rejected_on_package_open() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("records");
         let p = RecordPartition::create(&root, config()).await.unwrap();
         p.write(write("a", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
         let inner = p.inner.lock().await;
-        let (package, mut active) = segment::Package::prepare(&root, &inner.config, &inner.state, None).await.unwrap();
-        active.revisions.clear(); active.fingerprints.clear();
-        let old = serde_json::to_value(&active).unwrap();
-        assert!(old.get("revisions").is_none());
-        let old: crate::active::ActiveStatistics = serde_json::from_value(old).unwrap();
-        assert!(package.load(&root, &inner.config, old).await.is_err());
+        let (package, active) = segment::Package::prepare(&root, &inner.config, &inner.state, None).await.unwrap();
+        for field in ["revisions", "fingerprints"] {
+            let mut missing = serde_json::to_value(&active).unwrap();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<crate::active::ActiveStatistics>(missing).is_err(), "{field}");
+            let mut truncated = active.clone();
+            if field == "revisions" { truncated.revisions.clear(); }
+            else { truncated.fingerprints.clear(); }
+            assert!(package.load(&root, &inner.config, truncated).await.is_err(), "{field}");
+        }
+        let mut null = serde_json::to_value(&active).unwrap();
+        null["fingerprints"][0] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<crate::active::ActiveStatistics>(null).is_err());
+        package.load(&root, &inner.config, active).await.unwrap();
     }
 
     #[tokio::test]
@@ -1395,7 +1400,7 @@ mod tests {
                     "the retained package may move when the new tail is prepended");
                 assert_eq!(serde_json::to_vec(&files(&first.path(&root).unwrap(),closure_limit(settings.max_journal_bytes).unwrap()).unwrap()).unwrap(),fingerprint);
             }
-            for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {
+            for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() }] {
                 let got=counted(&p,mode.clone()).await;let want=counted(&oracle,mode).await;
                 assert_eq!(got.visible_seq,seq);assert_eq!(got.count_total,want.count_total);
                 let hits=|v:RecordSearch|v.hits.into_iter().map(|h|(h.record.record_id,h.record.version,h.score)).collect::<Vec<_>>();
@@ -1440,7 +1445,7 @@ mod tests {
         assert_eq!(p.write(deletion).await.unwrap(),receipt);
         assert_eq!(p.statistics().await.unwrap().active_records,0);
         assert_eq!(p.write(patch).await.unwrap().version,1);
-        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {assert!(query(&p,mode).await.hits.is_empty());}
+        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() }] {assert!(query(&p,mode).await.hits.is_empty());}
         let selected=p.inner.lock().await.anchor.as_ref().unwrap().segments[0].path(&root).unwrap();
         drop(p);
         std::fs::write(selected.join("unselected-extra"),b"corrupt certified closure").unwrap();

@@ -3,16 +3,17 @@
 [文档索引](README.md) · [当前功能与限制](../FEATURES.md) · [开发与验证](development.md)
 
 
-Existing `SearchMode::Hybrid` and HTTP requests without `rrf` retain zero-based
+`SearchMode::Hybrid` with `rrf: RrfOptions::default()` and HTTP requests without `rrf` use zero-based
 constant 0.6, equal unit weights, and the existing Record global candidate window
 `offset + length` per channel. These defaults have **not** been retuned.
 
-Rust callers opt into `SearchMode::WeightedHybrid { similarity_threshold,
-ann_mode, rrf: RrfOptions { ..Default::default() } }`. Adding a variant preserves
-existing Hybrid struct literals but downstream exhaustive SearchMode matches
-must handle the new variant. Storage/query access uses `RecordPartition`; the
+Rust callers use `SearchMode::Hybrid { similarity_threshold, ann_mode,
+rrf: RrfOptions { ..Default::default() } }` for both default and custom fusion.
+The single mode validates all weights and candidate budgets through the same path.
+Storage/query access uses `RecordPartition`; the
 retired low-level IndexArc/Search/Commit API is not available. The current
 Tantivy package format is for new databases; it does not read legacy indexes.
+Relation fusion takes its RRF settings from `RelationFusion`; its Rust query mode must use default Hybrid settings, and HTTP rejects a second `rrf` object.
 The HTTP API accepts an optional `rrf` object only with nonempty query text and a
 query vector:
 

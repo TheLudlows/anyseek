@@ -1417,6 +1417,7 @@ mod tests {
             SearchMode::Hybrid {
                 similarity_threshold: None,
                 ann_mode: crate::vector_similarity::AnnMode::All,
+                rrf: Default::default(),
             },
         ] {
             let vector = if mode == SearchMode::Lexical {

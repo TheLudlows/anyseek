@@ -1,7 +1,7 @@
 //! Independent NOT membership, posting-rank and count regression (#37).
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject,
+        Clustering, FrequentwordType, IndexMetaObject,
         LexicalSimilarity, StopwordType, TokenizerType,
     },
     search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
@@ -31,8 +31,6 @@ async fn fresh(label: &str, ngrams: u8) -> (RecordPartition, PathBuf) {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: ngrams,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     };

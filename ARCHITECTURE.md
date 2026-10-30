@@ -1,6 +1,6 @@
 # 当前架构
 
-anyseek 由 Rust 核心库和 HTTP/Web UI 服务组成。默认服务已接入 Record/catalog，每个 collection 一个持久 partition 和一个内部搜索 shard。低层索引库仍保留自身 API 和本机多 shard 实现，不代表服务已支持分布式分片。
+anyseek 由 Rust 核心库和 HTTP/Web UI 服务组成。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。公开数据入口统一为 RecordPartition；内部向量/元数据组件包含可变 tail 与冻结 Segment，其 shard 命名整理由 #94 跟踪。
 
 ## 模块边界
 
@@ -9,21 +9,21 @@ anyseek 由 Rust 核心库和 HTTP/Web UI 服务组成。默认服务已接入 R
 | UI | `anyseek/web/` | 创建/写入原请求保存与重试、搜索、分页、预览、日期过滤、服务备份恢复 |
 | 默认服务 | `record_service.rs`、`server.rs`、`main.rs` | HTTP 契约、身份入口、admission、响应数据有效性保护、启动恢复 |
 | 控制权威 | `catalog.rs`、`catalog/sqlite.rs`、`catalog/service_snapshot.rs` | Tenant、Key verifier、集合代次与生命周期、控制回执和完整服务快照 |
-| 数据权威 | `record.rs` | 原始 Document/向量、稳定 ID、版本、墓碑、幂等、共同可见视图 |
+| 数据权威 | `record.rs`、`record/committed.rs` | 原始 Document/向量、稳定 ID、版本、墓碑、幂等与持久批提交 |
 | 持久化 | `storage/journal.rs`、`partition.rs`、`sqlite_authority.rs`、`s3_compatible.rs` | 本地 WAL/见证，或 SQLite 唯一协调权威 + 不可变对象；owner lock、共同恢复 |
 | 不可变布局 | `record/anchor.rs`、`segment.rs`、`remote_checkpoint.rs` | 规范 payload、冻结 Segment + tail、远端 manifest 发布与 GC |
-| 派生索引 | `index.rs`、`commit.rs`、`doc_store.rs` | 现有倒排、向量、文档投影和 metadata 存储的构建/提交 |
-| 检索 | `search.rs`、`vector.rs`、`iterator.rs`、`min_heap.rs` | 三路检索、候选、排序、遍历；Record 的稳定身份在截断前参与平分排序 |
-| 活动统计 | `active.rs`、`field_length.rs` | 活动版本 N/df/字段长度；与物理编码计数分离 |
+| 派生索引 | `record/lexical/runtime.rs`、`component.rs`、`record/index_consumers.rs` | Tantivy 全文与独立向量/元数据消费、构建和派生包提交 |
+| 检索 | `record/query.rs`、`record/lexical/runtime_query.rs`、`vector.rs`、`min_heap.rs` | 三路检索、候选、排序、遍历；Record 的稳定身份在截断前参与平分排序 |
+| 活动身份 | `active.rs` | 向量/元数据记录身份、fingerprint 和活动 ordinal；全文统计由 Tantivy 固定 Searcher 管理 |
 | 过滤/分词 | `metadata_filter.rs`、`tokenizer.rs` | 共享元数据判定与文本处理 |
 
 路径相对于核心或服务的 src。`api_types.rs` 和 `api_schema.rs` 保留服务公共配置/查询 DTO 及 OpenAPI 描述；核心不依赖 HTTP schema。默认启动仅挂载 Record 服务，不保留独立的旧 HTTP/key/index 管理实现。
 
 ## 写入与查询
 
-写入先校验身份、条件版本、向量、记录和完整快照容量，再同步权威操作日志；随后增量应用搜索索引、撤销旧活动统计、发布共同序列，最后返回成功。索引应用失败返回 durable_pending 并封锁该实例；日志结果不确定返回 outcome_unknown，需要恢复和原 ID 重试。已接管工作不随 HTTP 请求取消而中断。
+`commit_writes` 与 HTTP `/ingest` 在业务判定和权威持久提交后逐项返回 committed、rejected、outcome_unknown 或 not_attempted；只有 committed 带业务回执。全文与向量消费者异步推进，持久提交不保证对应索引已可查。`/doc`、`/batch` 与 Rust `write` 继续提供同步写入入口。只有一层 Record WAL，不再维护独立 Intake 日志。
 
-Record partition 的 mutex 覆盖候选检索和原始数据回表。同一个查询只看到一个发布位置；替换/删除在 Top-K 前过滤旧版本。空查询使用同一删除检查、metadata 过滤和候选堆，纯向量 collection 不依赖词法字段也能浏览。
+查询短暂持有 Record guard 捕获派生拓扑，在 guard 外评分，完成后重验当前记录版本、fingerprint、删除及来源可见性。组件变化不依靠物理 ordinal 充当稳定身份。纯向量 collection 也能按 metadata 浏览；普通查询允许观察不同消费者的进度，提交与各索引水位分别表达。
 
 服务根据文本/向量选择 Lexical、Vector、Hybrid。Hybrid 两路候选通过 RRF 融合，支持权重和各路预算；ANN 可能因簇探测返回不足 K。候选窗口计数和候选内字段重排不等于全库精确结果。查询原始数据经 schema.store 和 fields 投影后输出；直接读取和 iterator 可返回完整权威 Record。
 
@@ -55,6 +55,6 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 ## 当前边界
 
-这是有界单机实现：Record 累计账本默认 10,000 项、完整 checkpoint 16 MiB 等限制见 [FEATURES](FEATURES.md)。checkpoint 回收旧 WAL 代，不等于持续账本/物理版本 GC。P2 的 source/evidence、generation、TTL、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、服务总缓存预算和完整资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文替换的复用边界见 [Tantivy 评估](docs/tantivy-evaluation.md)。
+这是有界单机实现：Record 累计账本默认 10,000 项、checkpoint/状态容量等限制见 [FEATURES](FEATURES.md)。history trim 按保留期限回收操作历史，checkpoint/对象 GC 负责各自闭包；这些不等于已删除集合代次的最终物理回收（#106）。P2 的 source/evidence、generation、TTL、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、服务总缓存预算和完整资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文替换的复用边界见 [Tantivy 评估](docs/tantivy-evaluation.md)。
 
 [Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/src/server/README.md) · [许可](LICENSE)

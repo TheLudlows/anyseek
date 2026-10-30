@@ -8,7 +8,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 // Explicit score sorting shares engine code: it is a consistency check, not an oracle.
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FieldLengthNormalization, FrequentwordType,
+        Clustering, FieldLengthNormalization, FrequentwordType,
         IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
     },
     search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
@@ -90,8 +90,6 @@ async fn fresh(
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     };

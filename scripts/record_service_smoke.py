@@ -26,7 +26,7 @@ def main():
                 if root.exists():
                     for cache in [*root.glob('collections/*/*/*'), *root.glob('*.object-cache')]:
                         if cache.is_dir():shutil.rmtree(cache)
-            process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**(fault_env or {})},stdout=log,stderr=log)
+            process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**(fault_env or {})},stdout=log,stderr=log)
             started=time.monotonic()
             for _ in range(int(max(args.startup_timeout,120 if args.cold_restarts else 0)/.05)):
                 if process.poll() is not None:
@@ -90,7 +90,7 @@ def main():
         try:
             if args.faults:
                 for stage in ['metadata_committed','root_published']:
-                    child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','ANYSEEK_CATALOG_INITIAL_FAULT':stage},stdout=log,stderr=log)
+                    child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','ANYSEEK_CATALOG_INITIAL_FAULT':stage},stdout=log,stderr=log)
                     try:
                         assert child.wait(timeout=30)==87,stage
                     finally:
@@ -504,7 +504,7 @@ def main():
             restore_env = {}
             if os.environ.get('ANYSEEK_STORAGE_BACKEND') == 's3':
                 restore_env['ANYSEEK_S3_BUCKET'] = os.environ['ANYSEEK_S3_TEST_RESTORE_BUCKET']
-            restored_process=subprocess.Popen([binary,f"index_path={restored['target_root']}",f'local_port={other_port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**restore_env},stdout=log,stderr=log)
+            restored_process=subprocess.Popen([binary,f"index_path={restored['target_root']}",f'local_port={other_port}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**restore_env},stdout=log,stderr=log)
             try:
                 base=f'http://127.0.0.1:{other_port}'
                 for _ in range(int(max(args.startup_timeout,120 if args.cold_restarts else 0)/.05)):

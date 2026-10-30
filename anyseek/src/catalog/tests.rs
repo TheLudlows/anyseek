@@ -9,7 +9,7 @@ pub(super) fn request(nonce: &str, command: CatalogCommand) -> CatalogRequest {
     }
 }
 pub(super) fn config() -> RecordConfig {
-    serde_json::from_value(json!({"index":{"id":0,"name":"shared","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1","stop_words":"None","frequent_words":"None","ngram_indexing":0,"access_type":"Mmap","clustering":"None","inference":"None"},"schema":[{"field":"body","field_type":"Text","store":false,"index_lexical":true}],"embedding_space_id":null,"max_records":32,"max_record_bytes":4096,"max_operations":100,"max_journal_bytes":1048576,"max_candidates":100})).unwrap()
+    serde_json::from_value(json!({"index":{"id":0,"name":"shared","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1","stop_words":"None","frequent_words":"None","ngram_indexing":0,"clustering":"None","inference":"None"},"schema":[{"field":"body","field_type":"Text","store":false,"index_lexical":true}],"embedding_space_id":null,"max_records":32,"max_record_bytes":4096,"max_operations":100,"max_journal_bytes":1048576,"max_candidates":100})).unwrap()
 }
 async fn setup(path: &Path) -> Catalog {
     let catalog = Catalog::create_with_key(path, "master".into(), "a".repeat(64))
@@ -62,6 +62,35 @@ async fn create(catalog: &Catalog, tenant: &str, id: &str) -> CatalogReceipt {
         .await
         .unwrap();
     receipt
+}
+
+#[tokio::test]
+async fn cancelled_reclamation_waiter_keeps_lifecycle_guard_until_cleanup_finishes() {
+    let parent = tempfile::tempdir().unwrap();
+    let c = Arc::new(setup(&parent.path().join("service")).await);
+    create(&c,"alpha","one").await; create(&c,"alpha","two").await; create(&c,"alpha","active").await;
+    for id in ["one","two"] {
+        c.execute(request(&format!("delete-{id}"),CatalogCommand::DeleteCollection {tenant_id:"alpha".into(),collection_id:id.into()})).await.unwrap();
+    }
+    let one = c.next_deleted_collection(0).await.unwrap().unwrap();
+    let two = c.next_deleted_collection(one.generation).await.unwrap().unwrap();
+    assert_ne!(one.generation,two.generation);
+    assert_eq!(c.next_deleted_collection(two.generation).await.unwrap().unwrap().generation,one.generation);
+    let (started,entered) = tokio::sync::oneshot::channel();
+    let (resume,finish) = tokio::sync::oneshot::channel();
+    let owner = c.clone(); let old = one.clone();
+    let caller = tokio::spawn(async move { owner.reclaim_deleted(old, |_| async move {
+        started.send(()).unwrap(); finish.await.unwrap(); Ok(true)
+    }).await });
+    tokio::time::timeout(Duration::from_secs(2),entered).await.unwrap().unwrap();
+    caller.abort(); assert!(caller.await.unwrap_err().is_cancelled());
+    let owner = c.clone(); let snapshot = tokio::spawn(async move { owner.execution.freeze().await });
+    tokio::task::yield_now().await; assert!(!snapshot.is_finished(),"cleanup still owns the snapshot barrier");
+    resume.send(()).unwrap();
+    let guard = tokio::time::timeout(Duration::from_secs(2),snapshot).await.unwrap().unwrap();
+    assert!(!c.collections().await.unwrap().iter().any(|entry| entry.generation==one.generation));
+    drop(guard);
+    assert_eq!(c.next_deleted_collection(0).await.unwrap().unwrap().generation,two.generation);
 }
 
 #[tokio::test]

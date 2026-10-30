@@ -1,5 +1,7 @@
 //! Physical retirement after a durable Catalog reclamation intent. This is not
 //! a Record mutation and must only run under the owning service's lifecycle gate.
+//! Catalog owns the async task and lifecycle barrier for the complete pass;
+//! these steps do not spawn additional independently owned async tasks.
 use super::*;
 
 impl RecordPartition {
@@ -7,21 +9,19 @@ impl RecordPartition {
     /// entries. Parent service ownership prevents new opens during retirement.
     pub async fn reclaim_deleted_files(path: &Path, limit: usize) -> Result<bool, RecordError> {
         let path = path.to_owned();
-        crate::resources::spawn(async move {
-            let scope = crate::resources::Scope::current();
-            tokio::task::spawn_blocking(move || {
-                let _io = scope.as_ref().map(|scope| scope.io()).transpose().map_err(|_| RecordError::Busy)?;
-                let work = || {
-                    if !path.parent().is_some_and(Path::exists) { return Ok(true); }
-                    package_pins::retire_tree_if_unpinned(&path, || {
-                        PartitionJournal::retire_snapshot_step(&path, limit).map_err(|error| match error {
-                            CreateError::NotPublished(error) if error.kind() == std::io::ErrorKind::WouldBlock => RecordError::Busy,
-                            error => creation_error(error),
-                        })
+        let scope = crate::resources::Scope::current();
+        tokio::task::spawn_blocking(move || {
+            let _io = scope.as_ref().map(|scope| scope.io()).transpose().map_err(|_| RecordError::Busy)?;
+            let work = || {
+                if !path.parent().is_some_and(Path::exists) { return Ok(true); }
+                package_pins::retire_tree_if_unpinned(&path, || {
+                    PartitionJournal::retire_snapshot_step(&path, limit).map_err(|error| match error {
+                        CreateError::NotPublished(error) if error.kind() == std::io::ErrorKind::WouldBlock => RecordError::Busy,
+                        error => creation_error(error),
                     })
-                };
-                match scope { Some(scope) => scope.run_sync(work), None => work() }
-            }).await.map_err(storage)?
+                })
+            };
+            match scope { Some(scope) => scope.run_sync(work), None => work() }
         }).await.map_err(storage)?
     }
 
@@ -29,37 +29,33 @@ impl RecordPartition {
     /// The caller must retain the Catalog lifecycle and service owner guards.
     #[cfg(feature = "s3-object-store")]
     pub async fn reclaim_deleted_s3(config: S3CompatibleRecordConfig, limit: usize) -> Result<bool, RecordError> {
-        crate::resources::spawn(async move {
-            if limit == 0 || limit > 64 { return Err(RecordError::Rejected("invalid reclamation batch".into())); }
-            let (store, mut authority) = remote(&config)?;
-            if let Some(head) = authority.read_head(&config.partition_id).map_err(storage)? {
-                authority.cancel_owner_index_builds(&config.partition_id, head.owner_epoch).map_err(storage)?;
-            }
-            if !authority.retire_partition(&config.partition_id).map_err(storage)? { return Err(RecordError::Busy); }
-            let objects = authority.reclamation_objects(&config.partition_id, limit).map_err(storage)?;
-            for object in objects {
-                authority.retire_object(&object.key, 0, unix_time_ms_i64()).map_err(storage)?;
-                store.delete_retired(&mut authority, &object.key, unix_time_ms_i64()).await.map_err(storage)?;
-            }
-            if !authority.reclamation_objects(&config.partition_id, 1).map_err(storage)?.is_empty() { return Ok(false); }
-            authority.prune_reclaimed_edges(&config.partition_id, limit).map_err(storage)
-        }).await.map_err(storage)?
+        if limit == 0 || limit > 64 { return Err(RecordError::Rejected("invalid reclamation batch".into())); }
+        let (store, mut authority) = remote(&config)?;
+        if let Some(head) = authority.read_head(&config.partition_id).map_err(storage)? {
+            authority.cancel_owner_index_builds(&config.partition_id, head.owner_epoch).map_err(storage)?;
+        }
+        if !authority.retire_partition(&config.partition_id).map_err(storage)? { return Err(RecordError::Busy); }
+        let objects = authority.reclamation_objects(&config.partition_id, limit).map_err(storage)?;
+        for object in objects {
+            authority.retire_object(&object.key, 0, unix_time_ms_i64()).map_err(storage)?;
+            store.delete_retired(&mut authority, &object.key, unix_time_ms_i64()).await.map_err(storage)?;
+        }
+        if !authority.reclamation_objects(&config.partition_id, 1).map_err(storage)?.is_empty() { return Ok(false); }
+        authority.prune_reclaimed_edges(&config.partition_id, limit).map_err(storage)
     }
 
     /// Retry monotonic object tombstones across all service incarnations. This
     /// includes ambiguous old PUTs after the Catalog incarnation row is gone.
     #[cfg(feature = "s3-object-store")]
     pub async fn retry_s3_deletions(config: S3CompatibleRecordConfig, after: String) -> Result<String, RecordError> {
-        crate::resources::spawn(async move {
-            let (store, mut authority) = remote(&config)?;
-            let objects = authority.collectible_objects(unix_time_ms_i64()).map_err(storage)?;
-            let mut next = String::new();
-            for object in objects.into_iter().filter(|object| object.key > after).take(16) {
-                store.delete_retired(&mut authority, &object.key, unix_time_ms_i64()).await.map_err(storage)?;
-                next = object.key;
-            }
-            Ok(next)
-        }).await.map_err(storage)?
+        let (store, mut authority) = remote(&config)?;
+        let objects = authority.retired_objects_page(&after, 16).map_err(storage)?;
+        let mut next = String::new();
+        for object in objects {
+            store.delete_retired(&mut authority, &object.key, unix_time_ms_i64()).await.map_err(storage)?;
+            next = object.key;
+        }
+        Ok(next)
     }
 }
 

@@ -60,11 +60,9 @@ fn default_retired() -> Option<Arc<Retired>> { Some(Arc::new(Retired::default())
 pub(crate) struct ActiveStatistics {
     pub keys: Vec<String>,
     /// Logical body version and indexing revision; independent of row position.
-    #[serde(default)]
     pub revisions: Vec<(u64, u64)>,
-    /// Fingerprints preserve query identity across cache rebuilds. None is legacy.
-    #[serde(default)]
-    pub fingerprints: Vec<Option<[u8; 32]>>,
+    /// Fingerprints preserve query identity across cache rebuilds.
+    pub fingerprints: Vec<[u8; 32]>,
     live: BTreeSet<usize>,
     #[serde(skip, default = "default_retired")]
     pub(crate) retired: Option<Arc<Retired>>,
@@ -92,7 +90,7 @@ impl ActiveStatistics {
     pub(crate) fn append_identity(&mut self, key: String, version: u64, revision: u64, fingerprint: [u8; 32]) {
         self.keys.push(key);
         self.revisions.push((version, revision));
-        self.fingerprints.push(Some(fingerprint));
+        self.fingerprints.push(fingerprint);
     }
     pub(crate) fn is_live(&self, id: usize) -> bool {
         self.live.contains(&id) && !self.retired.as_ref().is_some_and(|mask| mask.contains(id))
@@ -104,11 +102,11 @@ impl ActiveStatistics {
     pub(crate) fn retire(&mut self, id: usize) {
         self.live.remove(&id);
     }
-    pub(crate) fn validate_sparse(&self, _fields: usize) -> Result<(), String> {
-        if !self.revisions.is_empty() && self.revisions.len() != self.keys.len() {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.revisions.len() != self.keys.len() {
             return Err("component identity cardinality mismatch".into());
         }
-        if !self.fingerprints.is_empty() && self.fingerprints.len() != self.keys.len() {
+        if self.fingerprints.len() != self.keys.len() {
             return Err("component fingerprint cardinality mismatch".into());
         }
         if self.live.iter().any(|id| *id >= self.keys.len()) {
@@ -141,15 +139,11 @@ impl serde::Serialize for ActiveStatistics {
                 seq.end()
             }
         }
-        let mut state = serializer.serialize_struct("ActiveStatistics", 2 + usize::from(!self.revisions.is_empty()) + usize::from(!self.fingerprints.is_empty()))?;
+        let mut state = serializer.serialize_struct("ActiveStatistics", 4)?;
         state.serialize_field("keys", &self.keys)?;
         state.serialize_field("live", &Live(self))?;
-        if !self.revisions.is_empty() {
-            state.serialize_field("revisions", &self.revisions)?;
-        }
-        if !self.fingerprints.is_empty() {
-            state.serialize_field("fingerprints", &self.fingerprints)?;
-        }
+        state.serialize_field("revisions", &self.revisions)?;
+        state.serialize_field("fingerprints", &self.fingerprints)?;
         state.end()
     }
 }
@@ -189,14 +183,14 @@ mod tests {
     #[test]
     fn copied_membership_and_retirement_do_not_change_an_old_view() {
         let mut current = ActiveStatistics::default();
-        current.keys.push("a".into());
+        current.append_identity("a".into(), 1, 1, [0; 32]);
         current.publish(0);
         let old = current.clone_local();
         current.retire(0);
         assert!(old.is_live(0));
         assert!(!current.is_live(0));
-        current.keys.push("a".into());
+        current.append_identity("a".into(), 2, 2, [1; 32]);
         current.publish(1);
-        assert!(current.validate_sparse(0).is_ok());
+        assert!(current.validate().is_ok());
     }
 }

@@ -4,7 +4,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 // Rank ties must be resolved before local TopK and again after global merging.
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
+        Clustering, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
         },
     search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
     vector::{Embedding, Inference, Precision, Quantization},
@@ -29,6 +29,7 @@ async fn query(
         2 => SearchMode::Hybrid {
             similarity_threshold: None,
             ann_mode: AnnMode::All,
+            rrf: Default::default(),
         },
         _ => SearchMode::Lexical,
     };
@@ -68,8 +69,6 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
             stop_words: StopwordType::None,
             frequent_words: FrequentwordType::None,
             ngram_indexing: NgramSet::SingleTerm as u8,
-            document_compression: DocumentCompression::Snappy,
-            access_type: AccessType::Mmap,
             clustering: Clustering::None,
             inference: Inference::External {
                 dimensions: 3,
@@ -78,8 +77,7 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
                 similarity: VectorSimilarity::Cosine,
             },
         };
-        let index = Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await)
-            .unwrap();
+        let index = records::create(&path, meta, (&schema).to_vec()).await;
         // Identical scores, with reverse-valued facets to test secondary ordering.
         for component in 0..shards {
             let start = component * (90 / shards);
@@ -204,13 +202,10 @@ async fn stable_equal_score_block_boundary_and_explicit_id_sort() {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     };
-    let index = Ok::<_, String>(records::create(&path, meta, (&schema).to_vec()).await)
-        .unwrap();
+    let index = records::create(&path, meta, (&schema).to_vec()).await;
     for _ in 0..7 {
         records::insert(&index, (0..100)
                     .map(|_| serde_json::from_value(json!({"body":"alpha beta gamma delta epsilon zeta eta theta iota"})).unwrap())

@@ -1,7 +1,7 @@
 //! Versioned analysis must preserve source text and use one rule in every state.
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FrequentwordType,
+        Clustering, FrequentwordType,
          IndexMetaObject, LexicalSimilarity, StopwordType, TextNormalization,
         TokenizerType,
     },
@@ -34,8 +34,6 @@ async fn fresh(label: &str, rule: TextNormalization, ngrams: u8) -> (RecordParti
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::English,
         ngram_indexing: ngrams,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     };

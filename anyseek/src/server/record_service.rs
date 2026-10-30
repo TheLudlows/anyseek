@@ -15,8 +15,8 @@ use anyseek::{
     catalog::{
         Catalog, CatalogCommand, CatalogError, CatalogRequest, CollectionEntry, MASTER,
     },
-    index::{AccessType, FrequentwordType, IndexMetaObject, LexicalSimilarity},
-    index::{Clustering, DocumentCompression},
+    index::{FrequentwordType, IndexMetaObject, LexicalSimilarity},
+    index::Clustering,
     record::{
         OperationId, RecordConfig, RecordCursor, RecordError, RecordPartition, RecordQuery,
         RecordWrite, DataOutputPermit, S3CompatibleRecordConfig,
@@ -271,20 +271,22 @@ impl Service {
                     Err(_) => continue,
                 };
                 let result = scope.run(async {
-                    let mut entries = service.catalog.collections().await?;
-                    entries.retain(|entry| entry.deleted);
-                    entries.sort_by_key(|entry| entry.generation);
-                    if let Some(entry) = entries.iter().find(|entry| entry.generation > generation).or(entries.first()).cloned() {
-                        generation = entry.generation;
-                        service.reclaim_collection(entry).await?;
-                    }
+                    let collection = async {
+                        if let Some(entry) = service.catalog.next_deleted_collection(generation).await? {
+                            generation = entry.generation;
+                            service.reclaim_collection(entry).await?;
+                        }
+                        Ok::<_,Error>(())
+                    }.await;
+                    // A failed incarnation must not suppress service-wide
+                    // retries for objects whose Catalog row is already gone.
                     if tokio::time::Instant::now() >= next_sweep {
+                        next_sweep = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
                         if let Some(config) = service.s3_config("reclamation".into(), 16 * 1024 * 1024)? {
                             object_cursor = RecordPartition::retry_s3_deletions(config, object_cursor.clone()).await?;
                         }
-                        next_sweep = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
                     }
-                    Ok::<_,Error>(())
+                    collection
                 }).await;
                 if let Err(error) = result {
                     if error.1 != "busy" { log::warn!("collection reclamation pending: {}", error.2); }
@@ -700,8 +702,6 @@ fn record_config(
             stop_words: request.stop_words,
             frequent_words: FrequentwordType::English,
             ngram_indexing: 9,
-            document_compression: DocumentCompression::Snappy,
-            access_type: AccessType::Mmap,
             clustering: Clustering::Auto,
             inference,
         },

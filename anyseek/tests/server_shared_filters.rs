@@ -7,8 +7,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 use anyseek::server::api_types::SearchRequestObject;
 use anyseek::{
     index::{
-        AccessType, Clustering, Document, DocumentCompression,
-        FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet,
+        Clustering, Document, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet,
         SchemaField, StopwordType, TokenizerType,
         },
 
@@ -61,7 +60,6 @@ async fn try_query(
     index: &RecordPartition,
     name: &str,
     filter: Value,
-    realtime: bool,
     length: usize,
     ann: Value,
 ) -> Result<RecordSearch, anyseek::record::RecordError> {
@@ -74,11 +72,11 @@ async fn try_query(
                 Some(Embedding::F32(vec![1., 0., 0.]))
             },query_type:r.query_type(),mode:serde_json::from_value(mode(name, ann.clone())).unwrap(),offset:r.offset,length:r.length,result_type:r.result_type(),fields:r.field_filter,filters:r.facet_filter,sort:r.result_sort,temporal:None}).await
 }
-async fn query(index: &RecordPartition, mode: &str, filter: Value, realtime: bool, length: usize, ann: Value) -> RecordSearch {try_query(index,mode,filter,realtime,length,ann).await.unwrap()}
-async fn labels(_index: &RecordPartition, result: &RecordSearch, _realtime: bool) -> Vec<usize> {
+async fn query(index: &RecordPartition, mode: &str, filter: Value, length: usize, ann: Value) -> RecordSearch {try_query(index,mode,filter,length,ann).await.unwrap()}
+async fn labels(result: &RecordSearch) -> Vec<usize> {
     result.hits.iter().map(|hit| hit.record.document.as_ref().unwrap()["label"].as_u64().unwrap() as usize).collect()
 }
-async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
+async fn check(index: &RecordPartition, removed: &[usize]) {
     let mut cases = vec![
         (
             json!([{"String":{"field":"category","filter":["allowed"]}}]),
@@ -149,16 +147,16 @@ async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
             .filter(|i| !removed.contains(i))
             .collect();
         for name in ["Lexical", "Vector", "Hybrid"] {
-            let r = query(index, name, filter.clone(), realtime, 30, json!("All")).await;
-            let actual: HashSet<_> = labels(index, &r, realtime).await.into_iter().collect();
-            assert_eq!(actual, eligible, "{name} realtime={realtime} {filter}");
+            let r = query(index, name, filter.clone(), 30, json!("All")).await;
+            let actual: HashSet<_> = labels(&r).await.into_iter().collect();
+            assert_eq!(actual, eligible, "{name} {filter}");
             for ann in [json!("All"), json!({"Nprobe":1})] {
-                let r = query(index, name, filter.clone(), realtime, 3, ann).await;
-                let actual = labels(index, &r, realtime).await;
+                let r = query(index, name, filter.clone(), 3, ann).await;
+                let actual = labels(&r).await;
                 assert_eq!(
                     actual.len(),
                     eligible.len().min(3),
-                    "{name} realtime={realtime} {filter}"
+                    "{name} {filter}"
                 );
                 assert!(actual.iter().all(|i| eligible.contains(i)));
             }
@@ -172,7 +170,7 @@ async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
     ] {
         for name in ["Lexical", "Vector", "Hybrid"] {
             assert!(
-                try_query(index, name, bad.clone(), realtime, 3, json!("All"))
+                try_query(index, name, bad.clone(), 3, json!("All"))
                     .await
                     .unwrap_err().to_string()
                     .contains("facet_filter")
@@ -183,102 +181,95 @@ async fn check(index: &RecordPartition, realtime: bool, removed: &[usize]) {
 
 #[tokio::test]
 async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
-    for (tag, access, shards) in [("mmap1", AccessType::Mmap, 1), ("mmap3", AccessType::Mmap, 3)] {
-        let path = std::env::temp_dir().join(format!(
-            "anyseek-shared-filters-{}-{tag}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&path);
-        let meta = IndexMetaObject {
-            id: 0,
-            name: "shared_filters".into(),
-            lexical_similarity: LexicalSimilarity::Bm25f,
-            tokenizer: TokenizerType::TantivySimpleV1,
-        text_normalization: anyseek::index::TextNormalization::None,
-        field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
-            stop_words: StopwordType::None,
-            frequent_words: FrequentwordType::None,
-            ngram_indexing: NgramSet::SingleTerm as u8,
-            document_compression: DocumentCompression::Snappy,
-            access_type: access,
-            clustering: Clustering::None,
-            inference: Inference::External {
-                dimensions: 3,
-                precision: Precision::F32,
-                quantization: Quantization::None,
-                similarity: VectorSimilarity::Cosine,
-            },
-        };
-        let index = Ok::<_, String>(records::create(&path, meta, (&schema()).to_vec()).await)
-            .unwrap();
-        records::insert(&index, (0..24).map(doc).collect())
-            .await
-            .unwrap();
-        for attempt in 0..300 {
-            let r = query(&index, "Lexical", json!([]), true, 30, json!("All")).await;
-            if r.hits.len() == 24 {
-                break;
-            }
-            assert!(attempt < 299, "index queue did not finish");
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    let path = std::env::temp_dir().join(format!(
+        "anyseek-shared-filters-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&path);
+    let meta = IndexMetaObject {
+        id: 0,
+        name: "shared_filters".into(),
+        lexical_similarity: LexicalSimilarity::Bm25f,
+        tokenizer: TokenizerType::TantivySimpleV1,
+    text_normalization: anyseek::index::TextNormalization::None,
+    field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,
+        stop_words: StopwordType::None,
+        frequent_words: FrequentwordType::None,
+        ngram_indexing: NgramSet::SingleTerm as u8,
+        clustering: Clustering::None,
+        inference: Inference::External {
+            dimensions: 3,
+            precision: Precision::F32,
+            quantization: Quantization::None,
+            similarity: VectorSimilarity::Cosine,
+        },
+    };
+    let index = records::create(&path, meta, (&schema()).to_vec()).await;
+    records::insert(&index, (0..24).map(doc).collect())
+        .await
+        .unwrap();
+    for attempt in 0..300 {
+        let r = query(&index, "Lexical", json!([]), 30, json!("All")).await;
+        if r.hits.len() == 24 {
+            break;
         }
-        check(&index, true, &[]).await;
-        // Deleted uncommitted vectors must not enter the candidate heap.
-        let all = query(&index, "Lexical", json!([]), true, 30, json!("All")).await;
-        let map: HashMap<_, _> = labels(&index, &all, true)
-            .await
-            .into_iter()
-            .zip(all.hits.iter().map(|hit| hit.record.record_id.parse::<usize>().unwrap()))
-            .collect();
-        records::delete(&index, vec![map[&23]]).await;
-        check(&index, true, &[23]).await;
-        index.compact_journal().await.unwrap();
-        check(&index, false, &[23]).await;
-        records::delete(&index, vec![map[&22]]).await;
-        records::update(&index, map[&21], doc(25)).await;
-        index.compact_journal().await.unwrap();
-        // Updated/deleted IDs do not retain old metadata or old vectors.
-        for name in ["Lexical", "Vector", "Hybrid"] {
-            let r = query(
-                &index,
-                name,
-                json!([{"Int":{"field":"label","filter":{"start":21,"end":24}}}]),
-                true,
-                30,
-                json!("All"),
-            )
-            .await;
-            assert!(labels(&index, &r, true).await.is_empty());
-            let r = query(
-                &index,
-                name,
-                json!([{"Int":{"field":"label","filter":{"start":25,"end":26}}}]),
-                false,
-                3,
-                json!("All"),
-            )
-            .await;
-            assert_eq!(labels(&index, &r, false).await, vec![25]);
-        }
-
-        drop(index);
-        let index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
-        for name in ["Lexical", "Vector", "Hybrid"] {
-            let r = query(
-                &index,
-                name,
-                json!([{"Int":{"field":"label","filter":{"start":25,"end":26}}}]),
-                false,
-                3,
-                json!("All"),
-            )
-            .await;
-            assert_eq!(labels(&index, &r, false).await, vec![25]);
-        }
-
-        drop(index);
-        fs::remove_dir_all(path).unwrap();
+        assert!(attempt < 299, "index queue did not finish");
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    check(&index, &[]).await;
+    // Deleted uncommitted vectors must not enter the candidate heap.
+    let all = query(&index, "Lexical", json!([]), 30, json!("All")).await;
+    let map: HashMap<_, _> = labels(&all)
+        .await
+        .into_iter()
+        .zip(all.hits.iter().map(|hit| hit.record.record_id.parse::<usize>().unwrap()))
+        .collect();
+    records::delete(&index, vec![map[&23]]).await;
+    check(&index, &[23]).await;
+    index.compact_journal().await.unwrap();
+    check(&index, &[23]).await;
+    records::delete(&index, vec![map[&22]]).await;
+    records::update(&index, map[&21], doc(25)).await;
+    index.compact_journal().await.unwrap();
+    // Updated/deleted IDs do not retain old metadata or old vectors.
+    for name in ["Lexical", "Vector", "Hybrid"] {
+        let r = query(
+            &index,
+            name,
+            json!([{"Int":{"field":"label","filter":{"start":21,"end":24}}}]),
+            30,
+            json!("All"),
+        )
+        .await;
+        assert!(labels(&r).await.is_empty());
+        let r = query(
+            &index,
+            name,
+            json!([{"Int":{"field":"label","filter":{"start":25,"end":26}}}]),
+            3,
+            json!("All"),
+        )
+        .await;
+        assert_eq!(labels(&r).await, vec![25]);
+    }
+
+    drop(index);
+    let index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap();
+    for name in ["Lexical", "Vector", "Hybrid"] {
+        let r = query(
+            &index,
+            name,
+            json!([{"Int":{"field":"label","filter":{"start":25,"end":26}}}]),
+            3,
+            json!("All"),
+        )
+        .await;
+        assert_eq!(labels(&r).await, vec![25]);
+    }
+
+    drop(index);
+    fs::remove_dir_all(path).unwrap();
+
 }
 
 fn meta() -> IndexMetaObject {
@@ -292,8 +283,6 @@ fn meta() -> IndexMetaObject {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::External {
             dimensions: 3,
@@ -332,8 +321,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             };
             let mut vector_schema = schema();
             vector_schema.push(serde_json::from_value(json!({"field":"other_vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true})).unwrap());
-            let index = Ok::<_, String>(records::create(&path, config, (&vector_schema).to_vec()).await)
-                .unwrap();
+            let index = records::create(&path, config, (&vector_schema).to_vec()).await;
             let mut docs: Vec<_> = (0..24).map(doc).collect();
             for (i, d) in docs.iter_mut().enumerate() {
                 d.insert(
@@ -365,7 +353,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
                         Embedding::F32(vec![1., 0., 0.])
                     };
                     let result = index.query(RecordQuery {text:r.query_string.clone(),vector:Some(embedding),query_type:r.query_type(),mode:serde_json::from_value(mode(name, ann.clone())).unwrap(),offset:0,length:r.length,result_type:r.result_type(),fields:r.field_filter,filters:r.facet_filter,sort:vec![],temporal:None}).await.unwrap();
-                    let actual = labels(&index, &result, false).await;
+                    let actual = labels(&result).await;
                     assert!(
                         actual.iter().all(|i| *i >= 16 && *i < 24),
                         "{name} {metric} {precision} {quantization} {ann}"
@@ -405,7 +393,7 @@ async fn filtered_quantization_metrics_and_cluster_limits() {
             // The set dictionary reuses ID 0 after clear; old memberships must not survive.
             let r:SearchRequestObject=serde_json::from_value(json!({"query":"common","filter":[{"StringSet":{"field":"tags","filter":["even"]}}]})).unwrap();
             let result = index.query(RecordQuery {text:r.query_string.clone(),vector:None,query_type:r.query_type(),mode:r.search_mode(std::num::NonZeroUsize::new(anyseek::server::api_types::DEFAULT_NPROBE).unwrap()).unwrap(),offset:0,length:10,result_type:r.result_type(),fields:vec![],filters:r.facet_filter,sort:vec![],temporal:None}).await.unwrap();
-            assert!(labels(&index, &result, false).await.is_empty());
+            assert!(labels(&result).await.is_empty());
 
             drop(index);
             fs::remove_dir_all(path).unwrap();

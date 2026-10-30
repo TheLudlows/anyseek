@@ -1328,19 +1328,8 @@ impl RecordPartition {
             .map_err(|e| RecordError::OutcomeUnknown(e.to_string()))?
     }
 
-    async fn create_owned(path: &Path, mut config: RecordConfig) -> Result<Self, RecordError> {
+    async fn create_owned(path: &Path, config: RecordConfig) -> Result<Self, RecordError> {
         validate_config(&config)?;
-        // Preserve deterministic legacy schema identity in persisted configuration;
-        // this tag no longer chooses the native lexical encoding.
-        if !config
-            .schema
-            .iter()
-            .any(|field| field.index_lexical && field.longest)
-        {
-            if let Some(field) = config.schema.iter_mut().find(|field| field.index_lexical) {
-                field.longest = true;
-            }
-        }
         let mut state = State { history: history::HistoryState {scope:format!("{:032x}",rand::random::<u128>()),floor:0}, lineage: format!("{:032x}", rand::random::<u128>()), ..State::default() };
         state.admit_bytes(checkpoint_codec::json_length(&state)?)?;
         let entry = encode_entry(&Entry::Checkpoint {
@@ -1757,7 +1746,7 @@ impl RecordPartition {
 mod tests {
     use super::*;
     use crate::index::{
-        AccessType, Clustering, DocumentCompression, FieldLengthNormalization, FrequentwordType,
+        Clustering, FieldLengthNormalization, FrequentwordType,
         LexicalSimilarity, StopwordType, TextNormalization, TokenizerType,
     };
     use crate::vector::Inference;
@@ -1817,8 +1806,7 @@ mod tests {
         RecordConfig {history:HistoryRetention::default(),index:IndexMetaObject{id:0,name:"records".into(),lexical_similarity:LexicalSimilarity::Bm25f,
             tokenizer:TokenizerType::TantivySimpleV1,text_normalization:TextNormalization::None,
             field_length_normalization:FieldLengthNormalization::Shared,stop_words:StopwordType::None,
-            frequent_words:FrequentwordType::None,ngram_indexing:0,document_compression:DocumentCompression::Snappy,
-            access_type:AccessType::Mmap,clustering:Clustering::None,
+            frequent_words:FrequentwordType::None,ngram_indexing:0,clustering:Clustering::None,
             inference:serde_json::from_value::<Inference>(serde_json::json!({"External":{"dimensions":2,"precision":"F32","quantization":"None","similarity":"Cosine"}})).unwrap()},
             schema:serde_json::from_value(serde_json::json!([
                 {"field":"body","field_type":"Text","store":false,"index_lexical":true},
@@ -2198,7 +2186,7 @@ mod tests {
         NeighborRequest{seeds:vec![EvidenceRef{locator:None,record_id:id.into(),routing_key:"document-1".into(),version:1}],direction:RelationDirection::Both,relation_types:vec![],per_seed:128,max_candidates:100,allow_partial:false}
     }
     fn fusion_query() -> RecordQuery {
-        RecordQuery{temporal:None,text:"alpha".into(),vector:Some(Embedding::F32(vec![1.0,0.0])),mode:SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},query_type:QueryType::Union,offset:0,length:20,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![]}
+        RecordQuery{temporal:None,text:"alpha".into(),vector:Some(Embedding::F32(vec![1.0,0.0])),mode:SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() },query_type:QueryType::Union,offset:0,length:20,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![]}
     }
     fn fusion_options() -> RelationFusion {
         let mut neighbors=neighbor_request("a");neighbors.max_candidates=20;
@@ -2245,6 +2233,10 @@ mod tests {
         let result=p.query_with_relations(q,fusion_options()).await.unwrap();assert_eq!(result.hits.len(),1);assert_eq!(result.hits[0].record.record_id,"b");
         clock.set(now+100);let result=p.query_with_relations(fusion_query(),fusion_options()).await.unwrap();assert_eq!(result.evaluation_time_ms,now+100);assert!(!result.hits.iter().any(|h|h.record.record_id=="b"||h.record.record_id=="ab"));
         let mut bad=fusion_options();bad.rrf.keyword_candidates=Some(100);assert!(p.query_with_relations(fusion_query(),bad).await.is_err());
+        let mut conflicting=fusion_query();
+        if let SearchMode::Hybrid { rrf, .. } = &mut conflicting.mode { rrf.constant=5.0; }
+        assert!(matches!(p.query_with_relations(conflicting,fusion_options()).await,
+            Err(RecordError::Rejected(message)) if message == "specify RRF once in relation_fusion"));
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -2255,20 +2247,20 @@ mod tests {
             let mut q=fusion_query();q.mode=mode.clone();if mode==SearchMode::Lexical{q.vector=None;}q.offset=1;q.length=1;
             let r=p.query(q).await.unwrap();assert_eq!(r.hits.len(),1);let hit=&r.hits[0];assert_eq!(hit.channels.len(),1);assert_eq!(hit.channels[0].rank,1);assert_eq!(hit.channels[0].raw_score,Some(hit.score));assert!(hit.channels[0].rrf_contribution.is_none());
         }
-        let mut q=fusion_query();q.mode=SearchMode::WeightedHybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.5,vector_weight:2.0,keyword_candidates:Some(3),vector_candidates:Some(2)}};
+        let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.5,vector_weight:2.0,keyword_candidates:Some(3),vector_candidates:Some(2)}};
         let all=p.query(q).await.unwrap();
         let lexical_raw=query(&p,SearchMode::Lexical).await.hits[0].score;
         let vector_raw=query(&p,SearchMode::Vector{similarity_threshold:None,ann_mode:AnnMode::All}).await.hits[0].score;
         assert!(all.hits.iter().flat_map(|h|&h.channels).all(|c|c.raw_score==Some(if c.channel=="lexical"{lexical_raw}else{vector_raw})));
         for (rank,hit) in all.hits.iter().enumerate(){assert_eq!(hit.record.record_id,["a","b","c"][rank]);assert_eq!(hit.channels.iter().map(|c|c.rrf_contribution.unwrap()).sum::<f32>(),hit.score);let lex=hit.channels.iter().find(|c|c.channel=="lexical").unwrap();assert_eq!(lex.rank,rank);assert_eq!(lex.rrf_contribution,Some(0.5/(3.0+rank as f32)));assert_eq!(hit.channels.iter().any(|c|c.channel=="vector"),rank<2);}
-        let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All};q.offset=1;q.length=1;
+        let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All, rrf: Default::default() };q.offset=1;q.length=1;
         let page=p.query(q).await.unwrap();assert_eq!(page.hits[0].channels[0].rank,1);assert_eq!(page.hits[0].channels[1].rank,1);
-        let mut q=fusion_query();q.mode=SearchMode::WeightedHybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.0,vector_weight:1.0,keyword_candidates:Some(3),vector_candidates:Some(3)}};
+        let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.0,vector_weight:1.0,keyword_candidates:Some(3),vector_candidates:Some(3)}};
         let vector_only=p.query(q).await.unwrap();assert!(!vector_only.hits.is_empty());assert!(vector_only.hits.iter().all(|h|h.channels.len()==1&&h.channels[0].channel=="vector"&&h.channels[0].rrf_contribution==Some(h.score)));
         let mut q=fusion_query();q.mode=SearchMode::Lexical;q.vector=None;q.sort=vec![crate::search::ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}];q.offset=1;q.length=1;
         let sorted=p.query(q).await.unwrap();assert_eq!(sorted.hits.len(),1);assert_eq!(sorted.hits[0].channels[0].rank_basis,"requested_order");assert_eq!(sorted.hits[0].channels[0].rank,1);
         let browse=p.search(String::new(),None,SearchMode::Lexical,vec![],10).await.unwrap();assert!(browse.hits.iter().all(|h|h.channels[0].channel=="browse"&&h.channels[0].raw_score.is_none()));
-        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();let restored=query(&p,SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All}).await;assert!(restored.hits.iter().all(|h|h.channels.len()==2));
+        p.compact_journal().await.unwrap();drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();let restored=query(&p,SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All, rrf: Default::default() }).await;assert!(restored.hits.iter().all(|h|h.channels.len()==2));
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -2561,7 +2553,7 @@ mod tests {
             p.write(request).await.unwrap();
         }
         clock.set(now+1);
-        for mode in [SearchMode::Lexical,SearchMode::Vector { similarity_threshold:None,ann_mode:AnnMode::All },SearchMode::Hybrid {similarity_threshold:None,ann_mode:AnnMode::All}] {
+        for mode in [SearchMode::Lexical,SearchMode::Vector { similarity_threshold:None,ann_mode:AnnMode::All },SearchMode::Hybrid {similarity_threshold:None,ann_mode:AnnMode::All, rrf: Default::default() }] {
             let result=p.query(RecordQuery {temporal:Some(TemporalFilter {event:Some(TimeRange {from_ms:Some(100),to_ms:Some(101)}),ingested:Some(TimeRange {from_ms:Some(now as i64),to_ms:Some(now as i64+1)}),valid_at_ms:Some(100)}),text:"alpha".into(),vector:if mode==SearchMode::Lexical {None}else{Some(Embedding::F32(vec![1.0,0.0]))},mode,query_type:QueryType::Intersection,offset:0,length:1,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![]}).await.unwrap();
             assert_eq!(result.hits.len(),1); assert_eq!(result.hits[0].record.record_id,"b");
             assert_eq!(result.evaluation_time_ms,now+1);assert_eq!(result.statistics.evaluation_time_ms,now+1);
@@ -2786,7 +2778,7 @@ mod tests {
         let vector = SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All };
         assert!(query(&p, vector.clone()).await.hits.is_empty());
         assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 2);
-        assert_eq!(query(&p, SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All }).await.hits.len(), 2);
+        assert_eq!(query(&p, SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All, rrf: Default::default() }).await.hits.len(), 2);
         assert_eq!(p.statistics().await.unwrap().active_records, 2);
         let mut patch = write("enrich", "s", "unused", ExpectedVersion::Match(1));
         patch.document = None;
@@ -2855,7 +2847,7 @@ mod tests {
         assert_eq!(p.statistics().await.unwrap().active_records, 1);
         assert_eq!(p.statistics().await.unwrap().retained_source_revisions, 1);
         for mode in [SearchMode::Lexical, SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All },
-            SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All }] {
+            SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All, rrf: Default::default() }] {
             let found = query(&p, mode).await; assert_eq!(found.hits.len(), 1); assert_eq!(found.hits[0].record.record_id, "s");
         }
         assert!(p.write(source_write("old-ref", "bad", &[("s", 1)])).await.is_err());
@@ -2942,7 +2934,7 @@ mod tests {
         assert_eq!(result.hits.iter().map(|h|h.record.record_id.as_str()).collect::<Vec<_>>(), vec!["o"]);
         assert_eq!(result.statistics.active_records, 1);
         for mode in [SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All },
-                     SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All }] {
+                     SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All, rrf: Default::default() }] {
             let result = p.search("evidence".into(), Some(Embedding::F32(vec![1.0, 0.0])), mode, vec![], 10).await.unwrap();
             assert_eq!(result.hits.iter().map(|h| h.record.record_id.as_str()).collect::<Vec<_>>(), vec!["o"]);
             assert_eq!(result.statistics.active_records, 1);
@@ -3371,6 +3363,7 @@ mod tests {
                 SearchMode::Hybrid {
                     similarity_threshold: None,
                     ann_mode: AnnMode::All,
+                    rrf: Default::default(),
                 },
             )
             .await
@@ -3518,6 +3511,7 @@ mod tests {
             SearchMode::Hybrid {
                 similarity_threshold: None,
                 ann_mode: AnnMode::All,
+                rrf: Default::default(),
             },
         ] {
             let hits = query(&partition, mode).await;
@@ -3672,6 +3666,7 @@ mod tests {
             SearchMode::Hybrid {
                 similarity_threshold: None,
                 ann_mode: AnnMode::All,
+                rrf: Default::default(),
             },
         )
         .await;
@@ -3691,6 +3686,7 @@ mod tests {
             SearchMode::Hybrid {
                 similarity_threshold: None,
                 ann_mode: AnnMode::All,
+                rrf: Default::default(),
             },
         )
         .await;
@@ -3930,6 +3926,7 @@ mod tests {
             SearchMode::Hybrid {
                 similarity_threshold: None,
                 ann_mode: AnnMode::All,
+                rrf: Default::default(),
             },
         ] {
             let result = query(&partition, mode).await;
@@ -4075,6 +4072,7 @@ mod tests {
                 SearchMode::Hybrid {
                     similarity_threshold: None,
                     ann_mode: AnnMode::All,
+                    rrf: Default::default(),
                 },
             )
             .await;
@@ -4182,11 +4180,12 @@ mod tests {
                     SearchMode::Hybrid {
                         similarity_threshold: None,
                         ann_mode: AnnMode::All,
+                        rrf: Default::default(),
                     },
                 ),
                 (
                     "alpha",
-                    SearchMode::WeightedHybrid {
+                    SearchMode::Hybrid {
                         similarity_threshold: None,
                         ann_mode: AnnMode::All,
                         rrf: crate::search::RrfOptions {
@@ -4781,7 +4780,7 @@ impl Inner {
                 {
                     return Err(RecordError::Rejected("candidate budget exceeded".into()));
                 }
-                if let SearchMode::WeightedHybrid { rrf, .. } = &mode {
+                if let SearchMode::Hybrid { rrf, .. } = &mode {
                     if rrf
                         .keyword_candidates
                         .is_some_and(|n| n > self.config.max_candidates)

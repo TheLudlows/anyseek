@@ -78,7 +78,7 @@
   "record::query::tests::captured_candidates_survive_cache_rebuild_with_new_physical_rows",
   "record::query::tests::captured_candidate_rejects_same_body_version_vector_patch",
   "record::query::tests::candidate_and_filter_revalidation_fence_failed_component_after_capture",
-  "record::anchor::tests::missing_revision_identities_are_rejected_on_package_open",
+  "record::anchor::tests::incomplete_identities_are_rejected_on_package_open",
   "record::maintenance::tests::receipt_gc_checkpoint_recovery_resolves_publication_failures",
   "record::maintenance::tests::receipt_gc_preserves_history_and_retry_window_and_persists_rollback_floor",
   "record::maintenance::tests::receipt_gc_retains_generation_lease_provenance",
@@ -172,5 +172,8 @@
   "catalog::tests::collection_recreation_keeps_generations_receipts_and_backups_separate",
   "catalog::tests::reclamation_keeps_backup_and_receipt_fences_and_resumes_after_restart",
   "record::reclamation::tests::bounded_retirement_waits_for_owner_and_child_pin_then_resumes",
-  "storage::sqlite_authority::reclamation::tests::retirement_waits_for_pins_fences_old_publish_and_survives_backup"
+  "storage::sqlite_authority::reclamation::tests::retirement_waits_for_pins_fences_old_publish_and_survives_backup",
+  "catalog::tests::cancelled_reclamation_waiter_keeps_lifecycle_guard_until_cleanup_finishes",
+  "storage::sqlite_authority::reclamation::tests::reclamation_queries_are_scoped_paged_and_preserve_global_backup_pins",
+  "storage::sqlite_authority::reclamation::tests::targeted_gc_checks_keep_transitive_roots_pins_and_cycles_protected"
 ]

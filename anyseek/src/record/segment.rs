@@ -190,7 +190,7 @@ mod tests {
         second.write().await.meta.id=1;
         let native=b.inner.lock().await.index.test_index().read().await.record_lexical[0].clone();
         {let mut root=root_index.write().await;root.shard_vec.push(second);root.shard_number=2;root.record_lexical.push(native);}
-        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All}] {
+        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() }] {
             for order in [vec![],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Ascending}],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}]] {
               for (offset,length) in [(0,10),(0,1),(1,1)] {
                 let vector=if mode==SearchMode::Lexical{None}else{Some(Embedding::F32(vec![1.0,0.0]))};

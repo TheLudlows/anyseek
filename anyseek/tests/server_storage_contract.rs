@@ -4,7 +4,6 @@ use anyseek::record::RecordSearch;
 use anyseek::record::{RecordPartition, RecordQuery};
 
 // Retired storage options fail explicitly; retained API defaults are stable.
-use anyseek::index::{AccessType};
 use anyseek::server::api_types::CreateIndexRequest;
 use serde_json::json;
 use std::{fs, path::Path};
@@ -16,12 +15,14 @@ fn api_defaults_and_retired_codecs() {
     ]});
     let parsed: CreateIndexRequest = serde_json::from_value(request.clone()).unwrap();
     assert_eq!(parsed.schema.len(), 1);
-    for codec in ["Lz4", "Zstd"] {
+    for codec in ["None", "Snappy", "Lz4", "Zstd"] {
         let mut invalid = request.clone();
         invalid["document_compression"] = json!(codec);
         assert!(serde_json::from_value::<CreateIndexRequest>(invalid).is_err());
     }
-    assert!(serde_json::from_value::<AccessType>(json!("Ram")).is_err());
+    let mut invalid = request.clone();
+    invalid["schema"][0]["longest"] = json!(true);
+    assert!(serde_json::from_value::<CreateIndexRequest>(invalid).is_err());
 }
 
 #[tokio::test]
@@ -33,18 +34,17 @@ async fn retired_disk_metadata_is_not_silently_reinterpreted() {
     ]))
     .unwrap();
     let meta = serde_json::from_value(json!({
-        "id":0,"name":"storage_contract", "access_type":"Mmap",
+        "id":0,"name":"storage_contract",
         "lexical_similarity":"Bm25f", "tokenizer":"TantivySimpleV1"
     }))
     .unwrap();
-    let index = Ok::<_, String>(records::create(path, meta, (&schema).to_vec()).await)
-        .unwrap();
+    let index = records::create(path, meta, (&schema).to_vec()).await;
 
     drop(index);
     // Unknown codecs/access types are rejected while decoding persisted configuration.
     // Record does not read the retired index.json format.
-    let valid: serde_json::Value=json!({"id":0,"name":"typed","access_type":"Mmap","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1"});
-    for (field,value) in [("access_type","Ram"),("document_compression","Lz4"),("document_compression","Zstd")] {
+    let valid: serde_json::Value=json!({"id":0,"name":"typed","lexical_similarity":"Bm25f","tokenizer":"TantivySimpleV1"});
+    for (field,value) in [("access_type","Mmap"),("access_type","Ram"),("document_compression","None"),("document_compression","Snappy"),("document_compression","Lz4"),("document_compression","Zstd")] {
         let mut invalid=valid.clone();invalid[field]=json!(value);
         assert!(serde_json::from_value::<anyseek::index::IndexMetaObject>(invalid).is_err());
     }

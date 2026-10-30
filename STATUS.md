@@ -1,5 +1,16 @@
 # anyseek 当前状态
 
+## 当前状态（2026-10-30）
+
+主干基线 `9c9e5d2` 已合入 #90/#98/#102：一层 Record WAL、持久业务结果与异步索引、Tenant/Collection 模型和 SQLite 协调元数据已生效。本分支实施 #103/#104/#105，后续代次回收、性能调查和向量组件整理分别见 #106/#107/#94；以下历史验证数字不代表本分支已通过。
+
+本分支已提交 [PR #108](https://github.com/TheLudlows/anyseek/pull/108)，尚未合入。本地通过 171 项有界核心回归、27 项相关集成测试、9 项 doctest、9 项 Node 回归、CLI 校验、真实 HTTP base/committed-ingest，以及默认/无默认特性的独立核心构建。server 全 targets 编译、文档/词法分区静态检查和改动 Python 语法检查通过。另行运行的 fingerprint、查询、合并/消费专项及连续 2305 次更新后恢复用例通过；跨 AES 手工测试仍 ignored。GitHub CI、Windows、真实云 S3 和系统断电未计为本地验收通过。
+
+当前接口以[服务指南](anyseek/src/server/README.md)和[异步写入](docs/async-ingestion.md)为准，后续优先级见[路线](docs/roadmap.md)。不提供旧格式迁移升级。
+
+## 历史实施与验证记录
+
+
 2026-10-30，本分支基于 `b22484a`（#98/#101 已合入）进行确认范围的实现简化：删除 Record 历史格式迁移、旧配额占位和旧裁剪算法；Catalog 只保留一次完整更新校验；恢复使用来源 cut/hash 和必要旧 Operation ID 隔离，不复制完整旧 Catalog；HTTP 认证上下文复用，去掉仅解析集合的 owned task，实际操作继续复核代次。现有业务能力、来源数据保护、HTTP 故障矩阵及 #94 的 shard 工作不变。**格式不兼容：Catalog 4、RecordCheckpointV15、RecordAppliedV13、RecordHistoryTrimV13、anchor manifest 6、完整服务归档 2；旧库/WAL/备份拒绝读取，不提供迁移。**
 
 本轮本地验证：171 个有界核心用例通过，服务端 21 项、调整的三组集成测试通过；Catalog 16 项和旧 checkpoint 拒绝回归通过。本地 HTTP 基础故障、授权、Indexer、committed-ingest，以及 S3 fixture 无缓存基础/历史回归和独立 bucket 完整服务恢复通过。默认及无默认特性核心编译、文档链接和 Python 语法检查通过。全量 library 扩展回归运行至长后缀用例时因构建磁盘占满而停止，未计为通过；已清理旧构建产物并完成上述有界验证。Windows、真实云 S3、硬断电和全量手工验收不推定通过，等待本轮 PR CI。下文为历史记录。

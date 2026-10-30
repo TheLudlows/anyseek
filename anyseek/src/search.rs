@@ -81,15 +81,6 @@ pub enum SearchMode {
         /// Specifies in which clusters to search for ANN results.
         ann_mode: AnnMode,
     },
-    /// Opt-in weighted fusion. Existing Hybrid literals retain legacy defaults.
-    WeightedHybrid {
-        /// Optional vector similarity threshold.
-        similarity_threshold: Option<f32>,
-        /// Vector cluster probing policy, independent of candidate budgets.
-        ann_mode: AnnMode,
-        /// Validated fusion and candidate settings.
-        rrf: RrfOptions,
-    },
     /// Hybrid search mode: Search results are retrieved based on a combination of lexical and vector search.
     /// The relevance score of search results is calculated based on RRF (Reciprocal Rank Fusion) of the result positions in lexical and vector search.
     Hybrid {
@@ -99,6 +90,9 @@ pub enum SearchMode {
         similarity_threshold: Option<f32>,
         /// Specifies in which clusters to search for ANN results.
         ann_mode: AnnMode,
+        /// Fusion weights and candidate budgets; omitted JSON fields use defaults.
+        #[serde(default)]
+        rrf: RrfOptions,
     },
 }
 

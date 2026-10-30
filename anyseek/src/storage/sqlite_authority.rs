@@ -172,6 +172,7 @@ impl SqliteAuthority {
                  PRIMARY KEY(parent_key,child_key),
                  CHECK(parent_key <> child_key)
              );
+             CREATE INDEX IF NOT EXISTS retired_uploads_key_idx ON object_uploads(object_key) WHERE state IN (2,4,5);
              CREATE INDEX IF NOT EXISTS object_edges_child_idx ON object_edges(child_key);
              CREATE TABLE IF NOT EXISTS object_pins (
                  pin_id TEXT PRIMARY KEY,
@@ -187,6 +188,7 @@ impl SqliteAuthority {
                  binding_json TEXT NOT NULL,
                  active INTEGER NOT NULL CHECK(active IN (0,1))
              );
+             CREATE INDEX IF NOT EXISTS object_pins_object_idx ON object_pins(object_key);
              CREATE TABLE IF NOT EXISTS backup_exports (
                  backup_id TEXT PRIMARY KEY, snapshot BLOB NOT NULL
              );
@@ -1051,7 +1053,7 @@ impl SqliteAuthority {
             tx.commit()?;
             return Ok(false);
         }
-        let referenced = reachable_keys(&tx)?.contains(object_key);
+        let referenced = object_is_reachable(&tx, object_key)?;
         // Pins are roots of the same transitive closure.
         if referenced {
             tx.commit()?;
@@ -1075,7 +1077,7 @@ impl SqliteAuthority {
             "SELECT EXISTS(SELECT 1 FROM object_uploads WHERE object_key=?1 AND sha256=?2 AND byte_length=?3 AND state IN (2,4,5))",
             params![reference.key,reference.sha256.as_slice(),to_i64(reference.length)?], |r|r.get(0),
         )?;
-        let collectible = matches && !reachable_keys(&tx)?.contains(&reference.key);
+        let collectible = matches && !object_is_reachable(&tx, &reference.key)?;
         if !collectible {
             tx.commit()?;
             return Ok(false);
@@ -1121,6 +1123,25 @@ fn registry_reference(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRef> {
     let length: i64 = row.get(2)?;
     Ok(ObjectRef {key:row.get(0)?,sha256:digest.try_into().map_err(|_|rusqlite::Error::InvalidQuery)?,
         length:u64::try_from(length).map_err(|_|rusqlite::Error::InvalidQuery)?})
+}
+
+// Walk only this object's ancestors, using the reverse-edge index. UNION also
+// terminates malformed cycles. A root or pin protects every descendant.
+fn object_is_reachable(connection: &Connection, key: &str) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "WITH RECURSIVE ancestors(object_key) AS (
+             SELECT ?1 UNION
+             SELECT e.parent_key FROM object_edges e JOIN ancestors a ON e.child_key=a.object_key
+         )
+         SELECT EXISTS(SELECT 1 FROM ancestors a WHERE
+             EXISTS(SELECT 1 FROM object_pins p WHERE p.object_key=a.object_key) OR
+             EXISTS(SELECT 1 FROM partition_heads h WHERE h.retired=0 AND (
+                 json_extract(h.wal_tip_json,'$.key')=a.object_key OR
+                 json_extract(h.manifest_json,'$.key')=a.object_key OR
+                 json_extract(h.bootstrap_json,'$.key')=a.object_key OR
+                 json_extract(h.log_anchor_json,'$.key')=a.object_key)))",
+        [key], |r| r.get(0),
+    )
 }
 
 /// Walk immutable dependency metadata. All callers making lifecycle decisions

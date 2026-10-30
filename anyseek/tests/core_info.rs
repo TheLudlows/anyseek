@@ -1,6 +1,6 @@
 //! Public Record configuration and statistics are observational reads.
 #[path = "common/records.rs"] mod records;
-use anyseek::index::{AccessType, Clustering, DocumentCompression, FrequentwordType,
+use anyseek::index::{Clustering, FrequentwordType,
     IndexMetaObject, LexicalSimilarity, NgramSet, SchemaField, StopwordType, TokenizerType};
 use anyseek::vector::Inference;
 use serde_json::json;
@@ -17,8 +17,6 @@ async fn typed_snapshot_preserves_visible_position_and_configuration() {
         stop_words: StopwordType::None,
         frequent_words: FrequentwordType::None,
         ngram_indexing: NgramSet::SingleTerm as u8,
-        document_compression: DocumentCompression::Snappy,
-        access_type: AccessType::Mmap,
         clustering: Clustering::None,
         inference: Inference::None,
     };
