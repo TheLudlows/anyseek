@@ -60,17 +60,17 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | POST | `/api/v1/service-backups` | master 完整 catalog/数据/collection backups 快照 |
 | POST | `/api/v1/service-restores` | master 恢复到新的未启动根；旧 key 禁用 |
 
-固定静态资源另由同一服务提供。没有旧按 key 数据路由、按数字 DocID 删除路由或旧 CORS 预检层的兼容承诺。query 参数放在 POST JSON body，未知路径返回 404，不支持的方法由路由器返回 405。
+静态资源由独立控制台服务器提供，Rust 服务只保留 API。没有旧按 key 数据路由、按数字 DocID 删除路由或旧 CORS 预检层的兼容承诺。query 参数放在 POST JSON body，未知路径返回 404，不支持的方法由路由器返回 405。
 
 ## Web UI 和工具
 
-UI 增加实体目录/一跳关系检查；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、链接/原文/图片预览、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面支持 staging 租约检查和 renew 条件写入；未发布私有正文在 abort/到期后安全清理并保留摘要回执。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 Tenant/Key 或逐条更新/删除管理页面。
+独立 `console/` 使用 React/TypeScript/Vite，Rust 只保留 API，静态资源不再嵌入内核。UI 提供实体目录/一跳关系检查；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、原始记录/JSON 预览与复制、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面支持 staging 租约检查和 renew 条件写入；未发布私有正文在 abort/到期后安全清理并保留摘要回执。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 Tenant/Key 或逐条更新/删除管理页面。
 
-完整冒烟为 `scripts/record_service_smoke.py`，`--browser` 启用 Chromium，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 留在可选 `anyseek::server` 模块。
+完整冒烟为 `scripts/record_service_smoke.py`，浏览器验证在 `console/` 运行 `npm run test:browser`，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 留在可选 `anyseek::server` 模块。
 
 ## 资源与未完成项
 
-Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
+Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，公共/存活 8/8；partition 内部 8。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 

@@ -8,7 +8,7 @@ def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--browser',action='store_true');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','history','indexer','authorization','ingest']);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','history','indexer','authorization','ingest']);args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
     with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
@@ -580,11 +580,6 @@ def main():
             upload_exercise(call,restart_with,args.faults)
             from record_lease_smoke import exercise as lease_exercise
             lease_exercise(call,restart_with,root.parent,False)
-            if args.browser:
-                # The capacity test intentionally fills all 32 backup slots.
-                # Retire our completed evidence fixture before the UI creates its own.
-                from record_service_browser import exercise
-                exercise(base,tenant_key,call)
             if args.faults:lease_exercise(call,restart_with,root.parent,True,only_faults=True)
             from record_history_smoke import exercise as history_exercise
             history_exercise(call,restart_with,root.parent,args.faults)

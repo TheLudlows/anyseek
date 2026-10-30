@@ -1,0 +1,448 @@
+import { test, expect, type Page } from "@playwright/test";
+import { randomBytes } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+
+const login = async (page: Page) => {
+  await page.goto("/");
+  await page
+    .getByLabel("Tenant API Key", { exact: true })
+    .fill(process.env.ANYSEEK_TEST_KEY!);
+  await page.getByRole("button", { name: "连接服务", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "所有集合" })).toBeVisible();
+};
+const operation = () => ({
+  epoch: Math.floor(Date.now() / 86400000),
+  nonce: randomBytes(16).toString("hex"),
+});
+const call = async (path: string, body?: object) => {
+  const response = await fetch("http://127.0.0.1:18180/api/v1/" + path, {
+    method: body ? "POST" : "GET",
+    headers: {
+      apikey: process.env.ANYSEEK_TEST_KEY!,
+      "Content-Type": "application/json",
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  expect(response.status, await response.clone().text()).toBe(200);
+  return response.json();
+};
+
+test("API-only kernel, connection, real collection list, responsive navigation and screenshots", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  for (const path of ["/", "/js/master.js", "/css/master.css", "/svg/logo.svg"])
+    expect((await fetch("http://127.0.0.1:18180" + path)).status).toBe(404);
+  await page.goto("/");
+  await mkdir("test-results/screenshots", { recursive: true });
+  await page.screenshot({
+    path: "test-results/screenshots/welcome.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.getByLabel("Tenant API Key", { exact: true }).fill("invalid");
+  await page.getByRole("button", { name: "连接服务", exact: true }).click();
+  await expect(page.getByRole("alert").first()).toBeVisible();
+  await login(page);
+  await expect(page.getByRole("table")).toContainText("knowledge_base");
+  await page.screenshot({
+    path: "test-results/screenshots/collections.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.getByLabel("筛选集合").fill("missing");
+  await expect(
+    page.getByRole("heading", { name: "没有匹配的集合" }),
+  ).toBeVisible();
+  await page.getByLabel("筛选集合").clear();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "打开导航" }).click();
+  await page
+    .getByRole("navigation", { name: "主导航" })
+    .getByRole("button", { name: "数据", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "数据", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("table")).toContainText("guide_1");
+  await page.screenshot({
+    path: "test-results/screenshots/mobile-data.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test("creation and i64 import survive lost responses and reload with identical requests; exact display/copy, cursor and conditional edit", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page);
+  const creations: string[] = [];
+  await page.route(
+    "**/api/v1/index",
+    async (route) => {
+      creations.push(route.request().postData()!);
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      await route.abort("failed");
+    },
+    { times: 1 },
+  );
+  await page
+    .getByRole("button", { name: "创建集合", exact: true })
+    .first()
+    .click();
+  await page.getByLabel("集合名称", { exact: true }).fill("browser_records");
+  await page.getByText("字段结构 · Schema", { exact: true }).click();
+  await page.getByLabel("字段结构 JSON").fill(
+    JSON.stringify([
+      { field: "title", field_type: "Text" },
+      { field: "body", field_type: "Text" },
+      { field: "rank", field_type: "Int", filterable: true },
+      { field: "measure", field_type: "Float" },
+      { field: "data", field_type: "Json" },
+    ]),
+  );
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "创建集合", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "重试原始创建" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("集合名称", { exact: true })).toBeDisabled();
+  await page.reload();
+  await page
+    .getByRole("button", { name: "创建集合", exact: true })
+    .first()
+    .click();
+  await page.route(
+    "**/api/v1/index",
+    async (route) => {
+      creations.push(route.request().postData()!);
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  await page.getByRole("button", { name: "重试原始创建" }).click();
+  await expect(
+    page.getByRole("heading", { name: "数据", exact: true }),
+  ).toBeVisible();
+  expect(creations[0]).toBe(creations[1]);
+  const docs = [
+    "9223372036854775807",
+    "-9223372036854775808",
+    "9007199254740993",
+  ].map(
+    (n, i) =>
+      `{"title":"precision ${i}","body":"precision","rank":${n},"measure":1.2500e0,"data":{"n":${n}}}`,
+  );
+  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page
+    .getByLabel("导入 JSON", { exact: true })
+    .fill("[" + docs.join(",") + "]");
+  const writes: string[] = [];
+  await page.route(
+    "**/api/v1/index/browser_records/doc",
+    async (route) => {
+      writes.push(route.request().postData()!);
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      await route.abort("failed");
+    },
+    { times: 1 },
+  );
+  await page.getByRole("button", { name: "写入集合", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "重试原始写入" }),
+  ).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "数据", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await expect(page.getByLabel("导入 JSON", { exact: true })).toBeDisabled();
+  await page.route("**/api/v1/index/browser_records/doc", async (route) => {
+    writes.push(route.request().postData()!);
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "重试原始写入" }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "已确认写入 3 条" }),
+  ).toBeVisible();
+  expect(writes[0]).toBe(writes[1]);
+  writes
+    .slice(1)
+    .forEach((body, i) =>
+      expect(body.endsWith('"document":' + docs[i] + "}")).toBe(true),
+    );
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "关闭", exact: true })
+    .last()
+    .click();
+  await expect(page.getByRole("table")).toContainText("9223372036854775807");
+  await page
+    .getByRole("navigation", { name: "主导航" })
+    .getByRole("button", { name: "检索调试", exact: true })
+    .click();
+  await page.getByRole("textbox", { name: "检索内容" }).fill("precision");
+  await page.getByRole("button", { name: "运行检索", exact: true }).click();
+  await page.locator(".result-card").filter({ hasText: "precision 0" }).click();
+  const preview = page.getByRole("complementary", { name: "记录详情" });
+  await expect(preview.locator("pre").first()).toContainText(
+    "9223372036854775807",
+  );
+  await expect(preview.locator("pre").first()).toContainText("1.25");
+  await preview
+    .getByRole("button", { name: "复制 Document JSON", exact: true })
+    .click();
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toBe(docs[0].replace("1.2500e0", "1.25"));
+  const first = JSON.parse(writes[0]);
+  const original = await call("index/browser_records/doc/" + first.record_id);
+  expect(original.record_id).toBe(first.record_id);
+  await page
+    .getByRole("navigation", { name: "主导航" })
+    .getByRole("button", { name: "数据", exact: true })
+    .click();
+  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.getByLabel("Record envelope 模式").check();
+  await page
+    .getByLabel("导入 JSON", { exact: true })
+    .fill(
+      `{"record_id":"${first.record_id}","routing_key":"${first.routing_key}","expected":{"Match":1},"document":${copied}}`,
+    );
+  await page.getByRole("button", { name: "写入集合", exact: true }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "已确认写入 1 条" }),
+  ).toBeVisible();
+  expect(
+    (await call("index/browser_records/doc/" + first.record_id)).version,
+  ).toBe(2);
+});
+
+test("real lexical/vector/hybrid search, empty state, explanations, advanced tools and screenshots", async ({
+  page,
+}) => {
+  await login(page);
+  await page
+    .getByLabel("当前集合", { exact: true })
+    .selectOption("knowledge_base");
+  await page
+    .getByRole("navigation", { name: "主导航" })
+    .getByRole("button", { name: "检索调试", exact: true })
+    .click();
+  await page.getByRole("textbox", { name: "检索内容" }).fill("检索");
+  await page.getByRole("button", { name: "运行检索", exact: true }).click();
+  await expect(page.locator(".result-card").first()).toBeVisible();
+  await page.locator(".result-card").first().click();
+  await expect(
+    page.getByRole("complementary", { name: "记录详情" }),
+  ).toContainText("lexical");
+  await page.screenshot({
+    path: "test-results/screenshots/search.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.getByRole("button", { name: "向量 Vector", exact: true }).click();
+  await page.getByRole("textbox", { name: "查询向量" }).fill("[1,0,0]");
+  await page.getByRole("button", { name: "运行检索", exact: true }).click();
+  await expect(page.locator(".result-card")).toHaveCount(4);
+  await page.getByRole("button", { name: "混合 Hybrid", exact: true }).click();
+  await page.getByRole("button", { name: "运行检索", exact: true }).click();
+  await expect(page.locator(".result-card").first()).toBeVisible();
+  await page
+    .getByRole("button", { name: "关键词 Lexical", exact: true })
+    .click();
+  await page
+    .getByRole("textbox", { name: "检索内容" })
+    .fill("zzzzmissingzzzzz");
+  await page.getByRole("button", { name: "运行检索", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "没有找到匹配记录" }),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation", { name: "主导航" })
+    .getByRole("button", { name: "数据", exact: true })
+    .click();
+  await page.getByRole("button", { name: "高级检查", exact: true }).click();
+  await page.getByRole("button", { name: "运行检查", exact: true }).click();
+  await expect(page.locator(".json-view pre")).toContainText("records");
+  await page.getByRole("button", { name: "来源证据", exact: true }).click();
+  await expect(page.getByLabel("请求 JSON")).toContainText("locator");
+  await page.getByRole("button", { name: "暂存与租约", exact: true }).click();
+  await page.getByLabel("Record ID", { exact: true }).fill("missing");
+  await page.getByRole("button", { name: "运行检查", exact: true }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+});
+
+test("real cursor pagination, relation/evidence/generation tools and administrator backup/restore", async ({
+  page,
+}) => {
+  const collection = "product_docs";
+  for (const id of ["entity_a", "entity_b"])
+    await call(`index/${collection}/doc`, {
+      operation_id: operation(),
+      record_id: id,
+      routing_key: "route",
+      expected: "Absent",
+      document: { title: id, body: "entity" },
+      system: { kind: "entity" },
+    });
+  await call(`index/${collection}/doc`, {
+    operation_id: operation(),
+    record_id: "edge",
+    routing_key: "route",
+    expected: "Absent",
+    document: { title: "Knows", body: "relation" },
+    system: {
+      kind: "relation",
+      relation: {
+        from: { record_id: "entity_a", routing_key: "route", version: 1 },
+        to: { record_id: "entity_b", routing_key: "route", version: 1 },
+        relation_type: "knows",
+      },
+    },
+  });
+  await call(`index/${collection}/doc`, {
+    operation_id: operation(),
+    record_id: "source",
+    routing_key: "route",
+    expected: "Absent",
+    document: { title: "Source", body: "sourceword" },
+    system: { kind: "source" },
+  });
+  await call(`index/${collection}/doc`, {
+    operation_id: operation(),
+    record_id: "generation",
+    routing_key: "route",
+    expected: "Absent",
+    generation: {
+      action: "stage",
+      generation_id: "g1",
+      source: { record_id: "source", routing_key: "route", version: 1 },
+      members: ["chunk_a"],
+      chunks: [
+        {
+          record_id: "chunk_a",
+          document: { title: "Chunk A", body: "private" },
+        },
+      ],
+    },
+  });
+  for (let i = 0; i < 20; i++)
+    await call(`index/${collection}/doc`, {
+      operation_id: operation(),
+      record_id: "page_" + i.toString().padStart(2, "0"),
+      routing_key: "route",
+      expected: "Absent",
+      document: { title: "分页 " + i, body: "pagination" },
+    });
+  await login(page);
+  await page.getByLabel("当前集合", { exact: true }).selectOption(collection);
+  await page
+    .getByRole("navigation", { name: "主导航" })
+    .getByRole("button", { name: "数据", exact: true })
+    .click();
+  await expect(page.locator("tbody tr")).toHaveCount(20);
+  const firstIds = await page.locator(".record-link").allTextContents();
+  await page.getByRole("button", { name: "下一页记录", exact: true }).click();
+  await expect(page.getByText("第 2 页", { exact: true })).toBeVisible();
+  await expect(page.locator("tbody tr")).toHaveCount(4);
+  const secondIds = await page.locator(".record-link").allTextContents();
+  expect(secondIds.filter((id) => firstIds.includes(id))).toEqual([]);
+  await page.getByRole("button", { name: "高级检查", exact: true }).click();
+  await page.getByRole("button", { name: "实体目录", exact: true }).click();
+  await page.getByRole("button", { name: "运行检查", exact: true }).click();
+  await expect(page.locator(".json-view pre")).toContainText("entity_a");
+  await page.getByRole("button", { name: "一跳关系", exact: true }).click();
+  await page.getByLabel("请求 JSON", { exact: true }).fill(
+    JSON.stringify({
+      seeds: [{ record_id: "entity_a", routing_key: "route", version: 1 }],
+      direction: "out",
+      relation_types: [],
+      per_seed: 10,
+      max_candidates: 100,
+      allow_partial: false,
+    }),
+  );
+  await page.getByRole("button", { name: "运行检查", exact: true }).click();
+  await expect(page.locator(".json-view pre")).toContainText("entity_b");
+  await page.getByRole("button", { name: "关系融合", exact: true }).click();
+  await page.getByLabel("请求 JSON", { exact: true }).fill(
+    JSON.stringify({
+      query: "relation",
+      length: 10,
+      relation_fusion: {
+        rrf: {
+          constant: 3,
+          keyword_weight: 1,
+          vector_weight: 0,
+          keyword_candidates: 100,
+        },
+        relation_weight: 1,
+        neighbors: {
+          seeds: [{ record_id: "entity_a", routing_key: "route", version: 1 }],
+          direction: "out",
+          relation_types: [],
+          per_seed: 10,
+          max_candidates: 100,
+          allow_partial: false,
+        },
+      },
+    }),
+  );
+  await page.getByRole("button", { name: "运行检查", exact: true }).click();
+  await expect(page.locator(".json-view pre")).toContainText(
+    "candidate_window",
+  );
+  await page.getByRole("button", { name: "来源证据", exact: true }).click();
+  await page.getByLabel("请求 JSON", { exact: true }).fill(
+    JSON.stringify({
+      record_id: "source",
+      routing_key: "route",
+      version: 1,
+      locator: { kind: "utf8", field: "body", start: 0, end: 6 },
+    }),
+  );
+  await page.getByRole("button", { name: "运行检查", exact: true }).click();
+  await expect(page.locator(".json-view pre")).toContainText("content_sha256");
+  await expect(page.locator(".json-view pre")).toContainText("source");
+  await page.getByRole("button", { name: "暂存与租约", exact: true }).click();
+  await page.getByLabel("Record ID", { exact: true }).fill("generation");
+  await page.getByRole("button", { name: "运行检查", exact: true }).click();
+  await expect(page.locator(".json-view pre")).toContainText(
+    "lease_expires_at_ms",
+  );
+  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  await page
+    .getByLabel("Master API Key", { exact: true })
+    .fill(process.env.ANYSEEK_TEST_MASTER!);
+  await page
+    .getByRole("button", { name: "创建 / 重试备份", exact: true })
+    .click();
+  await expect(page.locator(".json-view pre")).toContainText("backup_id");
+  expect(
+    await page.getByLabel("服务备份 ID", { exact: true }).inputValue(),
+  ).toMatch(/^[0-9a-f]{64}$/);
+  await page
+    .getByRole("button", { name: "恢复 / 重试到新目录", exact: true })
+    .click();
+  await page.getByRole("button", { name: "确认恢复", exact: true }).click();
+  await expect(page.locator(".json-view pre")).toContainText("target_root");
+  await expect(page.locator(".json-view pre")).toContainText(
+    '"started": false',
+  );
+  expect(
+    await page.evaluate(() => JSON.stringify(sessionStorage)),
+  ).not.toContain(process.env.ANYSEEK_TEST_MASTER!);
+});

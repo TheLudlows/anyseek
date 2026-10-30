@@ -1,6 +1,6 @@
 # anyseek 开发与验证
 
-仅有一个 `anyseek` Cargo package：核心库位于 `anyseek/src/`，服务实现及 HTTP 契约位于 `anyseek/src/server/`，Web UI 位于 `anyseek/web/`。默认关闭 `server` feature；嵌入库不引入 HTTP/OpenAPI/服务日志依赖。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端为 `TheLudlows/anyseek`。
+仅有一个 `anyseek` Cargo package：核心库位于 `anyseek/src/`，服务实现及 HTTP 契约位于 `anyseek/src/server/`，独立 Web 控制台位于 `console/`，使用 Node.js 24/React/TypeScript/Vite；Rust 服务不嵌入任何前端资源。默认关闭 `server` feature；嵌入库不引入 HTTP/OpenAPI/服务日志依赖。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端为 `TheLudlows/anyseek`。
 
 ## 构建与测试
 
@@ -17,26 +17,26 @@ cargo test --workspace --doc
 cargo doc --workspace --no-deps
 python3 scripts/check_core_boundary.py
 python3 scripts/check_docs_brand.py
-node --test scripts/document_precision.test.cjs
+npm ci --prefix console
+npm test --prefix console
+npm run build --prefix console
 ```
 
 核心默认启用 `zh`、`vb`。独立边界脚本验证核心可脱离 HTTP 依赖构建；不是新的 SDK 或模型运行时。`.cargo/config.toml` 使用本机 CPU 指令，不将这类产物跨不同 CPU runner 复用。
 
 ## 真实 HTTP 与浏览器
 
-所有冒烟使用临时数据，不连接用户服务。浏览器测试需 Python Playwright 和 Chromium：
+所有冒烟使用临时数据，不连接用户服务。独立控制台浏览器测试需 Node.js 24、Playwright 和 Chromium（见[控制台指南](../console/README.md)）：
 
 ```sh
-python3 -m pip install playwright
-python3 -m playwright install chromium
-python3 scripts/record_precision_browser.py --server target/debug/anyseek_server
-python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
+(cd console && npx playwright install chromium && npm run test:browser)
+python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 cargo build -p anyseek --features server,fault-injection
-python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser --faults
+python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults
 python3 scripts/s3_storage_smoke.py --server target/debug/anyseek_server --faults
 ```
 
-Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测试；测试后重新 `cargo build --workspace --features server` 得到默认二进制。测试环境变量前缀为 `ANYSEEK_`（例如 `ANYSEEK_TEST_ROOT`、`ANYSEEK_BROWSER_TEST`）；正常服务主密钥仍为 `MASTER_KEY_SECRET`。
+Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测试；测试后重新 `cargo build --workspace --features server` 得到默认二进制。测试环境变量前缀为 `ANYSEEK_`（例如 `ANYSEEK_TEST_ROOT`）；正常服务主密钥仍为 `MASTER_KEY_SECRET`。
 
 ## S3 无缓存与合同验收
 

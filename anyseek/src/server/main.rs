@@ -2,7 +2,7 @@
 #![crate_name = "anyseek_server"]
 #![allow(clippy::approx_constant)]
 
-//! anyseek HTTP service and embedded search UI.
+//! AnySeek HTTP API service. The standalone console lives in console/.
 //! Build from this repository; see anyseek/src/server/README.md for startup and authentication,
 //! FEATURES.md for the complete route inventory, and test_api.rest for HTTP examples.
 

@@ -2,7 +2,7 @@
 
 `POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/ingest/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/doc` 同步语义保留，独立 Intake 日志已移除。详见[异步写入实施](../../../docs/async-ingestion.md)。
 
-默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -12,7 +12,7 @@ export MASTER_KEY_SECRET='replace-with-your-private-secret'
 target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 ```
 
-启动日志中的 `Master API key` 只用于管理 Tenant 和普通 API Key，以及现有服务备份管理；不能用于集合数据接口。先 POST `/api/v1/tenants` 提交 `{operation_id,tenant_id}`，再由 master POST `/api/v1/apikey` 提交 `{operation_id,tenant_id,key_id,apikey_base64}`，签发普通 Key。打开 `http://127.0.0.1:8080/` 后使用该 Tenant Key 连接。Tenant ID 与 Collection ID 均须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写，Tenant 不支持改名或删除。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
+启动日志中的 `Master API key` 只用于管理 Tenant 和普通 API Key，以及现有服务备份管理；不能用于集合数据接口。先 POST `/api/v1/tenants` 提交 `{operation_id,tenant_id}`，再由 master POST `/api/v1/apikey` 提交 `{operation_id,tenant_id,key_id,apikey_base64}`，签发普通 Key。按[控制台指南](../../../console/README.md)启动独立前端后使用该 Tenant Key 连接。API 默认端口为 8080，根路径不提供页面。Tenant ID 与 Collection ID 均须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写，Tenant 不支持改名或删除。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
 
 | 参数 | 默认值与约束 |
 | --- | --- |
@@ -134,7 +134,7 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 | 操作 / HTTP body / 响应 | 1 MiB / 2 MiB / 16 MiB |
 | Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
 | Catalog | 16 MiB 元数据、10,000 操作，仅安全回收过期控制回执 |
-| admission | 普通 32/每集合 16、恢复 2/1、后台 2/1、可信控制 8/2、静态/存活 8/8；partition 内部 16；30 秒请求期限 |
+| admission | 普通 32/每集合 16、恢复 2/1、后台 2/1、可信控制 8/2、公共/存活 8/8；partition 内部 16；30 秒请求期限 |
 | 调度 | 不同 collection 可并行；共同快照保留全局屏障，Key 撤销不排空数据工作，资源不足立即 Busy |
 | collection backups | 32 个，可持久退役 |
 | service archives / 新恢复根 | 每源根最多 4 个 archive/准备项，托管父目录最多 4 个生成根，备份权威 payload 预检 1 GiB |
@@ -160,7 +160,8 @@ Service archive/root 清理是明确的离线操作，不提供删除运行根�
 ```sh
 cargo test --workspace --features server --all-targets
 python3 scripts/check_core_boundary.py
-python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
+python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
+# 独立前端浏览器检查：见 console/README.md
 ```
 
 浏览器测试需 Python Playwright 和 Chromium。故障矩阵需先构建 `cargo build -p anyseek --features server,fault-injection`，再运行同一 smoke 脚本的 `--faults`。正常构建默认关闭故障注入。

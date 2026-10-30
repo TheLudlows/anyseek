@@ -51,9 +51,23 @@ jobs:
           PYCODE
       - name: Verify documentation links and product identifiers
         run: python3 scripts/check_docs_brand.py
-      - name: Verify document editor numeric precision and retries
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: Build standalone console and verify precise writes/retries
         if: steps.scope.outputs.code == 'true'
-        run: node --test scripts/document_precision.test.cjs
+        run: |
+          npm ci --prefix console
+          npm test --prefix console
+          npm run build --prefix console
+      - uses: actions/upload-artifact@v4
+        if: steps.scope.outputs.code == 'true'
+        with:
+          name: anyseek-console
+          path: console/dist/
+
       - name: Verify standalone core boundary
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/check_core_boundary.py
@@ -163,6 +177,24 @@ jobs:
           else
             target/debug/anyseek_server generate_openapi=true
           fi
+      - uses: actions/setup-node@v4
+        if: matrix.lane == 'core' && runner.os == 'Linux'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: Standalone console against disposable real API
+        if: matrix.lane == 'core' && runner.os == 'Linux'
+        working-directory: console
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.lane == 'core' && runner.os == 'Linux'
+        with:
+          name: console-browser-results
+          path: console/test-results/
 
   full-acceptance:
     if: github.event_name == 'workflow_dispatch' && inputs.full

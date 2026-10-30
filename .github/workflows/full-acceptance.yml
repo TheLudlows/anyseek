@@ -82,14 +82,26 @@ jobs:
           print('PASS no direct highlighter dependency')
           print('PASS no PDF/CSV/directory parser or query rewriting dependencies in resolved graph')
           PYCODE
-      - name: Install browser test runtime
+      - name: HTTP API smoke (no SDK)
+        run: python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: Standalone console browser acceptance
+        working-directory: console
         run: |
-          python3 -m pip install playwright
-          python3 -m playwright install --with-deps chromium
-      - name: HTTP API and embedded UI smoke (no SDK)
-        env:
-          ANYSEEK_BROWSER_TEST: "1"
-        run: python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --browser
+          npm ci
+          npm test
+          npm run build
+          npx playwright install --with-deps chromium
+          npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: console-full-browser-results
+          path: console/test-results/
       - name: Existing core and server tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --workspace --features server --all-targets
@@ -190,7 +202,7 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo build -p anyseek --features server
       - name: Native service HTTP and restart acceptance (Windows)
-        # Linux normal HTTP is included in build-and-smoke's --browser run.
+        # Linux normal HTTP is included in build-and-smoke; console browser checks run separately.
         if: runner.os == 'Windows'
         run: python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe
       - name: Build explicit fault-injection service (not release binary)

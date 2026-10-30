@@ -28,3 +28,10 @@ anyseek/tests/index_docid3_*/
 # Python smoke-test bytecode
 __pycache__/
 *.py[cod]
+
+# Standalone console
+console/node_modules/
+console/dist/
+console/*.tsbuildinfo
+console/test-results/
+console/playwright-report/
