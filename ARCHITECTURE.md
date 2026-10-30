@@ -58,3 +58,20 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 这是有界单机实现：Record 累计账本默认 10,000 项、checkpoint/状态容量等限制见 [FEATURES](FEATURES.md)。history trim 按保留期限回收操作历史，checkpoint/对象 GC 负责各自闭包；这些不等于已删除集合代次的最终物理回收（#106）。P2 的 source/evidence、generation、TTL、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、服务总缓存预算和完整资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文替换的复用边界见 [Tantivy 评估](docs/tantivy-evaluation.md)。
 
 [Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/src/server/README.md) · [许可](LICENSE)
+
+## 向量索引与 Segment 所有权
+
+一个逻辑 `VectorIndex` 持有当前有界 `segments` 拓扑。可变 tail 独立持有一个可写 Segment；冻结 Segment 与新 tail 一起参与查询。没有独立逻辑 shard 数量配置或计数，组件数量直接来自固定读取拓扑的数组长度。
+
+| 归属 | 保存内容 | 生命周期 |
+| --- | --- | --- |
+| RecordPartition | 规范数据、版本/删除/来源可见性、操作回执、当前 ordinal 到稳定记录身份的映射 | 权威提交与恢复 |
+| VectorIndex / RetrievalView | 查询拓扑、全局候选预算与 Top-K、伴随 Tantivy runtime 的读取 pin | 捕获读取视图，旋转/合并时替换拓扑 |
+| VectorSegment | 自己的向量/metadata 文件与 mmap、ANN 聚类/量化、物理行身份和活动 mask、构建内存租约 | 单组件构建、冻结、合并及最终释放 |
+| Tantivy runtime | 全文 postings、固定 Searcher、原生统计及文件引用 | 全文消费与固定读者 |
+
+`VectorIndex` 的 `meta`、schema、量化/距离/SIMD 参数是逻辑查询配置，`record_lexical` 与 `segments` 在同一读取拓扑中一一对应。Segment 中的同类配置用于本地文件解释与构建，不是独立逻辑索引的可变配置。其 `indexed_*`、`committed_doc_count`、`uncommitted`、`failed` 描述单组件构建进度；`active`、`delete_hashset` 和退休 token 是 Record 权威可见性的派生读取状态。`path`、向量及 metadata 文件/mmap、facet 字典、`block_vector_buffer`、层级偏移、维度/精度/量化范围属于物理 Segment；`build_reservation` 与 `build_input_covered` 随组件构建及引用释放。冻结后文件不可变，派生可见性 mask 仍可因 Record 更新而退休旧行。
+
+物理地址只在捕获的拓扑内表示 `local_ordinal * segments.len() + slot`。tail 旋转、合并和恢复对当前映射整体重排；固定读者继续使用原拓扑，并通过稳定记录身份、revision/fingerprint 和退休 token 重验。拓扑位置不写入共享 Segment 的 `meta.id`，也不充当持久记录身份。
+
+查询仍有界遍历 tail 和有效 Segment，按统一距离、稳定业务 ID 和候选预算做一次全局合并；各 Segment 内保留 ANN 聚类、SIMD 和量化。移除重复数量和位置 ID 不意味着把数据合为单个大文件，也不改变 ANN 的近似召回边界。

@@ -3,7 +3,7 @@
 //! docs/record-model.md for the bounded P1-A scope and validation evidence.
 use crate::{
     component::Commit,
-    index::{Document, IndexArc, IndexDocuments, IndexMetaObject, SchemaField, create_index},
+    index::{Document, VectorIndexArc, IndexDocuments, IndexMetaObject, SchemaField, create_index},
     search::{FacetFilter, QueryType, ResultSort, ResultType, SearchMode},
     storage::{journal::CreateError, partition::PartitionJournal},
     vector::Embedding,
@@ -887,10 +887,10 @@ async fn build(
     let (index,ordinals)=build_at(path,&cache,config,state).await?;
     Ok((view::RetrievalView::single(index),ordinals))
 }
-async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Result<(IndexArc,Vec<String>),RecordError>{
+async fn build_at(path:&Path,cache:&Path,config:&RecordConfig,state:&State)->Result<(VectorIndexArc,Vec<String>),RecordError>{
     build_at_selected(path,cache,config,state,None).await
 }
-async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(IndexArc,Vec<String>),RecordError>{
+async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&State,selected:Option<&std::collections::BTreeSet<String>>)->Result<(VectorIndexArc,Vec<String>),RecordError>{
     let visible = evidence::visibility(&state.records)?;
     let records: Vec<_> = state.records.values().filter(|record|
         visible.get(&record.record_id) == Some(&true)
@@ -898,7 +898,7 @@ async fn build_at_selected(path:&Path,cache:&Path,config:&RecordConfig,state:&St
         && !(state.evidence_quarantined && temporal::protected(record))).collect();
     build_records_at(path,cache,config,state.seq,records).await
 }
-async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u64,records:Vec<&Record>)->Result<(IndexArc,Vec<String>),RecordError>{
+async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u64,records:Vec<&Record>)->Result<(VectorIndexArc,Vec<String>),RecordError>{
     let disk_limit=config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("build disk limit overflow"))?;
     let _disk=crate::storage::build_budget::ensure_scope(path,disk_limit).map_err(storage)?;
     let reservation=build_budget::admit(config,records.iter().copied())?;
@@ -906,15 +906,14 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
         &cache,
         config.index.clone(),
         &retrieval_schema(config),
-        Some(1),
     )
     .await
     .map_err(storage)?;
     // Break legacy ownership cycles so a rejected candidate can release mapped
     // files on Windows. The partition owns the root for the complete query.
-    index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
-    index.read().await.shard_vec[0].write().await.build_input_covered=true;
-    for shard in &index.read().await.shard_vec {
+    index.read().await.segments[0].write().await.build_reservation=Some(reservation);
+    index.read().await.segments[0].write().await.build_input_covered=true;
+    for shard in &index.read().await.segments {
         let mut shard=shard.write().await;
         shard.active=Some(crate::active::ActiveStatistics::default());
         // Record segments must not choose a quantizer from the first arriving
@@ -937,7 +936,7 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
     let native = lexical::runtime::Runtime::create_owned(&cache.join("native"), config).await?;
     for record in &records {
         native.append(lexical::Identity { id:record.record_id.clone(),version:record.version,revision:sequence },record.document.as_ref().unwrap(),false).await?;
-        index.read().await.shard_vec[0]
+        index.read().await.segments[0]
             .write()
             .await
             .active
@@ -953,7 +952,7 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
     native.flush().await?;
     index.write().await.record_lexical.push(native);
     index.commit().await.map_err(storage)?;
-    index.read().await.shard_vec[0].write().await.build_input_covered=false;
+    index.read().await.segments[0].write().await.build_input_covered=false;
     Ok((
         index,
         records.into_iter().map(|r| r.record_id.clone()).collect(),
@@ -1854,7 +1853,7 @@ mod tests {
             let inner = p.inner.lock().await;
             let index = inner.index.test_index().read().await;
             assert!(index.stored_field_names.is_empty());
-            for shard in &index.shard_vec {
+            for shard in &index.segments {
                 assert!(shard.read().await.stored_field_names.is_empty());
             }
             drop(index);
@@ -3880,7 +3879,7 @@ mod tests {
         // The final boundary crossing still uses authoritative publication.
         {
             let mut inner = partition.inner.lock().await;
-            let shard = inner.index.test_index().read().await.shard_vec[0].clone();
+            let shard = inner.index.test_index().read().await.segments[0].clone();
             let native=inner.index.test_index().read().await.record_lexical[0].clone();
             shard.write().await.build_input_covered=true;
             for id in 1..65536 {

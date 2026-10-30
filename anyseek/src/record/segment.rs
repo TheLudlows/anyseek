@@ -186,10 +186,9 @@ mod tests {
         // This exercises global channel ranking/RRF, rather than merging two
         // already-fused result lists in the test.
         let root_index=a.inner.lock().await.index.test_index().clone();
-        let second=b.inner.lock().await.index.test_index().read().await.shard_vec[0].clone();
-        second.write().await.meta.id=1;
+        let second=b.inner.lock().await.index.test_index().read().await.segments[0].clone();
         let native=b.inner.lock().await.index.test_index().read().await.record_lexical[0].clone();
-        {let mut root=root_index.write().await;root.shard_vec.push(second);root.shard_number=2;root.record_lexical.push(native);}
+        {let mut root=root_index.write().await;root.segments.push(second);root.record_lexical.push(native);}
         for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() }] {
             for order in [vec![],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Ascending}],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}]] {
               for (offset,length) in [(0,10),(0,1),(1,1)] {
@@ -200,7 +199,7 @@ mod tests {
                 assert!(actual.error.is_none(),"{:?}",actual.error);
                 let mut mapped=Vec::new();
                 for hit in actual.results {
-                    let root=root_index.read().await;let shard=root.shard_vec[hit.doc_id%2].read().await;
+                    let root=root_index.read().await;let shard=root.segments[hit.doc_id%2].read().await;
                     mapped.push((shard.active.as_ref().unwrap().keys[hit.doc_id/2].clone(),hit.score));
                 }
                 let wanted:Vec<_>=expected.hits.into_iter().map(|hit|(hit.record.record_id,hit.score)).collect();

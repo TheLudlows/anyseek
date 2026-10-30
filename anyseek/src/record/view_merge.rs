@@ -3,14 +3,14 @@ use super::*;
 use std::collections::BTreeSet;
 
 pub(crate) struct MergeSources {
-    pub components: Vec<crate::component::ShardArc>,
+    pub components: Vec<crate::component::VectorSegmentArc>,
     pub natives: Vec<Arc<lexical::runtime::Runtime>>,
     pub keys: BTreeSet<String>,
     rows: BTreeMap<String, MergeRow>,
     _memory: crate::storage::build_budget::MemoryLease,
 }
 struct MergeRow {
-    component: crate::component::ShardArc,
+    component: crate::component::VectorSegmentArc,
     local: usize,
     version: u64,
     fingerprint: [u8; 32],
@@ -21,11 +21,11 @@ impl RetrievalView {
     /// Their native runtimes pin source files until the owned merge task ends.
     pub(in crate::record) async fn capture_merge(&self, max_rows: usize) -> Result<Option<MergeSources>, RecordError> {
         let root = self.query.read().await;
-        if root.shard_vec.len() < 3 || root.record_lexical.len() != root.shard_vec.len() { return Ok(None); }
-        let tail = self.tail.read().await.shard_vec[0].clone();
-        if !Arc::ptr_eq(&root.shard_vec[0], &tail) { return Err(storage("merge mutable tail topology mismatch")); }
+        if root.segments.len() < 3 || root.record_lexical.len() != root.segments.len() { return Ok(None); }
+        let tail = self.tail.read().await.segments[0].clone();
+        if !Arc::ptr_eq(&root.segments[0], &tail) { return Err(storage("merge mutable tail topology mismatch")); }
         let mut choices = Vec::new();
-        for (slot, component) in root.shard_vec.iter().enumerate().skip(1) {
+        for (slot, component) in root.segments.iter().enumerate().skip(1) {
             let shard = component.read().await;
             if shard.failed { return Err(RecordError::RecoveryRequired); }
             let active = shard.active.as_ref().ok_or_else(|| storage("merge statistics missing"))?;
@@ -40,7 +40,7 @@ impl RetrievalView {
         let slots = [choices[0].1, choices[1].1];
         let mut bytes = 4096u64;
         for slot in slots {
-            let shard = root.shard_vec[slot].read().await;
+            let shard = root.segments[slot].read().await;
             for key in &shard.active.as_ref().unwrap().keys {
                 bytes = bytes.checked_add(key.len() as u64 * 8 + 512).ok_or(RecordError::Busy)?;
             }
@@ -49,7 +49,7 @@ impl RetrievalView {
         let mut keys = BTreeSet::new();
         let mut rows = BTreeMap::new();
         for slot in slots {
-            let component = &root.shard_vec[slot];
+            let component = &root.segments[slot];
             let shard = component.read().await;
             let active = shard.active.as_ref().unwrap();
             for (local, key) in active.keys.iter().enumerate().filter(|(i, _)| active.is_live(*i)) {
@@ -63,7 +63,7 @@ impl RetrievalView {
             }
         }
         Ok(Some(MergeSources {
-            components: slots.iter().map(|&slot| root.shard_vec[slot].clone()).collect(),
+            components: slots.iter().map(|&slot| root.segments[slot].clone()).collect(),
             natives: slots.iter().map(|&slot| root.record_lexical[slot].clone()).collect(),
             keys, rows, _memory: memory,
         }))
@@ -72,7 +72,7 @@ impl RetrievalView {
     /// Called under the Record guard. All fallible preparation precedes the
     /// topology swap. The mutable tail and its queued local ordinals are kept.
     pub(in crate::record) async fn install_merge(
-        &mut self, sources: &MergeSources, merged: IndexArc,
+        &mut self, sources: &MergeSources, merged: VectorIndexArc,
         ordinals: &mut Vec<String>, locations: &mut BTreeMap<String, usize>,
         max_address_slots: usize,
     ) -> Result<bool, RecordError> {
@@ -80,20 +80,20 @@ impl RetrievalView {
             return Err(storage("merge replacement aliases live root"));
         }
         let mut root = self.query.write().await;
-        let old_count = root.shard_vec.len();
+        let old_count = root.segments.len();
         let slots = sources.components.iter().map(|source|
-            root.shard_vec.iter().position(|current| Arc::ptr_eq(source, current)))
+            root.segments.iter().position(|current| Arc::ptr_eq(source, current)))
             .collect::<Option<Vec<_>>>();
         let Some(mut slots) = slots else { return Ok(false); };
         slots.sort_unstable(); slots.dedup();
         if slots.len() != 2 || slots[0] == 0 { return Ok(false); }
         let replacement = merged.read().await;
-        if replacement.shard_vec.len() != 1 || replacement.record_lexical.len() != 1
+        if replacement.segments.len() != 1 || replacement.record_lexical.len() != 1
             || serde_json::to_value(&replacement.schema_map).map_err(storage)? != serde_json::to_value(&root.schema_map).map_err(storage)? {
             return Err(storage("invalid merge replacement topology/schema"));
         }
-        let candidate = replacement.shard_vec[0].clone();
-        if root.shard_vec.iter().any(|source| Arc::ptr_eq(source, &candidate)) { return Err(storage("merge replacement aliases source")); }
+        let candidate = replacement.segments[0].clone();
+        if root.segments.iter().any(|source| Arc::ptr_eq(source, &candidate)) { return Err(storage("merge replacement aliases source")); }
         let native = replacement.record_lexical[0].clone();
         let mut shard = candidate.write().await;
         if shard.failed { return Err(RecordError::RecoveryRequired); }
@@ -120,7 +120,7 @@ impl RetrievalView {
             }
             mask.share(local, source.token.clone()).map_err(storage)?;
             let current = locations.get(key).is_some_and(|ordinal|
-                ordinal / old_count == source.local && Arc::ptr_eq(&root.shard_vec[ordinal % old_count], &source.component));
+                ordinal / old_count == source.local && Arc::ptr_eq(&root.segments[ordinal % old_count], &source.component));
             if current && source.token.is_live() {
                 if replacement_locations.insert(key.clone(), local).is_some() { return Err(storage("duplicate replacement identity")); }
             } else {
@@ -143,7 +143,7 @@ impl RetrievalView {
             }
             if slots.contains(&slot) { continue; }
             remap_slots[slot] = Some(next_shards.len());
-            next_shards.push(root.shard_vec[slot].clone()); next_native.push(root.record_lexical[slot].clone());
+            next_shards.push(root.segments[slot].clone()); next_native.push(root.record_lexical[slot].clone());
         }
         let remap = |local: usize, slot: usize| local.checked_mul(next_count).and_then(|n| n.checked_add(slot))
             .filter(|n| *n < max_address_slots).ok_or_else(|| storage("merge address budget exceeded"));
@@ -180,7 +180,7 @@ impl RetrievalView {
         let removed = sources.natives.iter().map(|native| native.package_path()).collect::<Vec<_>>();
         self.pending_seals.retain(|package| !removed.iter().any(|path|
             path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name == format!("segment-{}", package.id))));
-        root.shard_vec = next_shards; root.record_lexical = next_native; root.shard_number = next_count;
+        root.segments = next_shards; root.record_lexical = next_native;
         self.retired = masks;
         *ordinals = mapped; *locations = next_locations;
         self.detached_cache = true;
@@ -192,7 +192,7 @@ impl RetrievalView {
     /// A detached view seals only its disposable tail, without inventing a new
     /// Record certificate or retaining a second authoritative file inventory.
     pub(in crate::record) async fn seal_cache_into_successor(
-        &mut self, new_tail: IndexArc, ordinals: &mut Vec<String>,
+        &mut self, new_tail: VectorIndexArc, ordinals: &mut Vec<String>,
         locations: &mut BTreeMap<String, usize>, budget: RotationBudget,
     ) -> Result<(), RecordError> {
         self.drain_indexes().await?;

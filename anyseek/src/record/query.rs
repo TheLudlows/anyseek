@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) struct Handle {
-    pub index: IndexArc,
+    pub index: VectorIndexArc,
     // Keep package pins until the shallow index/shard handles are released.
     _pins: Vec<Arc<lexical::runtime::Runtime>>,
     _memory: crate::storage::build_budget::MemoryLease,
@@ -24,7 +24,7 @@ impl Selection {
     pub async fn revalidate(
         &mut self,
         locations: &BTreeMap<String, usize>,
-        components: &[crate::component::ShardArc],
+        components: &[crate::component::VectorSegmentArc],
     ) -> Result<(), RecordError> {
         // One read guard per component, not one lock acquisition per record.
         let shards = futures::future::join_all(components.iter().map(|shard| shard.read())).await;
@@ -47,7 +47,7 @@ impl Handle {
     pub async fn filter(&self, filters: &[FacetFilter]) -> Result<Selection, RecordError> {
         let root = self.index.read().await;
         let shards =
-            futures::future::join_all(root.shard_vec.iter().map(|shard| shard.read())).await;
+            futures::future::join_all(root.segments.iter().map(|shard| shard.read())).await;
         if shards.iter().any(|shard| shard.failed) {
             return Err(RecordError::RecoveryRequired);
         }
@@ -89,7 +89,7 @@ impl Handle {
             _scope: scope,
         })
     }
-    pub async fn capture(index: &IndexArc, length: usize) -> Result<Self, RecordError> {
+    pub async fn capture(index: &VectorIndexArc, length: usize) -> Result<Self, RecordError> {
         let root = index.read().await;
         let metadata = checkpoint_codec::json_length(&(&root.meta, &root.schema_map))? as u64;
         let buffers = (length as u64)
@@ -122,7 +122,7 @@ impl Handle {
     ) -> Result<Vec<Candidate>, RecordError> {
         let root = self.index.read().await;
         let shards =
-            futures::future::join_all(root.shard_vec.iter().map(|shard| shard.read())).await;
+            futures::future::join_all(root.segments.iter().map(|shard| shard.read())).await;
         if shards.iter().any(|shard| shard.failed) {
             return Err(RecordError::RecoveryRequired);
         }

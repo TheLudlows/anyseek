@@ -36,7 +36,7 @@ pub(super) fn address_limit(config:&RecordConfig)->Result<usize,RecordError> {
         .ok_or_else(||storage("cache merge address budget overflow"))
 }
 pub(super) async fn build_candidate(root:&Path,config:&RecordConfig,snapshot:&Snapshot)
-    ->Result<IndexArc,RecordError> {
+    ->Result<VectorIndexArc,RecordError> {
     let build_limit=MAX_BUILD_BYTES;
     #[cfg(test)]
     let build_limit=std::fs::read_to_string(root.join(".test-cache-merge-build-budget")).ok()
@@ -84,8 +84,8 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
     let mut ordinals=Vec::new();let mut locations=BTreeMap::new();
     for (slot,index) in indexes.iter().enumerate() {
         let index=index.read().await;
-        let component=index.shard_vec[0].clone();
-        {let mut shard=component.write().await;shard.meta.id=slot as u64;
+        let component=index.segments[0].clone();
+        {let mut shard=component.write().await;
             let active=shard.active.as_mut().ok_or_else(||storage("recovery statistics missing"))?;
             active.retired.get_or_insert_with(Default::default);
             for (local,key) in active.keys.iter().enumerate() {
@@ -97,7 +97,7 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
         shards.push(component);natives.push(index.record_lexical[0].clone());
     }
     let index=indexes[0].clone();
-    {let mut root=index.write().await;root.shard_vec=shards;root.record_lexical=natives;root.shard_number=count;}
+    {let mut root=index.write().await;root.segments=shards;root.record_lexical=natives;}
     let mut view=view::RetrievalView::single(index);view.detached_cache=true;
     view.retain_address_budget(inventory,inventory_scope);
     Ok((view,ordinals,locations))

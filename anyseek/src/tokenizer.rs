@@ -12,7 +12,7 @@ use crate::{
 
 pub(crate) mod standard;
 
-/// Analysis configuration independent of the old posting codec and Shard.
+/// Analysis configuration independent of physical vector/metadata storage.
 /// Native Tantivy indexing and query compilation can reuse the exact same
 /// normalization, segmentation and syntax without creating a legacy index.
 pub(crate) struct AnalysisContext<'a> {

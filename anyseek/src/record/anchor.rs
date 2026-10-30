@@ -123,10 +123,10 @@ impl NativeReuse {
     }
 }
 pub(super) struct Loaded {
-    pub config:RecordConfig,pub state:State,pub index:IndexArc,
+    pub config:RecordConfig,pub state:State,pub index:VectorIndexArc,
     pub ordinals:Vec<String>,pub locations:BTreeMap<String,usize>,pub payloads:Closure,
 }
-struct VerifiedView { index:IndexArc, ordinals:Vec<String>, locations:BTreeMap<String,usize>, payloads:Closure }
+struct VerifiedView { index:VectorIndexArc, ordinals:Vec<String>, locations:BTreeMap<String,usize>, payloads:Closure }
 fn valid(id:&str)->bool{id.len()==32&&id.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))}
 fn directory(root:&Path,id:&str)->Result<PathBuf,RecordError>{
     if !valid(id){return Err(storage("invalid anchor identity"));}
@@ -154,7 +154,7 @@ impl Frozen {
                 }
             }).await.map_err(|_|RecordError::Busy)?;
         }
-        let active=index.read().await.shard_vec[0].read().await.active.as_ref().ok_or_else(||storage("missing frozen statistics"))?.clone_local();
+        let active=index.read().await.segments[0].read().await.active.as_ref().ok_or_else(||storage("missing frozen statistics"))?.clone_local();
         let native=index.read().await.record_lexical[0].clone();
         native.seal().await?;
         drop(native);
@@ -185,7 +185,7 @@ impl Frozen {
         }
         Ok(())
     }
-    async fn load(&self,root:&Path,config:&RecordConfig,mut active:crate::active::ActiveStatistics)->Result<IndexArc,RecordError>{
+    async fn load(&self,root:&Path,config:&RecordConfig,mut active:crate::active::ActiveStatistics)->Result<VectorIndexArc,RecordError>{
         let path=self.verify(root,closure_limit(config.max_journal_bytes)?)?;
         active.validate().map_err(storage)?;
         let schema:Vec<SchemaField>=serde_json::from_slice(&read_bounded(&path.join("schema.json"),config.max_journal_bytes)?).map_err(storage)?;
@@ -196,11 +196,11 @@ impl Frozen {
         reservation.grow(estimate).map_err(storage)?;
         let index=crate::index::open_index(&path).await.map_err(storage)?;
         index.write().await.record_lexical.push(lexical::runtime::Runtime::open_owned(&path.join("native"),config).await?);
-        index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
+        index.read().await.segments[0].write().await.build_reservation=Some(reservation);
         {
             let index=index.read().await;
-            if index.shard_number!=1||index.shard_vec.len()!=1||!index.stored_field_names.is_empty(){return Err(storage("invalid frozen topology"));}
-            let mut shard=index.shard_vec[0].write().await;
+            if index.segments.len()!=1||!index.stored_field_names.is_empty(){return Err(storage("invalid frozen topology"));}
+            let mut shard=index.segments[0].write().await;
             if shard.indexed_doc_count!=active.keys.len(){return Err(storage("frozen cardinality mismatch"));}
             shard.delete_hashset=(0..active.keys.len()).filter(|id|!active.is_live(*id)).collect();
             active.retired.get_or_insert_with(Default::default);
@@ -543,9 +543,9 @@ impl Reference {
         }
         if live!=expected{return Err(storage("anchor visible identity mismatch"));}
         let index=indexes[0].clone();
-        let mut shards=Vec::new();for component in &indexes{shards.push(component.read().await.shard_vec[0].clone());}
+        let mut shards=Vec::new();for component in &indexes{shards.push(component.read().await.segments[0].clone());}
         let mut native=Vec::new();for component in &indexes{native.extend(component.read().await.record_lexical.iter().cloned());}
-        {let mut root=index.write().await;root.shard_vec=shards;root.shard_number=n;root.record_lexical=native;}
+        {let mut root=index.write().await;root.segments=shards;root.record_lexical=native;}
         Ok(VerifiedView{index,ordinals,locations,payloads})
     }
 }
@@ -1459,7 +1459,7 @@ mod tests {
             let root=path();std::fs::create_dir(&root).unwrap();
             std::fs::write(root.join(filename),b"existing data").unwrap();
             let cfg=config();
-            assert!(create_index(&root,cfg.index,&retrieval_schema(&config()),Some(1)).await.is_err());
+            assert!(create_index(&root,cfg.index,&retrieval_schema(&config())).await.is_err());
             assert_eq!(std::fs::read(root.join(filename)).unwrap(),b"existing data");
             assert_eq!(std::fs::read_dir(&root).unwrap().count(),1);
             std::fs::remove_dir_all(root).unwrap();
@@ -1470,7 +1470,7 @@ mod tests {
     async fn empty_tail_does_not_preallocate_vector_rows() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         let inner=p.inner.lock().await;let index=inner.index.test_index().read().await;
-        for shard in &index.shard_vec {
+        for shard in &index.segments {
             let shard=shard.read().await;
             assert_eq!(shard.block_vector_buffer.capacity(),0);
         }
@@ -1502,7 +1502,7 @@ mod tests {
             let inner=restored.inner.lock().await;
             let index=inner.index.test_index().read().await;
             assert_eq!(PathBuf::from(&index.index_path_string),reference.segments[0].path(&root).unwrap());
-            assert_eq!(index.shard_number,2);
+            assert_eq!(index.segments.len(),2);
         }
         assert_eq!(scores(query(&restored,mode).await),expected);
         assert_eq!(restored.write(update).await.unwrap(),receipt);

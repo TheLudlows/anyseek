@@ -10,7 +10,7 @@ async fn freeze(p: &RecordPartition) {
     index.seal_cache_into_successor(tail, ordinals, locations,
         RotationBudget { max_segments: 16, max_address_slots: 100_000 }).await.unwrap();
 }
-async fn prepare(p: &RecordPartition) -> (MergeSources, IndexArc) {
+async fn prepare(p: &RecordPartition) -> (MergeSources, VectorIndexArc) {
     let (sources, state, settings, root) = {
         let inner = p.inner.lock().await;
         (inner.index.capture_merge(16384).await.unwrap().unwrap(), inner.state.try_clone().unwrap(),
@@ -21,7 +21,7 @@ async fn prepare(p: &RecordPartition) -> (MergeSources, IndexArc) {
     candidate.read().await.record_lexical[0].seal().await.unwrap();
     (sources, candidate)
 }
-async fn install(p: &RecordPartition, sources: &MergeSources, candidate: IndexArc) {
+async fn install(p: &RecordPartition, sources: &MergeSources, candidate: VectorIndexArc) {
     let mut inner = p.inner.lock().await;
     let Inner { index, ordinals, locations, .. } = &mut *inner;
     assert!(index.install_merge(sources, candidate, ordinals, locations, 100_000).await.unwrap());

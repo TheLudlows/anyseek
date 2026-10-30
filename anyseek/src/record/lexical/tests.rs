@@ -252,7 +252,7 @@ fn fixed_searcher_does_not_adopt_an_unselected_internal_commit() {
     )
     .unwrap();
     let snapshot = package.open(&root.0, CUT, LIMIT).unwrap();
-    let index = Index::open_in_dir(root.0.join("lexical")).unwrap();
+    let index = NativeIndex::open_in_dir(root.0.join("lexical")).unwrap();
     let mut writer = index
         .writer_with_num_threads::<TantivyDocument>(1, WRITER_BYTES)
         .unwrap();

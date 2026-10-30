@@ -1,7 +1,7 @@
 use crate::vector_similarity::VectorSimilarity;
 use crate::{
     clustering::{ClusterHeader, Medoid, ParentMedoid},
-    index::{Clustering, Document, FieldType, IS_SYSTEM_LE, Shard, ShardArc},
+    index::{Clustering, Document, FieldType, IS_SYSTEM_LE, VectorSegment, VectorSegmentArc},
     min_heap,
     search::{ResultObject, FacetFilter, FilterSparse},
     metadata_filter::{compile_filters, is_facet_filter},
@@ -443,7 +443,6 @@ impl TopK<'_> {
         level_id: u32,
         cluster_score: f32,
         score: f32,
-        _shard_id: u64,
     ) -> bool {
         self.observed_vector_count += 1;
 
@@ -536,8 +535,8 @@ impl TopK<'_> {
     }
 }
 
-impl Shard {
-    pub(crate) async fn index_vector_shard(&mut self, doc_id: usize, document: &Document) {
+impl VectorSegment {
+    pub(crate) async fn index_vector_segment(&mut self, doc_id: usize, document: &Document) {
         if !self.is_vector_indexing {
             return;
         }
@@ -1078,8 +1077,8 @@ impl Shard {
 
 #[allow(clippy::too_many_arguments)]
 #[allow(async_fn_in_trait)]
-pub(crate) trait SearchVectorShard {
-    async fn search_vector_shard(
+pub(crate) trait SearchVectorSegment {
+    async fn search_vector_segment(
         &self,
         query_vector: Option<(Embedding, f32, f32, i16, i32)>,
         length: usize,
@@ -1103,9 +1102,9 @@ pub enum ResultSource {
     Hybrid,
 }
 
-impl Shard {
+impl VectorSegment {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn search_vector_shard_uncommitted(
+    pub(crate) async fn search_vector_segment_uncommitted(
         &self,
         query_simd: &QuerySimd,
         query_embedding: &Embedding,
@@ -1176,14 +1175,13 @@ impl Shard {
                     level_id as u32,
                     0.0,
                     similarity,
-                    self.meta.id,
                 );
             }
         }
     }
 }
-impl SearchVectorShard for ShardArc {
-    async fn search_vector_shard(
+impl SearchVectorSegment for VectorSegmentArc {
+    async fn search_vector_segment(
         &self,
         query_vector: Option<(Embedding, f32, f32, i16, i32)>,
         length: usize,
@@ -1258,7 +1256,7 @@ impl SearchVectorShard for ShardArc {
         if include_uncommitted && shard_ref.uncommitted && !shard_ref.block_vector_buffer.is_empty()
         {
             shard_ref
-                .search_vector_shard_uncommitted(
+                .search_vector_segment_uncommitted(
                     &query_simd,
                     &query_embedding.0,
                     query_embedding.1,
@@ -1362,7 +1360,6 @@ impl SearchVectorShard for ShardArc {
                         level_id as u32,
                         similarity,
                         similarity,
-                        shard_ref.meta.id,
                     );
                 }
 
@@ -1462,7 +1459,6 @@ impl SearchVectorShard for ShardArc {
                                     level_id as u32,
                                     *cluster_score,
                                     similarity,
-                                    shard_ref.meta.id,
                                 );
                             }
                         }
@@ -1485,8 +1481,6 @@ impl SearchVectorShard for ShardArc {
                 chunk_id: item.chunk_id,
                 #[cfg(feature = "vb")]
                 level_id: item.level_id,
-                #[cfg(feature = "vb")]
-                shard_id: shard_ref.meta.id as u32,
                 #[cfg(feature = "vb")]
                 cluster_id: item.cluster_id,
                 #[cfg(feature = "vb")]
@@ -1528,7 +1522,7 @@ mod stable_ranking_tests {
         for order in [ (0..97).collect::<Vec<_>>(), (0..97).rev().collect(),
             (0..97).map(|i| (i * 37) % 97).collect() ] {
             let mut top = TopK::new(7, None, VectorSimilarity::Dot, 1.0);
-            for id in order { top.push(id, 0, 0, 0, 0, 1.0, 1.0, 0); }
+            for id in order { top.push(id, 0, 0, 0, 0, 1.0, 1.0); }
             top.items[..top.len].sort_by_key(|x| x.doc_id);
             assert_eq!(top.items[..top.len].iter().map(|x| x.doc_id).collect::<Vec<_>>(), (0..7).collect::<Vec<_>>());
         }
@@ -1537,7 +1531,7 @@ mod stable_ranking_tests {
     #[test]
     fn stable_vector_bound_matches_exhaustive_topk_and_rejects_dense_ties() {
         let mut dense = TopK::new(100, None, VectorSimilarity::Dot, 1.0);
-        for id in 0..70000 { dense.push(id, 0, 0, 0, 0, 1.0, 1.0, 0); }
+        for id in 0..70000 { dense.push(id, 0, 0, 0, 0, 1.0, 1.0); }
         assert_eq!(dense.full_scans, 1, "equal higher IDs need no O(K) scan");
         assert_eq!(dense.result_count_total, 70000, "preserve first-fix counts");
         for k in [1, 7, 100] {
@@ -1546,7 +1540,7 @@ mod stable_ranking_tests {
             for step in 0..3000 {
                 let id = (step * 37) % 131;
                 let score = if step % 19 == 0 { -0.0 } else { ((step * 17) % 11) as f32 };
-                top.push(id, 0, 0, 0, 0, score, score, 0);
+                top.push(id, 0, 0, 0, 0, score, score);
                 oracle.entry(id).and_modify(|s| *s = s.max(score)).or_insert(score);
                 let mut expected: Vec<_> = oracle.iter().map(|(&id,&score)| (score,id)).collect();
                 expected.sort_by(|a,b| min_heap::rank_ordering(b.0,b.1,a.0,a.1));
@@ -1562,15 +1556,15 @@ mod stable_ranking_tests {
     fn stable_vector_topk_signed_zero_duplicates_and_threshold() {
         let mut top = TopK::new(2, None, VectorSimilarity::Dot, 1.0);
         for (id, score) in [(9, 0.0), (8, -0.0), (7, 0.0), (6, -0.0), (7, 1.0)] {
-            top.push(id, 0, 0, 0, 0, score, score, 0);
+            top.push(id, 0, 0, 0, 0, score, score);
         }
         let mut ids = top.items[..top.len].iter().map(|x| x.doc_id).collect::<Vec<_>>();
         ids.sort(); assert_eq!(ids, vec![6, 7]);
-        assert!(!top.push(0, 0, 0, 0, 0, 0.0, f32::NAN, 0));
+        assert!(!top.push(0, 0, 0, 0, 0, 0.0, f32::NAN));
         let mut empty = TopK::new(0, None, VectorSimilarity::Dot, 1.0);
-        assert!(!empty.push(0, 0, 0, 0, 0, 1.0, 1.0, 0));
+        assert!(!empty.push(0, 0, 0, 0, 0, 1.0, 1.0));
         let mut threshold = TopK::new(2, Some(0.5), VectorSimilarity::Dot, 1.0);
-        assert!(!threshold.push(0, 0, 0, 0, 0, -1.0, -1.0, 0));
-        assert!(threshold.push(1, 0, 0, 0, 0, 0.0, 0.0, 0));
+        assert!(!threshold.push(0, 0, 0, 0, 0, -1.0, -1.0));
+        assert!(threshold.push(1, 0, 0, 0, 0, 0.0, 0.0));
     }
 }

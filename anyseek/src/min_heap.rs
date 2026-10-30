@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "vb")]
 use crate::vector::ResultSource;
 use crate::{
-    index::{FieldType, Shard},
+    index::{FieldType, VectorSegment},
     search::{ResultSortIndex, SortOrder},
     utils::{read_f64, read_i64, read_u32},
 };
@@ -21,8 +21,6 @@ pub struct Result {
     pub chunk_id: u32,
     #[cfg(feature = "vb")]
     pub level_id: u32,
-    #[cfg(feature = "vb")]
-    pub shard_id: u32,
     #[cfg(feature = "vb")]
     pub cluster_id: u32,
     #[cfg(feature = "vb")]
@@ -61,8 +59,8 @@ pub(crate) fn rank_ordering(
 }
 
 #[inline]
-pub(crate) fn rank_with_shards(
-    shards: &[RwLockReadGuard<'_, Shard>],
+pub(crate) fn rank_with_segments(
+    shards: &[RwLockReadGuard<'_, VectorSegment>],
     a: f32,
     a_id: usize,
     b: f32,
@@ -81,24 +79,24 @@ pub(crate) fn rank_with_shards(
 }
 
 pub(crate) fn result_ordering_root(
-    shard_vec: &[RwLockReadGuard<'_, Shard>],
-    shard_number: usize,
+    segments: &[RwLockReadGuard<'_, VectorSegment>],
     empty_query: bool,
     result_sort: &Vec<ResultSortIndex>,
     result1: Result,
     result2: Result,
 ) -> core::cmp::Ordering {
-    let shard_id1 = result1.doc_id % shard_number;
-    let doc_id1 = result1.doc_id / shard_number;
-    let shard1 = &shard_vec[shard_id1];
+    let segment_count = segments.len();
+    let slot1 = result1.doc_id % segment_count;
+    let doc_id1 = result1.doc_id / segment_count;
+    let shard1 = &segments[slot1];
 
-    let shard_id2 = result2.doc_id % shard_number;
-    let doc_id2 = result2.doc_id / shard_number;
-    let shard2 = &shard_vec[shard_id2];
+    let slot2 = result2.doc_id % segment_count;
+    let doc_id2 = result2.doc_id / segment_count;
+    let shard2 = &segments[slot2];
 
     for field in result_sort.iter() {
         if field.idx == usize::MAX {
-            if shard_vec.iter().all(|shard| shard.active.is_some()) {
+            if segments.iter().all(|shard| shard.active.is_some()) {
                 let first = &shard1.active.as_ref().unwrap().keys[doc_id1];
                 let second = &shard2.active.as_ref().unwrap().keys[doc_id2];
                 return if field.order == SortOrder::Descending {
@@ -298,9 +296,9 @@ pub(crate) fn result_ordering_root(
         }
     }
 
-    if shard_vec.iter().all(|shard| shard.active.is_some()) {
-        return rank_with_shards(
-            shard_vec,
+    if segments.iter().all(|shard| shard.active.is_some()) {
+        return rank_with_segments(
+            segments,
             result1.score,
             result1.doc_id,
             result2.score,
