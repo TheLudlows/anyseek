@@ -170,3 +170,25 @@ Full acceptance avoids only these established repeats:
   filtered tests and distinct s3-object-store `resource_` coverage remain.
 
 No test timeouts, fixtures, sharding or cache policy change in this trimming.
+
+## Shared test bodies without removing scenarios
+
+The four `unlocked_encoding_*` / `unlocked_upload_*` pairs in
+`record/remote_checkpoint.rs` retain all eight individually selected test names.
+Each pair now calls one assertion helper with its original `encode` or `upload`
+pause point; normalized bodies were identical before extraction. Both run under
+the same s3-object-store test module (included by `server`).
+
+| Shared scenario | Inputs and assertions retained at both pause points |
+| --- | --- |
+| reads, writer ordering, checkpoint and cancellation | seed receipt; two ordered writes; blocked writer/checkpoint; cancelled waiter; cold recovery and exact receipt replay |
+| candidate TTL | deadline +100ms, advance +101ms; Busy; absent receipt; unchanged local/authority sequence; healthy writer; expired retry rejected |
+| source expiry | expired original plus version-matched replacement; Busy; no replacement receipt; source absent before/after cold recovery; retry rejected/conflicted |
+| generation lease expiry | staged two-member generation; clock past lease; Busy; absent publication receipt; members hidden after maintenance/cold recovery |
+
+The common gate wait retains its five-second timeout and polling interval.
+Owner/sequence fencing before persistence and owner/head changes after upload
+remain separate: their error classes and attempted-write scopes differ.
+Executor prefix-stop tests and committed-ingest continue-after-conflict tests
+also remain separate contracts. This extraction reduces duplicate source, not
+the number of executed scenarios or measured test runtime.
