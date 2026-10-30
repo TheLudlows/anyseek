@@ -49,6 +49,45 @@ def exercise(call, restart, directory, faults, base, master):
     if not faults:
         return
 
+    # Queue two independent HTTP requests behind an explicit test-only drain barrier.
+    from concurrent.futures import ThreadPoolExecutor
+    pause_queue = pathlib.Path(directory) / 'committed-queue-pause'
+    trace = pathlib.Path(directory) / 'committed-batches'
+    pause_queue.write_text('pause')
+    restart({'ANYSEEK_COMMITTED_PAUSE_FILE': str(pause_queue), 'ANYSEEK_RECORD_BATCH_TRACE': str(trace)})
+    def queued(count):
+        deadline = time.monotonic() + 10
+        marker = pause_queue.with_suffix('.queued')
+        while not marker.exists() or marker.read_text() != str(count):
+            assert time.monotonic() < deadline, 'requests did not enter committed queue'
+            time.sleep(.01)
+    a, b = write('cross-a'), write('cross-b')
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        left = pool.submit(client.ingest, 'committed', [a]); queued(1)
+        right = pool.submit(client.ingest, 'committed', [b]); queued(2)
+        conflict_future = pool.submit(client.ingest, 'committed', [write('cross-a')]); queued(3)
+        pause_queue.unlink()
+        assert left.result()['results'][0]['receipt']['record_id'] == 'cross-a'
+        assert right.result()['results'][0]['receipt']['record_id'] == 'cross-b'
+        assert conflict_future.result()['results'][0]['code'] == 'rejected'
+    assert [int(line.split()[1]) for line in trace.read_text().splitlines()] == [2], trace.read_text()
+    # Failure in another request must not downgrade a known replay's HTTP result.
+    pause_queue.write_text('pause'); pause_queue.with_suffix('.queued').unlink()
+    unknown, tail = write('cross-unknown'), write('cross-tail')
+    restart({'ANYSEEK_COMMITTED_PAUSE_FILE': str(pause_queue), 'ANYSEEK_RECORD_FAULT': 'after_durable',
+             'ANYSEEK_RECORD_FAULT_NONCE': unknown['operation_id']['nonce']})
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        known = pool.submit(call, 'POST', path + '/ingest', {'records': [a]}); queued(1)
+        uncertain = pool.submit(call, 'POST', path + '/ingest', {'records': [unknown]}, status=503); queued(2)
+        untouched = pool.submit(call, 'POST', path + '/ingest', {'records': [write('cross-unknown'), tail]}, status=503); queued(4)
+        pause_queue.unlink()
+        assert known.result()['results'][0]['code'] == 'committed'
+        assert uncertain.result()['results'][0]['code'] == 'outcome_unknown'
+        assert [r['code'] for r in untouched.result()['results']] == ['not_attempted', 'not_attempted']
+    restart({})
+    assert client.ingest('committed', [unknown, tail])['results'][0]['code'] == 'committed'
+    print('PASS cross-request HTTP batching: one durable publication, independent replies, conflicts and uncertain ranges', flush=True)
+
     # Authorization owns work even if the client drops the socket while waiting.
     pause = pathlib.Path(directory) / 'ingest-authorized-pause'
     pause.write_text('pause')

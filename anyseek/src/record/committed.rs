@@ -43,7 +43,7 @@ impl RecordPartition {
         &self,
         requests: Vec<RecordWrite>,
     ) -> Result<CommittedBatch, RecordError> {
-        execute(self.clone(), requests, None).await
+        enqueue(self.clone(), requests, None).await
     }
     /// Inspect progress without advancing time or waiting for indexes.
     pub async fn committed_progress(&self) -> CommittedProgress {
@@ -63,22 +63,210 @@ impl RecordPartition {
         }
     }
 }
-pub(super) async fn execute(
+// Counts include in-flight inputs until their request result has been delivered.
+#[derive(Default)]
+pub(super) struct Queue {
+    pending: std::collections::VecDeque<Queued>,
+    records: usize,
+    bytes: usize,
+    running: bool,
+}
+struct Queued {
+    requests: Vec<RecordWrite>,
+    count: usize,
+    bytes: usize,
+    legacy: Option<IngestPipeline>,
+    reply: tokio::sync::oneshot::Sender<Result<CommittedBatch, RecordError>>,
+    _memory: crate::storage::build_budget::MemoryLease,
+}
+pub(super) async fn enqueue(
     partition: RecordPartition,
     requests: Vec<RecordWrite>,
     legacy: Option<IngestPipeline>,
 ) -> Result<CommittedBatch, RecordError> {
+    let bytes = request_bytes(&requests)?;
+    let memory = crate::storage::build_budget::reserve_memory(bytes as u64)
+        .map_err(|_| RecordError::Busy)?;
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    {
+        let mut queue = partition
+            .committed_queue
+            .lock()
+            .map_err(|_| RecordError::RecoveryRequired)?;
+        if queue.records + requests.len() > 64 || queue.bytes + bytes > 4 * 1024 * 1024 {
+            return Err(RecordError::Busy);
+        }
+        queue.records += requests.len();
+        queue.bytes += bytes;
+        let count = requests.len();
+        queue.pending.push_back(Queued {
+            requests,
+            count,
+            bytes,
+            legacy,
+            reply,
+            _memory: memory,
+        });
+        #[cfg(feature = "fault-injection")]
+        if let Some(path) = std::env::var_os("ANYSEEK_COMMITTED_PAUSE_FILE") {
+            // Explicit fault-binary observation, never part of the HTTP API.
+            let _ = std::fs::write(
+                std::path::Path::new(&path).with_extension("queued"),
+                queue.records.to_string(),
+            );
+        }
+        if !queue.running {
+            queue.running = true;
+            let worker = partition.clone();
+            crate::resources::spawn(async move {
+                use futures::FutureExt;
+                let outcome = std::panic::AssertUnwindSafe(run_queue(worker.clone()))
+                    .catch_unwind()
+                    .await;
+                if let Ok(replies) = outcome {
+                    drop(worker);
+                    for (reply, result) in replies {
+                        let _ = reply.send(result);
+                    }
+                } else {
+                    // Active senders were dropped during unwind (unknown); queued work never ran.
+                    let pending = {
+                        let mut queue = worker
+                            .committed_queue
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        queue.running = false;
+                        queue.records = 0;
+                        queue.bytes = 0;
+                        std::mem::take(&mut queue.pending)
+                    };
+                    for request in pending {
+                        let _ = request.reply.send(Ok(CommittedBatch {
+                            results: (0..request.count)
+                                .map(|_| CommittedItem::NotAttempted)
+                                .collect(),
+                            stop: Some(RecordError::RecoveryRequired),
+                        }));
+                    }
+                }
+            });
+        }
+    }
+    receive
+        .await
+        .map_err(|_| RecordError::OutcomeUnknown("committed queue worker exited".into()))?
+}
+type Delivery = (
+    tokio::sync::oneshot::Sender<Result<CommittedBatch, RecordError>>,
+    Result<CommittedBatch, RecordError>,
+);
+async fn run_queue(partition: RecordPartition) -> Vec<Delivery> {
+    loop {
+        #[cfg(feature = "fault-injection")]
+        if let Some(path) = std::env::var_os("ANYSEEK_COMMITTED_PAUSE_FILE") {
+            let path = std::path::Path::new(&path);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while path.exists() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        let mut group = {
+            let mut queue = partition.committed_queue.lock().unwrap();
+            let Some(first) = queue.pending.pop_front() else {
+                queue.running = false;
+                return Vec::new();
+            };
+            // Legacy retained identities stay on their existing recovery path.
+            let fresh = first.legacy.is_none();
+            let mut group = vec![first];
+            while fresh && queue.pending.front().is_some_and(|r| r.legacy.is_none()) {
+                group.push(queue.pending.pop_front().unwrap());
+            }
+            group
+        };
+        let legacy = group[0].legacy.clone();
+        let mut requests = Vec::new();
+        for request in &mut group {
+            requests.append(&mut request.requests);
+        }
+        let result = execute(partition.clone(), requests, legacy).await;
+        let count = group.iter().map(|r| r.count).sum::<usize>();
+        let bytes = group.iter().map(|r| r.bytes).sum::<usize>();
+        let mut replies = Vec::new();
+        match result {
+            Ok(batch) => {
+                let mut results = batch.results.into_iter();
+                for request in group {
+                    let rows: Vec<_> = results.by_ref().take(request.count).collect();
+                    let interrupted = rows.iter().any(|r| {
+                        matches!(
+                            r,
+                            CommittedItem::OutcomeUnknown | CommittedItem::NotAttempted
+                        )
+                    });
+                    replies.push((
+                        request.reply,
+                        Ok(CommittedBatch {
+                            results: rows,
+                            stop: if interrupted {
+                                batch.stop.clone()
+                            } else {
+                                None
+                            },
+                        }),
+                    ));
+                }
+            }
+            Err(error) => {
+                for request in group {
+                    replies.push((request.reply, Err(error.clone())));
+                }
+            }
+        }
+        // End the owner before delivering the last batch, so reopen cannot race its drop.
+        let last = {
+            let mut queue = partition.committed_queue.lock().unwrap();
+            queue.records -= count;
+            queue.bytes -= bytes;
+            let last = queue.pending.is_empty();
+            if last {
+                queue.running = false;
+            }
+            last
+        };
+        if last {
+            return replies;
+        }
+        for (reply, result) in replies {
+            let _ = reply.send(result);
+        }
+    }
+}
+fn request_bytes(requests: &[RecordWrite]) -> Result<usize, RecordError> {
     if requests.is_empty() || requests.len() > 64 {
         return Err(RecordError::Rejected(
             "ingest requires 1..64 commands".into(),
         ));
     }
-    let bytes = requests.iter().try_fold(0usize, |total, request| {
+    requests.iter().try_fold(0usize, |total, request| {
         total
             .checked_add(checkpoint_codec::json_length(request)?)
             .filter(|n| *n <= 4 * 1024 * 1024)
             .ok_or_else(|| RecordError::Rejected("ingest exceeds 4 MiB".into()))
-    })?;
+    })
+}
+#[cfg(test)]
+impl RecordPartition {
+    pub(super) fn committed_admitted(&self) -> usize {
+        self.committed_queue.lock().unwrap().records
+    }
+}
+pub(super) async fn execute(
+    partition: RecordPartition,
+    requests: Vec<RecordWrite>,
+    legacy: Option<IngestPipeline>,
+) -> Result<CommittedBatch, RecordError> {
+    let bytes = request_bytes(&requests)?;
     let memory = crate::storage::build_budget::reserve_memory(bytes as u64)
         .map_err(|_| RecordError::Busy)?;
     crate::resources::spawn(async move {
@@ -181,6 +369,85 @@ pub(super) async fn execute(
 mod tests {
     use super::*;
     use crate::record::tests::{config, write};
+    #[tokio::test]
+    async fn committed_queue_bounds_include_inflight_and_cancelled_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let lock = p.writer.lock().await;
+        let owner = p.clone();
+        let first = tokio::spawn(async move {
+            owner
+                .commit_writes(vec![write(
+                    "seed",
+                    "seed",
+                    "alpha",
+                    ExpectedVersion::Absent,
+                )])
+                .await
+        });
+        while p.committed_admitted() != 1 {
+            tokio::task::yield_now().await;
+        }
+        let request = write("cancelled", "r", "beta", ExpectedVersion::Absent);
+        let owner = p.clone();
+        let commands = vec![request.clone(); 63];
+        let waiting = tokio::spawn(async move { owner.commit_writes(commands).await });
+        while p.committed_admitted() != 64 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            p.commit_writes(vec![write(
+                "overflow",
+                "other",
+                "gamma",
+                ExpectedVersion::Absent
+            )])
+            .await,
+            Err(RecordError::Busy)
+        ));
+        waiting.abort();
+        let _ = waiting.await;
+        drop(lock);
+        first.await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while p.committed_admitted() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let receipt = p.write(request).await.unwrap();
+        assert_eq!(receipt.seq, 2);
+        assert!(p.get("other").await.unwrap().is_none());
+        let lock = p.writer.lock().await;
+        let large = write(
+            "large",
+            "large",
+            &"x".repeat(3 * 1024 * 1024),
+            ExpectedVersion::Absent,
+        );
+        let owner = p.clone();
+        let blocked = tokio::spawn(async move { owner.commit_writes(vec![large]).await });
+        while p.committed_admitted() != 1 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            p.commit_writes(vec![write(
+                "bytes",
+                "bytes",
+                &"x".repeat(2 * 1024 * 1024),
+                ExpectedVersion::Absent
+            )])
+            .await,
+            Err(RecordError::Busy)
+        ));
+        drop(lock);
+        assert!(matches!(
+            &blocked.await.unwrap().unwrap().results[..],
+            [CommittedItem::Rejected(_)]
+        ));
+    }
     #[tokio::test]
     async fn committed_ingest_continues_after_conflict_without_waiting_for_indexes() {
         let dir = tempfile::tempdir().unwrap();

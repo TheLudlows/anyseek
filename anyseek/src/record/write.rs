@@ -760,6 +760,16 @@ impl Inner {
         }
         self.append_operations(&payloads, sequence).await?;
         #[cfg(feature = "fault-injection")]
+        if let Some(path) = std::env::var_os("ANYSEEK_RECORD_BATCH_TRACE") {
+            use std::io::Write;
+            let mut trace = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(storage)?;
+            writeln!(trace, "{} {}", sequence, payloads.len()).map_err(storage)?;
+        }
+        #[cfg(feature = "fault-injection")]
         match injected.as_deref() {
             Some("after_append_unknown") => {
                 return Err(RecordError::OutcomeUnknown(

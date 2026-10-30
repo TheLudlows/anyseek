@@ -682,7 +682,7 @@ impl IngestPipeline {
     }
     /// Commit new commands without adding Accept records, preserving retained legacy identities.
     pub async fn commit_writes(&self, requests: Vec<RecordWrite>) -> Result<CommittedBatch, RecordError> {
-        committed::execute(self.partition.clone(), requests, Some(self.clone())).await
+        committed::enqueue(self.partition.clone(), requests, Some(self.clone())).await
     }
     pub(super) async fn require_completed(&self) -> Result<(), RecordError> {
         let spool = self.spool.lock().await;

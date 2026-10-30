@@ -616,6 +616,7 @@ fn unix_time_ms_i64() -> i64 {
 #[derive(Clone)]
 pub struct RecordPartition {
     writer: Arc<Mutex<()>>,
+    committed_queue: Arc<std::sync::Mutex<committed::Queue>>,
     inner: Arc<Mutex<Inner>>,
     admission: Arc<Semaphore>,
     output: Arc<std::sync::RwLock<output::OutputState>>,
@@ -1386,6 +1387,7 @@ impl RecordPartition {
                 fail_publication_stage: 0,
             })),
             writer: Arc::new(Mutex::new(())),
+            committed_queue: Arc::default(),
             admission: Arc::new(Semaphore::new(16)),
         })
     }
@@ -1497,7 +1499,7 @@ impl RecordPartition {
         inner.graph_cache=graph::Cache::rebuild(&inner.state)?;
         inner.reclaim_anchor_objects().await?;
         let indexes = index_consumers::Cursors::recovered(inner.state.seq);
-        Ok(Self {output,indexes,writer:Arc::new(Mutex::new(())),inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
+        Ok(Self {output,indexes,committed_queue:Arc::default(),writer:Arc::new(Mutex::new(())),inner:Arc::new(Mutex::new(inner)),admission:Arc::new(Semaphore::new(16))})
     }
     /// Commit one Record operation and synchronously publish its index inputs.
     /// Dropping this future does not cancel an already spawned operation; query
