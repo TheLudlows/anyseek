@@ -242,7 +242,7 @@ pub(crate) struct Service {
     records: RwLock<BTreeMap<String, RecordPartition>>,
     // Exclude management changes across the entire owned committed request.
     write_gate: Arc<RwLock<()>>,
-    control: Mutex<()>,
+    control: Arc<Mutex<()>>,
     control_admission: Arc<Semaphore>,
     resources: Arc<Governor>,
     preflight: Arc<Semaphore>,
@@ -295,10 +295,13 @@ impl Service {
         });
     }
 
-    async fn reclaim_collection(&self, entry: CollectionEntry) -> Result<bool, Error> {
+    async fn reclaim_collection(self: &Arc<Self>, entry: CollectionEntry) -> Result<bool, Error> {
         let path = self.root.join(entry.directory());
         let remote = self.s3_record_config(&entry)?;
-        self.catalog.reclaim_deleted(entry, move |_| async move {
+        // Management prepares backup roots before the Catalog snapshot barrier.
+        // Take its control gate first; ordinary data requests do not use it.
+        let control = self.control.clone().lock_owned().await;
+        self.catalog.reclaim_deleted(entry, (self.clone(), control), move |_| async move {
             // A zero-entry pass only takes the owner lock and durably moves the
             // root to trash. Old writers and fixed package readers must finish.
             match RecordPartition::reclaim_deleted_files(&path, 0).await {
@@ -371,7 +374,7 @@ impl Service {
             catalog,
             records: RwLock::new(BTreeMap::new()),
             write_gate: Arc::new(RwLock::new(())),
-            control: Mutex::new(()),
+            control: Arc::new(Mutex::new(())),
             control_admission: Arc::new(Semaphore::new(16)),
             resources: Governor::from_env()?,
             preflight: Arc::new(Semaphore::new(64)),
@@ -1927,6 +1930,32 @@ mod tests {
             .unwrap_or_else(std::env::temp_dir);
         std::fs::create_dir_all(&base).unwrap();
         base.join(format!("service-{:032x}", rand::random::<u128>()))
+    }
+    #[tokio::test]
+    async fn reclamation_waits_for_service_backup_before_catalog_lifecycle() {
+        let (service,root,_) = setup().await;
+        let records = service.records.read().await.clone();
+        let entry = service.catalog.listing("tenant").await.unwrap().remove(0);
+        service.catalog.execute(CatalogRequest {operation_id:OperationId::new("delete-for-gc".into()),
+            command:CatalogCommand::DeleteCollection {tenant_id:"tenant".into(),collection_id:"c".into()}}).await.unwrap();
+        let backup_gate = service.control.clone().lock_owned().await;
+        let owner = service.clone();
+        let old = entry.clone();
+        let mut reclaim = tokio::spawn(async move {owner.reclaim_collection(old).await});
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100),&mut reclaim).await.is_err());
+        assert!(!service.catalog.collections().await.unwrap()[0].reclaiming);
+        let archive = root.with_extension("archive");
+        tokio::time::timeout(std::time::Duration::from_secs(10),service.catalog.backup_service(
+            root.clone(),archive.clone(),"before-gc".into(),records)).await.unwrap().unwrap();
+        drop(backup_gate);
+        assert!(!tokio::time::timeout(std::time::Duration::from_secs(10),reclaim).await.unwrap().unwrap().unwrap(),
+            "the retained Record owner still protects the files");
+        service.records.write().await.clear();
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {
+            while !service.reclaim_collection(entry.clone()).await.unwrap() {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap(); std::fs::remove_dir_all(archive).unwrap();
     }
     #[tokio::test]
     async fn service_reclaims_only_owned_abandoned_export_directories() {

@@ -11,28 +11,29 @@ impl Catalog {
             .min_by_key(|entry| (entry.generation <= after, entry.generation)).cloned())
     }
 
-    /// Reclaim one exact deleted incarnation under its collection and snapshot
+    /// Reclaim one exact deleted incarnation under its incarnation and snapshot
     /// barriers. The caller owns the service root and performs bounded, retryable
-    /// cleanup; `true` means all physical resources have been released.
-    pub async fn reclaim_deleted<F, Fut>(
-        &self, entry: CollectionEntry, cleanup: F,
+    /// cleanup; `true` means all physical resources have been released. Keepalive
+    /// guards remain owned through the final metadata commit, even on cancellation.
+    pub async fn reclaim_deleted<F, Fut, Owner>(
+        &self, entry: CollectionEntry, keepalive: Owner, cleanup: F,
     ) -> Result<bool, CatalogError>
     where
         F: FnOnce(CollectionEntry) -> Fut + Send + 'static,
         Fut: Future<Output = Result<bool, String>> + Send + 'static,
+        Owner: Send + 'static,
     {
         let admission = self.admission.clone().try_acquire_owned().map_err(|_| CatalogError::Busy)?;
         let owner = self.inner.clone();
         let execution = self.execution.clone();
         crate::resources::spawn(async move {
             let _admission = admission;
-            let command = CatalogCommand::DeleteCollection {
-                tenant_id: entry.tenant_id.clone(), collection_id: entry.collection_id.clone(),
-            };
-            let _execution = execution.control(&command).await?;
+            let _keepalive = keepalive;
+            let id = entry.scope();
+            let _snapshot = execution.global.clone().read_owned().await;
+            let _incarnation = execution.collection(&id)?.write_owned().await;
             let mut inner = owner.lock().await;
             if !inner.is_healthy() { return Err(CatalogError::RecoveryRequired); }
-            let id = entry.scope();
             let Some(current) = inner.state.collections.get(&id) else { return Ok(true); };
             if !current.deleted || current.active { return Err(CatalogError::Conflict("collection is not deleted".into())); }
             if inner.state.backups.iter().any(|(id, backup)|
