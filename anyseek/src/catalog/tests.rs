@@ -312,7 +312,7 @@ async fn complete_service_restore_retains_tenants_but_disables_historical_keys()
         .await
         .unwrap();
     let archive = parent.path().join("archive");
-    catalog
+    let backup = catalog
         .backup_service(
             root.clone(),
             archive.clone(),
@@ -322,9 +322,10 @@ async fn complete_service_restore_retains_tenants_but_disables_historical_keys()
         .await
         .unwrap();
     let restored = parent.path().join("restored");
-    Catalog::restore_service(archive, restored.clone(), "restore".into(), "e".repeat(64))
-        .await
-        .unwrap();
+    let receipt = Catalog::restore_service(archive, restored.clone(), "restore".into(), "e".repeat(64))
+        .await.unwrap();
+    assert_eq!(receipt.source_catalog_hash.as_ref(), backup.objects.get(""));
+    assert!(!restored.join("authority-at-backup").exists());
     let catalog = Catalog::open(&restored).await.unwrap();
     catalog.require_service_completion(&restored).await.unwrap();
     assert_eq!(catalog.tenants().await.unwrap(), vec!["alpha", "beta"]);

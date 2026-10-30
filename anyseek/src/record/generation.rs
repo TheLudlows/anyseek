@@ -211,7 +211,7 @@ pub(super) fn prepare(state: &State, config: &RecordConfig, request: RecordWrite
     }
     let receipt = WriteReceipt { staged_only: matches!(request.generation, Some(GenerationCommand::Stage { .. }|GenerationCommand::Begin{..}|GenerationCommand::StageBatch{..}|GenerationCommand::Seal{..}|GenerationCommand::Renew { .. })), seq: state.seq.checked_add(1).ok_or_else(|| storage("sequence exhausted"))?,
         version: old.map_or(Some(1), |g| g.version.checked_add(1)).ok_or_else(|| storage("generation version exhausted"))?, record_id:request.record_id.clone() };
-    let applied = Applied { request_digest:None, legacy_graph_invalidation:false, request, receipt, observed_epoch:epoch, observed_time_ms:evaluation };
+    let applied = Applied { request_digest:None, request, receipt, observed_epoch:epoch, observed_time_ms:evaluation };
     let growth=checkpoint_codec::json_length(&applied)?.checked_mul(3).ok_or_else(|| storage("generation state growth overflow"))?;
     let mut candidate = state.try_clone_with_growth(growth)?; super::apply(&mut candidate, &applied)?;
     validate_state(&candidate, config)?;

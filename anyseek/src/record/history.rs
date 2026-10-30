@@ -1,26 +1,19 @@
 //! Authenticated history retention for receipt GC and generation owner fencing.
-//! The historical wire names are retained so existing checkpoints and WAL replay
-//! keep their exact digests. There is no external notification stream or cursor.
+//! There is no external notification stream or cursor.
 use super::*;
 
 const MIN_RETENTION_MS: u64 = 7 * 86_400_000;
-/// Conservative receipt-history retention policy. Event quotas are legacy wire
-/// metadata only; they no longer reserve memory or reject writes.
+/// Conservative receipt-history retention policy.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct HistoryRetention {
     /// Minimum authenticated age before history is eligible for receipt GC.
     /// The operation retry epoch and live generation provenance are also checked.
     pub retention_ms: u64,
-    #[serde(rename = "max_events")]
-    legacy_max_events: usize,
-    #[serde(rename = "max_bytes")]
-    legacy_max_bytes: usize,
 }
 impl Default for HistoryRetention {
     fn default() -> Self {
-        Self { retention_ms: MIN_RETENTION_MS, legacy_max_events: 100_000,
-            legacy_max_bytes: 64 * 1024 * 1024 }
+        Self { retention_ms: MIN_RETENTION_MS }
     }
 }
 pub(super) fn validate_config(config: &HistoryRetention) -> Result<(), RecordError> {
@@ -50,9 +43,6 @@ pub(super) struct Trim {
     previous: u64,
     pub(super) floor: u64,
     at: u64,
-    // Old WAL entries retain their exact public-point validation rule.
-    #[serde(default,skip_serializing_if="std::ops::Not::not")]
-    complete_time_prefix: bool,
 }
 /// Every command, including private generation updates, is a committed position.
 /// Source state has a monotonic authenticated time chain;
@@ -81,8 +71,7 @@ pub(super) fn apply_trim(
     trim: &Trim,
 ) -> Result<(), RecordError> {
     validate_state(state)?;
-    let expected=if trim.complete_time_prefix {committed_floor(state,trim.at,config.retention_ms)}
-        else {legacy_public_floor(state,trim.at,config.retention_ms)};
+    let expected=committed_floor(state,trim.at,config.retention_ms);
     if trim.previous != state.history.floor
         || trim.at < state.time_watermark_ms
         || expected != Some(trim.floor)
@@ -103,7 +92,6 @@ impl Inner {
             previous: self.state.history.floor,
             floor,
             at,
-            complete_time_prefix: true,
         };
         #[cfg(feature="s3-object-store")]
         if self.remote.is_some() {
@@ -159,18 +147,6 @@ impl Inner {
     }
 }
 
-// Pre-complete_time_prefix WAL entries advanced only over public commands.
-// Preserve that historical validation rule without rebuilding notification rows.
-fn legacy_public_floor(state: &State, at: u64, retention: u64) -> Option<u64> {
-    let cutoff = at.checked_sub(retention)?;
-    state.operations.iter().filter(|op| op.observed_time_ms <= cutoff
-        && op.receipt.seq > state.history.floor
-        && (op.request.vector_patch.is_some() || op.request.generation.as_ref()
-            .is_none_or(|command| matches!(command, GenerationCommand::Publish { .. }))))
-        .map(|op| op.receipt.seq)
-        .chain(state.expirations.iter().filter(|e| e.evaluation_time_ms <= cutoff
-            && e.seq > state.history.floor).map(|e| e.seq)).max()
-}
 #[cfg(test)]
 mod retention_tests {
     use super::*;
@@ -209,14 +185,7 @@ mod retention_tests {
             settings.history.retention_ms),Some(2),"upper bound includes both equal-time source and private stage");
         let safe=committed_floor(&state,now,settings.history.retention_ms).unwrap();
         assert!(safe>1 && safe<last_private);
-        // The previous algorithm stopped at the sole old public source event.
-        assert_eq!(legacy_public_floor(&state,now,settings.history.retention_ms),Some(1));
-        let old_wire=format!(r#"{{"previous":0,"floor":1,"at":{now}}}"#);
-        let old:Trim=serde_json::from_str(&old_wire).unwrap();
-        assert_eq!(serde_json::to_string(&old).unwrap(),old_wire);
-        let mut old_replayed=state.try_clone().unwrap();
-        apply_trim(&mut old_replayed,&settings.history,&old).unwrap();
-        let mut bad=Trim {previous:0,floor:recent_seq,at:now,complete_time_prefix:true};
+        let mut bad=Trim {previous:0,floor:recent_seq,at:now};
         assert!(apply_trim(&mut state.try_clone().unwrap(),&settings.history,&bad).is_err());
         bad.floor=safe;
         let mut replayed=state.try_clone().unwrap();
@@ -242,41 +211,5 @@ mod retention_tests {
         let inner = recovered.inner.lock().await;
         assert_eq!(inner.state.history.floor, safe);
         assert!(inner.state.operations.iter().any(|op| op.receipt.seq == recent_seq));
-    }
-}
-
-#[cfg(test)]
-mod compatibility_tests {
-    use super::*;
-    use crate::record::tests::{config, source_write, write};
-
-    #[tokio::test]
-    async fn legacy_event_quotas_are_wire_only_and_history_survives_reopen() {
-        let root = tempfile::tempdir().unwrap();
-        let mut wire = serde_json::to_value(config()).unwrap();
-        wire["change_feed"]["max_events"] = serde_json::json!(1);
-        wire["change_feed"]["max_bytes"] = serde_json::json!(1024);
-        let settings: RecordConfig = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&settings).unwrap(), wire);
-        let path = root.path().join("partition");
-        let p = RecordPartition::create(&path, settings.clone()).await.unwrap();
-        // These writes exceeded the removed notification count/reserve budget.
-        p.write(source_write("source", "s", &[])).await.unwrap();
-        p.write(write("one", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
-        let request = write("two", "b", "beta", ExpectedVersion::Absent);
-        let receipt = p.write(request.clone()).await.unwrap();
-        p.compact_journal().await.unwrap();
-        {
-            let inner = p.inner.lock().await;
-            let state = serde_json::to_value(&inner.state).unwrap();
-            assert!(state.get("feed").is_some());
-            assert!(state.get("history").is_none());
-            assert_eq!(checkpoint_codec::json_length(&inner.state).unwrap(), state_proof::length(&inner.state).unwrap());
-        }
-        drop(p);
-        let p = RecordPartition::open(&path, settings.max_journal_bytes).await.unwrap();
-        assert_eq!(p.write(request).await.unwrap(), receipt);
-        assert_eq!(p.page(None, 10).await.unwrap().records.len(), 3);
-        assert_eq!(serde_json::to_value(&p.inner.lock().await.config).unwrap()["change_feed"], wire["change_feed"]);
     }
 }

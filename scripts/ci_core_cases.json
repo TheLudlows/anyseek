@@ -78,7 +78,7 @@
   "record::query::tests::captured_candidates_survive_cache_rebuild_with_new_physical_rows",
   "record::query::tests::captured_candidate_rejects_same_body_version_vector_patch",
   "record::query::tests::candidate_and_filter_revalidation_fence_failed_component_after_capture",
-  "record::anchor::tests::legacy_statistics_migrate_revision_identity_on_package_open",
+  "record::anchor::tests::missing_revision_identities_are_rejected_on_package_open",
   "record::maintenance::tests::receipt_gc_checkpoint_recovery_resolves_publication_failures",
   "record::maintenance::tests::receipt_gc_preserves_history_and_retry_window_and_persists_rollback_floor",
   "record::maintenance::tests::receipt_gc_retains_generation_lease_provenance",

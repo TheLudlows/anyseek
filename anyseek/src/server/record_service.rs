@@ -35,6 +35,10 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
+tokio::task_local! { static AUTHENTICATED: String; }
+#[derive(Clone)]
+struct Principal(String);
+
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 #[derive(Debug)]
@@ -131,7 +135,11 @@ async fn owned<T: Send + 'static>(
     work: impl Future<Output = Result<T, Error>> + Send + 'static,
 ) -> Result<T, Error> {
     let scope = ResourceScope::current();
-    tokio::spawn(async move { match scope { Some(scope) => scope.run(work).await, None => work.await } }).await.map_err(|e| {
+    let principal = AUTHENTICATED.try_with(Clone::clone).ok();
+    tokio::spawn(async move {
+        let work = async move { match scope { Some(scope) => scope.run(work).await, None => work.await } };
+        match principal { Some(principal) => AUTHENTICATED.scope(principal, work).await, None => work.await }
+    }).await.map_err(|e| {
         Error(
             StatusCode::SERVICE_UNAVAILABLE,
             "outcome_unknown",
@@ -493,6 +501,13 @@ impl Service {
         Ok(())
     }
     async fn authenticate(&self, headers: &HeaderMap) -> Result<String, Error> {
+        match AUTHENTICATED.try_with(Clone::clone) {
+            Ok(principal) => Ok(principal),
+            // Direct library/handler tests do not enter the HTTP middleware.
+            Err(_) => self.authenticate_credentials(headers).await,
+        }
+    }
+    async fn authenticate_credentials(&self, headers: &HeaderMap) -> Result<String, Error> {
         let value = headers
             .get("apikey")
             .and_then(|v| v.to_str().ok())
@@ -542,7 +557,7 @@ impl Service {
     }
     async fn record(&self, key: &str, id: &str) -> Result<CollectionRecord, Error> {
         let entry = self.catalog
-            .authorized(key.into(), id.into(), |entry| async move { entry }).await?;
+            .collection_entry(key, id).await?;
         let partition = self.records.read().await.get(&entry.scope()).cloned().ok_or_else(not_found)?;
         Ok(CollectionRecord { generation: entry.generation, partition })
     }
@@ -1693,8 +1708,15 @@ async fn request_guard(
     {
         return bad("query parameters belong in the JSON body").into_response();
     }
+    let principal = request.extensions().get::<Principal>().cloned();
+    let run = async move {
+        match principal {
+            Some(principal) => AUTHENTICATED.scope(principal.0, next.run(request)).await,
+            None => next.run(request).await,
+        }
+    };
     let response =
-        match tokio::time::timeout_at(deadline, scope.clone().run(next.run(request))).await {
+        match tokio::time::timeout_at(deadline, scope.clone().run(run)).await {
             Ok(response) => response,
             Err(_) => Error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1986,6 +2008,33 @@ mod tests {
         let response=app.oneshot(axum::http::Request::builder().uri(uri).header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
         let status:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap(); assert_eq!(status["receipt"]["record_id"],"r");
         drop(service); std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
+    async fn authenticated_request_can_finish_when_key_is_revoked_while_reading_body() {
+        use tower::ServiceExt;
+        let (service,path,headers)=setup().await;
+        let app=router(service.clone());
+        let revoke=service.clone();
+        let body=Body::from_stream(futures::stream::once(async move {
+            revoke.catalog.execute(CatalogRequest {
+                operation_id:OperationId::new("revoke-before-handler".into()),
+                command:CatalogCommand::RevokeKey{key_id:"a".into()},
+            }).await.unwrap();
+            Ok::<_,std::io::Error>(Bytes::from(serde_json::to_vec(&json!({
+                "operation_id":OperationId::new("accepted-body".into()),"record_id":"r",
+                "routing_key":"r","expected":"Absent","document":{"body":"alpha"}
+            })).unwrap()))
+        }));
+        let request=axum::http::Request::builder().method("POST").uri("/api/v1/index/c/doc")
+            .header("apikey",headers["apikey"].clone()).body(body).unwrap();
+        let response=app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap();
+        let denied=axum::http::Request::builder().uri("/api/v1/index/c")
+            .header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap();
+        assert_eq!(app.clone().oneshot(denied).await.unwrap().status(),StatusCode::FORBIDDEN);
+        assert!(service.record("tenant","c").await.unwrap().get("r").await.unwrap().is_some());
+        drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn committed_response_survives_revoke_but_new_requests_fail() {

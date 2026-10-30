@@ -2,11 +2,11 @@
 
 本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/src/server/README.md)。
 
-[#98](https://github.com/TheLudlows/anyseek/issues/98) 将 Tenant/Catalog 与 S3 authority 统一到 SQLite。Catalog 格式为 3，authority schema 为 2；旧 Catalog 日志及旧数据库格式不提供迁移。验收状态见 [STATUS](../STATUS.md)。
+[#98](https://github.com/TheLudlows/anyseek/issues/98) 将 Tenant/Catalog 与 S3 authority 统一到 SQLite。Catalog 格式为 4，authority schema 为 2；旧 Catalog 日志及旧数据库格式不提供迁移。验收状态见 [STATUS](../STATUS.md)。
 
 ## 本地 Segment 与共同视图
 
-`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订、generation 与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV14/manifest 3，不读取旧格式、迁移或双写。
+`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订、generation 与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV15、anchor manifest 6 / 检索 package manifest 3，不读取旧格式、迁移或双写。
 
 `record/view.rs` 在同一 partition guard 下检索多个冻结段与可变 tail。更新/墓碑先排除旧版本，再截断 Top-K；各段共享活动 N/df/字段长度上下文，每个通道先形成全局排名再融合。查询、过滤、回表与统计固定同一视图，缺少必要 tail 时失败，不能只搜旧段。
 
@@ -69,7 +69,7 @@ C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级
 
 完整 checkpoint 包含版本、删除、来源/generation、原始数据引用、操作回执、回执历史 GC 切点及 generation 恢复隔离身份和 staging 恢复状态，因此 `log_base_seq` 可推进至该 checkpoint cut。新 WAL 链从新 base 开始；旧链的不可变 predecessor 边不修改，仍被备份或其他 pin 保护时不能删除。
 
-内部历史裁剪通过**同序号完整 checkpoint**认证 GC 切点和时间水位；冷恢复仍得到相同边界，不额外消耗业务序号。回执 GC 同时检查历史保留期、当前/前一 UTC 日重试窗口和存活 generation 的来源证明。为保持既有备份和远端摘要可验证，磁盘上的 `change_feed`、`feed`、`RecordFeedTrimV12` 名称及旧配额值作为兼容格式保留；旧事件数量/字节配额不再参与准入，不构建通知缓存。恢复隔离身份仍用于阻止旧 staging 在新 owner 下未经 renew 直接发布。外部 bootstrap/changes 同步接口已移除。
+内部历史裁剪通过**同序号完整 checkpoint**认证 GC 切点和时间水位；冷恢复仍得到相同边界，不额外消耗业务序号。回执 GC 同时检查历史保留期、当前/前一 UTC 日重试窗口和存活 generation 的来源证明。当前格式使用 `history` 和 `RecordHistoryTrimV13`，移除旧通知配额占位字段与旧裁剪算法；旧库、WAL 和备份明确拒绝，不做迁移。恢复隔离身份仍用于阻止旧 staging 在新 owner 下未经 renew 直接发布。外部 bootstrap/changes 同步接口已移除。
 
 物理删除不只看 indexed seq：checkpoint 已保存的幂等/staging/来源及历史裁剪状态、当前根、完整依赖图、读者/构建/备份 pin 必须共同满足。当前单机读者和构建受 partition guard 保护；多节点租约/外部 indexer 尚不在本批。
 
@@ -137,3 +137,5 @@ checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包�
 - [PR #74 CI](https://github.com/TheLudlows/anyseek/actions/runs/39814329888) 对最终 head `eb9431a3` 的五个任务全部通过，包含 Linux/Windows 原生持久化和 S3 语义/合同；合入源码为 `afbe323d`，与测试 head 的 Git tree 完全相同。主干 `a36e71e0` 的 [CI 五项也已通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455)；开发分支另行验收。
 
 HTTP fixture 不等于真实 S3 服务认证。本轮先交付合同工具与用例，实际 endpoint 尚未运行；最终修改的 PR 原生 Linux/Windows CI 已通过；主干 `a36e71e0` CI 已核对；开发分支 CI 与实际目标后端验收仍待完成。系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
+
+Catalog 管理操作在写事务之前仅做一次完整预算/可恢复性校验。完整服务归档格式为 2；恢复只保留源 Catalog cut/hash、来源身份及必要旧 Operation ID 隔离，不再复制完整历史 Catalog 或 Key 验证材料。HTTP 中间件在读取 body 前认证一次，已认证上下文供 handler 和 owned 工作复用；集合实际执行仍在生命周期屏障内检查代次。

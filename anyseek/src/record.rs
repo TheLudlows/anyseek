@@ -107,7 +107,6 @@ fn storage(error: impl std::fmt::Display) -> RecordError {
 pub struct RecordConfig {
     /// Conservative receipt-history retention; legacy wire metadata is preserved.
     #[serde(default)]
-    #[serde(rename = "change_feed")]
     pub history: HistoryRetention,
     /// Existing retrieval configuration; this partition uses one shard.
     pub index: IndexMetaObject,
@@ -290,9 +289,6 @@ pub struct WriteReceipt {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Applied {
     request_digest: Option<String>,
-    // Retain old serialized values for authenticated WAL/checkpoint digests.
-    #[serde(rename = "graph_invalidation")]
-    legacy_graph_invalidation: bool,
     request: RecordWrite,
     receipt: WriteReceipt,
     observed_epoch: u64,
@@ -304,7 +300,6 @@ struct State {
     #[serde(skip)]
     residency: Option<Arc<state_memory::Charge>>,
     lineage: String,
-    #[serde(rename = "feed")]
     history: history::HistoryState,
     independent_snapshot: bool,
     seq: u64,
@@ -331,15 +326,15 @@ struct State {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(Clone))]
 enum Entry {
-    #[serde(rename = "RecordAnchorV1")]
+    #[serde(rename = "RecordAnchorV2")]
     Anchor(anchor::Reference),
-    #[serde(rename = "RecordCheckpointV14")]
+    #[serde(rename = "RecordCheckpointV15")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV12")]
+    #[serde(rename = "RecordAppliedV13")]
     Applied(Applied),
     #[serde(rename = "RecordExpiredV12")]
     Expired(temporal::Expiration),
-    #[serde(rename = "RecordFeedTrimV12")]
+    #[serde(rename = "RecordHistoryTrimV13")]
     HistoryTrim(history::Trim),
     #[serde(rename = "RecordLeaseExpiredV12")]
     LeaseExpired(lease::Expiration),
@@ -3031,12 +3026,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_protocol_rejects_p1_checkpoint_without_migration() {
+    async fn source_protocol_rejects_old_checkpoint_without_migration() {
         let root = path(); let cfg = config();
-        let checkpoint = encode_entry(&Entry::Checkpoint { config: cfg.clone(), state: State::default() }).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV14", "Checkpoint", 1);
+        let current = RecordPartition::create(&root, cfg.clone()).await.unwrap();
+        let checkpoint = {
+            let inner = current.inner.lock().await;
+            encode_entry(&Entry::Checkpoint { config:inner.config.clone(), state:inner.state.try_clone().unwrap() }).unwrap()
+        };
+        drop(current); std::fs::remove_dir_all(&root).unwrap();
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV15", "RecordCheckpointV14", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
-        assert!(RecordPartition::open(&root, cfg.max_journal_bytes).await.is_err());
+        let error = RecordPartition::open(&root, cfg.max_journal_bytes).await.err().unwrap();
+        assert!(error.to_string().contains("RecordCheckpointV14"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

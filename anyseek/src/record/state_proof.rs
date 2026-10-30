@@ -16,7 +16,7 @@ impl Serialize for Metadata<'_> {
             operation_lookup:_,lookup_bytes:_}=self.0;
         let mut s=serializer.serialize_struct("State",14+usize::from(retired_operation_prefix.is_some()))?;
         macro_rules! field {($name:ident)=>{s.serialize_field(stringify!($name),$name)?};}
-        field!(lineage);s.serialize_field("feed",history)?;
+        field!(lineage);s.serialize_field("history",history)?;
         field!(independent_snapshot);field!(seq);field!(epoch_watermark);field!(time_watermark_ms);
         if retired_operation_prefix.is_some() {field!(retired_operation_prefix);}
         field!(expirations);field!(lease_expirations);field!(private_cleanup_pending);field!(evidence_quarantined);

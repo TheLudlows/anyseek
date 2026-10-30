@@ -167,7 +167,8 @@ jobs:
         run: |
           cargo test -p anyseek --features s3-object-store --lib record::indexer::tests
           cargo test -p anyseek --features s3-object-store --lib sqlite_authority::index_build::tests
-          cargo test -p anyseek --features s3-object-store --lib background_index
+          # indexer::tests already ran with these same features above.
+          cargo test -p anyseek --features s3-object-store --lib background_index -- --skip record::indexer::tests
           cargo test -p anyseek --features s3-object-store --lib expired_remote_index
       - name: Native catalog authorization and revocation recovery tests
         run: cargo test -p anyseek --lib catalog_
