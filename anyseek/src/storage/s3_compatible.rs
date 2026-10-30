@@ -337,7 +337,7 @@ impl S3CompatibleStore {
         let head = authority.read_head(partition_id)
             .map_err(UploadRegisterError::Metadata)?
             .ok_or_else(|| UploadRegisterError::Metadata(rusqlite::Error::QueryReturnedNoRows))?;
-        let key = format!("partitions/{partition_id}/bootstrap/initial.json");
+        let key = super::object_keys::key(partition_id, "manifests", "initial.json");
         let reference = self.put_and_register(authority, &key, checkpoint_bytes, created_at_ms).await?;
         authority.set_bootstrap_reference(
             partition_id, head.head_version, owner_epoch, reference,
@@ -371,7 +371,7 @@ impl S3CompatibleStore {
         }
         #[cfg(feature="fault-injection")]
         if std::env::var("ANYSEEK_REMOTE_BACKUP_FAULT").as_deref()==Ok("after_snapshot") {std::process::exit(92);}
-        let snapshot_key = format!("backups/{backup_id}/authority.json");
+        let snapshot_key = super::object_keys::key(partition.unwrap_or("backup"), "manifests", &format!("backup-{backup_id}/authority.json"));
         let snapshot:AuthorityBackupSnapshot=serde_json::from_slice(&snapshot_bytes).map_err(BackupError::Decode)?;
         let metadata_snapshot = self.put_backup_object(authority,backup_id,&snapshot_key,&snapshot_bytes,snapshot.created_at_ms).await
             .map_err(backup_upload_error)?;
@@ -387,7 +387,7 @@ impl S3CompatibleStore {
             object_closure: closure,
         };
         let descriptor_bytes = serde_json::to_vec(&descriptor).map_err(BackupError::Decode)?;
-        let descriptor_key = format!("backups/{backup_id}/descriptor.json");
+        let descriptor_key = super::object_keys::key(partition.unwrap_or("backup"), "manifests", &format!("backup-{backup_id}/descriptor.json"));
         let descriptor_ref = self.put_backup_object(authority,backup_id,&descriptor_key,&descriptor_bytes,snapshot.created_at_ms).await
             .map_err(backup_upload_error)?;
         authority.register_object_edge(&descriptor_ref, &descriptor.metadata_snapshot)
@@ -662,8 +662,8 @@ mod tests {
         let stamp=SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let id=format!("contract-{}-{stamp}",std::process::id());
         let prefix=format!("anyseek-contract-tests/{id}/");
-        let partition_prefix=format!("partitions/{id}/");
-        let backup_prefix=format!("backups/{id}/");
+        let partition_prefix=format!("anyseek/{id}/");
+        let backup_prefix=format!("anyseek/backup/manifests/backup-{id}/");
         let store=S3CompatibleStore::connect(&endpoint,&bucket,&region,&access,&secret,allow_http,1024*1024).unwrap();
         let source_path=env::temp_dir().join(format!("anyseek-{id}-source.sqlite"));
         let target_path=env::temp_dir().join(format!("anyseek-{id}-target.sqlite"));
@@ -700,7 +700,7 @@ mod tests {
 
             let mut source=SqliteAuthority::open(&source_path,Duration::from_secs(2)).unwrap();
             source.create_partition(&id,7).unwrap();
-            keys.insert(format!("{partition_prefix}bootstrap/initial.json"));
+            keys.insert(format!("{partition_prefix}manifests/initial.json"));
             let initial=store.publish_bootstrap(&mut source,&id,7,b"initial authority",10).await.unwrap();
             let bootstrap=initial.bootstrap.unwrap();
             let body=b"operation one";let digest:[u8;32]=Sha256::digest(body).into();
@@ -913,7 +913,7 @@ mod upload_retirement_tests {
         store.publish_bootstrap(&mut authority,"p",1,b"initial",1).await.unwrap();
         let closure=authority.reachable_objects().unwrap();
         let bytes=authority.prepare_backup_snapshot("interrupted",&closure,10,1024*1024).unwrap();
-        let reference=ObjectRef{key:"backups/interrupted/authority.json".into(),length:bytes.len() as u64,
+        let reference=ObjectRef{key:"anyseek/backup/manifests/backup-interrupted/authority.json".into(),length:bytes.len() as u64,
             sha256:Sha256::digest(&bytes).into()};
         authority.reserve_backup_upload(&reference,10,Some("interrupted")).unwrap();
         assert!(authority.reachable_objects().is_err());

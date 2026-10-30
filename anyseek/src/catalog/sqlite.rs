@@ -78,7 +78,8 @@ impl Store {
              CREATE TABLE catalog_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), format INTEGER NOT NULL, metadata TEXT NOT NULL);
              CREATE TABLE catalog_tenants (tenant_id TEXT PRIMARY KEY);
              CREATE TABLE catalog_keys (key_id TEXT PRIMARY KEY, tenant_id TEXT REFERENCES catalog_tenants(tenant_id), metadata TEXT NOT NULL);
-             CREATE TABLE catalog_collections (tenant_id TEXT NOT NULL REFERENCES catalog_tenants(tenant_id), collection_id TEXT NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(tenant_id,collection_id));
+             CREATE TABLE catalog_collections (tenant_id TEXT NOT NULL REFERENCES catalog_tenants(tenant_id), collection_id TEXT NOT NULL, generation INTEGER NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(tenant_id,collection_id,generation));
+             CREATE UNIQUE INDEX catalog_current_collection ON catalog_collections(tenant_id,collection_id) WHERE json_extract(metadata,'$.deleted')=0;
              CREATE TABLE catalog_backups (backup_id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
              CREATE TABLE catalog_operations (scope TEXT NOT NULL, epoch INTEGER NOT NULL, nonce TEXT NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(scope,epoch,nonce));
              COMMIT;"
@@ -96,7 +97,7 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(storage)?;
-        if format != 2 {
+        if format != 3 {
             return Err(storage("unsupported catalog SQLite format"));
         }
         let metadata: Metadata = serde_json::from_str(&metadata).map_err(storage)?;
@@ -121,10 +122,11 @@ impl Store {
                 .insert(id, serde_json::from_str(&value).map_err(storage)?);
         }
         for (id, value) in store
-            .rows("SELECT tenant_id || '/' || collection_id,metadata FROM catalog_collections ORDER BY tenant_id,collection_id")?
+            .rows("SELECT tenant_id || '/' || collection_id || '/' || printf('%016x',generation),metadata FROM catalog_collections ORDER BY tenant_id,collection_id,generation")?
         {
             let entry: CollectionEntry = serde_json::from_str(&value).map_err(storage)?;
-            if entry.scope() != id {
+            scope(&entry.tenant_id, &entry.collection_id)?;
+            if entry.scope() != id || entry.generation == 0 || entry.generation > state.seq {
                 return Err(storage("catalog collection identity mismatch"));
             }
             state.collections.insert(id, entry);
@@ -211,7 +213,7 @@ impl Store {
                 .as_ref()
                 != Some(&json)
             {
-                transaction.execute("INSERT INTO catalog_collections VALUES(?1,?2,?3) ON CONFLICT(tenant_id,collection_id) DO UPDATE SET metadata=excluded.metadata", params![collection.tenant_id,collection.collection_id,json]).map_err(storage)?;
+                transaction.execute("INSERT INTO catalog_collections VALUES(?1,?2,?3,?4) ON CONFLICT(tenant_id,collection_id,generation) DO UPDATE SET metadata=excluded.metadata", params![collection.tenant_id,collection.collection_id,collection.generation,json]).map_err(storage)?;
             }
         }
         for (id, backup) in &next.backups {
@@ -246,7 +248,7 @@ impl Store {
                     .map_err(storage)?;
             }
         }
-        transaction.execute("INSERT INTO catalog_meta VALUES(1,2,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
+        transaction.execute("INSERT INTO catalog_meta VALUES(1,3,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
         #[cfg(test)]
         crash("before_commit");
         transaction

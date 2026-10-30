@@ -440,8 +440,7 @@ impl std::fmt::Display for RemoteCommitError {
 #[cfg(feature = "s3-object-store")]
 impl RemotePersistence {
     fn open(config: &S3CompatibleRecordConfig) -> Result<Self, RecordError> {
-        if config.partition_id.is_empty()
-            || !config.partition_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        if !crate::storage::object_keys::valid_partition(&config.partition_id)
             || config.max_object_bytes == 0 || config.max_tail_blocks == 0 || config.max_tail_bytes == 0 {
             return Err(RecordError::Rejected("invalid S3 persistence configuration".into()));
         }
@@ -498,8 +497,8 @@ impl RemotePersistence {
         };
         // The object identity binds the complete range, including its predecessor.
         let digest: [u8; 32] = checkpoint_codec::json_digest(&block).map_err(|e| format!("{e:?}"))?;
-        let key = format!("partitions/{}/wal/{first:020}-{}", self.partition_id,
-            digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        let key = crate::storage::object_keys::key(&self.partition_id, "wal", &format!("{first:020}-{}",
+            digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
         let reference = crate::storage::object_log::upload_log_block(
             &self.store, &mut authority, &key, &block,
             unix_time_ms_i64(), self.max_object_bytes,

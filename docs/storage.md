@@ -2,7 +2,7 @@
 
 本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/src/server/README.md)。
 
-本次为 [#98](https://github.com/TheLudlows/anyseek/issues/98) 的 SQLite 持久化阶段；Tenant 模型和凭据边界已实施；同名重建与 namespace 删除尚未实施，不代表 #98 完成。旧 Catalog 日志及旧 SQLite authority schema 不提供迁移；新 authority schema 为 2。
+[#98](https://github.com/TheLudlows/anyseek/issues/98) 将 Tenant/Catalog 与 S3 authority 统一到 SQLite。Catalog 格式为 3，authority schema 为 2；旧 Catalog 日志及旧数据库格式不提供迁移。验收状态见 [STATUS](../STATUS.md)。
 
 ## 本地 Segment 与共同视图
 
@@ -18,7 +18,7 @@ Flush 复用未变冻结段、冻结当前 tail；compaction 重建完整等价�
 
 SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引水位、不可变引用、有限期幂等协调、对象依赖、pin、退休状态和备份/恢复协调记录。正文、原始向量、索引和 WAL 内容均在对象存储中。本地日志、payload 和索引是可以重建的缓存。
 
-服务使用根目录下的 `metadata.sqlite`，同时保存 Catalog 管理元数据与 S3 Record 协调状态；Catalog 不再维护独立持久化日志。Catalog 更新与管理回执在同一短事务提交，不复制正文、向量或完整 Record State。SQLite 使用 WAL 与 `synchronous=FULL`，不在事务内执行对象上传。Record 对象后端按分区持有稳定的本地 owner 文件锁；同一分区不能由两个 Record 实例同时持有，不同分区可以共享该数据库。集合备份只导出该分区的当前对象闭包和协调记录；恢复绑定按分区隔离，GC 只退休和删除本分区前缀的对象，全库可达性仍保护其他分区及 pin。服务根目录的 `s3-namespace` 是持久协调身份，同 collection ID 在独立服务根/恢复目标中不会共享可写对象命名空间；它应与 catalog、SQLite 权威库一起保留，不能当作缓存删除。
+服务使用根目录下的 `metadata.sqlite`，同时保存 Catalog 管理元数据与 S3 Record 协调状态；Catalog 不再维护独立持久化日志。Catalog 更新与管理回执在同一短事务提交，不复制正文、向量或完整 Record State。SQLite 使用 WAL 与 `synchronous=FULL`，不在事务内执行对象上传。Record 对象后端按分区持有稳定的本地 owner 文件锁；同一分区不能由两个 Record 实例同时持有，不同分区可以共享该数据库。集合备份只导出该分区的当前对象闭包和协调记录；恢复绑定按分区隔离，GC 只退休和删除本分区前缀的对象，全库可达性仍保护其他分区及 pin。集合本地目录直接派生为 `collections/{tenant_id}/{collection_id}/{generation}`，不保存名称到生成目录的映射。对象前缀为 `anyseek/{tenant_id}/{collection_id}/`，下分 `wal/records/lexical/vector/manifests`；内部代次编码在对象 ID 中。相同名称重建使用新代次，旧任务、回执与 GC 继续绑定原代次；客户端不传代次。没有自动 namespace 或 Bucket 归属标记，不同独立服务必须使用不同 bucket。
 
 普通写入先登记上传身份，再完成不可变 PUT、读回长度/字节/SHA-256 校验，最后由 SQLite 事务条件发布 head 与回执，再发布本地完整视图。对象缺失或校验失败不会回退为旧缓存成功。
 
@@ -91,7 +91,7 @@ C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级
 
 在同一个受控 cut 捕获逻辑 SQLite 快照并 pin 完整对象闭包。`backup_exports` 暂存**协调元数据快照字节**，用于进程中断后用同 backup ID 恢复原 cut，不保存正文、向量或索引内容。这项重复是可恢复导出的必要工作状态，显式退休时清除。
 
-metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition 命名空间派生。重试复用原快照时间、水位和闭包，不把后续写入冒充原备份。服务指针使用私有文件 + sync + rename，未完成指针可重试；指针退休与本地 PartitionJournal 退休分别处理，并在启动时重试 catalog 已认证的退休动作。
+metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 Tenant、集合代次和 Operation ID 派生。重试复用原快照时间、水位和闭包，不把后续写入冒充原备份。服务指针使用私有文件 + sync + rename，未完成指针可重试；指针退休与本地 PartitionJournal 退休分别处理，并在启动时重试 catalog 已认证的退休动作。
 
 本地最多保留 32 个 collection 备份指针。中断留下的同 ID 目录已经占用一个槽位，达到上限时仍允许修复该指针；新 ID 在分配前拒绝。重试只清理该目录内本实现拥有的 `.marker-<32hex>` 普通临时文件，继续使用原远端备份 cut。
 
@@ -99,11 +99,11 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 
 先校验 descriptor、SQLite 快照和完整对象闭包。中断后的相同快照导入可继续，不覆盖另一个快照或回退已推进的 head。
 
-恢复到新 collection 时，不复制一份能独立 GC 的原对象引用权威。先用不服务、不运行 GC 的临时导入库重放原 cut，再把验证后的规范文件复制到**新对象命名空间**，发布目标独立 checkpoint。原库和恢复目标因此可以独立压缩、退休备份和回收；重复恢复不能回退恢复目标后续写入。
+恢复到新 collection 时，不复制一份能独立 GC 的原对象引用权威。先用不服务、不运行 GC 的临时导入库重放原 cut，再把验证后的规范文件复制到**目标集合新代次的对象 ID**，发布目标独立 checkpoint。原库和恢复目标因此可以独立压缩、退休备份和回收；重复恢复不能回退恢复目标后续写入。
 
 恢复保留 Record 版本、tombstone、原始向量和操作回执。独立快照不自动获得当前删除历史权威：保留 `independent_snapshot`，隔离受保护证据并更换 generation 恢复隔离身份；不包含服务凭据。
 
-完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发 Key；在 S3 模式首次启动时，已认证的独立归档被发布到新的服务 namespace。归档中的 collection backup 仍可再次恢复。
+完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发 Key；在 S3 模式首次启动时，已认证的独立归档被发布到目标独立 bucket。归档中的 collection backup 仍可再次恢复。
 
 私有输入逐个物化为认证 journal 路径，随后由 catalog 逐个打开、预检和导出，每次释放其索引与预算租约；不同时持有所有 retained collection/备份的检索视图。私有工作目录在成功或失败后清理，现有共享内存与归档大小预算继续生效。
 
@@ -113,7 +113,7 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 partition
 
 checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包；S3 模式由 SQLite 选择远端 manifest，旧 owner epoch 和失败后的输出 fencing 继续防止陈旧写者或不可信响应。
 
-独立备份恢复校验源闭包，在目标独立 namespace 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新 generation 恢复隔离身份，不自动恢复历史普通 Key；typed evidence 保持隔离，不能据旧备份证明后续没有删除。
+独立备份恢复校验源闭包，在目标集合新代次（完整服务恢复使用独立 bucket） 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新 generation 恢复隔离身份，不自动恢复历史普通 Key；typed evidence 保持隔离，不能据旧备份证明后续没有删除。
 
 完整服务归档保留 collection 与其备份的恢复输入；普通 restore 的持久意图、备份 pin、私有目录清理和安全对象 GC 仍然有效。
 
@@ -125,7 +125,7 @@ checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包�
 | flush、compaction、历史裁剪、私有 staging 清理、seal | 完整对象闭包 + SQLite 所选 manifest | 同序号维护也必须远端认证；失败保持 fenced |
 | 冷启动 | 独占权威 owner 锁，认证 bootstrap/manifest/tail | 新建缓存前校验 bootstrap 预算、配置与初始序号；错误不发布缓存目录 |
 | 备份与指针 | SQLite 中原 ID 的 snapshot/pin + 不可变 descriptor | 中断重试维持原 cut；指针第 32 槽仍可修复 |
-| 恢复、服务归档 | 校验源闭包，目标独立 namespace；typed evidence 保持隔离 | catalog 激活前完成目标远端发布；归档包含 retained 源 |
+| 恢复、服务归档 | 校验源闭包，目标集合新代次（完整服务恢复使用独立 bucket）；typed evidence 保持隔离 | catalog 激活前完成目标远端发布；归档包含 retained 源 |
 | GC、备份退休 | SQLite 可达性、pin、单调退休/删除记录及 catalog 退休意图 | 删除失败留待重试；不回滚 head，不复活已退休身份 |
 
 ## 验证入口与边界

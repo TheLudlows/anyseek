@@ -177,22 +177,21 @@ jobs:
           cargo test -p anyseek --features s3-object-store --lib verified_cache
           cargo test -p anyseek --features s3-object-store --lib cache_corruption
       - name: Native service output and admission barriers
+        # Linux server coverage belongs to build-and-smoke workspace all-targets.
+        if: runner.os == 'Windows'
         run: cargo test -p anyseek --features server record_service::tests
-      - name: Native collection budgets, cancellation ownership and object buffer leases
-        shell: bash
-        run: |
-          cargo test -p anyseek --features server --lib resources::tests
-          cargo test -p anyseek --features s3-object-store --lib resource_
+      - name: Native collection budgets and cancellation ownership (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test -p anyseek --features server --lib resources::tests
+      - name: Native object buffer leases
+        run: cargo test -p anyseek --features s3-object-store --lib resource_
       - name: Build native service
+        if: runner.os == 'Windows'
         run: cargo build -p anyseek --features server
-      - name: Native service HTTP and restart acceptance
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe
-          else
-            python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
-          fi
+      - name: Native service HTTP and restart acceptance (Windows)
+        # Linux normal HTTP is included in build-and-smoke's --browser run.
+        if: runner.os == 'Windows'
+        run: python scripts/record_service_smoke.py --server target/debug/anyseek_server.exe
       - name: Build explicit fault-injection service (not release binary)
         run: cargo build -p anyseek --features server,fault-injection
       - name: Native real HTTP process fault and recovery matrix
@@ -270,8 +269,8 @@ jobs:
         run: mkdir -p target/s3-native-data
       - name: Build explicit fault-injection service
         run: cargo build -p anyseek --features server,fault-injection
-      - name: Authority, cache-failure, checkpoint and restore regressions
-        run: cargo test -p anyseek --lib --features server,fault-injection record::remote_checkpoint::tests
+      # Same-feature remote_checkpoint library tests belong to persistence-native:
+      # Linux --lib --bins and Windows --tests (which includes library unit tests).
       - name: Immutable object and joint-backup contract (HTTP fixture)
         shell: bash
         run: |

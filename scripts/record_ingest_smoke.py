@@ -11,7 +11,7 @@ from record_service_smoke import operation
 def exercise(call, restart, directory, faults, base, master):
     path = '/api/v1/index/committed'
     root = pathlib.Path(directory) / 'data'
-    existing = set(root.glob('collection-*'))
+    existing = set(root.glob('collections/*/*/*'))
     call('POST', '/api/v1/index', {'operation_id': operation(), 'collection_id': 'committed',
          'config': {'index_name': 'committed', 'schema': [{'field': 'body', 'field_type': 'Text', 'store': True}]}})
 
@@ -21,7 +21,7 @@ def exercise(call, restart, directory, faults, base, master):
 
     client = anyseekClient(base)
     client.set_default_key(master)
-    collection, = set(root.glob('collection-*')) - existing
+    collection, = set(root.glob('collections/*/*/*')) - existing
     pauses = [collection / ('.test-' + lane + '-consumer-pause') for lane in ['lexical', 'vector']]
     if faults:
         for pause in pauses:

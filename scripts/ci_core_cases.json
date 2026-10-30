@@ -105,9 +105,7 @@
   "record::cache_merge::tests::derived_merge_catches_concurrent_update_delete_and_recovers_without_certificate",
   "record::cache_merge::tests::derived_candidate_failure_preserves_live_view_and_recovery",
   "record::cache_merge::tests::abandoned_cache_job_retains_owner_and_management_returns_busy",
-  "record::cache_merge::tests::repeated_updates_beyond_sixteen_tails_recover_from_original_wal",
   "record::cache_merge::tests::recovery_rebuilds_private_cache_when_optional_merge_budget_is_exhausted",
-  "record::cache_merge::remote_tests::remote_long_suffix_merges_caches_without_replacing_anchor_and_cold_recovers",
   "record::remote_checkpoint::tests::first_checkpoint_rejects_corrupt_remote_wal_without_replacing_head",
   "record::state_values::admission_count_tests::admission_counts_follow_replacement_edit_clone_and_legacy_wire",
   "record::state_values::admission_count_tests::restored_admission_counts_reject_corrupt_derived_cache",
@@ -170,5 +168,6 @@
   "catalog::tests::tenant_backup_ownership_and_restore_intents_survive_restart",
   "catalog::tests::complete_service_restore_retains_tenants_but_disables_historical_keys",
   "catalog::tests::sqlite_process_exit_preserves_key_and_receipt_atomicity",
-  "catalog::tests::complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queued_writes"
+  "catalog::tests::complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queued_writes",
+  "catalog::tests::collection_recreation_keeps_generations_receipts_and_backups_separate"
 ]

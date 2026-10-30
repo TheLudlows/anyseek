@@ -205,8 +205,6 @@ pub struct CatalogRequest {
 pub struct CatalogReceipt {
     /// Durable catalog sequence.
     pub seq: u64,
-    /// Prepared relative data directory, when allocated.
-    pub directory: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Key {
@@ -224,8 +222,8 @@ pub struct CollectionEntry {
     pub tenant_id: String,
     /// Name unique within its tenant.
     pub collection_id: String,
-    /// Prepared relative data directory, when allocated.
-    pub directory: String,
+    /// Internal lifecycle identity, allocated by the catalog sequence.
+    pub generation: u64,
     /// Immutable Record configuration.
     pub config: RecordConfig,
     /// Physical initialization is complete and visible.
@@ -240,13 +238,38 @@ pub struct CollectionEntry {
 impl CollectionEntry {
     /// Tenant-qualified cache/backup identity, distinct from the public name.
     pub fn scope(&self) -> String {
-        format!("{}/{}", self.tenant_id, self.collection_id)
+        format!(
+            "{}/{}/{:016x}",
+            self.tenant_id, self.collection_id, self.generation
+        )
+    }
+    /// Local data location derived directly from tenant/name and internal generation.
+    pub fn directory(&self) -> String {
+        format!(
+            "collections/{}/{}/{:016x}",
+            self.tenant_id, self.collection_id, self.generation
+        )
+    }
+    /// Durably establish the name hierarchy before publishing a child partition.
+    pub fn prepare_parent(&self, root: &Path) -> Result<(), CatalogError> {
+        validate_name(&self.tenant_id)?;
+        validate_name(&self.collection_id)?;
+        let parent = root.join(self.directory()).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&parent).map_err(storage)?;
+        #[cfg(unix)]
+        for path in parent.ancestors().take_while(|path| path.starts_with(root)) {
+            std::fs::File::open(path)
+                .and_then(|f| f.sync_all())
+                .map_err(storage)?;
+        }
+        Ok(())
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BackupEntry {
     tenant_id: String,
     collection_id: String,
+    generation: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Applied {
@@ -267,6 +290,23 @@ struct State {
     historical_operations: Vec<(String, OperationId)>,
     service_snapshot: Option<(String, bool)>,
     authority_history: Vec<serde_json::Value>,
+}
+impl State {
+    // Generations sort in allocation order within one validated tenant/name.
+    fn current_key(&self, id: &str) -> Option<String> {
+        self.collections
+            .range(format!("{id}/")..format!("{id}0"))
+            .next_back()
+            .map(|(key, _)| key.clone())
+    }
+    fn collection(&self, id: &str) -> Option<&CollectionEntry> {
+        self.current_key(id)
+            .and_then(|key| self.collections.get(&key))
+    }
+    fn collection_mut(&mut self, id: &str) -> Option<&mut CollectionEntry> {
+        self.current_key(id)
+            .and_then(|key| self.collections.get_mut(&key))
+    }
 }
 struct Inner {
     state: State,
@@ -412,8 +452,8 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
             }
             crate::record::validate_config(config)
                 .map_err(|e| CatalogError::Rejected(e.to_string()))?;
-            if state.collections.contains_key(&id) {
-                return Err(CatalogError::Conflict("collection ID retained".into()));
+            if state.collection(&id).is_some_and(|e| !e.deleted) {
+                return Err(CatalogError::Conflict("collection name occupied".into()));
             }
             let restore_from = if let CatalogCommand::PrepareRestore { backup_id: id, .. } =
                 &event.request.command
@@ -431,20 +471,12 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
             } else {
                 None
             };
-            let directory = event
-                .receipt
-                .directory
-                .clone()
-                .ok_or_else(|| storage("missing prepared directory"))?;
-            if directory != format!("collection-{:016x}", event.receipt.seq) {
-                return Err(storage("invalid internal directory"));
-            }
             state.collections.insert(
-                id,
+                format!("{id}/{:016x}", event.receipt.seq),
                 CollectionEntry {
                     tenant_id: tenant_id.clone(),
                     collection_id: collection_id.clone(),
-                    directory,
+                    generation: event.receipt.seq,
                     config: config.clone(),
                     active: false,
                     initialized: false,
@@ -458,8 +490,7 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
             collection_id,
         } => {
             let entry = state
-                .collections
-                .get_mut(&scope(tenant_id, collection_id)?)
+                .collection_mut(&scope(tenant_id, collection_id)?)
                 .ok_or_else(|| CatalogError::Conflict("collection not prepared".into()))?;
             if entry.active || entry.deleted {
                 return Err(CatalogError::Conflict(
@@ -474,8 +505,7 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
             collection_id,
         } => {
             let entry = state
-                .collections
-                .get_mut(&scope(tenant_id, collection_id)?)
+                .collection_mut(&scope(tenant_id, collection_id)?)
                 .ok_or_else(|| CatalogError::Conflict("collection not found".into()))?;
             entry.active = false;
             entry.deleted = true;
@@ -487,8 +517,7 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
         } => {
             backup_id(id)?;
             if !state
-                .collections
-                .get(&scope(tenant_id, collection_id)?)
+                .collection(&scope(tenant_id, collection_id)?)
                 .is_some_and(|e| e.active && !e.deleted)
             {
                 return Err(CatalogError::Unauthorized);
@@ -496,11 +525,15 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
             if state.retired_backups.contains(id) {
                 return Err(CatalogError::Conflict("backup retired".into()));
             }
-            if state
-                .backups
-                .get(id)
-                .is_some_and(|b| b.tenant_id != *tenant_id || b.collection_id != *collection_id)
-            {
+            let generation = state
+                .collection(&scope(tenant_id, collection_id)?)
+                .unwrap()
+                .generation;
+            if state.backups.get(id).is_some_and(|b| {
+                b.tenant_id != *tenant_id
+                    || b.collection_id != *collection_id
+                    || b.generation != generation
+            }) {
                 return Err(CatalogError::Conflict("backup identity reused".into()));
             }
             state.backups.insert(
@@ -508,6 +541,7 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                 BackupEntry {
                     tenant_id: tenant_id.clone(),
                     collection_id: collection_id.clone(),
+                    generation,
                 },
             );
         }
@@ -659,14 +693,9 @@ impl Catalog {
                 .seq
                 .checked_add(1)
                 .ok_or_else(|| storage("sequence exhausted"))?;
-            let directory = matches!(
-                request.command,
-                CatalogCommand::PrepareCollection { .. } | CatalogCommand::PrepareRestore { .. }
-            )
-            .then(|| format!("collection-{seq:016x}"));
             let event = Applied {
                 request,
-                receipt: CatalogReceipt { seq, directory },
+                receipt: CatalogReceipt { seq },
                 observed_epoch: now,
             };
             let mut next = inner.state.clone();
@@ -778,6 +807,36 @@ impl Catalog {
         F: FnOnce(CollectionEntry) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
+        self.authorized_inner(tenant, collection, None, work).await
+    }
+    /// Execute only against the captured incarnation, never a same-name replacement.
+    pub async fn authorized_generation<T, F, Fut>(
+        &self,
+        tenant: String,
+        collection: String,
+        generation: u64,
+        work: F,
+    ) -> Result<T, CatalogError>
+    where
+        T: Send + 'static,
+        F: FnOnce(CollectionEntry) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        self.authorized_inner(tenant, collection, Some(generation), work)
+            .await
+    }
+    async fn authorized_inner<T, F, Fut>(
+        &self,
+        tenant: String,
+        collection: String,
+        generation: Option<u64>,
+        work: F,
+    ) -> Result<T, CatalogError>
+    where
+        T: Send + 'static,
+        F: FnOnce(CollectionEntry) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
         let id = scope(&tenant, &collection)?;
         let admission = self
             .admission
@@ -795,9 +854,8 @@ impl Catalog {
             }
             let entry = inner
                 .state
-                .collections
-                .get(&id)
-                .filter(|e| e.active && !e.deleted)
+                .collection(&id)
+                .filter(|e| e.active && !e.deleted && generation.is_none_or(|g| g == e.generation))
                 .ok_or(CatalogError::Unauthorized)?
                 .clone();
             let mut guard = CollectionWork {

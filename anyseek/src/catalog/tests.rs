@@ -96,7 +96,7 @@ async fn tenant_keys_same_name_collections_and_scoped_retries_survive_reopen() {
     let catalog = setup(&path).await;
     let alpha = create(&catalog, "alpha", "documents").await;
     let beta = create(&catalog, "beta", "documents").await;
-    assert_ne!(alpha.directory, beta.directory);
+    assert_ne!(alpha.seq, beta.seq);
     assert_eq!(catalog.authenticate(&"a".repeat(64)).await.unwrap(), MASTER);
     assert_eq!(
         catalog.authenticate(&"b".repeat(64)).await.unwrap(),
@@ -305,12 +305,12 @@ async fn complete_service_restore_retains_tenants_but_disables_historical_keys()
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("service");
     let catalog = setup(&root).await;
-    let receipt = create(&catalog, "alpha", "documents").await;
+    create(&catalog, "alpha", "documents").await;
     let entry = catalog.listing("alpha").await.unwrap().pop().unwrap();
-    let partition =
-        crate::record::RecordPartition::create(&root.join(receipt.directory.unwrap()), config())
-            .await
-            .unwrap();
+    entry.prepare_parent(&root).unwrap();
+    let partition = crate::record::RecordPartition::create(&root.join(entry.directory()), config())
+        .await
+        .unwrap();
     let archive = parent.path().join("archive");
     catalog
         .backup_service(
@@ -446,17 +446,24 @@ async fn complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queu
     let mut records = BTreeMap::new();
     for tenant in ["alpha", "beta"] {
         let receipt = create(&catalog, tenant, "documents").await;
-        let partition = RecordPartition::create(&root.join(receipt.directory.unwrap()), config())
+        let entry = catalog.listing(tenant).await.unwrap().remove(0);
+        entry.prepare_parent(&root).unwrap();
+        let partition = RecordPartition::create(&root.join(entry.directory()), config())
             .await
             .unwrap();
-        records.insert(format!("{tenant}/documents"), partition);
+        records.insert(
+            format!("{tenant}/documents/{:016x}", receipt.seq),
+            partition,
+        );
     }
     let write = |nonce: &str| {
         serde_json::from_value::<RecordWrite>(json!({"operation_id":OperationId::new(nonce.into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha"}})).unwrap()
     };
-    let first = records["alpha/documents"].clone();
+    let alpha = catalog.listing("alpha").await.unwrap().remove(0);
+    let beta = catalog.listing("beta").await.unwrap().remove(0);
+    let first = records[&alpha.scope()].clone();
     let command = write("owned");
-    let second = records["beta/documents"].clone();
+    let second = records[&beta.scope()].clone();
     let queued_command = write("queued");
     let (entered, ready) = tokio::sync::oneshot::channel();
     let (release, wait) = tokio::sync::oneshot::channel();
@@ -502,8 +509,159 @@ async fn complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queu
     assert!(!ran.load(Ordering::Acquire));
     release.send(()).unwrap();
     let receipt = snapshot.await.unwrap().unwrap();
-    assert_eq!(receipt.record_seqs["alpha/documents"], 1);
-    assert_eq!(receipt.record_seqs["beta/documents"], 0);
+    assert_eq!(receipt.record_seqs[&alpha.scope()], 1);
+    assert_eq!(receipt.record_seqs[&beta.scope()], 0);
     queued.await.unwrap().unwrap().unwrap();
     assert!(ran.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn collection_recreation_keeps_generations_receipts_and_backups_separate() {
+    use crate::record::{RecordPartition, RecordWrite};
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("service");
+    let catalog = setup(&root).await;
+    let first = create(&catalog, "alpha", "documents").await;
+    let old = catalog.listing("alpha").await.unwrap().remove(0);
+    old.prepare_parent(&root).unwrap();
+    let partition = RecordPartition::create(&root.join(old.directory()), config())
+        .await
+        .unwrap();
+    let write: RecordWrite = serde_json::from_value(json!({
+        "operation_id":OperationId::new("same-write".into()), "record_id":"r", "routing_key":"r",
+        "expected":"Absent", "document":{"body":"old"}
+    }))
+    .unwrap();
+    partition.write(write.clone()).await.unwrap();
+    let backup_id = "e".repeat(64);
+    catalog
+        .execute(request(
+            "old-backup",
+            CatalogCommand::RegisterBackup {
+                tenant_id: "alpha".into(),
+                collection_id: "documents".into(),
+                backup_id: backup_id.clone(),
+            },
+        ))
+        .await
+        .unwrap();
+    let delete = request(
+        "delete",
+        CatalogCommand::DeleteCollection {
+            tenant_id: "alpha".into(),
+            collection_id: "documents".into(),
+        },
+    );
+    catalog.execute(delete.clone()).await.unwrap();
+    let second = catalog
+        .execute(request(
+            "recreate",
+            CatalogCommand::PrepareCollection {
+                tenant_id: "alpha".into(),
+                collection_id: "documents".into(),
+                config: config(),
+            },
+        ))
+        .await
+        .unwrap();
+    catalog
+        .execute(request(
+            "reactivate",
+            CatalogCommand::ActivateCollection {
+                tenant_id: "alpha".into(),
+                collection_id: "documents".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let new = catalog.listing("alpha").await.unwrap().remove(0);
+    assert_ne!(old.generation, new.generation);
+    assert_ne!(old.directory(), new.directory());
+    assert_eq!(new.generation, second.seq);
+    // A captured old handle cannot enter work under the replacement's guard.
+    assert!(matches!(
+        catalog
+            .authorized_generation(
+                "alpha".into(),
+                "documents".into(),
+                old.generation,
+                |_| async { panic!("stale work ran") }
+            )
+            .await,
+        Err(CatalogError::Unauthorized)
+    ));
+    let current = RecordPartition::create(&root.join(&new.directory()), config())
+        .await
+        .unwrap();
+    assert!(
+        current
+            .operation(&write.operation_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut fresh = write.clone();
+    fresh.document = Some(serde_json::from_value(json!({"body":"new"})).unwrap());
+    current.write(fresh).await.unwrap();
+    assert_eq!(
+        partition.get("r").await.unwrap().unwrap().document.unwrap()["body"],
+        "old"
+    );
+    assert_eq!(
+        current.get("r").await.unwrap().unwrap().document.unwrap()["body"],
+        "new"
+    );
+    assert!(
+        catalog
+            .execute(request(
+                "reuse-backup",
+                CatalogCommand::RegisterBackup {
+                    tenant_id: "alpha".into(),
+                    collection_id: "documents".into(),
+                    backup_id: backup_id.clone(),
+                }
+            ))
+            .await
+            .is_err()
+    );
+    // Old control retries return their original outcome without mutating the new lifecycle.
+    assert_eq!(
+        catalog
+            .execute(request(
+                "create-documents",
+                CatalogCommand::PrepareCollection {
+                    tenant_id: "alpha".into(),
+                    collection_id: "documents".into(),
+                    config: config(),
+                }
+            ))
+            .await
+            .unwrap(),
+        first
+    );
+    catalog.execute(delete).await.unwrap();
+    assert_eq!(
+        catalog.listing("alpha").await.unwrap()[0].generation,
+        new.generation
+    );
+    catalog.require_backup("alpha", &backup_id).await.unwrap();
+    drop(catalog);
+    let catalog = Catalog::open(&root).await.unwrap();
+    assert_eq!(catalog.collections().await.unwrap().len(), 2);
+    assert_eq!(
+        catalog.listing("alpha").await.unwrap()[0].generation,
+        new.generation
+    );
+    // Complete-service snapshots retain both physical lifecycles and certify distinct cuts.
+    let archive = parent.path().join("archive");
+    let receipt = catalog
+        .backup_service(
+            root,
+            archive.clone(),
+            "generations".into(),
+            BTreeMap::from([(old.scope(), partition), (new.scope(), current)]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.record_seqs.len(), 2);
 }

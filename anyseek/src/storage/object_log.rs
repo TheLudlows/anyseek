@@ -179,7 +179,7 @@ pub(crate) async fn append_and_commit(
         entries: vec![entry],
     };
     let digest_hex: String = request_sha256.iter().map(|byte| format!("{byte:02x}")).collect();
-    let key = format!("partitions/{partition_id}/wal/{seq:020}-{digest_hex}.json");
+    let key = super::object_keys::key(partition_id, "wal", &format!("{seq:020}-{digest_hex}.json"));
     let object = upload_log_block(store, authority, &key, &block, created_at_ms, max_block_bytes).await?;
     match authority.publish_commit(
         partition_id, head.head_version, owner_epoch, operation_id, request_sha256,

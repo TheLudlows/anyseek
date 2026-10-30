@@ -19,3 +19,6 @@ pub(crate) mod segment;
 pub(crate) mod payload_pool;
 
 pub(crate) mod build_budget;
+
+#[cfg(feature = "s3-object-store")]
+pub(crate) mod object_keys;

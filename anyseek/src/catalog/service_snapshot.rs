@@ -13,7 +13,7 @@ pub struct ServiceSnapshot {
     pub identity: String,
     /// Protocol version, not an upgrade compatibility promise.
     pub format: u32,
-    /// Canonical authoritative journal payload hashes keyed by generated relative path.
+    /// Canonical authoritative journal payload hashes keyed by derived relative path.
     pub objects: BTreeMap<String, String>,
     /// Independent live collection backup sequences (archives excluded).
     pub collection_backups: BTreeMap<String, u64>,
@@ -65,11 +65,10 @@ fn object_hash(root: &Path) -> Result<String, CatalogError> {
     Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 fn safe_directory(name: &str) -> bool {
-    name.strip_prefix("collection-").is_some_and(|v| {
-        v.len() == 16
-            && v.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
+    let parts = name.split('/').collect::<Vec<_>>();
+    parts.len() == 4 && parts[0] == "collections"
+        && super::validate_name(parts[1]).is_ok() && super::validate_name(parts[2]).is_ok()
+        && parts[3].len() == 16 && parts[3].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn safe_backup(name: &str) -> bool {
     name.len() == 64
@@ -127,17 +126,17 @@ async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
     }
     for entry in entries {
         if manifest.absent_collections.contains(&entry.scope()) {
-            if !entry.deleted || entry.initialized || root.join(&entry.directory).exists() {
+            if !entry.deleted || entry.initialized || root.join(&entry.directory()).exists() {
                 return Err(storage("invalid absent collection proof"));
             }
             continue;
         }
-        if !safe_directory(&entry.directory) {
+        if !safe_directory(&entry.directory()) {
             return Err(storage("invalid collection directory"));
         }
-        names.insert(entry.directory.clone());
+        names.insert(entry.directory());
         let partition =
-            RecordPartition::open(&root.join(&entry.directory), entry.config.max_journal_bytes)
+            RecordPartition::open(&root.join(&entry.directory()), entry.config.max_journal_bytes)
                 .await
                 .map_err(storage)?;
         if partition.recovery_identity().await.map_err(storage)?.seq
@@ -306,7 +305,7 @@ impl Catalog {
     }
 
     /// Complete-service snapshot with privately materialized journal paths keyed
-    /// by generated collection/backup directory. Open one archive at a time so
+    /// by derived collection/backup directory. Open one archive at a time so
     /// retained backups do not all consume live index reservations. The server
     /// holds the control barrier, private paths and backup retention pins.
     pub async fn backup_service_with_archives(
@@ -343,14 +342,14 @@ impl Catalog {
                 for entry in inner.state.collections.values() {
                     if entry.deleted
                         && !entry.initialized
-                        && !source_root.join(&entry.directory).exists()
+                        && !source_root.join(&entry.directory()).exists()
                     {
                         continue;
                     }
                     let p = match records.get(&entry.scope()) {
                         Some(p) => p.clone(),
                         None => RecordPartition::open(
-                            &archives.get(&entry.directory).cloned().unwrap_or_else(||source_root.join(&entry.directory)),
+                            &archives.get(&entry.directory()).cloned().unwrap_or_else(||source_root.join(&entry.directory())),
                             entry.config.max_journal_bytes,
                         )
                         .await
@@ -393,7 +392,7 @@ impl Catalog {
                 for entry in inner.state.collections.values() {
                     if entry.deleted
                         && !entry.initialized
-                        && !source_root.join(&entry.directory).exists()
+                        && !source_root.join(&entry.directory()).exists()
                     {
                         absent_collections.insert(entry.scope());
                         continue;
@@ -401,20 +400,21 @@ impl Catalog {
                     let partition = match records.get(&entry.scope()) {
                         Some(p) => p.clone(),
                         None => RecordPartition::open(
-                            &archives.get(&entry.directory).cloned().unwrap_or_else(||source_root.join(&entry.directory)),
+                            &archives.get(&entry.directory()).cloned().unwrap_or_else(||source_root.join(&entry.directory())),
                             entry.config.max_journal_bytes,
                         )
                         .await
                         .map_err(storage)?,
                     };
+                    entry.prepare_parent(&stage)?;
                     let seq = partition
-                        .checkpoint(&stage.join(&entry.directory))
+                        .checkpoint(&stage.join(&entry.directory()))
                         .await
                         .map_err(storage)?;
                     record_seqs.insert(entry.scope(), seq);
                     objects.insert(
-                        entry.directory.clone(),
-                        object_hash(&stage.join(&entry.directory))?,
+                        entry.directory(),
+                        object_hash(&stage.join(&entry.directory()))?,
                     );
                 }
                 let mut collection_backups = BTreeMap::new();
@@ -549,13 +549,14 @@ impl Catalog {
                     if input.absent_collections.contains(&entry.scope()) {
                         continue;
                     }
+                    entry.prepare_parent(&stage)?;
                     RecordPartition::checkpoint_authenticated_archive(
-                        &archive.join(&entry.directory), &stage.join(&entry.directory), entry.config.max_journal_bytes,
-                        input.objects.get(&entry.directory).ok_or_else(||storage("missing authenticated child"))?,
+                        &archive.join(&entry.directory()), &stage.join(&entry.directory()), entry.config.max_journal_bytes,
+                        input.objects.get(&entry.directory()).ok_or_else(||storage("missing authenticated child"))?,
                         *input.record_seqs.get(&entry.scope()).ok_or_else(||storage("missing authenticated cut"))?,
                     ).await.map_err(storage)?;
                     #[cfg(feature = "fault-injection")]
-                    log::info!("service restore child complete elapsed_ms={} child={}", restore_started.elapsed().as_millis(), entry.directory);
+                    log::info!("service restore child complete elapsed_ms={} child={}", restore_started.elapsed().as_millis(), entry.directory());
                 }
                 for id in input.collection_backups.keys() {
                     let name = format!("backup-{id}");

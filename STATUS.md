@@ -1,6 +1,8 @@
 # anyseek 当前状态
 
-2026-10-30，本分支继续实施 [#98](https://github.com/TheLudlows/anyseek/issues/98)：Catalog 与 S3 authority 共用 SQLite；新增最小 Tenant 创建/查询和 Key 绑定；集合按 Tenant + Collection 定位，删除 Grant/revision/纯凭据撤销输出屏障，保留生命周期与 Record 数据有效性保护。普通 Key 可操作本租户集合和备份，master 不进入集合数据接口；恢复后历史普通 Key 禁用。集合同名重建、内部代次及 namespace/对象路径清理仍待后续实施，不能宣称 #98 完成。不提供旧格式迁移。下文为历史记录。
+2026-10-30，本分支已同步 master `7c0f88a`（PR #100 的 CI 精简），继续实施 [#98](https://github.com/TheLudlows/anyseek/issues/98)：Catalog 与 S3 authority 共用 SQLite，Key 绑定最小 Tenant，移除 Grant/revision/纯凭据撤销屏障。集合同名重建分配内部新代次，句柄、缓存、回执、备份和 GC 按代次隔离；本地目录由 Tenant/集合名/代次直接派生，不再持久化目录映射或自动 `s3-namespace`。对象使用 `anyseek/{tenant_id}/{collection_id}/...`，代次编码进对象 ID。完整服务恢复使用独立 bucket，历史普通 Key 禁用。不增加 RBAC、Bucket 检查或旧格式迁移。最终验收进行中，PR #99 仍为 Draft。下文为历史记录。
+
+本轮本地验证：Catalog 16 项、存储 74 项、远端 checkpoint 44 项、服务端 20 项通过；基础 HTTP 故障回归、S3 fixture 无缓存 HTTP 和独立 bucket 完整服务恢复通过；独立 core 双配置、9 项 Node 文档精度回归通过。fixture 同名重建/对象隔离/冷重启通过；完整 S3 storage 流程仍在推进时钟后的维护查询收到基线已有的 429 Busy，未放宽断言。真实云 S3、硬断电和本轮 Windows CI 尚不计为验收通过。
 
 2026-10-28：#86/#87 已合入 master `50f8839`。本轮已实现稳定索引身份、认证时间前缀与接收日志持续回收、有界对象登记，以及脱离权威 checkpoint 的全文/向量派生缓存合并。202 只表示命令持久接收；业务回执和两类索引水位分别核验。已按用户要求发布 [Draft PR #88](https://github.com/TheLudlows/anyseek/pull/88)，随后小步完成增量计数、TTL 下界、固定 cut 来源捕获、owned Compact/原生包复用及本地、远端锁外接收快照。远端首次 stale 后使用新命令背压及 pending 排空保障维护机会；普通远端追加仍持 Spool 锁跨网络。两次基准暴露的共享 I/O 配额问题已按 Journal、checkpoint、索引、接收/终态和回收分步修复并通过专项；最终冻结 `adc15e2` 已完成 35 targets，556 通过、0 失败、13 忽略；独立 core 双配置与 9 项 doctest 通过。最新 `1359d7e` 固定产物的同数据同资源 Meilisearch 对比已完成双方 2305 文档、393 查询及重启核验，必需维护阶段覆盖完整；AnySeek 索引水位 p99 929 ms 的长尾仍明确保留，小规模串行结果不代表饱和吞吐或相关性质量，结果统一记录在[异步写入实施](docs/async-ingestion.md)。真实 S3 和硬断电尚未验收。下方保留历史验收记录，不代表本轮结果。
 
@@ -16,6 +18,6 @@
 | 尚未验收 | 真实 S3、系统/文件系统崩溃及硬断电、手工跨 AES 验证 |
 | 核心剩余 | Record 操作账本持续 GC、完整 State 驻内存限制、全服务缓存总额、组合资源隔离验收 |
 
-SQLite 保存必要协调元数据，Payload 唯一保存原始正文与向量，Segment 保存派生检索数据；不增加重复正文、向量或倒排镜像。S3 模式必须保留 catalog、SQLite 权威库及其 WAL、`s3-namespace`，不能仅靠 bucket 恢复权威。
+SQLite 保存必要协调元数据，Payload 唯一保存原始正文与向量，Segment 保存派生检索数据；不增加重复正文、向量或倒排镜像。S3 模式必须保留 SQLite 权威库及其 WAL、owner 锁文件，不能仅靠 bucket 恢复权威。
 
 下一步建议及完成标准集中在[路线](docs/roadmap.md)，能力与限制见[项目全貌](docs/project-overview.md)，使用见[服务指南](anyseek/src/server/README.md)。不实施旧格式迁移，不引入模型，性能验证仅使用本轮冻结最终版本；不承诺无限容量、跨主机 HA 或权威卷丢失零 RPO。[#57](https://github.com/TheLudlows/anyseek/issues/57) 仍开放。

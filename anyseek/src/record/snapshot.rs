@@ -145,7 +145,7 @@ pub(super) async fn create(
 fn publication_fault(destination: &Path, stage: &str) {
     let prefix = std::env::var("ANYSEEK_SNAPSHOT_ROOT_PREFIX").unwrap_or_default();
     if !prefix.is_empty()
-        && destination.file_name().is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        && destination.components().any(|part| part.as_os_str().to_string_lossy().starts_with(&prefix))
         && std::env::var("ANYSEEK_SNAPSHOT_FAULT").as_deref() == Ok(stage)
     {
         std::process::exit(87);

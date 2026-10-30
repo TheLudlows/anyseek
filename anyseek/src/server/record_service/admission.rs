@@ -67,7 +67,7 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
             let id=format!("{}/{id}",tenant.as_deref().ok_or_else(||Error(StatusCode::FORBIDDEN,"unauthorized","Tenant credential required".into()))?);
             // Axum performs exactly the same percent decoding used by handlers.
             // Unknown/user supplied identities do not grow the resource registry.
-            if let Some((id, _)) = service.records.read().await.get_key_value(&id) { subject = format!("collection:{id}"); }
+            if let Some((id, _)) = service.records.read().await.range(format!("{id}/")..format!("{id}0")).next_back() { subject = format!("collection:{id}"); }
         }
     }
     let scope = service.resources.admit(subject, lane, (MAX_BODY + MAX_RESPONSE) as u64)

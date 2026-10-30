@@ -99,7 +99,7 @@ AnySeek 2305 条成功业务回执、145 批双水位全部验证，最终 pendi
 | `ANYSEEK_S3_TEST_ACCESS_KEY_ID` | 已有测试身份的访问标识 |
 | `ANYSEEK_S3_TEST_SECRET_ACCESS_KEY` | 同一测试身份的密钥，仅由环境注入 |
 
-契约测试使用随机独立命名空间，要求对测试对象具备 GetObject、PutObject、DeleteObject 权限及条件创建语义；授权应限定到专用桶及测试前缀（包括 `anyseek-contract-tests/`、`partitions/` 和 `backups/`）。默认不允许明文 HTTP，仅显式 `ANYSEEK_S3_TEST_ALLOW_HTTP=1` 时允许。SQLite 权威目录与缓存目录须隔离，不得复用生产目录。真实 S3 与硬断电仍未验收：进程退出/强杀只覆盖进程中断与重启，不能证明操作系统断电时页缓存、设备写缓存及文件系统持久顺序。
+契约测试使用随机独立命名空间，要求对测试对象具备 GetObject、PutObject、DeleteObject 权限及条件创建语义；授权应限定到专用桶及测试前缀（包括 `anyseek-contract-tests/`和 `anyseek/`）。默认不允许明文 HTTP，仅显式 `ANYSEEK_S3_TEST_ALLOW_HTTP=1` 时允许。SQLite 权威目录与缓存目录须隔离，不得复用生产目录。真实 S3 与硬断电仍未验收：进程退出/强杀只覆盖进程中断与重启，不能证明操作系统断电时页缓存、设备写缓存及文件系统持久顺序。
 
 ### 仍未闭环
 

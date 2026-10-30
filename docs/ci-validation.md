@@ -2,11 +2,11 @@
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
 repository documentation, dependency/core boundaries and the lexical partition;
-on code changes it builds and runs 36 exact bounded core regressions plus the
+on code changes it builds and runs 157 exact bounded core regressions plus the
 small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
-cases fail rather than silently matching zero tests. The largest rotation fixture
-in the 31-case core set contains 130 records; integration scales are listed below. This is fast feedback, **not full acceptance**.
+cases fail rather than silently matching zero tests. Integration scales are listed
+below. This is fast feedback, **not full acceptance**.
 Documentation-only changes keep static checks but skip the compiled core matrix.
 Generic x86-64 CPU flags permit target caching within each OS; full acceptance
 retains the existing native-CPU configuration and source-only cache policy.
@@ -82,7 +82,8 @@ remain available without a second copy of the test logic.
 | Linux library + service unit tests with server/fault-injection | Persistence: explicit --lib --bins |
 | Windows integration with server/fault-injection | Persistence remainder + four lexical matrix jobs |
 | Both OS no-default library and default/no-default doctests | Persistence, unchanged |
-| Browser normal service / HTTP fault service / S3 fixtures | Original jobs, unchanged |
+| Linux normal HTTP + browser / Windows normal HTTP | build-and-smoke / Persistence |
+| Both OS fault HTTP and S3 fixtures | Persistence and S3 jobs, unchanged |
 
 The removed Linux integration rerun had no integration test conditional on
 `fault-injection`; server and zh feature-specific tests still run in the Linux
@@ -100,7 +101,7 @@ unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests
 ## Small and full query fixtures (P1)
 
 Default PR core jobs explicitly select `small` and run six integration targets
-in addition to the 36 exact core cases. The manual matrix explicitly selects
+in addition to the 157 exact core cases. The manual matrix explicitly selects
 `full`, including its four independent Windows lexical jobs. No production
 capacity, scoring, timeout or fault boundary changes.
 
@@ -134,3 +135,60 @@ forty-term (1000) 47.10s, both passed. These compare fixture work at different
 scales, not engine throughput or identical large-layout coverage. Full 8194
 lexical and full union-ranking populations were preserved by parameter review
 but not rerun locally in this bounded validation.
+
+## Default long-recovery exclusions and full-suite deduplication
+
+The default list omits these two 2,305-update tests; their source and assertions
+remain unchanged and neither is ignored:
+
+- `record::cache_merge::tests::repeated_updates_beyond_sixteen_tails_recover_from_original_wal`
+- `record::cache_merge::remote_tests::remote_long_suffix_merges_caches_without_replacing_anchor_and_cold_recovers`
+
+Manual `build-and-smoke` runs both with workspace/server all-targets. Persistence
+also includes both in Linux server/fault-injection lib tests and Windows
+server/fault-injection `--tests` (library unit tests are included). They retain the
+long-tail boundary evidence; the default suite retains bounded cache recovery,
+batch/crash, idempotency, owner-lock, TTL and queue coverage. Other historical
+cases remain because their age alone does not establish duplicate assertions.
+
+In successful CI run `40997772763`, these two cases consumed about 17m21s of
+Windows core execution. Removing that work is an estimate of saved execution
+on a comparable runner, not a measured new workflow duration or an equal
+reduction in total CI wall time; compilation and other jobs remain.
+
+Full acceptance avoids only these established repeats:
+
+- S3 job's filtered `remote_checkpoint::tests` rerun: the persistence jobs run
+  the same tests with the same `server,fault-injection` features on both OSes.
+  S3 HTTP fixture contract and semantic suites remain.
+- Linux persistence normal HTTP smoke and its standalone service build:
+  `build-and-smoke --browser` runs the normal HTTP flow before browser checks;
+  persistence builds its own fault-enabled service before all later consumers.
+  Windows normal HTTP, both OS fault HTTP, Indexer and authorization remain.
+- Linux filtered server `record_service::tests` and `resources::tests` reruns:
+  workspace/server all-targets already owns these same-feature tests. Windows
+  filtered tests and distinct s3-object-store `resource_` coverage remain.
+
+No test timeouts, fixtures, sharding or cache policy change in this trimming.
+
+## Shared test bodies without removing scenarios
+
+The four `unlocked_encoding_*` / `unlocked_upload_*` pairs in
+`record/remote_checkpoint.rs` retain all eight individually selected test names.
+Each pair now calls one assertion helper with its original `encode` or `upload`
+pause point; normalized bodies were identical before extraction. Both run under
+the same s3-object-store test module (included by `server`).
+
+| Shared scenario | Inputs and assertions retained at both pause points |
+| --- | --- |
+| reads, writer ordering, checkpoint and cancellation | seed receipt; two ordered writes; blocked writer/checkpoint; cancelled waiter; cold recovery and exact receipt replay |
+| candidate TTL | deadline +100ms, advance +101ms; Busy; absent receipt; unchanged local/authority sequence; healthy writer; expired retry rejected |
+| source expiry | expired original plus version-matched replacement; Busy; no replacement receipt; source absent before/after cold recovery; retry rejected/conflicted |
+| generation lease expiry | staged two-member generation; clock past lease; Busy; absent publication receipt; members hidden after maintenance/cold recovery |
+
+The common gate wait retains its five-second timeout and polling interval.
+Owner/sequence fencing before persistence and owner/head changes after upload
+remain separate: their error classes and attempted-write scopes differ.
+Executor prefix-stop tests and committed-ingest continue-after-conflict tests
+also remain separate contracts. This extraction reduces duplicate source, not
+the number of executed scenarios or measured test runtime.

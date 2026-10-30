@@ -64,6 +64,8 @@ def main():
     for key, value in values.items():
         env[f'ANYSEEK_S3_{key}'] = value
         env[f'ANYSEEK_S3_TEST_{key}'] = value
+    if fixture:
+        env['ANYSEEK_S3_TEST_RESTORE_BUCKET'] = 'disposable-restored'
     report = {'backend': args.backend, 'real_endpoint_exercised': args.backend == 'real',
               'fault_injection': args.faults, 'suite': args.suite, 'checks': []}
     fixed_binary = tempfile.TemporaryDirectory(prefix='anyseek-acceptance-binary-')

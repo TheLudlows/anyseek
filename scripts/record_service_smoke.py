@@ -24,7 +24,7 @@ def main():
             if args.cold_restarts:
                 assert os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3','cold-restarts requires the S3 backend'
                 if root.exists():
-                    for cache in [*root.glob('collection-*'), *root.glob('*.object-cache')]:
+                    for cache in [*root.glob('collections/*/*/*'), *root.glob('*.object-cache')]:
                         if cache.is_dir():shutil.rmtree(cache)
             process=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**(fault_env or {})},stdout=log,stderr=log)
             started=time.monotonic()
@@ -244,7 +244,13 @@ def main():
             call('DELETE','/api/v1/index/shared',deletion_request)
             restart()
             call('GET','/api/v1/index/shared',key=keys['b'],status=403)
-            call('POST','/api/v1/index',{**create,'operation_id':operation()},key=keys['b'],status=409)
+            call('POST','/api/v1/index',{**create,'operation_id':operation()},key=keys['b'])
+            assert call('GET','/api/v1/index/shared',key=keys['b'])['indexed_doc_count']==0
+            old=saved[-1]['operation_id']
+            assert call('GET',f"/api/v1/index/shared/operation/{old['epoch']}/{old['nonce']}",key=keys['b'])['receipt'] is None
+            call('DELETE','/api/v1/index/shared',deletion_request,key=keys['b'])
+            call('GET','/api/v1/index/shared',key=keys['b'])
+            call('DELETE','/api/v1/index/shared',{'operation_id':operation()},key=keys['b'])
             call('POST','/api/v1/restore',{**restore,'operation_id':operation(),'collection_id':'after-source-delete'})
             assert call('GET','/api/v1/index/after-source-delete/doc/r0')['version']==5
             call('POST','/api/v1/restore',{**restore,'backup_id':'../escape'},status=400)
@@ -430,7 +436,7 @@ def main():
                         if kind=='restore':
                             body.update({'collection_id':restored_id,'backup_id':backup['backup_id']});endpoint='/api/v1/restore'
                         process.kill();process.wait(timeout=20)
-                        start({'ANYSEEK_SNAPSHOT_ROOT_PREFIX':'backup-' if kind=='backup' else 'collection-','ANYSEEK_SNAPSHOT_FAULT':stage})
+                        start({'ANYSEEK_SNAPSHOT_ROOT_PREFIX':'backup-' if kind=='backup' else 'collections','ANYSEEK_SNAPSHOT_FAULT':stage})
                         try: call('POST',endpoint,body)
                         except (OSError,http.client.HTTPException):pass
                         else:raise AssertionError(('expected snapshot publication exit',kind,stage))
@@ -477,7 +483,7 @@ def main():
             restart()
             assert any(x['backup_id']==backup['backup_id'] and x['retired'] and not x['on_disk'] for x in call('GET','/api/v1/backups'))
             call('POST','/api/v1/index/after-source-delete/backup',{'operation_id':operation()})
-            print('PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, Tenant-scoped restore, collection tombstone across restart')
+            print('PASS Record lifecycle: stable-view iterator, non-atomic conditional batch/delete plans, backup retries, complete restore, Tenant-scoped restore, same-name recreation and stale delete retry across restart')
             print('PASS real HTTP: default Record/catalog, same-Tenant keys, conditional writes, retry/response loss, checkpoint, crash restart, revoked operation lookup, full query parameters, vectors')
             # Whole service cut, including revoked authority and independent backups.
             ckey=base64.b64encode(os.urandom(32)).decode()
@@ -495,7 +501,10 @@ def main():
             assert not restored['started']
             original_base=base
             other_port=port+2
-            restored_process=subprocess.Popen([binary,f"index_path={restored['target_root']}",f'local_port={other_port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test'},stdout=log,stderr=log)
+            restore_env = {}
+            if os.environ.get('ANYSEEK_STORAGE_BACKEND') == 's3':
+                restore_env['ANYSEEK_S3_BUCKET'] = os.environ['ANYSEEK_S3_TEST_RESTORE_BUCKET']
+            restored_process=subprocess.Popen([binary,f"index_path={restored['target_root']}",f'local_port={other_port}','local_ip=127.0.0.1','force_shard_number=1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test',**restore_env},stdout=log,stderr=log)
             try:
                 base=f'http://127.0.0.1:{other_port}'
                 for _ in range(int(max(args.startup_timeout,120 if args.cold_restarts else 0)/.05)):

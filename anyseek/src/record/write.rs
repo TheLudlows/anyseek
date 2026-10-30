@@ -105,15 +105,14 @@ impl RemoteUpload {
             }
         }
         let digest = checkpoint_codec::json_digest(&self.block)?;
-        let key = format!(
-            "partitions/{}/wal/{:020}-{}",
-            self.head.partition_id,
+        let key = crate::storage::object_keys::key(&self.head.partition_id, "wal", &format!(
+            "{:020}-{}",
             self.block.first_seq,
             digest
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
-        );
+        ));
         // Independent short SQLite transactions avoid holding the shared authority
         // connection while awaiting network I/O. Retired objects cannot resurrect.
         let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open(

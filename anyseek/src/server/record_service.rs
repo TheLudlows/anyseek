@@ -310,18 +310,6 @@ impl Service {
             default_nprobe,
             _root_owner: root_owner,
         });
-        if std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref()==Ok("s3") {
-            let path=root.join("s3-namespace");
-            if !path.exists() {
-                use std::io::Write;
-                let temporary=root.join(format!(".s3-namespace-{:032x}",rand::random::<u128>()));
-                let mut file=std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|e|e.to_string())?;
-                file.write_all(format!("{:032x}",rand::random::<u128>()).as_bytes()).map_err(|e|e.to_string())?;
-                file.sync_all().map_err(|e|e.to_string())?;drop(file);
-                std::fs::rename(temporary,path).map_err(|e|e.to_string())?;
-                #[cfg(unix)]std::fs::File::open(root).and_then(|f|f.sync_all()).map_err(|e|e.to_string())?;
-            }
-        }
         // Only unaddressable preparation names inside this exclusively owned
         // service root are reclaimable. Never scan sibling service roots.
         for row in std::fs::read_dir(root).map_err(|e| e.to_string())? {
@@ -387,15 +375,7 @@ impl Service {
             .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(1_000_000);
         let max_tail_bytes = usize::try_from(entry.config.max_journal_bytes)
             .unwrap_or(usize::MAX).min(1024 * 1024 * 1024).max(1);
-        // A restored collection owns a distinct namespace and GC domain.
-        // Backup source identity is read from its authenticated descriptor.
-        let namespace=std::fs::read_to_string(self.root.join("s3-namespace")).map_err(storage)?;
-        if namespace.len()!=32 || !namespace.bytes().all(|b|b.is_ascii_hexdigit()) {return Err(storage("invalid S3 service namespace"));}
-        let partition_id = Sha256::digest(format!("{namespace}:{}",entry.scope()).as_bytes())
-            .iter().map(|byte|format!("{byte:02x}")).collect::<String>();
-        if partition_id.is_empty() || !partition_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(bad("invalid persisted S3 partition identity"));
-        }
+        let partition_id = entry.scope();
         Ok(Some(S3CompatibleRecordConfig {
             authority_path: self.root.join("metadata.sqlite"),
             partition_id,
@@ -419,7 +399,8 @@ impl Service {
         if self.records.read().await.contains_key(&entry.scope()) {
             return Ok(());
         }
-        let path = self.root.join(&entry.directory);
+        entry.prepare_parent(&self.root)?;
+        let path = self.root.join(entry.directory());
         let remote_config = self.s3_record_config(&entry)?;
         let partition = if let Some(remote_config) = remote_config {
             if !entry.active && path.exists() && entry.restore_from.is_none() {
@@ -494,7 +475,7 @@ impl Service {
         if !entry.active {
             self.catalog
                 .execute(CatalogRequest {
-                    operation_id: internal_id(format!("sys:activate:{}", entry.directory)),
+                    operation_id: internal_id(format!("sys:activate:{}", entry.directory())),
                     command: CatalogCommand::ActivateCollection {
                         tenant_id: entry.tenant_id.clone(),
                         collection_id: entry.collection_id.clone(),
@@ -556,18 +537,23 @@ impl Service {
                 )
             })
     }
-    async fn record(&self, key: &str, id: &str) -> Result<RecordPartition, Error> {
-        self.catalog
-            .authorized(key.into(), id.into(), |_| async {})
-            .await?;
-        self.records
-            .read()
-            .await
-            .get(&format!("{key}/{id}"))
-            .cloned()
-            .ok_or_else(not_found)
+    async fn record(&self, key: &str, id: &str) -> Result<CollectionRecord, Error> {
+        let entry = self.catalog
+            .authorized(key.into(), id.into(), |entry| async move { entry }).await?;
+        let partition = self.records.read().await.get(&entry.scope()).cloned().ok_or_else(not_found)?;
+        Ok(CollectionRecord { generation: entry.generation, partition })
     }
+}
 
+// A captured partition must pass the lifecycle check for this generation before use.
+#[derive(Clone)]
+struct CollectionRecord {
+    generation: u64,
+    partition: RecordPartition,
+}
+impl std::ops::Deref for CollectionRecord {
+    type Target = RecordPartition;
+    fn deref(&self) -> &RecordPartition { &self.partition }
 }
 
 #[derive(Deserialize)]
@@ -746,7 +732,7 @@ async fn create_collection(
             .map_err(|e| Error(e.0, "creation_rejected", e.2))?;
         anyseek::record::validate_config(&config)
             .map_err(|e| Error(StatusCode::BAD_REQUEST, "creation_rejected", e.to_string()))?;
-        s.catalog
+        let receipt = s.catalog
             .execute(CatalogRequest {
                 operation_id: request.operation_id,
                 command: CatalogCommand::PrepareCollection {
@@ -761,8 +747,9 @@ async fn create_collection(
             .collections()
             .await?
             .into_iter()
-            .find(|e| e.tenant_id == key && e.collection_id == id)
+            .find(|e| e.tenant_id == key && e.collection_id == id && e.generation == receipt.seq)
             .ok_or_else(not_found)?;
+        if entry.deleted { return Err(bad("collection creation was deleted")); }
         s.finish_collection(entry).await?;
         let _ = s.catalog.authorized(key, id.clone(), |_| async {}).await?;
         response(
@@ -785,9 +772,10 @@ async fn list_collections(
         let id = entry.collection_id.clone();
         let value = s
             .catalog
-            .authorized(
+            .authorized_generation(
                 key.clone(),
                 id,
+                entry.generation,
                 move |_| async move { p.statistics().await },
             )
             .await?;
@@ -808,7 +796,7 @@ async fn info(
     let data = p.output_permit()?;
     let value = s
         .catalog
-        .authorized(key, id, move |entry| async move {
+        .authorized_generation(key, id, p.generation, move |entry| async move {
             p.statistics().await.map(|stats| index_info(&entry, stats))
         })
         .await?;
@@ -835,7 +823,7 @@ async fn write(
     let pause_collection = id.clone();
     let result = s
         .catalog
-        .authorized(key, id, move |_| async move {
+        .authorized_generation(key, id, p.generation, move |_| async move {
             #[cfg(feature = "fault-injection")]
             pause_authorized_for_test(&pause_collection).await?;
             p.write(request).await
@@ -861,7 +849,7 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
     let operations: Vec<_> = request.records.iter().map(|r| r.operation_id.clone()).collect();
     #[cfg(feature = "fault-injection")]
     let pause_collection = id.clone();
-    let result = s.catalog.authorized(key, id, move |_| async move {
+    let result = s.catalog.authorized_generation(key, id, partition.generation, move |_| async move {
         let _gate = gate;
         #[cfg(feature = "fault-injection")]
         pause_authorized_for_test(&pause_collection).await?;
@@ -897,7 +885,7 @@ async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Pat
 async fn ingest_progress(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
     let partition = s.record(&key, &id).await?;
-    let progress = s.catalog.authorized(key, id, move |_| async move {
+    let progress = s.catalog.authorized_generation(key, id, partition.generation, move |_| async move {
         partition.committed_progress().await
     }).await?;
     response(progress)
@@ -926,7 +914,7 @@ async fn generation_status(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit()?;
-    let result = s.catalog.authorized(key, id, move |_| async move { p.generation_status(&record_id).await }).await?;
+    let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move { p.generation_status(&record_id).await }).await?;
     protected_data(result.map_err(Error::from).and_then(|status| status.ok_or_else(not_found)), Some(data))
 }
 async fn record_status(
@@ -935,7 +923,7 @@ async fn record_status(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit()?;
-    let result = s.catalog.authorized(key, id, move |_| async move { p.record_status(&record_id).await }).await?;
+    let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move { p.record_status(&record_id).await }).await?;
     protected_data(result.map_err(Error::from).and_then(|status| status.ok_or_else(not_found)), Some(data))
 }
 async fn read(
@@ -949,7 +937,7 @@ async fn read(
     let data = p.output_permit()?;
     let result = s
         .catalog
-        .authorized(key, id, move |_| async move { p.get(&record_id).await })
+        .authorized_generation(key, id, p.generation, move |_| async move { p.get(&record_id).await })
         .await?;
     let value = result
         .map_err(Error::from)
@@ -990,7 +978,7 @@ async fn iterate(
     let data = p.output_permit()?;
     let result = s
         .catalog
-        .authorized(key, id, move |_| async move {
+        .authorized_generation(key, id, p.generation, move |_| async move {
             let mut page = p.page(request.cursor, request.length).await?;
             if !request.fields.is_empty() {
                 for record in &mut page.records {
@@ -1007,13 +995,13 @@ async fn iterate(
 async fn evidence_excerpt(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
     let reference:anyseek::record::EvidenceRef=parse(&bytes)?;
     let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
-    let result =s.catalog.authorized(key,id,move |_|async move {p.evidence_excerpt(reference).await}).await?;
+    let result =s.catalog.authorized_generation(key, id, p.generation,move |_|async move {p.evidence_excerpt(reference).await}).await?;
     protected_data(result.map_err(Into::into),Some(data))
 }
 async fn entities(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
     let request:PageRequest=parse(&bytes)?;
     let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
-    let result =s.catalog.authorized(key,id,move |_|async move {
+    let result =s.catalog.authorized_generation(key, id, p.generation,move |_|async move {
         let mut page=p.entities(request.cursor,request.length).await?;
         if !request.fields.is_empty(){for record in &mut page.records {if let Some(doc)=record.document.as_mut(){doc.retain(|field,_|request.fields.contains(field));}}}
         Ok::<_,RecordError>(page)
@@ -1023,7 +1011,7 @@ async fn entities(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<S
 async fn neighbors(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
     let request:anyseek::record::NeighborRequest=parse(&bytes)?;
     let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
-    let result =s.catalog.authorized(key,id,move |_|async move {p.neighbors(request).await}).await?;
+    let result =s.catalog.authorized_generation(key, id, p.generation,move |_|async move {p.neighbors(request).await}).await?;
     protected_data(result.map_err(Into::into),Some(data))
 }
 #[derive(Deserialize)]
@@ -1055,7 +1043,7 @@ async fn batch(
     }
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
-    let result = s.catalog.authorized(key, id, move |_| async move {
+    let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move {
         let mut rows = Vec::new();
         let mut stopped = false;
         for write in request.writes {
@@ -1092,7 +1080,7 @@ async fn deletion_plan(
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
     let data = p.output_permit()?;
-    let result = s.catalog.authorized(key, id, move |entry| async move {
+    let result = s.catalog.authorized_generation(key, id, p.generation, move |entry| async move {
         let (seq, records) = match selection {
             DeleteSelection::Query { query } => {
                 if query.relation_fusion.is_some() || query.query_vector.is_some() || query.similarity_threshold.is_some() || query.query_string.trim().is_empty() {
@@ -1133,7 +1121,7 @@ async fn operation(
     let lookup = operation_id.clone();
     let result = s
         .catalog
-        .authorized(key, id, move |_| async move { p.operation(&lookup).await })
+        .authorized_generation(key, id, p.generation, move |_| async move { p.operation(&lookup).await })
         .await?;
     protected(result.map(|receipt|json!({"operation_id":operation_id,"receipt":receipt,"expires_at":operation_id.expires_at_unix_seconds(),"absence_proves_failure":false})).map_err(Into::into))
 }
@@ -1250,16 +1238,17 @@ async fn service_backup(
             // local directories may have been evicted; never open an S3 cache as
             // a standalone journal or silently omit its authoritative state.
             for entry in &entries {
-                let path=s.root.join(&entry.directory);
+                let path=s.root.join(&entry.directory());
                 if records.contains_key(&entry.scope()) || (!entry.initialized && !path.exists()) {continue;}
                 let config=s.s3_record_config(entry)?.ok_or_else(||storage("S3 configuration missing"))?;
                 let p=if let Some(proof)=restored.as_ref().filter(|r|r.record_seqs.contains_key(&entry.scope())) {
                     RecordPartition::adopt_s3_snapshot(&path,entry.config.clone(),config,&proof.identity).await?
                 } else {RecordPartition::open_s3(&path,entry.config.clone(),config).await?};
-                let destination=temporary.join(&entry.directory);
+                entry.prepare_parent(&temporary)?;
+                let destination=temporary.join(entry.directory());
                 p.checkpoint(&destination).await?;
                 drop(p);
-                archives.insert(entry.directory.clone(),destination);
+                archives.insert(entry.directory(),destination);
             }
             for row in std::fs::read_dir(&s.root).map_err(storage)? {
                 let row=row.map_err(storage)?;
@@ -1395,7 +1384,7 @@ async fn backup(
         let _writes = s.write_gate.write().await;
         let key = s.authenticate(&headers).await?;
         let p = s.record(&key, &id).await?;
-        let identity = serde_json::to_vec(&(key.clone(),id.clone(), &request.operation_id)).map_err(bad)?;
+        let identity = serde_json::to_vec(&(key.clone(),id.clone(),p.generation, &request.operation_id)).map_err(bad)?;
         let backup_id = verifier(&identity);
         if s.catalog.retired_backups().await?.contains(&backup_id) {
             return Err(Error(StatusCode::GONE,"backup_retired","backup identity was permanently retired".into()));
@@ -1409,7 +1398,7 @@ async fn backup(
         let oid = request.operation_id.clone();
         let collection_id = id.clone();
         let s3_mode = std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref() == Ok("s3");
-        let result = s.catalog.authorized(key, id, move |entry| async move {
+        let result = s.catalog.authorized_generation(key, id, p.generation, move |entry| async move {
             p.operation(&oid).await?;
             let seq = if s3_mode {
                 create_s3_backup_pointer(&p, &path, &root, &backup_id, &collection_id, &entry.config).await?
@@ -1519,7 +1508,7 @@ async fn restore(
         let _writes = s.write_gate.write().await;
         let key = s.authenticate(&headers).await?;
         s.catalog.require_backup(&key,&request.backup_id).await?;
-        let existing = s.catalog.collections().await?.into_iter().find(|e| e.tenant_id==key && e.collection_id==request.collection_id);
+        let existing = s.catalog.collections().await?.into_iter().find(|e| e.tenant_id==key && e.collection_id==request.collection_id && !e.deleted);
         let s3_mode = std::env::var("ANYSEEK_STORAGE_BACKEND").as_deref() == Ok("s3");
         let config = if let Some(entry) = existing {
             if entry.tenant_id!=key || entry.restore_from.as_ref()!=Some(&request.backup_id) { return Err(bad("collection identity belongs to another creation intent")); }
@@ -1543,10 +1532,10 @@ async fn restore(
         };
         let operation_id = request.operation_id.clone();
         let id = request.collection_id;
-        s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::PrepareRestore {
+        let receipt = s.catalog.execute(CatalogRequest { operation_id:request.operation_id, command:CatalogCommand::PrepareRestore {
             collection_id:id.clone(), tenant_id:key.clone(), config, backup_id:request.backup_id,
         }}).await?;
-        let entry = s.catalog.collections().await?.into_iter().find(|e|e.tenant_id==key && e.collection_id==id).ok_or_else(not_found)?;
+        let entry = s.catalog.collections().await?.into_iter().find(|e|e.tenant_id==key && e.collection_id==id && e.generation==receipt.seq).ok_or_else(not_found)?;
         if entry.deleted { return Err(bad("restored collection has since been deleted")); }
         s.finish_collection(entry).await?;
         let _ = s.catalog.authorized(key.clone(), id.clone(), |_|async {}).await?;
@@ -1588,7 +1577,11 @@ async fn delete_collection(
             .await?;
         // No physical deletion while mmap owners may remain. The durable catalog
         // tombstone prevents serving or reopening this identity after a restart.
-        s.records.write().await.remove(&format!("{key}/{id}"));
+        let deleted = s.catalog.collections().await?.into_iter()
+            .filter(|e| e.tenant_id == key && e.collection_id == id && e.generation < receipt.seq && e.deleted)
+            .map(|e| e.scope()).collect::<Vec<_>>();
+        let mut records = s.records.write().await;
+        for scope in deleted { records.remove(&scope); }
         response(
             json!({"receipt":receipt,"deleted":true,"physical_reclamation":"deferred"}),
         )
@@ -1606,7 +1599,7 @@ async fn checkpoint(
     let current = p.clone();
     let result = s
         .catalog
-        .authorized(key, id, move |_| async move {
+        .authorized_generation(key, id, p.generation, move |_| async move {
             p.start_index_committed(std::time::Duration::from_secs(30))
         })
         .await?;
@@ -1634,7 +1627,7 @@ async fn query(
     if request.query_vector.is_none() && request.similarity_threshold.is_some() {
         return Err(bad("similarity_threshold requires query_vector"));
     }
-    let result =s.catalog.authorized(key,id,move|entry|async move{
+    let result =s.catalog.authorized_generation(key, id, p.generation,move|entry|async move{
         let start=std::time::Instant::now();
         let vector=request.query_vector.as_ref().map(|value|anyseek::vector::parse_external_embedding(value,&entry.config.index.inference)).transpose().map_err(bad)?;
         let query=RecordQuery{temporal:request.temporal.clone(),text:request.query_string.clone(),vector,mode,query_type:request.query_type(),offset:request.offset,length:request.length,result_type:request.result_type(),fields:request.field_filter,filters:request.facet_filter,sort:request.result_sort};
@@ -1882,6 +1875,49 @@ mod tests {
         let request=axum::http::Request::builder().method(method).uri(path).header("apikey",key).header("content-type","application/json").body(Body::from(body)).unwrap();
         let response=app.clone().oneshot(request).await.unwrap();let status=response.status();
         let value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();(status,value)
+    }
+    #[tokio::test]
+    async fn collection_recreation_http_retries_and_captured_handles_keep_their_generation() {
+        let (service, path, headers) = setup().await;
+        let app = router(service.clone());
+        let key = headers["apikey"].to_str().unwrap();
+        let old = service.record("tenant", "c").await.unwrap();
+        let command = json!({"operation_id":OperationId::new("write-once".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"old"}});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",key,Some(command.clone())).await.0,StatusCode::OK);
+        let backup = json!({"operation_id":OperationId::new("same-backup".into())});
+        let (status, before) = tenant_api(&app,"POST","/api/v1/index/c/backup",key,Some(backup.clone())).await;
+        assert_eq!(status,StatusCode::OK);
+        let delete = json!({"operation_id":OperationId::new("delete-old".into())});
+        assert_eq!(tenant_api(&app,"DELETE","/api/v1/index/c",key,Some(delete.clone())).await.0,StatusCode::OK);
+        let create = json!({"operation_id":OperationId::new("recreate".into()),"collection_id":"c","config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(create.clone())).await.0,StatusCode::OK);
+        let current = service.record("tenant","c").await.unwrap();
+        assert_ne!(old.generation,current.generation);
+        assert!(service.catalog.authorized_generation("tenant".into(),"c".into(),old.generation,
+            |_|async{panic!("old handle ran against replacement")}).await.is_err());
+        let mut fresh = command.clone(); fresh["document"]["body"]=json!("new");
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",key,Some(fresh)).await.0,StatusCode::OK);
+        let (status, after) = tenant_api(&app,"POST","/api/v1/index/c/backup",key,Some(backup)).await;
+        assert_eq!(status,StatusCode::OK); assert_ne!(before["backup_id"],after["backup_id"]);
+        // Replaying the old delete cannot remove the replacement from the live cache.
+        assert_eq!(tenant_api(&app,"DELETE","/api/v1/index/c",key,Some(delete)).await.0,StatusCode::OK);
+        assert_eq!(service.record("tenant","c").await.unwrap().generation,current.generation);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(create)).await.0,StatusCode::OK);
+        let original = json!({"operation_id":OperationId::new("create".into()),"collection_id":"c","config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(original)).await.0,StatusCode::BAD_REQUEST);
+        assert_eq!(old.get("r").await.unwrap().unwrap().document.unwrap()["body"],"old");
+        drop(current); drop(old); drop(app); drop(service);
+        let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let p = service.record("tenant","c").await.unwrap();
+        assert_eq!(p.get("r").await.unwrap().unwrap().document.unwrap()["body"],"new");
+        drop(p);
+        let app = router(service.clone());
+        assert_eq!(tenant_api(&app,"DELETE","/api/v1/index/c",key,Some(json!({"operation_id":OperationId::new("delete-new".into())}))).await.0,StatusCode::OK);
+        let restored = tenant_api(&app,"POST","/api/v1/restore",key,Some(json!({"operation_id":OperationId::new("restore-name".into()),"collection_id":"c","backup_id":before["backup_id"]}))).await;
+        assert_eq!(restored.0,StatusCode::OK);
+        let p = service.record("tenant","c").await.unwrap();
+        assert_eq!(p.get("r").await.unwrap().unwrap().document.unwrap()["body"],"old");
+        drop(p); drop(app); drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn tenant_http_boundaries_same_names_backup_ownership_and_master_management_only(){
@@ -2152,7 +2188,7 @@ mod tests {
             let mut body = response.into_body();
             assert!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().is_ok());
         }
-        assert_eq!(service.records.read().await["tenant/c"].statistics().await.unwrap().visible_seq, 0);
+        assert_eq!(service.record("tenant", "c").await.unwrap().statistics().await.unwrap().visible_seq, 0);
         drop(app); drop(service); std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
@@ -2218,7 +2254,7 @@ mod tests {
             .header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(),StatusCode::OK);drop(response);
-        assert_eq!(service.records.read().await["tenant/c"].statistics().await.unwrap().visible_seq,0);
+        assert_eq!(service.record("tenant", "c").await.unwrap().statistics().await.unwrap().visible_seq,0);
         drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
 

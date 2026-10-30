@@ -62,6 +62,7 @@ def main():
         required=['ENDPOINT','BUCKET','REGION','ACCESS_KEY_ID','SECRET_ACCESS_KEY']
         missing=[f'ANYSEEK_S3_TEST_{key}' for key in required if not os.environ.get(f'ANYSEEK_S3_TEST_{key}')]
         if missing:parser.error('missing dedicated test configuration: '+', '.join(missing))
+        if not os.environ.get('ANYSEEK_S3_TEST_RESTORE_BUCKET'):parser.error('set ANYSEEK_S3_TEST_RESTORE_BUCKET to a second disposable bucket for full-service restore')
         env={**os.environ,'ANYSEEK_STORAGE_BACKEND':'s3','MASTER_KEY_SECRET':'s3-test'}
         for key in required+['ALLOW_HTTP']:
             env[f'ANYSEEK_S3_{key}']=os.environ.get(f'ANYSEEK_S3_TEST_{key}','0')
@@ -121,7 +122,7 @@ def main():
                 time.sleep(.1)
         def cold_restart():
             stop()
-            for path in [*root.glob('collection-*'), *root.glob('*.object-cache')]:
+            for path in [*root.glob('collections/*/*/*'), *root.glob('*.object-cache')]:
                 if path.is_dir():shutil.rmtree(path)
             start()
         def query(collection='main'):
@@ -167,6 +168,24 @@ def main():
             assert call('GET','/api/v1/index/main/doc/a',key=other_key)['document']['body']=='foreign tenant'
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
             print('PASS S3 Tenant isolation: same-name collections, separate objects, backup ownership and cold restart',flush=True)
+            # Reuse the public name and operation ID, never its old lifecycle objects.
+            old_write=write('old-generation','same','old incarnation')
+            call('POST','/api/v1/index/main/doc',old_write,key=other_key)
+            deleted={'operation_id':operation()}
+            call('DELETE','/api/v1/index/main',deleted,key=other_key)
+            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config},key=other_key)
+            fresh={**old_write,'document':{'body':'new incarnation','vector':[2,0]}}
+            assert call('POST','/api/v1/index/main/doc',fresh,key=other_key)['receipt']['version']==1
+            call('DELETE','/api/v1/index/main',deleted,key=other_key)
+            cold_restart()
+            assert call('GET','/api/v1/index/main/doc/same',key=other_key)['document']['body']=='new incarnation'
+            if fixture:
+                with S3.lock:keys=list(S3.objects)
+                assert any('/anyseek/other/main/wal/' in k for k in keys)
+                assert all('/partitions/' not in k for k in keys)
+            assert not root.joinpath('s3-namespace').exists()
+            print('PASS S3 same-name recreation: separate lifecycle objects/receipts, stale delete retry and cold restart',flush=True)
+
             if args.faults:
                 for stage in ['before_publish','after_publish']:
                     stop();start({'ANYSEEK_REMOTE_CHECKPOINT_FAULT':stage})
@@ -230,7 +249,9 @@ def main():
             assert whole['snapshot']['collection_backups']
             assert control('POST','/api/v1/service-backups',whole_request)==whole
             restored=control('POST','/api/v1/service-restores',{'operation_id':operation(),'backup_id':whole['backup_id']})
-            target_root=pathlib.Path(restored['target_root']);stop();start(target=target_root)
+            target_root=pathlib.Path(restored['target_root']);stop()
+            env['ANYSEEK_S3_BUCKET'] = 'disposable-restored' if args.backend == 'fixture' else os.environ['ANYSEEK_S3_TEST_RESTORE_BUCKET']
+            start(target=target_root)
             call('GET','/api/v1/index/main',key=user,status=403)
             tenant_key=base64.b64encode(os.urandom(32)).decode()
             call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'restored-access','apikey_base64':tenant_key})
@@ -240,12 +261,12 @@ def main():
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'copied-archive','backup_id':copied})
             assert call('GET','/api/v1/index/copied-archive/doc/a')['version']==2
             stop()
-            for path in [*target_root.glob('collection-*'), *target_root.glob('*.object-cache')]:
+            for path in [*target_root.glob('collections/*/*/*'), *target_root.glob('*.object-cache')]:
                 if path.is_dir():shutil.rmtree(path)
             start(target=target_root)
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
             assert call('GET','/api/v1/index/copied-archive/doc/a')['version']==2
-            assert target_root.joinpath('s3-namespace').read_text()!=root.joinpath('s3-namespace').read_text()
+            assert not target_root.joinpath('s3-namespace').exists()
             print('PASS complete service archive: retained S3 backups, isolated restore, disabled old keys and cold restart',flush=True)
         finally:
             for child in children:
