@@ -22,7 +22,6 @@ struct Metadata {
     retired_backups: std::collections::BTreeSet<String>,
     historical_operations: Vec<(String, OperationId)>,
     service_snapshot: Option<(String, bool)>,
-    authority_history: Vec<serde_json::Value>,
 }
 impl Metadata {
     fn from_state(state: &State) -> Self {
@@ -32,7 +31,6 @@ impl Metadata {
             retired_backups: state.retired_backups.clone(),
             historical_operations: state.historical_operations.clone(),
             service_snapshot: state.service_snapshot.clone(),
-            authority_history: state.authority_history.clone(),
         }
     }
 }
@@ -72,6 +70,7 @@ impl Store {
         })
     }
     pub(super) fn create(root: &Path, state: &State) -> Result<Self, CatalogError> {
+        validate_state(state)?;
         let mut store = Self::connect(root, true)?;
         store.connection.execute_batch(
             "BEGIN IMMEDIATE;
@@ -97,7 +96,7 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(storage)?;
-        if format != 3 {
+        if format != 4 {
             return Err(storage("unsupported catalog SQLite format"));
         }
         let metadata: Metadata = serde_json::from_str(&metadata).map_err(storage)?;
@@ -107,7 +106,6 @@ impl Store {
             retired_backups: metadata.retired_backups,
             historical_operations: metadata.historical_operations,
             service_snapshot: metadata.service_snapshot,
-            authority_history: metadata.authority_history,
             ..State::default()
         };
         for (id, _) in
@@ -165,7 +163,6 @@ impl Store {
             .map_err(storage)
     }
     pub(super) fn persist(&mut self, old: &State, next: &State) -> Result<(), CatalogError> {
-        validate_state(next)?;
         let transaction = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -248,7 +245,7 @@ impl Store {
                     .map_err(storage)?;
             }
         }
-        transaction.execute("INSERT INTO catalog_meta VALUES(1,3,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
+        transaction.execute("INSERT INTO catalog_meta VALUES(1,4,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
         #[cfg(test)]
         crash("before_commit");
         transaction
@@ -294,7 +291,6 @@ pub(super) fn resume(root: &Path) -> Result<(), CatalogError> {
     Ok(())
 }
 pub(super) fn create(root: &Path, state: &State) -> Result<Store, CatalogError> {
-    validate_state(state)?;
     if root.exists() {
         return Err(CatalogError::Conflict("catalog root exists".into()));
     }

@@ -239,3 +239,5 @@ execution order. The verified benefit is removing obsolete terminology and
 identical helper code without reducing cases or data. Full-scale and Windows
 execution were not repeated locally; their selection and unchanged fixtures
 were verified, not presented as executed acceptance.
+
+测试等价收敛：NOT oracle 的 Topk/TopkCount 共用初始化、compact 和 reopen 夹具，保留全部断言组合；固定状态计数查询保留首查和后续查两遍；退役字段按字段名各保留一个拒绝代表值。手工 S3 background_index 子集跳过同 feature 下已运行的 indexer::tests；不同平台、feature 和 HTTP 故障边界保持。

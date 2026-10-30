@@ -1,14 +1,14 @@
 //! Independent NOT membership, posting-rank and count regression (#37).
 use anyseek::{
     index::{
-        AccessType, Clustering, DocumentCompression, FrequentwordType,
-         IndexMetaObject, LexicalSimilarity, StopwordType, TokenizerType,
-
+        AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject,
+        LexicalSimilarity, StopwordType, TokenizerType,
     },
     search::{QueryType, ResultSort, ResultType, SearchMode, SortOrder},
     vector::Inference,
 };
-#[path = "common/records.rs"] mod records;
+#[path = "common/records.rs"]
+mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
 use records::JOURNAL_LIMIT;
 use serde_json::json;
@@ -40,31 +40,40 @@ async fn fresh(label: &str, ngrams: u8) -> (RecordPartition, PathBuf) {
         json!([{"field":"body","field_type":"Text","store":true,"index_lexical":true}]),
     )
     .unwrap();
-    (
-        records::create(&path, meta, schema).await,
-        path,
-    )
+    (records::create(&path, meta, schema).await, path)
 }
 async fn add(index: &RecordPartition, docs: &[&str]) {
-    records::append(index, docs.iter().map(|body| serde_json::from_value(json!({"body":body})).unwrap()).collect()).await;
+    records::append(
+        index,
+        docs.iter()
+            .map(|body| serde_json::from_value(json!({"body":body})).unwrap())
+            .collect(),
+    )
+    .await;
 }
 async fn rows_sorted(
     index: &RecordPartition,
     q: &str,
-    _realtime: bool,
     explicit: bool,
     count: bool,
 ) -> (Vec<(usize, f32)>, usize) {
     let r = index
         .query(RecordQuery {
-            text: q.into(), vector: None, temporal: None, query_type: QueryType::Union, mode: SearchMode::Lexical, offset: 0, length: 100, result_type:
-            if count {
+            text: q.into(),
+            vector: None,
+            temporal: None,
+            query_type: QueryType::Union,
+            mode: SearchMode::Lexical,
+            offset: 0,
+            length: 100,
+            result_type: if count {
                 ResultType::TopkCount
             } else {
                 ResultType::Topk
             },
-            fields: vec![], filters: vec![], sort:
-            if explicit {
+            fields: vec![],
+            filters: vec![],
+            sort: if explicit {
                 vec![ResultSort {
                     field: "_score".into(),
                     order: SortOrder::Descending,
@@ -72,10 +81,15 @@ async fn rows_sorted(
             } else {
                 vec![]
             },
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
     (
-        r.hits.iter().map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score)).collect(),
+        r.hits
+            .iter()
+            .map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score))
+            .collect(),
         r.count_total,
     )
 }
@@ -92,31 +106,26 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
     #[cfg(feature = "zh")]
     let profiles = ["simple", "zh"];
     for tokenizer in profiles {
-        for count_mode in [false, true] {
-            for count in [2, 9] {
-                for negative in ["banned", "禁用"] {
-                    let (mut index, path) = fresh(
-                        &format!("{tokenizer}-not-{count_mode}-{count}-{negative}"),
-                        0,
-                    )
-                    .await;
-                    let second = terms[..count].join(" ");
-                    let first = format!("alpha alpha {second} {negative}");
-                    add(&index, &[&first, &second]).await;
-                    for stage in 0..3 {
-                        if stage == 1 {
-                            index.compact_journal().await.unwrap();
-                        }
-                        if stage == 2 {
-
-                            drop(index);
-                            index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
-                        }
+        for count in [2, 9] {
+            for negative in ["banned", "禁用"] {
+                let (mut index, path) =
+                    fresh(&format!("{tokenizer}-not-{count}-{negative}"), 0).await;
+                let second = terms[..count].join(" ");
+                let first = format!("alpha alpha {second} {negative}");
+                add(&index, &[&first, &second]).await;
+                for stage in 0..3 {
+                    if stage == 1 {
+                        index.compact_journal().await.unwrap();
+                    }
+                    if stage == 2 {
+                        drop(index);
+                        index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
+                    }
+                    for count_mode in [false, true] {
                         for explicit in [false, true] {
                             let (result, total) = rows_sorted(
                                 &index,
                                 &format!("{second} -{negative}"),
-                                stage == 0,
                                 explicit,
                                 count_mode,
                             )
@@ -137,10 +146,10 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                             }
                         }
                     }
-
-                    drop(index);
-                    std::fs::remove_dir_all(path).unwrap();
                 }
+
+                drop(index);
+                std::fs::remove_dir_all(path).unwrap();
             }
         }
     }

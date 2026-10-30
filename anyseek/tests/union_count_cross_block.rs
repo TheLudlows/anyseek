@@ -1,13 +1,8 @@
-#[path = "common/scale.rs"] mod scale;
 // Exercises disjoint candidate groups; retired 65536-posting layout is not recreated.
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};
-// Regression test: multi-term `Union` `Count`/`TopkCount` must be consistent
-// across repeated queries when terms span multiple blocks.
-//
-// `union_count` sorted terms including end-flagged ones, so a wrong-block
-// term could land at index 0 and corrupt the initial count and bitmap.
-
+// Count and TopkCount agree across disjoint candidate groups on the first
+// and subsequent queries. This oracle does not depend on a posting block layout.
 
 use anyseek::index::{
     AccessType, Clustering, DocumentCompression, FrequentwordType, IndexMetaObject, LexicalSimilarity, NgramSet, StopwordType, TokenizerType,
@@ -94,7 +89,7 @@ async fn union_count_cross_block_consistent() {
 
     // 600 alpha + 50 beta + 50 gamma = 700; padding must not match.
     let mut prev_count = 0;
-    for rep in 0..scale::choose(2, 20) {
+    for rep in 0..2 {
         let count = search(&index, "alpha beta gamma", ResultType::Count).await;
         let topk_count = search(&index, "alpha beta gamma", ResultType::TopkCount).await;
 
@@ -121,7 +116,7 @@ async fn union_count_cross_block_consistent() {
 
 }
 
-/// Control: 2-term union (no cross-block issue) must be stable.
+/// Control: two-term union counts remain stable.
 #[tokio::test]
 async fn union_count_two_terms_stable() {
     let index = fresh("tests/index_union_two_terms/").await;

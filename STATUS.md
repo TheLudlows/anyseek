@@ -1,5 +1,9 @@
 # anyseek 当前状态
 
+2026-10-30，本分支基于 `b22484a`（#98/#101 已合入）进行确认范围的实现简化：删除 Record 历史格式迁移、旧配额占位和旧裁剪算法；Catalog 只保留一次完整更新校验；恢复使用来源 cut/hash 和必要旧 Operation ID 隔离，不复制完整旧 Catalog；HTTP 认证上下文复用，去掉仅解析集合的 owned task，实际操作继续复核代次。现有业务能力、来源数据保护、HTTP 故障矩阵及 #94 的 shard 工作不变。**格式不兼容：Catalog 4、RecordCheckpointV15、RecordAppliedV13、RecordHistoryTrimV13、anchor manifest 6、完整服务归档 2；旧库/WAL/备份拒绝读取，不提供迁移。**
+
+本轮本地验证：171 个有界核心用例通过，服务端 21 项、调整的三组集成测试通过；Catalog 16 项和旧 checkpoint 拒绝回归通过。本地 HTTP 基础故障、授权、Indexer、committed-ingest，以及 S3 fixture 无缓存基础/历史回归和独立 bucket 完整服务恢复通过。默认及无默认特性核心编译、文档链接和 Python 语法检查通过。全量 library 扩展回归运行至长后缀用例时因构建磁盘占满而停止，未计为通过；已清理旧构建产物并完成上述有界验证。Windows、真实云 S3、硬断电和全量手工验收不推定通过，等待本轮 PR CI。下文为历史记录。
+
 2026-10-30，本分支已同步 master `7c0f88a`（PR #100 的 CI 精简），继续实施 [#98](https://github.com/TheLudlows/anyseek/issues/98)：Catalog 与 S3 authority 共用 SQLite，Key 绑定最小 Tenant，移除 Grant/revision/纯凭据撤销屏障。集合同名重建分配内部新代次，句柄、缓存、回执、备份和 GC 按代次隔离；本地目录由 Tenant/集合名/代次直接派生，不再持久化目录映射或自动 `s3-namespace`。对象使用 `anyseek/{tenant_id}/{collection_id}/...`，代次编码进对象 ID。完整服务恢复使用独立 bucket，历史普通 Key 禁用。不增加 RBAC、Bucket 检查或旧格式迁移。最终验收进行中，PR #99 仍为 Draft。下文为历史记录。
 
 本轮本地验证：Catalog 16 项、存储 74 项、远端 checkpoint 44 项、服务端 20 项通过；基础 HTTP 故障回归、S3 fixture 无缓存 HTTP 和独立 bucket 完整服务恢复通过；独立 core 双配置、9 项 Node 文档精度回归通过。fixture 同名重建/对象隔离/冷重启通过；完整 S3 storage 流程仍在推进时钟后的维护查询收到基线已有的 429 Busy，未放宽断言。真实云 S3、硬断电和本轮 Windows CI 尚不计为验收通过。

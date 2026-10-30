@@ -49,7 +49,7 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
     let _preflight = preflight.clone().try_acquire_owned().map_err(|_| Error::from(CatalogError::Busy))?;
     let mut tenant=None;
     if lane != Lane::Public {
-        let principal=service.authenticate(&parts.headers).await?;
+        let principal=service.authenticate_credentials(&parts.headers).await?;
         let admin=matches!((path.as_str(),&parts.method),
             ("/api/v1/apikey",&Method::POST|&Method::DELETE)
             |("/api/v1/tenants",_)|("/api/v1/backups",&Method::GET)
@@ -57,6 +57,7 @@ pub(super) async fn request(service: &Service, request: axum::extract::Request) 
             |("/api/v1/service-backups"|"/api/v1/service-restores",_)
             |("/api/v1/catalog/operation/{epoch}/{nonce}",_));
         if admin != (principal==MASTER) {return Err(Error(StatusCode::FORBIDDEN,"unauthorized","credential is not valid for this management/data endpoint".into()));}
+        parts.extensions.insert(Principal(principal.clone()));
         if principal!=MASTER {tenant=Some(principal);}
     }
     let mut subject = "service".to_owned();

@@ -25,6 +25,8 @@ pub struct ServiceSnapshot {
     pub absent_collections: std::collections::BTreeSet<String>,
     /// Present only on a restored root; identifies its immutable input archive.
     pub restored_from: Option<String>,
+    /// Original Catalog hash for a restored service; no full historical Catalog copy.
+    pub source_catalog_hash: Option<String>,
 }
 const COMPLETE: &str = "service-snapshot-complete";
 const MANIFEST: &str = "service-snapshot-manifest";
@@ -96,12 +98,14 @@ fn complete(root: &Path, receipt: &ServiceSnapshot) -> Result<(), CatalogError> 
 }
 async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
     let manifest = read_manifest(root)?;
-    if manifest.format != 1 {
+    if manifest.format != 2 {
         return Err(storage("unsupported service snapshot format"));
+    }
+    if manifest.restored_from.is_some() != manifest.source_catalog_hash.is_some() {
+        return Err(storage("restore provenance mismatch"));
     }
     for (name, expected) in &manifest.objects {
         if !name.is_empty()
-            && name != "authority-at-backup"
             && !safe_directory(name)
             && !name.strip_prefix("backup-").is_some_and(safe_backup)
         {
@@ -121,9 +125,6 @@ async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
         return Err(storage("service cut mismatch"));
     }
     let mut names = std::collections::BTreeSet::from([String::new()]);
-    if manifest.restored_from.is_some() {
-        names.insert("authority-at-backup".into());
-    }
     for entry in entries {
         if manifest.absent_collections.contains(&entry.scope()) {
             if !entry.deleted || entry.initialized || root.join(&entry.directory()).exists() {
@@ -440,13 +441,14 @@ impl Catalog {
                 fault("backup_children");
                 let receipt = ServiceSnapshot {
                     identity,
-                    format: 1,
+                    format: 2,
                     objects,
                     collection_backups,
                     catalog_seq: inner.state.seq,
                     record_seqs,
                     absent_collections,
                     restored_from: None,
+                    source_catalog_hash: None,
                 };
                 drop(
                     PartitionJournal::create(
@@ -500,12 +502,6 @@ impl Catalog {
                 }
                 let original = Catalog::open(&archive).await?;
                 let mut state = original.inner.lock().await.state.clone();
-                let audit = state.clone();
-                let mut historical = state.clone();
-                historical.authority_history.clear();
-                state
-                    .authority_history
-                    .push(serde_json::to_value(historical).map_err(storage)?);
                 state.service_snapshot = Some((identity.clone(), true));
                 if state
                     .keys
@@ -544,7 +540,6 @@ impl Catalog {
                 );
                 let stage = staging(&target)?;
                 drop(Catalog::create_state(&stage, state.clone()).await?);
-                drop(Catalog::create_state(&stage.join("authority-at-backup"), audit).await?);
                 for entry in state.collections.values() {
                     if input.absent_collections.contains(&entry.scope()) {
                         continue;
@@ -572,7 +567,6 @@ impl Catalog {
                 for name in input
                     .objects
                     .keys()
-                    .chain(std::iter::once(&"authority-at-backup".to_string()))
                 {
                     objects.insert(name.clone(), object_hash(&stage.join(name))?);
                 }
@@ -580,13 +574,14 @@ impl Catalog {
                 fault("restore_children");
                 let receipt = ServiceSnapshot {
                     identity,
-                    format: 1,
+                    format: 2,
                     objects,
                     collection_backups: input.collection_backups,
                     catalog_seq: input.catalog_seq,
                     record_seqs: input.record_seqs,
                     absent_collections: input.absent_collections,
                     restored_from: Some(input.identity),
+                    source_catalog_hash: input.objects.get("").cloned(),
                 };
                 drop(
                     PartitionJournal::create(

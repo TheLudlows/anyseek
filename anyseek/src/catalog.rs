@@ -289,7 +289,6 @@ struct State {
     retired_backups: std::collections::BTreeSet<String>,
     historical_operations: Vec<(String, OperationId)>,
     service_snapshot: Option<(String, bool)>,
-    authority_history: Vec<serde_json::Value>,
 }
 impl State {
     // Generations sort in allocation order within one validated tenant/name.
@@ -327,6 +326,7 @@ impl Inner {
         next.epoch_watermark = now.max(next.epoch_watermark);
         next.operations
             .retain(|op| op.request.operation_id.epoch.saturating_add(1) >= next.epoch_watermark);
+        sqlite::validate_state(&next)?;
         self.healthy = false;
         match self.store.persist(&self.state, &next) {
             Ok(()) => {
@@ -775,6 +775,25 @@ impl Catalog {
             return Err(CatalogError::RecoveryRequired);
         }
         Ok(inner.state.collections.values().cloned().collect())
+    }
+    /// Resolve a current incarnation as a hint. Execution must still use
+    /// authorized_generation under the lifecycle guard before touching its data.
+    pub async fn collection_entry(
+        &self,
+        tenant: &str,
+        collection: &str,
+    ) -> Result<CollectionEntry, CatalogError> {
+        let id = scope(tenant, collection)?;
+        let inner = self.inner.lock().await;
+        if !inner.is_healthy() {
+            return Err(CatalogError::RecoveryRequired);
+        }
+        inner
+            .state
+            .collection(&id)
+            .filter(|e| e.active && !e.deleted)
+            .cloned()
+            .ok_or(CatalogError::Unauthorized)
     }
     /// List active collections belonging to an already authenticated tenant.
     pub async fn listing(&self, tenant: &str) -> Result<Vec<CollectionEntry>, CatalogError> {

@@ -740,7 +740,7 @@ mod tests {
         for i in 0..128 {
             let request=super::super::tests::write(&format!("op-{i}"),&format!("id-{i}"),&"x".repeat(8192),ExpectedVersion::Absent);
             let receipt=WriteReceipt{staged_only:false,seq:i+1,version:1,record_id:request.record_id.clone()};
-            let applied=Applied{request_digest:None,legacy_graph_invalidation:false,observed_epoch:request.operation_id.epoch,observed_time_ms:0,request,receipt};
+            let applied=Applied{request_digest:None,observed_epoch:request.operation_id.epoch,observed_time_ms:0,request,receipt};
             let prepared=state_memory::Prepared::new(&state,&applied).unwrap();
             snapshot=mutation::snapshot_after(&state,snapshot,&applied,&prepared.record).unwrap();
             prepared.admit_containers(&mut state,snapshot).unwrap();apply_prepared(&mut state,&applied,Some(prepared)).unwrap();

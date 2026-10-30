@@ -196,17 +196,8 @@ impl Frozen {
         reservation.grow(estimate).map_err(storage)?;
         let index=crate::index::open_index(&path).await.map_err(storage)?;
         index.write().await.record_lexical.push(lexical::runtime::Runtime::open_owned(&path.join("native"),config).await?);
-        // Legacy certificates did not persist vector revision identities. Their
-        // format required the same native/vector order; migrate only that format.
-        // New statistics carry their own identities and may have independent order.
-        if active.revisions.is_empty() && !active.keys.is_empty() {
-            let native = index.read().await.record_lexical[0].clone();
-            let snapshot = native.snapshot().await?;
-            if snapshot.identities.len() != active.keys.len()
-                || snapshot.identities.iter().zip(&active.keys).any(|(identity, key)| &identity.id != key) {
-                return Err(storage("legacy native/vector identity mismatch"));
-            }
-            active.revisions = snapshot.identities.iter().map(|identity| (identity.version, identity.revision)).collect();
+        if active.revisions.len() != active.keys.len() {
+            return Err(storage("frozen segment revision identities missing"));
         }
         index.read().await.shard_vec[0].write().await.build_reservation=Some(reservation);
         {
@@ -320,7 +311,7 @@ impl Reference {
             },
         };
         let payloads=pool.finish().map_err(storage)?;
-        let manifest=Manifest{format:5,seq:state.seq,state:referenced,payloads};
+        let manifest=Manifest{format:6,seq:state.seq,state:referenced,payloads};
         // Chain count is not a byte bound: repeated descriptors/long references
         // may exhaust a small configured authority before MAX_DELTAS. Measure
         // without constructing an encoded Vec or writing an oversized manifest.
@@ -446,7 +437,7 @@ impl Reference {
         let path=directory(root,&self.id)?;
         if files(&path,closure_limit(authority_budget)?)?.as_slice()!=self.files.as_slice(){return Err(storage("anchor closure checksum mismatch"));}
         let (manifest,mut manifest_lease)=read_manifest(&path.join("manifest"),authority_budget)?;
-        if manifest.format!=5{return Err(storage("unsupported anchor format"));}
+        if manifest.format!=6{return Err(storage("unsupported anchor format"));}
         let owners=manifest.state.owners()?;
         if owners.last()!=Some(&self.id.as_str()) || self.state_blocks.len()+1!=owners.len() {
             return Err(storage("state block closure count or head mismatch"));
@@ -827,23 +818,18 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn legacy_statistics_migrate_revision_identity_on_package_open() {
+    async fn missing_revision_identities_are_rejected_on_package_open() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("records");
         let p = RecordPartition::create(&root, config()).await.unwrap();
         p.write(write("a", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
         let inner = p.inner.lock().await;
         let (package, mut active) = segment::Package::prepare(&root, &inner.config, &inner.state, None).await.unwrap();
-        let expected = active.revisions.clone();
         active.revisions.clear(); active.fingerprints.clear();
         let old = serde_json::to_value(&active).unwrap();
         assert!(old.get("revisions").is_none());
         let old: crate::active::ActiveStatistics = serde_json::from_value(old).unwrap();
-        let restored = package.load(&root, &inner.config, old).await.unwrap();
-        let root = restored.read().await;
-        let shard = root.shard_vec[0].read().await;
-        assert_eq!(shard.active.as_ref().unwrap().revisions, expected);
-        assert!(shard.active.as_ref().unwrap().is_live(0));
+        assert!(package.load(&root, &inner.config, old).await.is_err());
     }
 
     #[tokio::test]
@@ -1174,7 +1160,7 @@ mod tests {
             let selected={
                 let mut inner=p.inner.lock().await;inner.maintain_index_tail().await.unwrap();
                 let selected=inner.anchor.as_ref().unwrap().id.clone();
-                if target=="wal" {inner.journal.append(br#"{"RecordFeedTrimV12":{"previous":0,"floor":999999,"at":0}}"#).unwrap();}
+                if target=="wal" {inner.journal.append(br#"{"RecordHistoryTrimV13":{"previous":0,"floor":999999,"at":0}}"#).unwrap();}
                 else {
                     let file=match target {
                         "payload"=>path.join(format!("payload-{}",inner.payloads.objects.keys().next().unwrap())),
