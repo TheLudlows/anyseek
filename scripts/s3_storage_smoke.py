@@ -239,7 +239,7 @@ def main():
                 assert not retired['cleanup_pending'],retired
                 call('PATCH','/api/v1/index/main');cold_restart()
                 assert call('GET',f'/api/v1/index/{target}/doc/a')['version']==2
-            print('PASS joint backup retry, interrupted restore, namespace isolation, retirement and cold restart',flush=True)
+            print('PASS joint backup retry, interrupted restore, generation isolation, retirement and cold restart',flush=True)
             # Keep a collection backup in the complete-service archive.
             archive=call('POST','/api/v1/index/main/backup',{'operation_id':operation()})
             user=base64.b64encode(os.urandom(32)).decode()

@@ -50,7 +50,7 @@ python3 scripts/s3_acceptance.py --backend fixture --suite all \
 
 可用 `--suite semantic|storage|contract` 单独运行；合同单独运行不要求 `--server`，但需要 cargo。入口在运行前复制固定服务二进制，避免合同测试重新构建时替换正在验收的程序。报告记录二进制 SHA-256、每组退出状态和耗时，不记录凭据。进程退出或损坏对象的故障注入只在明确的测试构建启用。服务归档超过 HTTP 完成期限可能返回 `outcome_unknown`；脚本用**同一请求和 operation_id** 有界重试，不能通过新 ID 绕过原结果。
 
-真实模式必须使用专用、可销毁的测试 bucket，并从进程环境提供以下配置；不会回退读取正常服务的 S3 配置。测试会创建和删除对象，端到端矩阵留下本轮独立 namespace，由测试 bucket 的管理者在验收后销毁；底层合同仅清理本轮显式记录的 key，不执行 bucket LIST 或批量前缀删除。
+真实模式必须使用专用、可销毁的测试 bucket，并从进程环境提供以下配置；不会回退读取正常服务的 S3 配置。测试会创建和删除对象，端到端矩阵留下本轮测试对象，由测试 bucket 的管理者在验收后销毁；底层合同仅清理本轮显式记录的 key，不执行 bucket LIST 或批量前缀删除。
 
 ```sh
 # 在当前进程环境设置 ANYSEEK_S3_TEST_ENDPOINT、ANYSEEK_S3_TEST_BUCKET、

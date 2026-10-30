@@ -2,7 +2,7 @@
 """Run shared Record acceptance and S3 contracts against a fixture or test bucket.
 
 Real mode accepts ONLY ANYSEEK_S3_TEST_* configuration. Use a dedicated disposable
-bucket: end-to-end tests leave isolated test namespaces for provider-side disposal.
+bucket: end-to-end tests leave test objects for provider-side disposal.
 Credentials are inherited through the environment and never added to reports.
 """
 import argparse

@@ -1,4 +1,4 @@
-//! Default reliable service. No route delegates to the legacy per-key index map.
+//! Tenant-scoped Record service with durable catalog and collection lifecycle ordering.
 mod admission;
 use crate::api_types::{CreateIndexRequest, FieldRequest, SearchRequestObject};
 use axum::{
@@ -754,7 +754,6 @@ async fn create_collection(
             .ok_or_else(not_found)?;
         if entry.deleted { return Err(bad("collection creation was deleted")); }
         s.finish_collection(entry).await?;
-        let _ = s.catalog.authorized(key, id.clone(), |_| async {}).await?;
         response(
             json!({"collection_id":id,"operation_id":operation_id}),
         )
@@ -1541,7 +1540,6 @@ async fn restore(
         let entry = s.catalog.collections().await?.into_iter().find(|e|e.tenant_id==key && e.collection_id==id && e.generation==receipt.seq).ok_or_else(not_found)?;
         if entry.deleted { return Err(bad("restored collection has since been deleted")); }
         s.finish_collection(entry).await?;
-        let _ = s.catalog.authorized(key.clone(), id.clone(), |_|async {}).await?;
         let stats = s.record(&key, &id).await?.statistics().await?;
         response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds(),"evidence_quarantined":stats.evidence_quarantined}))
     }).await
@@ -2085,29 +2083,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_data_fence_preserves_persistence_errors_and_key_revoke_does_not_cancel_output() {
+    async fn service_data_fence_preserves_persistence_errors() {
         use http_body::Body as _;
+        let (service,path,headers)=setup().await;
+        let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
+        write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&source).unwrap().into()).await.unwrap();
+        let record=service.record("tenant","c").await.unwrap(); let data=record.output_permit().unwrap();
+        // A real deletion invalidates the captured data permit without a public test hook.
+        let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null});
+        write(State(service.clone()),headers,Path("c".into()),serde_json::to_vec(&deletion).unwrap().into()).await.unwrap();
+        assert!(protected_data(Ok(json!({"body":"secret"})),Some(data.clone())).is_err());
+        assert!(protected_data::<Value>(Err(bad("other error")),Some(data.clone())).is_err());
         for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
-            let (service,path,headers)=setup().await;
-            let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
-            write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&source).unwrap().into()).await.unwrap();
-            let record=service.record("tenant","c").await.unwrap(); let data=record.output_permit().unwrap();
-            let _ =service.catalog.authorized("tenant".into(),"c".into(),|_|async{}).await.unwrap();
-            // A real deletion invalidates the captured data permit without a public test hook.
-            let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null});
-            write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&deletion).unwrap().into()).await.unwrap();
-            assert!(protected_data(Ok(json!({"body":"secret"})),Some(data.clone())).is_err());
-            assert!(protected_data::<Value>(Err(bad("other error")),Some(data.clone())).is_err());
             let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
             let value:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),4096).await.unwrap()).unwrap();
             assert_eq!(value["code"],Error::from(error.clone()).1); assert_eq!(value.as_object().unwrap().len(),2);
-            let mut body=protected_data::<Value>(Err(error.into()),Some(data)).unwrap().into_body();
-            service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-output".into()),command:CatalogCommand::RevokeKey{key_id:"a".into()}}).await.unwrap();
-            assert!(deliver(None,||()).is_ok());
+            let mut body=protected_data::<Value>(Err(error.into()),Some(data.clone())).unwrap().into_body();
             assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Ok(_))));
-            drop(body);drop(record);drop(service);std::fs::remove_dir_all(path).unwrap();
         }
+        drop(record);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
 
     #[tokio::test]
@@ -2227,7 +2222,6 @@ mod tests {
     async fn service_owned_response_retains_scope_before_middleware_handoff() {
         use http_body::Body as _;
         let (service,path,_) = setup().await;
-        let _ = service.catalog.authorized("tenant".into(),"c".into(),|_|async{}).await.unwrap();
         let governor = Arc::new(Governor::default());
         let scope = governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap();
         let response = scope.run(async { protected(Ok("pending output")).unwrap() }).await;
@@ -2556,7 +2550,7 @@ fn openapi_document() -> Value {
     doc
 }
 
-/// Generate reference for the actually mounted router, never the legacy routes.
+/// Generate the reference for the mounted Tenant/Record router.
 pub(crate) fn generate_openapi() {
     let text = serde_json::to_string_pretty(&openapi_document()).unwrap();
     println!("{text}");
