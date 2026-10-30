@@ -397,8 +397,6 @@ impl Service {
             .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(1_000_000);
         let max_tail_bytes = usize::try_from(entry.config.max_journal_bytes)
             .unwrap_or(usize::MAX).min(1024 * 1024 * 1024).max(1);
-        let directory_digest = Sha256::digest(entry.directory.as_bytes())
-            .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         // A restored collection owns a distinct namespace and GC domain.
         // Backup source identity is read from its authenticated descriptor.
         let namespace=std::fs::read_to_string(self.root.join("s3-namespace")).map_err(storage)?;
@@ -409,7 +407,7 @@ impl Service {
             return Err(bad("invalid persisted S3 partition identity"));
         }
         Ok(Some(S3CompatibleRecordConfig {
-            authority_path: self.root.join(format!(".authority-{directory_digest}.sqlite")),
+            authority_path: self.root.join("metadata.sqlite"),
             partition_id,
             owner_epoch: 1,
             endpoint,
@@ -1508,13 +1506,7 @@ async fn cleanup_retired_backup(root:&FsPath,id:&str)->Result<(),String> {
         if marker.backup_id!=id {return Err("backup marker mismatch".into());}
         Some(marker)
     }else{None};
-    let mut authorities=Vec::new();
-    for row in std::fs::read_dir(root).map_err(|e|e.to_string())? {
-        let path=row.map_err(|e|e.to_string())?.path();
-        if path.file_name().and_then(|n|n.to_str()).is_some_and(|n|n.starts_with(".authority-") && n.ends_with(".sqlite")) {
-            authorities.push(path);
-        }
-    }
+    let authorities=vec![root.join("metadata.sqlite")];
     for authority in &authorities {
         RecordPartition::retire_s3_backup(authority,id).await.map_err(|e|e.to_string())?;
     }

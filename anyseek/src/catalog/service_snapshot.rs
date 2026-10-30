@@ -49,6 +49,12 @@ fn read_manifest(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
     serde_json::from_slice(&entries[0]).map_err(storage)
 }
 fn object_hash(root: &Path) -> Result<String, CatalogError> {
+    if root.join(sqlite::DATABASE).exists() {
+        let (store, state) = sqlite::Store::open(root)?;
+        drop(store);
+        let bytes = serde_json::to_vec(&state).map_err(storage)?;
+        return Ok(Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect());
+    }
     let (journal, entries) = PartitionJournal::open(root, 256 * 1024 * 1024).map_err(storage)?;
     drop(journal);
     let mut hash = Sha256::new();
@@ -333,7 +339,7 @@ impl Catalog {
                 // Preflight bounded authoritative payload before creating the
                 // archive. Private snapshots carry certified immutable packages;
                 // no live cache is copied. Per-partition closure budgets also apply.
-                let mut total = encode(&Entry::Snapshot(inner.state.clone()))?.len() as u64;
+                let mut total = serde_json::to_vec(&inner.state).map_err(storage)?.len() as u64;
                 for entry in inner.state.collections.values() {
                     if entry.deleted
                         && !entry.initialized

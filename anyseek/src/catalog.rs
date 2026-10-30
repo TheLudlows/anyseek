@@ -1,9 +1,9 @@
-//! Durable identity, collection lifecycle and grant authority. Data directories
+//! SQLite identity, collection lifecycle and grant authority. Data directories
 //! are independent of identities; revoking a key never deletes a collection.
 //! The HTTP service integration is tracked in docs/record-model.md.
 use crate::{
     record::{OperationId, RecordConfig},
-    storage::{journal::CreateError, partition::PartitionJournal},
+    storage::partition::PartitionJournal,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,6 +15,7 @@ use std::{
 use tokio::sync::{Mutex, Semaphore};
 
 mod service_snapshot;
+mod sqlite;
 mod execution;
 #[cfg(test)]
 mod execution_tests;
@@ -190,17 +191,6 @@ struct State {
     service_snapshot: Option<(String, bool)>,
     authority_history: Vec<serde_json::Value>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum Entry {
-    Snapshot(State),
-    Applied(Applied),
-}
-fn encode(entry: &Entry) -> Result<Vec<u8>, CatalogError> {
-    let bytes = serde_json::to_vec(entry).map_err(storage)?;
-    let _: Entry = serde_json::from_slice(&bytes)
-        .map_err(|e| CatalogError::Rejected(format!("unrecoverable catalog entry: {e}")))?;
-    Ok(bytes)
-}
 #[derive(Default)]
 struct OutputState {
     healthy: bool,
@@ -243,8 +233,8 @@ struct Inner {
     state: State,
     healthy: bool,
     output: Arc<RwLock<OutputState>>,
-    // Dropped last: owner lock covers every in-memory authority.
-    journal: PartitionJournal,
+    // SQLite connection owns the stable catalog lock.
+    store: sqlite::Store,
     #[cfg(test)]
     operation_limit: usize,
     #[cfg(test)]
@@ -283,24 +273,15 @@ impl Inner {
         next.epoch_watermark = now.max(next.epoch_watermark);
         next.operations
             .retain(|op| op.request.operation_id.epoch.saturating_add(1) >= next.epoch_watermark);
-        let bytes = encode(&Entry::Snapshot(next.clone()))?;
-        PartitionJournal::validate_initial(bytes.len(), BUDGET)
-            .map_err(|e| CatalogError::Rejected(e.to_string()))?;
+        sqlite::validate_state(&next)?;
         self.fence();
-        match self.journal.checkpoint(&bytes) {
-            Ok(()) => {
-                self.state = next;
-                self.publish_output()
-            }
-            Err(CreateError::NotPublished(e)) => {
-                self.publish_output()?;
-                Err(storage(e))
-            }
-            Err(CreateError::PublicationUnknown(e)) => {
-                Err(CatalogError::OutcomeUnknown(e.to_string()))
-            }
+        match self.store.persist(&self.state, &next) {
+            Ok(()) => { self.state = next; self.publish_output() }
+            Err(error @ (CatalogError::OutcomeUnknown(_) | CatalogError::RecoveryRequired)) => Err(error),
+            Err(error) => { self.publish_output()?; Err(error) }
         }
     }
+
     fn capacity_failure(&mut self, revoke: bool, reason: impl std::fmt::Display) -> CatalogError {
         if revoke {
             self.fence();
@@ -551,17 +532,7 @@ impl Catalog {
     /// Resume an interrupted initial root. Caller must hold a stable service
     /// lifetime lock outside this root, including while the root name is absent.
     pub async fn resume_initialization(path: &Path) -> Result<(), CatalogError> {
-        let path = path.to_owned();
-        crate::resources::spawn(async move {
-                PartitionJournal::resume_initial(&path, BUDGET).map_err(|error| match error {
-                    CreateError::NotPublished(error) => storage(error),
-                    CreateError::PublicationUnknown(error) => {
-                        CatalogError::OutcomeUnknown(error.to_string())
-                    }
-                })
-            })
-            .await
-            .map_err(storage)?
+        sqlite::resume(path)
     }
 
     /// Explicit initialization only. Existing or uncertain roots must be opened,
@@ -569,7 +540,7 @@ impl Catalog {
     pub async fn create(path: &Path) -> Result<Self, CatalogError> {
         Self::create_state(path, State::default()).await
     }
-    /// Atomically initialize the first trusted identity in the root snapshot.
+    /// Atomically initialize the first trusted identity in the SQLite catalog.
     pub async fn create_with_key(
         path: &Path,
         key_id: String,
@@ -595,45 +566,19 @@ impl Catalog {
     async fn create_state(path: &Path, state: State) -> Result<Self, CatalogError> {
         let path = path.to_path_buf();
         crate::resources::spawn(async move {
-                let payload = encode(&Entry::Snapshot(state.clone()))?;
-                let journal =
-                    PartitionJournal::create(&path, BUDGET, &payload).map_err(|e| match e {
-                        CreateError::NotPublished(e) => storage(e),
-                        CreateError::PublicationUnknown(e) => {
-                            CatalogError::OutcomeUnknown(e.to_string())
-                        }
-                    })?;
-                Ok(Self::from_parts(state, journal))
-            })
-            .await
-            .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?
+            let store = sqlite::create(&path, &state)?;
+            Ok(Self::from_parts(state, store))
+        }).await.map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?
     }
-    /// Recover the certified catalog; never substitute an empty authority.
+    /// Open the durable SQLite authority; never substitute an empty catalog.
     pub async fn open(path: &Path) -> Result<Self, CatalogError> {
         let path = path.to_path_buf();
         crate::resources::spawn(async move {
-                let (journal, entries) = PartitionJournal::open(&path, BUDGET).map_err(storage)?;
-                let mut entries = entries.into_iter();
-                let first = entries
-                    .next()
-                    .ok_or_else(|| storage("missing catalog snapshot"))?;
-                let Entry::Snapshot(mut state) = serde_json::from_slice(&first).map_err(storage)?
-                else {
-                    return Err(storage("catalog must begin with snapshot"));
-                };
-                for bytes in entries {
-                    let Entry::Applied(event) = serde_json::from_slice(&bytes).map_err(storage)?
-                    else {
-                        return Err(storage("unexpected catalog snapshot"));
-                    };
-                    apply(&mut state, &event).map_err(storage)?;
-                }
-                Ok(Self::from_parts(state, journal))
-            })
-            .await
-            .map_err(storage)?
+            let (store, state) = sqlite::Store::open(&path)?;
+            Ok(Self::from_parts(state, store))
+        }).await.map_err(storage)?
     }
-    fn from_parts(state: State, journal: PartitionJournal) -> Self {
+    fn from_parts(state: State, store: sqlite::Store) -> Self {
         let output = Arc::new(RwLock::new(OutputState {
             healthy: true,
             failed: false,
@@ -650,7 +595,7 @@ impl Catalog {
                 state,
                 healthy: true,
                 output,
-                journal,
+                store,
                 #[cfg(test)]
                 operation_limit: MAX_OPERATIONS,
                 #[cfg(test)]
@@ -760,25 +705,8 @@ impl Catalog {
                 };
                 let mut next = inner.state.clone();
                 apply(&mut next, &event)?;
-                let snapshot = encode(&Entry::Snapshot(next.clone()))?;
-                if let Err(e) = PartitionJournal::validate_initial(snapshot.len(), BUDGET) {
+                if let Err(e) = sqlite::validate_state(&next) {
                     return Err(inner.capacity_failure(revoke, e));
-                }
-                let bytes = encode(&Entry::Applied(event.clone()))?;
-                if inner.journal.validate_append(bytes.len()).is_err() {
-                    if let Err(e) = inner.compact(now) {
-                        if revoke {
-                            inner.fence();
-                        }
-                        return Err(e);
-                    }
-                    // Compaction may expire ledger rows. Recompute next state
-                    // from the now-published authority rather than reintroduce them.
-                    next = inner.state.clone();
-                    apply(&mut next, &event)?;
-                    if let Err(e) = inner.journal.validate_append(bytes.len()) {
-                        return Err(inner.capacity_failure(revoke, e));
-                    }
                 }
                 // Gate output before persistence: on an uncertain revoke the old
                 // grant must never keep delivering. This short synchronous lock
@@ -791,10 +719,9 @@ impl Catalog {
                         .map_err(|_| CatalogError::RecoveryRequired)?;
                     output.healthy = false;
                 }
-                inner
-                    .journal
-                    .append(&bytes)
-                    .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?;
+                { let Inner { store, state, .. } = &mut *inner;
+                    store.persist(state, &next)?;
+                }
                 #[cfg(test)]
                 if inner.fail_after_durable {
                     return Err(CatalogError::OutcomeUnknown(
@@ -931,7 +858,7 @@ impl Catalog {
             .await
             .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?
     }
-    /// Online snapshot and WAL retirement. Only expired operation receipts
+    /// Online receipt pruning in SQLite. Only expired operation receipts
     /// are removed; identities, tombstones, collection intents and grant revisions
     /// survive. The persisted epoch watermark prevents rollback resurrection.
     pub async fn compact(&self) -> Result<(), CatalogError> {
@@ -1393,7 +1320,7 @@ mod tests {
     async fn catalog_invalid_config_rejected_without_poisoning_recovery() {
         let path = root();
         let mut catalog = setup(&path).await;
-        let wal_path = path.join("catalog/generation-0000000000000000/wal");
+        let wal_path = path.join("catalog/metadata.sqlite");
         drop(catalog); // Compare raw bytes only outside the Windows owner lock.
         let before = std::fs::read(&wal_path).unwrap();
         catalog = Catalog::open(&path.join("catalog")).await.unwrap();
@@ -1545,7 +1472,7 @@ mod tests {
         let before = catalog.operation(&id).await.unwrap();
         catalog.compact().await.unwrap();
         permit.deliver(|| ()).unwrap();
-        assert!(!path.join("catalog/generation-0000000000000000").exists());
+        assert!(path.join("catalog/metadata.sqlite").exists());
         drop(catalog);
         let catalog = Catalog::open(&path.join("catalog")).await.unwrap();
         assert_eq!(catalog.operation(&id).await.unwrap(), before);
@@ -1608,7 +1535,7 @@ mod tests {
         let catalog = Catalog::open(&path.join("catalog")).await.unwrap();
         let stage = std::env::var("ANYSEEK_CATALOG_CHILD_STAGE").unwrap();
         unsafe {
-            std::env::set_var("ANYSEEK_JOURNAL_CRASH", stage);
+            std::env::set_var("ANYSEEK_CATALOG_CRASH", stage);
         }
         let _ = catalog
             .execute(request(
@@ -1620,16 +1547,7 @@ mod tests {
     }
     #[tokio::test]
     async fn catalog_revoke_process_exit_boundaries() {
-        for stage in [
-            "log_written",
-            "log_synced",
-            "first_witness_torn",
-            "first_witness_written",
-            "first_witness_synced",
-            "second_witness_torn",
-            "second_witness_written",
-            "second_witness_synced",
-        ] {
+        for stage in ["before_commit", "after_commit"] {
             let path = root();
             let catalog = setup(&path).await;
             prepare(&catalog).await;
@@ -1663,7 +1581,7 @@ mod tests {
                 recovered.is_none(),
                 "{stage}: receipt and grants disagree"
             );
-            if stage == "second_witness_synced" {
+            if stage == "after_commit" {
                 assert!(!key_active);
             }
             catalog

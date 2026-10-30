@@ -353,6 +353,7 @@ impl S3CompatibleStore {
     pub(crate) async fn create_backup_bundle(
         &self,
         authority: &mut SqliteAuthority,
+        partition: Option<&str>,
         backup_id: &str,
         object_closure: &[ObjectRef],
         created_at_ms: i64,
@@ -361,8 +362,8 @@ impl S3CompatibleStore {
         if backup_id.is_empty() || !backup_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             return Err(BackupError::Invalid("backup ID must contain only ASCII letters, digits, '-' or '_'"));
         }
-        let snapshot_bytes = authority.prepare_backup_snapshot(
-            backup_id, object_closure, created_at_ms, max_snapshot_bytes
+        let snapshot_bytes = authority.prepare_scoped_backup_snapshot(
+            partition, backup_id, object_closure, created_at_ms, max_snapshot_bytes
         ).map_err(BackupError::Metadata)?;
         #[cfg(test)]
         if authority.database_path().with_extension("fail-backup-after-snapshot").exists() {
@@ -424,7 +425,7 @@ impl S3CompatibleStore {
             return Err(BackupError::Invalid("authority has no reachable objects to back up"));
         }
         self.create_backup_bundle(
-            authority, backup_id, &closure, created_at_ms, max_snapshot_bytes
+            authority, None, backup_id, &closure, created_at_ms, max_snapshot_bytes
         ).await
     }
 
@@ -708,7 +709,7 @@ mod tests {
             let first=source.read_head(&id).unwrap().unwrap();
             let closure=source.reachable_objects().unwrap();
             keys.insert(format!("{backup_prefix}authority.json"));keys.insert(format!("{backup_prefix}descriptor.json"));
-            let backup=store.create_backup_bundle(&mut source,&id,&closure,30,1024*1024).await.unwrap();
+            let backup=store.create_backup_bundle(&mut source,None,&id,&closure,30,1024*1024).await.unwrap();
             let body=b"operation two";let digest:[u8;32]=Sha256::digest(body).into();
             keys.insert(format!("{partition_prefix}wal/{:020}-{}.json",2,digest.iter().map(|b|format!("{b:02x}")).collect::<String>()));
             assert!(matches!(object_log::append_and_commit(&store,&mut source,&id,7,"op-2",digest,body.to_vec(),40,1024*1024).await.unwrap(),object_log::AppendCommitOutcome::Published{..}));
@@ -718,7 +719,7 @@ mod tests {
             assert!(matches!(source.publish_commit(&id,current.head_version,6,"stale-owner",[9;32],3,orphan.clone(),None).unwrap(),PublishOutcome::Conflict));
             assert_eq!(source.read_head(&id).unwrap().unwrap(),current);
             let current_closure=source.reachable_objects().unwrap();
-            let retry=store.create_backup_bundle(&mut source,&id,&current_closure,60,1024*1024).await.unwrap();
+            let retry=store.create_backup_bundle(&mut source,None,&id,&current_closure,60,1024*1024).await.unwrap();
             assert_eq!(retry,backup,"backup retry preserves the original metadata cut and descriptor");
             let mut target=SqliteAuthority::open(&target_path,Duration::from_secs(2)).unwrap();
             let snapshot=store.restore_backup_bundle(&mut target,&backup.descriptor_ref,1024*1024,100,16*1024*1024).await.unwrap();
@@ -835,7 +836,7 @@ mod tests {
         let reference = store.put_and_register(&mut source, "p0/log/1", b"committed operation", 10).await.unwrap();
         let result = source.publish_commit("p0", head.head_version, 5, "op-1", [7;32], 1, reference.clone(), None).unwrap();
         assert!(matches!(result, super::super::sqlite_authority::PublishOutcome::Published(_)));
-        let bundle = store.create_backup_bundle(&mut source, "backup-001", &[reference], 20, 1024 * 1024).await.unwrap();
+        let bundle = store.create_backup_bundle(&mut source,None, "backup-001", &[reference], 20, 1024 * 1024).await.unwrap();
 
         let mut target = SqliteAuthority::open(&target_path, Duration::from_secs(1)).unwrap();
         let restored = store.restore_backup_bundle(&mut target, &bundle.descriptor_ref, 1024 * 1024, 10, 1024 * 1024).await.unwrap();

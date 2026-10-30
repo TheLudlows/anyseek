@@ -2,6 +2,8 @@
 
 本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/src/server/README.md)。
 
+本次为 [#98](https://github.com/TheLudlows/anyseek/issues/98) 的 SQLite 持久化阶段；Tenant 模型、Grant 清理、同名重建与 namespace 删除尚未实施，不代表 #98 完成。旧 Catalog 日志及旧 SQLite authority schema 不提供迁移；新 authority schema 为 2。
+
 ## 本地 Segment 与共同视图
 
 `record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订、generation 与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV14/manifest 3，不读取旧格式、迁移或双写。
@@ -16,7 +18,7 @@ Flush 复用未变冻结段、冻结当前 tail；compaction 重建完整等价�
 
 SQLite 是唯一可变协调权威，保存 head/owner epoch、提交和索引水位、不可变引用、有限期幂等协调、对象依赖、pin、退休状态和备份/恢复协调记录。正文、原始向量、索引和 WAL 内容均在对象存储中。本地日志、payload 和索引是可以重建的缓存。
 
-SQLite 使用 WAL 与 `synchronous=FULL`。Record 对象后端增加稳定的本地 owner 文件锁；同一权威不能由两个 Record 实例同时持有。服务根目录的 `s3-namespace` 是持久协调身份，同 collection ID 在独立服务根/恢复目标中不会共享可写对象命名空间；它应与 catalog、SQLite 权威库一起保留，不能当作缓存删除。
+服务使用根目录下的 `metadata.sqlite`，同时保存 Catalog 管理元数据与 S3 Record 协调状态；Catalog 不再维护独立持久化日志。Catalog 更新与管理回执在同一短事务提交，不复制正文、向量或完整 Record State。SQLite 使用 WAL 与 `synchronous=FULL`，不在事务内执行对象上传。Record 对象后端按分区持有稳定的本地 owner 文件锁；同一分区不能由两个 Record 实例同时持有，不同分区可以共享该数据库。集合备份只导出该分区的当前对象闭包和协调记录；恢复绑定按分区隔离，GC 只退休和删除本分区前缀的对象，全库可达性仍保护其他分区及 pin。服务根目录的 `s3-namespace` 是持久协调身份，同 collection ID 在独立服务根/恢复目标中不会共享可写对象命名空间；它应与 catalog、SQLite 权威库一起保留，不能当作缓存删除。
 
 普通写入先登记上传身份，再完成不可变 PUT、读回长度/字节/SHA-256 校验，最后由 SQLite 事务条件发布 head 与回执，再发布本地完整视图。对象缺失或校验失败不会回退为旧缓存成功。
 

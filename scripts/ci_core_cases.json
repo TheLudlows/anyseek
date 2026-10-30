@@ -157,5 +157,11 @@
   "record::remote_checkpoint::tests::unlocked_encoding_applies_due_source_expiry_before_selecting_candidate",
   "record::remote_checkpoint::tests::unlocked_encoding_expired_generation_lease_cannot_publish",
   "record::remote_checkpoint::tests::unlocked_encoding_owner_or_sequence_change_fences_before_persistence",
-  "record::tests::unlocked_encoding_local_ttl_revalidation_and_wal_recovery"
+  "record::tests::unlocked_encoding_local_ttl_revalidation_and_wal_recovery",
+  "catalog::sqlite::tests::sqlite_catalog_reopens_without_a_catalog_journal_and_excludes_second_owner",
+  "catalog::sqlite::tests::sqlite_catalog_rolls_back_rows_and_receipt_together_on_statement_failure",
+  "catalog::sqlite::tests::sqlite_catalog_resumes_committed_private_initialization",
+  "catalog::sqlite::tests::sqlite_catalog_missing_or_corrupt_database_never_becomes_empty_catalog",
+  "catalog::sqlite::tests::sqlite_catalog_transactions_leave_shared_record_authority_tables_intact",
+  "record::remote_checkpoint::tests::shared_sqlite_collection_backup_excludes_other_heads_and_survives_global_gc"
 ]

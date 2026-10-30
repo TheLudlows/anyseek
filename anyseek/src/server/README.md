@@ -2,7 +2,7 @@
 
 `POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/ingest/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/doc` 同步语义保留，独立 Intake 日志已移除。详见[异步写入实施](../../../docs/async-ingestion.md)。
 
-默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -40,7 +40,7 @@ export ANYSEEK_S3_SECRET_ACCESS_KEY='your-secret-key'
 
 只有明确配置的开发 HTTP endpoint 才设置 `ANYSEEK_S3_ALLOW_HTTP=1`。可选 `ANYSEEK_S3_MAX_OBJECT_BYTES` 默认 64 MiB，`ANYSEEK_S3_MAX_TAIL_BLOCKS` 默认 1,000,000；单次 tail 字节预算同时受 collection 日志预算和 1 GiB 上限约束。凭证只在运行时使用。
 
-保留整个服务根中的 catalog、SQLite 权威文件及其 WAL、`s3-namespace`。这些是持久协调状态，不能作为缓存删除或在运行中复制 SQLite 文件作备份。collection 内的本地日志/payload/索引可从权威检查点及 tail 重建。C2 另在每个权威库旁的 `*.object-cache` 保存校验对象块（256 MiB / 4096 块，损坏或丢失回源）；旁边的 `*.object-cache.lock` 仅用于本机缓存操作协调，运行中清空缓存目录时保留该锁文件。缓存不包含凭据，也不决定当前 head 或权限；备份应使用服务 API，以同时固定元数据和对象闭包。
+Catalog 与 S3 协调元数据共用服务根目录下的 `metadata.sqlite`；保留该数据库、SQLite WAL、owner 锁文件及当前的 `s3-namespace`。这些是持久协调状态，不能作为缓存删除或在运行中复制 SQLite 文件作备份。collection 内的本地日志/payload/索引可从权威检查点及 tail 重建。C2 另在每个权威库旁的 `*.object-cache` 保存校验对象块（256 MiB / 4096 块，损坏或丢失回源）；旁边的 `*.object-cache.lock` 仅用于本机缓存操作协调，运行中清空缓存目录时保留该锁文件。缓存不包含凭据，也不决定当前 head 或权限；备份应使用服务 API，以同时固定元数据和对象闭包。
 
 PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到独立对象命名空间，不恢复原 grants，受保护证据保持隔离。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到新的服务 namespace。
 

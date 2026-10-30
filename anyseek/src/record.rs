@@ -446,7 +446,7 @@ impl RemotePersistence {
             return Err(RecordError::Rejected("invalid S3 persistence configuration".into()));
         }
         let owner=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
-            .open(config.authority_path.with_extension("sqlite.owner")).map_err(storage)?;
+            .open(config.authority_path.with_extension(format!("sqlite.owner-{}", Self::safe_backup_id(&config.partition_id)))).map_err(storage)?;
         owner.try_lock().map_err(storage)?;
         let store = crate::storage::s3_compatible::S3CompatibleStore::connect(
             &config.endpoint, &config.bucket, &config.region, &config.access_key_id,
@@ -528,10 +528,10 @@ impl RemotePersistence {
         let mut authority = self.authority.lock().await;
         let closure=match authority.saved_backup_closure(backup_id).map_err(|e|e.to_string())? {
             Some(closure)=>closure,
-            None=>authority.reachable_objects().map_err(|e|e.to_string())?,
+            None=>authority.partition_objects(&self.partition_id).map_err(|e|e.to_string())?,
         };
         let bundle = self.store.create_backup_bundle(
-            &mut authority, backup_id, &closure, created_at_ms, max_snapshot_bytes,
+            &mut authority, Some(&self.partition_id), backup_id, &closure, created_at_ms, max_snapshot_bytes,
         ).await.map_err(|error| error.to_string())?;
         let bytes=self.store.get_verified(&bundle.descriptor.metadata_snapshot).await.map_err(|e|e.to_string())?;
         let snapshot:crate::storage::sqlite_authority::AuthorityBackupSnapshot=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
@@ -1262,9 +1262,12 @@ impl RecordPartition {
         let mut authority = crate::storage::sqlite_authority::SqliteAuthority::open(
             authority_path, std::time::Duration::from_secs(5),
         ).map_err(storage)?;
-        let Some(partition_id)=authority.single_partition_id().map_err(storage)? else{return Ok(0)};
-        let id=RemotePersistence::safe_backup_id(&format!("{partition_id}:{backup_id}"));
-        authority.release_backup_pins(&id).map_err(storage)
+        let mut released=0;
+        for partition_id in authority.partition_ids().map_err(storage)? {
+            let id=RemotePersistence::safe_backup_id(&format!("{partition_id}:{backup_id}"));
+            released+=authority.release_backup_pins(&id).map_err(storage)?;
+        }
+        Ok(released)
     }
 
     /// Delete the backup descriptor and metadata snapshot after all authority copies

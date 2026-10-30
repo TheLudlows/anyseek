@@ -10,7 +10,7 @@ use std::{path::{Path, PathBuf}, time::Duration};
 mod index_build;
 pub(crate) use index_build::IndexBuild;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Immutable object identity; payload bytes are never stored in SQLite.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,7 +134,7 @@ impl SqliteAuthority {
              CREATE TABLE IF NOT EXISTS authority_schema (
                  singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL
              );
-             INSERT OR IGNORE INTO authority_schema(singleton,version) VALUES(1,1);
+             INSERT OR IGNORE INTO authority_schema(singleton,version) VALUES(1,2);
              CREATE TABLE IF NOT EXISTS partition_heads (
                  partition_id TEXT PRIMARY KEY,
                  head_version INTEGER NOT NULL CHECK(head_version>=0),
@@ -188,7 +188,7 @@ impl SqliteAuthority {
                  backup_id TEXT PRIMARY KEY, snapshot BLOB NOT NULL
              );
              CREATE TABLE IF NOT EXISTS restore_receipts (
-                 singleton INTEGER PRIMARY KEY CHECK(singleton=1), snapshot_sha256 BLOB NOT NULL
+                 partition_id TEXT PRIMARY KEY, snapshot_sha256 BLOB NOT NULL
              );
              CREATE TABLE IF NOT EXISTS retired_objects (
                  object_key TEXT PRIMARY KEY,
@@ -227,11 +227,9 @@ impl SqliteAuthority {
         read_head(&self.connection, partition_id)
     }
 
-    pub(crate) fn single_partition_id(&self)->rusqlite::Result<Option<String>> {
-        let mut statement=self.connection.prepare("SELECT partition_id FROM partition_heads ORDER BY partition_id LIMIT 2")?;
-        let ids=statement.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        if ids.len()>1 {return Err(rusqlite::Error::InvalidQuery);}
-        Ok(ids.into_iter().next())
+    pub(crate) fn partition_ids(&self)->rusqlite::Result<Vec<String>> {
+        let mut statement=self.connection.prepare("SELECT partition_id FROM partition_heads ORDER BY partition_id")?;
+        statement.query_map([],|r|r.get::<_,String>(0))?.collect()
     }
 
     /// Publish an immutable initial Record checkpoint/configuration before any
@@ -269,7 +267,14 @@ impl SqliteAuthority {
     /// Return every active object reachable from the current committed heads,
     /// following immutable manifest/WAL dependency edges transitively.
     pub(crate) fn reachable_objects(&self) -> rusqlite::Result<Vec<ObjectRef>> {
-        let keys = reachable_keys(&self.connection)?;
+        self.objects_for_keys(reachable_keys(&self.connection)?)
+    }
+
+    pub(crate) fn partition_objects(&self, partition: &str) -> rusqlite::Result<Vec<ObjectRef>> {
+        self.objects_for_keys(partition_keys(&self.connection, partition)?)
+    }
+
+    fn objects_for_keys(&self, keys: std::collections::BTreeSet<String>) -> rusqlite::Result<Vec<ObjectRef>> {
         let mut objects = Vec::with_capacity(keys.len());
         for key in keys {
             let row: Option<(Vec<u8>,i64,i64)> = self.connection.query_row(
@@ -542,12 +547,12 @@ impl SqliteAuthority {
         Ok(Some(head))
     }
 
-    pub(crate) fn bind_restore(&mut self,digest:[u8;32])->rusqlite::Result<()> {
+    pub(crate) fn bind_restore(&mut self,partition_id:&str,digest:[u8;32])->rusqlite::Result<()> {
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let old:Option<Vec<u8>>=tx.query_row("SELECT snapshot_sha256 FROM restore_receipts WHERE singleton=1",[],|r|r.get(0)).optional()?;
+        let old:Option<Vec<u8>>=tx.query_row("SELECT snapshot_sha256 FROM restore_receipts WHERE partition_id=?1",[partition_id],|r|r.get(0)).optional()?;
         match old {
             Some(old) if old.as_slice()!=digest=>return Err(rusqlite::Error::InvalidQuery),
-            None=>{tx.execute("INSERT INTO restore_receipts VALUES(1,?1)",[digest.as_slice()])?;},
+            None=>{tx.execute("INSERT INTO restore_receipts VALUES(?1,?2)",params![partition_id,digest.as_slice()])?;},
             _=>{},
         }
         tx.commit()
@@ -559,7 +564,7 @@ impl SqliteAuthority {
     )->rusqlite::Result<Option<PartitionHead>> {
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let h=read_head(&tx,partition_id)?.ok_or(rusqlite::Error::InvalidQuery)?;
-        let bound:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM restore_receipts)",[],|r|r.get(0))?;
+        let bound:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM restore_receipts WHERE partition_id=?1)",[partition_id],|r|r.get(0))?;
         if !bound || h.head_version!=expected_head_version || h.owner_epoch!=owner_epoch
             || h.committed_seq!=0 || h.manifest.is_some() || h.bootstrap.is_none() {return Ok(None);}
         ensure_durable_object(&tx,&manifest)?;
@@ -621,12 +626,15 @@ impl SqliteAuthority {
     /// closure in the same SQLite transaction. The caller must enumerate and validate
     /// all objects reachable through the active manifest and WAL chain before calling.
     /// Snapshot bytes contain metadata only, never record/vector/index payload bytes.
+    #[cfg(test)]
     pub(crate) fn prepare_backup_snapshot(
-        &mut self,
-        backup_id: &str,
-        object_closure: &[ObjectRef],
-        created_at_ms: i64,
-        max_snapshot_bytes: usize,
+        &mut self, backup_id: &str, object_closure: &[ObjectRef], created_at_ms: i64, max_snapshot_bytes: usize,
+    ) -> rusqlite::Result<Vec<u8>> {
+        self.prepare_scoped_backup_snapshot(None, backup_id, object_closure, created_at_ms, max_snapshot_bytes)
+    }
+
+    pub(crate) fn prepare_scoped_backup_snapshot(
+        &mut self, partition: Option<&str>, backup_id: &str, object_closure: &[ObjectRef], created_at_ms: i64, max_snapshot_bytes: usize,
     ) -> rusqlite::Result<Vec<u8>> {
         if backup_id.is_empty() || object_closure.is_empty() {
             return Err(rusqlite::Error::InvalidParameterName(
@@ -639,6 +647,10 @@ impl SqliteAuthority {
         ).optional()?;
         if let Some(bytes) = saved {
             if bytes.len()>max_snapshot_bytes { return Err(rusqlite::Error::InvalidQuery); }
+            let snapshot: AuthorityBackupSnapshot = serde_json::from_slice(&bytes).map_err(|_|rusqlite::Error::InvalidQuery)?;
+            if partition.is_some_and(|id| snapshot.heads.len()!=1 || snapshot.heads[0].partition_id!=id) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             return Ok(bytes);
         }
         let prior_backup: bool = tx.query_row(
@@ -658,15 +670,15 @@ impl SqliteAuthority {
         for object in &closure {
             ensure_durable_object(&tx, object)?;
         }
-        let reachable = reachable_keys(&tx)?;
+        let reachable = match partition { Some(id)=>partition_keys(&tx,id)?, None=>reachable_keys(&tx)? };
         if reachable.iter().any(|key| !closure.iter().any(|object| &object.key == key)) {
             return Err(rusqlite::Error::InvalidParameterName(
                 "backup closure omits a transitively reachable committed object".into()
             ));
         }
         let head_ids: Vec<String> = {
-            let mut statement = tx.prepare("SELECT partition_id FROM partition_heads ORDER BY partition_id")?;
-            let rows = statement.query_map([], |row| row.get(0))?;
+            let mut statement = tx.prepare("SELECT partition_id FROM partition_heads WHERE ?1 IS NULL OR partition_id=?1 ORDER BY partition_id")?;
+            let rows = statement.query_map([partition], |row| row.get(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut heads = Vec::with_capacity(head_ids.len());
@@ -685,17 +697,17 @@ impl SqliteAuthority {
             let pin_id = backup_pin_id(backup_id, &object.key);
             tx.execute(
                 "INSERT INTO object_pins(pin_id,partition_id,object_key,pin_kind,expires_at_ms,backup_id)
-                 VALUES(?1,'*',?2,'backup',NULL,?3)",
-                params![pin_id,object.key,backup_id],
+                 VALUES(?1,?4,?2,'backup',NULL,?3)",
+                params![pin_id,object.key,backup_id,partition.unwrap_or("*")],
             )?;
         }
 
         let receipts = {
             let mut statement = tx.prepare(
                 "SELECT partition_id,operation_id,request_sha256,committed_seq,result_json
-                 FROM operation_receipts ORDER BY partition_id,operation_id"
+                 FROM operation_receipts WHERE ?1 IS NULL OR partition_id=?1 ORDER BY partition_id,operation_id"
             )?;
-            let rows = statement.query_map([], |row| {
+            let rows = statement.query_map([partition], |row| {
                 let digest: Vec<u8> = row.get(2)?;
                 let request_sha256: [u8;32] = digest.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
                 let committed_seq: i64 = row.get(3)?;
@@ -765,6 +777,11 @@ impl SqliteAuthority {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let keys: std::collections::BTreeSet<_> = closure.iter().map(|o| o.key.as_str()).collect();
+        let objects = if partition.is_some() { objects.into_iter().filter(|o|keys.contains(o.reference.key.as_str())).collect() } else { objects };
+        let pins = if partition.is_some() { pins.into_iter().filter(|p| keys.contains(p.object_key.as_str()) && (p.partition_id==partition.unwrap() || p.backup_id.as_deref()==Some(backup_id))).collect() } else { pins };
+        let edges = if partition.is_some() { edges.into_iter().filter(|e|keys.contains(e.parent_key.as_str()) && keys.contains(e.child_key.as_str())).collect() } else { edges };
+        let retired = if partition.is_some() { retired.into_iter().filter(|o|keys.contains(o.object_key.as_str())).collect() } else { retired };
         let snapshot = AuthorityBackupSnapshot {
             format_version: 1,
             backup_id: backup_id.to_owned(),
@@ -812,7 +829,7 @@ impl SqliteAuthority {
         let digest: [u8;32] = Sha256::digest(bytes).into();
         if nonempty {
             let prior: Option<Vec<u8>> = tx.query_row(
-                "SELECT snapshot_sha256 FROM restore_receipts WHERE singleton=1", [], |r|r.get(0)
+                "SELECT snapshot_sha256 FROM restore_receipts WHERE partition_id='*'", [], |r|r.get(0)
             ).optional()?;
             if prior.as_deref()==Some(digest.as_slice()) {
                 // Retry completes post-import root registration, never rewinds a head.
@@ -899,7 +916,7 @@ impl SqliteAuthority {
         if required.iter().any(|key|!closure.iter().any(|r|&r.key==key)) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        tx.execute("INSERT INTO restore_receipts VALUES(1,?1)",[digest.as_slice()])?;
+        tx.execute("INSERT INTO restore_receipts VALUES('*',?1)",[digest.as_slice()])?;
         tx.commit()?;
         Ok(snapshot)
     }
@@ -1114,6 +1131,22 @@ fn reachable_keys(connection: &Connection) -> rusqlite::Result<std::collections:
     while let Some(key)=queue.pop() {
         for child in children.query_map([key],|r|r.get::<_,String>(0))? {
             let child=child?;if result.insert(child.clone()) {queue.push(child);}
+        }
+    }
+    Ok(result)
+}
+
+fn partition_keys(connection: &Connection, partition: &str) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    let head=read_head(connection,partition)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let mut result=std::collections::BTreeSet::new();
+    for object in [&head.wal_tip,&head.manifest,&head.bootstrap,&head.log_anchor].into_iter().flatten() {
+        result.insert(object.key.clone());
+    }
+    let mut queue=result.iter().cloned().collect::<Vec<_>>();
+    let mut children=connection.prepare("SELECT child_key FROM object_edges WHERE parent_key=?1")?;
+    while let Some(key)=queue.pop() {
+        for child in children.query_map([key], |r|r.get::<_,String>(0))? {
+            let child=child?; if result.insert(child.clone()) {queue.push(child);}
         }
     }
     Ok(result)
