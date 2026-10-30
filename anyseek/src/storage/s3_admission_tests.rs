@@ -74,6 +74,8 @@ async fn http_put_success_then_readback_failure_is_not_admission_refusal() {
                 }
                 Err(error) => panic!("fixture accept: {error}"),
             };
+            // Windows inherits nonblocking mode from the listener.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut bytes = Vec::new();
             let end = loop {
