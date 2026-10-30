@@ -71,6 +71,14 @@ def exercise(call, restart, directory, faults, base, master):
         assert right.result()['results'][0]['receipt']['record_id'] == 'cross-b'
         assert conflict_future.result()['results'][0]['code'] == 'rejected'
     assert [int(line.split()[1]) for line in trace.read_text().splitlines()] == [2], trace.read_text()
+    # Same two new commands submitted serially require two physical publications.
+    # The queue gate above creates deterministic backlog, not a latency benchmark.
+    trace.unlink()
+    restart({'ANYSEEK_RECORD_BATCH_TRACE': str(trace)})
+    for identity in ['serial-a', 'serial-b']:
+        assert client.ingest('committed', [write(identity)])['results'][0]['code'] == 'committed'
+    assert [int(line.split()[1]) for line in trace.read_text().splitlines()] == [1, 1], trace.read_text()
+    print('PASS publication comparison: two queued commands = 1 WAL publication; two serial commands = 2', flush=True)
     # Failure in another request must not downgrade a known replay's HTTP result.
     pause_queue.write_text('pause'); pause_queue.with_suffix('.queued').unlink()
     unknown, tail = write('cross-unknown'), write('cross-tail')

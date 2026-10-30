@@ -305,7 +305,9 @@ impl RecordPartition {
                 } else {
                     inner.index.drain_indexes().await?;
                 }
-                let prepared = inner.prepare_batch(requests).await;
+                drop(inner);
+                let prepared = partition.prepare_batch(requests).await;
+                inner = partition.inner.lock().await;
                 if let Ok(prepared) = &prepared {
                     scope.replayed = prepared
                         .result
@@ -447,14 +449,23 @@ impl Inner {
             output.fenced = true;
         }
     }
+}
 
+impl RecordPartition {
     async fn prepare_batch(
-        &mut self,
+        &self,
         requests: Vec<RecordWrite>,
     ) -> Result<PreparedBatch, RecordError> {
-        let base_state = self.state.try_clone()?;
-        let mut shadow = self.state.try_clone()?;
-        let mut snapshot = self.snapshot_bytes;
+        // The caller retains writer ownership throughout capture, planning and commit.
+        let inner = self.inner.lock().await;
+        let config = inner.config.clone();
+        let evaluation_time_ms = inner.evaluation_time_ms;
+        #[cfg(test)]
+        let root = inner.journal.root().to_path_buf();
+        let base_seq = inner.state.seq;
+        let base_state = inner.state.try_clone()?;
+        let mut shadow = inner.state.try_clone()?;
+        let mut snapshot = inner.snapshot_bytes;
         let mut plans = Vec::new();
         let mut result = BatchResult {
             results: Vec::new(),
@@ -463,25 +474,34 @@ impl Inner {
         let mut growth_total = 0u64;
         let mut updates_total = 0usize;
         let mut journal_bytes = 0usize;
-        let mut container_bound = self.state.container_bytes(snapshot)?;
+        let mut container_bound = inner.state.container_bytes(snapshot)?;
+        drop(inner);
         for request in requests {
             let plan = async {
+                let mut inner = self.inner.lock().await;
+                if !inner.healthy {
+                    return Err(RecordError::RecoveryRequired);
+                }
                 if !shadow.operation_lookup.contains_key(&request.operation_id) {
-                    if self.maintenance_requested.is_some() {
+                    if inner.maintenance_requested.is_some() {
                         return Err(RecordError::Busy);
                     }
                     if maintenance::has_expired_operations(&shadow, current_epoch())? {
-                        return Err(self.request_checkpoint("expired_operation_receipts"));
+                        return Err(inner.request_checkpoint("expired_operation_receipts"));
                     }
                 }
+                drop(inner);
+                #[cfg(test)]
+                pause_encoding(&root).await;
                 let plan = mutation::prepare_at(
                     &shadow,
-                    &self.config,
+                    &config,
                     snapshot,
                     request,
                     current_epoch(),
-                    self.evaluation_time_ms,
+                    evaluation_time_ms,
                 )?;
+                let mut inner = self.inner.lock().await;
                 let mutation::PreparedWrite::Append {
                     applied,
                     bytes,
@@ -494,9 +514,9 @@ impl Inner {
                     return Ok(plan);
                 };
                 let (growth, updates) =
-                    build_budget::write_estimate(&shadow, &self.config, applied)?;
+                    build_budget::write_estimate(&shadow, &inner.config, applied)?;
                 if growth > 0 {
-                    let fresh = (self.config.schema.len() as u64)
+                    let fresh = (inner.config.schema.len() as u64)
                         .checked_mul(65536 * 32)
                         .and_then(|n| n.checked_add(growth))
                         .ok_or_else(|| storage("batch admission overflow"))?;
@@ -514,11 +534,11 @@ impl Inner {
                 let native = updates_total
                     .checked_add(updates)
                     .ok_or_else(|| storage("batch native bound overflow"))?;
-                if !self.index.can_admit(total, native).await {
+                if !inner.index.can_admit(total, native).await {
                     if plans.is_empty() {
-                        self.maintain_index_tail().await?;
+                        inner.maintain_index_tail().await?;
                     }
-                    if !self.index.can_admit(total, native).await {
+                    if !inner.index.can_admit(total, native).await {
                         return Err(RecordError::Busy);
                     }
                 }
@@ -527,7 +547,7 @@ impl Inner {
                     .checked_add(bytes.len())
                     .and_then(|n| n.checked_add(24))
                     .ok_or_else(|| storage("batch journal bound overflow"))?;
-                if let Err(error) = self
+                if let Err(error) = inner
                     .ensure_journal_room(physical - 24, *reserve_bytes)
                     .await
                 {
@@ -539,7 +559,7 @@ impl Inner {
                     });
                 }
                 #[cfg(feature = "s3-object-store")]
-                if let Some(remote) = self.remote.as_ref() {
+                if let Some(remote) = inner.remote.as_ref() {
                     let mut entries: Vec<_> = plans
                         .iter()
                         .filter_map(|plan| match plan {
@@ -565,7 +585,7 @@ impl Inner {
                     ));
                     match remote.batch_tail_needs_checkpoint(&entries).await {
                         Ok(false) => {}
-                        Ok(true) => return Err(self.request_checkpoint("remote_tail_room")),
+                        Ok(true) => return Err(inner.request_checkpoint("remote_tail_room")),
                         Err(error) => {
                             return Err(if plans.is_empty() || !definite(&error) {
                                 error
@@ -608,22 +628,23 @@ impl Inner {
                 }
             }
         }
+        let mut inner = self.inner.lock().await;
         if plans.is_empty() {
             return Ok(PreparedBatch {
                 plans,
                 publication: Vec::new(),
                 result,
-                base_seq: self.state.seq,
+                base_seq,
                 base_state,
                 expires_at: None,
                 hides_evidence: false,
             });
         }
         // Admit live container growth before persistence. Values are separately owned.
-        self.state.admit_containers(container_bound)?;
+        inner.state.admit_containers(container_bound)?;
         // Retain all ordinary publication values before the first durable byte.
         let mut publication = Vec::new();
-        let mut prior = self.state.try_clone()?;
+        let mut prior = inner.state.try_clone()?;
         let mut hides_evidence = false;
         for plan in &mut plans {
             if let mutation::PreparedWrite::Append {
@@ -643,7 +664,7 @@ impl Inner {
                     .get(&applied.request.record_id)
                     .is_some_and(|r| r.system.is_some())
                     || (applied.request.vector_patch.is_none()
-                        && self.graph_cache.references(&applied.request.record_id));
+                        && inner.graph_cache.references(&applied.request.record_id));
                 let prepared = if let Some(candidate) = candidate {
                     candidate.admit_containers(container_bound)?;
                     prior = candidate.try_clone()?;
@@ -680,13 +701,15 @@ impl Inner {
             plans,
             publication,
             result,
-            base_seq: self.state.seq,
+            base_seq,
             base_state,
             expires_at,
             hides_evidence,
         })
     }
+}
 
+impl Inner {
     async fn commit_batch(
         &mut self,
         prepared: PreparedBatch,
@@ -818,6 +841,21 @@ impl Inner {
             std::process::exit(74);
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+async fn pause_encoding(root: &std::path::Path) {
+    let pause = root.join(".test-write-encode-pause");
+    if pause.exists() {
+        std::fs::write(root.join(".test-write-encode-started"), b"started").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while pause.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("encoding test gate released");
     }
 }
 

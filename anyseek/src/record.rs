@@ -1919,6 +1919,28 @@ mod tests {
         }).await.unwrap();
     }
     #[tokio::test]
+    async fn unlocked_encoding_local_ttl_revalidation_and_wal_recovery() {
+        let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
+        let p=RecordPartition::create(&root,config()).await.unwrap();let (clock,now)=test_clock(&p).await;
+        let seed=write("seed","seed","alpha",ExpectedVersion::Absent);let receipt=p.write(seed.clone()).await.unwrap();
+        let mut request=write("expires-encoding","r","beta",ExpectedVersion::Absent);
+        request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
+        std::fs::write(root.join(".test-write-encode-pause"),b"pause").unwrap();
+        let owner=p.clone();let command=request.clone();let task=tokio::spawn(async move {owner.write(command).await});
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !root.join(".test-write-encode-started").exists(){tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
+        }).await.unwrap();
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1),p.operation(&seed.operation_id)).await.unwrap().unwrap(),Some(receipt.clone()));
+        assert_eq!(p.committed_progress().await.committed_seq,Some(1));
+        clock.set(now+101);
+        std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
+        assert!(p.operation(&request.operation_id).await.unwrap().is_none());drop(p);
+        let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(seed).await.unwrap(),receipt);
+        assert!(p.operation(&request.operation_id).await.unwrap().is_none());
+    }
+    #[tokio::test]
     async fn committed_batch_output_barrier_uses_preceding_source_state() {
         let temporary=tempfile::tempdir().unwrap();
         let p=RecordPartition::create(&temporary.path().join("records"),config()).await.unwrap();

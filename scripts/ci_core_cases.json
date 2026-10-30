@@ -151,5 +151,11 @@
   "record::committed::tests::committed_ingest_unknown_preserves_scope_and_recovers_original_ids",
   "record::remote_checkpoint::tests::remote_committed_ingest_continues_rejections_and_cold_replays",
   "record::committed::tests::committed_queue_bounds_include_inflight_and_cancelled_requests",
-  "record::tests::committed_batch_output_barrier_uses_preceding_source_state"
+  "record::tests::committed_batch_output_barrier_uses_preceding_source_state",
+  "record::remote_checkpoint::tests::unlocked_encoding_preserves_reads_writer_order_checkpoint_and_cancellation",
+  "record::remote_checkpoint::tests::unlocked_encoding_discards_candidate_after_ttl_passes",
+  "record::remote_checkpoint::tests::unlocked_encoding_applies_due_source_expiry_before_selecting_candidate",
+  "record::remote_checkpoint::tests::unlocked_encoding_expired_generation_lease_cannot_publish",
+  "record::remote_checkpoint::tests::unlocked_encoding_owner_or_sequence_change_fences_before_persistence",
+  "record::tests::unlocked_encoding_local_ttl_revalidation_and_wal_recovery"
 ]
