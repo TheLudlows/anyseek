@@ -145,7 +145,7 @@ async function connectKey(key) {
     $('#indexList').empty();
     setSetupBusy(true);
     try {
-        if (!key) throw new Error('Paste the Master API key from the server logs, or another existing API key.');
+        if (!key) throw new Error('Paste a Tenant API key issued by the service administrator.');
         const indexes = await setupApi('GET', 'api/v1/apikey', key);
         if (request !== setupRequest) return;
         API_KEY = key;
@@ -237,14 +237,14 @@ $(function () {
                     sessionStorage.setItem(slot, JSON.stringify(pending));
                 }
                 $('#backupService,#restoreService').prop('disabled', true);
-                const result = await setupApi('POST', action === 'backup' ? 'api/v1/service-backups' : 'api/v1/service-restores', API_KEY, pending);
+                const result = await setupApi('POST', action === 'backup' ? 'api/v1/service-backups' : 'api/v1/service-restores', $('#serviceMasterKey').val().trim(), pending);
                 sessionStorage.removeItem(slot);
                 if (action === 'backup') {
                     sessionValue('seekpower.serviceBackupId', result.backup_id);
                     $('#serviceBackupId').val(result.backup_id);
                     $('#serviceRecoveryStatus').text('Service backup created: ' + result.backup_id);
                 } else {
-                    $('#serviceRecoveryStatus').text('Restored to new stopped root: ' + result.target_root + '. Current master only; historical keys remain disabled. Source/evidence content remains quarantined until deletion-history reconciliation is available.');
+                    $('#serviceRecoveryStatus').text('Restored to new stopped root: ' + result.target_root + '. Issue new Tenant keys with the target service master; historical keys remain disabled. Source/evidence content remains quarantined until deletion-history reconciliation is available.');
                 }
             } catch (error) {
                 $('#serviceRecoveryStatus').text((error.message || 'Recovery request failed.') + ' Retry preserves the original request; no running service is replaced.');
@@ -264,8 +264,8 @@ $(function () {
         const request = ++setupRequest;
         setSetupBusy(true);
         try {
-            const name = $('#newIndexName').val().trim();
-            if (!name) throw new Error('Enter an index name.');
+            const name = $('#newIndexName').val();
+            if (!/^[a-z][a-z0-9_-]{0,62}$/.test(name)) throw new Error('Name must match ^[a-z][a-z0-9_-]{0,62}$.');
             const schema = JSON.parse($('#indexSchema').val());
             if (!Array.isArray(schema) || !schema.length) throw new Error('Schema must be a nonempty JSON array.');
             const fields = new Set();
@@ -285,7 +285,7 @@ $(function () {
             }
             let pending = JSON.parse(sessionValue('seekpower.pendingCreate') || 'null');
             if (!pending) {
-                const body = {operation_id: newOperationId(), collection_id: newIdentity(), config};
+                const body = {operation_id: newOperationId(), collection_id: name, config};
                 if (mode !== 'Lexical') {
                     body.embedding_space_id = $('#embeddingSpaceId').val().trim();
                     if (!body.embedding_space_id) throw new Error('Enter the external embedding space/model identity.');

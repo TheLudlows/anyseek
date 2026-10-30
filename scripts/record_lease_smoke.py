@@ -17,7 +17,8 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
         endpoint='/api/v1/index/'+cid
         oid=operation()
         call('POST','/api/v1/index',{'operation_id':oid,'collection_id':cid,'config':config})
-        directories[endpoint]=call('GET',f"/api/v1/catalog/operation/{oid['epoch']}/{oid['nonce']}")['receipt']['directory']
+        seq=call('GET',f"/api/v1/catalog/operation/{oid['epoch']}/{oid['nonce']}")['receipt']['seq']
+        directories[endpoint]=f'collections/test/{cid}/{seq:016x}'
         call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','routing_key':'r','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
         return endpoint
     def stage(g='g',expected='Absent'):

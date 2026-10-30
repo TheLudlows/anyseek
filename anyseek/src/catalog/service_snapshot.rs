@@ -13,7 +13,7 @@ pub struct ServiceSnapshot {
     pub identity: String,
     /// Protocol version, not an upgrade compatibility promise.
     pub format: u32,
-    /// Canonical authoritative journal payload hashes keyed by generated relative path.
+    /// Canonical authoritative journal payload hashes keyed by derived relative path.
     pub objects: BTreeMap<String, String>,
     /// Independent live collection backup sequences (archives excluded).
     pub collection_backups: BTreeMap<String, u64>,
@@ -49,6 +49,12 @@ fn read_manifest(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
     serde_json::from_slice(&entries[0]).map_err(storage)
 }
 fn object_hash(root: &Path) -> Result<String, CatalogError> {
+    if root.join(sqlite::DATABASE).exists() {
+        let (store, state) = sqlite::Store::open(root)?;
+        drop(store);
+        let bytes = serde_json::to_vec(&state).map_err(storage)?;
+        return Ok(Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect());
+    }
     let (journal, entries) = PartitionJournal::open(root, 256 * 1024 * 1024).map_err(storage)?;
     drop(journal);
     let mut hash = Sha256::new();
@@ -59,11 +65,10 @@ fn object_hash(root: &Path) -> Result<String, CatalogError> {
     Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 fn safe_directory(name: &str) -> bool {
-    name.strip_prefix("collection-").is_some_and(|v| {
-        v.len() == 16
-            && v.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
+    let parts = name.split('/').collect::<Vec<_>>();
+    parts.len() == 4 && parts[0] == "collections"
+        && super::validate_name(parts[1]).is_ok() && super::validate_name(parts[2]).is_ok()
+        && parts[3].len() == 16 && parts[3].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn safe_backup(name: &str) -> bool {
     name.len() == 64
@@ -120,24 +125,24 @@ async fn validate(root: &Path) -> Result<ServiceSnapshot, CatalogError> {
         names.insert("authority-at-backup".into());
     }
     for entry in entries {
-        if manifest.absent_collections.contains(&entry.collection_id) {
-            if !entry.deleted || entry.initialized || root.join(&entry.directory).exists() {
+        if manifest.absent_collections.contains(&entry.scope()) {
+            if !entry.deleted || entry.initialized || root.join(&entry.directory()).exists() {
                 return Err(storage("invalid absent collection proof"));
             }
             continue;
         }
-        if !safe_directory(&entry.directory) {
+        if !safe_directory(&entry.directory()) {
             return Err(storage("invalid collection directory"));
         }
-        names.insert(entry.directory.clone());
+        names.insert(entry.directory());
         let partition =
-            RecordPartition::open(&root.join(&entry.directory), entry.config.max_journal_bytes)
+            RecordPartition::open(&root.join(&entry.directory()), entry.config.max_journal_bytes)
                 .await
                 .map_err(storage)?;
         if partition.recovery_identity().await.map_err(storage)?.seq
             != *manifest
                 .record_seqs
-                .get(&entry.collection_id)
+                .get(&entry.scope())
                 .ok_or_else(|| storage("missing partition"))?
         {
             return Err(storage("record cut mismatch"));
@@ -300,7 +305,7 @@ impl Catalog {
     }
 
     /// Complete-service snapshot with privately materialized journal paths keyed
-    /// by generated collection/backup directory. Open one archive at a time so
+    /// by derived collection/backup directory. Open one archive at a time so
     /// retained backups do not all consume live index reservations. The server
     /// holds the control barrier, private paths and backup retention pins.
     pub async fn backup_service_with_archives(
@@ -333,18 +338,18 @@ impl Catalog {
                 // Preflight bounded authoritative payload before creating the
                 // archive. Private snapshots carry certified immutable packages;
                 // no live cache is copied. Per-partition closure budgets also apply.
-                let mut total = encode(&Entry::Snapshot(inner.state.clone()))?.len() as u64;
+                let mut total = serde_json::to_vec(&inner.state).map_err(storage)?.len() as u64;
                 for entry in inner.state.collections.values() {
                     if entry.deleted
                         && !entry.initialized
-                        && !source_root.join(&entry.directory).exists()
+                        && !source_root.join(&entry.directory()).exists()
                     {
                         continue;
                     }
-                    let p = match records.get(&entry.collection_id) {
+                    let p = match records.get(&entry.scope()) {
                         Some(p) => p.clone(),
                         None => RecordPartition::open(
-                            &archives.get(&entry.directory).cloned().unwrap_or_else(||source_root.join(&entry.directory)),
+                            &archives.get(&entry.directory()).cloned().unwrap_or_else(||source_root.join(&entry.directory())),
                             entry.config.max_journal_bytes,
                         )
                         .await
@@ -387,28 +392,29 @@ impl Catalog {
                 for entry in inner.state.collections.values() {
                     if entry.deleted
                         && !entry.initialized
-                        && !source_root.join(&entry.directory).exists()
+                        && !source_root.join(&entry.directory()).exists()
                     {
-                        absent_collections.insert(entry.collection_id.clone());
+                        absent_collections.insert(entry.scope());
                         continue;
                     }
-                    let partition = match records.get(&entry.collection_id) {
+                    let partition = match records.get(&entry.scope()) {
                         Some(p) => p.clone(),
                         None => RecordPartition::open(
-                            &archives.get(&entry.directory).cloned().unwrap_or_else(||source_root.join(&entry.directory)),
+                            &archives.get(&entry.directory()).cloned().unwrap_or_else(||source_root.join(&entry.directory())),
                             entry.config.max_journal_bytes,
                         )
                         .await
                         .map_err(storage)?,
                     };
+                    entry.prepare_parent(&stage)?;
                     let seq = partition
-                        .checkpoint(&stage.join(&entry.directory))
+                        .checkpoint(&stage.join(&entry.directory()))
                         .await
                         .map_err(storage)?;
-                    record_seqs.insert(entry.collection_id.clone(), seq);
+                    record_seqs.insert(entry.scope(), seq);
                     objects.insert(
-                        entry.directory.clone(),
-                        object_hash(&stage.join(&entry.directory))?,
+                        entry.directory(),
+                        object_hash(&stage.join(&entry.directory()))?,
                     );
                 }
                 let mut collection_backups = BTreeMap::new();
@@ -463,8 +469,7 @@ impl Catalog {
             .map_err(|e| CatalogError::OutcomeUnknown(e.to_string()))?
     }
     /// Restore a complete archive into a new, non-serving root. All historical
-    /// keys remain as disabled tombstones; grants are rebuilt for current master
-    /// only. Original authority is retained separately for audit, never loaded
+    /// ordinary keys remain disabled; the target master issues fresh tenant keys. Original authority is retained separately for audit, never loaded
     /// by normal Service::open. Caller owns target's external service-root lock.
     pub async fn restore_service(
         archive: PathBuf,
@@ -513,18 +518,17 @@ impl Catalog {
                 }
                 state
                     .historical_operations
-                    .retain(|id| id.epoch.saturating_add(1) >= epoch());
+                    .retain(|(_,id)| id.epoch.saturating_add(1) >= epoch());
                 state.historical_operations.extend(
                     state
                         .operations
                         .iter()
-                        .map(|e| e.request.operation_id.clone()),
+                        .map(|e| (e.request.command.tenant().to_owned(),e.request.operation_id.clone())),
                 );
                 state.operations.clear();
                 for key in state.keys.values_mut() {
                     key.active = false;
                 }
-                state.grants.clear();
                 state.seq = state
                     .seq
                     .checked_add(1)
@@ -535,32 +539,24 @@ impl Catalog {
                     Key {
                         verifier: current_master,
                         active: true,
+                        tenant_id: None,
                     },
                 );
-                for entry in state
-                    .collections
-                    .values()
-                    .filter(|e| e.active && !e.deleted)
-                {
-                    state.grants.insert(
-                        entry.collection_id.clone(),
-                        BTreeMap::from([("master".into(), state.seq)]),
-                    );
-                }
                 let stage = staging(&target)?;
                 drop(Catalog::create_state(&stage, state.clone()).await?);
                 drop(Catalog::create_state(&stage.join("authority-at-backup"), audit).await?);
                 for entry in state.collections.values() {
-                    if input.absent_collections.contains(&entry.collection_id) {
+                    if input.absent_collections.contains(&entry.scope()) {
                         continue;
                     }
+                    entry.prepare_parent(&stage)?;
                     RecordPartition::checkpoint_authenticated_archive(
-                        &archive.join(&entry.directory), &stage.join(&entry.directory), entry.config.max_journal_bytes,
-                        input.objects.get(&entry.directory).ok_or_else(||storage("missing authenticated child"))?,
-                        *input.record_seqs.get(&entry.collection_id).ok_or_else(||storage("missing authenticated cut"))?,
+                        &archive.join(&entry.directory()), &stage.join(&entry.directory()), entry.config.max_journal_bytes,
+                        input.objects.get(&entry.directory()).ok_or_else(||storage("missing authenticated child"))?,
+                        *input.record_seqs.get(&entry.scope()).ok_or_else(||storage("missing authenticated cut"))?,
                     ).await.map_err(storage)?;
                     #[cfg(feature = "fault-injection")]
-                    log::info!("service restore child complete elapsed_ms={} child={}", restore_started.elapsed().as_millis(), entry.directory);
+                    log::info!("service restore child complete elapsed_ms={} child={}", restore_started.elapsed().as_millis(), entry.directory());
                 }
                 for id in input.collection_backups.keys() {
                     let name = format!("backup-{id}");

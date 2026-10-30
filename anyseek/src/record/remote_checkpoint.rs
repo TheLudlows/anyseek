@@ -2,7 +2,7 @@
 //! immutable local files to bounded object chunks; it contains no payload copies.
 //! SQLite alone selects the descriptor. Old graphs remain immutable for backups.
 use super::*;
-use crate::storage::sqlite_authority::ObjectRef;
+use crate::storage::{sqlite_authority::ObjectRef, object_keys};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 
@@ -339,7 +339,7 @@ impl RemotePersistence {
                 } else {
                     // Unselected failed attempts may be retired by GC. A fresh
                     // attempt never tries to resurrect their immutable keys.
-                    let key=format!("partitions/{}/files/{attempt:032x}/{}/{:08}-{digest}",self.partition_id,path,chunks.len());
+                    let key=object_keys::key(&self.partition_id, object_keys::file_category(&path), &format!("{attempt:032x}/{}/{:08}-{digest}",path,chunks.len()));
                     self.store.put_and_register(authority,&key,&bytes,unix_time_ms_i64()).await.map_err(storage)?
                 };
                 chunks.push(object);
@@ -383,7 +383,7 @@ impl RemotePersistence {
         if length>self.max_object_bytes {return Err(RecordError::Rejected("index-only descriptor exceeds object budget".into()));}
         let _encoded=crate::storage::build_budget::reserve_memory((length as u64).checked_mul(2).ok_or_else(||storage("index descriptor overflow"))?).map_err(|_|RecordError::Busy)?;
         let bytes=serde_json::to_vec(&index).map_err(storage)?;
-        let key=format!("partitions/{}/indexes/{:032x}",self.partition_id,rand::random::<u128>());
+        let key=object_keys::key(&self.partition_id, "manifests", &format!("index-{:032x}",rand::random::<u128>()));
         let object=self.store.put_and_register(&mut authority,&key,&bytes,unix_time_ms_i64()).await.map_err(storage)?;
         authority.register_object_edge(&object,&index.checkpoint).map_err(storage)?;
         if let Some(tip)=&index.wal_tip {authority.register_object_edge(&object,tip).map_err(storage)?;}
@@ -427,11 +427,7 @@ impl RemotePersistence {
             files,
         };
         let bytes = serde_json::to_vec(&checkpoint).map_err(storage)?;
-        let key = format!(
-            "partitions/{}/checkpoints/{}",
-            self.partition_id,
-            reference.identity()
-        );
+        let key = object_keys::key(&self.partition_id, "manifests", &reference.identity());
         let manifest = self
             .store
             .put_and_register(&mut authority, &key, &bytes, unix_time_ms_i64())
@@ -576,14 +572,14 @@ impl RemotePersistence {
         if head.owner_epoch != self.owner_epoch {
             return Err(RecordError::RecoveryRequired);
         }
-        for object in authority.unreferenced_objects().map_err(storage)? {
+        for object in authority.unreferenced_objects().map_err(storage)?.into_iter().filter(|o|object_keys::owns(&self.partition_id, &o.key)) {
             authority
                 .retire_object(&object.key, head.head_version, unix_time_ms_i64())
                 .map_err(storage)?;
         }
-        let objects = authority
+        let objects:Vec<_> = authority
             .collectible_objects(unix_time_ms_i64())
-            .map_err(storage)?;
+            .map_err(storage)?.into_iter().filter(|o|object_keys::owns(&self.partition_id, &o.key)).collect();
         for object in &objects {
             self.store
                 .delete_retired(&mut authority, &object.key, unix_time_ms_i64())
@@ -597,7 +593,7 @@ impl RemotePersistence {
 }
 
 impl RecordPartition {
-    /// Restore into a new object namespace. Borrowing another authority's object
+    /// Restore into a distinct partition identity. Borrowing another authority's object
     /// graph would let either GC delete the other owner's live data; instead copy
     /// verified canonical files and publish a new complete checkpoint before use.
     pub(super) async fn restore_s3_with_remote(
@@ -615,7 +611,7 @@ impl RecordPartition {
             .authority
             .lock()
             .await
-            .bind_restore(bundle.descriptor_ref.sha256)
+            .bind_restore(&target.partition_id,bundle.descriptor_ref.sha256)
             .map_err(storage)?;
         let existing = target
             .authority
@@ -653,7 +649,7 @@ impl RecordPartition {
         let source_id = snapshot.heads[0].partition_id.clone();
         if source_id == target.partition_id {
             return Err(RecordError::Rejected(
-                "restore requires a new partition/object namespace".into(),
+                "restore requires a distinct partition identity".into(),
             ));
         }
         let source = RemotePersistence {
@@ -802,11 +798,14 @@ mod tests {
         source_config(config()).await
     }
     async fn source_config(settings:RecordConfig) -> (RecordPartition, Arc<InMemory>, PathBuf, PathBuf, Arc<Clock>) {
+        source_partition(settings, "source").await
+    }
+    async fn source_partition(settings:RecordConfig, id:&str) -> (RecordPartition, Arc<InMemory>, PathBuf, PathBuf, Arc<Clock>) {
         let root = path();
         let db = path();
         let store = Arc::new(InMemory::new());
         let p = RecordPartition::create(&root, settings).await.unwrap();
-        let remote = remote(store.clone(), &db, "source");
+        let remote = remote(store.clone(), &db, id);
         let mut inner = p.inner.lock().await;
         let initial = encode_entry(&Entry::Checkpoint {
             config: inner.config.clone(),
@@ -814,10 +813,10 @@ mod tests {
         })
         .unwrap();
         let mut authority = remote.authority.lock().await;
-        authority.create_partition("source", 1).unwrap();
+        authority.create_partition(id, 1).unwrap();
         remote
             .store
-            .publish_bootstrap(&mut authority, "source", 1, &initial, unix_time_ms_i64())
+            .publish_bootstrap(&mut authority, id, 1, &initial, unix_time_ms_i64())
             .await
             .unwrap();
         drop(authority);
@@ -1202,7 +1201,7 @@ mod tests {
         p.compact_journal().await.unwrap();
         p.collect_s3_garbage().await.unwrap();
         let target=path();let db=path();
-        let restored=RecordPartition::restore_s3_with_remote(&target,config(),remote(store,&db,"restored"),&bundle,1024*1024,10000,16*1024*1024).await.unwrap();
+        let restored=RecordPartition::restore_s3_with_remote(&target,config(),remote(store.clone(),&db,"restored"),&bundle,1024*1024,10000,16*1024*1024).await.unwrap();
         restored.inner.lock().await.clock=clock.clone();
         assert_eq!(scores(&restored).await,expected);
         assert_eq!(restored.write(request).await.unwrap(),receipt);
@@ -1783,6 +1782,69 @@ mod tests {
         assert!(restored.get("b").await.unwrap().is_some());
     }
     #[tokio::test]
+    async fn shared_sqlite_collection_backup_excludes_other_heads_and_survives_global_gc() {
+        let (first,store,_root,db,clock)=source_partition(config(),"tenant/shared/0000000000000001").await;
+        first.write(write("first","a","alpha saved",ExpectedVersion::Absent)).await.unwrap();
+        let second_root=path();
+        let second=RecordPartition::create(&second_root,config()).await.unwrap();
+        let persistence=remote(store.clone(),&db,"tenant/shared/0000000000000002");
+        {
+            let mut inner=second.inner.lock().await;
+            let initial=encode_entry(&Entry::Checkpoint { config:inner.config.clone(),state:inner.state.clone() }).unwrap();
+            let mut authority=persistence.authority.lock().await;
+            authority.create_partition("tenant/shared/0000000000000002",1).unwrap();
+            persistence.store.publish_bootstrap(&mut authority,"tenant/shared/0000000000000002",1,&initial,unix_time_ms_i64()).await.unwrap();
+            drop(authority);
+            inner.clock=clock.clone();
+            inner.remote=Some(persistence);
+        }
+        second.write(write("tenant/shared/0000000000000002","b","beta private",ExpectedVersion::Absent)).await.unwrap();
+        let (first_bundle,first_seq,_)=first.create_s3_backup("first-cut",100,1024*1024).await.unwrap();
+        let bundle:crate::storage::s3_compatible::BackupBundle=serde_json::from_str(&first_bundle).unwrap();
+        let metadata={
+            let inner=first.inner.lock().await;
+            inner.remote.as_ref().unwrap().store.get_verified(&bundle.descriptor.metadata_snapshot).await.unwrap()
+        };
+        let snapshot:crate::storage::sqlite_authority::AuthorityBackupSnapshot=serde_json::from_slice(&metadata).unwrap();
+        assert_eq!(snapshot.heads.len(),1);
+        assert_eq!(snapshot.heads[0].partition_id,"tenant/shared/0000000000000001");
+        assert!(snapshot.receipts.iter().all(|r|r.partition_id=="tenant/shared/0000000000000001"));
+        assert!(snapshot.objects.iter().all(|o|!object_keys::owns("tenant/shared/0000000000000002", &o.reference.key)));
+        assert!(snapshot.pins.iter().all(|p|p.partition_id=="tenant/shared/0000000000000001"));
+        assert_eq!(first_seq,1);
+        let (second_bundle,_,_)=second.create_s3_backup("second-cut",101,1024*1024).await.unwrap();
+        assert_ne!(first_bundle,second_bundle);
+        let restored_root=path();
+        let restored=RecordPartition::restore_s3_with_remote(&restored_root,config(),remote(store.clone(),&db,"tenant/shared/0000000000000003"),&first_bundle,1024*1024,10000,16*1024*1024).await.unwrap();
+        restored.inner.lock().await.clock=clock.clone();
+        assert!(restored.get("a").await.unwrap().is_some());
+        assert!(restored.get("b").await.unwrap().is_none());
+        // Another partition's registered but unpublished upload is not protected
+        // by a committed head yet. This collector does not own that writer.
+        let pending={
+            let inner=second.inner.lock().await;
+            let r=inner.remote.as_ref().unwrap();
+            let mut authority=r.authority.lock().await;
+            r.store.put_and_register(&mut authority,"anyseek/tenant/shared/wal/0000000000000002-pending",b"unpublished",1).await.unwrap()
+        };
+        RecordPartition::retire_s3_backup(&db,"first-cut").await.unwrap();
+        first.collect_s3_garbage().await.unwrap();
+        {
+            let inner=second.inner.lock().await;
+            let r=inner.remote.as_ref().unwrap();
+            assert_eq!(r.store.get_verified(&pending).await.unwrap(),b"unpublished");
+            r.authority.lock().await.register_durable_object(&pending,2).unwrap();
+        }
+        assert!(second.get("b").await.unwrap().is_some());
+        assert!(restored.get("a").await.unwrap().is_some());
+        assert_eq!(second.create_s3_backup("second-cut",102,1024*1024).await.unwrap().0,second_bundle);
+        let other=RecordPartition::restore_s3_with_remote(&path(),config(),remote(store,&db,"tenant/shared/0000000000000004"),&second_bundle,1024*1024,10000,16*1024*1024).await.unwrap();
+        other.inner.lock().await.clock=clock;
+        assert!(other.get("b").await.unwrap().is_some());
+        assert!(other.get("a").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn sqlite_owner_lock_is_independent_of_partition_cache() {
         let db=path();
         let mut settings=S3CompatibleRecordConfig {
@@ -1794,11 +1856,13 @@ mod tests {
         let first=RemotePersistence::open(&settings).unwrap();
         assert!(RemotePersistence::open(&settings).is_err());
         settings.partition_id="another-cache".into();
-        assert!(RemotePersistence::open(&settings).is_err(),"a different cache/partition cannot bypass the authority owner");
+        let other=RemotePersistence::open(&settings).unwrap();
+        assert!(RemotePersistence::open(&settings).is_err(),"the same partition remains exclusively owned");
+        drop(other);
         drop(first);
         settings.partition_id="exclusive".into();
         drop(RemotePersistence::open(&settings).unwrap());
-        for file in [db.clone(),db.with_extension("sqlite-wal"),db.with_extension("sqlite-shm"),db.with_extension("sqlite.owner")] {let _=std::fs::remove_file(file);}
+        for file in [db.clone(),db.with_extension("sqlite-wal"),db.with_extension("sqlite-shm"),db.with_extension(format!("sqlite.owner-{}",RemotePersistence::safe_backup_id("exclusive"))),db.with_extension(format!("sqlite.owner-{}",RemotePersistence::safe_backup_id("another-cache")))] {let _=std::fs::remove_file(file);}
     }
 
     #[tokio::test]
@@ -1959,7 +2023,7 @@ impl RecordPartition {
         Ok(())
     }
 
-    /// Activate a verified complete-service restore in a fresh S3 namespace.
+    /// Activate a verified restore in its target bucket/collection generation.
     /// The service's completion certificate is the restore identity; arbitrary
     /// local caches must never be adopted through this management-only entry point.
     pub async fn adopt_s3_snapshot(
@@ -1978,7 +2042,7 @@ impl RecordPartition {
             .authority
             .lock()
             .await
-            .bind_restore(binding)
+            .bind_restore(&remote.partition_id,binding)
             .map_err(storage)?;
         let head = remote
             .authority
@@ -2219,13 +2283,12 @@ impl RemoteBuild {
                     .iter()
                     .map(|b| format!("{b:02x}"))
                     .collect::<String>();
-                let key = format!(
-                    "partitions/{}/files/build-{}/{}/{:08}-{digest}",
-                    self.partition_id,
+                let key = object_keys::key(&self.partition_id, object_keys::file_category(&path), &format!(
+                    "build-{}/{}/{:08}-{digest}",
                     self.build.build_epoch,
                     path,
                     chunks.len()
-                );
+                ));
                 let planned=ObjectRef{key:key.clone(),sha256:Sha256::digest(&bytes).into(),length:bytes.len() as u64};
                 authority.reserve_index_build_output(&self.build,&planned,unix_time_ms_i64()).map_err(storage)?;
                 let object = self.store.put_and_register(&mut authority,&key,&bytes,unix_time_ms_i64()).await.map_err(storage)?;
@@ -2254,11 +2317,7 @@ impl RemoteBuild {
             files,
         };
         let bytes = serde_json::to_vec(&checkpoint).map_err(storage)?;
-        let key = format!(
-            "partitions/{}/checkpoints/{}",
-            self.partition_id,
-            reference.identity()
-        );
+        let key = object_keys::key(&self.partition_id, "manifests", &reference.identity());
         let planned=ObjectRef{key:key.clone(),sha256:Sha256::digest(&bytes).into(),length:bytes.len() as u64};
         authority.reserve_index_build_output(&self.build,&planned,unix_time_ms_i64()).map_err(storage)?;
         let manifest = self

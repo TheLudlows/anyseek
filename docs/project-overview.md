@@ -4,7 +4,7 @@
 
 ## 定位与总体判断
 
-anyseek 是面向 AI 记忆与知识的文档存储、检索底座，提供 Rust 核心库、HTTP API 和内嵌 Web UI。已经具备数据库主体能力：可靠记录、统一检索视图、生命周期、共享授权、持久化和恢复。当前最需要补齐的是长期运行、容量管理和运维验证。
+anyseek 是面向 AI 记忆与知识的文档存储、检索底座，提供 Rust 核心库、HTTP API 和内嵌 Web UI。已经具备数据库主体能力：可靠记录、统一检索视图、生命周期、Tenant 隔离、持久化和恢复。当前最需要补齐的是长期运行、容量管理和运维验证。
 
 应用负责文档解析、切块、Embedding、事实抽取、实体消歧、Rerank、模型推理和记忆归纳；anyseek 保存和检索准备好的记录、向量、来源及显式关系。不引入 SQL/JOIN、完整图查询语言或账户平台。
 
@@ -15,7 +15,7 @@ flowchart TB
     API["Rust API / HTTP / Web UI"]
     Record["记录与生命周期：版本、幂等、来源、整代发布、TTL"]
     Query["统一检索视图：全文、向量、混合、过滤、一跳关系"]
-    Control["授权屏障与资源预算"]
+    Control["集合生命周期与资源预算"]
     Storage["本地 Segment + WAL，或 SQLite + S3"]
     App --> Pipeline --> API
     App --> API
@@ -38,9 +38,9 @@ flowchart TB
 | 向量后补 | 正文先可见，向量按精确版本后补 | 缺向量不参与该字段向量召回，不填零向量 |
 | 时间与生命周期 | 固定 evaluation_time、时间过滤、不可逆 TTL | 过期结果持久化，不会因时钟回退复活 |
 | 实体关系 | 显式实体目录、有预算的一跳邻居及关系通道融合 | 不自动抽取或推断关系，不提供完整图语言 |
-| 共享授权 | 多 API key 共享 collection、grant revision、撤权及未交付输出复核 | 已发送字节无法撤回；整 key 撤销等操作仍有全局排空 |
+| Tenant 认证 | API Key 绑定 Tenant，同租户 Key 访问范围一致，服务端验证集合归属 | master 仅做管理；凭据撤销只影响后续认证，不取消已认证工作 |
 | 持久化 | 本地 WAL/发布见证/Segment，或 SQLite 协调与 S3 不可变对象 | 真实 S3 合同和系统断电尚未验收 |
-| 备份恢复 | collection 快照、完整服务归档、独立恢复和安全对象 GC | 独立备份不能证明备份后没有删除；恢复不复活历史 grants |
+| 备份恢复 | collection 快照、完整服务归档、独立恢复和安全对象 GC | 独立备份不能证明备份后没有删除；恢复不自动启用历史普通 Key |
 | 服务资源 | 后台索引、校验缓存、collection 准入、控制预留及分级并发/字节/I/O 预算 | 保守准入与显式缓冲约束，不是全进程 RSS、系统带宽或全磁盘硬上限 |
 | 接入 | Rust 库、HTTP、OpenAPI、Web UI、Python 工具及故障验收脚本 | UI 未覆盖全部管理操作，准确契约见服务指南 |
 
@@ -59,7 +59,7 @@ flowchart TB
 
 S3 写入按「登记上传身份 → 上传 → 远端读回校验 → SQLite 条件发布」推进，上传成功本身不代表提交；完整流程与失败边界见[存储协议](storage.md)。
 
-S3 模式必须保留服务 catalog、SQLite 权威库及其 WAL、`s3-namespace`；collection 内日志、Payload、索引和 `*.object-cache` 是可重建缓存。不能仅保留 bucket 或在运行中直接复制 SQLite 文件来代替共同备份。
+S3 模式必须保留服务 catalog、SQLite 权威库及其 WAL；`collections/{tenant_id}/{collection_id}/{generation}` 内日志、Payload、索引和 `*.object-cache` 是可重建缓存。不能仅保留 bucket 或在运行中直接复制 SQLite 文件来代替共同备份。
 
 后台 Indexer 已支持固定已提交 cut、屏障外构建、条件发布及保留期间新增 tail。当前仍是固定 cut 全量构建，自动增量调度未实现。协议细节见[存储文档](storage.md)。
 

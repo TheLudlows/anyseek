@@ -5,6 +5,7 @@ Mutating calls require complete caller-retained requests. Persist them BEFORE
 sending; reuse them after a timeout, busy response or unknown outcome. No method
 allocates new identities or retries implicitly.
 """
+import re
 import json
 import time
 import uuid
@@ -57,17 +58,24 @@ class anyseekClient:
 
     @staticmethod
     def collection_path(collection_id):
-        return '/api/v1/index/' + quote(collection_id, safe='')
+        if not isinstance(collection_id,str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,62}',collection_id):
+            raise ValueError('collection_id must match ^[a-z][a-z0-9_-]{0,62}$')
+        return '/api/v1/index/' + collection_id
 
     def health(self):
         return self.api('GET', '/api/v1/live', key=None)
 
+    def create_tenant(self, request, key=_DEFAULT):
+        """Master: {operation_id, tenant_id}; no rename or deletion."""
+        return self.api('POST', '/api/v1/tenants', request, key)
+
     def register_key(self, request, key=_DEFAULT):
-        """Master: {operation_id, key_id, apikey_base64}; client supplies key."""
+        """Master: {operation_id, tenant_id, key_id, apikey_base64}; client supplies key."""
         return self.api('POST', '/api/v1/apikey', request, key)
 
     def create_collection(self, request, key=_DEFAULT):
         """{operation_id, collection_id, config, embedding_space_id?}."""
+        self.collection_path(request['collection_id'])
         return self.api('POST', '/api/v1/index', request, key)
 
     def write(self, collection_id, request, key=_DEFAULT):

@@ -19,14 +19,13 @@ def exercise(call, restart_with, work, faults):
         prefix = f'/api/v1/index/{collection}'
         call('POST', '/api/v1/index', {'operation_id': operation(), 'collection_id': collection,
              'config': {'index_name': 'background index acceptance', 'schema': [{'field': 'body', 'field_type': 'Text'}]}})
-        call('POST', prefix + '/grants', {'operation_id': operation(), 'key_id': 'indexer-key', 'allow': True})
         for identity, system in [('source', {'kind': 'source'}), ('derived', {'kind': 'derived',
              'evidence_refs': [{'record_id': 'source', 'routing_key': 'r', 'version': 1}]})]:
             call('POST', prefix + '/doc', {'operation_id': operation(), 'record_id': identity,
                  'routing_key': 'r', 'expected': 'Absent', 'document': {'body': 'alpha original'}, 'system': system})
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            # The accepted job may complete after revocation; its result must be blocked.
-            job = pool.submit(call, 'PATCH', prefix, key=key, status=403)
+            # The accepted job may complete after revocation; its result remains deliverable.
+            job = pool.submit(call, 'PATCH', prefix, key=key)
             try:
                 deadline = time.monotonic() + 10
                 while not started.exists():
@@ -41,8 +40,8 @@ def exercise(call, restart_with, work, faults):
                 pool.submit(call, 'PATCH', prefix + '/doc', deletion).result(timeout=5)
                 page = pool.submit(call, 'POST', prefix + '/query', {'query': 'alpha'}).result(timeout=5)
                 assert [hit['record']['record_id'] for hit in page['hits']] == ['concurrent'], page
-                pool.submit(call, 'POST', prefix + '/grants', {'operation_id': operation(),
-                            'key_id': 'indexer-key', 'allow': False}).result(timeout=5)
+                pool.submit(call, 'DELETE', '/api/v1/apikey', {'operation_id': operation(),
+                            'key_id': 'indexer-key'}).result(timeout=5)
                 call('POST', prefix + '/query', {'query': 'alpha'}, key=key, status=403)
             finally:
                 pause.unlink(missing_ok=True)
@@ -54,7 +53,7 @@ def exercise(call, restart_with, work, faults):
         call('POST', prefix + '/query', {'query': 'alpha'}, key=key, status=403)
         indexed = call('PATCH', prefix)
         assert indexed['indexed_seq'] == indexed['visible_seq'] == 4, indexed
-        print('PASS Indexer HTTP: concurrent acknowledged write, source deletion, revoke before output, complete restart tail', flush=True)
+        print('PASS Indexer HTTP: concurrent acknowledged write, source deletion, credential revoke without cancellation, complete restart tail', flush=True)
     finally:
         pause.unlink(missing_ok=True)
         started.unlink(missing_ok=True)

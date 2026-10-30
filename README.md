@@ -19,7 +19,7 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 | 文档发布 | 有界多批 staging、租约和清理、完整 generation 原子发布；正文可先发布，向量按精确版本后补 |
 | 共同检索 | 全文 BM25F、外部向量、元数据/时间过滤、显式一跳关系融合、稳定排序和逐命中解释 |
 | 时间与生命周期 | 固定查询 evaluation_time、不可逆 TTL |
-| 授权与恢复 | 多个 API key 共享 collection；撤销立即阻断，身份与数据生命周期独立；WAL/checkpoint、备份与独立恢复 |
+| 授权与恢复 | API Key 认证 Tenant，同租户 Key 访问一致；撤销拒绝后续认证，数据生命周期独立；WAL/checkpoint、备份与独立恢复 |
 
 Web UI 支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览，以及来源、关系、租约等检查入口。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。
 
@@ -43,7 +43,7 @@ export MASTER_KEY_SECRET='replace-with-your-private-secret'
 cargo run -p anyseek --features server --bin anyseek_server -- local_ip=127.0.0.1 local_port=8080
 ```
 
-打开 `http://127.0.0.1:8080/`，用启动日志中的 `Master API key` 连接，创建 collection 并写入 JSON。默认数据目录为可执行文件旁的 `anyseek_index`；首次目录必须不存在。重启保留原目录和 `MASTER_KEY_SECRET`；已有部署应显式设置原 `index_path`。Windows 启动及参数见 [服务指南](anyseek/src/server/README.md)。
+打开 `http://127.0.0.1:8080/`，先用启动日志中的 `Master API key` 按[服务指南](anyseek/src/server/README.md)创建 Tenant 并签发普通 Key，再用 Tenant Key 连接 UI、创建 collection 并写入 JSON。默认数据目录为可执行文件旁的 `anyseek_index`；首次目录必须不存在。重启保留原目录和 `MASTER_KEY_SECRET`；已有部署应显式设置原 `index_path`。Windows 启动及参数见 [服务指南](anyseek/src/server/README.md)。
 
 ## API 与接入
 

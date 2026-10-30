@@ -21,7 +21,7 @@
 </nav>
 <section id="welcome" class="setup-panel" style="display:none" aria-labelledby="setupTitle">
 <h1 id="setupTitle">Connect &amp; create an index</h1>
-<p>Paste the <strong>Master API key</strong> printed in the server console or Docker logs to connect and create indexes.</p>
+<p>Paste a <strong>Tenant API key</strong> issued by the service administrator to connect and create collections.</p>
 <form id="connectForm">
 <label for="setupKey">API key</label>
 <div class="setup-inline"><input id="setupKey" type="password" required autocomplete="off" spellcheck="false"><button type="submit">Connect</button></div>
@@ -37,7 +37,8 @@
 </form>
 <hr>
 <details id="serviceRecovery"><summary>Service backup and recovery (master key)</summary>
-<p>Create a consistent local snapshot of the catalog, retained collections and collection backups. Recovery creates a new stopped service root. Historical keys stay disabled; only the current master can access restored data.</p>
+<p>Create a consistent local snapshot of the catalog, retained collections and collection backups. Recovery creates a new stopped service root. Historical keys stay disabled; the target service master must issue new Tenant keys for data access.</p>
+<label for="serviceMasterKey">Management API key (not saved)</label><input id="serviceMasterKey" type="password" autocomplete="off">
 <button id="backupService" type="button">Create service backup / retry</button>
 <label for="serviceBackupId">Service backup ID</label><input id="serviceBackupId" spellcheck="false">
 <button id="restoreService" type="button">Restore to new stopped root / retry</button>
@@ -45,7 +46,7 @@
 </details>
 <form id="createIndexForm">
 <h2>Create index</h2>
-<label for="newIndexName">Index name</label><input id="newIndexName" required maxlength="200" placeholder="my-index">
+<label for="newIndexName">Index name</label><input id="newIndexName" required maxlength="63" pattern="[a-z][a-z0-9_-]{0,62}" placeholder="my-index">
 <label for="indexMode">Search mode</label><select id="indexMode"><option value="Lexical">Lexical — text search</option><option value="Vector">Vector — external embeddings</option><option value="Hybrid">Hybrid — text and embeddings</option></select>
 <div id="dimensionControl" hidden><label for="vectorDimensions">Vector dimensions</label><input id="vectorDimensions" type="number" min="1" max="4096" step="1" value="384"><label for="embeddingSpaceId">Embedding space/model identity</label><input id="embeddingSpaceId" type="text" placeholder="model-name-and-version"><p class="setup-help">Must match your external embedding model. Vectors are supplied in the “vector” document field; this server does not generate embeddings.</p></div>
 <p class="setup-help">Default fields: title, body and url. Vector/Hybrid also include vector (F32, cosine similarity).</p>

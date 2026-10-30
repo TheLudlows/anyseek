@@ -16,7 +16,7 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | 原始数据 | 权威状态保留完整 Document 和原始向量；schema.store 控制查询投影，不控制原始数据持久保存 |
 | 浏览 | 空查询浏览活动记录，包括纯向量 collection；iterator 按稳定 ID 分页，visible_seq 改变使 cursor 失效 |
 | 持久化 | 本地 Segment + tail，或 SQLite/S3 对象提交、远端 checkpoint 与 GC；成功写入 durable + visible；真实 S3/系统断电尚待验收 |
-| 授权 | key、collection、grant 独立；多个 key 共享数据，撤销不删除 collection；输出复核 revision |
+| Tenant 认证 | 普通 Key 绑定 Tenant，同租户 Key 访问范围一致；撤销只影响后续认证，数据生命周期独立 |
 | 备份 | collection 独立快照、备份退役、完整 service/catalog 备份、新未启动根恢复 |
 
 全文派生包使用锁定版本的 Tantivy，保留正式 BM25F/邻近度和分析契约。向量/元数据使用独立组件，Payload 唯一保存规范原文和原向量。旧倒排压缩、docstore、Block-max WAND/MaxScore 执行器及公开 IndexArc/Commit/Search 入口已删除；调用方改用 RecordPartition。原生 commit 不是业务发布，认证包和 Record 权威状态决定可见 cut。仅支持新库，不提供旧格式读取、双写或迁移。Linux 最终回归和 Windows 验收状态见实施记录，不能把组件编译通过视为全部验收。
@@ -32,14 +32,14 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | 方法 | 路径 | 当前契约 |
 | --- | --- | --- |
 | GET | `/api/v1/live` | 存活/版本 |
-| GET | `/api/v1/apikey` | 列出当前身份已获授权的 collections |
-| POST | `/api/v1/apikey` | master 注册 `{operation_id,key_id,apikey_base64}` |
+| GET/POST | `/api/v1/tenants` | master 查询/创建 Tenant；无改名和删除 |
+| GET | `/api/v1/apikey` | 列出认证 Tenant 的 collections |
+| POST | `/api/v1/apikey` | master 注册 `{operation_id,tenant_id,key_id,apikey_base64}` |
 | DELETE | `/api/v1/apikey` | master 撤销 `{operation_id,key_id}`，保留共享数据 |
 | POST | `/api/v1/index` | `{operation_id,collection_id,config,embedding_space_id?}` |
 | GET | `/api/v1/index/{id}` | 配置和活动统计 |
 | PATCH | `/api/v1/index/{id}` | 在线完整 checkpoint，返回 visible_seq |
-| DELETE | `/api/v1/index/{id}` | master 持久删除身份，body `{operation_id}` |
-| POST | `/api/v1/index/{id}/grants` | master 管理 `{operation_id,key_id,allow}` |
+| DELETE | `/api/v1/index/{id}` | Tenant Key 删除自己的集合，body `{operation_id}` |
 | POST/PATCH/DELETE | `/api/v1/index/{id}/doc` | 条件 RecordWrite；对象完整替换、显式 document:null 删除、vector_patch 后补或 generation 命令 |
 | GET | `/api/v1/index/{id}/doc/{record_id}/status` | 元数据可见原因及 pending_vector_fields，不返回隐藏正文 |
 | GET | `/api/v1/index/{id}/doc/{record_id}/generation` | 文档控制版本、active/staged 身份、租约期限/fence 和清理状态 |
@@ -54,7 +54,7 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | GET | `/api/v1/index/{id}/operation/{epoch}/{nonce}` | 已授权数据回执查询，缺席不证明失败 |
 | GET | `/api/v1/catalog/operation/{epoch}/{nonce}` | master 控制操作查询 |
 | POST | `/api/v1/index/{id}/backup` | 独立 collection 快照；同操作 ID 保留原快照 |
-| POST | `/api/v1/restore` | master 恢复到新 collection，不恢复历史 grants |
+| POST | `/api/v1/restore` | Tenant Key 将本租户备份恢复到新 collection |
 | GET | `/api/v1/backups` | master 查看 collection 备份及退役状态 |
 | DELETE | `/api/v1/backups/{id}` | master 退役备份；未完成 restore pin 来源 |
 | POST | `/api/v1/service-backups` | master 完整 catalog/数据/collection backups 快照 |
@@ -64,13 +64,13 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 
 ## Web UI 和工具
 
-UI 增加实体目录/一跳关系检查；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、链接/原文/图片预览、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面支持 staging 租约检查和 renew 条件写入；未发布私有正文在 abort/到期后安全清理并保留摘要回执。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 key/grant 或逐条更新/删除管理页面。
+UI 增加实体目录/一跳关系检查；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、链接/原文/图片预览、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面支持 staging 租约检查和 renew 条件写入；未发布私有正文在 abort/到期后安全清理并保留摘要回执。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 Tenant/Key 或逐条更新/删除管理页面。
 
 完整冒烟为 `scripts/record_service_smoke.py`，`--browser` 启用 Chromium，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 留在可选 `anyseek::server` 模块。
 
 ## 资源与未完成项
 
-Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，key 撤销/共同快照仍全局排空；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
+Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 

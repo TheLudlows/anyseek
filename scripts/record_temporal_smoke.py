@@ -27,7 +27,6 @@ def exercise(call, restart_with, directory, faults):
     endpoint = '/api/v1/index/temporal'
     reader=base64.b64encode(os.urandom(32)).decode()
     call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'temporal-reader','apikey_base64':reader})
-    call('POST',endpoint+'/grants',{'operation_id':operation(),'key_id':'temporal-reader','allow':True})
     source = {'operation_id': operation(), 'record_id': 's', 'routing_key': 'route', 'expected': 'Absent',
               'document': {'body': 'temporal source'}, 'system': {'kind': 'source'},
               'temporal': {'event_time_ms': 100, 'valid_from_ms': 100, 'valid_to_ms': 200, 'expire_at_ms': now + (100 if faults else 86400000)}}

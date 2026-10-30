@@ -23,7 +23,7 @@ def exercise(base, key, request_file):
         saved = json.loads(request_file.read_text())
         check(saved['base'] == base, 'saved requests belong to another service URL')
     else:
-        collection = uuid.uuid4().hex
+        collection = 'c'+uuid.uuid4().hex
         documents = [
             {'title': 'first', 'body': 'the quick brown fox'},
             {'title': 'second', 'body': 'the lazy brown dog'},

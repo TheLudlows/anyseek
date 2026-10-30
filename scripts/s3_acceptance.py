@@ -2,7 +2,7 @@
 """Run shared Record acceptance and S3 contracts against a fixture or test bucket.
 
 Real mode accepts ONLY ANYSEEK_S3_TEST_* configuration. Use a dedicated disposable
-bucket: end-to-end tests leave isolated test namespaces for provider-side disposal.
+bucket: end-to-end tests leave test objects for provider-side disposal.
 Credentials are inherited through the environment and never added to reports.
 """
 import argparse
@@ -64,6 +64,8 @@ def main():
     for key, value in values.items():
         env[f'ANYSEEK_S3_{key}'] = value
         env[f'ANYSEEK_S3_TEST_{key}'] = value
+    if fixture:
+        env['ANYSEEK_S3_TEST_RESTORE_BUCKET'] = 'disposable-restored'
     report = {'backend': args.backend, 'real_endpoint_exercised': args.backend == 'real',
               'fault_injection': args.faults, 'suite': args.suite, 'checks': []}
     fixed_binary = tempfile.TemporaryDirectory(prefix='anyseek-acceptance-binary-')

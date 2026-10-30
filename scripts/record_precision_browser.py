@@ -138,12 +138,18 @@ def main():
                         assert process.poll() is None and time.monotonic()<deadline, 'service failed to start'
                         time.sleep(.05)
 
+                tenant_key=base64.b64encode(hashlib.sha256(b'precision-tenant').digest()).decode()
                 def call(method, route, body=None):
-                    request = urllib.request.Request(base+route, data=None if body is None else json.dumps(body).encode(), headers={'apikey': master, 'Content-Type': 'application/json'}, method=method)
+                    management=route in ['/api/v1/tenants','/api/v1/apikey'] and method=='POST'
+                    key=master if management else tenant_key
+                    request = urllib.request.Request(base+route, data=None if body is None else json.dumps(body).encode(), headers={'apikey': key, 'Content-Type': 'application/json'}, method=method)
                     with urllib.request.urlopen(request, timeout=30) as response:
                         return json.load(response)
 
-                exercise(base, master, call, args.chromium)
+                from record_service_smoke import operation
+                call('POST','/api/v1/tenants',{'operation_id':operation(),'tenant_id':'precision'})
+                call('POST','/api/v1/apikey',{'operation_id':operation(),'tenant_id':'precision','key_id':'precision','apikey_base64':tenant_key})
+                exercise(base, tenant_key, call, args.chromium)
             except Exception:
                 log.flush()
                 log.seek(0)

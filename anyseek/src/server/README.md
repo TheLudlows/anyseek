@@ -2,7 +2,7 @@
 
 `POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/ingest/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/doc` 同步语义保留，独立 Intake 日志已移除。详见[异步写入实施](../../../docs/async-ingestion.md)。
 
-默认服务通过 `record_service.rs` 使用独立 catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，保留全文、向量、混合检索及 Web UI。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -12,7 +12,7 @@ export MASTER_KEY_SECRET='replace-with-your-private-secret'
 target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 ```
 
-打开 `http://127.0.0.1:8080/`，使用启动日志中的 `Master API key` 连接。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
+启动日志中的 `Master API key` 只用于管理 Tenant 和普通 API Key，以及现有服务备份管理；不能用于集合数据接口。先 POST `/api/v1/tenants` 提交 `{operation_id,tenant_id}`，再由 master POST `/api/v1/apikey` 提交 `{operation_id,tenant_id,key_id,apikey_base64}`，签发普通 Key。打开 `http://127.0.0.1:8080/` 后使用该 Tenant Key 连接。Tenant ID 与 Collection ID 均须匹配 `^[a-z][a-z0-9_-]{0,62}$`，不转换大小写，Tenant 不支持改名或删除。首次 `index_path` 必须不存在且父目录存在；重启必须指向可恢复的 catalog 根，并保持 `MASTER_KEY_SECRET` 一致。旧按 key 组织的目录、已有空目录和不完整权威状态不会被当成空数据库导入。没有旧格式升级或迁移接口。
 
 | 参数 | 默认值与约束 |
 | --- | --- |
@@ -40,9 +40,9 @@ export ANYSEEK_S3_SECRET_ACCESS_KEY='your-secret-key'
 
 只有明确配置的开发 HTTP endpoint 才设置 `ANYSEEK_S3_ALLOW_HTTP=1`。可选 `ANYSEEK_S3_MAX_OBJECT_BYTES` 默认 64 MiB，`ANYSEEK_S3_MAX_TAIL_BLOCKS` 默认 1,000,000；单次 tail 字节预算同时受 collection 日志预算和 1 GiB 上限约束。凭证只在运行时使用。
 
-保留整个服务根中的 catalog、SQLite 权威文件及其 WAL、`s3-namespace`。这些是持久协调状态，不能作为缓存删除或在运行中复制 SQLite 文件作备份。collection 内的本地日志/payload/索引可从权威检查点及 tail 重建。C2 另在每个权威库旁的 `*.object-cache` 保存校验对象块（256 MiB / 4096 块，损坏或丢失回源）；旁边的 `*.object-cache.lock` 仅用于本机缓存操作协调，运行中清空缓存目录时保留该锁文件。缓存不包含凭据，也不决定当前 head 或权限；备份应使用服务 API，以同时固定元数据和对象闭包。
+Catalog 与 S3 协调元数据共用服务根目录下的 `metadata.sqlite`；保留该数据库、SQLite WAL、owner 锁文件。不同独立服务必须使用不同 bucket；完整服务恢复启动前应配置目标服务的独立 bucket。对象位于 `anyseek/{tenant_id}/{collection_id}/`，不创建自动 namespace 或 Bucket 归属标记。这些是持久协调状态，不能作为缓存删除或在运行中复制 SQLite 文件作备份。collection 内的本地日志/payload/索引可从权威检查点及 tail 重建。C2 另在每个权威库旁的 `*.object-cache` 保存校验对象块（256 MiB / 4096 块，损坏或丢失回源）；旁边的 `*.object-cache.lock` 仅用于本机缓存操作协调，运行中清空缓存目录时保留该锁文件。缓存不包含凭据，也不决定当前 head 或权限；备份应使用服务 API，以同时固定元数据和对象闭包。
 
-PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到独立对象命名空间，不恢复原 grants，受保护证据保持隔离。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到新的服务 namespace。
+PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin 的对象。collection backup 的相同请求在中断后继续原 cut；恢复到新 collection，复制到目标集合新代次，不包含服务凭据，受保护证据保持隔离。完整服务备份沿用本地独立归档格式，包含 catalog 和完整数据；在 S3 模式恢复启动时会发布到目标独立 bucket。
 
 该后端已合入；真实目标服务的条件写/读后可见性认证与其余维护路径审计仍待完成，见[存储协议](../../../docs/storage.md)。SQLite 首版是单主机协调，不提供跨主机 HA。
 
@@ -75,7 +75,7 @@ UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响�
 
 ```sh
 BASE='http://127.0.0.1:8080'
-API_KEY='paste-master-key'
+API_KEY='paste-tenant-key'
 mkdir requests
 python3 - <<'PY'
 import json, time, uuid
@@ -107,11 +107,13 @@ Vector/Hybrid 默认每 level 探测最多 `default_nprobe` 个簇，`nprobe` �
 
 POST `iterator` 接收 `{cursor?,length?,fields?}`，按稳定 ID 正向分页；写入改变 visible_seq 后继续旧 cursor 返回 409。旧 skip/take 双向 HTTP 协议不再支持，低层 Rust iterator 另有自己的 API。
 
-## 共享授权、删除与批量
+## Tenant 认证、删除与批量
 
-master 注册调用方生成的 32 字节 key：POST `/api/v1/apikey`，body 为 `{operation_id,key_id,apikey_base64}`。master 在 `/api/v1/index/{id}/grants` POST `{operation_id,key_id,allow}` 管理授权。普通 key 可创建新 collection，访问已获授权的 collection，但不能管理其他身份或扩大授权。首版不区分读写角色。
+Tenant 由 master 创建和查询（POST/GET `/api/v1/tenants`），普通 Key 只能由 master 签发或撤销。普通 Key 认证成功后由服务端确定 Tenant，不接受客户端声明的 Tenant 作为数据访问身份。同 Tenant 的有效 Key 对其所有集合拥有相同访问范围，不提供 User、Project、Collection Grant、角色或共享授权。
 
-DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销身份；不会删除 collection，也不影响其他已授权 key。删除 collection 是独立的 master 操作，需 `{operation_id}`；保留身份墓碑，物理回收后置。撤销与写入发布有确定顺序，响应状态/头和 body 交付均复核 grant revision；已交给传输层的字节不能收回。
+DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销凭据；不会删除 Tenant 或集合，也不影响本租户其他有效 Key。撤销后新请求认证失败，已经通过认证开始执行的操作和响应允许完成；不再进行凭据撤销的 body frame 复核。来源删除等数据有效性保护仍在输出时检查。
+
+普通 Tenant Key 可 DELETE `/api/v1/index/{id}`（`{operation_id}`）删除自己的集合。删除后可同名重建；新集合获得内部新代次，客户端不用传代次。旧后台工作、回执、备份身份和 GC 不会作用于新代次。删除和重建前，客户端须停止旧请求及其重试；仅携带名称的旧请求无法与新集合请求区分。物理回收仍延后执行。
 
 `delete-plan` 接收 `{select:"all"}`、`{select:"ids",record_ids:[...]}` 或 `{select:"query",query:{query:"text"}}`。保存返回的 targets，为每项分配并保存 operation_id，再用 `/batch` 的 `{writes:[...]}` 提交。每批 1..100 个独立操作，返回逐项结果，**不是原子事务**。未知/待恢复错误停止未尝试尾部；重试不能重新生成删除选择条件。
 
@@ -119,11 +121,11 @@ DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销身份；不会删�
 
 独立备份恢复只恢复保存的数据，不证明备份之后没有删除：恢复 partition 保持 evidence quarantine，typed 内容不可读且没有强制解禁入口；普通记录也不能把该副本当成可信删除历史来源。当前没有解除 typed evidence 隔离的入口；授权恢复和内容可见性是两道独立条件。
 
-Collection backup 使用 POST `/api/v1/index/{id}/backup` 和 `{operation_id}`；原 ID 重试保留同一快照。master POST `/api/v1/restore`，body 为 `{operation_id,collection_id,backup_id}`，恢复到新身份，不恢复旧 grants。master 可 GET `/api/v1/backups`，或 DELETE `/api/v1/backups/{id}`（`{operation_id}`）持久退役备份；未完成 restore 会 pin 来源。`cleanup_pending:true` 表示逻辑退役已完成，物理清理还需重试。
+Collection backup 使用 POST `/api/v1/index/{id}/backup` 和 `{operation_id}`；原 ID 重试保留同一快照。本 Tenant 的普通 Key POST `/api/v1/restore`，body 为 `{operation_id,collection_id,backup_id}`，恢复到新身份，归属于当前认证 Tenant；其他 Tenant 的备份 ID 不可访问。master 可 GET `/api/v1/backups`，或 DELETE `/api/v1/backups/{id}`（`{operation_id}`）持久退役备份；未完成 restore 会 pin 来源。`cleanup_pending:true` 表示逻辑退役已完成，物理清理还需重试。
 
 master POST `/api/v1/service-backups`（`{operation_id}`）冻结 catalog、所有保留 collection 数据和未退役 collection backups。manifest 校验权威对象内容，外层发布有完成见证，不递归包含旧 service archives。
 
-master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**新的、未启动的 target_root**，不覆盖运行根。用当前 MASTER_KEY_SECRET 单独启动新根；历史 key 禁用、历史 grants 清空，当前 master 获得初始访问。历史控制请求显式冲突；Record 数据版本和回执保留。共享访问需注册新 key 并重新授权。来源备份及恢复 ID 必须使用返回的小写 hex。
+master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**新的、未启动的 target_root**，不覆盖运行根。用当前 MASTER_KEY_SECRET 单独启动新根；历史普通 Key 全部禁用；使用目标 master 为已有 Tenant 重新签发 Key 后才能访问数据。历史控制请求显式冲突；Record 数据版本和回执保留。不需要重建 Collection 授权关系。来源备份及恢复 ID 必须使用返回的小写 hex。
 
 ## 当前资源和验收边界
 
@@ -132,13 +134,13 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 | Record 身份含墓碑、保留操作、候选 | 各 10,000；Record 操作是累计保留上限，checkpoint 不释放额度 |
 | 操作 / HTTP body / 响应 | 1 MiB / 2 MiB / 16 MiB |
 | Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
-| catalog | 16 MiB 代、10,000 操作，仅安全回收过期控制回执 |
+| Catalog | 16 MiB 元数据、10,000 操作，仅安全回收过期控制回执 |
 | admission | 普通 32/每集合 16、恢复 2/1、后台 2/1、可信控制 8/2、静态/存活 8/8；partition 内部 16；30 秒请求期限 |
-| 调度 | 不同 collection 可并行；key 撤销/共同快照等保留全局排空，资源不足立即 Busy |
+| 调度 | 不同 collection 可并行；共同快照保留全局屏障，Key 撤销不排空数据工作，资源不足立即 Busy |
 | collection backups | 32 个，可持久退役 |
 | service archives / 新恢复根 | 每源根最多 4 个 archive/准备项，托管父目录最多 4 个生成根，备份权威 payload 预检 1 GiB |
 
-资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。控制通道只在 master 认证后开放，不被数据工作借用；key/grant 控制不等待备份/恢复工作流锁，但仍遵守共同快照与授权屏障；删除保留与多阶段恢复工作流的原有顺序。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
+资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。平台管理通道只在 master 认证后开放，不被数据工作借用；Key 管理不等待备份/恢复工作流锁，仍参与共同快照排序，但不排空已认证数据工作；删除保留与多阶段恢复工作流的原有顺序。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
 
 | 类别 | 全服务 / 每集合预留字节 | 全服务 / 每集合 I/O 并发 |
 | --- | --- | --- |
@@ -185,11 +187,11 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --b
 
 示例 epoch 仅作结构说明，实际按当前 UTC 日生成并随原请求保存。派生记录用自己的稳定 ID 和 `system:{"kind":"derived","evidence_refs":[{"record_id":"source-1","routing_key":"document-1","version":1}]}`。来源与派生均要求满足 collection 既有 schema/向量约束；向量字段可以缺失，缺失内容不参加向量召回。
 
-删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；权限撤销与数据输出各自复核。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建暂不支持，不能把 business document 中的同名字段当作已实现语义。
+删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；输出时继续复核来源数据有效性。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建暂不支持，不能把 business document 中的同名字段当作已实现语义。
 
 Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。存活服务的 WAL/在线 checkpoint 恢复与独立备份恢复不同；独立恢复目录不能提升为当前删除权威。
 
-`GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样执行授权与数据输出屏障。状态包括 visible、stale、deleted、unavailable、quarantined。
+`GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样检查 Tenant/集合代次和输出数据有效性。状态包括 visible、stale、deleted、unavailable、quarantined。
 
 当前 Record 权威 journal 使用 V12 entry 标签，拒绝旧格式，不提供升级迁移。低层搜索索引格式 8 与权威 journal 版本不是同一概念。
 
@@ -231,7 +233,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 - `POST /api/v1/index/{id}/entities`：`{"cursor":null,"length":100}`，稳定 ID 分页；视图变化拒绝旧 cursor。
 - `POST /api/v1/index/{id}/neighbors`：`{"seeds":[{"record_id":"a","routing_key":"r","version":1}],"direction":"both","relation_types":[],"per_seed":128,"max_candidates":1000,"allow_partial":false}`。
 
-一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据和授权输出屏障与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
+一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据有效性输出保护与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
 
 关系与全文/向量同视图融合见后文；不提供模型实体消歧或完整图语言。测试状态见[Record 语义](../../../docs/record-model.md)。
 
@@ -239,7 +241,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 `POST /api/v1/index/{id}/evidence` 接受 `{record_id,routing_key,version,locator}`。locator 可为 `{"kind":"utf8","field":"body","start":0,"end":5}`（UTF-8 字节半开区间，必须字符边界），或 `{"kind":"page","field":"pages","page":1}`（源字段为字符串数组、一基页码）。仅定位已持久内联 Source，不下载 URL 或解析 PDF；关系 endpoints/seeds 不接受 locator。派生 evidence_refs 和 generation source 可携带该定位。
 
-响应返回选中文本及完整字段/页的 SHA-256、固定 text/plain UTF-8 表示、精确 reference、共同水位与时间。Source 修订后可显式读取保留旧修订，普通 stale 派生仍隐藏；当前 source 已删除/过期/隔离时拒绝摘录，授权及输出屏障继续适用。定位写入和恢复均校验范围。UI 记录页可输入精确 reference 查看摘录。分平台结果见实施记录第 20 节。
+响应返回选中文本及完整字段/页的 SHA-256、固定 text/plain UTF-8 表示、精确 reference、共同水位与时间。Source 修订后可显式读取保留旧修订，普通 stale 派生仍隐藏；当前 source 已删除/过期/隔离时拒绝摘录，Tenant/集合代次和输出数据有效性检查继续适用。定位写入和恢复均校验范围。UI 记录页可输入精确 reference 查看摘录。分平台结果见实施记录第 20 节。
 
 ## staging 租约与私有清理
 

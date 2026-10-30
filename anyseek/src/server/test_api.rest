@@ -4,7 +4,8 @@
 // A new logical run needs new collection/record/operation identities.
 @base_url = http://127.0.0.1:8080
 @master_key = PASTE_MASTER_API_KEY
-@api_key = {{master_key}}
+@api_key = {{shared_key}}
+@tenant_id = rest-tenant
 @epoch = PASTE_CURRENT_UTC_DAY
 @collection_id = rest-demo
 @vector_collection_id = rest-vectors
@@ -16,14 +17,21 @@
 ### Health
 GET {{base_url}}/api/v1/live
 
+### Create Tenant (master only)
+POST {{base_url}}/api/v1/tenants
+apikey: {{master_key}}
+Content-Type: application/json
+
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-tenant"},"tenant_id":"{{tenant_id}}"}
+
 ### Register a caller-generated key (master only); no data belongs to the key
 POST {{base_url}}/api/v1/apikey
 apikey: {{master_key}}
 Content-Type: application/json
 
-{"operation_id":{"epoch":{{epoch}},"nonce":"rest-register"},"key_id":"{{shared_key_id}}","apikey_base64":"{{shared_key}}"}
+{"operation_id":{"epoch":{{epoch}},"nonce":"rest-register"},"tenant_id":"{{tenant_id}}","key_id":"{{shared_key_id}}","apikey_base64":"{{shared_key}}"}
 
-### List granted collections
+### List authenticated Tenant collections
 GET {{base_url}}/api/v1/apikey
 apikey: {{api_key}}
 
@@ -33,13 +41,6 @@ apikey: {{api_key}}
 Content-Type: application/json
 
 {"operation_id":{"epoch":{{epoch}},"nonce":"rest-create"},"collection_id":"{{collection_id}}","config":{"index_name":"Documents","schema":[{"field":"body","field_type":"Text"},{"field":"category","field_type":"String","filterable":true}]}}
-
-### Grant shared access (master only)
-POST {{base_url}}/api/v1/index/{{collection_id}}/grants
-apikey: {{master_key}}
-Content-Type: application/json
-
-{"operation_id":{"epoch":{{epoch}},"nonce":"rest-grant"},"key_id":"{{shared_key_id}}","allow":true}
 
 ### Conditional creation; success is already durable and visible
 POST {{base_url}}/api/v1/index/{{collection_id}}/doc
@@ -153,9 +154,9 @@ Content-Type: application/json
 
 {"operation_id":{"epoch":{{epoch}},"nonce":"rest-backup"}}
 
-### Restore data into a new collection (master only; old grants are not restored)
+### Restore own Tenant backup into a new collection
 POST {{base_url}}/api/v1/restore
-apikey: {{master_key}}
+apikey: {{api_key}}
 Content-Type: application/json
 
 {"operation_id":{"epoch":{{epoch}},"nonce":"rest-restore"},"collection_id":"rest-restored","backup_id":"{{backup_id}}"}
