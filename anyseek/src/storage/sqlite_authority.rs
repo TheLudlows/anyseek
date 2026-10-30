@@ -558,7 +558,7 @@ impl SqliteAuthority {
         tx.commit()
     }
 
-    /// Seed a NEW isolated restore namespace; never rewind an existing live head.
+    /// Seed a new restore partition head; never rewind an existing live head.
     pub(crate) fn publish_restored_checkpoint(
         &mut self,partition_id:&str,expected_head_version:u64,owner_epoch:u64,seq:u64,manifest:ObjectRef,
     )->rusqlite::Result<Option<PartitionHead>> {

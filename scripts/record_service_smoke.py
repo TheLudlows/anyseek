@@ -151,7 +151,7 @@ def main():
             call('POST','/api/v1/index/shared/doc',cross_collection,key=keys['b'],status=400)
             future={**writes[0],'operation_id':{'epoch':int(time.time()//86400)+1,'nonce':'future'}}
             assert call('POST','/api/v1/index/shared/doc',future,key=keys['b'],status=410)['code']=='operation_expired'
-            # Unknown scopes must never resolve through legacy per-key indices.
+            # Invalid collection names are rejected before data lookup.
             call('GET','/api/v1/index/0',key=keys['b'],status=400)
             vc={'operation_id':operation(),'collection_id':'vectors','embedding_space_id':'fixture-f32-cosine','config':{'index_name':'Vectors','schema':[{'field':'body','field_type':'Text'},{'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}}
             call('POST','/api/v1/index',vc)

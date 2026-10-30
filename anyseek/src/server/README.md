@@ -134,13 +134,13 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 | Record 身份含墓碑、保留操作、候选 | 各 10,000；Record 操作是累计保留上限，checkpoint 不释放额度 |
 | 操作 / HTTP body / 响应 | 1 MiB / 2 MiB / 16 MiB |
 | Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
-| catalog | 16 MiB 代、10,000 操作，仅安全回收过期控制回执 |
+| Catalog | 16 MiB 元数据、10,000 操作，仅安全回收过期控制回执 |
 | admission | 普通 32/每集合 16、恢复 2/1、后台 2/1、可信控制 8/2、静态/存活 8/8；partition 内部 16；30 秒请求期限 |
-| 调度 | 不同 collection 可并行；key 撤销/共同快照等保留全局排空，资源不足立即 Busy |
+| 调度 | 不同 collection 可并行；共同快照保留全局屏障，Key 撤销不排空数据工作，资源不足立即 Busy |
 | collection backups | 32 个，可持久退役 |
 | service archives / 新恢复根 | 每源根最多 4 个 archive/准备项，托管父目录最多 4 个生成根，备份权威 payload 预检 1 GiB |
 
-资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。控制通道只在 master 认证后开放，不被数据工作借用；key/grant 控制不等待备份/恢复工作流锁，但仍遵守共同快照与授权屏障；删除保留与多阶段恢复工作流的原有顺序。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
+资源通道在读取大 body 前按路由和解码后的已登记 collection 身份选择；未知身份共享服务额度。平台管理通道只在 master 认证后开放，不被数据工作借用；Key 管理不等待备份/恢复工作流锁，仍参与共同快照排序，但不排空已认证数据工作；删除保留与多阶段恢复工作流的原有顺序。恢复/创建、PATCH checkpoint/collection backup/service backup 分别归恢复和后台通道。
 
 | 类别 | 全服务 / 每集合预留字节 | 全服务 / 每集合 I/O 并发 |
 | --- | --- | --- |
@@ -191,7 +191,7 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --b
 
 Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。存活服务的 WAL/在线 checkpoint 恢复与独立备份恢复不同；独立恢复目录不能提升为当前删除权威。
 
-`GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样执行授权与数据输出屏障。状态包括 visible、stale、deleted、unavailable、quarantined。
+`GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样检查 Tenant/集合代次和输出数据有效性。状态包括 visible、stale、deleted、unavailable、quarantined。
 
 当前 Record 权威 journal 使用 V12 entry 标签，拒绝旧格式，不提供升级迁移。低层搜索索引格式 8 与权威 journal 版本不是同一概念。
 
@@ -241,7 +241,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 `POST /api/v1/index/{id}/evidence` 接受 `{record_id,routing_key,version,locator}`。locator 可为 `{"kind":"utf8","field":"body","start":0,"end":5}`（UTF-8 字节半开区间，必须字符边界），或 `{"kind":"page","field":"pages","page":1}`（源字段为字符串数组、一基页码）。仅定位已持久内联 Source，不下载 URL 或解析 PDF；关系 endpoints/seeds 不接受 locator。派生 evidence_refs 和 generation source 可携带该定位。
 
-响应返回选中文本及完整字段/页的 SHA-256、固定 text/plain UTF-8 表示、精确 reference、共同水位与时间。Source 修订后可显式读取保留旧修订，普通 stale 派生仍隐藏；当前 source 已删除/过期/隔离时拒绝摘录，授权及输出屏障继续适用。定位写入和恢复均校验范围。UI 记录页可输入精确 reference 查看摘录。分平台结果见实施记录第 20 节。
+响应返回选中文本及完整字段/页的 SHA-256、固定 text/plain UTF-8 表示、精确 reference、共同水位与时间。Source 修订后可显式读取保留旧修订，普通 stale 派生仍隐藏；当前 source 已删除/过期/隔离时拒绝摘录，Tenant/集合代次和输出数据有效性检查继续适用。定位写入和恢复均校验范围。UI 记录页可输入精确 reference 查看摘录。分平台结果见实施记录第 20 节。
 
 ## staging 租约与私有清理
 

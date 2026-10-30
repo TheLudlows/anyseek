@@ -70,7 +70,7 @@ UI 增加实体目录/一跳关系检查；保留连接、创建/选择 collecti
 
 ## 资源与未完成项
 
-Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，key 撤销/共同快照仍全局排空；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
+Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，静态/存活 8/8；partition 内部 8。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 

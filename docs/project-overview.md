@@ -4,7 +4,7 @@
 
 ## 定位与总体判断
 
-anyseek 是面向 AI 记忆与知识的文档存储、检索底座，提供 Rust 核心库、HTTP API 和内嵌 Web UI。已经具备数据库主体能力：可靠记录、统一检索视图、生命周期、共享授权、持久化和恢复。当前最需要补齐的是长期运行、容量管理和运维验证。
+anyseek 是面向 AI 记忆与知识的文档存储、检索底座，提供 Rust 核心库、HTTP API 和内嵌 Web UI。已经具备数据库主体能力：可靠记录、统一检索视图、生命周期、Tenant 隔离、持久化和恢复。当前最需要补齐的是长期运行、容量管理和运维验证。
 
 应用负责文档解析、切块、Embedding、事实抽取、实体消歧、Rerank、模型推理和记忆归纳；anyseek 保存和检索准备好的记录、向量、来源及显式关系。不引入 SQL/JOIN、完整图查询语言或账户平台。
 
@@ -15,7 +15,7 @@ flowchart TB
     API["Rust API / HTTP / Web UI"]
     Record["记录与生命周期：版本、幂等、来源、整代发布、TTL"]
     Query["统一检索视图：全文、向量、混合、过滤、一跳关系"]
-    Control["授权屏障与资源预算"]
+    Control["集合生命周期与资源预算"]
     Storage["本地 Segment + WAL，或 SQLite + S3"]
     App --> Pipeline --> API
     App --> API

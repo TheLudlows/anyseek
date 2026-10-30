@@ -593,7 +593,7 @@ impl RemotePersistence {
 }
 
 impl RecordPartition {
-    /// Restore into a new object namespace. Borrowing another authority's object
+    /// Restore into a distinct partition identity. Borrowing another authority's object
     /// graph would let either GC delete the other owner's live data; instead copy
     /// verified canonical files and publish a new complete checkpoint before use.
     pub(super) async fn restore_s3_with_remote(
@@ -649,7 +649,7 @@ impl RecordPartition {
         let source_id = snapshot.heads[0].partition_id.clone();
         if source_id == target.partition_id {
             return Err(RecordError::Rejected(
-                "restore requires a new partition/object namespace".into(),
+                "restore requires a distinct partition identity".into(),
             ));
         }
         let source = RemotePersistence {
@@ -2023,7 +2023,7 @@ impl RecordPartition {
         Ok(())
     }
 
-    /// Activate a verified complete-service restore in a fresh S3 namespace.
+    /// Activate a verified restore in its target bucket/collection generation.
     /// The service's completion certificate is the restore identity; arbitrary
     /// local caches must never be adopted through this management-only entry point.
     pub async fn adopt_s3_snapshot(
