@@ -15,11 +15,12 @@ test('switching preserves drafts and pending requests; reload remembers language
   await page.getByRole('button',{name:'Create collection',exact:true}).click();
   await page.getByLabel('Collection name',{exact:true}).fill('my_draft');
   const before=calls;
-  await page.getByRole('dialog').getByLabel('语言 / Language').selectOption('zh');
-  await expect(page.getByLabel('集合名称',{exact:true})).toHaveValue('my_draft');
+  await expect(page.locator('.language-switch')).toHaveCount(1);
+  await expect(page.getByRole('dialog').locator('.language-switch')).toHaveCount(0);
+  await expect(page.getByLabel('Collection name',{exact:true})).toHaveValue('my_draft');
   expect(calls).toBe(before);
   expect(await page.evaluate(()=>sessionStorage.getItem('pendingWrites'))).toBe('{"owner":"other","requests":[]}');
-  await page.getByRole('button',{name:'取消',exact:true}).click();
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
   await page.getByLabel('语言 / Language').selectOption('en');
   await page.reload();
   await expect(page).toHaveTitle('AnySeek · Semantic Space');
@@ -42,9 +43,8 @@ test('mobile language switching works with storage disabled',async({page})=>{
   await page.setViewportSize({width:390,height:844});
   await page.goto('/');
   await page.evaluate(()=>{Storage.prototype.setItem=()=>{throw new Error('blocked');};});
-  await page.getByRole('button',{name:'打开导航'}).click();
   await page.getByLabel('语言 / Language').selectOption('en');
-  await expect(page.getByRole('navigation',{name:'Main navigation'})).toBeVisible();
-  await expect.poll(async()=>page.locator('.sidebar').evaluate(el=>el.getBoundingClientRect().x)).toBe(0);
+  await expect(page.locator('.topbar').getByLabel('语言 / Language')).toHaveValue('en');
+  await expect(page.locator('.sidebar .language-switch')).toHaveCount(0);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 });

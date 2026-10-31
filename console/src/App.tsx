@@ -190,7 +190,6 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <LanguageSwitch />
           <div className="sidebar-guide">
             <div className="guide-icon">
               <Layers3 size={17} />
@@ -292,6 +291,7 @@ export default function App() {
             >
               <CircleHelp size={18} />
             </a>
+            <LanguageSwitch />
             <span className="user-avatar" title={t("AnySeek 工作区")}>
               A
             </span>
