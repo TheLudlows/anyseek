@@ -5,10 +5,10 @@ import {
   collectionPath,
   newIdentity,
   newOperationId,
-  storage,
 } from "./api.ts";
 import { sendIngest } from "./ingest.ts";
-import type { EmbeddingConfig } from "./embeddings.ts";
+import { beginWriteAttempt, finishWriteAttempt, clearPendingWrites, restoreWriteOutcomes, type PendingWrites } from "./pending-writes.ts";
+export type { PendingWrites } from "./pending-writes.ts";
 import type { Json } from "./types.ts";
 
 export function documentJsonSlices(text: string, parsed: Json): string[] {
@@ -79,17 +79,6 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
     };
   });
 }
-export type PendingWrites = {
-  owner: string;
-  collection: string;
-  requests: { body: string; embedded?: boolean;
-    outcome?: "committed" | "rejected" | "unknown" | "not_attempted" }[];
-  delivery?: "ingest";
-  embedding?: { config: EmbeddingConfig; dimensions: number };
-  completed: number;
-  unresolved: boolean;
-  rejected?: boolean;
-};
 export async function sendWrites(
   pending: PendingWrites,
   key: string,
@@ -98,12 +87,11 @@ export async function sendWrites(
 ) {
   if (pending.owner !== owner)
     throw new Error(t("保留的写入属于另一连接，请使用原 API Key 处理。"));
+  restoreWriteOutcomes(pending);
   if (pending.delivery === "ingest") return sendIngest(pending, key, progress);
   for (let i = pending.completed; i < pending.requests.length; i++) {
-    const previouslyUnresolved = pending.unresolved;
-    pending.unresolved = true;
-    pending.rejected = false;
-    storage.set("pendingWrites", pending); // Storage must succeed before dispatch.
+    const batch = [pending.requests[i]];
+    const unknownBefore = beginWriteAttempt(pending, batch);
     try {
       await api(
         key,
@@ -111,18 +99,13 @@ export async function sendWrites(
         pending.requests[i].body,
       );
     } catch (error) {
-      pending.rejected =
-        !previouslyUnresolved &&
-        error instanceof ApiError &&
-        ["rejected", "conflict"].includes(error.code);
-      pending.unresolved = !pending.rejected;
-      storage.set("pendingWrites", pending);
+      const outcome = error instanceof ApiError && ["rejected", "conflict"].includes(error.code)
+        ? "rejected" : "unknown";
+      finishWriteAttempt(pending, batch, unknownBefore, [outcome]);
       throw error;
     }
-    pending.completed = i + 1;
-    pending.unresolved = false;
-    storage.set("pendingWrites", pending);
+    finishWriteAttempt(pending, batch, unknownBefore, ["committed"]);
     progress(pending.completed);
   }
-  storage.remove("pendingWrites");
+  clearPendingWrites();
 }

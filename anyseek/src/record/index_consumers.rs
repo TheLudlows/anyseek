@@ -131,7 +131,7 @@ impl Engine {
         match self {
             Self::Lexical(native) => native.append_queued(input.identity, &input.document).await,
             Self::Vector { index, .. } => {
-                let component = index.read().await.segments[0].clone();
+                let component = index.read().await.segments[0].vector.clone();
                 #[cfg(test)]
                 let fail_after = Path::new(&index.read().await.index_path_string)
                     .parent()

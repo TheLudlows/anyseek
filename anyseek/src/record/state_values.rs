@@ -5,16 +5,6 @@ use super::*;
 use crate::storage::build_budget::reserve_memory;
 
 impl<T: Serialize> Shared<T> {
-    pub(super) fn admit(value: T) -> Result<Self, RecordError> {
-        let bytes = checkpoint_codec::json_length(&value)? as u64;
-        let mut lease = reserve_memory(
-            bytes
-                .checked_mul(32)
-                .ok_or_else(|| storage("value size overflow"))?,
-        )
-        .map_err(storage)?;
-        Self::from_admitted(value, &mut lease)
-    }
     pub(super) fn wire_bytes(&self) -> usize {
         (self.charged_bytes() / 32) as usize
     }

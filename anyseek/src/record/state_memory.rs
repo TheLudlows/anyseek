@@ -30,6 +30,18 @@ impl ProofValue for Record {}
 impl ProofValue for Applied {}
 
 impl<T: Serialize> Shared<T> {
+    pub(super) fn admit(value: T) -> Result<Self, RecordError> {
+        let bytes = checkpoint_codec::json_length(&value)? as u64;
+        let lease = reserve_memory(
+            bytes
+                .checked_mul(32)
+                .ok_or_else(|| storage("value size overflow"))?,
+        )
+        .map_err(storage)?;
+        // The measured value moves unchanged into its owner with the full lease.
+        Ok(Self(Arc::new(ValueOwner { value, _lease: lease })))
+    }
+
     fn take_parts(parts: &mut [MemoryLease], bytes: u64) -> Result<MemoryLease, RecordError> {
         crate::storage::build_budget::validate_single(bytes).map_err(storage)?;
         let total=parts.iter().try_fold(0u64,|n,p|n.checked_add(p.bytes()).ok_or_else(||storage("prepared balance overflow")))?;
@@ -153,6 +165,7 @@ impl State {
 /// A gross ownership reservation prepared before the durable append. Replacing
 /// a same-sized live value still allocates a complete new value while a snapshot
 /// may retain the old one; no net-size subtraction is used for these owners.
+#[derive(Clone)]
 pub(super) struct Prepared {
     pub record: Shared<Record>,
     pub operation: Shared<Applied>,
@@ -190,6 +203,37 @@ impl Prepared {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    #[test]
+    fn admit_measures_once_and_external_admission_still_checks_size() {
+        struct Counted<'a>(&'a std::cell::Cell<usize>);
+        impl Serialize for Counted<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.0.set(self.0.get() + 1);
+                serializer.serialize_str("alpha")
+            }
+        }
+        let calls = std::cell::Cell::new(0);
+        let value = Shared::admit(Counted(&calls)).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(value.charged_bytes(), 7 * 32);
+        let owner = Arc::downgrade(&value.0);
+        let copy = value.clone();
+        drop(value);
+        assert!(owner.upgrade().is_some());
+        drop(copy);
+        assert!(owner.upgrade().is_none());
+
+        let mut short = reserve_memory(7 * 32 - 1).unwrap();
+        assert!(Shared::from_admitted(Counted(&calls), &mut short).is_err());
+        assert_eq!(calls.get(), 2);
+        assert_eq!(short.bytes(), 7 * 32 - 1);
+        let mut enough = reserve_memory(8 * 32).unwrap();
+        let value = Shared::from_admitted(Counted(&calls), &mut enough).unwrap();
+        assert_eq!(calls.get(), 3);
+        assert_eq!(value.charged_bytes(), 7 * 32);
+        assert_eq!(enough.bytes(), 32);
+    }
+
     // Exhausting the process-wide pool must not affect unrelated parallel tests.
     fn isolated_budget_case(name: &str) -> bool {
         const FLAG: &str = "ANYSEEK_STATE_OWNERSHIP_CHILD";

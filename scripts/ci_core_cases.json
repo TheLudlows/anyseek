@@ -73,7 +73,7 @@
   "record::query::tests::candidate_revalidation_drops_updated_and_deleted_rows_without_full_state_clone",
   "record::query::tests::source_deletion_still_fences_a_query_scored_outside_the_record_guard",
   "record::tests::record_cancelled_query_retains_lock_until_shard_task_releases_mmaps",
-  "record::query::tests::independent_lexical_order_and_topology_join_by_revision",
+  "record::query::tests::independent_lexical_order_joins_by_revision",
   "record::query::tests::captured_candidates_survive_cache_rebuild_with_new_physical_rows",
   "record::query::tests::captured_candidate_rejects_same_body_version_vector_patch",
   "record::query::tests::candidate_and_filter_revalidation_fence_failed_component_after_capture",

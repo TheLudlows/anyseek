@@ -50,7 +50,7 @@ impl Context<'_> {
         }
         let target=self.root.join(format!("cache-{:032x}",rand::random::<u128>()));
         let (successor,_)=build_at(self.root,&target,self.config,&State::default()).await?;
-        successor.read().await.record_lexical[0].admit_writer().await?;
+        successor.read().await.segments[0].lexical.admit_writer().await?;
         let budget=view::RotationBudget{max_segments:limit,
             max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?};
         self.index.seal_cache_into_successor(successor,self.ordinals,self.locations,budget).await

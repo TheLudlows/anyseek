@@ -494,8 +494,34 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toBeChecked();
   const source = "[" + Array.from({ length: 11 }, (_, i) => `{"body":"embedding document ${i}","large":9223372036854775807}`).join(",") + "]";
   await page.getByLabel("导入 JSON", { exact: true }).fill(source);
+  const ingests: string[] = [];
+  await page.route(`**/api/v1/index/${id}/ingest`, async route => {
+    ingests.push(route.request().postData()!);
+    const response = await route.fetch();
+    expect(response.status()).toBe(200);
+    await route.abort("failed");
+  }, { times: 1 });
   await page.getByRole("button", { name: "写入集合", exact: true }).click();
+  await expect(page.getByRole("button", { name: "重试原始写入" })).toBeVisible();
+  await page.reload();
+  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: /^数据 · /, level: 1 }) }).getByRole("button", { name: "导入数据", exact: true }).click();
+  await expect(page.getByLabel("导入 JSON", { exact: true })).toBeDisabled();
+  await page.route(`**/api/v1/index/${id}/ingest`, async route => {
+    ingests.push(route.request().postData()!);
+    await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({
+      results: route.request().postDataJSON().records.map((record: any) => ({ operation_id: record.operation_id, code: "rejected" })),
+    }) });
+  }, { times: 1 });
+  await page.getByRole("button", { name: "重试原始写入" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "部分结果未知" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "移除未提交的请求" })).toHaveCount(0);
+  await page.route(`**/api/v1/index/${id}/ingest`, async route => {
+    ingests.push(route.request().postData()!);
+    await route.continue();
+  }, { times: 1 });
+  await page.getByRole("button", { name: "重试原始写入" }).click();
   await expect(page.getByText("已确认提交 11 条，索引正在异步更新。", { exact: true })).toBeVisible();
+  expect(ingests).toEqual([ingests[0], ingests[0], ingests[0]]);
   expect(modelCalls).toBe(2);
   await page.getByRole("dialog").locator(".modal-actions").getByRole("button", { name: "关闭", exact: true }).click();
   await expect.poll(async () => {

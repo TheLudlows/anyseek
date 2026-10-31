@@ -36,11 +36,11 @@ impl RetrievalView {
         super::query::Handle::capture(&self.query,length).await
     }
     pub(super) async fn components(&self)->Vec<crate::component::VectorSegmentArc> {
-        self.query.read().await.segments.clone()
+        self.query.read().await.segments.iter().map(|segment| segment.vector.clone()).collect()
     }
     pub(super) async fn matches_identity(&self, ordinal:usize, identity:&lexical::Identity, fingerprint:[u8; 32])->Result<bool, RecordError> {
         let root=self.query.read().await;
-        let shard=root.segments[ordinal % root.segments.len()].read().await;
+        let shard=root.segments[ordinal % root.segments.len()].vector.read().await;
         let local=ordinal / root.segments.len();
         if shard.failed { return Err(RecordError::RecoveryRequired); }
         Ok(shard.active.as_ref().is_some_and(|active| active.is_live(local)
@@ -50,13 +50,13 @@ impl RetrievalView {
     }
     pub(super) async fn can_admit(&self,bytes:u64,native_updates:usize)->bool {
         let root=self.tail.read().await;
-        for native in &root.record_lexical {
-            if native.needs_rotation(native_updates).await {return false;}
+        for segment in &root.segments {
+            if segment.lexical.needs_rotation(native_updates).await {return false;}
         }
         if self.reserved_rows.is_some() {
             return self.component_bytes.checked_add(bytes).is_some_and(|n|crate::storage::build_budget::validate_single(n).is_ok());
         }
-        let shard=root.segments[0].read().await;
+        let shard=root.segments[0].vector.read().await;
         shard.build_reservation.as_ref().is_some_and(|r|r.can_grow(bytes))
     }
 
@@ -92,8 +92,7 @@ impl RetrievalView {
         {
             return Err(storage("replacement must be a separate single-segment tail"));
         }
-        let native_tail = tail_root.record_lexical.first().cloned().ok_or_else(|| storage("missing native tail"))?;
-        let tail_shard = tail_root.segments[0].clone();
+        let tail_segment = tail_root.segments[0].clone();
         let tail_meta = serde_json::to_value(&tail_root.meta).map_err(storage)?;
         let tail_schema = serde_json::to_value(&tail_root.schema_map).map_err(storage)?;
         drop(tail_root);
@@ -105,7 +104,7 @@ impl RetrievalView {
         }
         let previous = root.segments.len();
         if previous == 0
-            || root.segments.iter().any(|s| Arc::ptr_eq(s, &tail_shard))
+            || root.segments.iter().any(|s| Arc::ptr_eq(&s.vector, &tail_segment.vector))
         {
             return Err(storage("invalid retrieval view topology"));
         }
@@ -148,8 +147,8 @@ impl RetrievalView {
         // Lock every component before modifying anything. Cancellation while
         // acquiring locks leaves the current context and addresses unchanged.
         root.segments.try_reserve(1).map_err(storage)?;
-        let mut shards = futures::future::join_all(root.segments.iter().map(|s| s.write())).await;
-        let mut tail = tail_shard.write().await;
+        let shards = futures::future::join_all(root.segments.iter().map(|segment| segment.vector.write())).await;
+        let tail = tail_segment.vector.write().await;
         let local = tail
             .active
             .as_ref()
@@ -157,29 +156,14 @@ impl RetrievalView {
         if !local.keys.is_empty() {
             return Err(storage("replacement tail is not empty"));
         }
-        let mut statistics = Vec::new();
-        statistics.try_reserve(next).map_err(storage)?;
-        let new_stats = local.clone();
-        statistics.push(new_stats);
         for shard in &shards {
-            let mut local = shard
-                .active
-                .as_ref()
-                .ok_or_else(|| storage("missing segment statistics"))?
-                .clone();
-            statistics.push(local);
+            shard.active.as_ref().ok_or_else(|| storage("missing segment statistics"))?;
         }
-        // No await or fallible work after this point. Old statistics point only
-        // at the discarded corpus; Drop does not retire their contributions.
-        let mut statistics = statistics.into_iter();
-        tail.active = statistics.next();
-        for (shard, statistics) in shards.iter_mut().zip(statistics) {
-            shard.active = Some(statistics);
-        }
+        // No await or fallible work after this point. Existing statistics and
+        // shared retirement masks remain owned by their original components.
         drop(tail);
         drop(shards);
-        root.record_lexical.insert(0, native_tail);
-        root.segments.insert(0, tail_shard);
+        root.segments.insert(0, tail_segment);
 
         *ordinals = mapped;
         *locations = next_locations;
@@ -210,7 +194,7 @@ impl RetrievalView {
         let id=path.file_name().unwrap().to_str().unwrap().strip_prefix("segment-").unwrap().to_owned();
         self.pending_seals.try_reserve(1).map_err(storage)?;
         self.tail.commit().await.map_err(storage)?;
-        let native=self.tail.read().await.record_lexical[0].clone();
+        let native=self.tail.read().await.segments[0].lexical.clone();
         native.seal().await?;
         let package=segment::Package::seal(root,&path,id,limit)?;
         self.rotate_tail(new_tail,ordinals,locations,budget).await?;
@@ -230,7 +214,7 @@ impl RetrievalView {
         if self.batch {
             self.initialize_async().await?;
             let local=self.reserved_rows.ok_or(RecordError::RecoveryRequired)?;
-            let native=self.tail.read().await.record_lexical[0].clone();
+            let native=self.tail.read().await.segments[0].lexical.clone();
             let identity=lexical::Identity { id:key.clone(),version,revision };
             let vector=index_consumers::Input::vector(&native.config,identity.clone(),local,&document)?;
             let lexical=index_consumers::Input::admitted(&native,identity,&document)?;
@@ -242,7 +226,7 @@ impl RetrievalView {
             self.batch_inputs.push(lexical); self.batch_vectors.push(vector);
             return local.checked_mul(self.query.read().await.segments.len()).ok_or_else(||storage("candidate address overflow"));
         }
-        let shard = self.tail.read().await.segments[0].clone();
+        let shard = self.tail.read().await.segments[0].vector.clone();
         {
             let mut shard=shard.write().await;
             if let Some(memory)=&mut shard.build_reservation {
@@ -260,7 +244,7 @@ impl RetrievalView {
             active.append_identity(key, version, revision, crate::active::fingerprint(&document).map_err(storage)?);
             local
         };
-        let native = self.tail.read().await.record_lexical[0].clone();
+        let native = self.tail.read().await.segments[0].lexical.clone();
         let identity = lexical::Identity { id:key_for_native, version, revision };
         native.append(identity, &document, true).await?;
         self.tail
@@ -281,19 +265,19 @@ impl RetrievalView {
         let root=self.query.read().await;
         self.retired.clear();
         for component in &root.segments {
-            let mut shard=component.write().await;
+            let mut shard=component.vector.write().await;
             let active=shard.active.as_mut().ok_or_else(||storage("component statistics missing"))?;
             let mask=active.retired.get_or_insert_with(Default::default).clone();
             self.retired.push(mask);
         }
         drop(root);
         let root=self.tail.read().await;
-        let shard=root.segments[0].read().await;
+        let shard=root.segments[0].vector.read().await;
         self.reserved_rows=Some(shard.indexed_doc_count);
         self.component_bytes=shard.build_reservation.as_ref().map_or(0,|r|r.bytes());
         let path=Path::new(&root.index_path_string).parent().ok_or_else(||storage("component parent missing"))?.to_owned();
-        self.lexical=Some(index_consumers::Consumer::new_lexical(root.record_lexical[0].clone(),cursors.clone(),path.clone(),self.owner.clone()));
-        self.vector=Some(index_consumers::Consumer::new_vector(self.tail.clone(),root.record_lexical[0].clone(),cursors,path,self.owner.clone()));
+        self.lexical=Some(index_consumers::Consumer::new_lexical(root.segments[0].lexical.clone(),cursors.clone(),path.clone(),self.owner.clone()));
+        self.vector=Some(index_consumers::Consumer::new_vector(self.tail.clone(),root.segments[0].lexical.clone(),cursors,path,self.owner.clone()));
         Ok(())
     }
     pub(super) async fn begin_batch(&mut self,cursors:Arc<index_consumers::Cursors>,owner:std::sync::Weak<Mutex<Inner>>) -> Result<(),RecordError> {
@@ -333,7 +317,7 @@ impl RetrievalView {
         }
         let root=self.query.read().await;
         let n=root.segments.len();
-        let mut shard=root.segments[ordinal%n].write().await;
+        let mut shard=root.segments[ordinal%n].vector.write().await;
         let local=ordinal/n;
         shard.delete_hashset.insert(local);
         let active = shard.active.as_mut().ok_or_else(||storage("missing view statistics"))?;
@@ -365,27 +349,27 @@ impl RetrievalView {
         let root=self.query.read().await;
         let mut result=Vec::new();
         for shard in &root.segments {
-            result.push(shard.read().await.active.as_ref().ok_or_else(||storage("missing view statistics"))?.clone_local());
+            result.push(shard.vector.read().await.active.as_ref().ok_or_else(||storage("missing view statistics"))?.clone_local());
         }
         Ok(result)
     }
     pub(super) async fn has_tail_rows(&self)->Result<bool,RecordError> {
         let root=self.tail.read().await;
-        let tail=root.segments[0].read().await;
+        let tail=root.segments[0].vector.read().await;
         Ok(!tail.active.as_ref().ok_or_else(||storage("missing tail statistics"))?.keys.is_empty())
     }
     pub(super) async fn statistics_wire_length(&self)->Result<usize,RecordError>{
         let root=self.query.read().await;let mut bytes=2usize;
         for shard in &root.segments {
-            let shard=shard.read().await;
+            let shard=shard.vector.read().await;
             let active=shard.active.as_ref().ok_or_else(||storage("missing view statistics"))?;
             bytes=bytes.checked_add(checkpoint_codec::json_length(active)?).and_then(|n|n.checked_add(1)).ok_or_else(||storage("statistics size overflow"))?;
         }
         Ok(bytes)
     }
     pub(super) async fn storage_paths(&self)->Vec<PathBuf>{
-        let mut paths = self.query.read().await.record_lexical.iter()
-            .map(|native| native.package_path().to_owned()).collect::<Vec<_>>();
+        let mut paths = self.query.read().await.segments.iter()
+            .map(|segment| segment.lexical.package_path().to_owned()).collect::<Vec<_>>();
         paths.push(PathBuf::from(&self.tail.read().await.index_path_string));
         paths.sort(); paths.dedup(); paths
     }
@@ -414,7 +398,7 @@ mod tests {
             let (tail, _) = build_at(&root, &target, &inner.config, &State::default())
                 .await
                 .unwrap();
-            let tail_shard = tail.read().await.segments[0].clone();
+            let tail_shard = tail.read().await.segments[0].vector.clone();
             let held = tail_shard.write().await;
             let Inner {
                 index,
@@ -424,8 +408,10 @@ mod tests {
             } = &mut *inner;
             let original = ordinals.clone();
             let original_locations = locations.clone();
-            let previous_component = index.query.read().await.segments[0].clone();
+            let previous_component = index.query.read().await.segments[0].vector.clone();
+            let previous_native = index.query.read().await.segments[0].lexical.clone();
             let previous_meta = serde_json::to_value(&previous_component.read().await.meta).unwrap();
+            let previous_keys = previous_component.read().await.active.as_ref().unwrap().keys.as_ptr();
             {
                 let pending = index.rotate_tail(
                     tail.clone(),
@@ -457,7 +443,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(index.query.read().await.segments.len(), 2);
-            assert!(Arc::ptr_eq(&index.query.read().await.segments[1], &previous_component));
+            assert!(Arc::ptr_eq(&index.query.read().await.segments[1].vector, &previous_component));
+            assert!(Arc::ptr_eq(&index.query.read().await.segments[1].lexical, &previous_native));
+            assert_eq!(previous_component.read().await.active.as_ref().unwrap().keys.as_ptr(), previous_keys,
+                "rotation must retain the original statistics allocation");
             assert_eq!(serde_json::to_value(&previous_component.read().await.meta).unwrap(), previous_meta,
                 "rotation must not rewrite metadata shared with captured readers");
         }

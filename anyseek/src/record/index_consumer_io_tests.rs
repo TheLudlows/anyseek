@@ -8,7 +8,7 @@ async fn fixture() -> (tempfile::TempDir, VectorIndexArc, RecordConfig, Engine, 
         "field":"number", "field_type":"Int", "facet":true, "store":false, "index_lexical":false
     })).unwrap());
     let (index, _) = build_at(root.path(), &root.path().join("cache"), &config, &State::default()).await.unwrap();
-    let native = index.read().await.record_lexical[0].clone();
+    let native = index.read().await.segments[0].lexical.clone();
     let engine = Engine::Vector { index:index.clone(), _native:native };
     let scope = Arc::new(crate::resources::Governor::default())
         .admit("vector-contention".into(),crate::resources::Lane::Background,0).unwrap();
@@ -21,7 +21,7 @@ fn input(config:&RecordConfig) -> Input {
 #[tokio::test(flavor="current_thread")]
 async fn vector_io_waits_before_identity_and_metadata_growth() {
     let (_root,index,config,engine,scope) = fixture().await;
-    let component = index.read().await.segments[0].clone();
+    let component = index.read().await.segments[0].vector.clone();
     // Force capacity growth with one row rather than a 65K-row workload.
     component.write().await.facets_file_mmap = memmap2::MmapOptions::new().len(1).map_anon().unwrap();
     let held = scope.io().unwrap(); let cursors = Cursors::default();
@@ -43,7 +43,7 @@ async fn vector_io_waits_before_identity_and_metadata_growth() {
 async fn component_commit_waits_then_finishes_vector_and_descriptor_under_one_loan() {
     let (_root,index,config,engine,scope) = fixture().await;
     let cursors = Cursors::default(); engine.append(input(&config),&cursors).await.unwrap();
-    let component = index.read().await.segments[0].clone();
+    let component = index.read().await.segments[0].vector.clone();
     let path = std::path::PathBuf::from(index.read().await.index_path_string.clone());
     let before = std::fs::read(path.join("component.json")).unwrap();
     let held = scope.io().unwrap();
@@ -53,14 +53,15 @@ async fn component_commit_waits_then_finishes_vector_and_descriptor_under_one_lo
     drop(held);
     tokio::time::timeout(std::time::Duration::from_secs(5),pending).await.unwrap().unwrap();
     assert_eq!(component.read().await.committed_doc_count,1);
-    let reopened = crate::component::open_index(&path).await.unwrap();
-    assert_eq!(reopened.read().await.segments[0].read().await.indexed_doc_count,1);
+    index.read().await.segments[0].lexical.seal().await.unwrap();
+    let reopened = crate::component::open_index(&path, &config).await.unwrap();
+    assert_eq!(reopened.read().await.segments[0].vector.read().await.indexed_doc_count,1);
     assert!(scope.io().is_ok());
 }
 #[tokio::test(flavor="current_thread")]
 async fn vector_real_metadata_io_failure_still_fences_component_and_cursor() {
     let (_root,index,config,engine,scope) = fixture().await;
-    let component = index.read().await.segments[0].clone();
+    let component = index.read().await.segments[0].vector.clone();
     { let mut shard = component.write().await;
       shard.facets_file_mmap = memmap2::MmapOptions::new().len(1).map_anon().unwrap();
       shard.readonly_metadata_for_test(); }
@@ -75,7 +76,7 @@ async fn vector_real_metadata_io_failure_still_fences_component_and_cursor() {
 async fn component_real_vector_write_failure_still_fences_after_partial_commit() {
     let (_root,index,config,engine,scope) = fixture().await;
     let cursors = Cursors::default(); engine.append(input(&config),&cursors).await.unwrap();
-    let component = index.read().await.segments[0].clone();
+    let component = index.read().await.segments[0].vector.clone();
     let path = std::path::PathBuf::from(index.read().await.index_path_string.clone());
     component.write().await.vector_file = crate::storage::build_budget::File::open(path.join("vectors.bin")).unwrap();
     assert!(scope.clone().run(index.commit()).await.is_err());
@@ -86,7 +87,7 @@ async fn component_real_vector_write_failure_still_fences_after_partial_commit()
 #[tokio::test(flavor="current_thread")]
 async fn component_guard_owner_can_finish_io_while_consumer_waits_for_guard() {
     let (_root,index,config,engine,scope) = fixture().await;
-    let component = index.read().await.segments[0].clone();
+    let component = index.read().await.segments[0].vector.clone();
     let mut shard = component.write().await;
     let cursors = Cursors::default(); let mut queued = input(&config); queued.ordinal = 1;
     let mut waiting = Box::pin(scope.clone().run(engine.append(queued,&cursors)));
@@ -109,18 +110,18 @@ async fn successor_component_creation_waits_before_touching_candidate_and_keeps_
     let schema = retrieval_schema(&config);
     let held = scope.io().unwrap();
     let mut create = Box::pin(scope.clone().run(crate::component::create_index(
-        &candidate,config.index.clone(),&schema)));
+        &candidate,config.index.clone(),&schema,&config)));
     assert!(tokio::time::timeout(std::time::Duration::from_millis(20),&mut create).await.is_err());
     assert!(!candidate.exists(), "no partial candidate on transient I/O contention");
     drop(held);
     let successor = tokio::time::timeout(std::time::Duration::from_secs(5),create).await.unwrap().unwrap();
-    assert_eq!(successor.read().await.segments[0].read().await.indexed_doc_count,0);
+    assert_eq!(successor.read().await.segments[0].vector.read().await.indexed_doc_count,0);
     assert!(candidate.join("schema.json").exists());
     assert!(candidate.join("vectors.bin").exists());
     assert!(candidate.join("metadata.bin").exists());
     let cursors = Cursors::default();
     scope.clone().run(engine.append(input(&config),&cursors)).await.unwrap();
     scope.clone().run(index.commit()).await.unwrap();
-    assert_eq!(index.read().await.segments[0].read().await.indexed_doc_count,1);
+    assert_eq!(index.read().await.segments[0].vector.read().await.indexed_doc_count,1);
     assert!(cursors.error().is_none()); assert!(scope.io().is_ok());
 }

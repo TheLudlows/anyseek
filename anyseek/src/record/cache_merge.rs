@@ -49,7 +49,7 @@ pub(super) async fn build_candidate(root:&Path,config:&RecordConfig,snapshot:&Sn
     let path=root.join(format!("cache-{:032x}",rand::random::<u128>()));
     let (candidate,_)=build_records_at(root,&path,config,snapshot.seq,snapshot.records.iter().map(|record|&**record).collect()).await?;
     candidate.commit().await.map_err(storage)?;
-    candidate.read().await.record_lexical[0].seal().await?;
+    candidate.read().await.segments[0].lexical.seal().await?;
     Ok(candidate)
 }
 
@@ -71,21 +71,21 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
         let path=root.join(format!("cache-{:032x}",rand::random::<u128>()));
         let (index,_)=build_records_at(root,&path,config,state.seq,chunk.to_vec()).await?;
         index.commit().await.map_err(storage)?;
-        index.read().await.record_lexical[0].seal().await?;
+        index.read().await.segments[0].lexical.seal().await?;
         indexes.push(index);
     }
     if indexes.is_empty() {
         let path=root.join(format!("cache-{:032x}",rand::random::<u128>()));
         let (index,_)=build_records_at(root,&path,config,state.seq,Vec::new()).await?;
         index.commit().await.map_err(storage)?;
-        index.read().await.record_lexical[0].seal().await?;indexes.push(index);
+        index.read().await.segments[0].lexical.seal().await?;indexes.push(index);
     }
-    let count=indexes.len();let mut shards=Vec::new();let mut natives=Vec::new();
+    let count=indexes.len();let mut segments=Vec::new();
     let mut ordinals=Vec::new();let mut locations=BTreeMap::new();
     for (slot,index) in indexes.iter().enumerate() {
         let index=index.read().await;
         let component=index.segments[0].clone();
-        {let mut shard=component.write().await;
+        {let mut shard=component.vector.write().await;
             let active=shard.active.as_mut().ok_or_else(||storage("recovery statistics missing"))?;
             active.retired.get_or_insert_with(Default::default);
             for (local,key) in active.keys.iter().enumerate() {
@@ -94,10 +94,10 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
                 ordinals[address]=key.clone();locations.insert(key.clone(),address);
             }
         }
-        shards.push(component);natives.push(index.record_lexical[0].clone());
+        segments.push(component);
     }
     let index=indexes[0].clone();
-    {let mut root=index.write().await;root.segments=shards;root.record_lexical=natives;}
+    {let mut root=index.write().await;root.segments=segments;}
     let mut view=view::RetrievalView::single(index);view.detached_cache=true;
     view.retain_address_budget(inventory,inventory_scope);
     Ok((view,ordinals,locations))
@@ -150,7 +150,7 @@ impl RecordPartition {
                     let config=inner.config.clone();
                     let base=serde_json::to_vec(&inner.anchor).map_err(storage)?;
                     let selected=inner.anchor.as_ref().map(|anchor|anchor.retained_packages().iter()
-                        .filter(|package|sources.natives.iter().any(|native|package.path(&root).is_ok_and(|path|path==native.package_path())))
+                        .filter(|package|sources.segments.iter().any(|segment|package.path(&root).is_ok_and(|path|path==segment.lexical.package_path())))
                         .cloned().collect::<Vec<_>>()).unwrap_or_default();
                     // A cache build uses the existing owner/GC barrier without
                     // copying a WAL suffix. Live updates propagate retirement
@@ -250,7 +250,7 @@ mod tests {
     async fn derived_merge_catches_concurrent_update_delete_and_recovers_without_certificate() {
         let temporary=tempfile::tempdir().unwrap();let root=temporary.path().join("records");
         let p=fixture(&root).await;
-        let held={let inner=p.inner.lock().await;inner.index.test_index().read().await.record_lexical[1].clone()};
+        let held={let inner=p.inner.lock().await;inner.index.test_index().read().await.segments[1].lexical.clone()};
         let held=held.snapshot().await.unwrap();
         std::fs::write(root.join(".test-cache-merge-pause"),b"pause").unwrap();
         let job=p.start_cache_merge_job(Duration::from_secs(20)).unwrap();started(&root).await;

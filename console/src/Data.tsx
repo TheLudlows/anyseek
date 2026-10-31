@@ -10,7 +10,7 @@ import {
   RefreshCw,
   Upload,
 } from "lucide-react";
-import { api, collectionPath, message, storage } from "./api.ts";
+import { api, collectionPath, message } from "./api.ts";
 import { apiFieldText, apiJsonText } from "./json.ts";
 import {
   Busy,
@@ -24,6 +24,7 @@ import {
   sendWrites,
   type PendingWrites,
 } from "./writes.ts";
+import { loadPendingWrites, savePendingWrites, clearPendingWrites } from "./pending-writes.ts";
 import { loadEmbeddingConfig } from "./embeddings.ts";
 import { generatePendingEmbeddings, prepareEmbeddedWrites } from "./embedding-writes.ts";
 import { SchemaTable } from "./SchemaTable.tsx";
@@ -297,7 +298,7 @@ function ImportData({
     catch (e) { setError(message(e)); }
   }
   const [pending, setPending] = useState<PendingWrites | null>(() =>
-    storage.get("pendingWrites"),
+    loadPendingWrites(),
   );
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
@@ -331,7 +332,7 @@ function ImportData({
           unresolved: false,
           ...(format === "markdown" ? { delivery: "ingest" as const } : {}),
         };
-        storage.set("pendingWrites", request);
+        savePendingWrites(request);
         setPending(request);
       }
       if (request.embedding) {
@@ -354,7 +355,7 @@ function ImportData({
       if (request.delivery === "ingest") await refreshProgress();
       await onWritten();
     } catch (e) {
-      setPending(storage.get("pendingWrites"));
+      setPending(loadPendingWrites());
       setError(message(e));
     } finally {
       setBusy(false);
@@ -456,7 +457,7 @@ function ImportData({
               className="secondary"
               disabled={busy}
               onClick={() => {
-                storage.remove("pendingWrites");
+                clearPendingWrites();
                 setPending(null);
                 setStatus(t("已保留确认写入的数据，已移除拒绝及未发送的请求。"));
                 setError("");

@@ -870,15 +870,15 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
         &cache,
         config.index.clone(),
         &retrieval_schema(config),
+        config,
     )
-    .await
-    .map_err(storage)?;
+    .await?;
     // Break legacy ownership cycles so a rejected candidate can release mapped
     // files on Windows. The partition owns the root for the complete query.
-    index.read().await.segments[0].write().await.build_reservation=Some(reservation);
-    index.read().await.segments[0].write().await.build_input_covered=true;
+    index.read().await.segments[0].vector.write().await.build_reservation=Some(reservation);
+    index.read().await.segments[0].vector.write().await.build_input_covered=true;
     for shard in &index.read().await.segments {
-        let mut shard=shard.write().await;
+        let mut shard=shard.vector.write().await;
         shard.active=Some(crate::active::ActiveStatistics::default());
         // Record segments must not choose a quantizer from the first arriving
         // vector. Pin the non-affine scalar layout across tail/flush/recovery.
@@ -897,10 +897,10 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
         }
     }
 
-    let native = lexical::runtime::Runtime::create_owned(&cache.join("native"), config).await?;
+    let native = index.read().await.segments[0].lexical.clone();
     for record in &records {
         native.append(lexical::Identity { id:record.record_id.clone(),version:record.version,revision:sequence },record.document.as_ref().unwrap(),false).await?;
-        index.read().await.segments[0]
+        index.read().await.segments[0].vector
             .write()
             .await
             .active
@@ -914,9 +914,8 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
             .map_err(storage)?;
     }
     native.flush().await?;
-    index.write().await.record_lexical.push(native);
     index.commit().await.map_err(storage)?;
-    index.read().await.segments[0].write().await.build_input_covered=false;
+    index.read().await.segments[0].vector.write().await.build_input_covered=false;
     Ok((
         index,
         records.into_iter().map(|r| r.record_id.clone()).collect(),
@@ -1807,7 +1806,7 @@ mod tests {
             let index = inner.index.test_index().read().await;
             assert!(index.stored_field_names.is_empty());
             for shard in &index.segments {
-                assert!(shard.read().await.stored_field_names.is_empty());
+                assert!(shard.vector.read().await.stored_field_names.is_empty());
             }
             drop(index);
             drop(inner);
@@ -3477,8 +3476,8 @@ mod tests {
         // The final boundary crossing still uses authoritative publication.
         {
             let mut inner = partition.inner.lock().await;
-            let shard = inner.index.test_index().read().await.segments[0].clone();
-            let native=inner.index.test_index().read().await.record_lexical[0].clone();
+            let shard = inner.index.test_index().read().await.segments[0].vector.clone();
+            let native=inner.index.test_index().read().await.segments[0].lexical.clone();
             shard.write().await.build_input_covered=true;
             for id in 1..65536 {
                 native.append(lexical::Identity{id:"a".into(),version:id as u64+1,revision:0},&original.document.clone().unwrap(),false).await.unwrap();

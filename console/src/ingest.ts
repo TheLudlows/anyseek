@@ -1,7 +1,7 @@
 import { t } from "./i18n.ts";
-import { collectionPath, storage } from "./api.ts";
+import { collectionPath } from "./api.ts";
 import { parseApiJson } from "./json.ts";
-import type { PendingWrites } from "./writes.ts";
+import { beginWriteAttempt, finishWriteAttempt, clearPendingWrites, type PendingWrites } from "./pending-writes.ts";
 
 export async function sendIngest(pending: PendingWrites, key: string, progress: (done: number) => void) {
   if (pending.embedding && pending.requests.some((request) => !request.embedded))
@@ -19,11 +19,7 @@ export async function sendIngest(pending: PendingWrites, key: string, progress: 
       }
       batch.push(request); bytes += size; offset++;
     }
-    const unknownBefore = batch.map((item) => item.outcome === "unknown");
-    // A lost response must remain retryable even after refresh or a later rejection.
-    batch.forEach((item) => { item.outcome = "unknown"; });
-    pending.unresolved = true; pending.rejected = false;
-    storage.set("pendingWrites", pending);
+    const unknownBefore = beginWriteAttempt(pending, batch);
     const response = await fetch("/api/v1/" + collectionPath(pending.collection) + "/ingest", {
       method: "POST", headers: { apikey: key, "Content-Type": "application/json" }, cache: "no-store",
       body: '{"records":[' + batch.map((item) => item.body).join(",") + "]}",
@@ -39,20 +35,13 @@ export async function sendIngest(pending: PendingWrites, key: string, progress: 
         || (row.code === "committed" && (!row.receipt || row.receipt.record_id !== JSON.parse(batch[i].body).record_id)))
         throw new Error(t("写入回执身份或格式不匹配，请保留原请求重试。"));
     });
-    value.results.forEach((row: any, i: number) => {
-      batch[i].outcome = row.code === "committed" ? "committed"
-        : unknownBefore[i] || row.code === "outcome_unknown" ? "unknown"
-        : row.code === "rejected" ? "rejected" : "not_attempted";
-    });
-    pending.completed = pending.requests.filter((item) => item.outcome === "committed").length;
-    pending.unresolved = pending.requests.some((item) => item.outcome === "unknown");
-    pending.rejected = !pending.unresolved && pending.requests.some((item) => item.outcome === "rejected");
-    storage.set("pendingWrites", pending);
+    finishWriteAttempt(pending, batch, unknownBefore,
+      value.results.map((row: any) => row.code === "outcome_unknown" ? "unknown" : row.code));
     progress(pending.completed);
     if (batch.some((item) => item.outcome !== "committed")) {
       const rejected = pending.requests.filter((item) => item.outcome === "rejected").length;
       throw new Error(t("已确认提交 {0} 条；{1}{2}请重试保留请求或检查服务状态。", pending.completed, rejected ? t("{0} 条被拒绝；", rejected) : "", pending.unresolved ? t("部分结果未知；") : ""));
     }
   }
-  storage.remove("pendingWrites");
+  clearPendingWrites();
 }

@@ -192,3 +192,62 @@ test("failure to persist the identity prevents dispatch; other connections canno
   sessionStorage.setItem = old;
   assert.equal(calls, 0);
 });
+
+test("saved /doc prefix and unresolved flags from before per-request outcomes retain original identities", async () => {
+  const { loadPendingWrites } = await import("../src/pending-writes.ts");
+  const legacy = pending('[{"body":"confirmed"},{"body":"unknown"},{"body":"unsent"}]');
+  legacy.completed = 1;
+  legacy.unresolved = true;
+  storage.set("pendingWrites", legacy);
+  let restored = loadPendingWrites()!;
+  const sent: string[] = [];
+  globalThis.fetch = async (_url, options) => {
+    sent.push(String(options?.body));
+    return new Response('{"code":"rejected"}', { status: 400 });
+  };
+  await assert.rejects(sendWrites(restored, "key", "owner"));
+  restored = loadPendingWrites()!;
+  assert.equal(restored.completed, 1);
+  assert.equal(restored.unresolved, true);
+  assert.equal(restored.rejected, false);
+  globalThis.fetch = async (_url, options) => {
+    sent.push(String(options?.body));
+    return new Response("{}");
+  };
+  await sendWrites(restored, "key", "owner");
+  assert.deepEqual(sent, [legacy.requests[1].body, legacy.requests[1].body, legacy.requests[2].body]);
+  assert.equal(loadPendingWrites(), null);
+});
+
+test("both transports retain persisted unknown identity if saving a confirmation fails", async () => {
+  const { loadPendingWrites } = await import("../src/pending-writes.ts");
+  for (const delivery of [undefined, "ingest"] as const) {
+    let request = pending('{"body":"one"}');
+    request.delivery = delivery;
+    const original = request.requests[0].body;
+    const setItem = sessionStorage.setItem;
+    globalThis.fetch = async (_url, options) => {
+      assert.equal(options?.body, delivery ? '{"records":[' + original + "]}" : original);
+      // Dispatch was saved, but the confirmation cannot be persisted.
+      sessionStorage.setItem = () => { throw new Error("confirmation quota"); };
+      const record = JSON.parse(original);
+      return new Response(delivery ? JSON.stringify({ results: [{ operation_id: record.operation_id,
+        code: "committed", receipt: { record_id: record.record_id } }] }) : "{}");
+    };
+    await assert.rejects(sendWrites(request, "key", "owner"), /confirmation quota/);
+    sessionStorage.setItem = setItem;
+    request = loadPendingWrites()!;
+    assert.equal(request.completed, 0);
+    assert.equal(request.unresolved, true);
+    globalThis.fetch = async () => {
+      const record = JSON.parse(original);
+      return new Response(delivery ? JSON.stringify({ results: [{ operation_id: record.operation_id,
+        code: "rejected" }] }) : '{"code":"rejected"}', { status: 400 });
+    };
+    await assert.rejects(sendWrites(request, "key", "owner"));
+    request = loadPendingWrites()!;
+    assert.equal(request.unresolved, true);
+    assert.equal(request.rejected, false);
+    assert.equal(request.requests[0].body, original);
+  }
+});
