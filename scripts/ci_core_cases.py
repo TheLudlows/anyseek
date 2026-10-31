@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run an explicit small cross-platform regression set; reject missing tests."""
+from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -31,10 +33,18 @@ def main():
     assert set(names) <= available, sorted(set(names) - available)
     for name in names:
         print(f"START {name}", flush=True)
-        result = subprocess.run(
-            [binary, name, "--exact", "--include-ignored", "--test-threads=1", "--nocapture"],
-            cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        print(result.stdout, flush=True)
+        trace_case = name == "record::maintenance::tests::receipt_gc_remote_checkpoint_cold_recovery_preserves_time_prefix"
+        with (tempfile.TemporaryDirectory(prefix="anyseek-maintenance-trace-") if trace_case else nullcontext()) as directory:
+            trace = Path(directory) / "phases.log" if directory else None
+            env = os.environ.copy() if trace else None
+            if trace:
+                env["ANYSEEK_TEST_PHASE_TIMINGS"] = str(trace)
+            result = subprocess.run(
+                [binary, name, "--exact", "--include-ignored", "--test-threads=1", "--nocapture"],
+                cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            print(result.stdout, flush=True)
+            if trace and trace.exists():
+                print(trace.read_text(encoding="utf-8"), flush=True)
         result.check_returncode()
         assert "test result: ok. 1 passed; 0 failed; 0 ignored;" in result.stdout, name
     print(f"PASS {len(names)} exact core cases", flush=True)

@@ -108,14 +108,24 @@ impl RecordPartition {
         let recovery = owner.clone();
         let cursors = self.indexes.clone();
         let handle = crate::resources::spawn_background(async move {
+          #[cfg(test)]
+          let _worker_phase=maintenance::Phase::new("background_worker",0);
           let outcome = std::panic::AssertUnwindSafe(async move {
             let _worker = worker;
             let _admission = admission;
             let started = Instant::now();
             let id = rand::random::<u128>();
             let plan = {
+                #[cfg(test)]
+                let waiting=maintenance::Phase::new("background_capture_writer_wait",0);
                 let _writer = writer.lock().await;
+                #[cfg(test)]
+                drop(waiting);
+                #[cfg(test)]
+                let waiting=maintenance::Phase::new("background_capture_inner_wait",0);
                 let mut inner = owner.lock().await;
+                #[cfg(test)]
+                drop(waiting);
                 let _capture_phase=maintenance::Phase::new("background_capture_locked",inner.state.seq);
                 if !inner.healthy { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
@@ -380,8 +390,16 @@ impl RecordPartition {
             }.await;
             // Drop construction accounting before rescanning/removing orphans.
             drop(disk); drop(memory);
+            #[cfg(test)]
+            let waiting=maintenance::Phase::new("background_cleanup_writer_wait",cut);
             let _writer = writer.lock().await;
+            #[cfg(test)]
+            drop(waiting);
+            #[cfg(test)]
+            let waiting=maintenance::Phase::new("background_cleanup_inner_wait",cut);
             let mut inner = owner.lock().await;
+            #[cfg(test)]
+            drop(waiting);
             if matches!(&result,Err(RecordError::RecoveryRequired)) {
                 inner.healthy=false;
                 inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
@@ -434,9 +452,19 @@ impl RecordPartition {
             }
           };
           if automatic {
-              let _writer = recovery_writer.lock().await;
-              let mut inner=recovery.lock().await;
               let outcome=match &result {Ok(_)=>"installed",Err(RecordError::Busy)=>"busy",Err(RecordError::RecoveryRequired)=>"recovery_required",Err(RecordError::DurablePending(_))=>"durable_pending",Err(RecordError::OutcomeUnknown(_))=>"outcome_unknown",Err(_)=>"failed"};
+              #[cfg(test)]
+              log::info!("record_maintenance event=worker_result outcome={outcome}");
+              #[cfg(test)]
+              let waiting=maintenance::Phase::new("background_finish_writer_wait",0);
+              let _writer = recovery_writer.lock().await;
+              #[cfg(test)]
+              drop(waiting);
+              #[cfg(test)]
+              let waiting=maintenance::Phase::new("background_finish_inner_wait",0);
+              let mut inner=recovery.lock().await;
+              #[cfg(test)]
+              drop(waiting);
               log::info!("record_maintenance event=worker_finished outcome={} seq={}",outcome,inner.state.seq);
               inner.maintenance_scheduled=false;
               if result.is_ok(){inner.maintenance_requested=None;inner.maintenance_trim=None;inner.maintenance_compacted_bytes=Some(inner.journal.physical_bytes());}
