@@ -106,7 +106,7 @@ impl<'a> QueryStatistics<'a> {
     }
 }
 
-fn validate_bounds(
+pub(super) fn validate_bounds(
     groups: &[super::query::ScoreGroup],
     boosts: &[f32],
     field_count: usize,
@@ -324,6 +324,36 @@ impl<'a> CorpusView<'a> {
         }
         Ok(Self { views })
     }
+    /// Execute the same predicate and active identity gate without score postings,
+    /// corpus statistics, candidate buffers, or ordering.
+    pub(super) fn count(
+        &self,
+        query: &dyn Query,
+        accepts: impl Fn(&Identity) -> bool,
+    ) -> Result<usize, RecordError> {
+        let mut count = 0;
+        for view in &self.views {
+            if view.live.is_empty() {
+                continue;
+            }
+            let weight = query
+                .weight(EnableScoring::disabled_from_searcher(&view.snapshot.searcher))
+                .map_err(storage)?;
+            for (segment_id, segment) in view.snapshot.searcher.segment_readers().iter().enumerate() {
+                let mut scorer = weight.scorer(segment, 1.0).map_err(storage)?;
+                while scorer.doc() != TERMINATED {
+                    let ordinal = view.snapshot.addresses[segment_id][scorer.doc() as usize];
+                    if view.live.contains(&ordinal) && accepts(&view.snapshot.identities[ordinal]) {
+                        count += 1;
+                    }
+                    scorer.advance();
+                }
+            }
+        }
+        // select() bounds the unique active population by MAX_POPULATION.
+        Ok(count)
+    }
+
     pub(super) fn score_groups(
         &self,
         query: &dyn Query,

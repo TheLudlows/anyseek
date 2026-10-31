@@ -35,6 +35,9 @@ async fn standard_profiles_preserve_operators_long_terms_originals_and_reopen() 
                 (long.as_str(), QueryType::Union, vec!["a"]),
                 ("繁体中国", QueryType::Intersection, vec!["a"]),
             ] {
+                let counted = partition.query(RecordQuery {text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:mode.clone(),offset:3,length:1,result_type:ResultType::Count,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
+                assert_eq!(counted.count_total, expected.len());
+                assert!(counted.hits.is_empty());
                 let result = partition.query(RecordQuery {text:text.into(),vector:None,mode:SearchMode::Lexical,query_type:mode,offset:0,length:10,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:vec![],temporal:None}).await.unwrap();
                 let ids = result.hits.iter().map(|h|h.record.record_id.as_str()).collect::<BTreeSet<_>>();
                 assert_eq!(ids, expected.iter().copied().collect(), "{profile:?} state={state} query={text}");
@@ -726,6 +729,7 @@ async fn native_query_contract_matches_before_and_after_commit() {
                 .unwrap();
                 let snapshot = package.open(&native.0, cut, LIMIT).unwrap();
                 let active = snapshot.active(cut, &all(&snapshot)).unwrap();
+                let corpus = super::scoring::CorpusView::select(&[&snapshot], cut, &all(&snapshot)).unwrap();
                 for committed in [false, true] {
                     if committed {
                         inner.index.test_index().commit().await.unwrap();
@@ -789,6 +793,7 @@ async fn native_query_contract_matches_before_and_after_commit() {
                                         true,
                                     )
                                     .await;
+                                assert_eq!(corpus.count(plan.predicate.as_ref(), |_| true).unwrap(), expected.count_total);
                                 let (count, hits) = active
                                     .score_groups(
                                         plan.predicate.as_ref(),
@@ -924,6 +929,19 @@ fn native_corpus_uses_one_selected_population_across_frozen_and_tail() {
         match_fields: vec![],
     }];
     let query = term(clean.fields[0], "alpha");
+    // Independent expectations: b's retired alpha revision must not count;
+    // selected lengths are 2, 1, 3, with population 3 and alpha DF 2.
+    assert_eq!(corpus.count(&AllQuery, |_| true).unwrap(), 3);
+    assert_eq!(corpus.count(&query, |_| true).unwrap(), 2);
+    assert_eq!(corpus.count(&query, |id| id.id != "a").unwrap(), 1);
+    let (_, scored) = corpus.score_groups(&query, &groups, &[1.0],
+        FieldLengthNormalization::Shared, 10, |_| true).unwrap();
+    let idf = (((3.0f32 - 2.0 + 0.5) / (2.0 + 0.5)) + 1.0).ln();
+    for (hit, (id, tf, length)) in scored.iter().zip([("a", 2.0, 2.0), ("c", 1.0, 3.0)]) {
+        assert_eq!(hit.identity.id, id);
+        assert_eq!(hit.score, idf * (tf * (1.2 + 1.0) / (tf + 1.2 * (1.0 - 0.75 + 0.75 * (length / 2.0)))));
+    }
+    assert_eq!(scored.len(), 2);
     for normalization in [
         FieldLengthNormalization::Shared,
         FieldLengthNormalization::PerField,

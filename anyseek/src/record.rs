@@ -2168,6 +2168,17 @@ mod tests {
             let mut q=fusion_query();q.mode=mode.clone();if mode==SearchMode::Lexical{q.vector=None;}q.offset=1;q.length=1;
             let r=p.query(q).await.unwrap();assert_eq!(r.hits.len(),1);let hit=&r.hits[0];assert_eq!(hit.channels.len(),1);assert_eq!(hit.channels[0].rank,1);assert_eq!(hit.channels[0].raw_score,Some(hit.score));assert!(hit.channels[0].rrf_contribution.is_none());
         }
+        // Count must still evaluate vector thresholds in both channel modes.
+        for threshold in [None, Some(0.5)] {
+            for mode in [SearchMode::Vector { similarity_threshold:threshold, ann_mode:AnnMode::All },
+                SearchMode::Hybrid { similarity_threshold:threshold, ann_mode:AnnMode::All, rrf:Default::default() }] {
+                let mut q=fusion_query();q.mode=mode;q.text="missing".into();
+                q.vector=Some(Embedding::F32(vec![-1.0,0.0]));q.result_type=ResultType::Count;
+                let counted=p.query(q).await.unwrap();
+                assert_eq!(counted.count_total, if threshold.is_some() {0} else {3});
+                assert!(counted.hits.is_empty());
+            }
+        }
         let mut q=fusion_query();q.mode=SearchMode::Hybrid{similarity_threshold:None,ann_mode:AnnMode::All,rrf:crate::search::RrfOptions{constant:3.0,keyword_weight:0.5,vector_weight:2.0,keyword_candidates:Some(3),vector_candidates:Some(2)}};
         let all=p.query(q).await.unwrap();
         let lexical_raw=query(&p,SearchMode::Lexical).await.hits[0].score;
@@ -2275,8 +2286,17 @@ mod tests {
         p.inner.lock().await.state.records.validate_counts().unwrap();
         p.write(source_write("ttl-indirect","e",&[("d",1)])).await.unwrap();
         p.inner.lock().await.state.records.validate_counts().unwrap();
-        clock.set(now+99); assert_eq!(p.statistics().await.unwrap().active_records,3);
-        clock.set(now+100); assert_eq!(p.statistics().await.unwrap().active_records,0);
+        for (time, expected) in [(now+99, 3), (now+100, 0)] {
+            clock.set(time);
+            assert_eq!(p.statistics().await.unwrap().active_records, expected);
+            for text in ["", "evidence"] {
+                let counted = p.query(RecordQuery { temporal:None, text:text.into(), vector:None,
+                    mode:SearchMode::Lexical, query_type:QueryType::Union, offset:0, length:0,
+                    result_type:ResultType::Count, fields:vec![], filters:vec![], sort:vec![] }).await.unwrap();
+                assert_eq!(counted.count_total, expected);
+                assert!(counted.hits.is_empty());
+            }
+        }
         p.inner.lock().await.state.records.validate_counts().unwrap();
         for id in ["s","d","e"] { assert!(p.get(id).await.unwrap().is_none()); }
         let state=p.inner.lock().await; assert_eq!(state.state.records["s"].version,2);
@@ -2797,13 +2817,20 @@ mod tests {
             assert_eq!(result.hits[2].record.version, 2);
             let mut q = options(); q.offset = 1; q.length = 1;
             assert_eq!(ids(&p.query(q).await.unwrap()), ["b"]);
-            let mut q = options(); q.length = 0;
-            let result = p.query(q).await.unwrap();
-            assert_eq!(result.count_total, 3); assert!(result.hits.is_empty());
+            for kind in [ResultType::TopkCount, ResultType::Count] {
+                let mut q = options(); q.length = 0; q.result_type = kind;
+                let result = p.query(q).await.unwrap();
+                assert_eq!(result.count_total, 3); assert!(result.hits.is_empty());
+            }
             let mut q = options();
             q.filters = vec![FacetFilter::Int { field: "rank".into(), filter: 2..3 }];
             let result = p.query(q).await.unwrap();
             assert_eq!(ids(&result), ["a", "z"]); assert_eq!(result.count_total, 2);
+            let mut q = options(); q.result_type = ResultType::Count;
+            q.filters = vec![FacetFilter::Int { field: "rank".into(), filter: 2..3 }];
+            q.sort = vec![ResultSort { field: "rank".into(), order: crate::search::SortOrder::Ascending }];
+            let result = p.query(q).await.unwrap();
+            assert_eq!(result.count_total, 2); assert!(result.hits.is_empty());
             let mut q = options(); q.offset = 1; q.length = 1;
             q.sort = vec![ResultSort { field: "rank".into(), order: crate::search::SortOrder::Ascending }];
             assert_eq!(ids(&p.query(q).await.unwrap()), ["z"]);
