@@ -1,4 +1,8 @@
 export const english: Record<string, string> = {
+  "普通 Key 已签发": "Tenant API key issued",
+  "已恢复上次完成的初始化结果。请先保存普通 Key，再进入工作区或创建另一个 Tenant；原 Tenant 和 Key 会继续保留在服务端。": "Your previous completed initialization has been restored. Save the key, then enter the workspace or create another tenant. The existing tenant and key remain on the server.",
+  "我已保存普通 Key": "I have saved the tenant API key",
+  "创建另一个 Tenant": "Create another tenant",
   "重新填写 Tenant": "Edit tenant name",
   "无法清除原初始化请求，请检查浏览器存储设置后重试。": "Could not clear the initialization request. Check browser storage settings and try again.",
   "名称已锁定，以便重试原请求。尚未开始签发普通 Key，可重新填写；这只清除本地请求，不会删除服务端可能已创建的 Tenant。": "The name is locked for retrying the original request. Key issuance has not started, so you can edit it. This only clears the local request; any tenant already created on the server remains.",
@@ -236,7 +240,6 @@ export const english: Record<string, string> = {
   "普通 Key 已签发，待连接": "Tenant API Key issued; awaiting connection",
   "新 Tenant API Key": "New Tenant API Key",
   "请复制并妥善保存此 Key，以便以后连接；关闭标签页后控制台不再保留。": "Copy and securely save this key for future connections. The console will not retain it after this tab closes.",
-  "我已保存普通 Key，确认进入工作区": "I have saved the Tenant API Key and am ready to enter the workspace",
   "我确认创建 Tenant 并签发普通 Key（重试时复用原请求）": "I confirm tenant creation and key issuance (retries reuse the original request)",
   "初始化中": "Initializing",
   "进入工作区": "Enter workspace",

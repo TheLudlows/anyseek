@@ -40,6 +40,19 @@ export function Initialize({
       setError(t("无法清除原初始化请求，请检查浏览器存储设置后重试。"));
     }
   }
+  function startAnotherTenant() {
+    if (locked.current || pending?.stage !== "connect" || !confirmed) return;
+    try {
+      clearBootstrap();
+      setPending(null);
+      setTenant("");
+      setMaster("");
+      setConfirmed(false);
+      setError("");
+    } catch {
+      setError(t("无法清除原初始化请求，请检查浏览器存储设置后重试。"));
+    }
+  }
   async function submit() {
     if (locked.current || !confirmed) return;
     locked.current = true;
@@ -83,9 +96,12 @@ export function Initialize({
         void submit();
       }}
     >
-      <h3>{t("首次初始化")}</h3>
+      <h3>{pending?.stage === "connect" ? t("普通 Key 已签发") : t("首次初始化")}</h3>
       <p className="field-help">
-        {t("创建新 Tenant 并签发普通 Key，然后进入工作区。已有 Tenant 请返回使用管理员签发的 Tenant API Key。")}</p>
+        {pending?.stage === "connect"
+          ? t("已恢复上次完成的初始化结果。请先保存普通 Key，再进入工作区或创建另一个 Tenant；原 Tenant 和 Key 会继续保留在服务端。")
+          : t("创建新 Tenant 并签发普通 Key，然后进入工作区。已有 Tenant 请返回使用管理员签发的 Tenant API Key。")}</p>
+      {pending?.stage !== "connect" && <>
       <label>
         {t("Tenant 名称")}<input
           required
@@ -99,6 +115,7 @@ export function Initialize({
       </label>
       <p className="field-help">
         {t("以小写字母开头，仅含小写字母、数字、下划线或连字符。创建后不能改名或删除。")}</p>
+      </>}
       {pending?.stage === "tenant" && (
         <div>
           <p className="field-help">
@@ -109,7 +126,7 @@ export function Initialize({
           </button>
         </div>
       )}
-      {pending && pending.stage !== "tenant" && (
+      {pending?.stage === "key" && (
         <p className="field-help">
           {t("已进入普通 Key 签发流程，Tenant 名称不能修改。请继续重试原请求或保存已签发的 Key。")}
         </p>
@@ -158,7 +175,7 @@ export function Initialize({
           onChange={(e) => setConfirmed(e.target.checked)}
         />
         {pending?.stage === "connect"
-          ? t("我已保存普通 Key，确认进入工作区")
+          ? t("我已保存普通 Key")
           : t("我确认创建 Tenant 并签发普通 Key（重试时复用原请求）")}
       </label>
       <Notice>{error}</Notice>
@@ -173,6 +190,11 @@ export function Initialize({
           t("确认初始化")
         )}
       </button>
+      {pending?.stage === "connect" && (
+        <button type="button" className="text-button" disabled={busy || !confirmed} onClick={startAnotherTenant}>
+          {t("创建另一个 Tenant")}
+        </button>
+      )}
       <button
         className="text-button"
         type="button"

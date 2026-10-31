@@ -1,0 +1,60 @@
+import { test, expect } from '@playwright/test';
+test('fresh connection dialog allows typing tenant before master key', async ({page}) => {
+ await page.goto('/');
+ await page.getByRole('button', {name:'连接 AnySeek 服务 使用 Tenant API Key'}).click();
+ const dialog=page.getByRole('dialog');
+ await dialog.getByRole('button',{name:'首次使用？使用 Master Key 初始化'}).click();
+ const tenant=dialog.getByLabel('Tenant 名称',{exact:true});
+ await expect(tenant).toBeEditable();
+ await tenant.click();
+ await page.keyboard.type('new_tenant');
+ await expect(tenant).toHaveValue('new_tenant');
+ await expect(dialog.getByLabel('Master Key',{exact:true})).toHaveValue('');
+});
+
+test('completed initialization in the connection dialog can start a new editable form', async ({page}) => {
+ const calls: {path: string; body: any}[]=[];
+ await page.route('**/api/v1/**', async route => {
+   calls.push({path:route.request().url().split('/api/v1/')[1], body:route.request().postDataJSON()});
+   await route.fulfill({json:{seq:1}});
+ });
+ await page.goto('/');
+ const openDialog=async()=>{
+   await page.getByRole('button',{name:'连接 AnySeek 服务 使用 Tenant API Key'}).click();
+   await page.getByRole('dialog').getByRole('button',{name:'首次使用？使用 Master Key 初始化'}).click();
+ };
+ await openDialog();
+ const dialog=page.getByRole('dialog');
+ await dialog.getByLabel('Tenant 名称',{exact:true}).fill('old_tenant');
+ await dialog.getByLabel('Master Key',{exact:true}).fill('test-master');
+ await dialog.getByRole('checkbox').check();
+ await dialog.getByRole('button',{name:'确认初始化',exact:true}).click();
+ await expect(dialog.getByRole('heading',{name:'普通 Key 已签发',exact:true})).toBeVisible();
+ const oldKey=await dialog.getByLabel('新 Tenant API Key').inputValue();
+ await dialog.getByRole('button',{name:'关闭',exact:true}).click();
+ await page.reload();
+ await openDialog();
+ await expect(dialog.getByRole('heading',{name:'普通 Key 已签发',exact:true})).toBeVisible();
+ await expect(dialog.getByLabel('Tenant 名称',{exact:true})).toHaveCount(0);
+ await expect(dialog.getByLabel('新 Tenant API Key')).toHaveValue(oldKey);
+ await expect(dialog.getByRole('button',{name:'创建另一个 Tenant',exact:true})).toBeDisabled();
+ await dialog.getByRole('checkbox').check();
+ await dialog.getByRole('button',{name:'创建另一个 Tenant',exact:true}).click();
+ const tenant=dialog.getByLabel('Tenant 名称',{exact:true});
+ await expect(tenant).toBeEditable();
+ await expect(tenant).toHaveValue('');
+ await expect(dialog.getByLabel('Master Key',{exact:true})).toHaveValue('');
+ await expect(dialog.getByRole('checkbox')).not.toBeChecked();
+ expect(calls).toHaveLength(2);
+ expect(await page.evaluate(()=>sessionStorage.getItem('anyseek.bootstrap'))).toBeNull();
+ await tenant.click();
+ await page.keyboard.type('new_tenant');
+ await expect(tenant).toHaveValue('new_tenant');
+ await dialog.getByLabel('Master Key',{exact:true}).fill('test-master');
+ await dialog.getByRole('checkbox').check();
+ await dialog.getByRole('button',{name:'确认初始化',exact:true}).click();
+ await expect(dialog.getByRole('heading',{name:'普通 Key 已签发',exact:true})).toBeVisible();
+ expect(calls.map(c=>[c.path,c.body.tenant_id])).toEqual([['tenants','old_tenant'],['apikey','old_tenant'],['tenants','new_tenant'],['apikey','new_tenant']]);
+ expect(calls[1].body.apikey_base64).toBe(oldKey);
+ expect(calls[3].body.apikey_base64).not.toBe(oldKey);
+});
