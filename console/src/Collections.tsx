@@ -7,6 +7,8 @@ import {
   Plus,
   Search,
 } from "lucide-react";
+import { DeleteCollection } from "./DeleteCollection.tsx";
+import type { PendingDelete } from "./collection-delete.ts";
 import { SchemaTable } from "./SchemaTable.tsx";
 import { api, ApiError, message, newOperationId, storage } from "./api.ts";
 import { Busy, Empty, JsonView, Modal, Notice } from "./components.tsx";
@@ -38,6 +40,9 @@ function schemaFor(mode: Mode) {
 const fieldTypes = { Text: "文本", String: "字符串", StringSet: "字符串集合", Int: "整数", Float: "小数", Timestamp: "时间戳", Json: "JSON 对象", Binary: "二进制", Vector: "向量" };
 
 export function Collections(props: Props) {
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState(() => storage.get<PendingDelete>("pendingDelete"));
+  const [deletedNotice, setDeletedNotice] = useState("");
   const [filter, setFilter] = useState(""),
     [creating, setCreating] = useState(false),
     [detail, setDetail] = useState<Collection | null>(null);
@@ -56,11 +61,18 @@ export function Collections(props: Props) {
           <h1>集合</h1>
           <p>组织数据，让每一次检索都有据可依。</p>
         </div>
-        <button className="primary" onClick={() => setCreating(true)}>
+        <button className="primary" disabled={!!pendingDelete} onClick={() => setCreating(true)}>
           <Plus size={16} />
           创建集合
         </button>
       </div>
+      <Notice kind="success">{deletedNotice}</Notice>
+      {pendingDelete && <Notice kind="info">
+        集合 {pendingDelete.collection} 有待确认删除。
+        {pendingDelete.owner === props.owner
+          ? <button type="button" className="text-button" onClick={() => setDeleting(pendingDelete.collection)}>继续处理删除</button>
+          : "请切换回原连接处理。"}
+      </Notice>}
       <div className="metrics">
         <div>
           <span className="metric-icon">
@@ -184,6 +196,7 @@ export function Collections(props: Props) {
                         >
                           结构
                         </button>
+                        <button className="text-button danger-text" disabled={!!pendingDelete} onClick={() => setDeleting(c.id)}>删除</button>
                         <button
                           className="text-button"
                           onClick={() => props.select(c.id, "search")}
@@ -211,6 +224,9 @@ export function Collections(props: Props) {
           <span>创建集合 → 导入记录 → 调试关键词、向量与混合检索</span>
         </p>
       </div>
+      {deleting && <DeleteCollection owner={props.owner} apiKey={props.apiKey} collection={deleting}
+        close={() => { setDeleting(null); setPendingDelete(storage.get<PendingDelete>("pendingDelete")); }}
+        deleted={async () => { setDeletedNotice(`集合 ${deleting} 已删除。`); setDetail(null); await props.refresh(); }} />}
       {creating && (
         <CreateCollection {...props} close={() => setCreating(false)} />
       )}

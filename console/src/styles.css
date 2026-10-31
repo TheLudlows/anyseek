@@ -2053,3 +2053,6 @@ th {
 .markdown-import .form-grid { margin-top: 16px; }
 .markdown-import .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
 .markdown-import .form-grid label { display: grid; gap: 8px; }
+
+.primary.danger { background: #b42318; border-color: #b42318; }
+.text-button.danger-text { color: #b42318; }
