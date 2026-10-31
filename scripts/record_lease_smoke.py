@@ -22,6 +22,14 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
         return {'operation_id':operation(),'record_id':'doc','expected':expected,'generation':{'action':'stage','generation_id':g,'source':{'record_id':'s','version':1},'members':['chunk-'+g],'chunks':[{'record_id':'chunk-'+g,'document':{'body':'PRIVATE-LEASE-PAYLOAD-'+g}}]}}
     def command(action,version,g='g'):
         return {'operation_id':operation(),'record_id':'doc','expected':{'Match':version},'generation':{'action':action,'generation_id':g}}
+    def recovered_status(endpoint):
+        deadline=time.monotonic()+20
+        while True:
+            status=call('GET',endpoint+'/doc/doc/generation',status=(200,429))
+            if status.get('code')!='busy' and not status['private_cleanup_pending']:
+                return status
+            assert time.monotonic()<deadline, 'private cleanup did not finish after recovery'
+            time.sleep(.05)
     if not only_faults:
         endpoint=create('leases');original=stage();receipt=call('POST',endpoint+'/doc',original)['receipt']
         status=call('GET',endpoint+'/doc/doc/generation');assert status['lease_fence']==1 and status['staged_members']==1
@@ -40,11 +48,12 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
         cleanup_fault=cache/'.test-cleanup-failure'
         cleanup_fault.write_text('fail this collection old-generation retirement')
         call('POST',endpoint+'/doc',command('abort',1))
-        assert call('GET',endpoint+'/doc/doc/generation')['private_cleanup_pending']
-        assert call('POST',endpoint+'/doc',request)['receipt']==receipt
+        # Pending private cleanup fences data until the injected failure is removed.
+        assert call('GET',endpoint+'/doc/doc/generation',status=429)['code']=='busy'
+        assert call('POST',endpoint+'/doc',request,status=429)['code']=='busy'
         cleanup_fault.unlink()
         restart_with(env)
-        assert not call('GET',endpoint+'/doc/doc/generation')['private_cleanup_pending']
+        recovered_status(endpoint)
         assert call('POST',endpoint+'/doc',request)['receipt']==receipt
         for fault in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
             clock(now);endpoint=create('lease-'+fault.replace('_','-'));request=stage();receipt=call('POST',endpoint+'/doc',request)['receipt']
@@ -54,7 +63,7 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
                 except (OSError,http.client.HTTPException):pass
                 else:raise AssertionError('expected lease process exit')
             else:assert call('GET',endpoint+'/doc/doc/generation',status=503)['code'] in ('outcome_unknown','durable_pending')
-            restart_with(env);status=call('GET',endpoint+'/doc/doc/generation');assert status['staged_members']==0 and status['version']==2 and not status['private_cleanup_pending'], (fault, status)
+            restart_with(env);status=recovered_status(endpoint);assert status['staged_members']==0 and status['version']==2 and not status['private_cleanup_pending'], (fault, status)
             assert call('POST',endpoint+'/doc',request)['receipt']==receipt
             call('POST',endpoint+'/doc',command('renew',1),status=409)
             assert call('GET',endpoint+'/doc/doc/generation')['visible_members']==0
