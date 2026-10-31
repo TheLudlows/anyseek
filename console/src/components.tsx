@@ -1,4 +1,3 @@
-import { LanguageSwitch } from "./LanguageSwitch.tsx";
 import { localizeNotice } from "./i18n.ts";
 import { t } from "./i18n.ts";
 import { useState, Children, isValidElement, cloneElement, Fragment, type ReactNode } from "react";
@@ -132,7 +131,6 @@ export function Modal({
     >
       <div className="modal-title">
         <h2>{title}</h2>
-        <LanguageSwitch />
         <button
           className="icon-button"
           disabled={busy}

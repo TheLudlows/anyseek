@@ -15,11 +15,12 @@ test('switching preserves drafts and pending requests; reload remembers language
   await page.getByRole('button',{name:'Create collection',exact:true}).click();
   await page.getByLabel('Collection name',{exact:true}).fill('my_draft');
   const before=calls;
-  await page.getByRole('dialog').getByLabel('语言 / Language').selectOption('zh');
-  await expect(page.getByLabel('集合名称',{exact:true})).toHaveValue('my_draft');
+  await expect(page.locator('.language-switch')).toHaveCount(1);
+  await expect(page.getByRole('dialog').locator('.language-switch')).toHaveCount(0);
+  await expect(page.getByLabel('Collection name',{exact:true})).toHaveValue('my_draft');
   expect(calls).toBe(before);
   expect(await page.evaluate(()=>sessionStorage.getItem('pendingWrites'))).toBe('{"owner":"other","requests":[]}');
-  await page.getByRole('button',{name:'取消',exact:true}).click();
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
   await page.getByLabel('语言 / Language').selectOption('en');
   await page.reload();
   await expect(page).toHaveTitle('AnySeek · Semantic Space');

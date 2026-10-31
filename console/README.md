@@ -214,7 +214,7 @@ npx playwright test --config playwright.bootstrap.config.ts
 
 ## 界面语言
 
-默认使用中文，可在页面右上角或弹窗标题栏的语言图标切换到 English。语言偏好保存在当前浏览器的 `anyseek.language`，刷新后恢复；浏览器禁用存储时仍可切换。切换不会刷新页面或清空表单、连接、待确认请求。
+默认使用中文，可在页面右上角唯一的语言图标切换到 English。语言偏好保存在当前浏览器的 `anyseek.language`，刷新后恢复；浏览器禁用存储时仍可切换。切换不会刷新页面或清空表单、连接、待确认请求。
 
 导航、表单、提示与打分详情同步切换；字段名、记录原文与 API JSON 保持原样，未知服务端错误保留原文。标签页标题随语言显示为「AnySeek · 语义空间」或「AnySeek · Semantic Space」。
 
