@@ -7,6 +7,7 @@ import {
   Plus,
   Search,
 } from "lucide-react";
+import { SchemaTable } from "./SchemaTable.tsx";
 import { api, ApiError, message, newOperationId, storage } from "./api.ts";
 import { Busy, Empty, JsonView, Modal, Notice } from "./components.tsx";
 import type { Collection, Mode, Json } from "./types.ts";
@@ -212,10 +213,10 @@ export function Collections(props: Props) {
           title={detail.name + " · 集合结构"}
           close={() => setDetail(null)}
         >
-          <JsonView value={detail.schema} label="Schema" />
+          <SchemaTable fields={detail.schema} dimensions={detail.vector_dimensions} />
           <details>
-            <summary>服务统计与配置</summary>
-            <JsonView value={detail} label="Collection JSON" />
+            <summary>高级服务统计</summary>
+            <JsonView value={{ statistics: detail.statistics, limits: detail.limits }} label="服务统计" />
           </details>
         </Modal>
       )}

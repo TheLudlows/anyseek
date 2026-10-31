@@ -7,6 +7,7 @@ export type SchemaField = {
   index_lexical?: boolean;
   index_vector?: boolean;
   filterable?: boolean;
+  boost?: number;
 };
 export type Collection = {
   id: string;

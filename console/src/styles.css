@@ -2045,3 +2045,5 @@ th {
 .embedding-fields { margin: 16px 0; }
 .embedding-choice { margin: 16px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
 .embedding-choice p { overflow-wrap: anywhere; }
+
+.schema-summary .data-table td { white-space: nowrap; }
