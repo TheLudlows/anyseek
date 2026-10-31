@@ -26,6 +26,7 @@ import {
 import { loadEmbeddingConfig } from "./embeddings.ts";
 import { generatePendingEmbeddings, prepareEmbeddedWrites } from "./embedding-writes.ts";
 import { SchemaTable } from "./SchemaTable.tsx";
+import { MarkdownImport } from "./MarkdownImport.tsx";
 import { Tools } from "./Tools.tsx";
 import type { Collection, Json, Page, RecordData } from "./types.ts";
 
@@ -155,7 +156,7 @@ export function Data({
                 text={
                   error
                     ? "检查连接，或刷新以建立新的分页视图。"
-                    : "导入一个 JSON 对象或对象数组，开始组织数据。"
+                    : "上传 Markdown 文档或导入 JSON，开始组织数据。"
                 }
                 action={
                   !error && (
@@ -164,7 +165,7 @@ export function Data({
                       onClick={() => setImporting(true)}
                     >
                       <Upload size={15} />
-                      导入 JSON
+                      导入数据
                     </button>
                   )
                 }
@@ -287,6 +288,9 @@ function ImportData({
   close: () => void;
   onWritten: () => Promise<void>;
 }) {
+  const [markdownRevision, setMarkdownRevision] = useState(0);
+  const [markdownBody, setMarkdownBody] = useState("");
+  const [format, setFormat] = useState<"json" | "markdown">("json");
   const [source, setSource] = useState(""),
     [envelope, setEnvelope] = useState(false);
   const [modelConfig] = useState(() => loadEmbeddingConfig(owner, collection.id));
@@ -316,6 +320,13 @@ function ImportData({
     let request = pending;
     try {
       if (!request) {
+        if (format === "markdown" && collection.schema.some(f => f.index_vector)) {
+          if (!autoEmbed || !modelConfig) throw new Error("向量集合导入 Markdown 需要先配置并启用浏览器嵌入服务。");
+          if (!modelConfig.textFields.includes(markdownBody)) throw new Error("请在嵌入配置中选择正文目标字段，确保为正文片段生成向量。");
+          const docs = JSON.parse(source);
+          if (docs.some((doc: Record<string, unknown>) => !modelConfig.textFields.some(field => typeof doc[field] === "string" && String(doc[field]).trim())))
+            throw new Error("嵌入文本字段没有映射内容，请检查字段映射与嵌入配置。");
+        }
         request = autoEmbed && !envelope && modelConfig
           ? prepareEmbeddedWrites(source, owner, collection, modelConfig)
           : {
@@ -324,6 +335,7 @@ function ImportData({
           requests: prepareDocumentRequests(source, envelope),
           completed: 0,
           unresolved: false,
+          ...(format === "markdown" ? { delivery: "ingest" as const } : {}),
         };
         storage.set("pendingWrites", request);
         setPending(request);
@@ -339,6 +351,7 @@ function ImportData({
       );
       setPending(null);
       setSource("");
+      setMarkdownRevision(value => value + 1);
       setStatus(
         request.delivery === "ingest"
           ? `已确认提交 ${request.requests.length} 条，索引正在异步更新。`
@@ -359,7 +372,7 @@ function ImportData({
     <Modal title={"导入数据 · " + collection.name} close={close} busy={busy}>
       <form onSubmit={submit}>
         <p className="modal-intro">
-          粘贴 JSON 或上传文件。普通对象会自动分配记录标识。
+          导入 Markdown 文档或 JSON 数据，自动分配记录标识。
         </p>
         {pending && (
           <Notice kind="info">
@@ -372,7 +385,12 @@ function ImportData({
           保留任务使用原模型 {pending.embedding.config.model} · {pending.embedding.config.endpoint}，已生成的向量不会重新生成。
         </Notice>}
         <fieldset disabled={busy || !!pending}>
-          <div className="editor-toolbar">
+          <div className="page-tabs" aria-label="导入格式">
+            <button type="button" className={format === "json" ? "active" : ""} onClick={() => { setFormat("json"); setSource(""); setError(""); }}>JSON 数据</button>
+            <button type="button" className={format === "markdown" ? "active" : ""} onClick={() => { setFormat("markdown"); setEnvelope(false); setSource(""); setError(""); }}>Markdown 文档</button>
+          </div>
+          {format === "markdown" && <MarkdownImport key={markdownRevision} collection={collection} onSource={(value, body) => { setSource(value); setMarkdownBody(body || ""); }} onReading={setBusy} />}
+          {format === "json" && <div className="editor-toolbar">
             <label className="checkbox">
               <input
                 type="checkbox"
@@ -403,14 +421,14 @@ function ImportData({
                 }}
               />
             </label>
-          </div>
+          </div>}
           {collection.schema.some((f) => f.index_vector) && <div className="embedding-choice">
             <label className="checkbox"><input type="checkbox" checked={autoEmbed && !envelope} disabled={!modelConfig || envelope} onChange={(e) => setAutoEmbed(e.target.checked)} />自动生成缺失的向量</label>
             <p className="field-help">{envelope ? "Record envelope 使用原始请求，不自动生成向量。" : modelConfig
               ? `${modelConfig.textFields.join(" + ")} → ${modelConfig.vectorField} · ${modelConfig.model}。所选文本将发送至 ${modelConfig.endpoint}，已有向量会保留。`
               : "在连接与管理中配置本集合的浏览器嵌入服务后，可直接导入文本。"}</p>
           </div>}
-          <label className="sr-only" htmlFor="document-json">
+          {format === "json" && <><label className="sr-only" htmlFor="document-json">
             导入 JSON
           </label>
           <textarea
@@ -425,7 +443,7 @@ function ImportData({
           />
           <p className="field-help">
             原始数字文本会完整保留。自动嵌入每批最多 16 条，单条文本最多 30 KiB；写入不保证批次原子性。
-          </p>
+          </p></>}
         </fieldset>
         <details>
           <summary>查看集合字段</summary>
