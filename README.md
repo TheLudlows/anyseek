@@ -2,11 +2,9 @@
 
 **面向 AI 记忆与知识的通用存储和检索底座。** 将原始记录、来源证据、版本、时间与显式关系放在同一个可恢复、可检索的数据视图中，通过 Rust 核心库、HTTP API 和独立 Web 控制台使用。
 
-anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、切块、embedding、实体抽取及记忆反思/重算由上层应用完成。自定义内容保存在 `document`，引擎管理稳定身份和系统元数据，不引入 SQL/JOIN 或完整图查询语言。
+anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、切块、embedding、实体抽取及记忆反思/重算由上层应用完成。自定义内容保存在 `document`，引擎管理稳定身份和系统元数据。
 
 [服务指南](anyseek/src/server/README.md) · [UI 启动与部署](console/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
-
-[异步索引写入入口](docs/async-ingestion.md)：`POST /api/v1/index/{id}/ingest` 在业务判定及持久提交后返回逐项结果；200 不代表每项成功，只有带 Record 回执的项成功。明确拒绝后继续处理后续项，429／503 保留已有结果。索引仍异步，现有 `/doc` 同步接口保留；独立 Intake 日志已移除。
 
 ## 当前能力
 
