@@ -2,6 +2,18 @@
 
 仅有一个 `anyseek` Cargo package：核心库位于 `anyseek/src/`，服务实现及 HTTP 契约位于 `anyseek/src/server/`，独立 Web 控制台位于 `console/`，使用 Node.js 24/React/TypeScript/Vite；Rust 服务不嵌入任何前端资源。默认关闭 `server` feature；嵌入库不引入 HTTP/OpenAPI/服务日志依赖。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端为 `TheLudlows/anyseek`。
 
+## 本地运行
+
+API 与 UI 使用两个独立进程。按[快速开始](../README.md#快速开始)启动 API 后，在另一个终端从仓库根运行：
+
+```sh
+cd console
+npm ci
+npm run dev
+```
+
+默认 UI 为 `http://127.0.0.1:5173`，默认 API 为 `http://127.0.0.1:8080`。UI 启动前通过 `API_TARGET` 指定其他 API 地址；具体 Linux / PowerShell 命令、远程访问与生产反向代理见[控制台指南](../console/README.md)。
+
 ## 构建与测试
 
 从仓库根运行，使用已安装 Rust 工具链：
@@ -16,7 +28,6 @@ cargo test -p anyseek --no-default-features --lib
 cargo test --workspace --doc
 cargo doc --workspace --no-deps
 python3 scripts/check_core_boundary.py
-python3 scripts/check_docs_brand.py
 npm ci --prefix console
 npm test --prefix console
 npm run build --prefix console

@@ -1,10 +1,10 @@
 # anyseek
 
-**面向 AI 记忆与知识的通用存储和检索底座。** 将原始记录、来源证据、版本、时间与显式关系放在同一个可恢复、可检索的数据视图中，通过 Rust 核心库、HTTP API 和独立 Web 控制台 使用。
+**面向 AI 记忆与知识的通用存储和检索底座。** 将原始记录、来源证据、版本、时间与显式关系放在同一个可恢复、可检索的数据视图中，通过 Rust 核心库、HTTP API 和独立 Web 控制台使用。
 
 anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、切块、embedding、实体抽取及记忆反思/重算由上层应用完成。自定义内容保存在 `document`，引擎管理稳定身份和系统元数据，不引入 SQL/JOIN 或完整图查询语言。
 
-[服务指南](anyseek/src/server/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
+[服务指南](anyseek/src/server/README.md) · [UI 启动与部署](console/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
 
 [异步索引写入入口](docs/async-ingestion.md)：`POST /api/v1/index/{id}/ingest` 在业务判定及持久提交后返回逐项结果；200 不代表每项成功，只有带 Record 回执的项成功。明确拒绝后继续处理后续项，429／503 保留已有结果。索引仍异步，现有 `/doc` 同步接口保留；独立 Intake 日志已移除。
 
@@ -35,15 +35,47 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 
 ## 快速开始
 
+API 和 UI 分别启动。API 需要 Rust 工具链，UI 需要 Node.js 24 和 npm。
+
+### 1. 启动 API
+
 从 [TheLudlows/anyseek](https://github.com/TheLudlows/anyseek) 获取源码，在仓库根构建：
 
 ```sh
 cargo build --workspace --features server
-export MASTER_KEY_SECRET='replace-with-your-private-secret'
-cargo run -p anyseek --features server --bin anyseek_server -- local_ip=127.0.0.1 local_port=8080
 ```
 
-API 默认运行在 `http://127.0.0.1:8080`。先用启动日志中的 `Master API key` 按[服务指南](anyseek/src/server/README.md)创建 Tenant 并签发普通 Key，再按[控制台指南](console/README.md)单独启动前端，用 Tenant Key 连接、创建 collection 并写入 JSON。API 不再内嵌前端；开发控制台默认地址是 `http://127.0.0.1:5173`。默认数据目录为可执行文件旁的 `anyseek_index`；首次目录必须不存在。重启保留原目录和 `MASTER_KEY_SECRET`；已有部署应显式设置原 `index_path`。Windows 启动及参数见 [服务指南](anyseek/src/server/README.md)。
+Linux / macOS，在第一个终端运行：
+
+```sh
+export MASTER_KEY_SECRET='replace-with-your-private-secret'
+./target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
+```
+
+Windows PowerShell：
+
+```powershell
+$env:MASTER_KEY_SECRET = 'replace-with-your-private-secret'
+.\target\debug\anyseek_server.exe local_ip=127.0.0.1 local_port=8080
+```
+
+访问 `http://127.0.0.1:8080/api/v1/live` 可查看服务版本。使用启动日志中的 `Master API key` 按[服务指南](anyseek/src/server/README.md)创建 Tenant 并签发普通 Tenant API Key，供 UI 连接使用。
+
+默认数据目录为可执行文件旁的 `anyseek_index`；首次目录必须不存在。重启保留原目录和 `MASTER_KEY_SECRET`，已有部署应显式设置原 `index_path`。其他启动参数见[服务指南](anyseek/src/server/README.md)。
+
+### 2. 启动 UI
+
+保持 API 运行，在第二个终端从仓库根执行；以下命令适用于 Linux / macOS 和 Windows PowerShell：
+
+```sh
+cd console
+npm ci
+npm run dev
+```
+
+打开 `http://127.0.0.1:5173`（以终端显示的地址为准），输入 **Tenant API Key**，连接后即可创建集合、导入数据并调试检索。Master Key 不能用于集合连接。
+
+UI 默认将 `/api` 转发至 `http://127.0.0.1:8080`。API 根地址 `/` 返回 404 是预期行为，浏览器页面由独立 UI 提供。其他 API 地址、远程访问及生产部署见 [UI 启动与部署](console/README.md)。
 
 ## API 与接入
 
@@ -60,7 +92,6 @@ HTTP 使用 `/api/v1`、`apikey` 请求头和 JSON。创建 collection 时声明
 
 ```sh
 cargo test --workspace --features server --all-targets
-python3 scripts/check_docs_brand.py
 ```
 
 [开发与验证指南](docs/development.md)包含独立核心、rustdoc、HTTP/Chromium 和故障测试命令。[Record 语义](docs/record-model.md)与[存储协议](docs/storage.md)说明现行不变量；[后续路线](docs/roadmap.md)列出剩余工作。
