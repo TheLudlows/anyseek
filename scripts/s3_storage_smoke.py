@@ -257,7 +257,8 @@ def main():
             call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'restored-access','apikey_base64':tenant_key})
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
             # Old collection archives in a service snapshot remain usable.
-            copied=next(iter(whole['snapshot']['collection_backups']))
+            copied=archive['backup_id']  # Created above by this tenant for main.
+            assert copied in whole['snapshot']['collection_backups']
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'copied-archive','backup_id':copied})
             assert call('GET','/api/v1/index/copied-archive/doc/a')['version']==2
             stop()
