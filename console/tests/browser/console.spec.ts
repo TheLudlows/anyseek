@@ -278,13 +278,9 @@ test("real lexical/vector/hybrid search, empty state, explanations, advanced too
   await expect(page.locator(".json-view pre")).toContainText("records");
   await page.getByRole("button", { name: "来源证据", exact: true }).click();
   await expect(page.getByLabel("请求 JSON")).toContainText("locator");
-  await page.getByRole("button", { name: "暂存与租约", exact: true }).click();
-  await page.getByLabel("Record ID", { exact: true }).fill("missing");
-  await page.getByRole("button", { name: "运行检查", exact: true }).click();
-  await expect(page.getByRole("alert")).toBeVisible();
 });
 
-test("real cursor pagination, relation/evidence/generation tools and administrator backup/restore", async ({
+test("real cursor pagination, relation/evidence tools and administrator backup/restore", async ({
   page,
 }) => {
   const collection = "product_docs";
@@ -319,24 +315,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
     expected: "Absent",
     document: { title: "Source", body: "sourceword" },
     system: { kind: "source" },
-  });
-  await call(`index/${collection}/doc`, {
-    operation_id: operation(),
-    record_id: "generation",
-    routing_key: "route",
-    expected: "Absent",
-    generation: {
-      action: "stage",
-      generation_id: "g1",
-      source: { record_id: "source", routing_key: "route", version: 1 },
-      members: ["chunk_a"],
-      chunks: [
-        {
-          record_id: "chunk_a",
-          document: { title: "Chunk A", body: "private" },
-        },
-      ],
-    },
   });
   for (let i = 0; i < 20; i++)
     await call(`index/${collection}/doc`, {
@@ -416,12 +394,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await page.getByRole("button", { name: "运行检查", exact: true }).click();
   await expect(page.locator(".json-view pre")).toContainText("content_sha256");
   await expect(page.locator(".json-view pre")).toContainText("source");
-  await page.getByRole("button", { name: "暂存与租约", exact: true }).click();
-  await page.getByLabel("Record ID", { exact: true }).fill("generation");
-  await page.getByRole("button", { name: "运行检查", exact: true }).click();
-  await expect(page.locator(".json-view pre")).toContainText(
-    "lease_expires_at_ms",
-  );
   await page.getByRole("button", { name: "连接与管理", exact: true }).click();
   await page
     .getByLabel("Master API Key", { exact: true })

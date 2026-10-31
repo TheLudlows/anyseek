@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowRight, Braces, Network, ScanText, Timer } from "lucide-react";
+import { ArrowRight, Braces, Network, ScanText } from "lucide-react";
 import {
   api,
   collectionPath,
@@ -87,13 +87,6 @@ const tools = [
       2,
     ),
   },
-  {
-    id: "generation",
-    name: "暂存与租约",
-    icon: Timer,
-    text: "检查 generation 发布、暂存成员及租约状态。",
-    sample: "",
-  },
 ];
 export function Tools({
   collection,
@@ -103,8 +96,7 @@ export function Tools({
   apiKey: string;
 }) {
   const [tool, setTool] = useState(tools[0]),
-    [source, setSource] = useState(tools[0].sample),
-    [record, setRecord] = useState("");
+    [source, setSource] = useState(tools[0].sample);
   const [result, setResult] = useState<Json>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -112,21 +104,11 @@ export function Tools({
     setBusy(true);
     setError("");
     try {
-      let path = collectionPath(collection.id) + "/" + tool.id,
-        body: string | undefined = source;
-      if (tool.id === "generation") {
-        if (!record.trim()) throw new Error("请输入 Record ID。");
-        path =
-          collectionPath(collection.id) +
-          "/doc/" +
-          encodeURIComponent(record) +
-          "/generation";
-        body = undefined;
-      } else {
-        JSON.parse(source);
-        if (next)
-          body = '{"length":20,"cursor":' + apiJsonText(result.next) + "}";
-      }
+      const path = collectionPath(collection.id) + "/" + tool.id;
+      let body = source;
+      JSON.parse(source);
+      if (next)
+        body = '{"length":20,"cursor":' + apiJsonText(result.next) + "}";
       setResult(await api(apiKey, path, body));
     } catch (e) {
       setResult(null);
@@ -170,28 +152,17 @@ export function Tools({
               run();
             }}
           >
-            {tool.id === "generation" ? (
-              <label>
-                Record ID
-                <input
-                  value={record}
-                  onChange={(e) => setRecord(e.target.value)}
-                  placeholder="输入 generation 记录标识"
-                />
-              </label>
-            ) : (
-              <label>
-                请求 JSON
-                <textarea
-                  aria-label="请求 JSON"
-                  className="code-input"
-                  rows={13}
-                  value={source}
-                  spellCheck={false}
-                  onChange={(e) => setSource(e.target.value)}
-                />
-              </label>
-            )}
+            <label>
+              请求 JSON
+              <textarea
+                aria-label="请求 JSON"
+                className="code-input"
+                rows={13}
+                value={source}
+                spellCheck={false}
+                onChange={(e) => setSource(e.target.value)}
+              />
+            </label>
             <div className="inline-actions">
               <button className="primary" disabled={busy}>
                 {busy ? <Busy label="正在读取" /> : "运行检查"}

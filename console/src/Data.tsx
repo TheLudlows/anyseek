@@ -342,8 +342,6 @@ function ImportData({
       setStatus(
         request.delivery === "ingest"
           ? `已确认提交 ${request.requests.length} 条，索引正在异步更新。`
-          : request.requests.some((r) => r.staging)
-          ? `已确认写入 ${request.requests.length} 条。暂存内容持久化完成，显式发布后才可检索。`
           : `已确认写入 ${request.requests.length} 条，已持久化且可见。`,
       );
       if (request.delivery === "ingest") await refreshProgress();
@@ -436,7 +434,7 @@ function ImportData({
             <summary>Record envelope 说明</summary>
             <p className="field-help">
               提供 record_id、routing_key、expected 和 document；document 为
-              null 表示删除。也支持 vector_patch 和 generation。Operation ID
+              null 表示删除。也支持 vector_patch。Operation ID
               由控制台生成并保留。
             </p>
           </details>
