@@ -19,6 +19,7 @@ import { Busy, Empty, Modal, Notice } from "./components.tsx";
 import { Collections } from "./Collections.tsx";
 import { Data } from "./Data.tsx";
 import { Search } from "./Search.tsx";
+import { Initialize } from "./Initialize.tsx";
 import { Recovery } from "./Tools.tsx";
 import type { Collection } from "./types.ts";
 
@@ -304,11 +305,7 @@ export default function App() {
         </header>
         <main id="main-content">
           <Notice>{error}</Notice>
-          {busy && !apiKey ? (
-            <section className="panel loading-block">
-              <Busy label="正在连接服务" />
-            </section>
-          ) : section === "settings" ? (
+          {section === "settings" ? (
             <>
               <div className="page-heading">
                 <div>
@@ -417,8 +414,11 @@ function ConnectForm({
   connect: (key: string) => Promise<void>;
   busy: boolean;
 }) {
+  const [initialize, setInitialize] = useState(false);
   const [key, setKey] = useState(""),
     [error, setError] = useState("");
+  if (initialize)
+    return <Initialize connect={connect} back={() => setInitialize(false)} />;
   return (
     <form
       className="connect-form"
@@ -455,9 +455,14 @@ function ConnectForm({
           </>
         )}
       </button>
-      <p className="field-help">
-        Master Key 用于管理操作，请在“连接与管理”中使用。
-      </p>
+      <button
+        type="button"
+        className="text-button"
+        disabled={busy}
+        onClick={() => setInitialize(true)}
+      >
+        首次使用？使用 Master Key 初始化
+      </button>
     </form>
   );
 }
@@ -474,9 +479,7 @@ function Welcome(props: {
           <br />
           检索底座
         </h1>
-        <p>
-          统一管理记录、向量与关系，通过全文、向量和混合检索访问你的数据。
-        </p>
+        <p>统一管理记录、向量与关系，通过全文、向量和混合检索访问你的数据。</p>
         <div className="welcome-features">
           <span>
             <Layers3 size={16} />
