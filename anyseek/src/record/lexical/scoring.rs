@@ -7,71 +7,21 @@ fn decoded(length: u64) -> f32 {
     DOCUMENT_LENGTH_COMPRESSION[int_to_byte4(length as u32) as usize] as f32
 }
 
-impl ActiveView<'_> {
-    #[cfg(test)]
-    pub(super) fn bm25f_unigram_probe(
-        &self,
-        query: &dyn Query,
-        terms: &[String],
-        boosts: &[f32],
-        normalization: FieldLengthNormalization,
-        limit: usize,
-        accepts: impl Fn(&Identity) -> bool,
-    ) -> Result<(usize, Vec<Hit>), RecordError> {
-        let groups = terms
-            .iter()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|term| super::query::ScoreGroup {
-                matched_term: term.clone(),
-                components: vec![term.clone()],
-                match_fields: vec![],
-            })
-            .collect::<Vec<_>>();
-        self.score_groups(query, &groups, boosts, normalization, limit, accepts)
-    }
+// Owned by one query over one selected corpus; never cached across views.
+struct QueryStatistics<'a> {
+    terms: BTreeSet<&'a String>,
+    slots: BTreeMap<&'a str, usize>,
+    averages: Vec<f32>,
+    idfs: Vec<f32>,
+}
 
-    #[cfg(test)]
-    pub(super) fn score_groups(
-        &self,
-        query: &dyn Query,
-        groups: &[super::query::ScoreGroup],
-        boosts: &[f32],
-        normalization: FieldLengthNormalization,
-        limit: usize,
-        accepts: impl Fn(&Identity) -> bool,
-    ) -> Result<(usize, Vec<Hit>), RecordError> {
-        self.score_groups_in(
-            &[self],
-            query,
-            groups,
-            boosts,
-            normalization,
-            limit,
-            accepts,
-        )
-    }
-
-    fn score_groups_in(
-        &self,
+impl<'a> QueryStatistics<'a> {
+    fn build(
         corpus: &[&ActiveView<'_>],
-        query: &dyn Query,
-        groups: &[super::query::ScoreGroup],
-        boosts: &[f32],
+        groups: &'a [super::query::ScoreGroup],
+        field_count: usize,
         normalization: FieldLengthNormalization,
-        limit: usize,
-        accepts: impl Fn(&Identity) -> bool,
-    ) -> Result<(usize, Vec<Hit>), RecordError> {
-        if groups.len() > 100
-            || limit > MAX_POPULATION
-            || boosts.len() != self.snapshot.fields.len()
-            || boosts.iter().any(|b| !b.is_finite() || *b < 0.0)
-        {
-            return Err(storage("invalid BM25F probe bounds"));
-        }
-        if self.live.is_empty() {
-            return Ok((0, Vec::new()));
-        }
+    ) -> Result<Self, RecordError> {
         // Preserve accumulation order independently of Tantivy's execution order.
         let terms = groups
             .iter()
@@ -82,8 +32,8 @@ impl ActiveView<'_> {
             .enumerate()
             .map(|(slot, term)| (term.as_str(), slot))
             .collect();
-        let mut sums = vec![0u64; boosts.len()];
-        let mut nonempty = vec![0u64; boosts.len()];
+        let mut sums = vec![0u64; field_count];
+        let mut nonempty = vec![0u64; field_count];
         let population: usize = corpus.iter().map(|v| v.live.len()).sum();
         for view in corpus {
             for (segment, addresses) in view.snapshot.addresses.iter().enumerate() {
@@ -98,7 +48,7 @@ impl ActiveView<'_> {
                 }
             }
         }
-        let mut averages = vec![1.0f32; boosts.len()];
+        let mut averages = vec![1.0f32; field_count];
         if normalization == FieldLengthNormalization::Shared {
             let sum = sums.iter().sum::<u64>();
             let mean = if sum == 0 {
@@ -152,6 +102,85 @@ impl ActiveView<'_> {
             let df = df as f32;
             idfs.push((((n - df + 0.5) / (df + 0.5)) + 1.0).ln());
         }
+        Ok(Self { terms, slots, averages, idfs })
+    }
+}
+
+fn validate_bounds(
+    groups: &[super::query::ScoreGroup],
+    boosts: &[f32],
+    field_count: usize,
+    limit: usize,
+) -> Result<(), RecordError> {
+    if groups.len() > 100
+        || limit > MAX_POPULATION
+        || boosts.len() != field_count
+        || boosts.iter().any(|b| !b.is_finite() || *b < 0.0)
+    {
+        return Err(storage("invalid BM25F probe bounds"));
+    }
+    Ok(())
+}
+
+impl ActiveView<'_> {
+    #[cfg(test)]
+    pub(super) fn bm25f_unigram_probe(
+        &self,
+        query: &dyn Query,
+        terms: &[String],
+        boosts: &[f32],
+        normalization: FieldLengthNormalization,
+        limit: usize,
+        accepts: impl Fn(&Identity) -> bool,
+    ) -> Result<(usize, Vec<Hit>), RecordError> {
+        let groups = terms
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|term| super::query::ScoreGroup {
+                matched_term: term.clone(),
+                components: vec![term.clone()],
+                match_fields: vec![],
+            })
+            .collect::<Vec<_>>();
+        self.score_groups(query, &groups, boosts, normalization, limit, accepts)
+    }
+
+    #[cfg(test)]
+    pub(super) fn score_groups(
+        &self,
+        query: &dyn Query,
+        groups: &[super::query::ScoreGroup],
+        boosts: &[f32],
+        normalization: FieldLengthNormalization,
+        limit: usize,
+        accepts: impl Fn(&Identity) -> bool,
+    ) -> Result<(usize, Vec<Hit>), RecordError> {
+        validate_bounds(groups, boosts, self.snapshot.fields.len(), limit)?;
+        let statistics = QueryStatistics::build(&[self], groups, boosts.len(), normalization)?;
+        self.score_groups_in(
+            &statistics,
+            query,
+            groups,
+            boosts,
+            limit,
+            accepts,
+        )
+    }
+
+    fn score_groups_in(
+        &self,
+        statistics: &QueryStatistics<'_>,
+        query: &dyn Query,
+        groups: &[super::query::ScoreGroup],
+        boosts: &[f32],
+        limit: usize,
+        accepts: impl Fn(&Identity) -> bool,
+    ) -> Result<(usize, Vec<Hit>), RecordError> {
+        if self.live.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+        let QueryStatistics { terms, slots, averages, idfs } = statistics;
         // Tantivy executes the complete Boolean/phrase predicate, but cannot
         // prune with its own BM25 score bounds for this different score.
         let weight = query
@@ -163,7 +192,7 @@ impl ActiveView<'_> {
         let mut count = 0;
         for (segment_id, segment) in self.snapshot.searcher.segment_readers().iter().enumerate() {
             let mut postings = Vec::new();
-            for word in &terms {
+            for word in terms {
                 let fields = self
                     .snapshot
                     .fields
@@ -307,16 +336,17 @@ impl<'a> CorpusView<'a> {
         if limit > MAX_POPULATION {
             return Err(storage("native corpus candidate budget exceeded"));
         }
+        validate_bounds(groups, boosts, self.views[0].snapshot.fields.len(), limit)?;
         let references: Vec<_> = self.views.iter().collect();
+        let statistics = QueryStatistics::build(&references, groups, boosts.len(), normalization)?;
         let mut count = 0usize;
         let mut hits: Vec<Hit> = Vec::new();
         for view in &self.views {
             let (matched, candidates) = view.score_groups_in(
-                &references,
+                &statistics,
                 query,
                 groups,
                 boosts,
-                normalization.clone(),
                 limit,
                 &accepts,
             )?;
