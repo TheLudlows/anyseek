@@ -99,7 +99,7 @@ export function Search({
     const body: Json = JSON.parse(advanced);
     if (!body || typeof body !== "object" || Array.isArray(body))
       throw new Error(t("高级参数必须是 JSON 对象。"));
-    if ((mode !== "Vector" || autoEmbed) && !query.trim()) throw new Error(t("请输入检索内容。"));
+    if ((mode === "Hybrid" || (mode === "Vector" && autoEmbed)) && !query.trim()) throw new Error(t("请输入检索内容。"));
     delete body.query;
     delete body.query_vector;
     if (mode !== "Vector") body.query = query;
@@ -270,7 +270,9 @@ export function Search({
               placeholder={
                 mode === "Vector" && !autoEmbed
                   ? t("向量模式使用下方 query vector")
-                  : t("输入关键词，探索你的数据…")
+                  : mode === "Lexical"
+                    ? t("输入关键词；留空可浏览记录…")
+                    : t("输入关键词，探索你的数据…")
               }
             />
             <button className="primary" disabled={busy}>
