@@ -144,7 +144,7 @@ test("creation and i64 import survive lost responses and reload with identical r
     (n, i) =>
       `{"title":"precision ${i}","body":"precision","rank":${n},"measure":1.2500e0,"data":{"n":${n}}}`,
   );
-  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: "数据", exact: true }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await page
     .getByLabel("导入 JSON", { exact: true })
     .fill("[" + docs.join(",") + "]");
@@ -167,7 +167,7 @@ test("creation and i64 import survive lost responses and reload with identical r
   await expect(
     page.getByRole("heading", { name: "数据", exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: "数据", exact: true }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await expect(page.getByLabel("导入 JSON", { exact: true })).toBeDisabled();
   await page.route("**/api/v1/index/browser_records/doc", async (route) => {
     writes.push(route.request().postData()!);
@@ -185,8 +185,8 @@ test("creation and i64 import survive lost responses and reload with identical r
     );
   await page
     .getByRole("dialog")
+    .locator(".modal-actions")
     .getByRole("button", { name: "关闭", exact: true })
-    .last()
     .click();
   await expect(page.getByRole("table")).toContainText("9223372036854775807");
   await page
@@ -213,7 +213,7 @@ test("creation and i64 import survive lost responses and reload with identical r
     .getByRole("navigation", { name: "主导航" })
     .getByRole("button", { name: "数据", exact: true })
     .click();
-  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: "数据", exact: true }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await page.getByLabel("Record envelope 模式").check();
   await page
     .getByLabel("导入 JSON", { exact: true })
@@ -426,7 +426,7 @@ for (const mode of ["Lexical", "Vector", "Hybrid"]) {
     const name = `form_${mode.toLowerCase()}`;
     await dialog.getByLabel("集合名称", { exact: true }).fill(name);
     await dialog.getByLabel("字段 1 名称", { exact: true }).fill("custom_title");
-    await dialog.getByLabel("检索模式", { exact: true }).selectOption(mode);
+    await dialog.getByRole("combobox", { name: "检索模式", exact: true }).selectOption(mode);
     await expect(dialog.getByLabel("字段 1 名称", { exact: true })).toHaveValue("custom_title");
     await expect(dialog.locator("textarea")).toHaveCount(0);
     await expect(dialog.getByText("Embedding 模型标识", { exact: true })).toHaveCount(0);
@@ -488,14 +488,14 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.reload();
   await expect(page.getByLabel("模型 API Key（可选）", { exact: true })).toHaveValue(modelKey);
   await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "数据", exact: true }).click();
-  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: "数据", exact: true }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toBeChecked();
   const source = "[" + Array.from({ length: 11 }, (_, i) => `{"body":"embedding document ${i}","large":9223372036854775807}`).join(",") + "]";
   await page.getByLabel("导入 JSON", { exact: true }).fill(source);
   await page.getByRole("button", { name: "写入集合", exact: true }).click();
   await expect(page.getByText("已确认提交 11 条，索引正在异步更新。", { exact: true })).toBeVisible();
   expect(modelCalls).toBe(2);
-  await page.getByRole("dialog").getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("dialog").locator(".modal-actions").getByRole("button", { name: "关闭", exact: true }).click();
   await expect.poll(async () => {
     const p = await call(`index/${id}/ingest`);
     return p.vector_seq >= p.committed_seq && p.lexical_seq >= p.committed_seq;
