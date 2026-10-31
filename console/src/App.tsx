@@ -20,6 +20,8 @@ import { Collections } from "./Collections.tsx";
 import { Data } from "./Data.tsx";
 import { Search } from "./Search.tsx";
 import { Initialize } from "./Initialize.tsx";
+import { EmbeddingSettings } from "./EmbeddingSettings.tsx";
+import { clearEmbeddingKeys } from "./embeddings.ts";
 import { Recovery } from "./Tools.tsx";
 import type { Collection } from "./types.ts";
 
@@ -86,6 +88,7 @@ export default function App() {
       if (attempt !== sequence.current) return;
       storage.set("apiKey", key.trim());
       const changed = currentKey.current && currentKey.current !== key.trim();
+      if (changed) clearEmbeddingKeys(owner);
       currentKey.current = key.trim();
       setApiKey(key.trim());
       setOwner(fingerprint);
@@ -131,6 +134,7 @@ export default function App() {
     navigate(page);
   }
   function disconnect() {
+    clearEmbeddingKeys(owner);
     ++sequence.current;
     currentKey.current = "";
     setApiKey("");
@@ -337,6 +341,9 @@ export default function App() {
                   )}
                 </div>
               </section>
+              {apiKey && selected?.schema.some((f) => f.index_vector) ? (
+                <EmbeddingSettings key={owner + selected.id} owner={owner} collection={selected} />
+              ) : apiKey && <section className="panel embedding-panel"><h2>浏览器嵌入</h2><p className="muted">在左侧选择一个含向量字段的集合，配置仅保存在浏览器的模型连接。</p></section>}
               <Recovery />
             </>
           ) : !apiKey ? (
@@ -378,6 +385,7 @@ export default function App() {
               key={owner + selected.id}
               collection={selected}
               apiKey={apiKey}
+              owner={owner}
             />
           )}
           <footer className="main-footer">

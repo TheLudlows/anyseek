@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -24,6 +24,8 @@ import {
   sendWrites,
   type PendingWrites,
 } from "./writes.ts";
+import { loadEmbeddingConfig } from "./embeddings.ts";
+import { generatePendingEmbeddings, prepareEmbeddedWrites } from "./embedding-writes.ts";
 import { Tools } from "./Tools.tsx";
 import type { Collection, Json, Page, RecordData } from "./types.ts";
 
@@ -287,6 +289,15 @@ function ImportData({
 }) {
   const [source, setSource] = useState(""),
     [envelope, setEnvelope] = useState(false);
+  const [modelConfig] = useState(() => loadEmbeddingConfig(owner, collection.id));
+  const [autoEmbed, setAutoEmbed] = useState(!!modelConfig);
+  const [indexProgress, setIndexProgress] = useState<Json>(null);
+  const generation = useRef<AbortController | null>(null);
+  useEffect(() => () => generation.current?.abort(), []);
+  async function refreshProgress() {
+    try { setIndexProgress(await api(apiKey, collectionPath(collection.id) + "/ingest")); }
+    catch (e) { setError(message(e)); }
+  }
   const [pending, setPending] = useState<PendingWrites | null>(() =>
     storage.get("pendingWrites"),
   );
@@ -305,7 +316,9 @@ function ImportData({
     let request = pending;
     try {
       if (!request) {
-        request = {
+        request = autoEmbed && !envelope && modelConfig
+          ? prepareEmbeddedWrites(source, owner, collection, modelConfig)
+          : {
           owner,
           collection: collection.id,
           requests: prepareDocumentRequests(source, envelope),
@@ -315,16 +328,25 @@ function ImportData({
         storage.set("pendingWrites", request);
         setPending(request);
       }
+      if (request.embedding) {
+        const controller = new AbortController(); generation.current = controller;
+        setStatus(`正在生成向量：${request.requests.filter((r) => r.embedded).length} / ${request.requests.length} 条`);
+        await generatePendingEmbeddings(request, owner, collection, (done) => setStatus(`已生成向量 ${done} / ${request!.requests.length} 条`), controller.signal);
+        controller.signal.throwIfAborted();
+      }
       await sendWrites(request, apiKey, owner, (done) =>
         setStatus(`已确认 ${done} / ${request!.requests.length} 条`),
       );
       setPending(null);
       setSource("");
       setStatus(
-        request.requests.some((r) => r.staging)
+        request.delivery === "ingest"
+          ? `已确认提交 ${request.requests.length} 条，索引正在异步更新。`
+          : request.requests.some((r) => r.staging)
           ? `已确认写入 ${request.requests.length} 条。暂存内容持久化完成，显式发布后才可检索。`
           : `已确认写入 ${request.requests.length} 条，已持久化且可见。`,
       );
+      if (request.delivery === "ingest") await refreshProgress();
       await onWritten();
     } catch (e) {
       setPending(storage.get("pendingWrites"));
@@ -346,6 +368,9 @@ function ImportData({
               : "原始请求已保留。重试复用原始内容与标识，避免重复写入。"}
           </Notice>
         )}
+        {pending?.embedding && !foreign && <Notice kind="info">
+          保留任务使用原模型 {pending.embedding.config.model} · {pending.embedding.config.endpoint}，已生成的向量不会重新生成。
+        </Notice>}
         <fieldset disabled={busy || !!pending}>
           <div className="editor-toolbar">
             <label className="checkbox">
@@ -379,6 +404,12 @@ function ImportData({
               />
             </label>
           </div>
+          {collection.schema.some((f) => f.index_vector) && <div className="embedding-choice">
+            <label className="checkbox"><input type="checkbox" checked={autoEmbed && !envelope} disabled={!modelConfig || envelope} onChange={(e) => setAutoEmbed(e.target.checked)} />自动生成缺失的向量</label>
+            <p className="field-help">{envelope ? "Record envelope 使用原始请求，不自动生成向量。" : modelConfig
+              ? `${modelConfig.textFields.join(" + ")} → ${modelConfig.vectorField} · ${modelConfig.model}。所选文本将发送至 ${modelConfig.endpoint}，已有向量会保留。`
+              : "在连接与管理中配置本集合的浏览器嵌入服务后，可直接导入文本。"}</p>
+          </div>}
           <label className="sr-only" htmlFor="document-json">
             导入 JSON
           </label>
@@ -393,7 +424,7 @@ function ImportData({
             spellCheck={false}
           />
           <p className="field-help">
-            原始数字文本会完整保留。多条记录逐条提交，不保证批次原子性。
+            原始数字文本会完整保留。自动嵌入每批最多 16 条，单条文本最多 30 KiB；写入不保证批次原子性。
           </p>
         </fieldset>
         <details>
@@ -412,11 +443,17 @@ function ImportData({
         )}
         <Notice>{error}</Notice>
         <Notice kind="success">{status}</Notice>
+        {indexProgress && <Notice kind="info">
+          提交进度 {indexProgress.committed_seq ?? "待恢复"} · 全文 {indexProgress.lexical_seq} · 向量 {indexProgress.vector_seq}
+          {indexProgress.index_error && " · 索引异常，请检查服务状态"}
+          <button type="button" className="text-button" disabled={busy} onClick={refreshProgress}>刷新索引进度</button>
+        </Notice>}
         <div className="modal-actions">
-          {pending?.rejected && !foreign && (
+          {pending && !foreign && (pending.rejected || (pending.delivery === "ingest" && !pending.unresolved)) && (
             <button
               type="button"
               className="secondary"
+              disabled={busy}
               onClick={() => {
                 storage.remove("pendingWrites");
                 setPending(null);
@@ -424,7 +461,7 @@ function ImportData({
                 setError("");
               }}
             >
-              移除被拒绝的请求
+              {pending.delivery === "ingest" ? "移除未提交的请求" : "移除被拒绝的请求"}
             </button>
           )}
           <button
