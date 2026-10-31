@@ -287,14 +287,14 @@ export default function App() {
             <>
               <div className="page-heading">
                 <div>
-                  <span className="eyebrow">CONNECTION & ADMINISTRATION</span>
+
                   <h1>{t("连接与管理")}</h1>
                   <p>{t("管理当前浏览器标签页的连接，以及服务备份。")}</p>
                 </div>
               </div>
               <section className="panel connection-panel">
                 <div>
-                  <span className="eyebrow">TENANT CONNECTION</span>
+
                   <h2>{apiKey ? t("服务已连接") : t("尚未连接")}</h2>
                   <p>
                     {t("API Key 仅保存在当前标签页的会话中；写入重试记录单独保留。")}</p>
@@ -447,7 +447,7 @@ function Welcome(props: {
   return (
     <div className="welcome-grid">
       <div className="welcome-copy">
-        <span className="eyebrow">WELCOME TO ANYSEEK</span>
+
         <h1>
           {t("AI 记忆与知识的")}<br />
           {t("检索底座")}</h1>
@@ -467,13 +467,13 @@ function Welcome(props: {
           <div className="art-lines" />
           <div className="art-box art-source">
             <Database size={22} />
-            <span>DATA</span>
+            <span>{t("数据")}</span>
           </div>
           <div className="art-box art-search">
             <SearchIcon size={22} />
-            <span>SEARCH</span>
+            <span>{t("检索")}</span>
           </div>
-          <span className="art-caption">Records. Vectors. Relations.</span>
+          <span className="art-caption">{t("记录 · 向量 · 关系")}</span>
         </div>
       </div>
       <section className="panel welcome-connect">

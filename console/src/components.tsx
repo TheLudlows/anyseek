@@ -184,7 +184,7 @@ export function RecordPreview({
         </button>
       </div>
       <div className="preview-inner">
-        <span className="eyebrow">RECORD</span>
+
         <h2>{recordTitle(record)}</h2>
         <dl className="metadata">
           <dt>Record ID</dt>
@@ -206,12 +206,12 @@ export function RecordPreview({
           </a>
         )}
         {scoreDetails}
-        <JsonView value={record.document} label="Document JSON" />
+        <JsonView value={record.document} label={t("文档 JSON")} />
         <details>
           <summary>
             {t("完整记录")}<ArrowRight size={13} />
           </summary>
-          <JsonView value={record} label="Record JSON" />
+          <JsonView value={record} label={t("记录 JSON")} />
         </details>
         {explanation != null && (
           <details>

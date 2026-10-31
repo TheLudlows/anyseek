@@ -85,8 +85,7 @@ export function Data({
     <>
       <div className="page-heading">
         <div>
-          <span className="eyebrow">COLLECTION / {collection.id}</span>
-          <h1>{t("数据")}</h1>
+          <h1>{t("数据 · {0}", collection.id)}</h1>
           <p>{t("查看原始记录，保留每一份信息的完整表达。")}</p>
         </div>
         <button className="primary" onClick={() => setImporting(true)}>

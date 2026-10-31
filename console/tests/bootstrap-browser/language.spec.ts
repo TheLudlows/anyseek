@@ -34,10 +34,18 @@ test('switching leaves search input unchanged',async({page})=>{
   await page.getByLabel('Tenant API Key',{exact:true}).fill('test-key');
   await page.getByRole('button',{name:'连接服务',exact:true}).click();
   await page.getByRole('button',{name:'检索调试',exact:true}).click();
+  await expect(page.locator('.eyebrow')).toHaveCount(0);
+  await expect(page.getByRole('heading', {name:'检索调试',exact:true})).toBeVisible();
+  await expect(page.locator('.segmented button')).toHaveText(['关键词', '向量', '混合']);
   const input=page.locator('.search-entry input');
   await input.fill('中文查询');
   await page.getByLabel('语言 / Language').selectOption('en');
   await expect(input).toHaveValue('中文查询');
+  await expect(page.getByRole('heading', {name:'Search playground',exact:true})).toBeVisible();
+  await expect(page.locator('.segmented button')).toHaveText(['Keyword', 'Vector', 'Hybrid']);
+  await page.getByRole('button', {name:'Connection & management',exact:true}).click();
+  await expect(page.getByRole('heading', {name:'Connection & management',exact:true})).toBeVisible();
+  await expect(page.locator('.eyebrow')).toHaveCount(0);
 });
 test('mobile language switching works with storage disabled',async({page})=>{
   await page.setViewportSize({width:390,height:844});

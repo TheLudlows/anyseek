@@ -1,4 +1,9 @@
 export const english: Record<string, string> = {
+  "数据 · {0}": "Data · {0}",
+  "记录 · 向量 · 关系": "Records · Vectors · Relations",
+  "管理员": "Administrator",
+  "文档 JSON": "Document JSON",
+  "记录 JSON": "Record JSON",
   "普通 Key 已签发": "Tenant API key issued",
   "已恢复上次完成的初始化结果。请先保存普通 Key，再进入工作区或创建另一个 Tenant；原 Tenant 和 Key 会继续保留在服务端。": "Your previous completed initialization has been restored. Save the key, then enter the workspace or create another tenant. The existing tenant and key remain on the server.",
   "我已保存普通 Key": "I have saved the tenant API key",
