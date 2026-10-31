@@ -1,3 +1,4 @@
+import { t } from "./i18n.ts";
 import { parseApiJson } from "./json.ts";
 import type { Json } from "./types.ts";
 
@@ -30,15 +31,15 @@ export async function api<T = Json>(
     value = text ? parseApiJson(text) : null;
   } catch {
     throw new ApiError(
-      `服务返回了非 JSON 响应（HTTP ${response.status}），请检查 API 代理配置。`,
+      t("服务返回了非 JSON 响应（HTTP {0}），请检查 API 代理配置。", response.status),
       response.status,
     );
   }
   if (!response.ok)
     throw new ApiError(
       response.status === 401
-        ? "API Key 无效或已失效，请重新连接。"
-        : value?.message || `请求失败（HTTP ${response.status}）`,
+        ? t("API Key 无效或已失效，请重新连接。")
+        : value?.message || t("请求失败（HTTP {0}）", response.status),
       response.status,
       value?.code,
     );

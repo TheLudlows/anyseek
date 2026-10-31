@@ -1,3 +1,4 @@
+import { t } from "./i18n.ts";
 export type MarkdownChunk = { source: string; title: string; section: string; content: string; index: number; oversized: boolean };
 
 // Conservative Markdown splitting: fenced code and contiguous lists/tables stay intact.
@@ -53,9 +54,9 @@ export function chunkMarkdown(source: string, input: string, target = 4000): Mar
 export type MarkdownMapping = { body: string; title: string; source: string; index: string };
 export function markdownDocuments(chunks: MarkdownChunk[], mapping: MarkdownMapping) {
   const fields = Object.values(mapping).filter(Boolean);
-  if (!mapping.body) throw new Error("请选择正文目标字段。");
-  if (new Set(fields).size !== fields.length) throw new Error("每种内容需要映射到不同的字段。");
-  if (!chunks.length) throw new Error("所选文档没有可导入的内容。");
+  if (!mapping.body) throw new Error(t("请选择正文目标字段。"));
+  if (new Set(fields).size !== fields.length) throw new Error(t("每种内容需要映射到不同的字段。"));
+  if (!chunks.length) throw new Error(t("所选文档没有可导入的内容。"));
   return chunks.map(chunk => {
     const context = [chunk.title, chunk.section].filter((v, i, all) => v && all.indexOf(v) === i).join("\n");
     const document: Record<string, string | number> = Object.create(null);

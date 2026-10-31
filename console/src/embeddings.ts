@@ -1,3 +1,4 @@
+import { t } from "./i18n.ts";
 import type { Collection } from "./types.ts";
 
 export type EmbeddingConfig = {
@@ -34,20 +35,20 @@ export function sessionEmbeddingKey(owner: string, collection: string, config: E
 export function validateEmbeddingConfig(config: EmbeddingConfig, collection: Collection) {
   let url: URL;
   try { url = new URL(config.endpoint); }
-  catch { throw new Error("请填写完整的模型 HTTP(S) API 地址。"); }
+  catch { throw new Error(t("请填写完整的模型 HTTP(S) API 地址。")); }
   if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash)
-    throw new Error("模型地址须为完整 HTTP(S) 地址，不包含用户名、密码、查询参数或片段。");
+    throw new Error(t("模型地址须为完整 HTTP(S) 地址，不包含用户名、密码、查询参数或片段。"));
   if (typeof location !== "undefined" && location.protocol === "https:" && url.protocol === "http:"
     && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))
-    throw new Error("当前控制台使用 HTTPS，请为模型服务提供 HTTPS 地址。");
-  if (!config.model.trim()) throw new Error("请填写模型名称。");
+    throw new Error(t("当前控制台使用 HTTPS，请为模型服务提供 HTTPS 地址。"));
+  if (!config.model.trim()) throw new Error(t("请填写模型名称。"));
   if (!config.textFields.length || new Set(config.textFields).size !== config.textFields.length
     || config.textFields.some((name) => !collection.schema.some((f) => f.field === name && !f.index_vector && ["Text", "String"].includes(f.field_type))))
-    throw new Error("请选择集合中用于嵌入的文本字段。");
+    throw new Error(t("请选择集合中用于嵌入的文本字段。"));
   if (!collection.schema.some((f) => f.field === config.vectorField && f.index_vector && f.field_type === "Json"))
-    throw new Error("请选择 Json 类型的向量目标字段。");
+    throw new Error(t("请选择 Json 类型的向量目标字段。"));
   if (!Number.isInteger(collection.vector_dimensions) || collection.vector_dimensions! < 1)
-    throw new Error("服务未返回集合向量维度，请更新 API 服务后再使用自动嵌入。");
+    throw new Error(t("服务未返回集合向量维度，请更新 API 服务后再使用自动嵌入。"));
 }
 export function saveEmbeddingConfig(owner: string, collection: Collection, config: EmbeddingConfig, key: string, remember: boolean) {
   validateEmbeddingConfig(config, collection);
@@ -83,16 +84,16 @@ export function clearEmbeddingConfig(owner: string, collection: string) {
 export function validateVector(value: unknown, dimensions: number): asserts value is number[] {
   if (!Array.isArray(value) || value.length !== dimensions
     || !value.every((n) => typeof n === "number" && Number.isFinite(n)))
-    throw new Error(`模型返回向量无效：需要 ${dimensions} 维有限数值数组。`);
+    throw new Error(t("模型返回向量无效：需要 {0} 维有限数值数组。", dimensions));
 }
 export const EMBEDDING_BATCH_SIZE = 16;
 export async function embedTexts(config: EmbeddingConfig, key: string, texts: string[], dimensions: number, signal?: AbortSignal): Promise<number[][]> {
-  if (config.requiresKey && !key) throw new Error("请在连接与管理中重新填写当前模型的 API Key；浏览器未保留该密钥。");
+  if (config.requiresKey && !key) throw new Error(t("请在连接与管理中重新填写当前模型的 API Key；浏览器未保留该密钥。"));
   if (!texts.length || texts.length > EMBEDDING_BATCH_SIZE || texts.some((s) => !s.trim()))
-    throw new Error("每次模型请求需包含 1–16 条非空文本。");
+    throw new Error(t("每次模型请求需包含 1–16 条非空文本。"));
   const body = JSON.stringify({ model: config.model, input: texts, encoding_format: "float" });
   if (new TextEncoder().encode(body).length > 512 * 1024)
-    throw new Error("单批嵌入文本超过 512 KiB，请减少文本或拆分导入。");
+    throw new Error(t("单批嵌入文本超过 512 KiB，请减少文本或拆分导入。"));
   const timeout = AbortSignal.timeout(60_000);
   let response: Response;
   try {
@@ -104,18 +105,18 @@ export async function embedTexts(config: EmbeddingConfig, key: string, texts: st
     });
   } catch (error) {
     if (signal?.aborted) throw error;
-    if (timeout.aborted) throw new Error("模型请求超过 60 秒，请稍后重试。");
-    throw new Error("无法连接模型服务，请检查地址、网络、HTTPS 和服务端 CORS 设置（需允许 POST、Content-Type 和 Authorization）。");
+    if (timeout.aborted) throw new Error(t("模型请求超过 60 秒，请稍后重试。"));
+    throw new Error(t("无法连接模型服务，请检查地址、网络、HTTPS 和服务端 CORS 设置（需允许 POST、Content-Type 和 Authorization）。"));
   }
-  if (!response.ok) throw new Error(`模型请求失败（HTTP ${response.status}）${response.status === 401 || response.status === 403 ? "，请检查模型 API Key。" : response.status === 429 ? "，请稍后重试。" : "，请检查模型服务配置。"}`);
+  if (!response.ok) throw new Error(t("模型请求失败（HTTP {0}）{1}", response.status, response.status === 401 || response.status === 403 ? t("，请检查模型 API Key。") : response.status === 429 ? t("，请稍后重试。") : t("，请检查模型服务配置。")));
   let data;
   try { data = (await response.json()).data; }
-  catch { throw new Error("模型未返回有效的 JSON 响应。"); }
-  if (!Array.isArray(data) || data.length !== texts.length) throw new Error("模型返回的向量数量与输入不一致。");
+  catch { throw new Error(t("模型未返回有效的 JSON 响应。")); }
+  if (!Array.isArray(data) || data.length !== texts.length) throw new Error(t("模型返回的向量数量与输入不一致。"));
   const vectors: number[][] = new Array(texts.length);
   for (const row of data) {
     if (!row || !Number.isInteger(row.index) || row.index < 0 || row.index >= texts.length || vectors[row.index])
-      throw new Error("模型返回了重复或无效的向量序号。");
+      throw new Error(t("模型返回了重复或无效的向量序号。"));
     validateVector(row.embedding, dimensions);
     vectors[row.index] = row.embedding;
   }
