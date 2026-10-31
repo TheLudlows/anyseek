@@ -195,7 +195,6 @@ mod tests {
                 let expected=oracle.query(RecordQuery{temporal:None,text:"alpha".into(),vector:vector.clone(),mode:mode.clone(),query_type:QueryType::Union,offset,length,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:order.clone()}).await.unwrap();
                 let cut={let inner=oracle.inner.lock().await;lexical::Cut{sequence:inner.state.seq,evaluation_time_ms:inner.evaluation_time_ms}};
                 let actual=lexical::runtime_query::search(&root_index,"alpha".into(),vector,mode.clone(),QueryType::Union,offset,length,ResultType::TopkCount,vec![],vec![],order.clone(),cut).await.unwrap();
-                assert!(actual.error.is_none(),"{:?}",actual.error);
                 let mut mapped=Vec::new();
                 for hit in actual.results {
                     let root=root_index.read().await;let shard=root.segments[hit.doc_id%2].vector.read().await;

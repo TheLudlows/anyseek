@@ -1087,7 +1087,7 @@ pub(crate) trait SearchVectorSegment {
         cluster_search: AnnMode,
         field_filter: Vec<String>,
         facet_filter: Vec<FacetFilter>,
-    ) -> ResultObject;
+    ) -> Result<ResultObject, crate::record::RecordError>;
 }
 
 /// Defines the source of search results, which can be lexical, vector-based, or a hybrid of both.
@@ -1190,21 +1190,21 @@ impl SearchVectorSegment for VectorSegmentArc {
         ann_mode: AnnMode,
         field_filter: Vec<String>,
         facet_filter: Vec<FacetFilter>,
-    ) -> ResultObject {
+    ) -> Result<ResultObject, crate::record::RecordError> {
         let mut result_object: ResultObject = Default::default();
 
         let shard_ref = self.read().await;
-        if shard_ref.failed {return ResultObject {error:Some("vector component requires recovery".into()),..Default::default()};}
+        if shard_ref.failed { return Err(crate::record::RecordError::RecoveryRequired); }
         let facet_filter = match compile_filters(&shard_ref, &facet_filter) {
             Ok(filters) => filters,
-            Err(error) => return ResultObject { error: Some(error), ..Default::default() },
+            Err(error) => return Err(crate::record::RecordError::Rejected(error)),
         };
         let mut observed_cluster_count = 0;
 
         let non_affine = shard_ref.max_vector_value == f32::MIN;
 
         if !shard_ref.is_vector_indexing || shard_ref.indexed_vector_count == 0 {
-            return result_object;
+            return Ok(result_object);
         }
 
         let mut field_filter_set: AHashSet<u16> = AHashSet::new();
@@ -1508,7 +1508,7 @@ impl SearchVectorSegment for VectorSegmentArc {
         result_object.observed_vector_count = top_k.observed_vector_count;
         result_object.observed_cluster_count = observed_cluster_count;
 
-        result_object
+        Ok(result_object)
     }
 }
 

@@ -4438,10 +4438,7 @@ impl Inner {
                         sort,
                         lexical::Cut { sequence:self.state.seq,evaluation_time_ms:self.evaluation_time_ms },
                     )
-                    .await;
-                if let Some(error) = result.error {
-                    return Err(storage(error));
-                }
+                    .await?;
                 let mut hits = Vec::new();
                 for (rank,hit) in result.results.into_iter().enumerate() {
                     let id = self

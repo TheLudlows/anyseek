@@ -67,7 +67,7 @@ impl Handle {
         let scope = crate::resources::Scope::current()
             .map(|scope| scope.bytes(bytes))
             .transpose()
-            .map_err(storage)?;
+            .map_err(|_| RecordError::Busy)?;
         let mut rows = BTreeMap::new();
         for shard in &shards {
             let active = shard.active.as_ref().unwrap();
@@ -108,7 +108,7 @@ impl Handle {
         let scope = crate::resources::Scope::current()
             .map(|scope| scope.bytes(bytes))
             .transpose()
-            .map_err(storage)?;
+            .map_err(|_| RecordError::Busy)?;
         Ok(Self {
             index: Arc::new(tokio::sync::RwLock::new(root.clone())),
             _pins: root.segments.iter().map(|segment| segment.lexical.clone()).collect(),
@@ -215,9 +215,6 @@ impl RecordPartition {
             },
         )
         .await?;
-        if let Some(error) = result.error.take() {
-            return Err(storage(error));
-        }
         let candidates = handle
             .candidates(std::mem::take(&mut result.results))
             .await?;
@@ -347,6 +344,17 @@ mod tests {
             Err(RecordError::RecoveryRequired)));
         assert!(matches!(selection.revalidate(&inner.locations, &components).await,
             Err(RecordError::RecoveryRequired)));
+        let failed = crate::search::search_with_counts(&handle.index, String::new(),
+            Some(Embedding::F32(vec![1.0, 0.0])), SearchMode::Vector {
+                similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All },
+            0, 10, ResultType::TopkCount, true, vec![], vec![], vec![], &mut vec![]).await;
+        assert!(matches!(failed, Err(RecordError::RecoveryRequired)));
+        // Exhaust only the caller's byte allowance; the same captured index is healthy.
+        components[0].write().await.failed = false;
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("query-bytes".into(), crate::resources::Lane::Foreground, 512 * 1024 * 1024).unwrap();
+        assert!(matches!(scope.run(Handle::capture(&handle.index, 10)).await, Err(RecordError::Busy)));
+
     }
 
     #[tokio::test]

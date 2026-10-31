@@ -162,6 +162,9 @@ async fn check(index: &RecordPartition, removed: &[usize]) {
             }
         }
     }
+}
+
+async fn check_request_contract(index: &RecordPartition) {
     for bad in [
         json!([{"Int":{"field":"absent","filter":{"start":0,"end":1}}}]),
         json!([{"Float":{"field":"category","filter":{"start":0.,"end":1.}}}]),
@@ -169,14 +172,43 @@ async fn check(index: &RecordPartition, removed: &[usize]) {
         json!([{"Timestamp":{"field":"date","filter":{"start":2,"end":1}}}]),
     ] {
         for name in ["Lexical", "Vector", "Hybrid"] {
-            assert!(
-                try_query(index, name, bad.clone(), 3, json!("All"))
-                    .await
-                    .unwrap_err().to_string()
-                    .contains("facet_filter")
-            );
+            assert!(matches!(try_query(index, name, bad.clone(), 3, json!("All")).await,
+                Err(anyseek::record::RecordError::Rejected(message)) if message.contains("facet_filter")));
         }
     }
+    for name in ["Lexical", "Vector", "Hybrid"] {
+        let request = || RecordQuery {
+            text: "common".into(), vector: (name != "Lexical").then(|| Embedding::F32(vec![1.,0.,0.])),
+            mode: serde_json::from_value(mode(name, json!("All"))).unwrap(),
+            query_type: anyseek::search::QueryType::Union, offset: 0, length: 30,
+            result_type: anyseek::search::ResultType::TopkCount,
+            fields: vec![], filters: vec![], sort: vec![], temporal: None,
+        };
+        let valid = if name == "Vector" { "vector" } else { "body" };
+        let mut cases = vec![(vec![], true), (vec![valid], true),
+            (vec!["missing"], false), (vec![valid, "missing"], false),
+            (vec!["label"], false)];
+        if name == "Hybrid" {
+            cases.extend([(vec!["vector"], true), (vec!["body", "vector"], true)]);
+        } else {
+            cases.push((vec![if name == "Vector" { "body" } else { "vector" }], false));
+        }
+        for (fields, valid) in cases {
+            let mut query = request();
+            query.fields = fields.iter().map(|field| (*field).into()).collect();
+            let result = index.query(query).await;
+            if valid { assert_eq!(result.unwrap().hits.len(), 24, "{name} {fields:?}"); }
+            else { assert!(matches!(result, Err(anyseek::record::RecordError::Rejected(_))), "{name} {fields:?}: {result:?}"); }
+        }
+        for field in ["missing", "body", "vector"] {
+            let mut query = request();
+            query.sort = ["_id", field].map(|field| anyseek::search::ResultSort {
+                field: field.into(), order: anyseek::search::SortOrder::Ascending,
+            }).to_vec();
+            assert!(matches!(index.query(query).await, Err(anyseek::record::RecordError::Rejected(_))));
+        }
+    }
+
 }
 
 #[tokio::test]
@@ -215,6 +247,7 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
         assert!(attempt < 299, "index queue did not finish");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    check_request_contract(&index).await;
     check(&index, &[]).await;
     // Deleted uncommitted vectors must not enter the candidate heap.
     let all = query(&index, "Lexical", json!([]), 30, json!("All")).await;

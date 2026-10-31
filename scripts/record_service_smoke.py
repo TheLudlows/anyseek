@@ -161,6 +161,18 @@ def main():
                     assert abs(sum(c['rrf_contribution'] for c in channels)-hit['score'])<1e-5
                 else:assert channels[0]['channel']=='vector' and channels[0]['raw_score']==hit['score']
 
+            # Reuse the same process and collection for all query error contracts.
+            for query in [{'query':'alpha'}, {'query_vector':[1,0],'all':True},
+                          {'query':'alpha','query_vector':[1,0],'rrf':{}}]:
+                for extra in [{'filter':[{'Int':{'field':'missing','filter':{'start':0,'end':1}}}]},
+                              {'search_fields':['missing']}, {'search_fields':['body','missing']},
+                              {'sort':[{'field':'missing','order':'Ascending'}]},
+                              {'sort':[{'field':'body','order':'Ascending'}]}]:
+                    error=call('POST','/api/v1/index/vectors/query',{**query,**extra},status=400)
+                    assert error['code']=='rejected',error
+                for extra in [{}, {'search_fields':[]}]:
+                    assert len(call('POST','/api/v1/index/vectors/query',{**query,**extra})['hits'])==1
+
             assert call('GET','/api/v1/index/vectors/doc/v')['document']['vector']==[2,0]
             pending={**vw,'operation_id':operation(),'record_id':'pending','document':{'body':'pendingword'}}
             call('POST','/api/v1/index/vectors/doc',pending)

@@ -1097,11 +1097,7 @@ impl Runtime {
                     &mut Vec::new(),
                 )
                 .await;
-            assert_eq!(
-                old.result_count_total, 0,
-                "legacy lexical executor must not supply the hit"
-            );
-            assert!(old.error.is_some(), "private vector component rejects lexical execution");
+            assert!(matches!(old, Err(RecordError::Rejected(_))), "private vector component rejects lexical execution");
             let component_path=std::path::PathBuf::from(&index.read().await.index_path_string);
             assert!(!component_path.join("index.bin").exists());
             assert!(!component_path.join("docstore.bin").exists());
