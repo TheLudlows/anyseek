@@ -263,8 +263,8 @@ impl Reference {
         let mut incremental=None;
         let mut image_lease=None;
         let mut base_reason=if compact {"forced_full_base"} else if pool_compaction {"payload_pool_bound"}
-            else if state.private_cleanup_pending {"private_cleanup"} else {"missing_predecessor_or_journal"};
-        if !compact && !pool_compaction && !state.private_cleanup_pending {
+            else {"missing_predecessor_or_journal"};
+        if !compact && !pool_compaction {
             if let Some(previous)=previous.filter(|_|journal.is_some() || captured.is_some()) {
                 base_reason="missing_captured_proof";
                 if previous.captured.get().is_some() {
@@ -296,8 +296,8 @@ impl Reference {
                 }
             }
         }
-        log::info!("record_maintenance phase=state_image seq={} reason={} incremental={} compact={} payload_compaction={} private_cleanup={} prior_objects={} prior_deltas={}",
-            state.seq,base_reason,incremental.is_some(),compact,pool_compaction,state.private_cleanup_pending,
+        log::info!("record_maintenance phase=state_image seq={} reason={} incremental={} compact={} payload_compaction={} prior_objects={} prior_deltas={}",
+            state.seq,base_reason,incremental.is_some(),compact,pool_compaction,
             prior_objects,previous.map_or(0,|p|p.state_blocks.len()));
         let referenced=match incremental {
             Some(image)=>{pool.retain_prior_closure();image},
@@ -308,7 +308,7 @@ impl Reference {
             },
         };
         let payloads=pool.finish().map_err(storage)?;
-        let manifest=Manifest{format:6,seq:state.seq,state:referenced,payloads};
+        let manifest=Manifest{format:7,seq:state.seq,state:referenced,payloads};
         // Chain count is not a byte bound: repeated descriptors/long references
         // may exhaust a small configured authority before MAX_DELTAS. Measure
         // without constructing an encoded Vec or writing an oversized manifest.
@@ -418,7 +418,6 @@ impl Reference {
                 match entry {
                     Entry::Applied(op)=>apply(&mut replayed,&op),
                     Entry::Expired(event)=>temporal::apply(&mut replayed,&event),
-                    Entry::LeaseExpired(event)=>lease::apply(&mut replayed,&event),
                     Entry::HistoryTrim(event)=>history::apply_trim(&mut replayed,&config.history,&event),
                     Entry::Anchor(_)|Entry::Checkpoint{..}=>Err(storage("authority in WAL suffix")),
                 }
@@ -434,7 +433,7 @@ impl Reference {
         let path=directory(root,&self.id)?;
         if files(&path,closure_limit(authority_budget)?)?.as_slice()!=self.files.as_slice(){return Err(storage("anchor closure checksum mismatch"));}
         let (manifest,mut manifest_lease)=read_manifest(&path.join("manifest"),authority_budget)?;
-        if manifest.format!=6{return Err(storage("unsupported anchor format"));}
+        if manifest.format!=7{return Err(storage("unsupported anchor format"));}
         let owners=manifest.state.owners()?;
         if owners.last()!=Some(&self.id.as_str()) || self.state_blocks.len()+1!=owners.len() {
             return Err(storage("state block closure count or head mismatch"));
@@ -616,7 +615,6 @@ impl Inner {
     pub(super) async fn maintain_index_tail(&mut self)->Result<(),RecordError> {
         self.index.drain_batch_prefix(self.state.seq).await?;
         if self.background.is_some(){return Err(RecordError::Busy);}
-        if self.state.private_cleanup_pending {return Err(self.request_checkpoint("private_cleanup"));}
         // The certificate continues selecting its own immutable packages. The
         // live derived view has an independent finite component allowance plus
         // one successor, so foreground writes can proceed during a merge.
@@ -1022,7 +1020,7 @@ mod tests {
             timed.temporal=Some(metadata.clone());
             if failure==1 {p.inner.lock().await.fail_after_durable=true;}
             if failure==2 {p.inner.lock().await.fail_publication_stage=1;}
-            let timed_receipt=WriteReceipt{staged_only:false,seq:3,version:1,record_id:"timed".into()};
+            let timed_receipt=WriteReceipt{seq:3,version:1,record_id:"timed".into()};
             let result=p.write(timed.clone()).await;
             if failure==0 {assert_eq!(result.unwrap(),timed_receipt);} else {assert!(matches!(result,Err(RecordError::DurablePending(3))));}
             assert_eq!(serde_json::to_vec(&p.inner.lock().await.anchor).unwrap(),anchor,"suffix must not be absorbed by another compact");

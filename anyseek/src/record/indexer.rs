@@ -205,7 +205,6 @@ impl RecordPartition {
                 }else{None};
                 let source=if mode==JobMode::Compact {source}else{None};
                 intent.apply(&mut snapshot,&config)?;
-                let prior=if intent.rewrites_payloads(){Default::default()}else{prior};
                 let reference = if mode==JobMode::Compact {
                     let source=source.as_ref().ok_or(RecordError::RecoveryRequired)?;
                     anchor::Reference::prepare_captured(&root,&config,&snapshot,prior,source.anchor(),source.frames(),native.as_ref()).await?
@@ -414,12 +413,8 @@ impl RecordPartition {
             }
             if inner.healthy {
                 match inner.reclaim_anchor_objects().await {
-                    Ok(())=>inner.maintenance_gc_pending=false,
+                    Ok(())=>{},
                     Err(error)=>{
-                        if intent.rewrites_payloads() || inner.maintenance_gc_pending {
-                            inner.maintenance_gc_pending=true;
-                            inner.maintenance_requested=Some("private_cleanup_gc");
-                        }
                         log::warn!("index build cleanup pending: {error}");
                     },
                 }
@@ -444,7 +439,7 @@ impl RecordPartition {
               let outcome=match &result {Ok(_)=>"installed",Err(RecordError::Busy)=>"busy",Err(RecordError::RecoveryRequired)=>"recovery_required",Err(RecordError::DurablePending(_))=>"durable_pending",Err(RecordError::OutcomeUnknown(_))=>"outcome_unknown",Err(_)=>"failed"};
               log::info!("record_maintenance event=worker_finished outcome={} seq={}",outcome,inner.state.seq);
               inner.maintenance_scheduled=false;
-              if result.is_ok(){if !inner.maintenance_gc_pending {inner.maintenance_requested=None;}inner.maintenance_trim=None;inner.maintenance_compacted_bytes=Some(inner.journal.physical_bytes());}
+              if result.is_ok(){inner.maintenance_requested=None;inner.maintenance_trim=None;inner.maintenance_compacted_bytes=Some(inner.journal.physical_bytes());}
           }
           result
         });

@@ -11,17 +11,17 @@ impl Serialize for Metadata<'_> {
         // obligation here. Exactly the three serde-skipped fields are excluded.
         let State {residency:_,lineage,history,
             independent_snapshot,seq,epoch_watermark,time_watermark_ms,retired_operation_prefix,expirations,
-            lease_expirations,private_cleanup_pending,evidence_quarantined,
-            records:_,source_revisions:_,generations,operations:_,
+            evidence_quarantined,
+            records:_,source_revisions:_,operations:_,
             operation_lookup:_,lookup_bytes:_}=self.0;
-        let mut s=serializer.serialize_struct("State",14+usize::from(retired_operation_prefix.is_some()))?;
+        let mut s=serializer.serialize_struct("State",11+usize::from(retired_operation_prefix.is_some()))?;
         macro_rules! field {($name:ident)=>{s.serialize_field(stringify!($name),$name)?};}
         field!(lineage);s.serialize_field("history",history)?;
         field!(independent_snapshot);field!(seq);field!(epoch_watermark);field!(time_watermark_ms);
         if retired_operation_prefix.is_some() {field!(retired_operation_prefix);}
-        field!(expirations);field!(lease_expirations);field!(private_cleanup_pending);field!(evidence_quarantined);
+        field!(expirations);field!(evidence_quarantined);
         s.serialize_field("records",&())?;s.serialize_field("source_revisions",&())?;
-        field!(generations);s.serialize_field("operations",&())?;s.end()
+        s.serialize_field("operations",&())?;s.end()
     }
 }
 

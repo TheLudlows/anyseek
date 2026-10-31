@@ -86,46 +86,7 @@ mod tests {
         assert_eq!(p.write(request).await.unwrap(),receipt);assert!(p.get("new").await.unwrap().is_some());
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
-    #[tokio::test]
-    async fn private_erasure_intent_is_not_installed_before_background_certificate() {
-        use super::super::tests::{config,path,source_write,generation_write,stage_generation};
-        struct Clock(std::sync::atomic::AtomicU64);
-        impl temporal::Clock for Clock {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0.load(std::sync::atomic::Ordering::SeqCst))}}
-        for fail_gc in [false,true] {
-        let root=path();let settings=config();let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
-        let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(now)));p.inner.lock().await.clock=clock.clone();
-        p.write(source_write("source","s",&[])).await.unwrap();
-        let stage=generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["private"]));
-        let receipt=p.write(stage.clone()).await.unwrap();
-        std::fs::write(root.join(".test-native-rebuild-pause"),b"pause").unwrap();
-        clock.0.store(now+1_800_001,std::sync::atomic::Ordering::SeqCst);
-        assert!(matches!(p.advance_time().await,Err(RecordError::Busy)));
-        tokio::time::timeout(std::time::Duration::from_secs(5),async {
-            while !root.join(".test-native-rebuild-started").exists(){tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
-        }).await.unwrap();
-        {let inner=tokio::time::timeout(std::time::Duration::from_secs(2),p.inner.lock()).await.unwrap();
-            assert!(inner.state.private_cleanup_pending);assert_eq!(inner.state.lease_expirations.len(),1);}
-        if fail_gc {std::fs::write(root.join(".test-cleanup-failure"),b"retain old private generation").unwrap();}
-        std::fs::remove_file(root.join(".test-native-rebuild-pause")).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(20),async {
-            while p.inner.lock().await.maintenance_scheduled {tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
-        }).await.unwrap();
-        if fail_gc {
-            {let inner=p.inner.lock().await;assert!(!inner.state.private_cleanup_pending);assert!(inner.maintenance_gc_pending);assert!(inner.maintenance_requested.is_some());}
-            std::fs::remove_file(root.join(".test-cleanup-failure")).unwrap();
-            assert!(matches!(p.advance_time().await,Err(RecordError::Busy)));
-            tokio::time::timeout(std::time::Duration::from_secs(20),async {
-                while p.inner.lock().await.maintenance_scheduled {tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
-            }).await.unwrap();
-        }
-        {let inner=p.inner.lock().await;assert!(!inner.state.private_cleanup_pending);assert!(!inner.maintenance_gc_pending);assert!(inner.maintenance_requested.is_none());}
-        assert_eq!(p.write(stage.clone()).await.unwrap(),receipt);
-        drop(p);let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();p.inner.lock().await.clock=clock;
-        assert_eq!(p.write(stage).await.unwrap(),receipt);assert!(p.get("private").await.unwrap().is_none());
-        drop(p);std::fs::remove_dir_all(root).unwrap();
-        }
-    }
+
     #[test]
     fn receipt_gc_preserves_history_and_retry_window_and_persists_rollback_floor() {
         let settings=super::super::tests::config();
@@ -178,27 +139,6 @@ mod tests {
         for operation in state.operations.iter().rev(){reversed.push(operation.clone()).unwrap();}
         unordered.operations=reversed;
         assert!(temporal::validate_state(&unordered).is_err());
-    }
-
-    #[tokio::test]
-    async fn receipt_gc_retains_generation_lease_provenance() {
-        use super::super::tests::{config,source_write,generation_write,stage_generation};
-        let root=tempfile::tempdir().unwrap();
-        let p=RecordPartition::create(&root.path().join("partition"),config()).await.unwrap();
-        p.write(source_write("source","s",&[])).await.unwrap();
-        p.write(generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["private"]))).await.unwrap();
-        let mut inner=p.inner.lock().await;
-        let expiry=inner.state.time_watermark_ms+1_800_001;
-        inner.expire_staging(expiry).await.unwrap();
-        let mut state=inner.state.try_clone().unwrap();
-        state.history.floor=state.seq;
-        collect_operations(&mut state,current_epoch()+2).unwrap();
-        assert_eq!(state.operations.len(),1);
-        assert!(state.operations[0].request.generation.is_some());
-        assert!(state.operations[0].request_digest.is_some());
-        assert_eq!(state.lease_expirations.len(),1);
-        lease::validate_state(&state).unwrap();
-        validate_restored_state(&inner.config,&state).unwrap();
     }
 
     #[tokio::test]
@@ -406,7 +346,6 @@ impl SourceProof {
             match entry {
                 Entry::Applied(op)=>apply(state,&op)?,
                 Entry::Expired(event)=>temporal::apply(state,&event)?,
-                Entry::LeaseExpired(event)=>lease::apply(state,&event)?,
                 Entry::HistoryTrim(event)=>history::apply_trim(state,&config.history,&event)?,
                 _=>return Err(storage("unexpected captured source authority")),
             }
@@ -440,24 +379,21 @@ impl RecordPartition {
 /// A same-sequence transition is proved against the authenticated source cut,
 /// then installed with the new certificate, never applied to live State early.
 pub(super) struct Intent {
-    private_cleanup:bool,
     trim:Option<history::Trim>,
     operations:Option<OperationGc>,
 }
 impl Intent {
     pub(super) fn capture(inner:&Inner,automatic:bool)->Result<Self,RecordError> {
-        Ok(Self{private_cleanup:automatic&&inner.state.private_cleanup_pending,
+        Ok(Self{
             trim:if automatic {inner.maintenance_trim.clone()}else{None},
             operations:if automatic {Some(OperationGc::capture(&inner.state,current_epoch(),
                 inner.maintenance_trim.as_ref().map_or(inner.state.history.floor,|trim|trim.floor))?)}else{None}})
     }
     pub(super) fn apply(&self,state:&mut State,config:&RecordConfig)->Result<(),RecordError> {
-        if self.private_cleanup {state.private_cleanup_pending=false;}
         if let Some(trim)=&self.trim {history::apply_trim(state,&config.history,trim)?;}
         if let Some(operations)=&self.operations {operations.apply(state)?;}
         Ok(())
     }
-    pub(super) fn rewrites_payloads(&self)->bool {self.private_cleanup}
     #[cfg(feature="fault-injection")]
     pub(super) fn trims_history(&self)->bool {self.trim.is_some()}
 }
@@ -469,13 +405,8 @@ fn expired_operation(op:&Applied,history_floor:u64,epoch:u64)->bool {
 }
 pub(super) fn has_expired_operations(state:&State,epoch:u64)->Result<bool,RecordError> {
     let epoch=epoch.max(state.epoch_watermark);
-    if !state.operations.iter().take_while(|op|op.receipt.seq<=state.history.floor)
-        .any(|op|expired_operation(op,state.history.floor,epoch)) {return Ok(false);}
-    let _memory=crate::storage::build_budget::reserve_memory((state.operations.len() as u64)
-        .checked_mul(512).ok_or_else(||storage("receipt GC protection overflow"))?).map_err(storage)?;
-    let protected=lease::protected_operation_sequences(state);
     Ok(state.operations.iter().take_while(|op|op.receipt.seq<=state.history.floor)
-        .any(|op|expired_operation(op,state.history.floor,epoch)&&!protected.contains(&op.receipt.seq)))
+        .any(|op|expired_operation(op,state.history.floor,epoch)))
 }
 struct OperationGc {
     epoch:u64,
@@ -488,9 +419,8 @@ impl OperationGc {
         let epoch=epoch.max(state.epoch_watermark);
         let memory=crate::storage::build_budget::reserve_memory((state.operations.len() as u64)
             .checked_mul(512).ok_or_else(||storage("receipt GC inventory overflow"))?).map_err(storage)?;
-        let protected=lease::protected_operation_sequences(state);
         let selected:std::collections::BTreeSet<_>=state.operations.iter()
-            .filter(|op|expired_operation(op,floor,epoch)&&!protected.contains(&op.receipt.seq))
+            .filter(|op|expired_operation(op,floor,epoch))
             .map(|op|op.receipt.seq).collect();
         let prefix=state.operations.iter().filter(|op|selected.contains(&op.receipt.seq))
             .max_by_key(|op|op.receipt.seq).map(|last|temporal::RetiredPrefix {seq:last.receipt.seq,time_ms:last.observed_time_ms});

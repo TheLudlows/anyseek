@@ -83,7 +83,7 @@ impl Delta {
                         digest.push(&piece)?;
                         writer.push(&piece)?;
                     }
-                    Entry::Expired(_) | Entry::HistoryTrim(_) | Entry::LeaseExpired(_) => {
+                    Entry::Expired(_) | Entry::HistoryTrim(_) => {
                         let piece = BTreeMap::from([("event", &entry)]);
                         digest.push(&piece)?;
                         writer.push(&piece)?;
@@ -133,7 +133,7 @@ impl Delta {
             } else {
                 let entry: Entry = serde_json::from_value(object.remove("event")
                     .ok_or_else(|| invalid("missing delta event"))?).map_err(storage)?;
-                if !matches!(entry, Entry::Expired(_) | Entry::HistoryTrim(_) | Entry::LeaseExpired(_)) {
+                if !matches!(entry, Entry::Expired(_) | Entry::HistoryTrim(_)) {
                     return Err(invalid("invalid delta maintenance entry"));
                 }
                 entry
@@ -256,7 +256,7 @@ impl Pieces for Writer<'_> {
 }
 fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError> {
         // An empty-body header retains all scalar identity and authorization state.
-        // Large history and staging collections are emitted separately below.
+        // Large history collections are emitted separately below.
         let header = State {
             lineage: state.lineage.clone(),
             history: state.history.clone(),
@@ -265,7 +265,6 @@ fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError>
             epoch_watermark: state.epoch_watermark,
             time_watermark_ms: state.time_watermark_ms,
             retired_operation_prefix: state.retired_operation_prefix.clone(),
-            private_cleanup_pending: state.private_cleanup_pending,
             evidence_quarantined: state.evidence_quarantined,
             ..State::default()
         };
@@ -282,73 +281,10 @@ fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError>
         for operation in &state.operations {
             sink.push(&BTreeMap::from([("operations", [operation])]))?;
         }
-        for (id, manifest) in &state.generations {
-            #[derive(Serialize)]
-            struct StagedMetadata<'a> {
-                deadline_ms: u64,
-                scope: &'a str,
-                id: &'a str,
-                source: &'a EvidenceRef,
-                chunks: [(); 0],
-                members: &'a [String],
-                sealed: bool,
-            }
-            #[derive(Serialize)]
-            struct GenerationMetadata<'a> {
-                routing_key: &'a str,
-                version: u64,
-                used: &'a std::collections::BTreeSet<String>,
-                active: &'a Option<String>,
-                active_members: &'a [String],
-                staged: Option<StagedMetadata<'a>>,
-            }
-            let staged = manifest.staged.as_ref().map(|s| StagedMetadata {
-                deadline_ms: s.deadline_ms,
-                scope: &s.scope,
-                id: &s.id,
-                source: &s.source,
-                chunks: [],
-                members: &s.members,
-                sealed: s.sealed,
-            });
-            let metadata = GenerationMetadata {
-                routing_key: &manifest.routing_key,
-                version: manifest.version,
-                used: &manifest.used,
-                active: &manifest.active,
-                active_members: &manifest.active_members,
-                staged,
-            };
-            sink.push(&BTreeMap::from([(
-                "generations",
-                BTreeMap::from([(id, metadata)]),
-            )]))?;
-            if let Some(staged) = &manifest.staged {
-                #[derive(Serialize)]
-                struct Piece<'a> {
-                    generation_chunk: &'a str,
-                    generations: BTreeMap<
-                        &'a str,
-                        BTreeMap<&'static str, BTreeMap<&'static str, [&'a GenerationChunk; 1]>>,
-                    >,
-                }
-                for chunk in &staged.chunks {
-                    sink.push(&Piece {
-                        generation_chunk: id,
-                        generations: BTreeMap::from([(
-                            id.as_str(),
-                            BTreeMap::from([("staged", BTreeMap::from([("chunks", [chunk])]))]),
-                        )]),
-                    })?;
-                }
-            }
-        }
         for event in &state.expirations {
             sink.push(&BTreeMap::from([("expirations", [event])]))?;
         }
-        for event in &state.lease_expirations {
-            sink.push(&BTreeMap::from([("lease_expirations", [event])]))?;
-        }
+
     Ok(())
 }
 struct PieceDigest { hash: sha2::Sha256, entries: u64, expanded: u64 }
@@ -607,9 +543,7 @@ fn apply_piece(
         if !header.records.is_empty()
             || !header.source_revisions.is_empty()
             || !header.operations.is_empty()
-            || !header.generations.is_empty()
             || !header.expirations.is_empty()
-            || !header.lease_expirations.is_empty()
         {
             return Err(invalid("nonempty state header collections"));
         }
@@ -619,42 +553,7 @@ fn apply_piece(
     let state = state
         .as_mut()
         .ok_or_else(|| invalid("missing state header"))?;
-    if let Some(id) = object.remove("generation_chunk") {
-        if object.len() != 1 {
-            return Err(invalid("invalid generation chunk piece"));
-        }
-        let id = id
-            .as_str()
-            .ok_or_else(|| invalid("invalid generation identity"))?;
-        let generations = object
-            .remove("generations")
-            .ok_or_else(|| invalid("missing generation chunk"))?;
-        let mut groups: BTreeMap<String, Value> =
-            serde_json::from_value(generations).map_err(storage)?;
-        if groups.len() != 1 {
-            return Err(invalid("invalid generation chunk group"));
-        }
-        let mut group = groups
-            .remove(id)
-            .ok_or_else(|| invalid("generation chunk identity mismatch"))?;
-        let chunks = group
-            .get_mut("staged")
-            .and_then(|s| s.get_mut("chunks"))
-            .ok_or_else(|| invalid("missing staged chunk"))?
-            .take();
-        let mut chunks: Vec<GenerationChunk> = serde_json::from_value(chunks).map_err(storage)?;
-        if chunks.len() != 1 {
-            return Err(invalid("invalid generation chunk count"));
-        }
-        state
-            .generations
-            .get_mut(id)
-            .and_then(|g| g.staged.as_mut())
-            .ok_or_else(|| invalid("unknown staged generation"))?
-            .chunks
-            .push(chunks.remove(0));
-        return Ok(());
-    }
+
     if object.len() != 1 {
         return Err(invalid("invalid state piece fields"));
     }
@@ -663,9 +562,7 @@ fn apply_piece(
         "records" => state.records.len() >= config.max_records,
         "source_revisions" => state.source_revisions.len() >= config.max_records,
         "operations" => state.operations.len() >= config.max_operations,
-        "generations" => state.generations.len() >= config.max_records,
         "expirations" => state.expirations.len() >= config.max_operations,
-        "lease_expirations" => state.lease_expirations.len() >= config.max_operations,
         _ => false,
     };
     if exceeded {
@@ -695,25 +592,8 @@ fn apply_piece(
         }
         "source_revisions" => state.source_revisions.push(one!(Record))?,
         "operations" => state.operations.push(one!(Applied))?,
-        "generations" => {
-            let values: BTreeMap<String, generation::Manifest> =
-                serde_json::from_value(value.take()).map_err(storage)?;
-            if values.len() != 1 {
-                return Err(invalid("invalid generation piece cardinality"));
-            }
-            for (id, generation) in values {
-                if generation
-                    .staged
-                    .as_ref()
-                    .is_some_and(|s| !s.chunks.is_empty())
-                    || state.generations.insert(id, generation).is_some()
-                {
-                    return Err(invalid("duplicate or nonempty generation metadata"));
-                }
-            }
-        }
+
         "expirations" => state.expirations.push(one!(temporal::Expiration)),
-        "lease_expirations" => state.lease_expirations.push(one!(lease::Expiration)),
         _ => return Err(invalid("unknown state piece")),
     }
     Ok(())
@@ -739,8 +619,8 @@ mod tests {
         let mut snapshot=checkpoint_codec::length(&config,&state).unwrap();
         for i in 0..128 {
             let request=super::super::tests::write(&format!("op-{i}"),&format!("id-{i}"),&"x".repeat(8192),ExpectedVersion::Absent);
-            let receipt=WriteReceipt{staged_only:false,seq:i+1,version:1,record_id:request.record_id.clone()};
-            let applied=Applied{request_digest:None,observed_epoch:request.operation_id.epoch,observed_time_ms:0,request,receipt};
+            let receipt=WriteReceipt{seq:i+1,version:1,record_id:request.record_id.clone()};
+            let applied=Applied{observed_epoch:request.operation_id.epoch,observed_time_ms:0,request,receipt};
             let prepared=state_memory::Prepared::new(&state,&applied).unwrap();
             snapshot=mutation::snapshot_after(&state,snapshot,&applied,&prepared.record).unwrap();
             prepared.admit_containers(&mut state,snapshot).unwrap();apply_prepared(&mut state,&applied,Some(prepared)).unwrap();
@@ -772,14 +652,6 @@ mod tests {
             serde_json::json!({"$payload":123,"document":"unchanged", "float":1.23456789}),
         );
         partition.write(first).await.unwrap();
-        partition
-            .write(super::super::tests::generation_write(
-                "stage",
-                ExpectedVersion::Absent,
-                super::super::tests::stage_generation("g", &["a", "b"]),
-            ))
-            .await
-            .unwrap();
         let mut revision = super::super::tests::source_write("revision", "s", &[]);
         revision.expected = ExpectedVersion::Match(1);
         revision.document.as_mut().unwrap().insert(
@@ -811,13 +683,13 @@ mod tests {
         (descriptor, reader)
     }
     #[tokio::test]
-    async fn chunks_preserve_full_history_staging_opaque_json_and_owned_residency() {
+    async fn chunks_preserve_full_history_opaque_json_and_owned_residency() {
         let root = tempfile::tempdir().unwrap();
         let (config, state) = fixture(root.path()).await;
         let directory = root.path().join("chunks");
         let (descriptor, pool) = prepare(&directory, &config, &state);
         assert!(descriptor.entries > state.records.len() as u64 + state.operations.len() as u64);
-        // The persisted metadata must not retain either original or staged bodies.
+        // The persisted metadata must not retain original bodies.
         for slot in 0..descriptor.chunks.len() {
             let bytes = std::fs::read(filename(&directory, slot)).unwrap();
             assert!(!bytes.windows(b"unchanged".len()).any(|w| w == b"unchanged"));
@@ -841,15 +713,6 @@ mod tests {
         ));
         drop(decoded);
         assert!(owner.upgrade().is_none());
-        assert_eq!(
-            copy.generations["doc"]
-                .staged
-                .as_ref()
-                .unwrap()
-                .chunks
-                .len(),
-            2
-        );
         assert_eq!(copy.source_revisions.len(), 1);
     }
     #[tokio::test]

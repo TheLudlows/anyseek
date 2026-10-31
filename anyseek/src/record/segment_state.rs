@@ -10,21 +10,15 @@ pub(super) fn visit(state: &mut Value, mut body: impl FnMut(&mut Value)->Result<
         if let Some(document)=value.get_mut("document") {if !document.is_null(){body(document)?;}}
         Ok(())
     }
-    fn chunks(value:&mut Value, body:&mut impl FnMut(&mut Value)->Result<(),RecordError>)->Result<(),RecordError>{
-        if let Some(chunks)=value.get_mut("chunks").and_then(Value::as_array_mut){for chunk in chunks {record(chunk,body)?;}}
-        Ok(())
-    }
+
     if let Some(records)=state.get_mut("records").and_then(Value::as_object_mut){for value in records.values_mut(){record(value,&mut body)?;}}
     if let Some(history)=state.get_mut("source_revisions").and_then(Value::as_array_mut){for value in history{record(value,&mut body)?;}}
     if let Some(operations)=state.get_mut("operations").and_then(Value::as_array_mut){for op in operations{
         let request=op.get_mut("request").ok_or_else(||storage("missing prepared request"))?;
         record(request,&mut body)?;
         if let Some(patch)=request.get_mut("vector_patch"){if !patch.is_null(){body(patch)?;}}
-        if let Some(generation)=request.get_mut("generation"){chunks(generation,&mut body)?;}
     }}
-    if let Some(generations)=state.get_mut("generations").and_then(Value::as_object_mut){for manifest in generations.values_mut(){
-        if let Some(staged)=manifest.get_mut("staged"){chunks(staged,&mut body)?;}
-    }}
+
     Ok(())
 }
 // Count encoded metadata without allocating another full JSON buffer.
@@ -168,8 +162,8 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
-    async fn referenced_state_keeps_history_private_chunks_and_same_version_vector_patch() {
-        use super::super::tests::{path,config,source_write,write,generation_write,stage_generation};
+    async fn referenced_state_keeps_history_and_same_version_vector_patch() {
+        use super::super::tests::{path,config,source_write,write};
         let root=path(); let settings=config();
         let partition=RecordPartition::create(&root,settings.clone()).await.unwrap();
         let mut source=source_write("source","s",&[]);
@@ -180,7 +174,6 @@ mod tests {
         patch.document=None;
         patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[7.0,0.0]})).unwrap());
         assert_eq!(partition.write(patch.clone()).await.unwrap().version,1);
-        partition.write(generation_write("private",ExpectedVersion::Absent,stage_generation("g",&["a","b"]))).await.unwrap();
         let mut revision=write("revision","s","changed",ExpectedVersion::Match(1));
         revision.document.as_mut().unwrap().shift_remove("vector");
         partition.write(revision).await.unwrap();
@@ -196,9 +189,6 @@ mod tests {
         assert_eq!(state.operations[0].request.document,original);
         assert_eq!(state.source_revisions[0].document.as_ref().unwrap()["vector"],serde_json::json!([7.0,0.0]));
         assert_eq!(state.records["s"].version,2);
-        // Neither the current source nor its historical revision can expose staged bodies.
-        assert!(!state.records.contains_key("a"));
-        assert_eq!(state.generations["doc"].staged.as_ref().unwrap().chunks.len(),2);
         drop(pool);drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -7,8 +7,7 @@
 use super::*;
 
 impl replay::Context<'_> {
-    pub(super) async fn publish_prepared(&mut self,applied:&Applied,snapshot_bytes:usize,prepared:Option<state_memory::Prepared>,candidate:Option<State>)->Result<(),RecordError>{
-        if applied.request.generation.is_some() { return self.publish_generation(applied, snapshot_bytes,candidate).await; }
+    pub(super) async fn publish_prepared(&mut self,applied:&Applied,snapshot_bytes:usize,prepared:Option<state_memory::Prepared>)->Result<(),RecordError>{
         let receipt = &applied.receipt;
         let document = enrichment::document(self.state.records.get(&receipt.record_id), &applied.request)?;
         let hiding = applied.request.vector_patch.is_none() && (self
@@ -66,39 +65,8 @@ impl replay::Context<'_> {
     }
 }
 
-impl replay::Context<'_> {
-    async fn publish_generation(&mut self, applied: &Applied, snapshot_bytes: usize, candidate: Option<State>) -> Result<(), RecordError> {
-        let growth=checkpoint_codec::json_length(applied)?.checked_mul(3).ok_or_else(|| storage("generation state growth overflow"))?;
-        let next = if let Some(candidate)=candidate { candidate } else {
-            let mut next=self.state.try_clone_with_growth(growth)?;
-            apply(&mut next,applied).map_err(|_|RecordError::DurablePending(applied.receipt.seq))?;next
-        };
-        if matches!(applied.request.generation, Some(GenerationCommand::Publish { .. })) {
-            let visible = evidence::visibility(&next.records).map_err(|_| RecordError::DurablePending(applied.receipt.seq))?;
-            let retired: Vec<_> = self.locations.keys().filter(|id| visible.get(*id) != Some(&true)).cloned().collect();
-            for id in retired {
-                if let Some(ordinal) = self.locations.remove(&id) {
-                    self.index.retire(ordinal).await.map_err(|error| { log::error!("Record generation publication failed at sequence {}: {:?}", applied.receipt.seq, error); RecordError::DurablePending(applied.receipt.seq) })?;
-                }
-            }
-            for (id, record) in next.records.iter().filter(|(id, _)| !self.state.records.contains_key(*id)) {
-                if visible.get(id) != Some(&true) { return Err(RecordError::DurablePending(applied.receipt.seq)); }
-                let ordinal=self.index.append(id.clone(),record.version,applied.receipt.seq,temporal::indexed(record.document.as_ref().unwrap(), &record.temporal, record.ingested_at_ms)).await.map_err(|error| { log::error!("Record generation publication failed at sequence {}: {:?}", applied.receipt.seq, error); RecordError::DurablePending(applied.receipt.seq) })?;
-                if self.ordinals.len()<=ordinal {self.ordinals.resize(ordinal+1,String::new());}
-                self.ordinals[ordinal]=id.clone();self.locations.insert(id.clone(),ordinal);
-                #[cfg(test)]
-                if self.fail_publication_stage == 1 { return Err(RecordError::DurablePending(applied.receipt.seq)); }
-            }
-        }
-        *self.state = next; *self.snapshot_bytes = snapshot_bytes;
-        #[cfg(test)]
-        assert_eq!(snapshot_bytes, encode_entry(&Entry::Checkpoint { config:self.config.clone(), state:self.state.try_clone()? }).unwrap().len());
-        Ok(())
-    }
-}
-
 impl Inner {
-    pub(super) async fn publish_prepared(&mut self,applied:&Applied,bytes:usize,prepared:Option<state_memory::Prepared>,candidate:Option<State>)->Result<(),RecordError>{
-        self.replay_context().publish_prepared(applied,bytes,prepared,candidate).await
+    pub(super) async fn publish_prepared(&mut self,applied:&Applied,bytes:usize,prepared:Option<state_memory::Prepared>)->Result<(),RecordError>{
+        self.replay_context().publish_prepared(applied,bytes,prepared).await
     }
 }

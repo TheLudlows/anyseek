@@ -111,7 +111,7 @@ pub(super) fn admit<'a>(
     reserve_memory(estimate).map_err(storage)
 }
 
-/// Admit the complete business operation, including all generation members,
+/// Admit the complete business operation, including its index updates,
 /// before WAL append. Native commits cannot split the operation's authority cut.
 pub(super) fn write_estimate(
     state: &State,
@@ -124,23 +124,11 @@ pub(super) fn write_estimate(
             .and_then(|n|n.checked_add(identity_estimate(id).ok()?))
             .ok_or_else(|| storage("write estimate overflow"))
     };
-    match &applied.request.generation {
-        Some(GenerationCommand::Publish { .. }) => {
-            let chunks=&state.generations[&applied.request.record_id]
-                .staged.as_ref().ok_or_else(|| storage("missing staged generation"))?.chunks;
-            let bytes=chunks.iter().try_fold(0u64, |sum, c| {
-                sum.checked_add(estimate(&c.document,&c.record_id)?)
-                    .ok_or_else(|| storage("generation estimate overflow"))
-            })?;
-            Ok((bytes,chunks.len()))
-        },
-        Some(_) => Ok((0,0)),
-        None => match enrichment::document(
+    match enrichment::document(
             state.records.get(&applied.request.record_id), &applied.request,
         )? {
             Some(document) => Ok((estimate(&document,&applied.request.record_id)?,1)),
             None => Ok((0,0)),
-        },
     }
 }
 

@@ -358,8 +358,7 @@ mod admission_count_tests {
             if i < 4 { request.temporal = Some(TemporalMetadata { expire_at_ms: Some(1000), ..Default::default() }); }
             if i >= 8 { request.document = None; }
             let version = state.records.get(&request.record_id).map_or(1, |r| r.version + 1);
-            let applied = Applied { request_digest: None,
-                receipt: WriteReceipt { staged_only: false, seq: i + 1, version, record_id: request.record_id.clone() },
+            let applied = Applied { receipt: WriteReceipt { seq: i + 1, version, record_id: request.record_id.clone() },
                 request, observed_epoch: 1, observed_time_ms: 1 };
             apply(&mut state, &applied).unwrap();
             check(&state.records);
@@ -371,7 +370,7 @@ mod admission_count_tests {
             check(&recovered); assert!(recovered.same_values(&clone).unwrap());
         }
         assert_eq!(state.records.live_ttl_count(), 0);
-        state.records.edit("id-0", 0, |r| { r.retired_generation = true; Ok(()) }).unwrap();
+        state.records.edit("id-0", 0, |r| { r.document = None; Ok(()) }).unwrap();
         check(&state.records);
         let before = serde_json::to_value(&state.records).unwrap();
         assert!(state.records.edit("id-0", 0, |r| { r.document = None; Err(storage("injected edit failure")) }).is_err());
@@ -383,8 +382,7 @@ mod admission_count_tests {
         let mut state = State::default();
         let mut request = super::super::tests::write("deadline", "id", "alpha", ExpectedVersion::Any);
         request.temporal = Some(TemporalMetadata { expire_at_ms: Some(1000), ..Default::default() });
-        let applied = Applied { request_digest: None,
-            receipt: WriteReceipt { staged_only: false, seq: 1, version: 1, record_id: "id".into() },
+        let applied = Applied { receipt: WriteReceipt { seq: 1, version: 1, record_id: "id".into() },
             request, observed_epoch: 1, observed_time_ms: 1 };
         apply(&mut state, &applied).unwrap();
         let records = &mut state.records;

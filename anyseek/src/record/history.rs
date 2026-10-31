@@ -1,4 +1,4 @@
-//! Authenticated history retention for receipt GC and generation owner fencing.
+//! Authenticated history retention for receipt GC.
 //! There is no external notification stream or cursor.
 use super::*;
 
@@ -8,7 +8,7 @@ const MIN_RETENTION_MS: u64 = 7 * 86_400_000;
 #[serde(default, deny_unknown_fields)]
 pub struct HistoryRetention {
     /// Minimum authenticated age before history is eligible for receipt GC.
-    /// The operation retry epoch and live generation provenance are also checked.
+    /// The operation retry epoch is also checked.
     pub retention_ms: u64,
 }
 impl Default for HistoryRetention {
@@ -24,7 +24,7 @@ pub(super) fn validate_config(config: &HistoryRetention) -> Result<(), RecordErr
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct HistoryState {
-    // Owner identity fences staged generations across restore.
+    // Owner scope distinguishes restored history authority.
     pub scope: String,
     // Authenticated GC eligibility boundary; not an index-consumer cursor.
     pub floor: u64,
@@ -44,7 +44,7 @@ pub(super) struct Trim {
     pub(super) floor: u64,
     at: u64,
 }
-/// Every command, including private generation updates, is a committed position.
+/// Every command is a committed position.
 /// Source state has a monotonic authenticated time chain;
 /// include those positions so a private-only stream can advance retention.
 fn committed_floor(state:&State,at:u64,retention:u64)->Option<u64> {
@@ -61,7 +61,6 @@ fn committed_floor(state:&State,at:u64,retention:u64)->Option<u64> {
     // Upper bounds include every equal-time commit without a full locked scan.
     [last_before(state.operations.len(),|i|(state.operations[i].receipt.seq,state.operations[i].observed_time_ms),cutoff),
         last_before(state.expirations.len(),|i|(state.expirations[i].seq,state.expirations[i].evaluation_time_ms),cutoff),
-        last_before(state.lease_expirations.len(),|i|(state.lease_expirations[i].seq,state.lease_expirations[i].evaluation_time_ms),cutoff),
         state.retired_operation_prefix.as_ref().filter(|prefix|prefix.time_ms<=cutoff).map(|prefix|prefix.seq)]
         .into_iter().flatten().filter(|seq|*seq>state.history.floor).max()
 }
@@ -103,7 +102,7 @@ impl Inner {
         // physical WAL can be compacted through the existing checkpoint route.
         if self
             .journal
-            .validate_append_with_reserve(bytes.len(), generation::reserve_bytes(&self.state))
+            .validate_append_with_reserve(bytes.len(), mutation::reserve_bytes(&self.state))
             .is_err()
         {
             return Ok(());
@@ -113,7 +112,7 @@ impl Inner {
         candidate.time_watermark_ms = at;
         let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
         if checkpoint_codec::validate_size(
-            snapshot_bytes, generation::reserve_bytes(&self.state),
+            snapshot_bytes, mutation::reserve_bytes(&self.state),
             self.config.max_journal_bytes,
         )
         .is_err()
@@ -150,18 +149,18 @@ impl Inner {
 #[cfg(test)]
 mod retention_tests {
     use super::*;
-    use crate::record::tests::{config,source_write,generation_write,stage_generation,write};
+    use crate::record::tests::{config,source_write,write};
 
     fn apply_at(state:&mut State,settings:&RecordConfig,mut request:RecordWrite,at:u64) {
         request.operation_id.epoch=at/86_400_000;
-        let mutation::PreparedWrite::Append {applied,candidate,..}=mutation::prepare_at(
+        let mutation::PreparedWrite::Append {applied,..}=mutation::prepare_at(
             state,settings,checkpoint_codec::length(settings,state).unwrap(),request,at/86_400_000,at).unwrap()
             else {panic!("new operation")};
-        if let Some(candidate)=candidate {*state=candidate;} else {apply(state,&applied).unwrap();}
+        apply(state,&applied).unwrap();
     }
 
     #[tokio::test]
-    async fn private_renewals_advance_retention_without_dropping_recent_receipts() {
+    async fn ordinary_writes_advance_retention_without_dropping_recent_receipts() {
         let root=tempfile::tempdir().unwrap();
         let mut settings=config();settings.max_operations=2048;settings.max_journal_bytes=4*1024*1024;
         let initial=RecordPartition::create(&root.path().join("initial"),settings.clone()).await.unwrap();
@@ -170,21 +169,18 @@ mod retention_tests {
         let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let beginning=now-8*86_400_000;
         apply_at(&mut state,&settings,source_write("source","s",&[]),beginning);
-        apply_at(&mut state,&settings,generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["chunk"])),beginning);
-        // Keep one upload genuinely alive across the retention period. Every
-        // renewal is within its 30-minute lease; no fabricated long lease.
+        apply_at(&mut state,&settings,write("initial", "ordinary", "alpha", ExpectedVersion::Absent),beginning);
         for i in 1..=768u64 {
-            apply_at(&mut state,&settings,generation_write(&format!("renew-{i}"),ExpectedVersion::Match(i),
-                GenerationCommand::Renew {generation_id:"g".into()}),beginning+i*900_000);
+            apply_at(&mut state,&settings,write(&format!("update-{i}"),"ordinary","alpha",ExpectedVersion::Match(i)),beginning+i*900_000);
         }
-        let last_private=state.seq;
+        let last_update=state.seq;
         apply_at(&mut state,&settings,write("recent-public","recent","beta",ExpectedVersion::Absent),now);
         let recent_seq=state.seq;
         validate_restored_state(&settings,&state).unwrap();
         assert_eq!(committed_floor(&state,beginning+settings.history.retention_ms,
-            settings.history.retention_ms),Some(2),"upper bound includes both equal-time source and private stage");
+            settings.history.retention_ms),Some(2),"upper bound includes both equal-time source and ordinary write");
         let safe=committed_floor(&state,now,settings.history.retention_ms).unwrap();
-        assert!(safe>1 && safe<last_private);
+        assert!(safe>1 && safe<last_update);
         let mut bad=Trim {previous:0,floor:recent_seq,at:now};
         assert!(apply_trim(&mut state.try_clone().unwrap(),&settings.history,&bad).is_err());
         bad.floor=safe;

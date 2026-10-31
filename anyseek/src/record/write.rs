@@ -509,7 +509,6 @@ impl RecordPartition {
                     bytes,
                     snapshot_bytes,
                     reserve_bytes,
-                    candidate,
                     ..
                 } = &plan
                 else {
@@ -597,9 +596,7 @@ impl RecordPartition {
                         }
                     }
                 }
-                if let Some(candidate) = candidate {
-                    shadow = candidate.try_clone()?;
-                } else {
+                {
                     let prepared = state_memory::Prepared::new(&shadow, applied)?;
                     prepared.admit_containers(&mut shadow, *snapshot_bytes)?;
                     apply_prepared(&mut shadow, applied, Some(prepared))?;
@@ -652,26 +649,18 @@ impl RecordPartition {
             if let mutation::PreparedWrite::Append {
                 applied,
                 snapshot_bytes,
-                candidate,
                 ..
             } = plan
             {
                 // Evaluate against each preceding planned state, including sources
                 // created earlier in this batch. Ordinary writes remain revalidatable.
-                hides_evidence |= matches!(
-                    applied.request.generation,
-                    Some(GenerationCommand::Publish { .. })
-                ) || prior
+                hides_evidence |= prior
                     .records
                     .get(&applied.request.record_id)
                     .is_some_and(|r| r.system.is_some())
                     || (applied.request.vector_patch.is_none()
                         && inner.graph_cache.references(&applied.request.record_id));
-                let prepared = if let Some(candidate) = candidate {
-                    candidate.admit_containers(container_bound)?;
-                    prior = candidate.try_clone()?;
-                    None
-                } else {
+                let prepared = {
                     let prepared = state_memory::Prepared::new(&prior, applied)?;
                     prepared.admit_containers(&mut prior, *snapshot_bytes)?;
                     apply_prepared(
@@ -694,9 +683,6 @@ impl RecordPartition {
                 .values()
                 .filter(|record| record.document.is_some())
                 .filter_map(|record| record.temporal.expire_at_ms)
-                .chain(shadow.generations.values().filter_map(|generation| {
-                    generation.staged.as_ref().map(|stage| stage.deadline_ms)
-                }))
                 .min();
         drop(shadow);
         Ok(PreparedBatch {
@@ -723,7 +709,7 @@ impl Inner {
         }
         // Wall time can move while uploading even though this task owns the writer.
         // Apply due transitions before selecting the candidate, then discard any
-        // candidate whose business basis or own TTL/lease has become stale.
+        // candidate whose business basis or own TTL has become stale.
         self.advance_time().await?;
         if state_proof::verify(&self.config, &prepared.base_state, &self.state).is_err()
             || prepared
@@ -821,11 +807,10 @@ impl Inner {
             if let mutation::PreparedWrite::Append {
                 applied,
                 snapshot_bytes,
-                candidate,
                 ..
             } = plan
             {
-                self.publish_prepared(&applied, snapshot_bytes, prepared, candidate)
+                self.publish_prepared(&applied, snapshot_bytes, prepared)
                     .await?;
             }
         }

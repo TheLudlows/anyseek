@@ -53,7 +53,7 @@ pub(super) async fn create(
     }
     checkpoint_codec::validate_size(
         checkpoint_codec::length(&config, &state)?,
-        generation::reserve_bytes(&state),
+        mutation::reserve_bytes(&state),
         config.max_journal_bytes,
     )
     .map_err(|e| RecordError::Rejected(e.to_string()))?;

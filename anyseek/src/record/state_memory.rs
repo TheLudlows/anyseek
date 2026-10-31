@@ -114,7 +114,6 @@ impl State {
         let values = self.records.bytes().checked_add(self.source_revisions.bytes())
             .and_then(|n|n.checked_add(self.operations.bytes())).ok_or_else(||storage("shared value total overflow"))?;
         total.checked_sub(values).and_then(|n|n.checked_add(self.lookup_bytes))
-            .and_then(|n|n.checked_add(std::mem::size_of::<std::sync::OnceLock<generation_values::Counts>>()))
             .ok_or_else(||storage("state container size overflow"))
     }
     // Container keys, pointers, lookup and nonshared metadata are copied only
@@ -140,12 +139,9 @@ impl State {
             time_watermark_ms: self.time_watermark_ms,
             retired_operation_prefix: self.retired_operation_prefix.clone(),
             expirations: self.expirations.clone(),
-            lease_expirations: self.lease_expirations.clone(),
-            private_cleanup_pending: self.private_cleanup_pending,
             evidence_quarantined: self.evidence_quarantined,
             records: self.records.clone(),
             source_revisions: self.source_revisions.clone(),
-            generations: self.generations.clone(),
             operations: self.operations.clone(),
             operation_lookup: self.operation_lookup.clone(),
             lookup_bytes: self.lookup_bytes,

@@ -24,7 +24,7 @@ async fn add(index: &RecordPartition, docs: &[Value], total: usize) {
             operation_id: OperationId::new(format!("insert-{id}")), record_id: id,
             routing_key: "oracle".into(), expected: ExpectedVersion::Absent,
             document: Some(serde_json::from_value(document.clone()).unwrap()),
-            vector_patch: None, generation: None, temporal: None, system: None,
+            vector_patch: None, temporal: None, system: None,
         }).await.unwrap();
     }
     assert_eq!(index.statistics().await.unwrap().active_records, total);
