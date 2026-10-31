@@ -72,6 +72,7 @@ export function JsonView({
         <span>{label}</span>
         <button
           className="icon-button"
+          type="button"
           aria-label={"复制 " + label}
           onClick={async () => {
             try {

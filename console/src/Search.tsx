@@ -13,6 +13,7 @@ import { embedTexts, embeddingKey, loadEmbeddingConfig, validateEmbeddingConfig 
 import { apiFieldText } from "./json.ts";
 import {
   Busy,
+  JsonView,
   Empty,
   Notice,
   RecordPreview,
@@ -32,6 +33,7 @@ export function Search({
 }) {
   const [modelConfig] = useState(() => loadEmbeddingConfig(owner, collection.id));
   const [autoEmbed, setAutoEmbed] = useState(!!modelConfig);
+  const [preview, setPreview] = useState<{ text: string; vector: number[] } | null>(null);
   const [phase, setPhase] = useState("");
   const [mode, setMode] = useState<Mode>(
       collection.schema.some((f) => f.index_vector) &&
@@ -66,6 +68,28 @@ export function Search({
   );
   const hasVector = collection.schema.some((f) => f.index_vector);
   useEffect(() => () => request.current?.abort(), []);
+  const currentPreview = preview?.text === query && preview.vector.length === collection.vector_dimensions ? preview : null;
+  async function queryEmbedding(signal: AbortSignal) {
+    if (!query.trim()) throw new Error("请输入检索内容。");
+    if (!modelConfig) throw new Error("请先在连接与管理中配置浏览器嵌入服务。");
+    validateEmbeddingConfig(modelConfig, collection);
+    if (currentPreview) return currentPreview.vector;
+    setPhase("正在生成查询向量");
+    const [embedding] = await embedTexts(modelConfig, embeddingKey(owner, collection.id, modelConfig), [query], collection.vector_dimensions!, signal);
+    signal.throwIfAborted();
+    setPreview({ text: query, vector: embedding });
+    return embedding;
+  }
+  async function previewVector() {
+    if (busy) return;
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    setError(""); setBusy(true); setPhase("正在生成查询向量");
+    try { await queryEmbedding(controller.signal); }
+    catch (e) { if (!controller.signal.aborted) setError(message(e)); }
+    finally { if (!controller.signal.aborted) setBusy(false); }
+  }
   async function build(signal: AbortSignal) {
     const body: Json = JSON.parse(advanced);
     if (!body || typeof body !== "object" || Array.isArray(body))
@@ -142,11 +166,7 @@ export function Search({
       "sort",
     ]);
     if (mode !== "Lexical" && autoEmbed) {
-      if (!modelConfig) throw new Error("请先在连接与管理中配置浏览器嵌入服务。");
-      validateEmbeddingConfig(modelConfig, collection);
-      setPhase("正在生成查询向量");
-      const [embedding] = await embedTexts(modelConfig, embeddingKey(owner, collection.id, modelConfig), [query], collection.vector_dimensions!, signal);
-      body.query_vector = embedding;
+      body.query_vector = await queryEmbedding(signal);
     }
     // Source-preserving JSON rewrite for advanced parameters is provided below.
     return mergeQuerySource(original, body, controlled);
@@ -241,7 +261,7 @@ export function Search({
               aria-label="检索内容"
               value={query}
               disabled={busy || (mode === "Vector" && !autoEmbed)}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => { setQuery(e.target.value); setPreview(null); }}
               placeholder={
                 mode === "Vector" && !autoEmbed
                   ? "向量模式使用下方 query vector"
@@ -262,6 +282,16 @@ export function Search({
           {mode !== "Lexical" && <div className="embedding-choice">
             <label className="checkbox"><input type="checkbox" checked={autoEmbed} disabled={busy || !modelConfig} onChange={(e) => setAutoEmbed(e.target.checked)} />自动生成查询向量</label>
             <p className="field-help">{modelConfig ? `${modelConfig.model} · 查询文本将发送至 ${modelConfig.endpoint}` : "在连接与管理中配置本集合的嵌入服务，或在下方粘贴查询向量。"}</p>
+          </div>}
+          {mode !== "Lexical" && autoEmbed && <div className="vector-entry">
+            <button type="button" className="secondary" disabled={busy || !modelConfig || !query.trim()} onClick={previewVector}>
+              生成并预览向量
+            </button>
+            <p className="field-help">仅调用嵌入模型，不执行检索。运行检索将复用预览向量；修改文本后需重新生成。</p>
+            {currentPreview && <details open>
+              <summary>当前查询向量 · {currentPreview.vector.length} 维</summary>
+              <JsonView value={currentPreview.vector} label="查询向量预览" />
+            </details>}
           </div>}
           {mode !== "Lexical" && !autoEmbed && (
             <div className="vector-entry">

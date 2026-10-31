@@ -531,6 +531,21 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "检索调试", exact: true }).click();
   await page.getByRole("button", { name: "向量 Vector", exact: true }).click();
   await page.getByLabel("检索内容", { exact: true }).fill("find documents");
+  let queryCalls = 0;
+  page.on("request", request => {
+    if (request.method() === "POST" && request.url().endsWith(`/index/${id}/query`)) {
+      queryCalls++;
+      expect(request.postDataJSON().query_vector).toEqual([1, 0, 0]);
+    }
+  });
+  await page.getByRole("button", { name: "生成并预览向量", exact: true }).click();
+  await expect(page.getByText("当前查询向量 · 3 维", { exact: true })).toBeVisible();
+  expect(modelCalls).toBe(3);
+  expect(queryCalls).toBe(0);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.getByRole("button", { name: "复制 查询向量预览", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("[1,0,0]");
+  expect(queryCalls).toBe(0);
   await page.getByRole("button", { name: /筛选与参数/ }).click();
   await page.getByText("高级查询参数 · JSON", { exact: true }).click();
   await page.getByLabel("高级查询参数", { exact: true }).fill('{"all":true}');
@@ -540,6 +555,13 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.getByRole("button", { name: "下一页结果", exact: true }).click();
   await expect(page.locator(".result-card")).toHaveCount(1);
   expect(modelCalls).toBe(3);
+  expect(queryCalls).toBe(2);
+  await page.getByLabel("检索内容", { exact: true }).fill("another query");
+  await expect(page.getByText("当前查询向量 · 3 维", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "生成并预览向量", exact: true }).click();
+  await expect(page.getByText("当前查询向量 · 3 维", { exact: true })).toBeVisible();
+  expect(modelCalls).toBe(4);
+  expect(queryCalls).toBe(2);
   await page.getByRole("button", { name: "连接与管理", exact: true }).click();
   await page.getByRole("button", { name: "清除本地模型配置", exact: true }).click();
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("anyseek.embedding.")))).toEqual([]);
