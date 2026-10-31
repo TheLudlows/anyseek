@@ -1,4 +1,4 @@
-//! Record's native lexical component. The companion IndexArc owns only vectors
+//! Record's native lexical component. The companion VectorIndexArc owns only vectors
 //! and metadata. Tail commits are private until Record's publication guard opens.
 use super::*;
 use crate::record::{Document, RecordConfig};
@@ -41,7 +41,7 @@ pub(crate) struct Runtime {
 enum WriteState { Writable, Sealed, Failed }
 struct Data {
     write_state: WriteState,
-    index: Index,
+    index: NativeIndex,
     reader: IndexReader,
     writer: Option<IndexWriter<TantivyDocument>>,
     identities: Vec<Identity>,
@@ -134,7 +134,7 @@ impl Runtime {
         let directory =
             super::directory::BudgetDirectory::persistent(path, limit, 65536, 0)?;
         directory.retain_pin(pin.clone())?;
-        let index = Index::create(directory.clone(), schema, Default::default()).map_err(storage)?;
+        let index = NativeIndex::create(directory.clone(), schema, Default::default()).map_err(storage)?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -189,7 +189,7 @@ impl Runtime {
             .ok_or_else(||storage("native selected byte budget overflow"))?;
         let directory=super::directory::BudgetDirectory::open_selected(path,limit)?;
         directory.retain_pin(pin.clone())?;
-        let index = Index::open(directory).map_err(storage)?;
+        let index = NativeIndex::open(directory).map_err(storage)?;
         let reader: IndexReader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -1173,7 +1173,7 @@ impl Runtime {
             assert_eq!(query(&p, SearchMode::Lexical).await.count_total, 1);
             let inner = p.inner.lock().await;
             let index = inner.index.test_index().read().await;
-            for shard in &index.shard_vec {
+            for shard in &index.segments {
                 let shard = shard.read().await;
                 assert!(shard.indexed_schema_vec.iter().all(|field| !field.index_lexical));
             }

@@ -15,18 +15,17 @@ const FORMAT: u32 = 2;
 const DESCRIPTOR: &str = "component.json";
 const VECTOR: &str = "vectors.bin";
 const FACETS: &str = "metadata.bin";
-pub(crate) type IndexArc = Arc<RwLock<Index>>;
-pub(crate) type ShardArc = Arc<RwLock<Shard>>;
+pub(crate) type VectorIndexArc = Arc<RwLock<VectorIndex>>;
+pub(crate) type VectorSegmentArc = Arc<RwLock<VectorSegment>>;
 
 #[derive(Clone)]
-pub(crate) struct Index {
+pub(crate) struct VectorIndex {
     pub index_path_string: String,
     pub record_lexical: Vec<Arc<crate::record::lexical::runtime::Runtime>>,
     pub schema_map: HashMap<String, SchemaField>,
     pub stored_field_names: Vec<String>,
     pub meta: IndexMetaObject,
-    pub shard_number: usize,
-    pub shard_vec: Vec<ShardArc>,
+    pub segments: Vec<VectorSegmentArc>,
     pub quantization: Quantization,
     pub vector_similarity: VectorSimilarity,
     pub is_simd: bool,
@@ -34,7 +33,7 @@ pub(crate) struct Index {
     pub turbo_quant: TurboQuant,
 }
 
-pub(crate) struct Shard {
+pub(crate) struct VectorSegment {
     pub failed: bool,
     pub indexed_doc_count: usize,
     pub indexed_vector_count: usize,
@@ -107,7 +106,7 @@ pub(crate) fn field_width(field: &FieldType) -> usize {
         _ => 1,
     }
 }
-fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: Option<Descriptor>) -> Result<IndexArc,String> {
+fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: Option<Descriptor>) -> Result<VectorIndexArc,String> {
     crate::vector::validate_vector_schema(&meta.inference,schema)?;
     if schema.iter().any(|f| f.index_lexical || f.store) { return Err("vector/metadata component cannot own lexical fields or payloads".into()); }
     let (original,precision,quantization,similarity)=vector_settings(&meta);
@@ -135,7 +134,7 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
     }
     let vector_map=unsafe{Mmap::map(&vector_file)}.map_err(|e|e.to_string())?;
     let facet_map=if width==0 {MmapOptions::new().len(1).map_anon()}else{unsafe{MmapMut::map_mut(&facets_file)}}.map_err(|e|e.to_string())?;
-    let mut shard=Shard {failed:false,indexed_doc_count:0,indexed_vector_count:0,indexed_cluster_count:0,committed_doc_count:0,uncommitted:false,
+    let mut shard=VectorSegment {failed:false,indexed_doc_count:0,indexed_vector_count:0,indexed_cluster_count:0,committed_doc_count:0,uncommitted:false,
         schema_map:schema_map.clone(),indexed_schema_vec:indexed,#[cfg(test)] stored_field_names:Vec::new(),meta:meta.clone(),is_last_level_incomplete:false,
         last_level_vector_file_start_pos:0,vector_levels:0,delete_hashset:AHashSet::new(),active:None,build_reservation:None,build_input_covered:false,
         path:path.to_owned(),facets,facets_map,facets_size_sum:width,facets_file,facets_file_mmap:facet_map,string_set_to_single_term_id_vec:Vec::new(),
@@ -155,13 +154,12 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
         shard.validate_vectors()?;
     }
     shard.string_set_to_single_term_id();
-    Ok(Arc::new(RwLock::new(Index {index_path_string:path.to_string_lossy().into_owned(),record_lexical:Vec::new(),schema_map,stored_field_names:Vec::new(),meta,shard_number:1,
-        shard_vec:vec![Arc::new(RwLock::new(shard))],quantization,
+    Ok(Arc::new(RwLock::new(VectorIndex {index_path_string:path.to_string_lossy().into_owned(),record_lexical:Vec::new(),schema_map,stored_field_names:Vec::new(),meta,
+        segments:vec![Arc::new(RwLock::new(shard))],quantization,
         vector_similarity:similarity,is_simd:simd,is_vector_indexing:original>0,turbo_quant:turbo})))
 }
 
-pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&Vec<SchemaField>,shards:Option<usize>)->Result<IndexArc,String>{
-    if shards!=Some(1) {return Err("Record component requires one physical partition".into());}
+pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&[SchemaField])->Result<VectorIndexArc,String>{
     let permit = match crate::resources::Scope::current() {
         Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(|e|e.to_string())?),
         _ => None,
@@ -169,16 +167,16 @@ pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&Vec<Sch
     let create = || create_component_files(path, meta, schema);
     match permit { Some(permit) => permit.run(create), None => create() }
 }
-// Serial local file construction only: no acquired Index/Shard locks, native
+// Serial local file construction only: no acquired VectorIndex/VectorSegment locks, native
 // writer, spawned task, or remote I/O can be reached while this loan is held.
-fn create_component_files(path:&Path,meta:IndexMetaObject,schema:&[SchemaField])->Result<IndexArc,String>{
+fn create_component_files(path:&Path,meta:IndexMetaObject,schema:&[SchemaField])->Result<VectorIndexArc,String>{
     fs::create_dir(path).map_err(|e|e.to_string())?;
     // Keep the independently authenticated schema file for package validation.
     let schema_file=File::create(path.join("schema.json")).map_err(|e|e.to_string())?;
     serde_json::to_writer(&schema_file,schema).map_err(|e|e.to_string())?;schema_file.sync_all().map_err(|e|e.to_string())?;
     assemble(path,meta,schema,None)
 }
-pub(crate) async fn open_index(path:&Path)->Result<IndexArc,String>{
+pub(crate) async fn open_index(path:&Path)->Result<VectorIndexArc,String>{
     let io=crate::resources::Scope::current().map(|scope|scope.io())
         .transpose().map_err(|e|e.to_string())?;
     let file=fs::File::open(path.join(DESCRIPTOR)).map_err(|e|e.to_string())?;
@@ -197,7 +195,7 @@ pub(crate) async fn open_index(path:&Path)->Result<IndexArc,String>{
     assemble(path,saved.meta.clone(),&saved.schema.clone(),Some(saved))
 }
 
-impl Shard {
+impl VectorSegment {
     pub(crate) fn is_deleted(&self, id: usize) -> bool {
         self.delete_hashset.contains(&id) || self.active.as_ref().is_some_and(|active| !active.is_live(id))
     }
@@ -309,7 +307,7 @@ impl Shard {
             .map_err(|e|e.to_string())?;
         if !self.build_input_covered {if let Some(memory)=&mut self.build_reservation {memory.grow(estimate).map_err(|e|e.to_string())?;}}
         self.ensure_metadata_capacity(ordinal+1)?;
-        if self.is_vector_indexing {self.index_vector_shard(ordinal,&document).await;}
+        if self.is_vector_indexing {self.index_vector_segment(ordinal,&document).await;}
         self.write_metadata(ordinal,&document)?;
         self.indexed_doc_count+=1;self.uncommitted=true;
         if let Some(active)=&mut self.active {active.publish(ordinal);}
@@ -397,21 +395,21 @@ impl Shard {
 
 #[allow(async_fn_in_trait)]
 pub(crate) trait IndexDocuments { async fn index_documents(&self,documents:Vec<Document>)->Result<(),String>; }
-impl IndexDocuments for IndexArc {
+impl IndexDocuments for VectorIndexArc {
     async fn index_documents(&self,documents:Vec<Document>)->Result<(),String>{
         let root=self.read().await;
-        if root.shard_vec.len()!=1 {return Err("writes require the private tail component".into());}
-        let mut shard=root.shard_vec[0].write().await;
+        if root.segments.len()!=1 {return Err("writes require the private tail component".into());}
+        let mut shard=root.segments[0].write().await;
         for document in documents {shard.append(document).await?;}
         Ok(())
     }
 }
 #[allow(async_fn_in_trait)]
 pub(crate) trait Commit {async fn commit(&self)->std::io::Result<()>;}
-impl Commit for IndexArc {
+impl Commit for VectorIndexArc {
     async fn commit(&self)->std::io::Result<()>{
         let root=self.read().await;
-        for shard in &root.shard_vec {shard.write().await.commit_component().await?;}
+        for shard in &root.segments {shard.write().await.commit_component().await?;}
         Ok(())
     }
 }

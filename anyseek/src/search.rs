@@ -1,6 +1,6 @@
 //! Query configuration and Record's private vector-component execution.
-use crate::{INDEX_RUNTIME, index::IndexArc, min_heap::{Result, result_ordering_root},
-    vector::{Embedding, Inference, Quantization, SearchVectorShard},
+use crate::{INDEX_RUNTIME, index::VectorIndexArc, min_heap::{Result, result_ordering_root},
+    vector::{Embedding, Inference, Quantization, SearchVectorSegment},
     vector_similarity::{AnnMode, QuantizedVector, VectorSimilarity, normalize_f32, normalize_f32_simd,
         quantize_f32_to_i8, quantize_f32_to_i8_simd}};
 use serde::{Serialize, Deserialize};
@@ -285,7 +285,7 @@ pub(crate) struct ResultSortIndex {
 }
 
 pub(crate) async fn search_with_counts(
-    index: &IndexArc,
+    index: &VectorIndexArc,
     query_string: String,
     query_vector: Option<Embedding>,
     search_mode: SearchMode,
@@ -381,7 +381,7 @@ pub(crate) async fn search_with_counts(
                         }
                         (VectorSimilarity::Euclidean, Quantization::ScalarQuantizationI8, true) => {
                             let non_affine =
-                                index_ref.shard_vec[0].read().await.max_vector_value == f32::MIN;
+                                index_ref.segments[0].read().await.max_vector_value == f32::MIN;
                             if non_affine {
                                 let quantized_vector = QuantizedVector::new_scale_norm_simd(fvecs);
                                 (
@@ -393,9 +393,9 @@ pub(crate) async fn search_with_counts(
                                 )
                             } else {
                                 let mut min_vector_value =
-                                    index_ref.shard_vec[0].read().await.min_vector_value;
+                                    index_ref.segments[0].read().await.min_vector_value;
                                 let mut max_vector_value =
-                                    index_ref.shard_vec[0].read().await.max_vector_value;
+                                    index_ref.segments[0].read().await.max_vector_value;
                                 let quantized_vector = QuantizedVector::new_scale_norm_affine_simd(
                                     &mut min_vector_value,
                                     &mut max_vector_value,
@@ -429,7 +429,7 @@ pub(crate) async fn search_with_counts(
                             false,
                         ) => {
                             let non_affine =
-                                index_ref.shard_vec[0].read().await.max_vector_value == f32::MIN;
+                                index_ref.segments[0].read().await.max_vector_value == f32::MIN;
                             if non_affine {
                                 let quantized_vector = QuantizedVector::new_scale_norm(fvecs);
                                 (
@@ -441,9 +441,9 @@ pub(crate) async fn search_with_counts(
                                 )
                             } else {
                                 let mut min_vector_value =
-                                    index_ref.shard_vec[0].read().await.min_vector_value;
+                                    index_ref.segments[0].read().await.min_vector_value;
                                 let mut max_vector_value =
-                                    index_ref.shard_vec[0].read().await.max_vector_value;
+                                    index_ref.segments[0].read().await.max_vector_value;
                                 let quantized_vector = QuantizedVector::new_scale_norm_affine(
                                     &mut min_vector_value,
                                     &mut max_vector_value,
@@ -486,9 +486,9 @@ pub(crate) async fn search_with_counts(
 
 
         let SearchMode::Vector { similarity_threshold, ann_mode } = search_mode else { unreachable!() };
-        let shard_number = index_ref.shard_vec.len();
+        let segment_count = index_ref.segments.len();
         let mut tasks = Vec::new();
-        for (slot, shard) in index_ref.shard_vec.iter().enumerate() {
+        for (slot, shard) in index_ref.segments.iter().enumerate() {
             let shard = shard.clone();
             let query = query_vector.clone();
             let ann = ann_mode.clone();
@@ -496,9 +496,9 @@ pub(crate) async fn search_with_counts(
             let filters = facet_filter.clone();
             tasks.push(INDEX_RUNTIME.handle().spawn(crate::resources::inherit(async move {
                 #[cfg(test)] crate::record::query_test_gate().await;
-                let mut result = shard.search_vector_shard(query, offset + length, include_uncommitted,
+                let mut result = shard.search_vector_segment(query, offset + length, include_uncommitted,
                     similarity_threshold, ann, fields, filters).await;
-                for hit in &mut result.results { hit.doc_id = hit.doc_id * shard_number + slot; }
+                for hit in &mut result.results { hit.doc_id = hit.doc_id * segment_count + slot; }
                 result
             })));
         }
@@ -519,15 +519,15 @@ pub(crate) async fn search_with_counts(
             }
         }
         if failure.is_some() { result.error = failure; result.results.clear(); return result; }
-        let shards = futures::future::join_all(index_ref.shard_vec.iter().map(|shard| shard.read())).await;
-        result.results.sort_by(|a,b| crate::min_heap::rank_with_shards(&shards,b.score,b.doc_id,a.score,a.doc_id));
+        let shards = futures::future::join_all(index_ref.segments.iter().map(|shard| shard.read())).await;
+        result.results.sort_by(|a,b| crate::min_heap::rank_with_segments(&shards,b.score,b.doc_id,a.score,a.doc_id));
         result.results.truncate(offset + length);
         let sorts = result_sort.iter().filter_map(|sort| Some(ResultSortIndex {
             idx: match sort.field.as_str() { "_id" => usize::MAX, "_score" => usize::MAX-1,
                 _ => *shards[0].facets_map.get(&sort.field)? }, order: sort.order.clone(),
         })).collect::<Vec<_>>();
         if !sorts.is_empty() {
-            result.results.sort_by(|a,b| result_ordering_root(&shards,shard_number,false,&sorts,*b,*a));
+            result.results.sort_by(|a,b| result_ordering_root(&shards,false,&sorts,*b,*a));
         }
         result.results = result.results.into_iter().skip(offset).take(length).collect();
         result.result_count = result.results.len();

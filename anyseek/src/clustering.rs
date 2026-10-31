@@ -8,7 +8,7 @@ use std::arch::aarch64::*;
 use std::arch::x86_64::*;
 
 use crate::{
-    index::{Clustering, Shard},
+    index::{Clustering, VectorSegment},
     vector::{Embedding, Quantization},
     vector_similarity::{
         QuerySimd, VectorSimilarity, similarity_embedding, similarity_embedding_simd,
@@ -224,7 +224,7 @@ pub(crate) fn accumulate(sum: &mut [f32], emb: &Embedding) {
     }
 }
 
-impl Shard {
+impl VectorSegment {
     /// cluster the vectors in the block_vector_buffer, and return the medoids
     pub(crate) async fn cluster_vector_shard(&mut self, sort: bool) -> Vec<Medoid> {
         let non_affine = self.max_vector_value == f32::MIN;

@@ -9,7 +9,7 @@ pub(super) static WORKERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(
 const MAX_DEADLINE: Duration = Duration::from_secs(300);
 
 #[derive(Clone,Copy,Eq,PartialEq)]
-enum JobMode { Index, Automatic, Compact }
+enum JobMode { VectorIndex, Automatic, Compact }
 
 fn crash_boundary(point:&str) {
     #[cfg(test)]
@@ -90,7 +90,7 @@ impl RecordPartition {
         })})
     }
     pub(super) fn start_index_job(&self,timeout:Duration,automatic:bool)->Result<IndexJob,RecordError> {
-        self.start_owned_index_job(timeout,if automatic {JobMode::Automatic}else{JobMode::Index})
+        self.start_owned_index_job(timeout,if automatic {JobMode::Automatic}else{JobMode::VectorIndex})
     }
     pub(super) fn start_compact_job(&self)->Result<IndexJob,RecordError> {
         self.start_owned_index_job(MAX_DEADLINE,JobMode::Compact)
@@ -120,7 +120,7 @@ impl RecordPartition {
                 if !inner.healthy { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
                 inner.index.drain_indexes().await?;
-                if mode==JobMode::Index {inner.advance_time().await?;}
+                if mode==JobMode::VectorIndex {inner.advance_time().await?;}
                 inner.reclaim_anchor_objects().await?;
                 let estimate = (inner.snapshot_bytes as u64).checked_mul(4)
                     .ok_or_else(||storage("index snapshot estimate overflow"))?;
@@ -149,7 +149,7 @@ impl RecordPartition {
                         Some(anchor::NativeReuse::capture(&inner,admission).await?)
                     }else{None}
                 }else{None};
-                let source=if mode!=JobMode::Index {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
+                let source=if mode!=JobMode::VectorIndex {Some(maintenance::SourceCapture::capture(&inner)?)}else{None};
                 // Complete fallible local capture before acquiring the remote pin.
                 let snapshot={let _phase=maintenance::Phase::new("snapshot_clone_locked",inner.state.seq);
                     inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?};
@@ -509,7 +509,7 @@ mod tests {
         p.write(write("first", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
         p.compact_journal().await.unwrap();
         let inner = p.inner.lock().await;
-        let shard = inner.index.test_index().read().await.shard_vec[0].clone();
+        let shard = inner.index.test_index().read().await.segments[0].clone();
         let guard = shard.write().await;
         {
         let admission = scope.clone().run(anchor::NativeReuse::admit(&inner));

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{fmt, sync::LazyLock};
 use crate::{search::QueryType, vector::Inference};
-pub(crate) use crate::component::{Index, IndexArc, Shard, ShardArc, create_index, open_index, IndexDocuments};
+pub(crate) use crate::component::{VectorIndexArc, VectorSegment, VectorSegmentArc, create_index, open_index, IndexDocuments};
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const ROARING_BLOCK_SIZE: usize = 65536;
 pub(crate) const MAX_QUERY_TERM_NUMBER: usize = 100;

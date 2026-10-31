@@ -11,7 +11,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tantivy::{
-    DocSet, Index, ReloadPolicy, Searcher, TERMINATED, TantivyDocument, Term,
+    DocSet, Index as NativeIndex, ReloadPolicy, Searcher, TERMINATED, TantivyDocument, Term,
     query::{EnableScoring, Query},
     schema::{FAST, Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions},
     tokenizer::{PreTokenizedString, Token},
@@ -241,7 +241,7 @@ impl Candidate {
         std::fs::create_dir(&native).map_err(storage)?;
         let directory = directory::BudgetDirectory::new(&native, byte_limit, 1024, memory_bytes)?;
         let index =
-            Index::create(directory, schema.clone(), Default::default()).map_err(storage)?;
+            NativeIndex::create(directory, schema.clone(), Default::default()).map_err(storage)?;
         let mut writer = index
             .writer_with_options::<TantivyDocument>(
                 tantivy::indexer::IndexWriterOptions::builder()
@@ -357,7 +357,7 @@ impl Candidate {
             return Err(storage("unsupported or inconsistent lexical package"));
         }
         let (expected, fields) = schema(&manifest.fields)?;
-        let index = Index::open_in_dir(path.join("lexical")).map_err(storage)?;
+        let index = NativeIndex::open_in_dir(path.join("lexical")).map_err(storage)?;
         if index.schema() != expected {
             return Err(storage("lexical schema mismatch"));
         }

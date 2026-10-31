@@ -1,4 +1,4 @@
-//! Retrieval capabilities owned by one partition view. No IndexArc escapes to
+//! Retrieval capabilities owned by one partition view. No VectorIndexArc escapes to
 //! production callers: writes target the tail, searches target the selected view.
 use super::*;
 
@@ -8,8 +8,8 @@ pub(super) struct RotationBudget {
 }
 
 pub(super) struct RetrievalView {
-    query: IndexArc,
-    tail: IndexArc,
+    query: VectorIndexArc,
+    tail: VectorIndexArc,
     // Ordered like query components after the mutable tail, before certified packages.
     pub(super) pending_seals: Vec<segment::Package>,
     pub(super) detached_cache: bool,
@@ -35,13 +35,13 @@ impl RetrievalView {
     pub(super) async fn capture_query(&self,length:usize)->Result<super::query::Handle,RecordError> {
         super::query::Handle::capture(&self.query,length).await
     }
-    pub(super) async fn components(&self)->Vec<crate::component::ShardArc> {
-        self.query.read().await.shard_vec.clone()
+    pub(super) async fn components(&self)->Vec<crate::component::VectorSegmentArc> {
+        self.query.read().await.segments.clone()
     }
     pub(super) async fn matches_identity(&self, ordinal:usize, identity:&lexical::Identity, fingerprint:[u8; 32])->Result<bool, RecordError> {
         let root=self.query.read().await;
-        let shard=root.shard_vec[ordinal % root.shard_number].read().await;
-        let local=ordinal / root.shard_number;
+        let shard=root.segments[ordinal % root.segments.len()].read().await;
+        let local=ordinal / root.segments.len();
         if shard.failed { return Err(RecordError::RecoveryRequired); }
         Ok(shard.active.as_ref().is_some_and(|active| active.is_live(local)
             && active.keys.get(local)==Some(&identity.id)
@@ -56,11 +56,11 @@ impl RetrievalView {
         if self.reserved_rows.is_some() {
             return self.component_bytes.checked_add(bytes).is_some_and(|n|crate::storage::build_budget::validate_single(n).is_ok());
         }
-        let shard=root.shard_vec[0].read().await;
+        let shard=root.segments[0].read().await;
         shard.build_reservation.as_ref().is_some_and(|r|r.can_grow(bytes))
     }
 
-    pub(super) fn single(index: IndexArc) -> Self {
+    pub(super) fn single(index: VectorIndexArc) -> Self {
         Self {
             query: index.clone(),
             tail: index,
@@ -81,20 +81,19 @@ impl RetrievalView {
     /// invoking this transition; it grants no publication authority itself.
     pub(super) async fn rotate_tail(
         &mut self,
-        new_tail: IndexArc,
+        new_tail: VectorIndexArc,
         ordinals: &mut Vec<String>,
         locations: &mut BTreeMap<String, usize>,
         budget: RotationBudget,
     ) -> Result<(), RecordError> {
         let tail_root = new_tail.read().await;
         if Arc::ptr_eq(&self.query, &new_tail)
-            || tail_root.shard_number != 1
-            || tail_root.shard_vec.len() != 1
+            || tail_root.segments.len() != 1
         {
-            return Err(storage("replacement must be a separate single-shard tail"));
+            return Err(storage("replacement must be a separate single-segment tail"));
         }
         let native_tail = tail_root.record_lexical.first().cloned().ok_or_else(|| storage("missing native tail"))?;
-        let tail_shard = tail_root.shard_vec[0].clone();
+        let tail_shard = tail_root.segments[0].clone();
         let tail_meta = serde_json::to_value(&tail_root.meta).map_err(storage)?;
         let tail_schema = serde_json::to_value(&tail_root.schema_map).map_err(storage)?;
         drop(tail_root);
@@ -104,10 +103,9 @@ impl RetrievalView {
         {
             return Err(storage("replacement tail configuration mismatch"));
         }
-        let previous = root.shard_number;
+        let previous = root.segments.len();
         if previous == 0
-            || root.shard_vec.len() != previous
-            || root.shard_vec.iter().any(|s| Arc::ptr_eq(s, &tail_shard))
+            || root.segments.iter().any(|s| Arc::ptr_eq(s, &tail_shard))
         {
             return Err(storage("invalid retrieval view topology"));
         }
@@ -149,8 +147,8 @@ impl RetrievalView {
         }
         // Lock every component before modifying anything. Cancellation while
         // acquiring locks leaves the current context and addresses unchanged.
-        root.shard_vec.try_reserve(1).map_err(storage)?;
-        let mut shards = futures::future::join_all(root.shard_vec.iter().map(|s| s.write())).await;
+        root.segments.try_reserve(1).map_err(storage)?;
+        let mut shards = futures::future::join_all(root.segments.iter().map(|s| s.write())).await;
         let mut tail = tail_shard.write().await;
         let local = tail
             .active
@@ -171,28 +169,18 @@ impl RetrievalView {
                 .clone();
             statistics.push(local);
         }
-        let ids = (0..next)
-            .map(u64::try_from)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(storage)?;
         // No await or fallible work after this point. Old statistics point only
         // at the discarded corpus; Drop does not retire their contributions.
         let mut statistics = statistics.into_iter();
         tail.active = statistics.next();
-        tail.meta.id = ids[0];
-        for ((shard, statistics), id) in shards
-            .iter_mut()
-            .zip(statistics)
-            .zip(ids.into_iter().skip(1))
-        {
+        for (shard, statistics) in shards.iter_mut().zip(statistics) {
             shard.active = Some(statistics);
-            shard.meta.id = id;
         }
         drop(tail);
         drop(shards);
         root.record_lexical.insert(0, native_tail);
-        root.shard_vec.insert(0, tail_shard);
-        root.shard_number = next;
+        root.segments.insert(0, tail_shard);
+
         *ordinals = mapped;
         *locations = next_locations;
         self.tail = new_tail;
@@ -214,7 +202,7 @@ impl RetrievalView {
     /// possibly sealed sole writer. Successful handoff remains private until
     /// the Record certificate selects these packages.
     pub(super) async fn seal_into_successor(
-        &mut self, root: &Path, new_tail: IndexArc, ordinals: &mut Vec<String>,
+        &mut self, root: &Path, new_tail: VectorIndexArc, ordinals: &mut Vec<String>,
         locations: &mut BTreeMap<String,usize>, budget: RotationBudget, limit: u64,
     ) -> Result<(),RecordError> {
         self.drain_indexes().await?;
@@ -252,9 +240,9 @@ impl RetrievalView {
             self.component_bytes=self.component_bytes.checked_add(growth).ok_or_else(||storage("component admission overflow"))?;
             self.reserved_rows=Some(local.checked_add(1).ok_or_else(||storage("component ordinal overflow"))?);
             self.batch_inputs.push(lexical); self.batch_vectors.push(vector);
-            return local.checked_mul(self.query.read().await.shard_number).ok_or_else(||storage("candidate address overflow"));
+            return local.checked_mul(self.query.read().await.segments.len()).ok_or_else(||storage("candidate address overflow"));
         }
-        let shard = self.tail.read().await.shard_vec[0].clone();
+        let shard = self.tail.read().await.segments[0].clone();
         {
             let mut shard=shard.write().await;
             if let Some(memory)=&mut shard.build_reservation {
@@ -284,7 +272,7 @@ impl RetrievalView {
             self.component_bytes=shard.read().await.build_reservation.as_ref().map_or(0, |r|r.bytes());
         }
         local
-            .checked_mul(self.query.read().await.shard_number)
+            .checked_mul(self.query.read().await.segments.len())
             .ok_or_else(|| storage("candidate address overflow"))
     }
     async fn initialize_async(&mut self) -> Result<(),RecordError> {
@@ -292,7 +280,7 @@ impl RetrievalView {
         let cursors=self.cursors.clone().ok_or(RecordError::RecoveryRequired)?;
         let root=self.query.read().await;
         self.retired.clear();
-        for component in &root.shard_vec {
+        for component in &root.segments {
             let mut shard=component.write().await;
             let active=shard.active.as_mut().ok_or_else(||storage("component statistics missing"))?;
             let mask=active.retired.get_or_insert_with(Default::default).clone();
@@ -300,7 +288,7 @@ impl RetrievalView {
         }
         drop(root);
         let root=self.tail.read().await;
-        let shard=root.shard_vec[0].read().await;
+        let shard=root.segments[0].read().await;
         self.reserved_rows=Some(shard.indexed_doc_count);
         self.component_bytes=shard.build_reservation.as_ref().map_or(0,|r|r.bytes());
         let path=Path::new(&root.index_path_string).parent().ok_or_else(||storage("component parent missing"))?.to_owned();
@@ -344,8 +332,8 @@ impl RetrievalView {
             return self.retired[ordinal%self.retired.len()].insert(ordinal/self.retired.len()).map_err(storage);
         }
         let root=self.query.read().await;
-        let n=root.shard_number;
-        let mut shard=root.shard_vec[ordinal%n].write().await;
+        let n=root.segments.len();
+        let mut shard=root.segments[ordinal%n].write().await;
         let local=ordinal/n;
         shard.delete_hashset.insert(local);
         let active = shard.active.as_mut().ok_or_else(||storage("missing view statistics"))?;
@@ -376,19 +364,19 @@ impl RetrievalView {
     pub(super) async fn local_statistics(&self)->Result<Vec<crate::active::ActiveStatistics>,RecordError>{
         let root=self.query.read().await;
         let mut result=Vec::new();
-        for shard in &root.shard_vec {
+        for shard in &root.segments {
             result.push(shard.read().await.active.as_ref().ok_or_else(||storage("missing view statistics"))?.clone_local());
         }
         Ok(result)
     }
     pub(super) async fn has_tail_rows(&self)->Result<bool,RecordError> {
         let root=self.tail.read().await;
-        let tail=root.shard_vec[0].read().await;
+        let tail=root.segments[0].read().await;
         Ok(!tail.active.as_ref().ok_or_else(||storage("missing tail statistics"))?.keys.is_empty())
     }
     pub(super) async fn statistics_wire_length(&self)->Result<usize,RecordError>{
         let root=self.query.read().await;let mut bytes=2usize;
-        for shard in &root.shard_vec {
+        for shard in &root.segments {
             let shard=shard.read().await;
             let active=shard.active.as_ref().ok_or_else(||storage("missing view statistics"))?;
             bytes=bytes.checked_add(checkpoint_codec::json_length(active)?).and_then(|n|n.checked_add(1)).ok_or_else(||storage("statistics size overflow"))?;
@@ -402,7 +390,7 @@ impl RetrievalView {
         paths.sort(); paths.dedup(); paths
     }
     #[cfg(test)]
-    pub(super) fn test_index(&self) -> &IndexArc {
+    pub(super) fn test_index(&self) -> &VectorIndexArc {
         &self.query
     }
 }
@@ -426,7 +414,7 @@ mod tests {
             let (tail, _) = build_at(&root, &target, &inner.config, &State::default())
                 .await
                 .unwrap();
-            let tail_shard = tail.read().await.shard_vec[0].clone();
+            let tail_shard = tail.read().await.segments[0].clone();
             let held = tail_shard.write().await;
             let Inner {
                 index,
@@ -436,6 +424,8 @@ mod tests {
             } = &mut *inner;
             let original = ordinals.clone();
             let original_locations = locations.clone();
+            let previous_component = index.query.read().await.segments[0].clone();
+            let previous_meta = serde_json::to_value(&previous_component.read().await.meta).unwrap();
             {
                 let pending = index.rotate_tail(
                     tail.clone(),
@@ -453,7 +443,7 @@ mod tests {
             drop(held);
             assert_eq!(*ordinals, original);
             assert_eq!(*locations, original_locations);
-            assert_eq!(index.query.read().await.shard_number, 1);
+            assert_eq!(index.query.read().await.segments.len(), 1);
             index
                 .rotate_tail(
                     tail,
@@ -466,6 +456,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            assert_eq!(index.query.read().await.segments.len(), 2);
+            assert!(Arc::ptr_eq(&index.query.read().await.segments[1], &previous_component));
+            assert_eq!(serde_json::to_value(&previous_component.read().await.meta).unwrap(), previous_meta,
+                "rotation must not rewrite metadata shared with captured readers");
         }
         assert_eq!(
             query(&partition, SearchMode::Lexical).await.hits[0].score,
@@ -517,7 +511,7 @@ mod tests {
                 ));
                 assert_eq!(*ordinals, old_ordinals);
                 assert_eq!(*locations, old_locations);
-                assert_eq!(index.query.read().await.shard_number, 1);
+                assert_eq!(index.query.read().await.segments.len(), 1);
             }
             index
                 .rotate_tail(

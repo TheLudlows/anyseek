@@ -116,7 +116,7 @@ impl Input {
 enum Engine {
     Lexical(Arc<lexical::runtime::Runtime>),
     Vector {
-        index: IndexArc,
+        index: VectorIndexArc,
         _native: Arc<lexical::runtime::Runtime>,
     },
 }
@@ -131,7 +131,7 @@ impl Engine {
         match self {
             Self::Lexical(native) => native.append_queued(input.identity, &input.document).await,
             Self::Vector { index, .. } => {
-                let component = index.read().await.shard_vec[0].clone();
+                let component = index.read().await.segments[0].clone();
                 #[cfg(test)]
                 let fail_after = Path::new(&index.read().await.index_path_string)
                     .parent()
@@ -256,7 +256,7 @@ impl Consumer {
         }
     }
     pub fn new_vector(
-        index: IndexArc,
+        index: VectorIndexArc,
         native: Arc<lexical::runtime::Runtime>,
         cursors: Arc<Cursors>,
         _root: PathBuf,

@@ -2,7 +2,7 @@
 //! component, possibly lagging native prefixes, and one global rank fusion.
 use super::*;
 use crate::{
-    index::IndexArc,
+    index::VectorIndexArc,
     search::{
         ChannelExplanation, FacetFilter, QueryType, ResultObject, ResultSort, ResultSortIndex,
         ResultType, RrfOptions, SearchMode, rrf_contribution,
@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub(crate) async fn search(
-    index: &IndexArc,
+    index: &VectorIndexArc,
     text: String,
     vector: Option<Embedding>,
     mode: SearchMode,
@@ -83,7 +83,7 @@ pub(crate) async fn search(
         }
     }
     let root = index.read().await;
-    let shards = futures::future::join_all(root.shard_vec.iter().map(|s| s.read())).await;
+    let shards = futures::future::join_all(root.segments.iter().map(|s| s.read())).await;
     if shards.iter().any(|shard|shard.failed) {return Err(RecordError::RecoveryRequired);}
     if root.record_lexical.is_empty() || shards.is_empty() {
         return Err(storage("empty retrieval view"));
@@ -220,7 +220,7 @@ pub(crate) async fn search(
         })
         .collect::<Vec<_>>();
     let order = |a: crate::min_heap::Result, b: crate::min_heap::Result| {
-        crate::min_heap::result_ordering_root(&shards, n, text.is_empty(), &sorts, b, a)
+        crate::min_heap::result_ordering_root(&shards, text.is_empty(), &sorts, b, a)
     };
     lexical.sort_by(|a, b| order(*a, *b));
     let mut result = ResultObject {
@@ -234,7 +234,7 @@ pub(crate) async fn search(
         let mut fused = BTreeMap::<usize, crate::min_heap::Result>::new();
         lexical.truncate(rrf.keyword_candidates.unwrap_or(offset + length));
         lexical.sort_by(|a, b| {
-            crate::min_heap::rank_with_shards(&shards, b.score, b.doc_id, a.score, a.doc_id)
+            crate::min_heap::rank_with_segments(&shards, b.score, b.doc_id, a.score, a.doc_id)
         });
         for (channel, weight, hits) in [
             ("lexical", rrf.keyword_weight, lexical),
