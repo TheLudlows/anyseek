@@ -246,7 +246,9 @@ test("real lexical/vector/hybrid search, empty state, explanations, advanced too
   await page.locator(".result-card").first().click();
   await expect(
     page.getByRole("complementary", { name: "记录详情" }),
-  ).toContainText("lexical");
+  ).toContainText("关键词");
+  await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("原始分数");
+  await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("第 1 名");
   await page.screenshot({
     path: "test-results/screenshots/search.png",
     fullPage: true,
@@ -259,6 +261,11 @@ test("real lexical/vector/hybrid search, empty state, explanations, advanced too
   await page.getByRole("button", { name: "混合 Hybrid", exact: true }).click();
   await page.getByRole("button", { name: "运行检索", exact: true }).click();
   await expect(page.locator(".result-card").first()).toBeVisible();
+  await expect(page.locator(".result-card").first()).toContainText("关键词：");
+  await expect(page.locator(".result-card").first()).toContainText("向量：");
+  await page.locator(".result-card").first().click();
+  await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("最终融合分");
+  await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("融合贡献");
   await page
     .getByRole("button", { name: "关键词 Lexical", exact: true })
     .click();

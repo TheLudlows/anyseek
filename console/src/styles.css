@@ -2056,3 +2056,7 @@ th {
 
 .primary.danger { background: #b42318; border-color: #b42318; }
 .text-button.danger-text { color: #b42318; }
+
+.score-details { margin: 20px 0; }
+.score-details .data-table th, .score-details .data-table td { padding: 10px 8px; white-space: nowrap; }
+.score-basis { display: block; color: var(--muted); margin-top: 4px; }

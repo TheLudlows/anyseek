@@ -151,10 +151,12 @@ export function RecordPreview({
   record,
   close,
   explanation,
+  scoreDetails,
 }: {
   record: RecordData;
   close: () => void;
   explanation?: unknown;
+  scoreDetails?: ReactNode;
 }) {
   let sourceUrl: string | null = null;
   try {
@@ -195,6 +197,7 @@ export function RecordPreview({
             打开来源链接 <ArrowRight size={13} />
           </a>
         )}
+        {scoreDetails}
         <JsonView value={record.document} label="Document JSON" />
         <details>
           <summary>
@@ -203,8 +206,8 @@ export function RecordPreview({
           <JsonView value={record} label="Record JSON" />
         </details>
         {explanation != null && (
-          <details open>
-            <summary>检索解释</summary>
+          <details>
+            <summary>原始检索解释 · JSON</summary>
             <JsonView value={explanation} label="检索得分与通道" />
           </details>
         )}
