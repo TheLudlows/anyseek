@@ -62,6 +62,11 @@ test("document requests preserve i64 boundaries, nested numbers, exponents and e
   requests.forEach((r, i) =>
     assert.ok(r.body.endsWith('"document":' + raws[i] + "}")),
   );
+  for (const request of requests) {
+    assert.deepEqual(Object.keys(JSON.parse(request.body)).sort(), [
+      "document", "expected", "operation_id", "record_id",
+    ]);
+  }
   assert.equal(
     new Set(requests.map((r) => JSON.parse(r.body).operation_id.nonce)).size,
     raws.length,
@@ -70,7 +75,7 @@ test("document requests preserve i64 boundaries, nested numbers, exponents and e
 
 test("envelopes retain raw expected version and generation; IDs remain editor-owned", () => {
   const source =
-    '{"record_id":"r","routing_key":"r","expected":{"Match":9007199254740993},"document":{"rank":-9223372036854775808},"generation":{"action":"stage","members":[]}}';
+    '{"record_id":"r","expected":{"Match":9007199254740993},"document":{"rank":-9223372036854775808},"generation":{"action":"stage","members":[]}}';
   const [request] = prepareDocumentRequests(source, true);
   assert.ok(request.body.startsWith(source.slice(0, -1) + ',"operation_id":'));
   assert.equal(request.staging, true);
@@ -88,7 +93,7 @@ test("envelopes retain raw expected version and generation; IDs remain editor-ow
     assert.throws(() => prepareDocumentRequests(raw));
   assert.throws(() =>
     prepareDocumentRequests(
-      '{"record_id":"r","routing_key":"r","expected":"Any","document":{},"operation_id":null}',
+      '{"record_id":"r","expected":"Any","document":{},"operation_id":null}',
       true,
     ),
   );

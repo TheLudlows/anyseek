@@ -24,4 +24,4 @@
 
 SQLite 仅保存协调元数据，规范原文/原向量归 Payload，Tantivy 与向量/元数据组件保存派生检索数据。幂等历史回收保留期限、来源/备份保护和持久 epoch 拒绝规则，不通过删除窗口内回执解除容量限制。
 
-超大 collection 分片、自动 split/merge、跨主机 HA、直接远端 Directory、预取与自动调度按实际容量需求后置。保留 Stage.members、routing_key 和必要一致性校验；不预设统一内部水位、UUID 替换 Operation ID 或重建执行框架。模型推理、解析切块、Embedding/Reflect、SQL/JOIN、完整图语言和旧格式迁移不进入本轮。
+超大 collection 分片、自动 split/merge、跨主机 HA、直接远端 Directory、预取与自动调度按实际容量需求后置。保留 Stage.members 和必要一致性校验；不预设统一内部水位、UUID 替换 Operation ID 或重建执行框架。模型推理、解析切块、Embedding/Reflect、SQL/JOIN、完整图语言和旧格式迁移不进入本轮。

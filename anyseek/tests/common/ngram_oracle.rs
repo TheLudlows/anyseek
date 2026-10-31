@@ -22,7 +22,7 @@ async fn add(index: &RecordPartition, docs: &[Value], total: usize) {
         let id = format!("{:020}", total - docs.len() + ordinal);
         index.write(RecordWrite {
             operation_id: OperationId::new(format!("insert-{id}")), record_id: id,
-            routing_key: "oracle".into(), expected: ExpectedVersion::Absent,
+             expected: ExpectedVersion::Absent,
             document: Some(serde_json::from_value(document.clone()).unwrap()),
             vector_patch: None, generation: None, temporal: None, system: None,
         }).await.unwrap();

@@ -6,7 +6,7 @@ use std::io::{self, Write};
 
 #[derive(Serialize)]
 enum BorrowedEntry<'a, S: ?Sized> {
-    #[serde(rename = "RecordCheckpointV15")]
+    #[serde(rename = "RecordCheckpointV16")]
     Checkpoint {
         config: &'a RecordConfig,
         state: &'a S,

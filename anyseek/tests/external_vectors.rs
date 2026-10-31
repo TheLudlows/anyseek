@@ -79,7 +79,7 @@ async fn external_write_query_reopen_contract() {
     let old=index.get("00000000000000000000").await.unwrap().unwrap();
     assert!(index.write(anyseek::record::RecordWrite {
         operation_id:anyseek::record::OperationId::new("invalid-update".into()),record_id:old.record_id.clone(),
-        routing_key:old.routing_key.clone(),expected:anyseek::record::ExpectedVersion::Match(old.version),
+        expected:anyseek::record::ExpectedVersion::Match(old.version),
         document:Some(missing),vector_patch:None,generation:None,temporal:None,system:None,
     }).await.is_err());
     assert_eq!(index.get(&old.record_id).await.unwrap().unwrap().version,old.version);

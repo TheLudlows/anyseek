@@ -19,12 +19,12 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
         call('POST','/api/v1/index',{'operation_id':oid,'collection_id':cid,'config':config})
         seq=call('GET',f"/api/v1/catalog/operation/{oid['epoch']}/{oid['nonce']}")['receipt']['seq']
         directories[endpoint]=f'collections/test/{cid}/{seq:016x}'
-        call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','routing_key':'r','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
+        call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
         return endpoint
     def stage(g='g',expected='Absent'):
-        return {'operation_id':operation(),'record_id':'doc','routing_key':'r','expected':expected,'generation':{'action':'stage','generation_id':g,'source':{'record_id':'s','routing_key':'r','version':1},'members':['chunk-'+g],'chunks':[{'record_id':'chunk-'+g,'document':{'body':'PRIVATE-LEASE-PAYLOAD-'+g}}]}}
+        return {'operation_id':operation(),'record_id':'doc','expected':expected,'generation':{'action':'stage','generation_id':g,'source':{'record_id':'s','version':1},'members':['chunk-'+g],'chunks':[{'record_id':'chunk-'+g,'document':{'body':'PRIVATE-LEASE-PAYLOAD-'+g}}]}}
     def command(action,version,g='g'):
-        return {'operation_id':operation(),'record_id':'doc','routing_key':'r','expected':{'Match':version},'generation':{'action':action,'generation_id':g}}
+        return {'operation_id':operation(),'record_id':'doc','expected':{'Match':version},'generation':{'action':action,'generation_id':g}}
     if not only_faults:
         endpoint=create('leases');original=stage();receipt=call('POST',endpoint+'/doc',original)['receipt']
         status=call('GET',endpoint+'/doc/doc/generation');assert status['lease_fence']==1 and status['staged_members']==1

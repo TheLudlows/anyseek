@@ -63,9 +63,9 @@ mod tests {
     use super::*;
     fn manifest() -> generation::Manifest {
         serde_json::from_value(serde_json::json!({
-            "routing_key":"r", "version":1, "used":["g"], "active":null, "active_members":[],
+             "version":1, "used":["g"], "active":null, "active_members":[],
             "staged":{"deadline_ms":1000,"scope":"scope","id":"g",
-                "source":{"record_id":"s","routing_key":"r","version":1},
+                "source":{"record_id":"s","version":1},
                 "chunks":[{"record_id":"a","document":{},"temporal":{"expire_at_ms":100},"evidence_refs":[]}],
                 "members":["a"],"sealed":false}
         })).unwrap()

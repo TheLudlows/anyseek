@@ -22,7 +22,6 @@ export type Collection = {
 };
 export type RecordData = {
   record_id: string;
-  routing_key: string;
   version: number;
   document: Record<string, Json> | null;
   [key: string]: Json;

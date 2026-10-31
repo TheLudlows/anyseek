@@ -53,11 +53,10 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
           !Object.hasOwn(doc, "vector_patch") &&
           !Object.hasOwn(doc, "generation")) ||
         !doc.record_id ||
-        !doc.routing_key ||
         !doc.expected
       )
         throw new Error(
-          "Record envelope 需要 record_id、routing_key、expected，以及 document、vector_patch 或 generation。",
+          "Record envelope 需要 record_id、expected，以及 document、vector_patch 或 generation。",
         );
       if (Object.hasOwn(doc, "operation_id"))
         throw new Error("Operation ID 由控制台管理，请移除此字段。");
@@ -76,7 +75,6 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
     const header = JSON.stringify({
       operation_id: newOperationId(),
       record_id: id,
-      routing_key: id,
       expected: "Absent",
     });
     return {

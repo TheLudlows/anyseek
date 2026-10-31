@@ -149,7 +149,6 @@ export default async function setup() {
       await post("index/knowledge_base/doc", {
         operation_id: operation(),
         record_id: "guide_" + (i + 1),
-        routing_key: "guide",
         expected: "Absent",
         document: {
           title: documents[i][0],

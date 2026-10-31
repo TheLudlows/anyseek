@@ -218,7 +218,7 @@ test("creation and i64 import survive lost responses and reload with identical r
   await page
     .getByLabel("导入 JSON", { exact: true })
     .fill(
-      `{"record_id":"${first.record_id}","routing_key":"${first.routing_key}","expected":{"Match":1},"document":${copied}}`,
+      `{"record_id":"${first.record_id}","expected":{"Match":1},"document":${copied}}`,
     );
   await page.getByRole("button", { name: "写入集合", exact: true }).click();
   await expect(
@@ -292,7 +292,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
     await call(`index/${collection}/doc`, {
       operation_id: operation(),
       record_id: id,
-      routing_key: "route",
       expected: "Absent",
       document: { title: id, body: "entity" },
       system: { kind: "entity" },
@@ -300,14 +299,13 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await call(`index/${collection}/doc`, {
     operation_id: operation(),
     record_id: "edge",
-    routing_key: "route",
     expected: "Absent",
     document: { title: "Knows", body: "relation" },
     system: {
       kind: "relation",
       relation: {
-        from: { record_id: "entity_a", routing_key: "route", version: 1 },
-        to: { record_id: "entity_b", routing_key: "route", version: 1 },
+        from: { record_id: "entity_a", version: 1 },
+        to: { record_id: "entity_b", version: 1 },
         relation_type: "knows",
       },
     },
@@ -315,7 +313,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await call(`index/${collection}/doc`, {
     operation_id: operation(),
     record_id: "source",
-    routing_key: "route",
     expected: "Absent",
     document: { title: "Source", body: "sourceword" },
     system: { kind: "source" },
@@ -323,12 +320,11 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await call(`index/${collection}/doc`, {
     operation_id: operation(),
     record_id: "generation",
-    routing_key: "route",
     expected: "Absent",
     generation: {
       action: "stage",
       generation_id: "g1",
-      source: { record_id: "source", routing_key: "route", version: 1 },
+      source: { record_id: "source", version: 1 },
       members: ["chunk_a"],
       chunks: [
         {
@@ -342,7 +338,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
     await call(`index/${collection}/doc`, {
       operation_id: operation(),
       record_id: "page_" + i.toString().padStart(2, "0"),
-      routing_key: "route",
       expected: "Absent",
       document: { title: "分页 " + i, body: "pagination" },
     });
@@ -366,7 +361,7 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await page.getByRole("button", { name: "一跳关系", exact: true }).click();
   await page.getByLabel("请求 JSON", { exact: true }).fill(
     JSON.stringify({
-      seeds: [{ record_id: "entity_a", routing_key: "route", version: 1 }],
+      seeds: [{ record_id: "entity_a", version: 1 }],
       direction: "out",
       relation_types: [],
       per_seed: 10,
@@ -390,7 +385,7 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
         },
         relation_weight: 1,
         neighbors: {
-          seeds: [{ record_id: "entity_a", routing_key: "route", version: 1 }],
+          seeds: [{ record_id: "entity_a", version: 1 }],
           direction: "out",
           relation_types: [],
           per_seed: 10,
@@ -408,7 +403,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await page.getByLabel("请求 JSON", { exact: true }).fill(
     JSON.stringify({
       record_id: "source",
-      routing_key: "route",
       version: 1,
       locator: { kind: "utf8", field: "body", start: 0, end: 6 },
     }),

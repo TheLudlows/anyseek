@@ -308,7 +308,7 @@ impl Reference {
             },
         };
         let payloads=pool.finish().map_err(storage)?;
-        let manifest=Manifest{format:6,seq:state.seq,state:referenced,payloads};
+        let manifest=Manifest{format:7,seq:state.seq,state:referenced,payloads};
         // Chain count is not a byte bound: repeated descriptors/long references
         // may exhaust a small configured authority before MAX_DELTAS. Measure
         // without constructing an encoded Vec or writing an oversized manifest.
@@ -434,7 +434,7 @@ impl Reference {
         let path=directory(root,&self.id)?;
         if files(&path,closure_limit(authority_budget)?)?.as_slice()!=self.files.as_slice(){return Err(storage("anchor closure checksum mismatch"));}
         let (manifest,mut manifest_lease)=read_manifest(&path.join("manifest"),authority_budget)?;
-        if manifest.format!=6{return Err(storage("unsupported anchor format"));}
+        if manifest.format!=7{return Err(storage("unsupported anchor format"));}
         let owners=manifest.state.owners()?;
         if owners.last()!=Some(&self.id.as_str()) || self.state_blocks.len()+1!=owners.len() {
             return Err(storage("state block closure count or head mismatch"));

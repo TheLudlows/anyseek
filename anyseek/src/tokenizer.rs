@@ -954,7 +954,7 @@ mod tests {
         }
         for (id,body) in ["中国 rust","中国 rust。","中国 rust search","中国 search rust","rust 中国"].into_iter().enumerate() {
             let request=serde_json::from_value(json!({"operation_id":crate::record::OperationId::new(format!("zh-{id}")),
-                "record_id":id.to_string(),"routing_key":"zh","expected":"Absent","document":{"body":body}})).unwrap();
+                "record_id":id.to_string(),"expected":"Absent","document":{"body":body}})).unwrap();
             index.write(request).await.unwrap();
         }
         index.compact_journal().await.unwrap();drop(index);

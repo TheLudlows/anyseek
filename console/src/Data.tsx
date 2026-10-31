@@ -453,7 +453,7 @@ function ImportData({
           <details>
             <summary>Record envelope 说明</summary>
             <p className="field-help">
-              提供 record_id、routing_key、expected 和 document；document 为
+              提供 record_id、expected 和 document；document 为
               null 表示删除。也支持 vector_patch 和 generation。Operation ID
               由控制台生成并保留。
             </p>

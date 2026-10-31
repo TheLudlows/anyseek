@@ -177,8 +177,6 @@ export function RecordPreview({
         <dl className="metadata">
           <dt>Record ID</dt>
           <dd>{apiFieldText(record, "record_id")}</dd>
-          <dt>Routing key</dt>
-          <dd>{apiFieldText(record, "routing_key")}</dd>
           <dt>版本</dt>
           <dd>{apiFieldText(record, "version")}</dd>
         </dl>
