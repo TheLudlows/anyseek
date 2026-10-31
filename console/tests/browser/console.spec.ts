@@ -517,7 +517,7 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.getByRole("button", { name: "写入集合", exact: true }).click();
   await expect(page.getByText("已确认提交 11 条，索引正在异步更新。", { exact: true })).toBeVisible();
   expect(modelCalls).toBe(2);
-  await page.getByRole("dialog").getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "关闭", exact: true }).first().click();
   await expect.poll(async () => {
     const p = await call(`index/${id}/ingest`);
     return p.vector_seq >= p.committed_seq && p.lexical_seq >= p.committed_seq;

@@ -84,8 +84,8 @@ def main():
             elif name in ['temporal','history','indexer','authorization']:
                 exercise(call,restart_with,root.parent,args.faults)
             elif name=='lease':
-                exercise(call,restart_with,root.parent,False)
-                if args.faults:exercise(call,restart_with,root.parent,True,only_faults=True)
+                exercise(call,restart_with,root.parent,False,tenant_key=tenant_key)
+                if args.faults:exercise(call,restart_with,root.parent,True,only_faults=True,tenant_key=tenant_key)
             else:exercise(call,restart_with,args.faults)
         try:
             if args.faults:
@@ -578,8 +578,8 @@ def main():
             from record_upload_smoke import exercise as upload_exercise
             upload_exercise(call,restart_with,args.faults)
             from record_lease_smoke import exercise as lease_exercise
-            lease_exercise(call,restart_with,root.parent,False)
-            if args.faults:lease_exercise(call,restart_with,root.parent,True,only_faults=True)
+            lease_exercise(call,restart_with,root.parent,False,tenant_key=tenant_key)
+            if args.faults:lease_exercise(call,restart_with,root.parent,True,only_faults=True,tenant_key=tenant_key)
             from record_history_smoke import exercise as history_exercise
             history_exercise(call,restart_with,root.parent,args.faults)
         except Exception:

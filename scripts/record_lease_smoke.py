@@ -5,7 +5,7 @@ import time
 from record_service_smoke import operation
 
 
-def exercise(call,restart_with,directory,faults,only_faults=False):
+def exercise(call,restart_with,directory,faults,only_faults=False,*,tenant_key):
     now=int(time.time()*1000);clock_file=directory/'lease-clock-ms'
     def clock(value):
         pending=clock_file.with_suffix('.next');pending.write_text(str(value));os.replace(pending,clock_file)
@@ -17,7 +17,7 @@ def exercise(call,restart_with,directory,faults,only_faults=False):
         endpoint='/api/v1/index/'+cid
         oid=operation()
         call('POST','/api/v1/index',{'operation_id':oid,'collection_id':cid,'config':config})
-        seq=call('GET',f"/api/v1/catalog/operation/{oid['epoch']}/{oid['nonce']}")['receipt']['seq']
+        seq=call('GET',f"/api/v1/catalog/operation/{oid['epoch']}/{oid['nonce']}",key=tenant_key)['receipt']['seq']
         directories[endpoint]=f'collections/test/{cid}/{seq:016x}'
         call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
         return endpoint
