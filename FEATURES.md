@@ -1,6 +1,6 @@
 # 当前功能与边界
 
-HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、generation、时间/TTL、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续运行容量仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
+HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、时间/TTL、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续运行容量仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
 
 ## 检索和数据
 
@@ -9,7 +9,7 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | 全文 | BM25F/邻近度、布尔/短语、多字段、中文分词、停用词和 N-gram |
 | 向量 | 外部 JSON/base64、多向量字段、F32/I8、三种距离、量化、IVF ANN；模型推理由调用方提供 |
 | 混合 | 全文/向量及可选关系通道共同视图 RRF，支持权重和候选预算、逐命中 rank/原始分数/贡献；候选窗口不当作全库精确并集 |
-| 来源与整文 | 精确来源版本、内联字符/页码定位、直接/间接证据；修订后 stale 默认隐藏，删除立即隐藏；多批 staging、租约、完整成员 Seal/Publish |
+| 来源与整文 | 精确来源版本、内联字符/页码定位、直接/间接证据；修订后 stale 默认隐藏，删除立即隐藏；片段逐批写入，不保证整文原子发布 |
 | 时间与生命周期 | UTC 毫秒时间过滤、固定 evaluation_time、不可逆 TTL；同 collection 实体与一跳关系 |
 | 过滤和排序 | 共享元数据谓词、字段排序、分页和投影；ANN/Hybrid 候选内重排不保证全库字段 Top-K |
 | 身份和写入 | 稳定 Record ID、不可变 routing key、版本条件、墓碑、防 ABA、原 operation_id 重试 |
@@ -40,9 +40,8 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | GET | `/api/v1/index/{id}` | 配置和活动统计 |
 | PATCH | `/api/v1/index/{id}` | 在线完整 checkpoint，返回 visible_seq |
 | DELETE | `/api/v1/index/{id}` | Tenant Key 删除自己的集合，body `{operation_id}` |
-| POST/PATCH/DELETE | `/api/v1/index/{id}/doc` | 条件 RecordWrite；对象完整替换、显式 document:null 删除、vector_patch 后补或 generation 命令 |
+| POST/PATCH/DELETE | `/api/v1/index/{id}/doc` | 条件 RecordWrite；对象完整替换、显式 document:null 删除、vector_patch 后补 |
 | GET | `/api/v1/index/{id}/doc/{record_id}/status` | 元数据可见原因及 pending_vector_fields，不返回隐藏正文 |
-| GET | `/api/v1/index/{id}/doc/{record_id}/generation` | 文档控制版本、active/staged 身份、租约期限/fence 和清理状态 |
 | GET | `/api/v1/index/{id}/doc/{record_id}` | 原始 Record；可用 `?fields=body,title` 投影 |
 | POST | `/api/v1/index/{id}/ingest` | `{records:[RecordWrite,...]}`，1..64 非原子逐项业务结果；索引异步，HTTP 200 不代表全部成功 |
 | GET | `/api/v1/index/{id}/ingest` | committed/lexical/vector 水位、index_error 和 recovery_required |
@@ -67,13 +66,13 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 
 ## Web UI 和工具
 
-独立 `console/` 使用 React/TypeScript/Vite，Rust 只保留 API，静态资源不再嵌入内核。UI 提供实体目录/一跳关系检查；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、原始记录/JSON 预览与复制、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通写入确认后直接可见；generation staging 回执明确仅持久，必须显式 Publish 才开放成员。界面支持 staging 租约检查和 renew 条件写入；未发布私有正文在 abort/到期后安全清理并保留摘要回执。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 Tenant/Key 或逐条更新/删除管理页面。
+独立 `console/` 使用 React/TypeScript/Vite，Rust 只保留 API，静态资源不再嵌入内核。UI 提供实体目录/一跳关系检查；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、原始记录/JSON 预览与复制、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通同步写入确认后直接可见；异步 ingest 的索引进度独立推进。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 Tenant/Key 或逐条更新/删除管理页面。
 
 完整冒烟为 `scripts/record_service_smoke.py`，浏览器验证在 `console/` 运行 `npm run test:browser`，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 留在可选 `anyseek::server` 模块。
 
 ## 资源与未完成项
 
-默认 Record 身份（含墓碑）、保留操作各最多 10,000，可显式选 `bounded_100k` 将身份/操作准入提高到 100,000；候选仍最多 10,000。单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record 历史至少保留七天，过期操作在历史水位、epoch 和来源/generation 保护允许后安全 GC；普通 checkpoint 不清空窗口内回执。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/16，恢复 2/1，后台 2/1，可信控制 8/2，公共/存活 8/8；partition 内部 16。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
+默认 Record 身份（含墓碑）、保留操作各最多 10,000，可显式选 `bounded_100k` 将身份/操作准入提高到 100,000；候选仍最多 10,000。单操作 1 MiB；完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record 历史至少保留七天，过期操作在历史水位、epoch 允许后安全 GC；普通 checkpoint 不清空窗口内回执。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/16，恢复 2/1，后台 2/1，可信控制 8/2，公共/存活 8/8；partition 内部 16。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 

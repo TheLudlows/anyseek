@@ -27,13 +27,13 @@ anyseek 由 Rust 核心库、HTTP API 服务和独立 Web 控制台组成。资�
 
 服务根据文本/向量选择 Lexical、Vector、Hybrid。Hybrid 两路候选通过 RRF 融合，支持权重和各路预算；ANN 可能因簇探测返回不足 K。候选窗口计数和候选内字段重排不等于全库精确结果。查询原始数据经 schema.store 和 fields 投影后输出；直接读取和 iterator 可返回完整权威 Record。
 
-## 来源、整文和派生可见性
+## 来源和派生可见性
 
-`record/` 中的 mutation/publication/recovery 复用同一权威提交；evidence、generation、temporal、history、graph 模块分别处理来源依赖、整代生命周期、时间逻辑、回执历史保留和显式一跳关系。HTTP/UI 只适配请求，不维护第二套业务权威。
+`record/` 中的 mutation/publication/recovery 复用同一权威提交；evidence、temporal、history、graph 模块分别处理来源依赖、时间逻辑、回执历史保留和显式一跳关系。HTTP/UI 只适配请求，不维护第二套业务权威。
 
-来源以精确版本引用。来源删除、stale 或 TTL 使派生内容隐藏，查询、回表和输出共用可见性屏障。generation Begin/StageBatch 仅持久私有成员，Seal 验证完整清单，Publish 原子切换整代及索引活动统计；可选向量后补使用条件版本。租约到期清理私有正文但保留幂等摘要回执。
+来源以精确版本引用。来源删除、stale 或 TTL 使派生内容隐藏，查询、回表和输出共用可见性屏障。片段通过普通写入逐批持久化，不提供整文原子发布或整代切换；可选向量后补使用条件版本。
 
-时间过滤固定一次 evaluation_time；不可逆过期通过权威提交形成墓碑。关系双端精确版本及一跳候选受同一来源、generation、TTL 和当前 Tenant 集合边界约束；融合预算耗尽不伪称全量结果。
+时间过滤固定一次 evaluation_time；不可逆过期通过权威提交形成墓碑。关系双端精确版本及一跳候选受同一来源、TTL 和当前 Tenant 集合边界约束；融合预算耗尽不伪称全量结果。
 
 ## 认证与生命周期
 
@@ -55,7 +55,7 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 ## 当前边界
 
-这是有界单机实现：Record 累计账本默认 10,000 项、checkpoint/状态容量等限制见 [FEATURES](FEATURES.md)。history trim 按保留期限回收操作历史，checkpoint/对象 GC 负责各自闭包；已删除集合代次的最终物理回收也已由 #109 合入，仍受在途任务、读者和备份保护约束。P2 的 source/evidence、generation、TTL、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、整体磁盘/缓存容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
+这是有界单机实现：Record 累计账本默认 10,000 项、checkpoint/状态容量等限制见 [FEATURES](FEATURES.md)。history trim 按保留期限回收操作历史，checkpoint/对象 GC 负责各自闭包；已删除集合代次的最终物理回收也已由 #109 合入，仍受在途任务、读者和备份保护约束。P2 的 source/evidence、TTL、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、整体磁盘/缓存容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
 
 [Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/src/server/README.md) · [许可](LICENSE)
 
@@ -80,7 +80,7 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 Tantivy 使用原生词典、postings、位置和固定 Searcher，不另存完整正文，也不决定业务 head。Payload 唯一保存规范原文和原始向量；伴随向量/元数据组件只保存派生文件。S3 对象先完整物化并校验再检索，当前没有直接远端随机读 Directory。
 
-分析身份保留 `xxh64-utf8-v1` helper；全文包记录精确 Tantivy 版本、schema 和分析契约。RecordCheckpointV15、检索 package manifest 3 与私有向量/metadata descriptor 1 是不同结构标签，不是多个提交权威。认证包选择验证完整不可变文件闭包；固定 Searcher、构建、备份和查询 pin 保护仍在使用的文件。
+分析身份保留 `xxh64-utf8-v1` helper；全文包记录精确 Tantivy 版本、schema 和分析契约。RecordCheckpointV16、检索 package manifest 3 与私有向量/metadata descriptor 1 是不同结构标签，不是多个提交权威。认证包选择验证完整不可变文件闭包；固定 Searcher、构建、备份和查询 pin 保护仍在使用的文件。
 
 同步写入等待必要派生应用；异步索引写入单独报告 committed/lexical/vector 水位。查询固定派生拓扑与 evaluation_time，再重验当前 Record 身份、fingerprint 和来源可见性，不要求各异步消费者同时推进。保留 BM25F/邻近度、中文与 N-gram 适配及全局通道排名后的单次 RRF；ANN 和有界候选不保证全库精确召回。
 

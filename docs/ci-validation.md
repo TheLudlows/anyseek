@@ -188,7 +188,6 @@ the same s3-object-store test module (included by `server`).
 | reads, writer ordering, checkpoint and cancellation | seed receipt; two ordered writes; blocked writer/checkpoint; cancelled waiter; cold recovery and exact receipt replay |
 | candidate TTL | deadline +100ms, advance +101ms; Busy; absent receipt; unchanged local/authority sequence; healthy writer; expired retry rejected |
 | source expiry | expired original plus version-matched replacement; Busy; no replacement receipt; source absent before/after cold recovery; retry rejected/conflicted |
-| generation lease expiry | staged two-member generation; clock past lease; Busy; absent publication receipt; members hidden after maintenance/cold recovery |
 
 The common gate wait retains its five-second timeout and polling interval.
 Owner/sequence fencing before persistence and owner/head changes after upload
