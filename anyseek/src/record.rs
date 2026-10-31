@@ -61,6 +61,7 @@ mod segment;
 mod anchor;
 mod anchor_image;
 mod package_pins;
+mod reclamation;
 #[cfg(feature="s3-object-store")]
 mod remote_checkpoint;
 pub(crate) mod build_budget;

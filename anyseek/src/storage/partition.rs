@@ -81,6 +81,28 @@ fn publish(prepared: &Path, target: &Path) -> Result<(), CreateError> {
         platform::PublishError::RenameAttempted(error) => CreateError::PublicationUnknown(error),
     })
 }
+// Visit only one child at a time so memory and deletion work are bounded even
+// for a large tree. Symlinks are removed as entries and are never followed.
+fn remove_bounded(path: &Path, remaining: &mut usize, depth: usize) -> io::Result<()> {
+    if *remaining == 0 { return Ok(()); }
+    if depth > 128 { return Err(io::Error::other("retired tree depth exceeded")); }
+    while *remaining > 0 {
+        let child = fs::read_dir(path)?.next().transpose()?;
+        let Some(child) = child else {
+            fs::remove_dir(path)?;
+            *remaining -= 1;
+            return Ok(());
+        };
+        if child.file_type()?.is_dir() {
+            remove_bounded(&child.path(), remaining, depth + 1)?;
+        } else {
+            fs::remove_file(child.path())?;
+            *remaining -= 1;
+        }
+    }
+    Ok(())
+}
+
 impl PartitionJournal {
     pub(crate) fn root(&self)->&Path {&self.path}
     pub(crate) fn validate_checkpoint_budget(length: usize, max_bytes: u64) -> io::Result<()> {
@@ -250,6 +272,12 @@ impl PartitionJournal {
     /// Retire an explicitly tombstoned snapshot under the parent service lock.
     /// Stable trash naming makes deletion retryable after partial cleanup.
     pub(crate) fn retire_snapshot(path: &Path) -> Result<(), CreateError> {
+        Self::retire_snapshot_step(path, usize::MAX).map(|_| ())
+    }
+
+    /// Remove at most `limit` entries from durable trash. A zero limit only
+    /// detaches the root after all writers have released its owner lock.
+    pub(crate) fn retire_snapshot_step(path: &Path, limit: usize) -> Result<bool, CreateError> {
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::other("missing parent"))?;
@@ -269,12 +297,18 @@ impl PartitionJournal {
             return Err(io::Error::other("ambiguous retired snapshot").into());
         }
         if let Some(source) = present.first() {
+            if !fs::symlink_metadata(source)?.file_type().is_dir() {
+                return Err(io::Error::other("retired root must be a directory").into());
+            }
             if *source == path || *source == staging {
                 let owner = OpenOptions::new()
                     .read(true)
                     .write(true)
                     .open(source.join("owner"))?;
-                owner.try_lock().map_err(io::Error::other)?;
+                owner.try_lock().map_err(|error| match error {
+                    std::fs::TryLockError::WouldBlock => io::Error::new(io::ErrorKind::WouldBlock, "partition owner busy"),
+                    std::fs::TryLockError::Error(error) => error,
+                })?;
                 drop(owner); // Parent ownership protects closed-handle Windows moves.
             }
             // Re-publish even recovered trash before deleting: its previous
@@ -282,13 +316,17 @@ impl PartitionJournal {
             // Alternating names also handles a partially deleted trash tree.
             let target = if *source == trash { &retry } else { &trash };
             publish(source, target)?;
-            fs::remove_dir_all(target)?;
+            let mut remaining = limit;
+            remove_bounded(target, &mut remaining, 0)?;
+            #[cfg(unix)]
+            File::open(parent)?.sync_all()?;
+            if target.exists() { return Ok(false); }
         }
         let repair_lock = parent.join(format!(".initial-resume-{name}.lock"));
         if repair_lock.exists() {
             fs::remove_file(repair_lock)?;
         }
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) fn open(path: &Path, max_bytes: u64) -> io::Result<(Self, Vec<Vec<u8>>)> {

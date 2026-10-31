@@ -2,7 +2,7 @@
 
 本地 Segment 已由 PR #71 合入；SQLite/S3 协调、远端 checkpoint、保留与共同备份已由 [PR #72](https://github.com/TheLudlows/anyseek/pull/72) 合入；[PR #73](https://github.com/TheLudlows/anyseek/pull/73) 和 [PR #74](https://github.com/TheLudlows/anyseek/pull/74) 的维护路径、审计修复及无缓存验收也已合入。实现与剩余验收统一见 [STATUS](../STATUS.md)，配置见 [服务指南](../anyseek/src/server/README.md)。
 
-[#98](https://github.com/TheLudlows/anyseek/issues/98) 将 Tenant/Catalog 与 S3 authority 统一到 SQLite。Catalog 格式为 4，authority schema 为 2；旧 Catalog 日志及旧数据库格式不提供迁移。验收状态见 [STATUS](../STATUS.md)。
+[#98](https://github.com/TheLudlows/anyseek/issues/98) 将 Tenant/Catalog 与 S3 authority 统一到 SQLite。Catalog 格式为 5，authority schema 为 3，authority 备份快照为 2；旧 Catalog 日志及旧数据库格式不提供迁移。验收状态见 [STATUS](../STATUS.md)。
 
 ## 本地 Segment 与共同视图
 
@@ -141,3 +141,13 @@ checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包�
 HTTP fixture 不等于真实 S3 服务认证。本轮先交付合同工具与用例，实际 endpoint 尚未运行；最终修改的 PR 原生 Linux/Windows CI 已通过；主干 `a36e71e0` CI 已核对；开发分支 CI 与实际目标后端验收仍待完成。系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
 
 Catalog 管理操作在写事务之前仅做一次完整预算/可恢复性校验。完整服务归档格式为 2；恢复只保留源 Catalog cut/hash、来源身份及必要旧 Operation ID 隔离，不再复制完整历史 Catalog 或 Key 验证材料。HTTP 中间件在读取 body 前认证一次，已认证上下文供 handler 和 owned 工作复用；集合实际执行仍在生命周期屏障内检查代次。
+
+## 已删除集合代次的最终回收
+
+删除请求持久提交逻辑删除后返回 `physical_reclamation: pending`。服务只有一个有界回收循环：每秒选择一个旧代次，最多删除 64 个本地文件项或 16 个远端对象；另每 30 秒重试最多 16 个单调对象墓碑。受资源准入拒绝、owner/固定读者或备份保护时等待后续重试；进度与失败写入服务日志。
+
+Catalog 先持久记录 reclaiming 意图，新完整服务备份排除该代次；现有独立备份不修改。仍有有效集合备份关联时不开始回收。代次回收使用内部代次互斥，不占用同名新集合的业务锁；完整服务备份屏障保留到本轮结束。请求、后台任务和固定 package 读者释放后，将本地根原子移入稳定 trash；中断后从 trash 继续，不重新打开已删除的 Record 日志。
+
+S3 先撤销旧 owner 的构建状态并确认 pins 已释放，再退役该代次的 head，删除业务回执/构建/恢复元数据及已清理对象的依赖边。待删对象由 SQLite 按 key 游标分页；每次 DELETE 前及登记完成前，校验活动 head 并沿目标对象的反向依赖检查 head/pin 可达性，不再反复加载完整待删列表。每轮最多清理 16 条依赖边。旧 partition 身份保留最小墓碑，禁止旧发布或同身份重建。未知 PUT 的墓碑在 Catalog 代次记录删除后仍由有界服务 sweep 重试，防止迟到对象永久遗留；这些协调墓碑不属于可以直接清空的历史残留。批次限制文件/对象/依赖边处理数和返回的候选数量，校验成本仍随活动 head 和相关依赖图增长，不能据此承诺整进程 CPU 或 RSS 硬上限。
+
+物理清理完成后删除 Catalog 的旧代次行，保留期限内管理回执和持久 epoch 拒绝规则。旧任务、旧 GC 和旧删除回执不能修改同名新代次。普通客户端仅携带名称，仍须在删除/重建时停止旧请求与重试。真实云 S3、系统掉电和 Windows 验收分别记录，不由本地 fixture 推定通过。

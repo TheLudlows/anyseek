@@ -18,6 +18,7 @@ use std::{
 use tokio::sync::{Mutex, Semaphore};
 
 mod execution;
+mod reclamation;
 mod service_snapshot;
 mod sqlite;
 #[cfg(test)]
@@ -232,6 +233,8 @@ pub struct CollectionEntry {
     pub initialized: bool,
     /// Logically deleted; physical reclamation is separate.
     pub deleted: bool,
+    /// Durable intent: new service archives omit this deleted incarnation.
+    pub reclaiming: bool,
     /// Source backup identity for a retained restore intent.
     pub restore_from: Option<String>,
 }
@@ -481,6 +484,7 @@ fn apply(state: &mut State, event: &Applied) -> Result<(), CatalogError> {
                     active: false,
                     initialized: false,
                     deleted: false,
+                    reclaiming: false,
                     restore_from,
                 },
             );

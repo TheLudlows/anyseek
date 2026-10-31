@@ -73,3 +73,15 @@ pub(super) fn retire_if_unpinned(
     drop(registry);
     Ok(true)
 }
+
+/// A deleted root can only move after every fixed reader of its children ends.
+pub(super) fn retire_tree_if_unpinned(
+    path: &Path, remove: impl FnOnce() -> Result<bool, RecordError>,
+) -> Result<bool, RecordError> {
+    let path = key(path)?;
+    let registry = PINS.lock().map_err(|_| storage("package pins poisoned"))?;
+    if registry.keys().any(|p| p.starts_with(&path)) { return Err(RecordError::Busy); }
+    let result = remove();
+    drop(registry);
+    result
+}

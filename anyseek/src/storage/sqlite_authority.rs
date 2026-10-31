@@ -8,9 +8,10 @@ use sha2::{Digest, Sha256};
 use std::{path::{Path, PathBuf}, time::Duration};
 
 mod index_build;
+mod reclamation;
 pub(crate) use index_build::IndexBuild;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Immutable object identity; payload bytes are never stored in SQLite.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +49,7 @@ pub(crate) struct AuthorityBackupSnapshot {
     pub backup_id: String,
     pub created_at_ms: i64,
     pub heads: Vec<PartitionHead>,
+    pub retired_partitions: Vec<String>,
     pub receipts: Vec<ReceiptSnapshot>,
     pub objects: Vec<ObjectRegistrySnapshot>,
     pub pins: Vec<PinSnapshot>,
@@ -134,9 +136,10 @@ impl SqliteAuthority {
              CREATE TABLE IF NOT EXISTS authority_schema (
                  singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL
              );
-             INSERT OR IGNORE INTO authority_schema(singleton,version) VALUES(1,2);
+             INSERT OR IGNORE INTO authority_schema(singleton,version) VALUES(1,3);
              CREATE TABLE IF NOT EXISTS partition_heads (
                  partition_id TEXT PRIMARY KEY,
+                 retired INTEGER NOT NULL DEFAULT 0 CHECK(retired IN (0,1)),
                  head_version INTEGER NOT NULL CHECK(head_version>=0),
                  owner_epoch INTEGER NOT NULL CHECK(owner_epoch>=0),
                  committed_seq INTEGER NOT NULL CHECK(committed_seq>=0),
@@ -169,6 +172,7 @@ impl SqliteAuthority {
                  PRIMARY KEY(parent_key,child_key),
                  CHECK(parent_key <> child_key)
              );
+             CREATE INDEX IF NOT EXISTS retired_uploads_key_idx ON object_uploads(object_key) WHERE state IN (2,4,5);
              CREATE INDEX IF NOT EXISTS object_edges_child_idx ON object_edges(child_key);
              CREATE TABLE IF NOT EXISTS object_pins (
                  pin_id TEXT PRIMARY KEY,
@@ -184,6 +188,7 @@ impl SqliteAuthority {
                  binding_json TEXT NOT NULL,
                  active INTEGER NOT NULL CHECK(active IN (0,1))
              );
+             CREATE INDEX IF NOT EXISTS object_pins_object_idx ON object_pins(object_key);
              CREATE TABLE IF NOT EXISTS backup_exports (
                  backup_id TEXT PRIMARY KEY, snapshot BLOB NOT NULL
              );
@@ -228,7 +233,7 @@ impl SqliteAuthority {
     }
 
     pub(crate) fn partition_ids(&self)->rusqlite::Result<Vec<String>> {
-        let mut statement=self.connection.prepare("SELECT partition_id FROM partition_heads ORDER BY partition_id")?;
+        let mut statement=self.connection.prepare("SELECT partition_id FROM partition_heads WHERE retired=0 ORDER BY partition_id")?;
         statement.query_map([],|r|r.get::<_,String>(0))?.collect()
     }
 
@@ -677,7 +682,7 @@ impl SqliteAuthority {
             ));
         }
         let head_ids: Vec<String> = {
-            let mut statement = tx.prepare("SELECT partition_id FROM partition_heads WHERE ?1 IS NULL OR partition_id=?1 ORDER BY partition_id")?;
+            let mut statement = tx.prepare("SELECT partition_id FROM partition_heads WHERE retired=0 AND (?1 IS NULL OR partition_id=?1) ORDER BY partition_id")?;
             let rows = statement.query_map([partition], |row| row.get(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
@@ -783,10 +788,14 @@ impl SqliteAuthority {
         let edges = if partition.is_some() { edges.into_iter().filter(|e|keys.contains(e.parent_key.as_str()) && keys.contains(e.child_key.as_str())).collect() } else { edges };
         let retired = if partition.is_some() { retired.into_iter().filter(|o|keys.contains(o.object_key.as_str())).collect() } else { retired };
         let snapshot = AuthorityBackupSnapshot {
-            format_version: 1,
+            format_version: 2,
             backup_id: backup_id.to_owned(),
             created_at_ms,
             heads,
+            retired_partitions: {
+                let mut query = tx.prepare("SELECT partition_id FROM partition_heads WHERE retired=1 AND (?1 IS NULL OR partition_id=?1) ORDER BY partition_id")?;
+                query.query_map([partition], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?
+            },
             receipts,
             objects,
             pins,
@@ -816,7 +825,7 @@ impl SqliteAuthority {
         }
         let snapshot: AuthorityBackupSnapshot =
             serde_json::from_slice(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if snapshot.format_version != 1 || snapshot.backup_id.is_empty() {
+        if snapshot.format_version != 2 || snapshot.backup_id.is_empty() {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -879,6 +888,10 @@ impl SqliteAuthority {
                  VALUES(?1,?2,?3,?4,?5,?6)",
                 params![pin.pin_id,pin.partition_id,pin.object_key,pin.pin_kind,pin.expires_at_ms,pin.backup_id],
             )?;
+        }
+        for id in &snapshot.retired_partitions {
+            if !super::object_keys::valid_partition(id) { return Err(rusqlite::Error::InvalidQuery); }
+            tx.execute("INSERT INTO partition_heads(partition_id,retired,head_version,owner_epoch,committed_seq,indexed_seq,log_base_seq) VALUES(?1,1,0,0,0,0,0)", [id])?;
         }
         for head in &snapshot.heads {
             tx.execute(
@@ -1040,7 +1053,7 @@ impl SqliteAuthority {
             tx.commit()?;
             return Ok(false);
         }
-        let referenced = reachable_keys(&tx)?.contains(object_key);
+        let referenced = object_is_reachable(&tx, object_key)?;
         // Pins are roots of the same transitive closure.
         if referenced {
             tx.commit()?;
@@ -1064,7 +1077,7 @@ impl SqliteAuthority {
             "SELECT EXISTS(SELECT 1 FROM object_uploads WHERE object_key=?1 AND sha256=?2 AND byte_length=?3 AND state IN (2,4,5))",
             params![reference.key,reference.sha256.as_slice(),to_i64(reference.length)?], |r|r.get(0),
         )?;
-        let collectible = matches && !reachable_keys(&tx)?.contains(&reference.key);
+        let collectible = matches && !object_is_reachable(&tx, &reference.key)?;
         if !collectible {
             tx.commit()?;
             return Ok(false);
@@ -1112,11 +1125,36 @@ fn registry_reference(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRef> {
         length:u64::try_from(length).map_err(|_|rusqlite::Error::InvalidQuery)?})
 }
 
+// Walk only this object's ancestors, using the reverse-edge index. UNION also
+// terminates malformed cycles. A root or pin protects every descendant.
+fn object_is_reachable(connection: &Connection, key: &str) -> rusqlite::Result<bool> {
+    // Keep the original fail-closed head decoding without materializing every
+    // live object. JSON extraction alone would silently ignore missing fields.
+    let mut heads = connection.prepare("SELECT partition_id FROM partition_heads WHERE retired=0")?;
+    for id in heads.query_map([],|r|r.get::<_,String>(0))? {
+        read_head(connection,&id?)?.ok_or(rusqlite::Error::InvalidQuery)?;
+    }
+    connection.query_row(
+        "WITH RECURSIVE ancestors(object_key) AS (
+             SELECT ?1 UNION
+             SELECT e.parent_key FROM object_edges e JOIN ancestors a ON e.child_key=a.object_key
+         )
+         SELECT EXISTS(SELECT 1 FROM ancestors a WHERE
+             EXISTS(SELECT 1 FROM object_pins p WHERE p.object_key=a.object_key) OR
+             EXISTS(SELECT 1 FROM partition_heads h WHERE h.retired=0 AND (
+                 json_extract(h.wal_tip_json,'$.key')=a.object_key OR
+                 json_extract(h.manifest_json,'$.key')=a.object_key OR
+                 json_extract(h.bootstrap_json,'$.key')=a.object_key OR
+                 json_extract(h.log_anchor_json,'$.key')=a.object_key)))",
+        [key], |r| r.get(0),
+    )
+}
+
 /// Walk immutable dependency metadata. All callers making lifecycle decisions
 /// execute this under their publication transaction; pins are roots, not clocks.
 fn reachable_keys(connection: &Connection) -> rusqlite::Result<std::collections::BTreeSet<String>> {
     let mut result = std::collections::BTreeSet::new();
-    let mut heads = connection.prepare("SELECT partition_id FROM partition_heads")?;
+    let mut heads = connection.prepare("SELECT partition_id FROM partition_heads WHERE retired=0")?;
     let ids = heads.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     for id in ids {
         let h=read_head(connection,&id)?.ok_or(rusqlite::Error::InvalidQuery)?;
@@ -1181,7 +1219,7 @@ fn ensure_durable_object(tx: &rusqlite::Transaction<'_>, object: &ObjectRef) -> 
 fn read_head(connection: &Connection, partition_id: &str) -> rusqlite::Result<Option<PartitionHead>> {
     connection.query_row(
         "SELECT partition_id,head_version,owner_epoch,committed_seq,wal_tip_json,manifest_json,bootstrap_json,indexed_seq,log_base_seq,log_anchor_json
-         FROM partition_heads WHERE partition_id=?1",
+         FROM partition_heads WHERE partition_id=?1 AND retired=0",
         [partition_id],
         |row| Ok((
             row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?,

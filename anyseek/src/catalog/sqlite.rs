@@ -96,7 +96,7 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(storage)?;
-        if format != 4 {
+        if format != 5 {
             return Err(storage("unsupported catalog SQLite format"));
         }
         let metadata: Metadata = serde_json::from_str(&metadata).map_err(storage)?;
@@ -199,6 +199,12 @@ impl Store {
                 transaction.execute("INSERT INTO catalog_keys VALUES(?1,?2,?3) ON CONFLICT(key_id) DO UPDATE SET metadata=excluded.metadata", params![id,key.tenant_id,json]).map_err(storage)?;
             }
         }
+        for (id, collection) in &old.collections {
+            if !next.collections.contains_key(id) {
+                transaction.execute("DELETE FROM catalog_collections WHERE tenant_id=?1 AND collection_id=?2 AND generation=?3",
+                    params![collection.tenant_id,collection.collection_id,collection.generation]).map_err(storage)?;
+            }
+        }
         for (id, collection) in &next.collections {
             let json = serde_json::to_string(collection).map_err(storage)?;
             if old
@@ -245,7 +251,7 @@ impl Store {
                     .map_err(storage)?;
             }
         }
-        transaction.execute("INSERT INTO catalog_meta VALUES(1,4,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
+        transaction.execute("INSERT INTO catalog_meta VALUES(1,5,?1) ON CONFLICT(singleton) DO UPDATE SET metadata=excluded.metadata", [serde_json::to_string(&Metadata::from_state(next)).map_err(storage)?]).map_err(storage)?;
         #[cfg(test)]
         crash("before_commit");
         transaction
