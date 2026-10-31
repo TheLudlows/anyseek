@@ -214,45 +214,8 @@ pre {
 .brand-dot {
   color: #7587eb;
 }
-.workspace-switch {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  margin: 34px 4px 28px;
-  padding: 12px 10px;
-  border: 1px solid #e8ebf1;
-  border-radius: 9px;
-  background: white;
-  box-shadow: 0 2px 3px #202b3b02;
-}
-.workspace-switch > div {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-}
-.workspace-switch strong {
-  font-size: 12px;
-}
-.workspace-switch small {
-  color: #96a0ae;
-  font-size: 10px;
-  letter-spacing: 0.3px;
-}
-.workspace-avatar {
-  height: 29px;
-  width: 29px;
-  border-radius: 7px;
-  background: #eaf0f1;
-  color: #617d7d;
-  display: grid;
-  place-items: center;
-  font-size: 13px;
-  font-weight: 650;
-}
-.workspace-switch > svg {
-  color: #929cab;
-}
 .nav-label {
+  margin-top: 28px;
   font-size: 10px;
   letter-spacing: 1.3px;
   color: #9aa3b0;

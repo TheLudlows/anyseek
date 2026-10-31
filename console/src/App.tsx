@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
-  ChevronDown,
   ChevronRight,
   CircleHelp,
   Database,
@@ -171,14 +170,6 @@ export default function App() {
             AnySeek<span className="brand-dot">.</span>
           </span>
         </a>
-        <div className="workspace-switch">
-          <span className="workspace-avatar">A</span>
-          <div>
-            <strong>检索工作区</strong>
-            <small>AnySeek Console</small>
-          </div>
-          <ChevronDown size={14} />
-        </div>
         <span className="nav-label">工作空间</span>
         <nav aria-label="主导航">
           {sections.map((s) => (
