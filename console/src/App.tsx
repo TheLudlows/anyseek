@@ -19,6 +19,7 @@ import { Busy, Empty, Modal, Notice } from "./components.tsx";
 import { Collections } from "./Collections.tsx";
 import { Data } from "./Data.tsx";
 import { Search } from "./Search.tsx";
+import { Initialize } from "./Initialize.tsx";
 import { Recovery } from "./Tools.tsx";
 import type { Collection } from "./types.ts";
 
@@ -195,7 +196,7 @@ export default function App() {
             <div className="guide-icon">
               <Layers3 size={17} />
             </div>
-            <strong>让信息触手可及</strong>
+            <strong>管理 AI 记忆与知识</strong>
             <p>
               从原始记录到精准检索，
               <br />
@@ -227,7 +228,7 @@ export default function App() {
               <ShieldCheck size={17} />
             </span>
             <span>
-              <strong>{apiKey ? "服务已连接" : "连接你的服务"}</strong>
+              <strong>{apiKey ? "服务已连接" : "连接 AnySeek 服务"}</strong>
               <small>{apiKey ? "Tenant API" : "使用 Tenant API Key"}</small>
             </span>
             <ChevronRight size={14} />
@@ -304,11 +305,7 @@ export default function App() {
         </header>
         <main id="main-content">
           <Notice>{error}</Notice>
-          {busy && !apiKey ? (
-            <section className="panel loading-block">
-              <Busy label="正在连接服务" />
-            </section>
-          ) : section === "settings" ? (
+          {section === "settings" ? (
             <>
               <div className="page-heading">
                 <div>
@@ -385,7 +382,7 @@ export default function App() {
           )}
           <footer className="main-footer">
             <span>
-              AnySeek<span className="footer-dot">·</span>为发现而构建
+              AnySeek<span className="footer-dot">·</span>AI 记忆与知识检索
             </span>
             <span>
               {selected?.version ? "Engine v" + selected.version : "检索控制台"}
@@ -417,8 +414,11 @@ function ConnectForm({
   connect: (key: string) => Promise<void>;
   busy: boolean;
 }) {
+  const [initialize, setInitialize] = useState(false);
   const [key, setKey] = useState(""),
     [error, setError] = useState("");
+  if (initialize)
+    return <Initialize connect={connect} back={() => setInitialize(false)} />;
   return (
     <form
       className="connect-form"
@@ -455,9 +455,14 @@ function ConnectForm({
           </>
         )}
       </button>
-      <p className="field-help">
-        Master Key 用于管理操作，请在“连接与管理”中使用。
-      </p>
+      <button
+        type="button"
+        className="text-button"
+        disabled={busy}
+        onClick={() => setInitialize(true)}
+      >
+        首次使用？使用 Master Key 初始化
+      </button>
     </form>
   );
 }
@@ -470,15 +475,11 @@ function Welcome(props: {
       <div className="welcome-copy">
         <span className="eyebrow">WELCOME TO ANYSEEK</span>
         <h1>
-          连接数据，
+          AI 记忆与知识的
           <br />
-          发现更多可能<span>。</span>
+          检索底座
         </h1>
-        <p>
-          一个专注于数据与检索的工作空间。
-          <br />
-          让原始记录、关键词与语义，通向同一个答案。
-        </p>
+        <p>统一管理记录、向量与关系，通过全文、向量和混合检索访问你的数据。</p>
         <div className="welcome-features">
           <span>
             <Layers3 size={16} />
@@ -501,16 +502,16 @@ function Welcome(props: {
           </div>
           <div className="art-box art-search">
             <SearchIcon size={22} />
-            <span>DISCOVER</span>
+            <span>SEARCH</span>
           </div>
-          <span className="art-caption">Less noise. More discovery.</span>
+          <span className="art-caption">Records. Vectors. Relations.</span>
         </div>
       </div>
       <section className="panel welcome-connect">
         <span className="connect-emblem">
           <ShieldCheck size={23} />
         </span>
-        <h2>从连接开始</h2>
+        <h2>连接 AnySeek 服务</h2>
         <p>连接你的 AnySeek 服务，进入检索工作区。</p>
         <ConnectForm {...props} />
         <div className="welcome-secure">

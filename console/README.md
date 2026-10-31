@@ -4,7 +4,7 @@
 
 ## 本地启动 UI
 
-### 1. 启动 API 并获取 Tenant Key
+### 1. 启动 API
 
 API 需要保持运行。完整的 Linux / macOS、Windows PowerShell 启动命令见仓库[快速开始](../README.md#快速开始)，Tenant 和普通 API Key 的签发流程见[服务指南](../anyseek/src/server/README.md#构建与启动)。
 
@@ -24,7 +24,9 @@ API 已运行时只需执行本步骤。`npm ci` 用于首次安装或锁文件�
 
 ### 3. 打开界面
 
-打开终端显示的地址，默认是 `http://127.0.0.1:5173`。输入 Tenant API Key，点击“连接服务”，进入集合页后即可创建集合、导入 JSON 并调试检索。
+打开终端显示的地址，默认是 `http://127.0.0.1:5173`。已有 Tenant API Key 时，输入 Key 并点击“连接服务”。首次启动只有 Master Key 时，点击“首次使用？使用 Master Key 初始化”，填写新 Tenant 名称和 Master Key，确认创建并签发普通 Key。复制保存生成的普通 Key，再确认进入工作区，即可创建集合、导入 JSON 并调试检索。
+
+初始化只复用现有 Tenant 与 Key 接口，Master Key 仅在内存中使用。初始化请求和生成的普通 Key 保留在当前标签页的 sessionStorage；失败、丢响应、返回或刷新后，从同一入口重试原请求，不生成新身份或密钥。刷新后需重新输入 Master Key。重试仅在当前或前一 UTC 日的 operation_id 有效期内；期间不要关闭标签页、清除会话或切换 API 服务。返回不会撤销 Tenant 或 Key。已有 Tenant 冲突不会当作成功，请使用管理员已签发的普通 Key 连接；本入口不管理已有 Tenant 的权限或密钥。
 
 | 地址 | 用途 |
 | --- | --- |
@@ -122,7 +124,7 @@ docker run --rm -p 8081:80 --network YOUR_NETWORK \
 - **高级检查**：实体目录、一跳关系、关系融合、来源证据、generation 与租约检查。
 - **连接与管理**：切换 Tenant Key；单独输入 Master Key 备份服务或恢复到新的停止状态目录，Master Key 不持久保存。
 
-API Key 保存在当前标签页的 sessionStorage。创建与写入在发送前保留原始请求，刷新或网络中断后可以重试；待确认请求绑定连接指纹与原集合。**断开连接保留待确认请求**，用原 Key 和原集合继续处理。结果未知时不提供丢弃入口，明确拒绝后可修改。逐条导入不提供批次原子性，generation staging 与发布区分提示。
+Tenant API Key 保存在当前标签页的 sessionStorage，Master Key 不保存。创建与写入在发送前保留原始请求，刷新或网络中断后可以重试；待确认请求绑定连接指纹与原集合。**断开连接保留待确认请求**，用原 Key 和原集合继续处理。结果未知时不提供丢弃入口，明确拒绝后可修改。逐条导入不提供批次原子性，generation staging 与发布区分提示。
 
 写入和重试保持输入数字 token；预览、复制及游标续页保持服务响应中的数字 token，避免 JavaScript 的 i64 精度损失。游标冲突时从第一页刷新。
 
@@ -143,6 +145,14 @@ npm run test:browser
 浏览器测试会启动独立临时数据根的真实 API（127.0.0.1:18180）和 Vite（127.0.0.1:4173），不连接用户服务，也不使用配置中的 S3 bucket。请保持这两个端口空闲。可通过 `ANYSEEK_SERVER` 指定服务二进制绝对路径，通过 `CHROMIUM_PATH` 指定已安装的 Chromium。
 
 测试覆盖内核静态路由清理、连接与集合创建、创建回包丢失、i64 导入/回包丢失/刷新重试/精确复制/条件编辑、三种真实检索、空态、高级入口及移动端。截图位于 `test-results/screenshots/`；失败时保留 trace。
+
+首次初始化的隔离浏览器测试使用 mock API，不需要启动 Rust 服务：
+
+```sh
+npx playwright test --config playwright.bootstrap.config.ts
+```
+
+覆盖正常初始化、Tenant/Key 丢响应与刷新重试、连接失败重试、普通 Key 连接、取消返回、重复点击与 Tenant 冲突；不创建真实部署凭据。
 
 ## 界面
 
