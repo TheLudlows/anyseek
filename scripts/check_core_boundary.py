@@ -9,6 +9,10 @@ import tomllib
 
 core = Path(__file__).resolve().parents[1] / 'anyseek'
 manifest = tomllib.loads((core / 'Cargo.toml').read_text())
+assert not (core / 'web').exists(), 'frontend source belongs in console/, not the Rust package'
+for source in (core / 'src').rglob('*.rs'):
+    assert not re.search(r'include_(?:bytes|str)!\([^)]*(?:/web/|console/|dist/)', source.read_text()), f'embedded frontend in Rust: {source}'
+print('PASS standalone console is absent from the Rust source/package boundary', flush=True)
 assert not ({ 'num-format', 'tabled', 'chrono', 'colored', 'half', 'lz4_flex', 'zstd', 'snowball_stemmers_rs', 'gxhash'} & set(manifest['dependencies']))
 assert not {'api-schema', 'gxhash'} & manifest.get('features', {}).keys()
 for source in (core / 'src').rglob('*.rs'):

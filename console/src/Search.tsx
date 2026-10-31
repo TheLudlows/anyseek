@@ -1,0 +1,544 @@
+import { useEffect, useRef, useState } from "react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ArrowUpRight,
+  ChevronDown,
+  Search as SearchIcon,
+  SlidersHorizontal,
+  Sparkles,
+} from "lucide-react";
+import { api, collectionPath, message } from "./api.ts";
+import { apiFieldText } from "./json.ts";
+import {
+  Busy,
+  Empty,
+  Notice,
+  RecordPreview,
+  recordBody,
+  recordTitle,
+} from "./components.tsx";
+import type { Collection, Hit, Json, Mode, QueryResult } from "./types.ts";
+
+export function Search({
+  collection,
+  apiKey,
+}: {
+  collection: Collection;
+  apiKey: string;
+}) {
+  const [mode, setMode] = useState<Mode>(
+      collection.schema.some((f) => f.index_vector) &&
+        !collection.schema.some(
+          (f) => f.field_type === "Text" && f.index_lexical !== false,
+        )
+        ? "Vector"
+        : "Lexical",
+    ),
+    [query, setQuery] = useState(""),
+    [vector, setVector] = useState("");
+  const [filters, setFilters] = useState(false),
+    [from, setFrom] = useState(""),
+    [until, setUntil] = useState(""),
+    [valid, setValid] = useState("");
+  const [dateFrom, setDateFrom] = useState(""),
+    [dateUntil, setDateUntil] = useState(""),
+    [sort, setSort] = useState("score");
+  const [advanced, setAdvanced] = useState("{}"),
+    [page, setPage] = useState(0),
+    [result, setResult] = useState<QueryResult | null>(null);
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState(""),
+    [selected, setSelected] = useState<Hit | null>(null);
+  const request = useRef<AbortController | null>(null),
+    submitted = useRef<string | null>(null);
+  const dateField = collection.schema.find(
+    (f) => f.field_type === "Timestamp" && f.filterable,
+  )?.field;
+  const hasText = collection.schema.some(
+    (f) => f.field_type === "Text" && f.index_lexical !== false,
+  );
+  const hasVector = collection.schema.some((f) => f.index_vector);
+  useEffect(() => () => request.current?.abort(), []);
+  function build() {
+    const body: Json = JSON.parse(advanced);
+    if (!body || typeof body !== "object" || Array.isArray(body))
+      throw new Error("高级参数必须是 JSON 对象。");
+    if (mode !== "Vector" && !query.trim()) throw new Error("请输入检索内容。");
+    delete body.query;
+    delete body.query_vector;
+    if (mode !== "Vector") body.query = query;
+    if (mode !== "Lexical") {
+      const parsed = JSON.parse(vector);
+      if (
+        !Array.isArray(parsed) ||
+        !parsed.length ||
+        !parsed.every((n) => typeof n === "number" && Number.isFinite(n))
+      )
+        throw new Error("请输入非空的有限数值向量数组。");
+      body.query_vector = parsed;
+    }
+    const ms = (value: string) => {
+      if (!value.trim()) return undefined;
+      const n = Number(value);
+      if (!Number.isSafeInteger(n))
+        throw new Error("时间筛选须为整数 UTC 毫秒。");
+      return n;
+    };
+    const start = ms(from),
+      end = ms(until),
+      at = ms(valid);
+    if (start !== undefined && end !== undefined && start >= end)
+      throw new Error("事件结束时间必须晚于开始时间。");
+    if (start !== undefined || end !== undefined || at !== undefined)
+      body.temporal = {
+        event:
+          start !== undefined || end !== undefined
+            ? { from_ms: start, to_ms: end }
+            : undefined,
+        valid_at_ms: at,
+      };
+    if (dateField && (dateFrom || dateUntil)) {
+      const a = dateFrom
+        ? Date.parse(dateFrom + "T00:00:00Z") / 1000
+        : Number.MIN_SAFE_INTEGER;
+      const b = dateUntil
+        ? Date.parse(dateUntil + "T00:00:00Z") / 1000 + 86400
+        : Number.MAX_SAFE_INTEGER;
+      if (!Number.isFinite(a) || !Number.isFinite(b) || a >= b)
+        throw new Error("请选择有效日期范围。");
+      body.filter = [
+        ...(body.filter || []),
+        { Timestamp: { field: dateField, filter: { start: a, end: b } } },
+      ];
+    }
+    if (dateField && sort !== "score")
+      body.sort = [
+        {
+          field: dateField,
+          order: sort === "new" ? "Descending" : "Ascending",
+        },
+      ];
+    body.length = 10;
+    delete body.offset;
+    body.count = true;
+    // Advanced filters may include i64 tokens. Do not round them via stringify.
+    // Keep the original JSON members and append the explicitly controlled fields.
+    const original = advanced.trim();
+    const controlled = new Set([
+      "query",
+      "query_vector",
+      "offset",
+      "length",
+      "count",
+      "temporal",
+      "filter",
+      "sort",
+    ]);
+    // Source-preserving JSON rewrite for advanced parameters is provided below.
+    return mergeQuerySource(original, body, controlled);
+  }
+  async function run(next = 0, fresh = true) {
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    setError("");
+    setSelected(null);
+    try {
+      const source = fresh ? build() : submitted.current;
+      if (!source) return;
+      if (fresh) submitted.current = source;
+      // offset is appended last and controlled by pagination.
+      const body = source.slice(0, -1) + ',"offset":' + next * 10 + "}";
+      setBusy(true);
+      setResult(null);
+      const response = await api<QueryResult>(
+        apiKey,
+        collectionPath(collection.id) + "/query",
+        body,
+        "POST",
+        controller.signal,
+      );
+      if (!controller.signal.aborted) {
+        setResult(response);
+        setPage(next);
+      }
+    } catch (e) {
+      if (!controller.signal.aborted) setError(message(e));
+    } finally {
+      if (!controller.signal.aborted) setBusy(false);
+    }
+  }
+  const total = result?.count_total;
+  return (
+    <>
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">SEARCH PLAYGROUND</span>
+          <h1>检索调试</h1>
+          <p>探索数据中的关联，找到更准确的结果。</p>
+        </div>
+        <span className="context-pill">
+          <span className="status-dot" />
+          {collection.name}
+        </span>
+      </div>
+      <section className="panel query-panel">
+        <div className="query-top">
+          <div className="segmented" aria-label="检索模式">
+            {(["Lexical", "Vector", "Hybrid"] as Mode[]).map((m) => (
+              <button
+                key={m}
+                className={mode === m ? "active" : ""}
+                disabled={
+                  busy ||
+                  (!hasVector && m !== "Lexical") ||
+                  (!hasText && m !== "Vector")
+                }
+                onClick={() => setMode(m)}
+              >
+                {m === "Hybrid" && <Sparkles size={13} />}
+                {{ Lexical: "关键词", Vector: "向量", Hybrid: "混合" }[m]}
+                <span>{m}</span>
+              </button>
+            ))}
+          </div>
+          <button
+            className={"text-button filter-toggle " + (filters ? "active" : "")}
+            onClick={() => setFilters(!filters)}
+            aria-expanded={filters}
+          >
+            <SlidersHorizontal size={15} />
+            筛选与参数
+            <ChevronDown size={13} />
+          </button>
+        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            run();
+          }}
+        >
+          <div className="search-entry">
+            <SearchIcon size={21} />
+            <input
+              aria-label="检索内容"
+              value={query}
+              disabled={mode === "Vector"}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={
+                mode === "Vector"
+                  ? "向量模式使用下方 query vector"
+                  : "输入关键词，探索你的数据…"
+              }
+            />
+            <button className="primary" disabled={busy}>
+              {busy ? (
+                <Busy label="检索中" />
+              ) : (
+                <>
+                  运行检索
+                  <ArrowRight size={15} />
+                </>
+              )}
+            </button>
+          </div>
+          {mode !== "Lexical" && (
+            <div className="vector-entry">
+              <label>
+                Query vector
+                <textarea
+                  aria-label="查询向量"
+                  className="code-input"
+                  value={vector}
+                  onChange={(e) => setVector(e.target.value)}
+                  placeholder="[0.12, -0.08, 0.31, …]"
+                  rows={3}
+                />
+              </label>
+              <p className="field-help">
+                使用与集合相同模型生成的向量
+                {collection.embedding_space_id &&
+                  `（${collection.embedding_space_id}）`}
+                。
+              </p>
+            </div>
+          )}
+          {filters && (
+            <div className="query-filters">
+              {dateField && (
+                <>
+                  <div className="form-row">
+                    <label>
+                      {dateField} · 起始日期（UTC）
+                      <input
+                        type="date"
+                        value={dateFrom}
+                        onChange={(e) => setDateFrom(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      截至日期（含当天）
+                      <input
+                        type="date"
+                        value={dateUntil}
+                        onChange={(e) => setDateUntil(e.target.value)}
+                      />
+                    </label>
+                    <label>
+                      排序
+                      <select
+                        value={sort}
+                        onChange={(e) => setSort(e.target.value)}
+                      >
+                        <option value="score">相关度</option>
+                        <option value="new">最新优先</option>
+                        <option value="old">最早优先</option>
+                      </select>
+                    </label>
+                  </div>
+                </>
+              )}
+              <div className="form-row">
+                <label>
+                  事件起始 · UTC 毫秒
+                  <input
+                    value={from}
+                    onChange={(e) => setFrom(e.target.value)}
+                    placeholder="可选"
+                  />
+                </label>
+                <label>
+                  事件结束 · UTC 毫秒
+                  <input
+                    value={until}
+                    onChange={(e) => setUntil(e.target.value)}
+                    placeholder="不含此时刻"
+                  />
+                </label>
+                <label>
+                  有效时刻 · UTC 毫秒
+                  <input
+                    value={valid}
+                    onChange={(e) => setValid(e.target.value)}
+                    placeholder="可选"
+                  />
+                </label>
+              </div>
+              <details>
+                <summary>高级查询参数 · JSON</summary>
+                <p className="field-help">
+                  可配置
+                  RRF、字段、过滤条件等。查询文本、向量及分页由上方控制；关系融合可在高级检查中调试。
+                </p>
+                <textarea
+                  aria-label="高级查询参数"
+                  className="code-input"
+                  value={advanced}
+                  onChange={(e) => setAdvanced(e.target.value)}
+                  rows={5}
+                />
+              </details>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  setFrom("");
+                  setUntil("");
+                  setValid("");
+                  setDateFrom("");
+                  setDateUntil("");
+                  setSort("score");
+                  setAdvanced("{}");
+                }}
+              >
+                重置筛选与参数
+              </button>
+            </div>
+          )}
+        </form>
+        <div className="query-hint">
+          <span>
+            {mode === "Lexical"
+              ? "关键词匹配 · 精确发现"
+              : mode === "Vector"
+                ? "向量相似度 · 语义发现"
+                : "关键词 + 向量 · 融合排序"}
+          </span>
+          <span>Enter 运行检索</span>
+        </div>
+      </section>
+      <Notice>{error}</Notice>
+      {!result && !busy ? (
+        <section className="panel search-empty">
+          <Empty
+            title="让数据给出答案"
+            text="输入查询并运行检索，在这里查看匹配记录与通道得分。"
+          />
+          <div className="search-capabilities">
+            <span>
+              01 <b>关键词匹配</b>
+            </span>
+            <span>
+              02 <b>语义检索</b>
+            </span>
+            <span>
+              03 <b>混合排序</b>
+            </span>
+          </div>
+        </section>
+      ) : busy ? (
+        <section className="panel loading-block">
+          <Busy label="正在检索集合" />
+          <div className="skeleton" />
+          <div className="skeleton" />
+          <div className="skeleton" />
+        </section>
+      ) : (
+        result && (
+          <div className={"split-content " + (selected ? "has-preview" : "")}>
+            <section className="panel results-panel">
+              <div className="results-toolbar">
+                <h2>
+                  检索结果{" "}
+                  <span className="count-badge">
+                    {total == null ? "总数未知" : total.toLocaleString()}
+                  </span>
+                </h2>
+                <span className="muted">
+                  {(result.time / 1e6).toLocaleString(undefined, {
+                    maximumFractionDigits: 2,
+                  })}{" "}
+                  ms
+                </span>
+              </div>
+              {!result.hits.length ? (
+                <Empty
+                  title="没有找到匹配记录"
+                  text="尝试其他关键词、调整向量或放宽筛选条件。"
+                />
+              ) : (
+                <div className="result-list">
+                  {result.hits.map((hit, index) => (
+                    <button
+                      className={
+                        "result-card " + (selected === hit ? "selected" : "")
+                      }
+                      key={hit.record.record_id}
+                      onClick={() => setSelected(hit)}
+                    >
+                      <span className="result-rank">
+                        {String(page * 10 + index + 1).padStart(2, "0")}
+                      </span>
+                      <div>
+                        <div className="result-meta">
+                          <span className="mono">{hit.record.record_id}</span>
+                          <span>Score {hit.score?.toFixed(4) ?? "—"}</span>
+                        </div>
+                        <h3>
+                          {recordTitle(hit.record)}
+                          <ArrowUpRight size={15} />
+                        </h3>
+                        <p>{recordBody(hit.record) || "点击查看记录内容"}</p>
+                        <div className="channel-tags">
+                          {hit.channels?.map((channel, i) => (
+                            <span key={i}>{channel.channel}</span>
+                          ))}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="pagination">
+                <span>
+                  {result.evaluation_time_ms
+                    ? "评估于 " +
+                      new Date(result.evaluation_time_ms).toLocaleTimeString()
+                    : ""}
+                </span>
+                <div>
+                  <button
+                    className="secondary compact"
+                    aria-label="上一页结果"
+                    disabled={page === 0}
+                    onClick={() => run(page - 1, false)}
+                  >
+                    <ArrowLeft size={14} />
+                  </button>
+                  <span>第 {page + 1} 页</span>
+                  <button
+                    className="secondary compact"
+                    aria-label="下一页结果"
+                    disabled={
+                      total == null
+                        ? result.hits.length < 10
+                        : (page + 1) * 10 >= total
+                    }
+                    onClick={() => run(page + 1, false)}
+                  >
+                    <ArrowRight size={14} />
+                  </button>
+                </div>
+              </div>
+            </section>
+            {selected && (
+              <RecordPreview
+                record={selected.record}
+                close={() => setSelected(null)}
+                explanation={makeExplanation(selected)}
+              />
+            )}
+          </div>
+        )
+      )}
+    </>
+  );
+}
+function makeExplanation(hit: Hit) {
+  return (
+    '{"score":' +
+    (apiFieldText(hit, "score") || "null") +
+    ',"channels":' +
+    (apiFieldText(hit, "channels") || "[]") +
+    "}"
+  );
+}
+
+// Preserve arbitrary numeric tokens in advanced JSON instead of rounding i64 filters.
+import { apiJsonText, parseApiJson } from "./json.ts";
+function mergeQuerySource(source: string, body: Json, controlled: Set<string>) {
+  const original = parseApiJson(source),
+    parts: string[] = [];
+  for (const key of Object.keys(original)) {
+    if (!controlled.has(key))
+      parts.push(JSON.stringify(key) + ":" + rawField(original, key));
+  }
+  for (const key of controlled) {
+    if (body[key] === undefined) continue;
+    // Unmodified advanced filters/sort/temporal retain their source.
+    const unchanged =
+      original[key] !== undefined &&
+      JSON.stringify(original[key]) === JSON.stringify(body[key]);
+    if (unchanged)
+      parts.push(JSON.stringify(key) + ":" + rawField(original, key));
+    else if (
+      key === "filter" &&
+      original.filter &&
+      body.filter?.length > original.filter.length
+    ) {
+      parts.push(
+        '"filter":' +
+          apiJsonText(original.filter).slice(0, -1) +
+          (original.filter.length ? "," : "") +
+          JSON.stringify(body.filter.at(-1)) +
+          "]",
+      );
+    } else parts.push(JSON.stringify(key) + ":" + JSON.stringify(body[key]));
+  }
+  return "{" + parts.join(",") + "}";
+}
+function rawField(object: Json, key: string) {
+  if (typeof object[key] === "string") return JSON.stringify(object[key]);
+  return apiFieldText(object, key) || "null";
+}

@@ -17,7 +17,7 @@ pub enum Lane {
     Background,
     /// Trusted authorization and lifecycle controls.
     Control,
-    /// Liveness and static assets.
+    /// Liveness and unmatched public requests.
     Public,
 }
 impl Lane {

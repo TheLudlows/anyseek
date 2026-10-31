@@ -49,7 +49,7 @@ pub(crate) async fn initialize(params: HashMap<String, String>) {
         num_cpus::get(),
         num_cpus::get_physical()
     );
-    log::info!("Web UI and REST API: http://{local_ip}:{local_port}; Ctrl-C to shut down");
+    log::info!("REST API: http://{local_ip}:{local_port}; Ctrl-C to shut down");
     println!("Master API key: {master_apikey}");
 
     let service = crate::record_service::Service::open(&index_path, default_nprobe)

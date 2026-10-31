@@ -162,7 +162,8 @@ Full acceptance avoids only these established repeats:
   the same tests with the same `server,fault-injection` features on both OSes.
   S3 HTTP fixture contract and semantic suites remain.
 - Linux persistence normal HTTP smoke and its standalone service build:
-  `build-and-smoke --browser` runs the normal HTTP flow before browser checks;
+  `build-and-smoke` runs normal HTTP acceptance; standalone console browser checks
+  run against their own disposable API in PR feedback and full acceptance;
   persistence builds its own fault-enabled service before all later consumers.
   Windows normal HTTP, both OS fault HTTP, Indexer and authorization remain.
 - Linux filtered server `record_service::tests` and `resources::tests` reruns:

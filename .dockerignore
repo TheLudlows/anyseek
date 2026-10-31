@@ -3,3 +3,9 @@
 .vscode
 .idea
 *.md
+.git
+console/node_modules
+console/dist
+console/test-results
+console/playwright-report
+console/*.tsbuildinfo

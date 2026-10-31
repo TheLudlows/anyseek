@@ -1,6 +1,6 @@
 # anyseek
 
-**面向 AI 记忆与知识的通用存储和检索底座。** 将原始记录、来源证据、版本、时间与显式关系放在同一个可恢复、可检索的数据视图中，通过 Rust 核心库、HTTP API 和内嵌 Web UI 使用。
+**面向 AI 记忆与知识的通用存储和检索底座。** 将原始记录、来源证据、版本、时间与显式关系放在同一个可恢复、可检索的数据视图中，通过 Rust 核心库、HTTP API 和独立 Web 控制台 使用。
 
 anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、切块、embedding、实体抽取及记忆反思/重算由上层应用完成。自定义内容保存在 `document`，引擎管理稳定身份和系统元数据，不引入 SQL/JOIN 或完整图查询语言。
 
@@ -21,7 +21,7 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 | 时间与生命周期 | 固定查询 evaluation_time、不可逆 TTL |
 | 授权与恢复 | API Key 认证 Tenant，同租户 Key 访问一致；撤销拒绝后续认证，数据生命周期独立；WAL/checkpoint、备份与独立恢复 |
 
-Web UI 支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览，以及来源、关系、租约等检查入口。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。
+[独立控制台](console/README.md)支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览，以及来源、关系、租约等检查入口。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。
 
 ## 边界与后续路线
 
@@ -43,7 +43,7 @@ export MASTER_KEY_SECRET='replace-with-your-private-secret'
 cargo run -p anyseek --features server --bin anyseek_server -- local_ip=127.0.0.1 local_port=8080
 ```
 
-打开 `http://127.0.0.1:8080/`，先用启动日志中的 `Master API key` 按[服务指南](anyseek/src/server/README.md)创建 Tenant 并签发普通 Key，再用 Tenant Key 连接 UI、创建 collection 并写入 JSON。默认数据目录为可执行文件旁的 `anyseek_index`；首次目录必须不存在。重启保留原目录和 `MASTER_KEY_SECRET`；已有部署应显式设置原 `index_path`。Windows 启动及参数见 [服务指南](anyseek/src/server/README.md)。
+API 默认运行在 `http://127.0.0.1:8080`。先用启动日志中的 `Master API key` 按[服务指南](anyseek/src/server/README.md)创建 Tenant 并签发普通 Key，再按[控制台指南](console/README.md)单独启动前端，用 Tenant Key 连接、创建 collection 并写入 JSON。API 不再内嵌前端；开发控制台默认地址是 `http://127.0.0.1:5173`。默认数据目录为可执行文件旁的 `anyseek_index`；首次目录必须不存在。重启保留原目录和 `MASTER_KEY_SECRET`；已有部署应显式设置原 `index_path`。Windows 启动及参数见 [服务指南](anyseek/src/server/README.md)。
 
 ## API 与接入
 

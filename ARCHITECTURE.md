@@ -1,12 +1,12 @@
 # 当前架构
 
-anyseek 由 Rust 核心库和 HTTP/Web UI 服务组成。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。公开数据入口统一为 RecordPartition；内部向量/元数据组件包含可变 tail 与冻结 Segment，其 shard 命名整理由 #94 跟踪。
+anyseek 由 Rust 核心库、HTTP API 服务和独立 Web 控制台组成。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。公开数据入口统一为 RecordPartition；内部向量/元数据组件包含可变 tail 与冻结 Segment，其 shard 命名整理由 #94 跟踪。
 
 ## 模块边界
 
 | 层 | 代码 | 职责 |
 | --- | --- | --- |
-| UI | `anyseek/web/` | 创建/写入原请求保存与重试、搜索、分页、预览、日期过滤、服务备份恢复 |
+| 独立 UI | `console/` | 创建/写入原请求保存与重试、搜索、分页、预览、日期过滤、服务备份恢复 |
 | 默认服务 | `record_service.rs`、`server.rs`、`main.rs` | HTTP 契约、身份入口、admission、响应数据有效性保护、启动恢复 |
 | 控制权威 | `catalog.rs`、`catalog/sqlite.rs`、`catalog/service_snapshot.rs` | Tenant、Key verifier、集合代次与生命周期、控制回执和完整服务快照 |
 | 数据权威 | `record.rs`、`record/committed.rs` | 原始 Document/向量、稳定 ID、版本、墓碑、幂等与持久批提交 |

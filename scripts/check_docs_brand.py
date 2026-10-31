@@ -5,7 +5,7 @@ import re
 from urllib.parse import unquote
 
 root = Path(__file__).resolve().parents[1]
-docs = list(root.glob('*.md')) + list((root / 'docs').rglob('*.md')) + [root / 'anyseek/src/server/README.md']
+docs = list(root.glob('*.md')) + list((root / 'docs').rglob('*.md')) + [root / 'anyseek/src/server/README.md', root / 'console/README.md']
 errors = []
 def anchors(path):
     result, counts, fenced = set(), {}, False
@@ -33,7 +33,7 @@ for path in docs:
 
 # Current executable surfaces only; historical Markdown/third-party assets are not rebranded.
 paths = list((root / 'anyseek/src').rglob('*.rs'))
-paths += list((root / 'anyseek/web').rglob('*.js')) + list((root / 'anyseek/web').rglob('*.html')) + list((root / 'anyseek/web').rglob('*.svg'))
+paths += [path for path in (root / 'console').rglob('*') if path.is_file() and path.suffix in {'.ts', '.tsx', '.html', '.svg'} and not {'node_modules', 'dist', 'test-results', 'playwright-report'} & set(path.parts)]
 paths += list((root / 'scripts').glob('*.py')) + list((root / '.github/workflows').glob('*.yml'))
 paths += [root / 'Dockerfile', root / 'Cargo.toml', root / 'anyseek/Cargo.toml']
 allowed = re.compile(r'https?://[^\s<>"\)]+|__seekpower_time_\w*|\.seekpower-service-|seekpower\.(?:apiKey|index|pending\w*|serviceBackupId)')

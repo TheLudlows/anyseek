@@ -1803,7 +1803,7 @@ async fn request_guard(
 
 pub(crate) fn router(service: Arc<Service>) -> Router {
     Service::start_reclamation(&service);
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/api/v1/live", get(|| async { Json(crate::VERSION) }))
         .route(
             "/api/v1/apikey",
@@ -1845,53 +1845,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
             "/api/v1/catalog/operation/{epoch}/{nonce}",
             get(catalog_operation),
         );
-    for (path, content_type, bytes) in [
-        (
-            "/",
-            "text/html; charset=utf-8",
-            include_bytes!("../../web/index.html").as_slice(),
-        ),
-        (
-            "/js/master.js",
-            "text/javascript",
-            include_bytes!("../../web/js/master.js").as_slice(),
-        ),
-        (
-            "/js/setup.js",
-            "text/javascript",
-            include_bytes!("../../web/js/setup.js").as_slice(),
-        ),
-        (
-            "/js/documents.js",
-            "text/javascript",
-            include_bytes!("../../web/js/documents.js").as_slice(),
-        ),
-        (
-            "/js/jquery-3.7.1.min.js",
-            "text/javascript",
-            include_bytes!("../../web/js/jquery-3.7.1.min.js").as_slice(),
-        ),
-        (
-            "/css/master.css",
-            "text/css",
-            include_bytes!("../../web/css/master.css").as_slice(),
-        ),
-        (
-            "/css/flexboxgrid.min.css",
-            "text/css",
-            include_bytes!("../../web/css/flexboxgrid.min.css").as_slice(),
-        ),
-        (
-            "/svg/logo.svg",
-            "image/svg+xml",
-            include_bytes!("../../web/svg/logo.svg").as_slice(),
-        ),
-    ] {
-        app = app.route(
-            path,
-            get(move || async move { ([(header::CONTENT_TYPE, content_type)], bytes) }),
-        );
-    }
     app.fallback(|| async { not_found() })
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(axum::middleware::from_fn_with_state(
