@@ -2012,3 +2012,13 @@ th {
 .language-switch:focus-within { outline:2px solid var(--accent, #2563eb); outline-offset:2px; }
 html[lang="en"] .row-actions { flex-wrap:wrap; }
 html[lang="en"] .schema-summary .data-table th { white-space:normal;min-width:95px; }
+
+.collection-statistics section + section { margin-top: 24px; }
+.collection-statistics h3 { margin: 16px 0 10px; font-size: 13px; }
+.statistics-table { width: 100%; table-layout: fixed; }
+.statistics-table th:first-child { width: 57%; }
+.statistics-table th, .statistics-table td { white-space: normal; overflow-wrap: anywhere; }
+.statistics-table tbody th { text-align: left; font-weight: 500; }
+.statistics-table small { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; font-weight: 400; line-height: 1.6; }
+.statistics-table td { text-align: right; font-variant-numeric: tabular-nums; vertical-align: top; }
+.statistics-table thead th:last-child { text-align: right; }

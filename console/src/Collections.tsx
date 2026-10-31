@@ -10,9 +10,10 @@ import {
 } from "lucide-react";
 import { DeleteCollection } from "./DeleteCollection.tsx";
 import type { PendingDelete } from "./collection-delete.ts";
+import { CollectionStatistics } from "./CollectionStatistics.tsx";
 import { SchemaTable } from "./SchemaTable.tsx";
 import { api, ApiError, message, newOperationId, storage } from "./api.ts";
-import { Busy, Empty, JsonView, Modal, Notice } from "./components.tsx";
+import { Busy, Empty, Modal, Notice } from "./components.tsx";
 import type { Collection, Mode, Json } from "./types.ts";
 
 type Props = {
@@ -234,7 +235,7 @@ export function Collections(props: Props) {
           <SchemaTable fields={detail.schema} dimensions={detail.vector_dimensions} />
           <details>
             <summary>{t("高级服务统计")}</summary>
-            <JsonView value={{ statistics: detail.statistics, limits: detail.limits }} label={t("服务统计")} />
+            <CollectionStatistics statistics={detail.statistics} limits={detail.limits} />
           </details>
         </Modal>
       )}
