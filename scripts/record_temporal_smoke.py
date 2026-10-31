@@ -27,13 +27,13 @@ def exercise(call, restart_with, directory, faults):
     endpoint = '/api/v1/index/temporal'
     reader=base64.b64encode(os.urandom(32)).decode()
     call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'temporal-reader','apikey_base64':reader})
-    source = {'operation_id': operation(), 'record_id': 's', 'routing_key': 'route', 'expected': 'Absent',
+    source = {'operation_id': operation(), 'record_id': 's',  'expected': 'Absent',
               'document': {'body': 'temporal source'}, 'system': {'kind': 'source'},
               'temporal': {'event_time_ms': 100, 'valid_from_ms': 100, 'valid_to_ms': 200, 'expire_at_ms': now + (100 if faults else 86400000)}}
     receipt = call('POST', endpoint + '/doc', source)['receipt']
     for rid, parent in [('d', 's'), ('i', 'd')]:
-        call('POST', endpoint + '/doc', {'operation_id': operation(), 'record_id': rid, 'routing_key': 'route', 'expected': 'Absent',
-             'document': {'body': 'temporal derived'}, 'system': {'kind': 'derived', 'evidence_refs': [{'record_id': parent, 'routing_key': 'route', 'version': 1}]}})
+        call('POST', endpoint + '/doc', {'operation_id': operation(), 'record_id': rid,  'expected': 'Absent',
+             'document': {'body': 'temporal derived'}, 'system': {'kind': 'derived', 'evidence_refs': [{'record_id': parent,  'version': 1}]}})
     query = {'query': 'temporal', 'temporal': {'event': {'from_ms': 100, 'to_ms': 101}, 'valid_at_ms': 100}}
     result = call('POST', endpoint + '/query', query)
     assert [h['record']['record_id'] for h in result['hits']] == ['s'], result

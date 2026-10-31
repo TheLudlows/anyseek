@@ -29,7 +29,7 @@ pub async fn insert(partition: &RecordPartition, docs: Vec<Document>) -> Result<
         let id = format!("{:020}", start + ordinal);
         write(partition,RecordWrite {
             operation_id: OperationId::new(format!("insert-{id}")), record_id: id,
-            routing_key: "fixture".into(), expected: ExpectedVersion::Absent,
+             expected: ExpectedVersion::Absent,
             document: Some(document), vector_patch: None, temporal: None, system: None,
         }).await?;
     }
@@ -41,7 +41,7 @@ pub async fn delete(partition: &RecordPartition, ids: Vec<usize>) {
         if let Some(record) = partition.get(&id).await.unwrap() {
             write(partition,RecordWrite {
                 operation_id: OperationId::new(format!("delete-{id}-{}", record.version)),
-                record_id: id, routing_key: record.routing_key,
+                record_id: id,
                 expected: ExpectedVersion::Match(record.version), document: None,
                 vector_patch: None, temporal: None, system: None,
             }).await.unwrap();
@@ -51,7 +51,7 @@ pub async fn delete(partition: &RecordPartition, ids: Vec<usize>) {
 pub async fn update(partition: &RecordPartition, ordinal: usize, document: Document) {
     let id=format!("{ordinal:020}");let old=partition.get(&id).await.unwrap().unwrap();
     write(partition,RecordWrite {operation_id:OperationId::new(format!("update-{id}-{}",old.version)),record_id:id,
-        routing_key:old.routing_key,expected:ExpectedVersion::Match(old.version),document:Some(document),
+        expected:ExpectedVersion::Match(old.version),document:Some(document),
         vector_patch:None,temporal:None,system:None}).await.unwrap();
 }
 pub async fn clear(partition: &RecordPartition) {

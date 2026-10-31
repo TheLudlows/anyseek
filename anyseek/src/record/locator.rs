@@ -75,7 +75,6 @@ pub(super) fn validate_retained(state:&State,reference:&EvidenceRef)->Result<(),
     let target=state.records.get(&reference.record_id).filter(|r|r.version==reference.version)
         .or_else(||state.source_revisions.iter().find(|r|r.record_id==reference.record_id&&r.version==reference.version))
         .ok_or_else(||reject("missing located source revision"))?;
-    if target.routing_key!=reference.routing_key{return Err(reject("located source route mismatch"));}
     validate(reference,target)
 }
 impl RecordPartition {
@@ -88,7 +87,7 @@ impl RecordPartition {
         if !inner.healthy{return Err(RecordError::RecoveryRequired);}
         let current=inner.state.records.get(&reference.record_id).filter(|r|inner.locations.contains_key(&r.record_id))
             .ok_or_else(||RecordError::Conflict("source is not currently visible".into()))?;
-        if current.routing_key!=reference.routing_key || !current.system.as_ref().is_some_and(|s|s.kind==EvidenceKind::Source) {return Err(reject("exact source route required"));}
+        if !current.system.as_ref().is_some_and(|s|s.kind==EvidenceKind::Source) {return Err(reject("source record required"));}
         let target=if current.version==reference.version {current}else{inner.state.source_revisions.iter().find(|r|r.record_id==reference.record_id&&r.version==reference.version).ok_or_else(||RecordError::Conflict("source revision absent".into()))?};
         let locator=reference.locator.as_ref().ok_or_else(||reject("evidence excerpt requires locator"))?;
         let (whole,selected)=selection(target,locator)?;

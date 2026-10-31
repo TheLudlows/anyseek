@@ -133,7 +133,7 @@ def main():
                 result.append((page['count_total'],[(h['record']['record_id'],h['record']['version'],h['record']['document'],h['score']) for h in page['hits']]))
             return result
         def write(nonce,record,body,expected='Absent'):
-            return {'operation_id':operation(),'record_id':record,'routing_key':'r','expected':expected,
+            return {'operation_id':operation(),'record_id':record,'expected':expected,
                 'document':{'body':body,'vector':[2,0]}}
         try:
             start()

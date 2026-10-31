@@ -1180,7 +1180,7 @@ async fn deletion_plan(
                 (page.visible_seq, page.records)
             }
         };
-        let targets: Vec<_> = records.into_iter().map(|r| json!({"record_id":r.record_id,"routing_key":r.routing_key,"expected":{"Match":r.version},"document":null})).collect();
+        let targets: Vec<_> = records.into_iter().map(|r| json!({"record_id":r.record_id,"expected":{"Match":r.version},"document":null})).collect();
         Ok::<_,Error>(json!({"visible_seq":seq,"targets":targets,"atomic":false,"instruction":"Persist targets with one original operation_id each before executing /batch; retries must reuse the saved requests, never regenerate the selection."}))
     }).await?;
     protected_data(result, Some(data))
@@ -1951,7 +1951,7 @@ mod tests {
         let app = router(service.clone());
         let key = headers["apikey"].to_str().unwrap();
         let old = service.record("tenant", "c").await.unwrap();
-        let command = json!({"operation_id":OperationId::new("write-once".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"old"}});
+        let command = json!({"operation_id":OperationId::new("write-once".into()),"record_id":"r","expected":"Absent","document":{"body":"old"}});
         assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",key,Some(command.clone())).await.0,StatusCode::OK);
         let backup = json!({"operation_id":OperationId::new("same-backup".into())});
         let (status, before) = tenant_api(&app,"POST","/api/v1/index/c/backup",key,Some(backup.clone())).await;
@@ -2005,7 +2005,7 @@ mod tests {
         assert_eq!(tenant_api(&app,"GET","/api/v1/index/c",&other,None).await.0,StatusCode::FORBIDDEN);
         let create=json!({"collection_id":"c","config":{"index_name":"other","schema":[{"field":"body","field_type":"Text"}]},"operation_id":op("create")});
         assert_eq!(tenant_api(&app,"POST","/api/v1/index",&other,Some(create)).await.0,StatusCode::OK);
-        let write=json!({"operation_id":op("write"),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"tenant private"}});
+        let write=json!({"operation_id":op("write"),"record_id":"r","expected":"Absent","document":{"body":"tenant private"}});
         assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",tenant,Some(write.clone())).await.0,StatusCode::OK);
         assert_eq!(tenant_api(&app,"GET","/api/v1/index/c/doc/r",&other,None).await.0,StatusCode::NOT_FOUND);
         assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",&other,Some(write)).await.0,StatusCode::OK);
@@ -2026,9 +2026,9 @@ mod tests {
         use tower::ServiceExt;
         let (service,path,headers)=setup().await;
         let app=router(service.clone());let key=headers["apikey"].to_str().unwrap();
-        let original=json!({"operation_id":OperationId::new("ordinary".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha"}});
+        let original=json!({"operation_id":OperationId::new("ordinary".into()),"record_id":"r","expected":"Absent","document":{"body":"alpha"}});
         assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",key,Some(original)).await.0,StatusCode::OK);
-        let removed=json!({"operation_id":OperationId::new("removed".into()),"record_id":"r","routing_key":"r","expected":{"Match":1},"document":null,"generation":{"action":"abort","generation_id":"g"}});
+        let removed=json!({"operation_id":OperationId::new("removed".into()),"record_id":"r","expected":{"Match":1},"document":null,"generation":{"action":"abort","generation_id":"g"}});
         for (endpoint,body) in [("doc",removed.clone()),("batch",json!({"writes":[removed.clone()]})),("ingest",json!({"records":[removed]}))] {
             assert_eq!(tenant_api(&app,"POST",&format!("/api/v1/index/c/{endpoint}"),key,Some(body)).await.0,StatusCode::BAD_REQUEST);
         }
@@ -2044,7 +2044,7 @@ mod tests {
         use tower::ServiceExt;
         let (service,path,headers)=setup().await; let app=router(service.clone());
         let operation=OperationId::new("committed-http".into());
-        let body=json!({"records":[{"operation_id":operation,"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha async"}}]});
+        let body=json!({"records":[{"operation_id":operation,"record_id":"r","expected":"Absent","document":{"body":"alpha async"}}]});
         let make=|value:&Value| axum::http::Request::builder().method("POST").uri("/api/v1/index/c/ingest")
             .header("apikey",headers["apikey"].clone()).header("content-type","application/json").body(Body::from(serde_json::to_vec(value).unwrap())).unwrap();
         let response=app.clone().oneshot(make(&body)).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
@@ -2078,7 +2078,7 @@ mod tests {
             }).await.unwrap();
             Ok::<_,std::io::Error>(Bytes::from(serde_json::to_vec(&json!({
                 "operation_id":OperationId::new("accepted-body".into()),"record_id":"r",
-                "routing_key":"r","expected":"Absent","document":{"body":"alpha"}
+                "expected":"Absent","document":{"body":"alpha"}
             })).unwrap()))
         }));
         let request=axum::http::Request::builder().method("POST").uri("/api/v1/index/c/doc")
@@ -2095,7 +2095,7 @@ mod tests {
     #[tokio::test]
     async fn committed_response_survives_revoke_but_new_requests_fail() {
         let (service,path,_)=setup().await; let mut headers=HeaderMap::new(); headers.insert("apikey",STANDARD.encode([7;32]).parse().unwrap());
-        let body=json!({"records":[{"operation_id":OperationId::new("committed-revoke".into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha"}}]});
+        let body=json!({"records":[{"operation_id":OperationId::new("committed-revoke".into()),"record_id":"r","expected":"Absent","document":{"body":"alpha"}}]});
         let response=ingest(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&body).unwrap().into()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
         service.catalog.execute(CatalogRequest{operation_id:OperationId::new("revoke-committed".into()),command:CatalogCommand::RevokeKey{key_id:"a".into()}}).await.unwrap();
         assert!(axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.is_ok()); assert!(ingest_progress(State(service.clone()),headers,Path("c".into())).await.is_err());
@@ -2116,8 +2116,8 @@ mod tests {
         for target in ["r", "missing", "listing"] {
             let (service, path, headers) = setup().await;
             for doc in [
-                json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}}),
-                json!({"operation_id":OperationId::new("derived".into()),"record_id":"r","routing_key":"route","expected":"Absent","document":{"body":"secret-original"},"system":{"kind":"derived","evidence_refs":[{"record_id":"s","routing_key":"route","version":1}]}}),
+                json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}}),
+                json!({"operation_id":OperationId::new("derived".into()),"record_id":"r","expected":"Absent","document":{"body":"secret-original"},"system":{"kind":"derived","evidence_refs":[{"record_id":"s","version":1}]}}),
             ] {
                 write(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&doc).unwrap().into()).await.unwrap();
             }
@@ -2155,7 +2155,7 @@ mod tests {
             ));
             entered.notified().await;
             let body =
-                json!({"operation_id":OperationId::new("delete-source".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null}).to_string();
+                json!({"operation_id":OperationId::new("delete-source".into()),"record_id":"s","expected":{"Match":1},"document":null}).to_string();
             let acknowledgment=raw(address,format!("DELETE /api/v1/index/c/doc HTTP/1.1\r\nHost: localhost\r\napikey: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",headers["apikey"].to_str().unwrap(),body.len())).await;
             assert!(String::from_utf8_lossy(&acknowledgment).starts_with("HTTP/1.1 200"));
             release.notify_one();
@@ -2175,11 +2175,11 @@ mod tests {
     async fn service_source_delete_blocks_body_after_response_header_handoff() {
         use http_body::Body as _;
         let (service, path, headers) = setup().await;
-        let source = json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}});
+        let source = json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}});
         write(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&source).unwrap().into()).await.unwrap();
         let response = read(State(service.clone()), headers.clone(), Path(("c".into(), "s".into())), Query(ReadParams { fields: String::new() })).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let delete=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null});
+        let delete=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","expected":{"Match":1},"document":null});
         write(State(service.clone()), headers, Path("c".into()), serde_json::to_vec(&delete).unwrap().into()).await.unwrap();
         let mut body=response.into_body();
         let frame=std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await;
@@ -2191,11 +2191,11 @@ mod tests {
     async fn service_data_fence_preserves_persistence_errors() {
         use http_body::Body as _;
         let (service,path,headers)=setup().await;
-        let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","routing_key":"route","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
+        let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
         write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&source).unwrap().into()).await.unwrap();
         let record=service.record("tenant","c").await.unwrap(); let data=record.output_permit().unwrap();
         // A real deletion invalidates the captured data permit without a public test hook.
-        let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","routing_key":"route","expected":{"Match":1},"document":null});
+        let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","expected":{"Match":1},"document":null});
         write(State(service.clone()),headers,Path("c".into()),serde_json::to_vec(&deletion).unwrap().into()).await.unwrap();
         assert!(protected_data(Ok(json!({"body":"secret"})),Some(data.clone())).is_err());
         assert!(protected_data::<Value>(Err(bad("other error")),Some(data.clone())).is_err());
@@ -2416,8 +2416,8 @@ fn openapi_document() -> Value {
     doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, temporal and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root keep historical credentials disabled. See docs/record-model.md for acceptance limits."});
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
-    schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","routing_key","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"routing_key":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
-    schemas.get_mut("RecordWrite").unwrap()["required"] = json!(["operation_id","record_id","routing_key","expected"]);
+    schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
+    schemas.get_mut("RecordWrite").unwrap()["required"] = json!(["operation_id","record_id","expected"]);
     schemas.get_mut("RecordWrite").unwrap()["anyOf"] = json!([{"required":["document"]},{"required":["vector_patch"]}]);
     schemas.get_mut("RecordWrite").unwrap()["properties"]["vector_patch"] = json!({"type":"object","minProperties":1,"description":"Fill absent vector fields with exact Match version; omit document/system. Preserves body version."});
     schemas.get_mut("RecordWrite").unwrap()["properties"]["system"] = json!({"$ref":"#/components/schemas/EvidenceMetadata"});
@@ -2430,7 +2430,7 @@ fn openapi_document() -> Value {
     schemas.insert("RelationFusion".into(),json!({"type":"object","additionalProperties":false,"required":["neighbors","rrf","relation_weight"],"properties":{"neighbors":{"$ref":"#/components/schemas/NeighborRequest"},"rrf":{"$ref":"#/components/schemas/RrfOptions"},"relation_weight":{"type":"number","exclusiveMinimum":0}}}));
     schemas.get_mut("SearchRequestObject").unwrap()["properties"]["relation_fusion"]=json!({"anyOf":[{"$ref":"#/components/schemas/RelationFusion"},{"type":"null"}]});
     schemas.insert("RelationMetadata".into(),json!({"type":"object","additionalProperties":false,"required":["from","to","relation_type"],"properties":{"from":{"$ref":"#/components/schemas/EvidenceRef"},"to":{"$ref":"#/components/schemas/EvidenceRef"},"relation_type":{"type":"string","minLength":1,"maxLength":128},"weight":{"type":["number","null"]}}}));
-    schemas.insert("EvidenceRef".into(), json!({"type":"object","additionalProperties":false,"required":["record_id","routing_key","version"],"properties":{"record_id":{"type":"string"},"routing_key":{"type":"string"},"version":{"type":"integer","minimum":1}}}));
+    schemas.insert("EvidenceRef".into(), json!({"type":"object","additionalProperties":false,"required":["record_id","version"],"properties":{"record_id":{"type":"string"},"version":{"type":"integer","minimum":1}}}));
     schemas.insert("EvidenceLocator".into(),json!({"oneOf":[{"type":"object","additionalProperties":false,"required":["kind","field","start","end"],"properties":{"kind":{"const":"utf8"},"field":{"type":"string"},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":1}}},{"type":"object","additionalProperties":false,"required":["kind","field","page"],"properties":{"kind":{"const":"page"},"field":{"type":"string"},"page":{"type":"integer","minimum":1}}}]}));
     schemas.get_mut("EvidenceRef").unwrap()["properties"]["locator"]=json!({"anyOf":[{"$ref":"#/components/schemas/EvidenceLocator"},{"type":"null"}]});
     schemas.insert("EvidenceMetadata".into(), json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["source","derived","entity","relation"]},"evidence_refs":{"type":"array","maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}}}}));
@@ -2680,8 +2680,13 @@ fn unread_admission_refusal_closes_only_http1_connections() {
 
 #[cfg(test)]
 #[test]
-fn external_sync_routes_are_absent_from_schema() {
+fn identity_schemas_and_external_sync_routes_are_strict() {
     let doc = openapi_document();
+    for name in ["RecordWrite", "EvidenceRef"] {
+        let schema = &doc["components"]["schemas"][name];
+        assert!(schema["properties"].get("routing_key").is_none());
+        assert_eq!(schema["additionalProperties"], false);
+    }
     let paths = doc["paths"].as_object().unwrap();
     assert!(paths.keys().all(|path| !path.contains("/bootstrap") && !path.ends_with("/changes")));
     for path in ["/api/v1/index/{id}/iterator", "/api/v1/index/{id}/doc/{record_id}"] {

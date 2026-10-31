@@ -2047,3 +2047,24 @@ th {
 .embedding-choice p { overflow-wrap: anywhere; }
 
 .schema-summary .data-table td { white-space: nowrap; }
+
+.markdown-preview { max-height: 320px; overflow: auto; margin: 16px 0; }
+.markdown-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; padding: 12px; }
+.markdown-import .form-grid { margin-top: 16px; }
+.markdown-import .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.markdown-import .form-grid label { display: grid; gap: 8px; }
+
+.primary.danger { background: #b42318; border-color: #b42318; }
+.text-button.danger-text { color: #b42318; }
+
+.score-details { margin: 20px 0; }
+.score-details .data-table th, .score-details .data-table td { padding: 10px 8px; white-space: nowrap; }
+.score-basis { display: block; color: var(--muted); margin-top: 4px; }
+
+.language-switch { display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px;color:var(--muted); }
+.language-switch select { width:auto;min-width:100px;padding:6px 9px; }
+.sidebar-bottom > .language-switch { margin:8px 12px 14px; }
+.modal-title .language-switch { margin-left:auto;flex-shrink:0; }
+.modal-title .language-switch span { display:none; }
+html[lang="en"] .row-actions { flex-wrap:wrap; }
+html[lang="en"] .schema-summary .data-table th { white-space:normal;min-width:95px; }

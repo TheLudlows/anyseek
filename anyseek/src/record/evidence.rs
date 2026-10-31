@@ -23,14 +23,12 @@ pub enum EvidenceKind {
     Relation,
 }
 /// A precise reference in the current collection. Cross-collection references
-/// are not accepted; routing is verified rather than inferred from an opaque ID.
+/// are not accepted; each dependency names an exact record version.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceRef {
     /// Stable identity of the evidence record.
     pub record_id: String,
-    /// Immutable routing key of the referenced record.
-    pub routing_key: String,
     /// Exact immutable revision, never implicitly rebound to a newer revision.
     pub version: u64,
     /// Optional exact inline source location; never interpreted on ordinary endpoints.
@@ -94,7 +92,6 @@ fn visit(
                     (target.system.is_some() || !typed)
                         && (typed || target.system.as_ref().is_none_or(|s|s.kind!=EvidenceKind::Relation))
                         && target.version == reference.version
-                        && target.routing_key == reference.routing_key
                 });
                 // Traverse even a deleted ancestor so cycles cannot be concealed
                 // behind tombstones in a recovered authoritative graph.
@@ -133,7 +130,6 @@ pub(super) fn validate(
     let old = records.get(&request.record_id);
     if request.system.is_some() || old.is_some_and(|r| r.system.is_some()) {
         if request.record_id.len() > 256
-            || request.routing_key.len() > 256
             || request.operation_id.nonce.len() > 128
         {
             return Err(rejected(
@@ -197,9 +193,9 @@ pub(super) fn validate(
         let target = records
             .get(&reference.record_id)
             .ok_or_else(|| rejected("evidence not found in this collection"))?;
-        if target.version != reference.version || target.routing_key != reference.routing_key {
+        if target.version != reference.version {
             return Err(RecordError::Conflict(
-                "evidence version or route mismatch".into(),
+                "evidence version mismatch".into(),
             ));
         }
         super::locator::validate(reference,target)?;
@@ -287,7 +283,7 @@ pub(super) fn status(records: &state_values::Records, id: &str) -> Result<Eviden
         if let Some(system) = &record.system {
             for (reference,typed) in system.evidence_refs.iter().map(|r|(r,true)).chain(super::graph::endpoints(system).map(|r|(r,false))) {
                 match records.get(&reference.record_id) {
-                    Some(target) if (target.system.is_some() || !typed) && target.routing_key == reference.routing_key => stale |= target.version != reference.version,
+                    Some(target) if target.system.is_some() || !typed => stale |= target.version != reference.version,
                     _ => unavailable = true,
                 }
                 queue.push(&reference.record_id);
@@ -303,7 +299,7 @@ pub(super) fn validate_history(records: &state_values::Records, history: &state_
     for revision in history {
         let Some(current) = records.get(&revision.record_id) else { return Err(rejected("orphan source revision")); };
         if !retained_revision(revision) || revision.version == 0 || revision.version >= current.version
-            || revision.routing_key != current.routing_key || revision.system != current.system
+            || revision.system != current.system
             || !seen.insert((&revision.record_id, revision.version)) {
             return Err(rejected("inconsistent source revision history"));
         }

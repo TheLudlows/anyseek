@@ -1,3 +1,4 @@
+import { t } from "./i18n.ts";
 import {
   api,
   ApiError,
@@ -44,7 +45,7 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
     !docs.length ||
     !docs.every((d) => d && typeof d === "object" && !Array.isArray(d))
   )
-    throw new Error("请输入一个 JSON 对象或非空的对象数组。");
+    throw new Error(t("请输入一个 JSON 对象或非空的对象数组。"));
   return documentJsonSlices(text, parsed).map((raw, i) => {
     if (envelopeMode) {
       const doc = docs[i];
@@ -52,14 +53,13 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
         (!Object.hasOwn(doc, "document") &&
           !Object.hasOwn(doc, "vector_patch")) ||
         !doc.record_id ||
-        !doc.routing_key ||
         !doc.expected
       )
         throw new Error(
-          "Record envelope 需要 record_id、routing_key、expected，以及 document 或 vector_patch。",
+          t("Record envelope 需要 record_id、expected，以及 document 或 vector_patch。"),
         );
       if (Object.hasOwn(doc, "operation_id"))
-        throw new Error("Operation ID 由控制台管理，请移除此字段。");
+        throw new Error(t("Operation ID 由控制台管理，请移除此字段。"));
       return {
         body:
           raw.slice(0, -1) +
@@ -72,7 +72,6 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
     const header = JSON.stringify({
       operation_id: newOperationId(),
       record_id: id,
-      routing_key: id,
       expected: "Absent",
     });
     return {
@@ -98,7 +97,7 @@ export async function sendWrites(
   progress: (done: number) => void = () => {},
 ) {
   if (pending.owner !== owner)
-    throw new Error("保留的写入属于另一连接，请使用原 API Key 处理。");
+    throw new Error(t("保留的写入属于另一连接，请使用原 API Key 处理。"));
   if (pending.delivery === "ingest") return sendIngest(pending, key, progress);
   for (let i = pending.completed; i < pending.requests.length; i++) {
     const previouslyUnresolved = pending.unresolved;

@@ -75,7 +75,7 @@ pub enum RecordError {
     Busy,
     /// Invalid request or an exhausted resource budget; no write accepted.
     Rejected(String),
-    /// Conditional version, routing key, or operation digest conflict.
+    /// Conditional version or operation digest conflict.
     Conflict(String),
     /// The operation's epoch is outside the supported retry window.
     OperationExpired,
@@ -214,8 +214,6 @@ pub struct RecordWrite {
     pub operation_id: OperationId,
     /// Collection-unique opaque business identity; never a path.
     pub record_id: String,
-    /// Immutable colocation key, retained through delete/recreate.
-    pub routing_key: String,
     /// Conditional write contract.
     pub expected: ExpectedVersion,
     /// Complete original input including vectors; None deletes unless vector_patch is set.
@@ -232,13 +230,12 @@ pub struct RecordWrite {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<EvidenceMetadata>,
 }
-/// Authoritative record. Deleted identities retain version and routing key.
+/// Authoritative record. Deleted identities retain their identity and version.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Record {
     /// Stable identity.
     pub record_id: String,
-    /// Immutable colocation key.
-    pub routing_key: String,
     /// Monotonic revision including tombstones.
     pub version: u64,
     /// Original unnormalized input, absent for a tombstone.
@@ -300,11 +297,11 @@ struct State {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(test, derive(Clone))]
 enum Entry {
-    #[serde(rename = "RecordAnchorV3")]
+    #[serde(rename = "RecordAnchorV4")]
     Anchor(anchor::Reference),
-    #[serde(rename = "RecordCheckpointV16")]
+    #[serde(rename = "RecordCheckpointV17")]
     Checkpoint { config: RecordConfig, state: State },
-    #[serde(rename = "RecordAppliedV14")]
+    #[serde(rename = "RecordAppliedV15")]
     Applied(Applied),
     #[serde(rename = "RecordExpiredV12")]
     Expired(temporal::Expiration),
@@ -971,7 +968,6 @@ fn apply_prepared(state: &mut State, applied: &Applied, prepared: Option<state_m
     let previous = state.records.get(&r.record_id);
     if applied.receipt.version != previous.map_or(1, |r| if applied.request.vector_patch.is_some() { r.version } else { r.version.saturating_add(1) })
         || applied.receipt.record_id != r.record_id
-        || previous.is_some_and(|p| p.routing_key != r.routing_key)
         || state.operation_lookup.contains_key(&r.operation_id)
     {
         return Err(storage("inconsistent committed record operation"));
@@ -1777,7 +1773,6 @@ mod tests {
             temporal: None,
             system: None,            operation_id: OperationId::new(nonce.into()),
             record_id: id.into(),
-            routing_key: "document-1".into(),
             expected,
             document: Some(
                 serde_json::from_value(
@@ -1954,7 +1949,7 @@ mod tests {
         source.document.as_mut().unwrap().insert("body".into(),serde_json::json!("A中éZ"));
         source.document.as_mut().unwrap().insert("pages".into(),serde_json::json!(["第一页","page two"]));
         p.write(source.clone()).await.unwrap();
-        let reference=EvidenceRef{record_id:"s".into(),routing_key:"document-1".into(),version:1,locator:Some(EvidenceLocator::Utf8{field:"body".into(),start:1,end:6})};
+        let reference=EvidenceRef{record_id:"s".into(),version:1,locator:Some(EvidenceLocator::Utf8{field:"body".into(),start:1,end:6})};
         assert_eq!(p.evidence_excerpt(reference.clone()).await.unwrap().text,"中é");
         let mut derived=source_write("located-derived","d",&[("s",1)]);derived.system.as_mut().unwrap().evidence_refs[0]=reference.clone();
         let receipt=p.write(derived.clone()).await.unwrap();assert_eq!(p.write(derived).await.unwrap(),receipt);
@@ -2040,7 +2035,7 @@ mod tests {
 
     #[test]
     fn previous_document_upload_storage_formats_are_rejected() {
-        for tag in ["RecordCheckpointV15", "RecordAppliedV13", "RecordAnchorV2", "RecordLeaseExpiredV12"] {
+        for tag in ["RecordCheckpointV16", "RecordAppliedV14", "RecordAnchorV3", "RecordCheckpointV15", "RecordAppliedV13", "RecordAnchorV2", "RecordLeaseExpiredV12"] {
             let value=serde_json::json!({tag:{}});
             let error=serde_json::from_value::<Entry>(value).unwrap_err().to_string();
             assert!(error.contains("unknown variant"),"{tag}: {error}");
@@ -2063,11 +2058,11 @@ mod tests {
     }
     fn edge_write(nonce:&str,id:&str,from:&str,to:&str)->RecordWrite {
         let mut request=write(nonce,id,"alpha edge",ExpectedVersion::Absent);
-        let endpoint=|id:&str|EvidenceRef{locator:None,record_id:id.into(),routing_key:"document-1".into(),version:1};
+        let endpoint=|id:&str|EvidenceRef{locator:None,record_id:id.into(),version:1};
         request.system=Some(EvidenceMetadata{kind:EvidenceKind::Relation,relation:Some(RelationMetadata{from:endpoint(from),to:endpoint(to),relation_type:"knows".into(),weight:Some(0.5)}),evidence_refs:vec![]});request
     }
     fn neighbor_request(id:&str)->NeighborRequest {
-        NeighborRequest{seeds:vec![EvidenceRef{locator:None,record_id:id.into(),routing_key:"document-1".into(),version:1}],direction:RelationDirection::Both,relation_types:vec![],per_seed:128,max_candidates:100,allow_partial:false}
+        NeighborRequest{seeds:vec![EvidenceRef{locator:None,record_id:id.into(),version:1}],direction:RelationDirection::Both,relation_types:vec![],per_seed:128,max_candidates:100,allow_partial:false}
     }
     fn fusion_query() -> RecordQuery {
         RecordQuery{temporal:None,text:"alpha".into(),vector:Some(Embedding::F32(vec![1.0,0.0])),mode:SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() },query_type:QueryType::Union,offset:0,length:20,result_type:ResultType::Topk,fields:vec![],filters:vec![],sort:vec![]}
@@ -2485,7 +2480,7 @@ mod tests {
         request.system = Some(EvidenceMetadata {
             kind: if dependencies.is_empty() { EvidenceKind::Source } else { EvidenceKind::Derived }, relation:None,
             evidence_refs: dependencies.iter().map(|(id, version)| EvidenceRef {
-                locator:None, record_id: (*id).into(), routing_key: "document-1".into(), version: *version,
+                locator:None, record_id: (*id).into(), version: *version,
             }).collect(),
         });
         request
@@ -2597,6 +2592,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_identity_contract_rejects_removed_routing_field() {
+        fn strict<T: Serialize + serde::de::DeserializeOwned>(value: &T) {
+            let mut wire = serde_json::to_value(value).unwrap();
+            assert!(wire.get("routing_key").is_none());
+            let _: T = serde_json::from_value(wire.clone()).unwrap();
+            wire["routing_key"] = serde_json::json!("obsolete");
+            assert!(serde_json::from_value::<T>(wire).is_err());
+        }
+        let root = path();
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let source = source_write("source", "s", &[]);
+        strict(&source);
+        p.write(source).await.unwrap();
+        strict(&p.get("s").await.unwrap().unwrap());
+        strict(&EvidenceRef { record_id:"s".into(), version:1, locator:None });
+        drop(p);
+        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(p.get("s").await.unwrap().unwrap().version, 1);
+        drop(p);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn source_protocol_rejects_old_checkpoint_without_migration() {
         let root = path(); let cfg = config();
         let current = RecordPartition::create(&root, cfg.clone()).await.unwrap();
@@ -2605,10 +2623,10 @@ mod tests {
             encode_entry(&Entry::Checkpoint { config:inner.config.clone(), state:inner.state.try_clone().unwrap() }).unwrap()
         };
         drop(current); std::fs::remove_dir_all(&root).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV16", "RecordCheckpointV14", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV17", "RecordCheckpointV15", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         let error = RecordPartition::open(&root, cfg.max_journal_bytes).await.err().unwrap();
-        assert!(error.to_string().contains("RecordCheckpointV14"));
+        assert!(error.to_string().contains("RecordCheckpointV15"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2618,9 +2636,6 @@ mod tests {
         let p = RecordPartition::create(&root, config()).await.unwrap();
         p.write(source_write("s", "s", &[])).await.unwrap();
         assert!(p.write(source_write("wrong-version", "bad", &[("s", 2)])).await.is_err());
-        let mut wrong = source_write("wrong-route", "bad", &[("s", 1)]);
-        wrong.system.as_mut().unwrap().evidence_refs[0].routing_key = "wrong".into();
-        assert!(p.write(wrong).await.is_err());
         assert!(p.write(source_write("missing", "bad", &[("other-collection-record", 1)])).await.is_err());
         assert!(p.write(source_write("self", "self", &[("self", 1)])).await.is_err());
         assert!(p.write(source_write("many", "many", &vec![("s", 1); 33])).await.is_err());
@@ -2630,7 +2645,7 @@ mod tests {
         }
         assert!(p.write(source_write("too-deep", "deep", &[(&previous, 1)])).await.is_err());
         assert_eq!(p.statistics().await.unwrap().active_records, 17);
-        let value = serde_json::json!({"kind":"derived","evidence_refs":[{"collection_id":"other","record_id":"s","routing_key":"document-1","version":1}]});
+        let value = serde_json::json!({"kind":"derived","evidence_refs":[{"collection_id":"other","record_id":"s","version":1}]});
         assert!(serde_json::from_value::<EvidenceMetadata>(value).is_err());
         drop(p); std::fs::remove_dir_all(root).unwrap();
     }

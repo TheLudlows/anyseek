@@ -77,7 +77,7 @@ UI 默认将 `/api` 转发至 `http://127.0.0.1:8080`。API 根地址 `/` 返回
 
 ## API 与接入
 
-HTTP 使用 `/api/v1`、`apikey` 请求头和 JSON。创建 collection 时声明 schema；写入携带 `operation_id`、`record_id`、固定 `routing_key`、`expected` 和 `document`。发送前保存完整请求，未知结果重试原身份，不生成新的操作。
+HTTP 使用 `/api/v1`、`apikey` 请求头和 JSON。创建 collection 时声明 schema；写入携带 `operation_id`、`record_id`、`expected` 和 `document`。发送前保存完整请求，未知结果重试原身份，不生成新的操作。
 
 - [HTTP 请求示例](anyseek/src/server/test_api.rest)与[服务契约](anyseek/src/server/README.md)：记录、查询、授权、备份等完整流程。
 - `POST /api/v1/index/{id}/query`：文本、向量或混合查询；空对象浏览可见记录。

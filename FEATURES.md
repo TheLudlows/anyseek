@@ -12,7 +12,7 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | 来源与整文 | 精确来源版本、内联字符/页码定位、直接/间接证据；修订后 stale 默认隐藏，删除立即隐藏；片段逐批写入，不保证整文原子发布 |
 | 时间与生命周期 | UTC 毫秒时间过滤、固定 evaluation_time、不可逆 TTL；同 collection 实体与一跳关系 |
 | 过滤和排序 | 共享元数据谓词、字段排序、分页和投影；ANN/Hybrid 候选内重排不保证全库字段 Top-K |
-| 身份和写入 | 稳定 Record ID、不可变 routing key、版本条件、墓碑、防 ABA、原 operation_id 重试 |
+| 身份和写入 | 稳定 Record ID、版本条件、墓碑、防 ABA、原 operation_id 重试 |
 | 原始数据 | 权威状态保留完整 Document 和原始向量；schema.store 控制查询投影，不控制原始数据持久保存 |
 | 浏览 | 空查询浏览活动记录，包括纯向量 collection；iterator 按稳定 ID 分页，visible_seq 改变使 cursor 失效 |
 | 持久化 | 本地 Segment + tail，或 SQLite/S3 对象提交、远端 checkpoint 与 GC；同步写入 durable + visible；异步索引入口返回持久业务结果；真实 S3/系统断电尚待验收 |

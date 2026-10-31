@@ -62,7 +62,7 @@ PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin �
 collection ID、record ID 是字符串业务身份，内部 DocID 不作为 HTTP 身份。所有数据请求使用 `apikey` 请求头。
 
 - 创建：`{operation_id,collection_id,config,embedding_space_id?}`。`config` 包含名称/schema/可选向量配置；集合信息返回只读 `vector_dimensions`（无向量时为 null），供客户端校验。向量由调用方生成；`embedding_space_id` 仅为可选说明，不参与模型调用或向量来源校验。
-- 写入：`{operation_id,record_id,routing_key,expected,document}`。`document` 必须显式提供；对象完整替换，`null` 删除。已有身份不能更换 routing key。
+- 写入：`{operation_id,record_id,expected,document}`。`document` 必须显式提供；对象完整替换，`null` 删除。
 - `expected` 为 `"Absent"`、`{"Match":N}` 或 `"Any"`。删除后重建继续推进版本，避免旧条件命中新内容。
 - 操作 ID 是 `{epoch,nonce}`，epoch 是自 Unix epoch 起的 UTC 日数。当前日和前一日可重试；正常当日签发至少有 24 小时窗口。控制操作保留 `sys:` nonce 前缀。
 - 同步 `/doc`、`/batch` 成功表示 durable + visible，不需随后 PATCH。`/ingest` 的 committed 项只保证持久业务结果，索引异步推进。PATCH collection 是在线完整 checkpoint，不是确认写入的第二步；操作历史由保留期限及安全 GC 条件决定，不能通过手工 checkpoint 清空窗口内回执。
@@ -82,7 +82,7 @@ UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响�
 
 ## 异步索引写入
 
-`POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每次 1..64 项；每项携带自己的稳定 Record ID、routing key、条件版本和 Operation ID。文档显式为对象或 null，也可提交 vector_patch。HTTP body 仍为 2 MiB；partition 队列按在途项目总数 64 和序列化请求总量 4 MiB 有界准入，超额拒绝。
+`POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每次 1..64 项；每项携带自己的稳定 Record ID、条件版本和 Operation ID。文档显式为对象或 null，也可提交 vector_patch。HTTP body 仍为 2 MiB；partition 队列按在途项目总数 64 和序列化请求总量 4 MiB 有界准入，超额拒绝。
 
 返回 `atomic:false`、`searchability:"asynchronous"` 和与输入位置对应的 `results`。HTTP 200 只表示本次取得确定的逐项业务结果，不表示每项均成功：
 
@@ -130,7 +130,7 @@ op = lambda: {'epoch':int(time.time()//86400), 'nonce':uuid.uuid4().hex}
 requests = {
     'create': {'operation_id':op(), 'collection_id':'demo', 'config':{
         'index_name':'Demo', 'schema':[{'field':'body','field_type':'Text'}]}},
-    'write': {'operation_id':op(), 'record_id':'welcome', 'routing_key':'welcome',
+    'write': {'operation_id':op(), 'record_id':'welcome',
               'expected':'Absent', 'document':{'body':'hello search'}}
 }
 for name, request in requests.items():
@@ -143,7 +143,7 @@ curl -X POST "$BASE/api/v1/index/demo/query" -H "apikey: $API_KEY" -H 'Content-T
 curl "$BASE/api/v1/index/demo/doc/welcome" -H "apikey: $API_KEY"
 ```
 
-写入返回 `receipt`、`operation_id`、`expires_at`。查询返回 `hits[].record`（包含 record_id、routing_key、version、document）、score、visible_seq、statistics 和 count_total；按 ID 读取返回 Record envelope。更多条件更新、删除、授权、向量、备份示例见 [test_api.rest](test_api.rest)。
+写入返回 `receipt`、`operation_id`、`expires_at`。查询返回 `hits[].record`（包含 record_id、version、document）、score、visible_seq、statistics 和 count_total；按 ID 读取返回 Record envelope。更多条件更新、删除、授权、向量、备份示例见 [test_api.rest](test_api.rest)。
 
 ## 查询与遍历
 
@@ -226,26 +226,26 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 ```json
 {
   "operation_id": {"epoch": 20747, "nonce": "save-source"},
-  "record_id": "source-1", "routing_key": "document-1", "expected": "Absent",
+  "record_id": "source-1",  "expected": "Absent",
   "document": {"body": "Original source text"},
   "system": {"kind": "source"}
 }
 ```
 
-示例 epoch 仅作结构说明，实际按当前 UTC 日生成并随原请求保存。派生记录用自己的稳定 ID 和 `system:{"kind":"derived","evidence_refs":[{"record_id":"source-1","routing_key":"document-1","version":1}]}`。来源与派生均要求满足 collection 既有 schema/向量约束；向量字段可以缺失，缺失内容不参加向量召回。
+示例 epoch 仅作结构说明，实际按当前 UTC 日生成并随原请求保存。派生记录用自己的稳定 ID 和 `system:{"kind":"derived","evidence_refs":[{"record_id":"source-1","version":1}]}`。来源与派生均要求满足 collection 既有 schema/向量约束；向量字段可以缺失，缺失内容不参加向量召回。
 
-删除仍提交 `operation_id,record_id,routing_key,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；输出时继续复核来源数据有效性。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建暂不支持，不能把 business document 中的同名字段当作已实现语义。
+删除仍提交 `operation_id,record_id,expected:{"Match":1},document:null`，省略 system。确认成功后直接和间接派生内容立即从查询、按 ID 读取和统计隐藏；输出时继续复核来源数据有效性。引用只允许当前 collection，未知 collection 字段明确拒绝。Source 更新要求 `expected:{"Match":当前版本}`，可省略 system（继承来源类型）；保留旧修订，新来源可见，依赖旧版的直接/间接派生立即 stale 并默认隐藏。派生重算必须创建新 ID、引用最新版本。derived 更新、删除后重建暂不支持，不能把 business document 中的同名字段当作已实现语义。
 
 Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保存 operation_id 供重试。**独立备份中的 typed 内容恢复后保持 `evidence_quarantined:true`，当前没有解除隔离入口**；原文被保存但不可搜索，避免旧备份复活后来的删除。live WAL/在线 checkpoint 恢复不新增隔离。存活服务的 WAL/在线 checkpoint 恢复与独立备份恢复不同；独立恢复目录不能提升为当前删除权威。
 
 `GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样检查 Tenant/集合代次和输出数据有效性。状态包括 visible、stale、deleted、unavailable、quarantined。
 
-当前 Record 权威 journal 使用 RecordCheckpointV16、RecordAppliedV14 和 RecordHistoryTrimV13 等显式标签，拒绝旧格式，不提供升级迁移。低层搜索索引格式 8 与权威 journal 版本不是同一概念。
+当前 Record 权威 journal 使用 RecordCheckpointV17、RecordAppliedV15 和 RecordHistoryTrimV13 等显式标签，拒绝旧格式，不提供升级迁移。低层搜索索引格式 8 与权威 journal 版本不是同一概念。
 
 
 ### 可选向量与后补
 
-正文可先写入，不需零向量占位。沿用写入端点提交 `operation_id,record_id,routing_key,expected:{"Match":当前正文版本},vector_patch:{"vector":[2,0]}`，省略 document/system；仅填充尚未存在的 schema 向量字段。正文版本保持不变，提交序号推进；重复请求必须保留 operation_id。已删除、stale 或隔离 typed 记录不可补写，来源正文版本改变后旧请求冲突。
+正文可先写入，不需零向量占位。沿用写入端点提交 `operation_id,record_id,expected:{"Match":当前正文版本},vector_patch:{"vector":[2,0]}`，省略 document/system；仅填充尚未存在的 schema 向量字段。正文版本保持不变，提交序号推进；重复请求必须保留 operation_id。已删除、stale 或隔离 typed 记录不可补写，来源正文版本改变后旧请求冲突。
 
 状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[Record 语义](../../../docs/record-model.md)。
 
@@ -263,12 +263,12 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 
 ## 实体与显式一跳关系
 
-通过现有 RecordWrite 创建 `system:{"kind":"entity"}`，或 `system:{"kind":"relation","relation":{"from":{"record_id":"a","routing_key":"r","version":1},"to":{"record_id":"b","routing_key":"r","version":1},"relation_type":"knows","weight":0.5}}`。正文仍在 document；weight 可选，仅为调用方声明，不自动改变检索分数。evidence_refs 单独声明证据，端点不自动视为内容证据。
+通过现有 RecordWrite 创建 `system:{"kind":"entity"}`，或 `system:{"kind":"relation","relation":{"from":{"record_id":"a","version":1},"to":{"record_id":"b","version":1},"relation_type":"knows","weight":0.5}}`。正文仍在 document；weight 可选，仅为调用方声明，不自动改变检索分数。evidence_refs 单独声明证据，端点不自动视为内容证据。
 
 端点必须是同 collection/partition 当前可见的精确非关系版本。关系与双端的来源、TTL 共同控制可见性；端点替换、删除和 ABA 不会把旧边重新绑定。实体/关系正文可以 Match 精确更新，但 system 声明不可变，重算或重绑定使用新 Record ID。
 
 - `POST /api/v1/index/{id}/entities`：`{"cursor":null,"length":100}`，稳定 ID 分页；视图变化拒绝旧 cursor。
-- `POST /api/v1/index/{id}/neighbors`：`{"seeds":[{"record_id":"a","routing_key":"r","version":1}],"direction":"both","relation_types":[],"per_seed":128,"max_candidates":1000,"allow_partial":false}`。
+- `POST /api/v1/index/{id}/neighbors`：`{"seeds":[{"record_id":"a","version":1}],"direction":"both","relation_types":[],"per_seed":128,"max_candidates":1000,"allow_partial":false}`。
 
 一跳最多 32 个不同 seeds，类型最多 16 个，每 seed 最多 128 条，候选上限不超过 collection 配置，结果内容预算 4 MiB。排序为 seed 输入顺序再 neighbor ID/edge ID；自环去重。默认超预算拒绝，显式 allow_partial 才返回 complete=false、reason 与 count.relation=window；count 是返回的有效边路径数量，不是唯一邻居数。返回共同 visible_seq/evaluation_time_ms/statistics，数据有效性输出保护与查询相同。Web UI 记录页可提交实体/关系 JSON，并检查实体目录与一跳结果。
 
@@ -276,7 +276,7 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 
 ## 精确来源摘录
 
-`POST /api/v1/index/{id}/evidence` 接受 `{record_id,routing_key,version,locator}`。locator 可为 `{"kind":"utf8","field":"body","start":0,"end":5}`（UTF-8 字节半开区间，必须字符边界），或 `{"kind":"page","field":"pages","page":1}`（源字段为字符串数组、一基页码）。仅定位已持久内联 Source，不下载 URL 或解析 PDF；关系 endpoints/seeds 不接受 locator。派生 evidence_refs 可携带该定位。
+`POST /api/v1/index/{id}/evidence` 接受 `{record_id,version,locator}`。locator 可为 `{"kind":"utf8","field":"body","start":0,"end":5}`（UTF-8 字节半开区间，必须字符边界），或 `{"kind":"page","field":"pages","page":1}`（源字段为字符串数组、一基页码）。仅定位已持久内联 Source，不下载 URL 或解析 PDF；关系 endpoints/seeds 不接受 locator。派生 evidence_refs 可携带该定位。
 
 响应返回选中文本及完整字段/页的 SHA-256、固定 text/plain UTF-8 表示、精确 reference、共同水位与时间。Source 修订后可显式读取保留旧修订，普通 stale 派生仍隐藏；当前 source 已删除/过期/隔离时拒绝摘录，Tenant/集合代次和输出数据有效性检查继续适用。定位写入和恢复均校验范围。UI 记录页可输入精确 reference 查看摘录。分平台结果见实施记录第 20 节。
 
@@ -285,7 +285,7 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 `POST /api/v1/index/{id}/query` optionally accepts `relation_fusion`:
 
 ```json
-{"query":"alpha","length":10,"relation_fusion":{"neighbors":{"seeds":[{"record_id":"entity-a","routing_key":"route","version":1}],"direction":"both","per_seed":10,"max_candidates":100,"allow_partial":false},"rrf":{"constant":0.6,"keyword_weight":1,"vector_weight":1,"keyword_candidates":100,"vector_candidates":100},"relation_weight":1}}
+{"query":"alpha","length":10,"relation_fusion":{"neighbors":{"seeds":[{"record_id":"entity-a","version":1}],"direction":"both","per_seed":10,"max_candidates":100,"allow_partial":false},"rrf":{"constant":0.6,"keyword_weight":1,"vector_weight":1,"keyword_candidates":100,"vector_candidates":100},"relation_weight":1}}
 ```
 
 Add `query_vector` for the vector channel, with existing `all`/`nprobe`/threshold options. No embedding is computed. At least one enabled text/vector channel is required. `relation_weight` must be finite and positive. Existing `RrfOptions` validation applies; an enabled text/vector channel requires its explicit positive candidate budget. The sum of enabled text/vector budgets and `neighbors.max_candidates` must not exceed the collection candidate limit. Top-level `rrf`, field sorting and count-only/zero-length requests are rejected in this mode. Ordinary queries are unchanged.

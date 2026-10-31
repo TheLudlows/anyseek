@@ -109,7 +109,7 @@ impl Delta {
         let (hash, entries, expanded) = digest.finish();
         if entries != writer.entries || expanded != writer.expanded { return Err(invalid("delta preparation count mismatch")); }
         Ok(Some(Self { parent: identity, frames: Descriptor {
-            format: 2, config: config.clone(), chunks: writer.chunks,
+            format: 4, config: config.clone(), chunks: writer.chunks,
             entries, expanded, digest: hash, _build_lease:Some(Arc::new(writer.metadata)),
         }}))
     }
@@ -120,7 +120,7 @@ impl Delta {
         &self, root: &Path, pool: &PoolReader, authority: u64,
         mut accept: impl FnMut(Entry) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
-        if self.frames.format != 2 { return Err(invalid("unsupported delta format")); }
+        if self.frames.format != 4 { return Err(invalid("unsupported delta format")); }
         let mut actual = PieceDigest::new();
         self.frames.visit_pieces(root, pool, authority, None, |wire, _, bytes| {
             actual.value(&wire, bytes)?;
@@ -346,7 +346,7 @@ impl Descriptor {
             file.sync_all().map_err(storage)?;
         }
         Ok(Self {
-            format: 1,
+            format: 3,
             config: config.clone(),
             chunks: writer.chunks,
             entries: writer.entries,
@@ -360,7 +360,7 @@ impl Descriptor {
         mut accept:impl FnMut(Value,u64,u64)->Result<u64,RecordError>) -> Result<(),RecordError> {
         validate_config(&self.config)?;
         let limit = authority.min(self.config.max_journal_bytes);
-        if !matches!(self.format, 1 | 2)
+        if !matches!(self.format, 3 | 4)
             || self.chunks.is_empty()
             || self.chunks.len() > MAX_CHUNKS
             || self.expanded > expanded_limit(limit)?
@@ -467,14 +467,14 @@ impl Descriptor {
     // State, retaining only one decoded frame rather than a second full history.
     #[cfg(test)]
     pub(super) fn verify_expected(&self,root:&Path,pool:&PoolReader,authority:u64,state:&State)->Result<(),RecordError> {
-        if self.format != 1 { return Err(invalid("unsupported complete state format")); }
+        if self.format != 3 { return Err(invalid("unsupported complete state format")); }
         self.verify_encoded(root, pool, authority, &checkpoint_codec::StateEncoding::new(state)?)
     }
     pub(super) fn verify_encoded(&self, root: &Path, pool: &PoolReader, authority: u64,
         encoded: &checkpoint_codec::StateEncoding<'_>,
     ) -> Result<(), RecordError> {
         let state = encoded.state();
-        if self.format != 1 { return Err(invalid("unsupported complete state format")); }
+        if self.format != 3 { return Err(invalid("unsupported complete state format")); }
         // Recoverability is checked per bounded frame/value, with the complete
         // residency charged to the shared pool by its actual owners.
         if encoded.digest() != self.digest || encoded.length() as u64 > authority.min(self.config.max_journal_bytes) {
@@ -496,7 +496,7 @@ impl Descriptor {
         pool: &PoolReader,
         authority: u64,
     ) -> Result<Decoded, RecordError> {
-        if self.format != 1 { return Err(invalid("unsupported complete state format")); }
+        if self.format != 3 { return Err(invalid("unsupported complete state format")); }
         let mut state=None;
         let mut residency=reserve_memory(0).map_err(storage)?;
         self.visit_pieces(root,pool,authority,Some(&mut residency),|wire,ordinal,_| {

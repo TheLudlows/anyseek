@@ -9,15 +9,15 @@ from record_service_smoke import operation
 def exercise(call,restart_with,faults):
     endpoint='/api/v1/index/locators'
     call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'locators','config':{'index_name':'Locators','schema':[{'field':'body','field_type':'Text','store':True}]}})
-    source={'operation_id':operation(),'record_id':'s','routing_key':'r','expected':'Absent','document':{'body':'A中éZ','pages':['第一页','page two']},'system':{'kind':'source'}}
+    source={'operation_id':operation(),'record_id':'s','expected':'Absent','document':{'body':'A中éZ','pages':['第一页','page two']},'system':{'kind':'source'}}
     call('POST',endpoint+'/doc',source)
-    ref={'record_id':'s','routing_key':'r','version':1,'locator':{'kind':'utf8','field':'body','start':1,'end':6}}
+    ref={'record_id':'s','version':1,'locator':{'kind':'utf8','field':'body','start':1,'end':6}}
     excerpt=call('POST',endpoint+'/evidence',ref)
     assert excerpt['text']=='中é' and excerpt['content_sha256']==hashlib.sha256('A中éZ'.encode()).hexdigest()
     assert call('POST',endpoint+'/evidence',{**ref,'locator':{'kind':'page','field':'pages','page':2}})['text']=='page two'
     call('POST',endpoint+'/evidence',{**ref,'locator':{'kind':'page','field':'pages','page':0}},status=400)
     def derived(rid,reference=ref):
-        return {'operation_id':operation(),'record_id':rid,'routing_key':'r','expected':'Absent','document':{'body':'located proof'},'system':{'kind':'derived','evidence_refs':[reference]}}
+        return {'operation_id':operation(),'record_id':rid,'expected':'Absent','document':{'body':'located proof'},'system':{'kind':'derived','evidence_refs':[reference]}}
     bad={**ref,'locator':{**ref['locator'],'start':2}}
     call('POST',endpoint+'/doc',derived('bad',bad),status=400)
     request=derived('d');receipt=call('POST',endpoint+'/doc',request)['receipt']
@@ -45,7 +45,7 @@ def exercise(call,restart_with,faults):
     call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'locator-reader'})
     call('POST',endpoint+'/evidence',ref,key=reader,status=403)
     archive=call('POST',endpoint+'/backup',{'operation_id':operation()})
-    call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','routing_key':'r','expected':{'Match':2},'document':None})
+    call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','expected':{'Match':2},'document':None})
     call('POST',endpoint+'/evidence',ref,status=409)
     call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'locators-copy','backup_id':archive['backup_id']})
     call('POST','/api/v1/index/locators-copy/evidence',ref,status=409)

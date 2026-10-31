@@ -1,3 +1,4 @@
+import { t } from "./i18n.ts";
 import { useState } from "react";
 import { ArrowRight, Braces, Network, ScanText } from "lucide-react";
 import {
@@ -12,22 +13,22 @@ import { apiJsonText } from "./json.ts";
 import { Busy, JsonView, Notice } from "./components.tsx";
 import type { Collection, Json } from "./types.ts";
 
-const tools = [
+const getTools = () => [
   {
     id: "entities",
-    name: "实体目录",
+    name: t("实体目录"),
     icon: Network,
-    text: "浏览可见实体，使用原始游标继续读取。",
+    text: t("浏览可见实体，使用原始游标继续读取。"),
     sample: '{"length":20}',
   },
   {
     id: "neighbors",
-    name: "一跳关系",
+    name: t("一跳关系"),
     icon: Network,
-    text: "从明确的种子记录出发，查看有界的一跳关系。",
+    text: t("从明确的种子记录出发，查看有界的一跳关系。"),
     sample: JSON.stringify(
       {
-        seeds: [{ record_id: "entity_id", routing_key: "route", version: 1 }],
+        seeds: [{ record_id: "entity_id", version: 1 }],
         direction: "out",
         relation_types: [],
         per_seed: 10,
@@ -40,9 +41,9 @@ const tools = [
   },
   {
     id: "query",
-    name: "关系融合",
+    name: t("关系融合"),
     icon: Braces,
-    text: "直接提交查询与 relation_fusion，检查通道与候选窗口。",
+    text: t("直接提交查询与 relation_fusion，检查通道与候选窗口。"),
     sample: JSON.stringify(
       {
         query: "关键词",
@@ -57,7 +58,7 @@ const tools = [
           relation_weight: 1,
           neighbors: {
             seeds: [
-              { record_id: "entity_id", routing_key: "route", version: 1 },
+              { record_id: "entity_id", version: 1 },
             ],
             direction: "out",
             relation_types: [],
@@ -73,13 +74,12 @@ const tools = [
   },
   {
     id: "evidence",
-    name: "来源证据",
+    name: t("来源证据"),
     icon: ScanText,
-    text: "读取精确的证据摘录与内容哈希。UTF-8 范围以字节计。",
+    text: t("读取精确的证据摘录与内容哈希。UTF-8 范围以字节计。"),
     sample: JSON.stringify(
       {
         record_id: "source_id",
-        routing_key: "route",
         version: 1,
         locator: { kind: "utf8", field: "body", start: 0, end: 10 },
       },
@@ -95,11 +95,13 @@ export function Tools({
   collection: Collection;
   apiKey: string;
 }) {
-  const [tool, setTool] = useState(tools[0]),
+  const tools = getTools();
+  const [toolId, setToolId] = useState(tools[0].id),
     [source, setSource] = useState(tools[0].sample);
   const [result, setResult] = useState<Json>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
+  const tool = tools.find(item => item.id === toolId) ?? tools[0];
   async function run(next = false) {
     setBusy(true);
     setError("");
@@ -119,14 +121,14 @@ export function Tools({
   }
   return (
     <div className="tools-layout">
-      <nav className="tool-nav" aria-label="高级检查工具">
+      <nav className="tool-nav" aria-label={t("高级检查工具")}>
         {tools.map((t) => (
           <button
             key={t.id}
             disabled={busy}
             className={t === tool ? "active" : ""}
             onClick={() => {
-              setTool(t);
+              setToolId(t.id);
               setSource(t.sample);
               setResult(null);
               setError("");
@@ -153,9 +155,9 @@ export function Tools({
             }}
           >
             <label>
-              请求 JSON
+              {t("请求 JSON")}
               <textarea
-                aria-label="请求 JSON"
+                aria-label={t("请求 JSON")}
                 className="code-input"
                 rows={13}
                 value={source}
@@ -165,7 +167,7 @@ export function Tools({
             </label>
             <div className="inline-actions">
               <button className="primary" disabled={busy}>
-                {busy ? <Busy label="正在读取" /> : "运行检查"}
+                {busy ? <Busy label={t("正在读取")} /> : t("运行检查")}
               </button>
               {tool.id === "entities" && result?.next && (
                 <button
@@ -174,14 +176,13 @@ export function Tools({
                   disabled={busy}
                   onClick={() => run(true)}
                 >
-                  下一页实体
-                  <ArrowRight size={14} />
+                  {t("下一页实体")}<ArrowRight size={14} />
                 </button>
               )}
             </div>
           </form>
           <Notice>{error}</Notice>
-          {result && <JsonView value={result} label="API 响应" />}
+          {result && <JsonView value={result} label={t("API 响应")} />}
         </div>
       </section>
     </div>
@@ -199,18 +200,18 @@ export function Recovery() {
     setError("");
     setResult(null);
     try {
-      if (!master.trim()) throw new Error("请输入 Master API Key。");
+      if (!master.trim()) throw new Error(t("请输入 Master API Key。"));
       const owner = await ownerFor(master.trim());
       let pending = storage.get<{ owner: string; body: string }>(
         "service." + action,
       );
       if (pending && pending.owner !== owner)
         throw new Error(
-          "已有另一管理连接的待确认操作，请用原 Master Key 重试。",
+          t("已有另一管理连接的待确认操作，请用原 Master Key 重试。"),
         );
       if (!pending) {
         if (action === "restore" && !/^[0-9a-f]{64}$/.test(backup))
-          throw new Error("备份 ID 应为 64 位小写十六进制字符串。");
+          throw new Error(t("备份 ID 应为 64 位小写十六进制字符串。"));
         pending = {
           owner,
           body: JSON.stringify({
@@ -239,16 +240,14 @@ export function Recovery() {
     <section className="panel recovery-panel">
       <div className="panel-toolbar">
         <div>
-          <h2>服务备份与恢复</h2>
-          <p>管理员操作，需要单独提供 Master API Key。</p>
+          <h2>{t("服务备份与恢复")}</h2>
+          <p>{t("管理员操作，需要单独提供 Master API Key。")}</p>
         </div>
         <span className="tag">ADMIN</span>
       </div>
       <div className="tool-body">
         <Notice kind="info">
-          恢复会创建新的停止状态数据根目录，不替换运行中的服务。目标服务需重新签发
-          Tenant Key，证据内容遵循服务返回的隔离状态。
-        </Notice>
+          {t("恢复会创建新的停止状态数据根目录，不替换运行中的服务。目标服务需重新签发 Tenant Key，证据内容遵循服务返回的隔离状态。")}</Notice>
         <label>
           Master API Key
           <input
@@ -256,16 +255,15 @@ export function Recovery() {
             autoComplete="off"
             value={master}
             onChange={(e) => setMaster(e.target.value)}
-            placeholder="仅用于本页操作，不保存此密钥"
+            placeholder={t("仅用于本页操作，不保存此密钥")}
           />
         </label>
         <label>
-          服务备份 ID
-          <input
+          {t("服务备份 ID")}<input
             className="mono"
             value={backup}
             onChange={(e) => setBackup(e.target.value.trim())}
-            placeholder="创建备份后获取，或粘贴已有备份 ID"
+            placeholder={t("创建备份后获取，或粘贴已有备份 ID")}
           />
         </label>
         <div className="inline-actions">
@@ -274,42 +272,37 @@ export function Recovery() {
             disabled={busy}
             onClick={() => run("backup")}
           >
-            {busy ? <Busy label="处理中" /> : "创建 / 重试备份"}
+            {busy ? <Busy label={t("处理中")} /> : t("创建 / 重试备份")}
           </button>
           <button
             className="secondary"
             disabled={busy}
             onClick={() => setConfirmRestore(true)}
           >
-            恢复 / 重试到新目录
-          </button>
+            {t("恢复 / 重试到新目录")}</button>
         </div>
         {confirmRestore && (
           <div className="restore-confirm">
             <Notice kind="info">
-              确认使用上方备份创建新的恢复目录？如果有待确认恢复，将复用其原始请求。
-            </Notice>
+              {t("确认使用上方备份创建新的恢复目录？如果有待确认恢复，将复用其原始请求。")}</Notice>
             <button
               className="primary"
               disabled={busy}
               onClick={() => run("restore")}
             >
-              确认恢复
-            </button>
+              {t("确认恢复")}</button>
             <button
               className="text-button"
               disabled={busy}
               onClick={() => setConfirmRestore(false)}
             >
-              取消
-            </button>
+              {t("取消")}</button>
           </div>
         )}
         <Notice>{error}</Notice>
-        {result && <JsonView value={result} label="服务响应" />}
+        {result && <JsonView value={result} label={t("服务响应")} />}
         <p className="field-help">
-          网络中断时保留原始请求；使用相同密钥重试，避免重复操作。
-        </p>
+          {t("网络中断时保留原始请求；使用相同密钥重试，避免重复操作。")}</p>
       </div>
     </section>
   );

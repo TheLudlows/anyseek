@@ -218,7 +218,7 @@ test("creation and i64 import survive lost responses and reload with identical r
   await page
     .getByLabel("导入 JSON", { exact: true })
     .fill(
-      `{"record_id":"${first.record_id}","routing_key":"${first.routing_key}","expected":{"Match":1},"document":${copied}}`,
+      `{"record_id":"${first.record_id}","expected":{"Match":1},"document":${copied}}`,
     );
   await page.getByRole("button", { name: "写入集合", exact: true }).click();
   await expect(
@@ -246,7 +246,9 @@ test("real lexical/vector/hybrid search, empty state, explanations, advanced too
   await page.locator(".result-card").first().click();
   await expect(
     page.getByRole("complementary", { name: "记录详情" }),
-  ).toContainText("lexical");
+  ).toContainText("关键词");
+  await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("原始分数");
+  await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("第 1 名");
   await page.screenshot({
     path: "test-results/screenshots/search.png",
     fullPage: true,
@@ -259,6 +261,11 @@ test("real lexical/vector/hybrid search, empty state, explanations, advanced too
   await page.getByRole("button", { name: "混合 Hybrid", exact: true }).click();
   await page.getByRole("button", { name: "运行检索", exact: true }).click();
   await expect(page.locator(".result-card").first()).toBeVisible();
+  await expect(page.locator(".result-card").first()).toContainText("关键词：");
+  await expect(page.locator(".result-card").first()).toContainText("向量：");
+  await page.locator(".result-card").first().click();
+  await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("最终融合分");
+  await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("融合贡献");
   await page
     .getByRole("button", { name: "关键词 Lexical", exact: true })
     .click();
@@ -288,7 +295,6 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
     await call(`index/${collection}/doc`, {
       operation_id: operation(),
       record_id: id,
-      routing_key: "route",
       expected: "Absent",
       document: { title: id, body: "entity" },
       system: { kind: "entity" },
@@ -296,14 +302,13 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
   await call(`index/${collection}/doc`, {
     operation_id: operation(),
     record_id: "edge",
-    routing_key: "route",
     expected: "Absent",
     document: { title: "Knows", body: "relation" },
     system: {
       kind: "relation",
       relation: {
-        from: { record_id: "entity_a", routing_key: "route", version: 1 },
-        to: { record_id: "entity_b", routing_key: "route", version: 1 },
+        from: { record_id: "entity_a", version: 1 },
+        to: { record_id: "entity_b", version: 1 },
         relation_type: "knows",
       },
     },
@@ -311,7 +316,6 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
   await call(`index/${collection}/doc`, {
     operation_id: operation(),
     record_id: "source",
-    routing_key: "route",
     expected: "Absent",
     document: { title: "Source", body: "sourceword" },
     system: { kind: "source" },
@@ -320,7 +324,6 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
     await call(`index/${collection}/doc`, {
       operation_id: operation(),
       record_id: "page_" + i.toString().padStart(2, "0"),
-      routing_key: "route",
       expected: "Absent",
       document: { title: "分页 " + i, body: "pagination" },
     });
@@ -344,7 +347,7 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
   await page.getByRole("button", { name: "一跳关系", exact: true }).click();
   await page.getByLabel("请求 JSON", { exact: true }).fill(
     JSON.stringify({
-      seeds: [{ record_id: "entity_a", routing_key: "route", version: 1 }],
+      seeds: [{ record_id: "entity_a", version: 1 }],
       direction: "out",
       relation_types: [],
       per_seed: 10,
@@ -368,7 +371,7 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
         },
         relation_weight: 1,
         neighbors: {
-          seeds: [{ record_id: "entity_a", routing_key: "route", version: 1 }],
+          seeds: [{ record_id: "entity_a", version: 1 }],
           direction: "out",
           relation_types: [],
           per_seed: 10,
@@ -386,7 +389,6 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
   await page.getByLabel("请求 JSON", { exact: true }).fill(
     JSON.stringify({
       record_id: "source",
-      routing_key: "route",
       version: 1,
       locator: { kind: "utf8", field: "body", start: 0, end: 6 },
     }),
@@ -503,6 +505,21 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "检索调试", exact: true }).click();
   await page.getByRole("button", { name: "向量 Vector", exact: true }).click();
   await page.getByLabel("检索内容", { exact: true }).fill("find documents");
+  let queryCalls = 0;
+  page.on("request", request => {
+    if (request.method() === "POST" && request.url().endsWith(`/index/${id}/query`)) {
+      queryCalls++;
+      expect(request.postDataJSON().query_vector).toEqual([1, 0, 0]);
+    }
+  });
+  await page.getByRole("button", { name: "生成并预览向量", exact: true }).click();
+  await expect(page.getByText("当前查询向量 · 3 维", { exact: true })).toBeVisible();
+  expect(modelCalls).toBe(3);
+  expect(queryCalls).toBe(0);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.getByRole("button", { name: "复制 查询向量预览", exact: true }).click();
+  await expect.poll(async () => JSON.parse(await page.evaluate(() => navigator.clipboard.readText()))).toEqual([1,0,0]);
+  expect(queryCalls).toBe(0);
   await page.getByRole("button", { name: /筛选与参数/ }).click();
   await page.getByText("高级查询参数 · JSON", { exact: true }).click();
   await page.getByLabel("高级查询参数", { exact: true }).fill('{"all":true}');
@@ -512,6 +529,13 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.getByRole("button", { name: "下一页结果", exact: true }).click();
   await expect(page.locator(".result-card")).toHaveCount(1);
   expect(modelCalls).toBe(3);
+  expect(queryCalls).toBe(2);
+  await page.getByLabel("检索内容", { exact: true }).fill("another query");
+  await expect(page.getByText("当前查询向量 · 3 维", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "生成并预览向量", exact: true }).click();
+  await expect(page.getByText("当前查询向量 · 3 维", { exact: true })).toBeVisible();
+  expect(modelCalls).toBe(4);
+  expect(queryCalls).toBe(2);
   await page.getByRole("button", { name: "连接与管理", exact: true }).click();
   await page.getByRole("button", { name: "清除本地模型配置", exact: true }).click();
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("anyseek.embedding.")))).toEqual([]);

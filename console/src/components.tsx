@@ -1,4 +1,7 @@
-import { useState, type ReactNode } from "react";
+import { LanguageSwitch } from "./LanguageSwitch.tsx";
+import { localizeNotice } from "./i18n.ts";
+import { t } from "./i18n.ts";
+import { useState, Children, isValidElement, cloneElement, Fragment, type ReactNode } from "react";
 import {
   AlertCircle,
   ArrowRight,
@@ -11,6 +14,14 @@ import {
 import { apiJsonText, apiFieldText, prettyJson } from "./json.ts";
 import type { RecordData } from "./types.ts";
 
+function noticeContent(children: ReactNode): ReactNode {
+  return Children.map(children, child => {
+    if (typeof child === "string") return localizeNotice(child);
+    if (isValidElement<{ children?: ReactNode }>(child) && child.type === Fragment)
+      return cloneElement(child, {}, noticeContent(child.props.children));
+    return child;
+  });
+}
 export function Notice({
   children,
   kind = "error",
@@ -24,15 +35,15 @@ export function Notice({
       role={kind === "error" ? "alert" : "status"}
     >
       <AlertCircle size={16} />
-      <div>{children}</div>
+      <div>{noticeContent(children)}</div>
     </div>
   ) : null;
 }
-export function Busy({ label = "正在加载" }: { label?: string }) {
+export function Busy({ label = t("正在加载") }: { label?: string }) {
   return (
     <span className="busy" role="status">
       <LoaderCircle size={15} className="spin" />
-      {label}
+      {localizeNotice(label)}
     </span>
   );
 }
@@ -72,14 +83,15 @@ export function JsonView({
         <span>{label}</span>
         <button
           className="icon-button"
-          aria-label={"复制 " + label}
+          type="button"
+          aria-label={t("复制 ") + label}
           onClick={async () => {
             try {
               await navigator.clipboard.writeText(source);
               setCopied(true);
               setTimeout(() => setCopied(false), 1800);
             } catch {
-              setError("复制失败，请选择下方内容手动复制。");
+              setError(t("复制失败，请选择下方内容手动复制。"));
             }
           }}
         >
@@ -120,10 +132,11 @@ export function Modal({
     >
       <div className="modal-title">
         <h2>{title}</h2>
+        <LanguageSwitch />
         <button
           className="icon-button"
           disabled={busy}
-          aria-label="关闭"
+          aria-label={t("关闭")}
           onClick={close}
         >
           <X size={18} />
@@ -150,10 +163,12 @@ export function RecordPreview({
   record,
   close,
   explanation,
+  scoreDetails,
 }: {
   record: RecordData;
   close: () => void;
   explanation?: unknown;
+  scoreDetails?: ReactNode;
 }) {
   let sourceUrl: string | null = null;
   try {
@@ -163,10 +178,10 @@ export function RecordPreview({
     /* Records without a web URL still have their full JSON preview. */
   }
   return (
-    <aside className="preview" aria-label="记录详情">
+    <aside className="preview" aria-label={t("记录详情")}>
       <div className="preview-heading">
-        <span>记录详情</span>
-        <button className="icon-button" aria-label="关闭预览" onClick={close}>
+        <span>{t("记录详情")}</span>
+        <button className="icon-button" aria-label={t("关闭预览")} onClick={close}>
           <X size={17} />
         </button>
       </div>
@@ -176,9 +191,7 @@ export function RecordPreview({
         <dl className="metadata">
           <dt>Record ID</dt>
           <dd>{apiFieldText(record, "record_id")}</dd>
-          <dt>Routing key</dt>
-          <dd>{apiFieldText(record, "routing_key")}</dd>
-          <dt>版本</dt>
+          <dt>{t("版本")}</dt>
           <dd>{apiFieldText(record, "version")}</dd>
         </dl>
         {recordBody(record) && (
@@ -191,20 +204,21 @@ export function RecordPreview({
             target="_blank"
             rel="noopener noreferrer"
           >
-            打开来源链接 <ArrowRight size={13} />
+            {t("打开来源链接")}<ArrowRight size={13} />
           </a>
         )}
+        {scoreDetails}
         <JsonView value={record.document} label="Document JSON" />
         <details>
           <summary>
-            完整记录 <ArrowRight size={13} />
+            {t("完整记录")}<ArrowRight size={13} />
           </summary>
           <JsonView value={record} label="Record JSON" />
         </details>
         {explanation != null && (
-          <details open>
-            <summary>检索解释</summary>
-            <JsonView value={explanation} label="检索得分与通道" />
+          <details>
+            <summary>{t("原始检索解释 · JSON")}</summary>
+            <JsonView value={explanation} label={t("检索得分与通道")} />
           </details>
         )}
       </div>

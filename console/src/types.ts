@@ -22,12 +22,11 @@ export type Collection = {
 };
 export type RecordData = {
   record_id: string;
-  routing_key: string;
   version: number;
   document: Record<string, Json> | null;
   [key: string]: Json;
 };
-export type Hit = { record: RecordData; score?: number; channels?: Json[] };
+export type Hit = { record: RecordData; score?: number; channels?: import("./scores.ts").ChannelScore[] };
 export type Page = {
   records: RecordData[];
   next: Json;

@@ -171,5 +171,7 @@
   "record::tests::removed_upload_envelope_is_rejected_but_business_generation_is_opaque",
   "record::tests::previous_document_upload_storage_formats_are_rejected",
   "record::anchor::tests::payload_budget_retains_historical_objects_beyond_live_operation_limit",
-  "record::segment_state::tests::full_state_payload_bound_counts_sources_and_vector_patches"
+  "record::segment_state::tests::full_state_payload_bound_counts_sources_and_vector_patches",
+  "record::tests::record_identity_contract_rejects_removed_routing_field",
+  "record::tests::source_protocol_rejects_old_checkpoint_without_migration"
 ]
