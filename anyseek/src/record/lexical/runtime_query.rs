@@ -83,12 +83,12 @@ pub(crate) async fn search(
         }
     }
     let root = index.read().await;
-    let shards = futures::future::join_all(root.segments.iter().map(|s| s.read())).await;
+    let shards = futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
     if shards.iter().any(|shard|shard.failed) {return Err(RecordError::RecoveryRequired);}
-    if root.record_lexical.is_empty() || shards.is_empty() {
+    if shards.is_empty() {
         return Err(storage("empty retrieval view"));
     }
-    let config = &root.record_lexical[0].config;
+    let config = &root.segments[0].lexical.config;
     // Admission precedes active identity maps, term/field scorers and Top-K buffers.
     // The input bound is the selected live population, not retired physical history.
     let mut query_bytes = 65536u64;
@@ -106,8 +106,8 @@ pub(crate) async fn search(
         .transpose().map_err(storage)?;
 
     let mut snapshots = Vec::new();
-    for runtime in &root.record_lexical {
-        snapshots.push(runtime.snapshot().await?);
+    for segment in &root.segments {
+        snapshots.push(segment.lexical.snapshot().await?);
     }
     let mut selected = BTreeSet::new();
     let mut locations = BTreeMap::new();
@@ -161,7 +161,7 @@ pub(crate) async fn search(
                 .map(|i| snapshots[0].fields[i])
         })
         .collect::<Vec<_>>();
-    let analyzer = &root.record_lexical[0].analyzer;
+    let analyzer = &root.segments[0].lexical.analyzer;
     let plan = analyzer
         .query_fields(
             &text,

@@ -162,8 +162,8 @@ impl Frozen {
                 }
             }).await.map_err(|_|RecordError::Busy)?;
         }
-        let active=index.read().await.segments[0].read().await.active.as_ref().ok_or_else(||storage("missing frozen statistics"))?.clone_local();
-        let native=index.read().await.record_lexical[0].clone();
+        let active=index.read().await.segments[0].vector.read().await.active.as_ref().ok_or_else(||storage("missing frozen statistics"))?.clone_local();
+        let native=index.read().await.segments[0].lexical.clone();
         native.seal().await?;
         drop(native);
         drop(index);
@@ -202,13 +202,12 @@ impl Frozen {
         let estimate=mapped.checked_mul(2).ok_or_else(||storage("loaded segment estimate overflow"))?;
         let mut reservation=build_budget::admit(config,std::iter::empty()).map_err(|e|storage(format!("stage=frozen_component_base package={} {e}",self.id)))?;
         reservation.grow(estimate).map_err(storage)?;
-        let index=crate::index::open_index(&path).await.map_err(storage)?;
-        index.write().await.record_lexical.push(lexical::runtime::Runtime::open_owned(&path.join("native"),config).await?);
-        index.read().await.segments[0].write().await.build_reservation=Some(reservation);
+        let index=crate::index::open_index(&path,config).await?;
+        index.read().await.segments[0].vector.write().await.build_reservation=Some(reservation);
         {
             let index=index.read().await;
             if index.segments.len()!=1||!index.stored_field_names.is_empty(){return Err(storage("invalid frozen topology"));}
-            let mut shard=index.segments[0].write().await;
+            let mut shard=index.segments[0].vector.write().await;
             if shard.indexed_doc_count!=active.keys.len(){return Err(storage("frozen cardinality mismatch"));}
             shard.delete_hashset=(0..active.keys.len()).filter(|id|!active.is_live(*id)).collect();
             active.retired.get_or_insert_with(Default::default);
@@ -551,8 +550,7 @@ impl Reference {
         if live!=expected{return Err(storage("anchor visible identity mismatch"));}
         let index=indexes[0].clone();
         let mut shards=Vec::new();for component in &indexes{shards.push(component.read().await.segments[0].clone());}
-        let mut native=Vec::new();for component in &indexes{native.extend(component.read().await.record_lexical.iter().cloned());}
-        {let mut root=index.write().await;root.segments=shards;root.record_lexical=native;}
+        {let mut root=index.write().await;root.segments=shards;}
         Ok(VerifiedView{index,ordinals,locations,payloads})
     }
 }
@@ -605,7 +603,7 @@ impl Inner {
         let root=self.journal.root().to_path_buf();
         let target=root.join(format!("segment-{:032x}",rand::random::<u128>()));
         let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
-        successor.read().await.record_lexical[0].admit_writer().await?;
+        successor.read().await.segments[0].lexical.admit_writer().await?;
         let budget=view::RotationBudget{max_segments:capacity::segments(&self.config).checked_add(1).ok_or_else(||storage("recovery segment limit overflow"))?,max_address_slots:self.config.max_records.checked_add(self.config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("view address budget overflow"))?};
         // Fence before the first potentially destructive seal. A successful
         // private handoff restores availability even if certificate preparation
@@ -634,7 +632,7 @@ impl Inner {
         let _disk=crate::storage::build_budget::DiskScope::begin(&root,closure_limit(self.config.max_journal_bytes)?).map_err(storage)?;
         let target=root.join(format!("cache-{:032x}",rand::random::<u128>()));
         let (successor,_)=build_at(&root,&target,&self.config,&State::default()).await?;
-        successor.read().await.record_lexical[0].admit_writer().await?;
+        successor.read().await.segments[0].lexical.admit_writer().await?;
         let budget=view::RotationBudget{max_segments:limit,max_address_slots:cache_merge::address_limit(&self.config)?};
         let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
         self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
@@ -1222,7 +1220,7 @@ mod tests {
         let tail=p.inner.lock().await.index.stable_tail_path(&path).await.unwrap();
         let b=write("b","b","alpha beta",ExpectedVersion::Absent);
         let receipt=p.write(b.clone()).await.unwrap();
-        let held=p.inner.lock().await.index.test_index().read().await.record_lexical[0].snapshot().await.unwrap();
+        let held=p.inner.lock().await.index.test_index().read().await.segments[0].lexical.snapshot().await.unwrap();
         std::fs::write(path.join(".test-anchor-reject-loaded"),b"reject").unwrap();
         assert!(p.compact_journal().await.is_err());
         let sealed={let inner=p.inner.lock().await;assert!(inner.healthy);
@@ -1489,7 +1487,7 @@ mod tests {
             let root=path();std::fs::create_dir(&root).unwrap();
             std::fs::write(root.join(filename),b"existing data").unwrap();
             let cfg=config();
-            assert!(create_index(&root,cfg.index,&retrieval_schema(&config())).await.is_err());
+            assert!(create_index(&root,cfg.index.clone(),&retrieval_schema(&cfg),&cfg).await.is_err());
             assert_eq!(std::fs::read(root.join(filename)).unwrap(),b"existing data");
             assert_eq!(std::fs::read_dir(&root).unwrap().count(),1);
             std::fs::remove_dir_all(root).unwrap();
@@ -1501,7 +1499,7 @@ mod tests {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
         let inner=p.inner.lock().await;let index=inner.index.test_index().read().await;
         for shard in &index.segments {
-            let shard=shard.read().await;
+            let shard=shard.vector.read().await;
             assert_eq!(shard.block_vector_buffer.capacity(),0);
         }
         drop(index);drop(inner);drop(p);std::fs::remove_dir_all(root).unwrap();

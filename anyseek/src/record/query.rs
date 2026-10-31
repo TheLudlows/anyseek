@@ -47,7 +47,7 @@ impl Handle {
     pub async fn filter(&self, filters: &[FacetFilter]) -> Result<Selection, RecordError> {
         let root = self.index.read().await;
         let shards =
-            futures::future::join_all(root.segments.iter().map(|shard| shard.read())).await;
+            futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
         if shards.iter().any(|shard| shard.failed) {
             return Err(RecordError::RecoveryRequired);
         }
@@ -84,7 +84,7 @@ impl Handle {
         }
         Ok(Selection {
             rows,
-            _pins: root.record_lexical.clone(),
+            _pins: root.segments.iter().map(|segment| segment.lexical.clone()).collect(),
             _memory: memory,
             _scope: scope,
         })
@@ -111,7 +111,7 @@ impl Handle {
             .map_err(storage)?;
         Ok(Self {
             index: Arc::new(tokio::sync::RwLock::new(root.clone())),
-            _pins: root.record_lexical.clone(),
+            _pins: root.segments.iter().map(|segment| segment.lexical.clone()).collect(),
             _memory: memory,
             _scope: scope,
         })
@@ -122,7 +122,7 @@ impl Handle {
     ) -> Result<Vec<Candidate>, RecordError> {
         let root = self.index.read().await;
         let shards =
-            futures::future::join_all(root.segments.iter().map(|shard| shard.read())).await;
+            futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
         if shards.iter().any(|shard| shard.failed) {
             return Err(RecordError::RecoveryRequired);
         }
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn independent_lexical_order_and_topology_join_by_revision() {
+    async fn independent_lexical_order_joins_by_revision() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("records");
         let p = RecordPartition::create(&root, config()).await.unwrap();
@@ -359,17 +359,17 @@ mod tests {
         }
         let handle = p.inner.lock().await.index.capture_query(10).await.unwrap();
         let one = lexical::runtime::Runtime::create(&temporary.path().join("lexical-one"), &config()).unwrap();
-        let two = lexical::runtime::Runtime::create(&temporary.path().join("lexical-two"), &config()).unwrap();
         let doc = write("unused", "unused", "alpha", ExpectedVersion::Absent).document.unwrap();
         one.append(lexical::Identity { id: "b".into(), version: 1, revision: 2 }, &doc, true).await.unwrap();
         // Same body version, stale enrichment revision must not join the live row.
         one.append(lexical::Identity { id: "a".into(), version: 1, revision: 0 }, &doc, true).await.unwrap();
-        two.append(lexical::Identity { id: "a".into(), version: 1, revision: 1 }, &doc, true).await.unwrap();
-        one.seal().await.unwrap(); two.seal().await.unwrap();
+        one.append(lexical::Identity { id: "a".into(), version: 1, revision: 1 }, &doc, true).await.unwrap();
+        one.seal().await.unwrap();
         // Open immutable packages again to exercise persisted identity addresses.
         let one = lexical::runtime::Runtime::open(&temporary.path().join("lexical-one"), &config()).unwrap();
-        let two = lexical::runtime::Runtime::open(&temporary.path().join("lexical-two"), &config()).unwrap();
-        handle.index.write().await.record_lexical = vec![one, two];
+        assert_eq!(one.snapshot().await.unwrap().identities.len(), 3,
+            "the stale lexical revision remains present for join validation");
+        handle.index.write().await.segments[0].lexical = one;
         let result = lexical::runtime_query::search(&handle.index, "alpha".into(),
             Some(Embedding::F32(vec![1.0, 0.0])), SearchMode::Hybrid {
                 similarity_threshold: None, ann_mode: crate::vector_similarity::AnnMode::All, rrf: Default::default() },

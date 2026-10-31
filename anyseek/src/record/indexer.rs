@@ -504,7 +504,7 @@ mod tests {
         p.write(write("first", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
         p.compact_journal().await.unwrap();
         let inner = p.inner.lock().await;
-        let shard = inner.index.test_index().read().await.segments[0].clone();
+        let shard = inner.index.test_index().read().await.segments[0].vector.clone();
         let guard = shard.write().await;
         {
         let admission = scope.clone().run(anchor::NativeReuse::admit(&inner));

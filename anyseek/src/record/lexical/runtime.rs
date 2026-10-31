@@ -1,5 +1,5 @@
-//! Record's native lexical component. The companion VectorIndexArc owns only vectors
-//! and metadata. Tail commits are private until Record's publication guard opens.
+//! Record's native lexical component, paired with vectors and metadata by the
+//! retrieval segment. Tail commits are private until Record's publication guard opens.
 use super::*;
 use crate::record::{Document, RecordConfig};
 use tantivy::{IndexReader, IndexWriter};
@@ -1011,7 +1011,7 @@ impl Runtime {
             for i in 0..128 {
                 partition.write(write(&format!("op-{i}"),&format!("r-{i}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
             }
-            let held=partition.inner.lock().await.index.test_index().read().await.record_lexical[0].snapshot().await.unwrap();
+            let held=partition.inner.lock().await.index.test_index().read().await.segments[0].lexical.snapshot().await.unwrap();
             assert_eq!(held.identities.len(),128);
             partition.inner.lock().await.fail_publication_stage=1;
             let request=write("rotate-and-retry","r-new","alpha",ExpectedVersion::Absent);
@@ -1081,7 +1081,7 @@ impl Runtime {
             assert_eq!(query(&partition, SearchMode::Lexical).await.count_total, 1);
             let index = partition.inner.lock().await.index.test_index().clone();
             assert!(!index.read().await.schema_map["body"].index_lexical);
-            assert_eq!(index.read().await.record_lexical.len(), 1);
+            assert_eq!(index.read().await.segments.len(), 1);
             let old = crate::search::search_with_counts(
                     &index,
                     "alpha".into(),
@@ -1135,7 +1135,7 @@ impl Runtime {
             let inner = p.inner.lock().await;
             let index = inner.index.test_index().read().await;
             for shard in &index.segments {
-                let shard = shard.read().await;
+                let shard = shard.vector.read().await;
                 assert!(shard.indexed_schema_vec.iter().all(|field| !field.index_lexical));
             }
         }

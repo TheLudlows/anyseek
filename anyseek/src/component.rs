@@ -1,4 +1,5 @@
-//! Private vector and metadata component. No lexical postings or original payloads.
+//! Retrieval topology and its private vector/metadata component. The component
+//! files contain no lexical postings or original payloads.
 //! The enclosing Record certificate authenticates these files; this descriptor is
 //! never a business head and is only opened after the package closure is verified.
 use crate::{index::*, vector::{Inference, Precision, Quantization, VectorHeader},
@@ -18,14 +19,21 @@ const FACETS: &str = "metadata.bin";
 pub(crate) type VectorIndexArc = Arc<RwLock<VectorIndex>>;
 pub(crate) type VectorSegmentArc = Arc<RwLock<VectorSegment>>;
 
+/// A segment's vector/metadata component and lexical runtime share topology and
+/// lifetime. Cloning a view retains both components, including native file pins.
+#[derive(Clone)]
+pub(crate) struct RetrievalSegment {
+    pub vector: VectorSegmentArc,
+    pub lexical: Arc<crate::record::lexical::runtime::Runtime>,
+}
+
 #[derive(Clone)]
 pub(crate) struct VectorIndex {
     pub index_path_string: String,
-    pub record_lexical: Vec<Arc<crate::record::lexical::runtime::Runtime>>,
     pub schema_map: HashMap<String, SchemaField>,
     pub stored_field_names: Vec<String>,
     pub meta: IndexMetaObject,
-    pub segments: Vec<VectorSegmentArc>,
+    pub segments: Vec<RetrievalSegment>,
     pub quantization: Quantization,
     pub vector_similarity: VectorSimilarity,
     pub is_simd: bool,
@@ -106,7 +114,7 @@ pub(crate) fn field_width(field: &FieldType) -> usize {
         _ => 1,
     }
 }
-fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: Option<Descriptor>) -> Result<VectorIndexArc,String> {
+fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: Option<Descriptor>) -> Result<(VectorIndex, VectorSegmentArc),String> {
     crate::vector::validate_vector_schema(&meta.inference,schema)?;
     if schema.iter().any(|f| f.index_lexical || f.store) { return Err("vector/metadata component cannot own lexical fields or payloads".into()); }
     let (original,precision,quantization,similarity)=vector_settings(&meta);
@@ -154,29 +162,41 @@ fn assemble(path: &Path, meta: IndexMetaObject, schema: &[SchemaField], saved: O
         shard.validate_vectors()?;
     }
     shard.string_set_to_single_term_id();
-    Ok(Arc::new(RwLock::new(VectorIndex {index_path_string:path.to_string_lossy().into_owned(),record_lexical:Vec::new(),schema_map,stored_field_names:Vec::new(),meta,
-        segments:vec![Arc::new(RwLock::new(shard))],quantization,
-        vector_similarity:similarity,is_simd:simd,is_vector_indexing:original>0,turbo_quant:turbo})))
+    Ok((VectorIndex {index_path_string:path.to_string_lossy().into_owned(),schema_map,stored_field_names:Vec::new(),meta,
+        segments:Vec::new(),quantization,
+        vector_similarity:similarity,is_simd:simd,is_vector_indexing:original>0,turbo_quant:turbo}, Arc::new(RwLock::new(shard))))
 }
 
-pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&[SchemaField])->Result<VectorIndexArc,String>{
+pub(crate) async fn create_index(path:&Path,meta:IndexMetaObject,schema:&[SchemaField],config:&crate::record::RecordConfig)->Result<VectorIndexArc,crate::record::RecordError>{
     let permit = match crate::resources::Scope::current() {
-        Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(|e|e.to_string())?),
+        Some(scope) if !scope.has_file_io_loan() => Some(scope.journal_io().await.map_err(|e|crate::record::RecordError::Storage(e.to_string()))?),
         _ => None,
     };
     let create = || create_component_files(path, meta, schema);
-    match permit { Some(permit) => permit.run(create), None => create() }
+    let (mut index, vector) = match permit { Some(permit) => permit.run(create), None => create() }.map_err(crate::record::RecordError::Storage)?;
+    let lexical = crate::record::lexical::runtime::Runtime::create_owned(&path.join("native"), config)
+        .await?;
+    index.segments.push(RetrievalSegment { vector, lexical });
+    Ok(Arc::new(RwLock::new(index)))
 }
 // Serial local file construction only: no acquired VectorIndex/VectorSegment locks, native
 // writer, spawned task, or remote I/O can be reached while this loan is held.
-fn create_component_files(path:&Path,meta:IndexMetaObject,schema:&[SchemaField])->Result<VectorIndexArc,String>{
+fn create_component_files(path:&Path,meta:IndexMetaObject,schema:&[SchemaField])->Result<(VectorIndex, VectorSegmentArc),String>{
     fs::create_dir(path).map_err(|e|e.to_string())?;
     // Keep the independently authenticated schema file for package validation.
     let schema_file=File::create(path.join("schema.json")).map_err(|e|e.to_string())?;
     serde_json::to_writer(&schema_file,schema).map_err(|e|e.to_string())?;schema_file.sync_all().map_err(|e|e.to_string())?;
     assemble(path,meta,schema,None)
 }
-pub(crate) async fn open_index(path:&Path)->Result<VectorIndexArc,String>{
+pub(crate) async fn open_index(path:&Path,config:&crate::record::RecordConfig)->Result<VectorIndexArc,crate::record::RecordError>{
+    let (mut index, vector) = open_component_files(path).map_err(crate::record::RecordError::Storage)?;
+    let lexical = crate::record::lexical::runtime::Runtime::open_owned(&path.join("native"), config)
+        .await?;
+    index.segments.push(RetrievalSegment { vector, lexical });
+    Ok(Arc::new(RwLock::new(index)))
+}
+
+fn open_component_files(path:&Path)->Result<(VectorIndex, VectorSegmentArc),String>{
     let io=crate::resources::Scope::current().map(|scope|scope.io())
         .transpose().map_err(|e|e.to_string())?;
     let file=fs::File::open(path.join(DESCRIPTOR)).map_err(|e|e.to_string())?;
@@ -399,7 +419,7 @@ impl IndexDocuments for VectorIndexArc {
     async fn index_documents(&self,documents:Vec<Document>)->Result<(),String>{
         let root=self.read().await;
         if root.segments.len()!=1 {return Err("writes require the private tail component".into());}
-        let mut shard=root.segments[0].write().await;
+        let mut shard=root.segments[0].vector.write().await;
         for document in documents {shard.append(document).await?;}
         Ok(())
     }
@@ -409,7 +429,7 @@ pub(crate) trait Commit {async fn commit(&self)->std::io::Result<()>;}
 impl Commit for VectorIndexArc {
     async fn commit(&self)->std::io::Result<()>{
         let root=self.read().await;
-        for shard in &root.segments {shard.write().await.commit_component().await?;}
+        for shard in &root.segments {shard.vector.write().await.commit_component().await?;}
         Ok(())
     }
 }
@@ -422,7 +442,7 @@ mod descriptor_tests {
         let path=root.path().join(super::DESCRIPTOR);
         let file=std::fs::File::create(&path).unwrap();
         file.set_len(64*1024*1024+1).unwrap();drop(file);
-        let error=match super::open_index(root.path()).await {Ok(_)=>panic!("oversized descriptor accepted"),Err(error)=>error};
+        let error=match super::open_component_files(root.path()) {Ok(_)=>panic!("oversized descriptor accepted"),Err(error)=>error};
         assert_eq!(error,"component descriptor budget exceeded");
         assert_eq!(std::fs::metadata(path).unwrap().len(),64*1024*1024+1);
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(),1);

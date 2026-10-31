@@ -18,7 +18,7 @@ async fn prepare(p: &RecordPartition) -> (MergeSources, VectorIndexArc) {
     };
     let target = root.join(format!("cache-{:032x}", rand::random::<u128>()));
     let (candidate, _) = build_at_selected(&root, &target, &settings, &state, Some(&sources.keys)).await.unwrap();
-    candidate.read().await.record_lexical[0].seal().await.unwrap();
+    candidate.read().await.segments[0].lexical.seal().await.unwrap();
     (sources, candidate)
 }
 async fn install(p: &RecordPartition, sources: &MergeSources, candidate: VectorIndexArc) {
@@ -157,7 +157,7 @@ async fn merge_rejection_keeps_addresses_and_reader_pins_protect_retired_files()
     let p = seeded(&root).await;
     let held = p.inner.lock().await.index.capture_query(10).await.unwrap();
     let (sources, candidate) = prepare(&p).await;
-    let paths = sources.natives.iter().map(|native| native.package_path().to_owned()).collect::<Vec<_>>();
+    let paths = sources.segments.iter().map(|segment| segment.lexical.package_path().to_owned()).collect::<Vec<_>>();
     {
         let mut inner = p.inner.lock().await;
         let old_ordinals = inner.ordinals.clone();
@@ -198,8 +198,8 @@ async fn same_version_vector_patch_retires_premerge_reader_row() {
     patch.document = None;
     patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector": [1.0, 0.0]})).unwrap());
     assert_eq!(p.write(patch).await.unwrap().version, 1);
-    for source in &sources.components {
-        let shard = source.read().await;
+    for source in &sources.segments {
+        let shard = source.vector.read().await;
         let active = shard.active.as_ref().unwrap();
         for (local, key) in active.keys.iter().enumerate().filter(|(_, key)| key.as_str() == "a") {
             assert!(!active.is_live(local), "same-version patch must retire the old reader's physical row");
@@ -231,7 +231,7 @@ async fn detached_merge_keeps_unrelated_authority_corruption_fail_closed() {
     p.write(write("d", "d", "alpha", ExpectedVersion::Absent)).await.unwrap(); freeze(&p).await;
     p.write(write("e", "e", "alpha", ExpectedVersion::Absent)).await.unwrap(); freeze(&p).await;
     let (sources, candidate) = prepare(&p).await;
-    assert!(sources.natives.iter().all(|native| native.package_path() != selected_path));
+    assert!(sources.segments.iter().all(|segment| segment.lexical.package_path() != selected_path));
     install(&p, &sources, candidate).await;
     assert!(p.inner.lock().await.index.detached_cache);
     let file = selected_path.join("schema.json");

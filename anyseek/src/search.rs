@@ -381,7 +381,7 @@ pub(crate) async fn search_with_counts(
                         }
                         (VectorSimilarity::Euclidean, Quantization::ScalarQuantizationI8, true) => {
                             let non_affine =
-                                index_ref.segments[0].read().await.max_vector_value == f32::MIN;
+                                index_ref.segments[0].vector.read().await.max_vector_value == f32::MIN;
                             if non_affine {
                                 let quantized_vector = QuantizedVector::new_scale_norm_simd(fvecs);
                                 (
@@ -393,9 +393,9 @@ pub(crate) async fn search_with_counts(
                                 )
                             } else {
                                 let mut min_vector_value =
-                                    index_ref.segments[0].read().await.min_vector_value;
+                                    index_ref.segments[0].vector.read().await.min_vector_value;
                                 let mut max_vector_value =
-                                    index_ref.segments[0].read().await.max_vector_value;
+                                    index_ref.segments[0].vector.read().await.max_vector_value;
                                 let quantized_vector = QuantizedVector::new_scale_norm_affine_simd(
                                     &mut min_vector_value,
                                     &mut max_vector_value,
@@ -429,7 +429,7 @@ pub(crate) async fn search_with_counts(
                             false,
                         ) => {
                             let non_affine =
-                                index_ref.segments[0].read().await.max_vector_value == f32::MIN;
+                                index_ref.segments[0].vector.read().await.max_vector_value == f32::MIN;
                             if non_affine {
                                 let quantized_vector = QuantizedVector::new_scale_norm(fvecs);
                                 (
@@ -441,9 +441,9 @@ pub(crate) async fn search_with_counts(
                                 )
                             } else {
                                 let mut min_vector_value =
-                                    index_ref.segments[0].read().await.min_vector_value;
+                                    index_ref.segments[0].vector.read().await.min_vector_value;
                                 let mut max_vector_value =
-                                    index_ref.segments[0].read().await.max_vector_value;
+                                    index_ref.segments[0].vector.read().await.max_vector_value;
                                 let quantized_vector = QuantizedVector::new_scale_norm_affine(
                                     &mut min_vector_value,
                                     &mut max_vector_value,
@@ -489,7 +489,7 @@ pub(crate) async fn search_with_counts(
         let segment_count = index_ref.segments.len();
         let mut tasks = Vec::new();
         for (slot, shard) in index_ref.segments.iter().enumerate() {
-            let shard = shard.clone();
+            let shard = shard.vector.clone();
             let query = query_vector.clone();
             let ann = ann_mode.clone();
             let fields = field_filter.clone();
@@ -519,7 +519,7 @@ pub(crate) async fn search_with_counts(
             }
         }
         if failure.is_some() { result.error = failure; result.results.clear(); return result; }
-        let shards = futures::future::join_all(index_ref.segments.iter().map(|shard| shard.read())).await;
+        let shards = futures::future::join_all(index_ref.segments.iter().map(|segment| segment.vector.read())).await;
         result.results.sort_by(|a,b| crate::min_heap::rank_with_segments(&shards,b.score,b.doc_id,a.score,a.doc_id));
         result.results.truncate(offset + length);
         let sorts = result_sort.iter().filter_map(|sort| Some(ResultSortIndex {
