@@ -1,17 +1,4 @@
 import { test, expect } from '@playwright/test';
-test('fresh connection dialog allows typing tenant before master key', async ({page}) => {
- await page.goto('/');
- await page.getByRole('button', {name:'连接 AnySeek 服务 使用 Tenant API Key'}).click();
- const dialog=page.getByRole('dialog');
- await dialog.getByRole('button',{name:'首次使用？使用 Master Key 初始化'}).click();
- const tenant=dialog.getByLabel('Tenant 名称',{exact:true});
- await expect(tenant).toBeEditable();
- await tenant.click();
- await page.keyboard.type('new_tenant');
- await expect(tenant).toHaveValue('new_tenant');
- await expect(dialog.getByLabel('Master Key',{exact:true})).toHaveValue('');
-});
-
 test('completed initialization in the connection dialog can start a new editable form', async ({page}) => {
  const calls: {path: string; body: any}[]=[];
  await page.route('**/api/v1/**', async route => {
@@ -25,7 +12,12 @@ test('completed initialization in the connection dialog can start a new editable
  };
  await openDialog();
  const dialog=page.getByRole('dialog');
- await dialog.getByLabel('Tenant 名称',{exact:true}).fill('old_tenant');
+ const initialTenant=dialog.getByLabel('Tenant 名称',{exact:true});
+ await expect(initialTenant).toBeEditable();
+ await initialTenant.click();
+ await page.keyboard.type('old_tenant');
+ await expect(initialTenant).toHaveValue('old_tenant');
+ await expect(dialog.getByLabel('Master Key',{exact:true})).toHaveValue('');
  await dialog.getByLabel('Master Key',{exact:true}).fill('test-master');
  await dialog.getByRole('checkbox').check();
  await dialog.getByRole('button',{name:'确认初始化',exact:true}).click();

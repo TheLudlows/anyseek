@@ -2,7 +2,7 @@
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
 dependency/core boundaries and the lexical partition;
-on code changes it builds and runs 175 exact bounded core regressions plus the
+on code changes it builds and runs 174 exact bounded core regressions plus the
 small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
 cases fail rather than silently matching zero tests. Integration scales are listed
@@ -104,7 +104,7 @@ unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests
 ## Small and full query fixtures (P1)
 
 Default PR core jobs explicitly select `small` and run six integration targets
-in addition to the 175 exact core cases. The manual matrix explicitly selects
+in addition to the 174 exact core cases. The manual matrix explicitly selects
 `full`, including its four independent Windows lexical jobs. No production
 capacity, scoring, timeout or fault boundary changes.
 
@@ -118,8 +118,9 @@ capacity, scoring, timeout or fault boundary changes.
 | repeated disjoint union | 760 / 2 repeats | 760 / 20 repeats | same members, first/repeated Count vs TopkCount |
 | dense deletion AND/OR | 2048, one shared setup | same | all four independent count assertions |
 
-The lexical 576/522 append/winner fixtures and ranking 400/160/250 score-gap,
-mode-agreement and pagination fixtures remain unchanged. Full scale restores
+The lexical 576/522 append/winner fixtures and ranking 400/160 score-gap and mode-agreement fixtures retain their populations.
+Long-query pagination now shares the 400-record score-gap fixture and checks
+record IDs as well as scores; the duplicate 250-record fixture is removed. Full scale restores
 original population values; small scale does not claim to exercise their larger
 layout boundaries. Dedicated 8192-package/10001-identity and other physical,
 byte-budget and publication boundaries remain in full acceptance.
