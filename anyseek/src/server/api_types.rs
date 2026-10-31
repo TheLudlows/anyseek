@@ -1,7 +1,7 @@
 //! HTTP contracts, including an optional vector-search probe budget.
 use super::api_schema;
 use crate::{
-    index::{Document, FieldType, SchemaField, StopwordType, TokenizerType, TextNormalization},
+    index::{FieldType, SchemaField, StopwordType, TokenizerType, TextNormalization},
     search::{FacetFilter, QueryType, ResultSort, ResultType, SearchMode},
     vector::{Inference, Precision, Quantization},
     vector_similarity::{AnnMode, VectorSimilarity},
@@ -178,31 +178,6 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-/// Search result object
-pub struct SearchResultObject {
-    /// Time taken to execute the search query in nanoseconds
-    pub time: u128,
-    /// Search query string
-    pub original_query: String,
-    /// Search query string, unchanged from the caller input
-    pub query: String,
-    /// Offset of the returned search results
-    pub offset: usize,
-    /// Number of requested search results
-    pub length: usize,
-    /// Number of returned search results matching the query
-    pub count: usize,
-    /// Total matches reported by the selected retrieval mode; null when count=false.
-    #[schema(required = true)]
-    pub count_total: Option<usize>,
-    /// Vector of lexical search query terms.
-    pub query_terms: Vec<String>,
-    #[schema(value_type=Vec<std::collections::HashMap<String, serde_json::Value>>)]
-    /// Vector of search result documents
-    pub results: Vec<Document>,
-}
-
 /// Create an index. Compression, scoring, clustering and word N-grams are managed internally.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -331,32 +306,6 @@ fn tokenizer_type_api() -> TokenizerType {
     TokenizerType::default()
 }
 
-/// Iterate live document IDs; optionally include stored documents.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct GetIteratorRequest {
-    #[serde(default)]
-    /// Start ID; omitted starts at the beginning or end according to take.
-    pub document_id: Option<u64>,
-    #[serde(default)]
-    /// Number of live IDs to skip.
-    pub skip: usize,
-    /// Positive for forward traversal, negative for backward. Defaults to 10.
-    #[serde(default = "iterator_take")]
-    #[schema(default = 10)]
-    pub take: isize,
-    #[serde(default = "default_true")]
-    #[schema(default = true)]
-    /// Return stored fields as well as IDs.
-    pub include_document: bool,
-    #[serde(default)]
-    /// Empty means all stored fields.
-    pub fields: Vec<String>,
-}
-fn iterator_take() -> isize {
-    10
-}
-
 /// URL query parameters for a stored document read.
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
@@ -365,140 +314,6 @@ pub struct GetDocumentRequest {
     /// Comma-separated stored field names; omit to return all stored fields.
     #[serde(default)]
     pub fields: String,
-}
-
-/// One complete replacement. Updates delete the old document and allocate a new ID.
-#[derive(Debug, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DocumentReplacement {
-    /// Existing internal document ID.
-    pub id: u64,
-    /// Full replacement document, not a partial patch.
-    #[schema(value_type = std::collections::HashMap<String, serde_json::Value>)]
-    pub document: Document,
-}
-
-/// One replacement or a batch of replacements.
-#[derive(Debug, Deserialize, ToSchema)]
-#[serde(untagged, try_from = "serde_json::Value")]
-pub enum UpdateDocuments {
-    /// One complete replacement.
-    Single(DocumentReplacement),
-    /// Several complete replacements.
-    Batch(Vec<DocumentReplacement>),
-}
-impl TryFrom<serde_json::Value> for UpdateDocuments {
-    type Error = serde_json::Error;
-    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
-        match value {
-            serde_json::Value::Object(_) => serde_json::from_value(value).map(Self::Single),
-            serde_json::Value::Array(ref items)
-                if items.iter().all(serde_json::Value::is_object) =>
-            {
-                serde_json::from_value(value).map(Self::Batch)
-            }
-            _ => Err(serde::de::Error::custom(
-                "expected a replacement object or an array of replacement objects",
-            )),
-        }
-    }
-}
-impl UpdateDocuments {
-    /// Convert complete replacements to the engine batch format.
-    pub fn into_documents(self) -> Vec<(u64, Document)> {
-        let documents = match self {
-            Self::Single(d) => vec![d],
-            Self::Batch(d) => d,
-        };
-        documents.into_iter().map(|d| (d.id, d.document)).collect()
-    }
-}
-
-/// Delete all documents matching nonempty text and optional metadata predicates.
-#[derive(Debug, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DeleteQueryRequest {
-    /// Nonempty text query; all matching documents are deleted.
-    pub query: String,
-    #[serde(default)]
-    #[schema(default = "and")]
-    /// Match all (and) or any (or) query terms.
-    pub operator: QueryOperator,
-    #[serde(default)]
-    /// Limit text matching to these fields; empty searches all.
-    pub search_fields: Vec<String>,
-    #[serde(default)]
-    #[schema(value_type = Vec<api_schema::FacetFilter>)]
-    /// Metadata predicates combined with AND.
-    pub filter: Vec<FacetFilter>,
-}
-
-/// Select exactly one deletion form. Full removal requires all=true.
-#[derive(Debug, Deserialize, ToSchema)]
-#[serde(untagged, try_from = "serde_json::Map<String, serde_json::Value>")]
-pub enum DeleteDocuments {
-    /// Delete the specified internal IDs.
-    Ids {
-        /// IDs to delete.
-        ids: Vec<u64>,
-    },
-    /// Delete every text and metadata match.
-    Query(DeleteQueryRequest),
-    /// Explicitly remove every document.
-    All {
-        /// Must be true.
-        all: bool,
-    },
-}
-
-impl TryFrom<serde_json::Map<String, serde_json::Value>> for DeleteDocuments {
-    type Error = serde_json::Error;
-    fn try_from(
-        mut fields: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Self, Self::Error> {
-        if fields.len() == 1 {
-            if let Some(ids) = fields.remove("ids") {
-                return serde_json::from_value(ids).map(|ids| Self::Ids { ids });
-            }
-            if let Some(all) = fields.remove("all") {
-                return serde_json::from_value(all).map(|all| Self::All { all });
-            }
-        }
-        serde_json::from_value(serde_json::Value::Object(fields)).map(Self::Query)
-    }
-}
-
-/// All HTTP errors use this JSON shape; status codes determine success or failure.
-#[derive(Serialize, ToSchema)]
-pub struct ErrorResponse {
-    /// Stable error category.
-    pub code: &'static str,
-    /// Human-readable diagnostic.
-    pub message: String,
-}
-
-/// Public index metadata. Field definitions use the same names as creation.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct IndexResponseObject {
-    /// Persisted pre-tokenization rule; cannot be overridden per query.
-    #[schema(value_type = api_schema::TextNormalization)]
-    pub text_normalization: TextNormalization,
-    /// Immutable length denominator policy; Shared is the default.
-    #[serde(default)]
-    #[schema(value_type = api_schema::FieldLengthNormalization)]
-    pub field_length_normalization: crate::index::FieldLengthNormalization,
-    /// Index ID within the authenticated key scope.
-    pub id: u64,
-    /// Display name.
-    pub name: String,
-    /// Resolved public field settings, ordered by name.
-    pub schema: Vec<FieldRequest>,
-    /// Allocated document count, including deleted IDs.
-    pub indexed_doc_count: usize,
-    /// Committed document count.
-    pub committed_doc_count: usize,
-    /// Running server version.
-    pub version: String,
 }
 
 #[cfg(test)]

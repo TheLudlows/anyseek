@@ -158,7 +158,7 @@ def main():
             other_key=base64.b64encode(os.urandom(32)).decode()
             call('POST','/api/v1/apikey',{'operation_id':operation(),'tenant_id':'other','key_id':'other','apikey_base64':other_key})
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config},key=other_key)
-            assert call('GET','/api/v1/index/main',key=other_key)['indexed_doc_count']==0
+            assert call('GET','/api/v1/index/main',key=other_key)['statistics']['active_records']==0
             call('POST','/api/v1/index/main/doc',write('foreign','a','foreign tenant'),key=other_key)
             assert call('GET','/api/v1/index/main/doc/a',key=other_key)['version']==1
             assert call('GET','/api/v1/index/main/doc/a')['version']==2

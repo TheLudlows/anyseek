@@ -116,7 +116,7 @@ export function Data({
                 <h2>
                   {t("记录")}{" "}
                   <span className="count-badge">
-                    {collection.indexed_doc_count.toLocaleString(getLocale())}
+                    {collection.statistics.active_records.toLocaleString(getLocale())}
                   </span>
                 </h2>
                 <p>{t("按服务游标分页，点击记录查看完整内容。")}</p>

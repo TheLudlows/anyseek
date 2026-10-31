@@ -40,7 +40,7 @@ def exercise(call, restart, directory, faults, base, master):
             pause.unlink()
     assert not (collection / 'intake').exists()
     receipt = result['results'][0]['receipt']
-    assert client.ingest_status('committed', first['operation_id'])['receipt'] == receipt
+    assert client.operation_status('committed', first['operation_id'])['receipt'] == receipt
     restart({})
     replay = client.ingest('committed', [first, conflict, later])
     assert replay['results'][0]['receipt'] == receipt
@@ -122,7 +122,7 @@ def exercise(call, restart, directory, faults, base, master):
     stream.close()
     pause.unlink()
     while True:
-        status = client.ingest_status('committed', lost['operation_id'])
+        status = client.operation_status('committed', lost['operation_id'])
         if status['receipt'] is not None:
             break
         assert time.monotonic() < deadline, 'cancelled request did not commit'
@@ -148,5 +148,5 @@ def exercise(call, restart, directory, faults, base, master):
         retried = client.ingest('committed', commands)
         assert [r['code'] for r in retried['results']] == ['committed', 'rejected', 'committed', 'rejected', 'committed'], retried
         assert retried['results'][0]['receipt'] == receipt
-        assert client.ingest_status('committed', new['operation_id'])['receipt'] == retried['results'][2]['receipt']
+        assert client.operation_status('committed', new['operation_id'])['receipt'] == retried['results'][2]['receipt']
     print('PASS committed ingest HTTP faults: paused indexes, disconnect, 429/503 item scopes, original-id restart recovery', flush=True)

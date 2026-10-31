@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test('empty and whitespace lexical queries reach the API', async ({ page }) => {
   const queries: Record<string, unknown>[] = [];
-  const collection = { id: 'docs', name: 'docs', schema: [{field: 'body', field_type: 'Text', store: true}], indexed_doc_count: 0, version: '1', statistics: {}, limits: {} };
+  const collection = { id: 'docs', name: 'docs', schema: [{field: 'body', field_type: 'Text', store: true}], version: '1', statistics: { active_records: 0 }, limits: {} };
   await page.route('**/api/v1/**', async route => {
     if (route.request().url().endsWith('/query')) {
       queries.push(route.request().postDataJSON());

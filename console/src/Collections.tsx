@@ -51,7 +51,7 @@ export function Collections(props: Props) {
     (c.name + c.id).toLowerCase().includes(filter.toLowerCase()),
   );
   const total = props.collections.reduce(
-    (sum, c) => sum + c.indexed_doc_count,
+    (sum, c) => sum + c.statistics.active_records,
     0,
   );
   return (
@@ -183,7 +183,7 @@ export function Collections(props: Props) {
                         : "—"}
                     </td>
                     <td className="numeric">
-                      {c.indexed_doc_count.toLocaleString(getLocale())}
+                      {c.statistics.active_records.toLocaleString(getLocale())}
                     </td>
                     <td className="muted">{c.schema.length} {t("个字段")}</td>
                     <td>

@@ -137,7 +137,7 @@ def main():
             call('GET',f'/api/v1/index/shared/operation/{oid["epoch"]}/{oid["nonce"]}',key=keys['a'],status=403)
             assert call('GET','/api/v1/index/shared/doc/r0',key=keys['b'])['version']==2
             restart();call('GET','/api/v1/index/shared',key=keys['a'],status=403)
-            assert call('GET','/api/v1/index/shared',key=keys['b'])['indexed_doc_count']==4
+            assert call('GET','/api/v1/index/shared',key=keys['b'])['statistics']['active_records']==4
             deletion={**replacement,'operation_id':operation(),'expected':{'Match':2},'document':None}
             assert call('DELETE','/api/v1/index/shared/doc',deletion,key=keys['b'])['receipt']['version']==3
             call('GET','/api/v1/index/shared/doc/r0',key=keys['b'],status=404)
@@ -231,7 +231,7 @@ def main():
             all_plan=call('POST','/api/v1/index/restored/delete-plan',{'select':'all'})
             clear=[{**t,'operation_id':operation()} for t in all_plan['targets']]
             assert all(r['code']=='applied' for r in call('POST','/api/v1/index/restored/batch',{'writes':clear})['results'])
-            assert call('GET','/api/v1/index/restored')['indexed_doc_count']==0
+            assert call('GET','/api/v1/index/restored')['statistics']['active_records']==0
             # Retrying backup after source changes still returns its original point.
             assert call('POST','/api/v1/index/shared/backup',backup_request,key=keys['b'])==backup
             deletion_request={'operation_id':operation()}
@@ -241,7 +241,7 @@ def main():
             restart()
             call('GET','/api/v1/index/shared',key=keys['b'],status=403)
             call('POST','/api/v1/index',{**create,'operation_id':operation()},key=keys['b'])
-            assert call('GET','/api/v1/index/shared',key=keys['b'])['indexed_doc_count']==0
+            assert call('GET','/api/v1/index/shared',key=keys['b'])['statistics']['active_records']==0
             old=saved[-1]['operation_id']
             assert call('GET',f"/api/v1/index/shared/operation/{old['epoch']}/{old['nonce']}",key=keys['b'])['receipt'] is None
             call('DELETE','/api/v1/index/shared',deletion_request,key=keys['b'])
