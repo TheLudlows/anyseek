@@ -199,8 +199,8 @@ mod retention_tests {
         let inner=p.inner.lock().await;
         assert!(inner.state.operations.len()<before);
         assert!(inner.state.operations.iter().any(|op|op.receipt.seq==recent_seq));
-        assert!(inner.state.operations.iter().any(|op|op.request.operation_id.nonce=="stage"));
-        assert!(inner.state.operations.iter().any(|op|op.request.operation_id.nonce=="renew-768"));
+        assert!(!inner.state.operations.iter().any(|op|op.request.operation_id.nonce=="initial"));
+        assert!(inner.state.operations.iter().any(|op|op.request.operation_id.nonce=="update-768"));
         validate_restored_state(&settings,&inner.state).unwrap();
         drop(inner);drop(p);
         let recovered=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();

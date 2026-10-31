@@ -14,7 +14,7 @@ pub(super) enum PreparedWrite {
         bytes: Vec<u8>,
         snapshot_bytes: usize,
         reserve_bytes: usize,
-        planning: Vec<crate::storage::build_budget::MemoryLease>,
+        _planning: Vec<crate::storage::build_budget::MemoryLease>,
     },
 }
 
@@ -188,7 +188,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         bytes,
         snapshot_bytes,
         reserve_bytes,
-        planning: vec![_request_plan,_prior_plan],
+        _planning: vec![_request_plan,_prior_plan],
     })
 }
 

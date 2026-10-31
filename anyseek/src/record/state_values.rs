@@ -76,6 +76,7 @@ impl<T: Serialize> Values<T> {
             if keep(value) { true } else { *bytes -= value.wire_bytes(); false }
         });
     }
+    #[cfg(test)]
     pub(super) fn edit(
         &mut self,
         index: usize,
