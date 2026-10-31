@@ -469,6 +469,7 @@ impl RecordPartition {
         let mut shadow = inner.state.try_clone()?;
         let mut snapshot = inner.snapshot_bytes;
         let mut plans = Vec::new();
+        let mut publication = Vec::new();
         let mut result = BatchResult {
             results: Vec::new(),
             stop: None,
@@ -596,16 +597,15 @@ impl RecordPartition {
                         }
                     }
                 }
-                {
-                    let prepared = state_memory::Prepared::new(&shadow, applied)?;
-                    prepared.admit_containers(&mut shadow, *snapshot_bytes)?;
-                    apply_prepared(&mut shadow, applied, Some(prepared))?;
-                }
+                let prepared = state_memory::Prepared::new(&shadow, applied)?;
+                prepared.admit_containers(&mut shadow, *snapshot_bytes)?;
+                apply_prepared(&mut shadow, applied, Some(prepared.clone()))?;
                 snapshot = *snapshot_bytes;
                 container_bound = container_bound.max(shadow.container_bytes(snapshot)?);
                 growth_total = total;
                 updates_total = native;
                 journal_bytes = physical;
+                publication.push(Some(prepared));
                 Ok(plan)
             }
             .await;
@@ -641,11 +641,14 @@ impl RecordPartition {
         }
         // Admit live container growth before persistence. Values are separately owned.
         inner.state.admit_containers(container_bound)?;
-        // Retain all ordinary publication values before the first durable byte.
-        let mut publication = Vec::new();
-        let mut prior = inner.state.try_clone()?;
+        // Replay the captured basis and the identical append prefix used by shadow.
+        // By induction each step has the same prior record (including vector patches
+        // and retained source revisions), so its immutable Prepared owners are reusable.
+        // Readers can advance live time during planning; commit_batch still revalidates
+        // base_state and TTL before any publication of these prepared values.
+        let mut prior = base_state.try_clone()?;
         let mut hides_evidence = false;
-        for plan in &mut plans {
+        for (plan, prepared) in plans.iter().zip(&publication) {
             if let mutation::PreparedWrite::Append {
                 applied,
                 snapshot_bytes,
@@ -660,20 +663,9 @@ impl RecordPartition {
                     .is_some_and(|r| r.system.is_some())
                     || (applied.request.vector_patch.is_none()
                         && inner.graph_cache.references(&applied.request.record_id));
-                let prepared = {
-                    let prepared = state_memory::Prepared::new(&prior, applied)?;
-                    prepared.admit_containers(&mut prior, *snapshot_bytes)?;
-                    apply_prepared(
-                        &mut prior,
-                        applied,
-                        Some(state_memory::Prepared {
-                            record: prepared.record.clone(),
-                            operation: prepared.operation.clone(),
-                        }),
-                    )?;
-                    Some(prepared)
-                };
-                publication.push(prepared);
+                let prepared = prepared.as_ref().ok_or_else(|| storage("missing batch ownership"))?;
+                prepared.admit_containers(&mut prior, *snapshot_bytes)?;
+                apply_prepared(&mut prior, applied, Some(prepared.clone()))?;
             }
         }
         drop(prior);
@@ -851,6 +843,52 @@ mod tests {
     use super::*;
     use crate::record::tests::{config, write};
     use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn batch_reuses_ordered_values_across_vector_patch_and_source_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("records");
+        let settings = config();
+        let p = RecordPartition::create(&root, settings.clone()).await.unwrap();
+        let mut source = crate::record::tests::source_write("source", "s", &[]);
+        source.document.as_mut().unwrap().remove("vector");
+        let mut patch = write("patch", "s", "", ExpectedVersion::Match(1));
+        patch.document = None;
+        patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
+        let update = write("update", "s", "updated", ExpectedVersion::Match(1));
+        let derived = crate::record::tests::source_write("derived", "d", &[("s", 2)]);
+        let conflict = write("conflict", "s", "bad", ExpectedVersion::Match(1));
+        let suffix = write("suffix", "unused", "unused", ExpectedVersion::Absent);
+        let requests = vec![source, patch, update, derived, conflict, suffix];
+
+        // Compare every retained value with an independent sequential projection,
+        // including the vector-only revision followed by an ordinary source update.
+        let prepared = p.prepare_batch(requests.clone()).await.unwrap();
+        assert_eq!(prepared.publication.len(), 4);
+        let mut oracle = prepared.base_state.try_clone().unwrap();
+        for (plan, retained) in prepared.plans.iter().zip(&prepared.publication) {
+            let mutation::PreparedWrite::Append { applied, .. } = plan else { panic!("append expected") };
+            apply(&mut oracle, applied).unwrap();
+            let retained = retained.as_ref().unwrap();
+            assert_eq!(serde_json::to_value(&retained.record).unwrap(),
+                serde_json::to_value(oracle.records.get(&applied.request.record_id).unwrap()).unwrap());
+            assert_eq!(serde_json::to_value(&retained.operation).unwrap(), serde_json::to_value(oracle.operations.last().unwrap()).unwrap());
+        }
+        drop(prepared);
+        let result = p.execute_writes(requests.clone(), IndexDelivery::Asynchronous).await.unwrap();
+        assert_eq!(result.results.len(), 5);
+        assert!(matches!(result.results[4], Err(RecordError::Conflict(_))));
+        assert_eq!(result.results[..4].iter().map(|r| r.as_ref().unwrap().version).collect::<Vec<_>>(), [1, 1, 2, 1]);
+        p.inner.lock().await.index.drain_indexes().await.unwrap();
+        drop(p);
+        let p = RecordPartition::open(&root, settings.max_journal_bytes).await.unwrap();
+        assert_eq!(p.get("s").await.unwrap().unwrap().document.unwrap()["body"], "updated");
+        assert!(p.get("d").await.unwrap().is_some());
+        assert!(p.get("unused").await.unwrap().is_none());
+        for (request, receipt) in requests[..4].iter().zip(&result.results) {
+            assert_eq!(p.write(request.clone()).await.unwrap(), *receipt.as_ref().unwrap());
+        }
+    }
 
     #[tokio::test]
     async fn failed_batch_retains_only_attempted_prefix_and_prior_replays() {
