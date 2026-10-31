@@ -51,7 +51,9 @@ pub struct SearchRequestObject {
     #[schema(default = "and")]
     /// Match all (and) or any (or) query terms.
     pub operator: QueryOperator,
-    /// Search only these indexed fields; empty means all indexed fields.
+    /// Select indexed fields for the active search mode; unknown or inapplicable names are rejected.
+    /// Omitted/empty means all fields. Hybrid accepts lexical and/or vector names;
+    /// each channel uses its selected fields, or all its fields if none are selected.
     #[serde(default)]
     #[serde(rename = "search_fields")]
     pub field_filter: Vec<String>,
@@ -63,7 +65,7 @@ pub struct SearchRequestObject {
     #[schema(value_type = Vec<api_schema::FacetFilter>)]
     #[serde(rename = "filter")]
     pub facet_filter: Vec<FacetFilter>,
-    /// Sort by filterable fields or _score; empty means relevance order.
+    /// Sort by filterable fields, _id or _score; invalid fields are rejected. Empty means relevance order.
     #[serde(default)]
     #[schema(value_type = Vec<api_schema::ResultSort>)]
     #[serde(rename = "sort")]

@@ -1,4 +1,5 @@
 //! Query configuration and Record's private vector-component execution.
+use crate::record::RecordError;
 use crate::{INDEX_RUNTIME, index::VectorIndexArc, min_heap::{Result, result_ordering_root},
     vector::{Embedding, Inference, Quantization, SearchVectorSegment},
     vector_similarity::{AnnMode, QuantizedVector, VectorSimilarity, normalize_f32, normalize_f32_simd,
@@ -186,9 +187,6 @@ pub struct ResultObject {
     /// Per-returned-ordinal hybrid diagnostics, collected without altering ranking.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub explanations: std::collections::BTreeMap<usize, Vec<ChannelExplanation>>,
-    /// Invalid query input. Callers must check this before consuming search results.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
     /// Search query string
     pub original_query: String,
     /// Search query string, unchanged from the caller input
@@ -297,35 +295,26 @@ pub(crate) async fn search_with_counts(
     facet_filter: Vec<FacetFilter>,
     result_sort: Vec<ResultSort>,
     component_counts: &mut Vec<usize>,
-) -> ResultObject {
+) -> std::result::Result<ResultObject, RecordError> {
         if !matches!(search_mode, SearchMode::Vector { .. }) {
-            return ResultObject { error: Some("vector component cannot execute lexical queries".into()), ..Default::default() };
+            return Err(RecordError::Rejected("vector component cannot execute lexical queries".into()));
         }
         let index_ref = index.read().await;
         if let Err(error) =
             crate::metadata_filter::validate_filters(&index_ref.schema_map, &facet_filter)
         {
-            return ResultObject {
-                error: Some(error),
-                ..Default::default()
-            };
+            return Err(RecordError::Rejected(error));
         }
         if let Err(error) = crate::vector::validate_query_vector(
             &index_ref.meta.inference,
             &search_mode,
             query_vector.as_ref(),
         ) {
-            return ResultObject {
-                error: Some(error),
-                ..Default::default()
-            };
+            return Err(RecordError::Rejected(error));
         }
         if length == 0 || offset.checked_add(length).is_none()
         {
-            return ResultObject {
-                error: Some("vector search requires a positive, bounded result window".into()),
-                ..Default::default()
-            };
+            return Err(RecordError::Rejected("vector search requires a positive, bounded result window".into()));
         }
         let query_vector = if index_ref.is_vector_indexing
         {
@@ -475,10 +464,7 @@ pub(crate) async fn search_with_counts(
                     (qv, 0.0, 0.0, 0, 0)
                 }
             } else {
-                return ResultObject {
-                    error: Some("query_vector is required for Vector/Hybrid search".into()),
-                    ..Default::default()
-                };
+                return Err(RecordError::Rejected("query_vector is required for Vector/Hybrid search".into()));
             })
         } else {
             None
@@ -497,9 +483,9 @@ pub(crate) async fn search_with_counts(
             tasks.push(INDEX_RUNTIME.handle().spawn(crate::resources::inherit(async move {
                 #[cfg(test)] crate::record::query_test_gate().await;
                 let mut result = shard.search_vector_segment(query, offset + length, include_uncommitted,
-                    similarity_threshold, ann, fields, filters).await;
+                    similarity_threshold, ann, fields, filters).await?;
                 for hit in &mut result.results { hit.doc_id = hit.doc_id * segment_count + slot; }
-                result
+                Ok(result)
             })));
         }
         let mut result = ResultObject { original_query: query_string.clone(), query: query_string,
@@ -507,18 +493,18 @@ pub(crate) async fn search_with_counts(
         let mut failure = None;
         for task in tasks {
             match task.await {
-                Ok(mut channel) => {
+                Ok(Ok(mut channel)) => {
                     component_counts.push(channel.result_count_total);
                     result.result_count_total += channel.result_count_total;
                     result.observed_vector_count += channel.observed_vector_count;
                     result.observed_cluster_count += channel.observed_cluster_count;
-                    if let Some(error) = channel.error { failure.get_or_insert(error); }
                     if result_type != ResultType::Count { result.results.append(&mut channel.results); }
                 }
-                Err(error) => { failure.get_or_insert(error.to_string()); }
+                Ok(Err(error)) => { failure.get_or_insert(error); }
+                Err(error) => { failure.get_or_insert(RecordError::Storage(error.to_string())); }
             }
         }
-        if failure.is_some() { result.error = failure; result.results.clear(); return result; }
+        if let Some(error) = failure { return Err(error); }
         let shards = futures::future::join_all(index_ref.segments.iter().map(|segment| segment.vector.read())).await;
         result.results.sort_by(|a,b| crate::min_heap::rank_with_segments(&shards,b.score,b.doc_id,a.score,a.doc_id));
         result.results.truncate(offset + length);
@@ -531,5 +517,5 @@ pub(crate) async fn search_with_counts(
         }
         result.results = result.results.into_iter().skip(offset).take(length).collect();
         result.result_count = result.results.len();
-        result
+        Ok(result)
 }

@@ -58,6 +58,22 @@ fn external_config_and_numeric_validation() {
         let encoded = encode_bytes_to_base64_string(&embedding_to_bytes_be(&Embedding::F32(vector)));
         assert!(parse_external_embedding(&json!(encoded), &inference()).is_err());
     }
+    // Scalar, SIMD lane edges, and the existing Record dimension ceiling.
+    // Literal magnitudes are independent of the implementation's bound formula.
+    for dimensions in [1, 31, 32, 33, 4096] {
+        for quantization in [Quantization::None, Quantization::ScalarQuantizationI8, Quantization::TurboQuantI8] {
+            let config = Inference::External { dimensions, precision: Precision::F32,
+                quantization, similarity: VectorSimilarity::Euclidean };
+            for value in [0.0, 1.0, 1e14] {
+                assert!(validate_embedding(&config, &Embedding::F32(vec![value; dimensions])).is_ok(),
+                    "accepted magnitude {value}, dimensions={dimensions}, {quantization}");
+            }
+            for value in [-1e19, 1e19] {
+                assert!(validate_embedding(&config, &Embedding::F32(vec![value; dimensions])).is_err(),
+                    "unsafe magnitude {value}, dimensions={dimensions}, {quantization}");
+            }
+        }
+    }
     assert!(validate_embedding(&inference(), &Embedding::I8(vec![1,0,0])).is_err());
     for value in [json!([1,2]), json!([1,"x",3]), json!("!bad-base64"), json!(null)] {
         assert!(parse_external_embedding(&value, &inference()).is_err());
@@ -130,4 +146,50 @@ async fn external_f32_and_quantized_thresholds() {
     }
 }
 }
+}
+
+
+#[tokio::test]
+async fn euclidean_magnitude_contract_survives_freeze_and_reopen() {
+    use anyseek::record::RecordError;
+    for quantization in [Quantization::None, Quantization::ScalarQuantizationI8, Quantization::TurboQuantI8] {
+        for dimensions in [1, 32] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("euclidean");
+            let mut config = meta();
+            config.inference = Inference::External { dimensions, precision: Precision::F32,
+                quantization, similarity: VectorSimilarity::Euclidean };
+            let mut positive = vec![0.0; dimensions]; positive[0] = 1e16;
+            let mut negative = vec![0.0; dimensions]; negative[0] = -1e16;
+            let mut unsafe_vector = vec![0.0; dimensions]; unsafe_vector[0] = 1e19;
+            let mut index = records::create(&path, config, schema()).await;
+            assert!(matches!(records::insert(&index, vec![document("rejected", json!(unsafe_vector))]).await,
+                Err(RecordError::Rejected(_))));
+            records::insert(&index, vec![document("alpha", json!(positive))]).await.unwrap();
+            assert!(matches!(try_query(&index, SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All },
+                Some(Embedding::F32(unsafe_vector))).await, Err(RecordError::Rejected(_))));
+            for stage in ["tail", "frozen", "reopened"] {
+                if stage == "frozen" { index.compact_journal().await.unwrap(); }
+                if stage == "reopened" { drop(index); index = RecordPartition::open(&path, records::JOURNAL_LIMIT).await.unwrap(); }
+                for ann_mode in [AnnMode::All, AnnMode::Nprobe(1)] {
+                    let result = query(&index, SearchMode::Vector { similarity_threshold: None, ann_mode },
+                        Some(Embedding::F32(negative.clone()))).await;
+                    assert_eq!(result.hits.len(), 1, "{stage}, dimensions={dimensions}, {quantization}");
+                    assert!((result.hits[0].score / -4e32 - 1.0).abs() < 0.001,
+                        "squared distance must stay in original units: {}", result.hits[0].score);
+                }
+                for (vector, expected) in [(vec![0.0; dimensions], -1e32), (positive.clone(), 0.0)] {
+                    let result = query(&index, SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All },
+                        Some(Embedding::F32(vector))).await;
+                    assert_eq!(result.hits.len(), 1);
+                    assert!((result.hits[0].score - expected).abs() < 1e29);
+                }
+                for (threshold, count) in [(3e32, 0), (5e32, 1)] {
+                    let result = query(&index, SearchMode::Vector { similarity_threshold: Some(threshold), ann_mode: AnnMode::All },
+                        Some(Embedding::F32(negative.clone()))).await;
+                    assert_eq!(result.hits.len(), count, "threshold is a squared distance");
+                }
+            }
+        }
+    }
 }

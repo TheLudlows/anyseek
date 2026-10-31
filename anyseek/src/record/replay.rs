@@ -67,6 +67,12 @@ impl Context<'_> {
                     self.stage_stable_tail().await?;
                 }
                 let prepared=state_memory::Prepared::new(&*self.state,&applied)?;
+                if matches!(self.config.index.inference, crate::vector::Inference::External { precision: crate::vector::Precision::F32,
+                    similarity: crate::vector_similarity::VectorSimilarity::Euclidean, .. })
+                    && let Some(document) = &prepared.record.document {
+                    crate::vector::validate_vectors_in_schema(&self.config.index.inference, self.config.schema.iter(), document)
+                        .map_err(RecordError::Rejected)?;
+                }
                 let bytes=mutation::snapshot_after(&*self.state,*self.snapshot_bytes,&applied,&prepared.record)?;
                 prepared.admit_containers(&mut *self.state,bytes)?;
                 self.publish_prepared(&applied,bytes,Some(prepared)).await?;

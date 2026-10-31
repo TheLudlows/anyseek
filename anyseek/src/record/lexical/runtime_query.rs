@@ -24,8 +24,15 @@ pub(crate) async fn search(
     sort: Vec<ResultSort>,
     cut: Cut,
 ) -> Result<ResultObject, RecordError> {
+    {
+        let root = index.read().await;
+        let config = &root.segments.first().ok_or_else(|| storage("empty retrieval view"))?.lexical.config;
+        validate_selection(&config.schema, &mode, &fields, &sort)?;
+        crate::metadata_filter::validate_filters(&root.schema_map, &filters)
+            .map_err(RecordError::Rejected)?;
+    }
     if matches!(mode, SearchMode::Vector { .. }) {
-        return Ok(crate::search::search_with_counts(
+        return crate::search::search_with_counts(
                 index,
                 text,
                 vector,
@@ -39,7 +46,7 @@ pub(crate) async fn search(
                 sort,
                 &mut Vec::new(),
             )
-            .await);
+            .await;
     }
     let rrf = if let SearchMode::Hybrid { rrf, .. } = &mode {
         *rrf
@@ -77,10 +84,7 @@ pub(crate) async fn search(
                 vec![],
                 &mut vector_counts,
             )
-            .await;
-        if let Some(error) = &vector_result.error {
-            return Err(storage(error));
-        }
+            .await?;
     }
     let root = index.read().await;
     let shards = futures::future::join_all(root.segments.iter().map(|segment| segment.vector.read())).await;
@@ -103,7 +107,7 @@ pub(crate) async fn search(
         .ok_or_else(|| storage("native query memory overflow"))?;
     let _memory = crate::storage::build_budget::reserve_memory(query_bytes).map_err(storage)?;
     let _buffer = crate::resources::Scope::current().map(|scope| scope.bytes(query_bytes))
-        .transpose().map_err(storage)?;
+        .transpose().map_err(|_| RecordError::Busy)?;
 
     let mut snapshots = Vec::new();
     for segment in &root.segments {
@@ -297,4 +301,35 @@ pub(crate) async fn search(
     result.explanations.retain(|id, _| returned.contains(id));
     result.result_count = result.results.len();
     Ok(result)
+}
+
+// An empty selection preserves each channel's default fields. Hybrid selections
+// may name either channel; a channel with no selected fields keeps its default.
+fn validate_selection(
+    schema: &[crate::index::SchemaField],
+    mode: &SearchMode,
+    fields: &[String],
+    sorts: &[ResultSort],
+) -> Result<(), RecordError> {
+    for name in fields {
+        let field = schema.iter().find(|field| &field.field == name)
+            .ok_or_else(|| RecordError::Rejected(format!("unknown search field: {name}")))?;
+        let applicable = match mode {
+            SearchMode::Lexical => field.index_lexical,
+            SearchMode::Vector { .. } => field.index_vector,
+            SearchMode::Hybrid { .. } => field.index_lexical || field.index_vector,
+        };
+        if !applicable {
+            return Err(RecordError::Rejected(format!("search field is not indexed for this mode: {name}")));
+        }
+    }
+    for sort in sorts {
+        if matches!(sort.field.as_str(), "_id" | "_score") { continue; }
+        let field = schema.iter().find(|field| field.field == sort.field)
+            .ok_or_else(|| RecordError::Rejected(format!("unknown sort field: {}", sort.field)))?;
+        if !field.facet {
+            return Err(RecordError::Rejected(format!("sort field is not a facet: {}", sort.field)));
+        }
+    }
+    Ok(())
 }
