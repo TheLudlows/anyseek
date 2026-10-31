@@ -656,7 +656,7 @@ struct KeyRevoke {
     operation_id: OperationId,
     key_id: String,
 }
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all="snake_case")]
 enum CapacityProfile {
     #[default]
@@ -665,16 +665,23 @@ enum CapacityProfile {
     #[serde(rename="bounded_100k")]
     Bounded100k,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 struct CollectionCreate {
+    #[schema(schema_with = operation_id_schema)]
     operation_id: OperationId,
+    #[schema(pattern = "^[a-z][a-z0-9_-]{0,62}$", min_length = 1, max_length = 63)]
     collection_id: String,
     config: CreateIndexRequest,
     #[serde(default)]
+    #[schema(default = CapacityProfile::default)]
     capacity_profile: CapacityProfile,
     #[serde(default)]
     embedding_space_id: Option<String>,
+}
+// Reuse the shared operation contract without coupling the core record type to OpenAPI.
+fn operation_id_schema() -> utoipa::openapi::Ref {
+    utoipa::openapi::Ref::from_schema_name("OperationId")
 }
 fn record_config(
     request: CreateIndexRequest,
@@ -1935,6 +1942,57 @@ mod tests {
         let value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();(status,value)
     }
     #[tokio::test]
+    async fn collection_create_schema_matches_http_profiles_and_optional_fields() {
+        let doc = openapi_document();
+        let schemas = &doc["components"]["schemas"];
+        let schema = &schemas["CollectionCreate"];
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], json!(["operation_id", "collection_id", "config"]));
+        assert_eq!(schema["properties"]["embedding_space_id"]["type"], json!(["string", "null"]));
+        assert_eq!(schema["properties"]["capacity_profile"]["default"],
+            serde_json::to_value(CapacityProfile::default()).unwrap());
+        assert_eq!(schemas["CapacityProfile"]["enum"], json!(["standard_10k", "bounded_100k"]));
+        assert_eq!(schemas["CapacityProfile"]["type"], "string");
+        assert_eq!(schema["properties"]["capacity_profile"]["$ref"], "#/components/schemas/CapacityProfile");
+        assert_eq!(schema["properties"]["collection_id"]["pattern"], "^[a-z][a-z0-9_-]{0,62}$");
+        assert_eq!(schema["properties"]["collection_id"]["minLength"], 1);
+        assert_eq!(schema["properties"]["collection_id"]["maxLength"], 63);
+        assert_eq!(schema["properties"]["operation_id"]["$ref"], "#/components/schemas/OperationId");
+        assert_eq!(schema["properties"]["config"]["$ref"], "#/components/schemas/CreateIndexRequest");
+
+        let (service, path, headers) = setup().await;
+        let app = router(service.clone());
+        let key = headers["apikey"].to_str().unwrap();
+        let request = |id: &str| json!({"operation_id":OperationId::new(format!("schema-{id}")),
+            "collection_id":id,"config":{"index_name":"schema","schema":[{"field":"body","field_type":"Text"}]}});
+        let omitted = request("omitted");
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(omitted.clone())).await.0, StatusCode::OK);
+        assert_eq!(service.record("tenant","omitted").await.unwrap().configuration().await.unwrap().max_records, 10_000);
+        // Drive accepted requests from the generated enum, not another request definition.
+        for (i, profile) in schemas["CapacityProfile"]["enum"].as_array().unwrap().iter().enumerate() {
+            let id = format!("profile-{i}");
+            let mut body = request(&id);
+            body["capacity_profile"] = profile.clone();
+            body["embedding_space_id"] = Value::Null;
+            assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(body)).await.0, StatusCode::OK);
+            let parsed: CapacityProfile = serde_json::from_value(profile.clone()).unwrap();
+            let config = serde_json::from_value(request(&id)["config"].clone()).unwrap();
+            assert_eq!(service.record("tenant",&id).await.unwrap().configuration().await.unwrap().max_records,
+                record_config(config,None,parsed).unwrap().max_records);
+        }
+        for invalid in [json!("unlimited"), Value::Null] {
+            let mut body = request("invalid"); body["capacity_profile"] = invalid;
+            assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(body)).await.0, StatusCode::BAD_REQUEST);
+        }
+        let mut unknown = request("unknown"); unknown["unknown"] = json!(true);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(unknown)).await.0, StatusCode::BAD_REQUEST);
+        for required in schema["required"].as_array().unwrap() {
+            let mut body = request("missing"); body.as_object_mut().unwrap().remove(required.as_str().unwrap());
+            assert_eq!(tenant_api(&app,"POST","/api/v1/index",key,Some(body)).await.0, StatusCode::BAD_REQUEST);
+        }
+        drop(app); drop(service); std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
     async fn collection_recreation_http_retries_and_captured_handles_keep_their_generation() {
         let (service, path, headers) = setup().await;
         let app = router(service.clone());
@@ -2405,7 +2463,7 @@ mod tests {
 fn openapi_document() -> Value {
     use utoipa::OpenApi;
     #[derive(utoipa::OpenApi)]
-    #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject)))]
+    #[openapi(components(schemas(CreateIndexRequest, SearchRequestObject, CollectionCreate)))]
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
@@ -2430,8 +2488,6 @@ fn openapi_document() -> Value {
     schemas.insert("EvidenceLocator".into(),json!({"oneOf":[{"type":"object","additionalProperties":false,"required":["kind","field","start","end"],"properties":{"kind":{"const":"utf8"},"field":{"type":"string"},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":1}}},{"type":"object","additionalProperties":false,"required":["kind","field","page"],"properties":{"kind":{"const":"page"},"field":{"type":"string"},"page":{"type":"integer","minimum":1}}}]}));
     schemas.get_mut("EvidenceRef").unwrap()["properties"]["locator"]=json!({"anyOf":[{"$ref":"#/components/schemas/EvidenceLocator"},{"type":"null"}]});
     schemas.insert("EvidenceMetadata".into(), json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["source","derived","entity","relation"]},"evidence_refs":{"type":"array","maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}}}}));
-    schemas.insert("CollectionCreate".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","collection_id","config"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"collection_id":{"type":"string"},"config":{"$ref":"#/components/schemas/CreateIndexRequest"},"embedding_space_id":{"type":["string","null"]}}}));
-    schemas.get_mut("CollectionCreate").unwrap()["properties"]["collection_id"]=json!({"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$","minLength":1,"maxLength":63});
     schemas.get_mut("EvidenceMetadata").unwrap()["properties"]["relation"]=json!({"anyOf":[{"$ref":"#/components/schemas/RelationMetadata"},{"type":"null"}]});
     let mut paths = serde_json::Map::new();
     for (path, method, summary, schema) in [
