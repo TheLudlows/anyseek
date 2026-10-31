@@ -60,7 +60,6 @@ async fn stable_ranking_shards_pagination_explicit_sort_and_concurrency() {
             {"field":"vector","field_type":"Json","store":false,"index_lexical":false,"index_vector":true}
         ])).unwrap();
         let meta = IndexMetaObject {
-            id: 0,
             name: "stable".into(),
             lexical_similarity: LexicalSimilarity::Bm25f,
             tokenizer: TokenizerType::TantivySimpleV1,
@@ -193,7 +192,6 @@ async fn stable_equal_score_block_boundary_and_explicit_id_sort() {
     ]))
     .unwrap();
     let meta = IndexMetaObject {
-        id: 0,
         name: "stable-blocks".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

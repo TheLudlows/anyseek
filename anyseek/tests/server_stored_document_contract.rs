@@ -39,7 +39,7 @@ async fn stored_records_and_projection_survive_reopen() {
         {"field":"data","field_type":"Json","store":true,"index_lexical":true},
         {"field":"hidden","field_type":"Text","store":false,"index_lexical":true}
     ])).unwrap();
-    let meta=IndexMetaObject { id:0, name:"raw_document".into(),
+    let meta=IndexMetaObject { name:"raw_document".into(),
         lexical_similarity:LexicalSimilarity::Bm25f, tokenizer:TokenizerType::TantivySimpleV1,
     text_normalization: anyseek::index::TextNormalization::None,
     field_length_normalization: anyseek::index::FieldLengthNormalization::Shared,

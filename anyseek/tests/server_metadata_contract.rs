@@ -32,7 +32,6 @@ fn schema() -> Vec<SchemaField> {
 async fn create(path: &Path) -> RecordPartition {
     let _ = fs::remove_dir_all(path);
     let meta = IndexMetaObject {
-        id: 0,
         name: "metadata_contract".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

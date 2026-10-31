@@ -290,10 +290,6 @@ pub enum TextNormalization {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IndexMetaObject {
-    /// unique index ID
-    /// Only used in anyseek server, not by the anyseek library itself.
-    /// In the anyseek server with REST API, the index ID is used to specify the index (within the API key) where you want to index and search.
-    pub id: u64,
     /// index name: used informational purposes
     pub name: String,
     /// LexicalSimilarity defines the scoring and ranking of the search results: Bm25f or Bm25fProximity

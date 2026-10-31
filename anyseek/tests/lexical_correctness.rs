@@ -81,7 +81,6 @@ async fn fresh(
     ]))
     .unwrap();
     let meta = IndexMetaObject {
-        id: 0,
         name: label.into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

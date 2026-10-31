@@ -94,7 +94,6 @@ pub async fn exercise(proximity: bool) {
                     let path = std::env::temp_dir().join(&label);
                     assert!(!path.exists());
                     let meta = IndexMetaObject {
-                        id: 0,
                         name: label.clone(),
                         lexical_similarity: if proximity {
                             LexicalSimilarity::Bm25fProximity
@@ -233,7 +232,6 @@ pub async fn exercise_quantized_df() {
         let path = std::env::temp_dir().join(&label);
         assert!(!path.exists());
         let meta = IndexMetaObject {
-            id: 0,
             name: label,
             lexical_similarity: LexicalSimilarity::Bm25f,
             tokenizer: TokenizerType::TantivySimpleV1,

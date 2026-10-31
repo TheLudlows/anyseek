@@ -299,7 +299,7 @@ struct State {
 enum Entry {
     #[serde(rename = "RecordAnchorV4")]
     Anchor(anchor::Reference),
-    #[serde(rename = "RecordCheckpointV17")]
+    #[serde(rename = "RecordCheckpointV18")]
     Checkpoint { config: RecordConfig, state: State },
     #[serde(rename = "RecordAppliedV15")]
     Applied(Applied),
@@ -1756,7 +1756,7 @@ mod tests {
         base.join(format!("anyseek-record-{:032x}", rand::random::<u128>()))
     }
     pub(super) fn config() -> RecordConfig {
-        RecordConfig {history:HistoryRetention::default(),index:IndexMetaObject{id:0,name:"records".into(),lexical_similarity:LexicalSimilarity::Bm25f,
+        RecordConfig {history:HistoryRetention::default(),index:IndexMetaObject{name:"records".into(),lexical_similarity:LexicalSimilarity::Bm25f,
             tokenizer:TokenizerType::TantivySimpleV1,text_normalization:TextNormalization::None,
             field_length_normalization:FieldLengthNormalization::Shared,stop_words:StopwordType::None,
             frequent_words:FrequentwordType::None,ngram_indexing:0,clustering:Clustering::None,
@@ -2035,7 +2035,7 @@ mod tests {
 
     #[test]
     fn previous_document_upload_storage_formats_are_rejected() {
-        for tag in ["RecordCheckpointV16", "RecordAppliedV14", "RecordAnchorV3", "RecordCheckpointV15", "RecordAppliedV13", "RecordAnchorV2", "RecordLeaseExpiredV12"] {
+        for tag in ["RecordCheckpointV17", "RecordCheckpointV16", "RecordAppliedV14", "RecordAnchorV3", "RecordCheckpointV15", "RecordAppliedV13", "RecordAnchorV2", "RecordLeaseExpiredV12"] {
             let value=serde_json::json!({tag:{}});
             let error=serde_json::from_value::<Entry>(value).unwrap_err().to_string();
             assert!(error.contains("unknown variant"),"{tag}: {error}");
@@ -2592,7 +2592,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_identity_contract_rejects_removed_routing_field() {
+    async fn record_identity_contract_rejects_removed_fields() {
         fn strict<T: Serialize + serde::de::DeserializeOwned>(value: &T) {
             let mut wire = serde_json::to_value(value).unwrap();
             assert!(wire.get("routing_key").is_none());
@@ -2600,6 +2600,10 @@ mod tests {
             wire["routing_key"] = serde_json::json!("obsolete");
             assert!(serde_json::from_value::<T>(wire).is_err());
         }
+        let mut metadata = serde_json::to_value(config().index).unwrap();
+        assert!(metadata.get("id").is_none());
+        metadata["id"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<IndexMetaObject>(metadata).is_err());
         let root = path();
         let p = RecordPartition::create(&root, config()).await.unwrap();
         let source = source_write("source", "s", &[]);
@@ -2623,10 +2627,10 @@ mod tests {
             encode_entry(&Entry::Checkpoint { config:inner.config.clone(), state:inner.state.try_clone().unwrap() }).unwrap()
         };
         drop(current); std::fs::remove_dir_all(&root).unwrap();
-        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV17", "RecordCheckpointV15", 1);
+        let legacy = String::from_utf8(checkpoint).unwrap().replacen("RecordCheckpointV18", "RecordCheckpointV17", 1);
         let journal = PartitionJournal::create(&root, cfg.max_journal_bytes, legacy.as_bytes()).unwrap(); drop(journal);
         let error = RecordPartition::open(&root, cfg.max_journal_bytes).await.err().unwrap();
-        assert!(error.to_string().contains("RecordCheckpointV15"));
+        assert!(error.to_string().contains("RecordCheckpointV17"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

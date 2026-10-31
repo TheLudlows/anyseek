@@ -11,7 +11,7 @@ use serde::{Serialize, Deserialize};
 use std::{collections::HashMap, fs, io::{Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}, sync::Arc};
 use tokio::sync::RwLock;
 
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 const DESCRIPTOR: &str = "component.json";
 const VECTOR: &str = "vectors.bin";
 const FACETS: &str = "metadata.bin";

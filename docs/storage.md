@@ -8,7 +8,7 @@
 
 每个向量/元数据组件记录包必须完整保存与 keys 一一对应的 revisions 和 fingerprint（SHA-256）。加载时统一检查数量及活动身份；缺失字段、空 fingerprint 或不一致的身份数量直接拒绝，不保留旧包等待 checkpoint 补全的分支。空组件也显式保存空身份数组。
 
-`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV17、anchor manifest 8 / 检索 package manifest 3，不读取旧格式、迁移或双写。
+`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV18、完整/增量 state descriptor 5/6、私有向量/metadata descriptor 3、anchor manifest 8 / 检索 package manifest 3，不读取旧格式、迁移或双写。
 
 `record/view.rs` 在同一 partition guard 下检索多个冻结段与可变 tail。更新/墓碑先排除旧版本，再截断 Top-K；各段共享活动 N/df/字段长度上下文，每个通道先形成全局排名再融合。查询、过滤、回表与统计固定同一视图，缺少必要 tail 时失败，不能只搜旧段。
 
@@ -71,7 +71,7 @@ C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级
 
 完整 checkpoint 包含版本、删除、来源、原始数据引用、操作回执、回执历史 GC 切点及历史恢复 scope，因此 `log_base_seq` 可推进至该 checkpoint cut。新 WAL 链从新 base 开始；旧链的不可变 predecessor 边不修改，仍被备份或其他 pin 保护时不能删除。
 
-内部历史裁剪通过**同序号完整 checkpoint**认证 GC 切点和时间水位；冷恢复仍得到相同边界，不额外消耗业务序号。回执 GC 同时检查历史保留期、当前/前一 UTC 日重试窗口。当前格式使用 `RecordCheckpointV17`、`RecordAppliedV15`、`RecordAnchorV4`、`history` 和 `RecordHistoryTrimV13`，移除旧通知配额占位字段与旧裁剪算法；旧库、WAL 和备份明确拒绝，不做迁移。外部 bootstrap/changes 同步接口已移除。
+内部历史裁剪通过**同序号完整 checkpoint**认证 GC 切点和时间水位；冷恢复仍得到相同边界，不额外消耗业务序号。回执 GC 同时检查历史保留期、当前/前一 UTC 日重试窗口。当前格式使用 `RecordCheckpointV18`、`RecordAppliedV15`、`RecordAnchorV4`、`history` 和 `RecordHistoryTrimV13`，移除旧通知配额占位字段与旧裁剪算法；旧库、WAL 和备份明确拒绝，不做迁移。外部 bootstrap/changes 同步接口已移除。
 
 物理删除不只看 indexed seq：checkpoint 已保存的幂等/来源及历史裁剪状态、当前根、完整依赖图、读者/构建/备份 pin 必须共同满足。当前单机读者和构建受 partition guard 保护；多节点租约/外部 indexer 尚不在本批。
 

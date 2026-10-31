@@ -8,7 +8,6 @@ use serde_json::json;
 async fn typed_snapshot_preserves_visible_position_and_configuration() {
     let root=tempfile::tempdir().unwrap();let path=root.path().join("records");
     let meta = IndexMetaObject {
-        id: 17,
         name: "typed info".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,
@@ -28,11 +27,16 @@ async fn typed_snapshot_preserves_visible_position_and_configuration() {
     records::append(&partition, vec![serde_json::from_value(json!({"body":"hello"})).unwrap()]).await;
     let before=partition.statistics().await.unwrap();
     let config=partition.configuration().await.unwrap();
-    assert_eq!(config.index.id,17);
+    assert_eq!(config.index.name,"typed info");
+    assert!(serde_json::to_value(&config.index).unwrap().get("id").is_none());
     assert_eq!(config.schema.len(),1);
     assert!(config.schema[0].index_lexical);
     assert_eq!(before.active_records,1);
     assert_eq!(partition.statistics().await.unwrap().visible_seq,before.visible_seq);
     partition.compact_journal().await.unwrap();
     assert_eq!(partition.statistics().await.unwrap().active_records,1);
+    drop(partition);
+    let reopened=anyseek::record::RecordPartition::open(&path,records::JOURNAL_LIMIT).await.unwrap();
+    assert_eq!(reopened.configuration().await.unwrap().index.name,"typed info");
+    assert_eq!(reopened.statistics().await.unwrap().active_records,1);
 }

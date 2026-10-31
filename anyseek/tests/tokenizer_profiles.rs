@@ -11,7 +11,7 @@ fn retired_profiles_are_rejected_in_enum_and_persisted_metadata() {
     for name in RETIRED {
         let error = serde_json::from_value::<TokenizerType>(json!(name)).unwrap_err();
         assert!(error.to_string().contains("unknown variant"), "{error}");
-        let meta = json!({"id":0,"name":"profiles",
+        let meta = json!({"name":"profiles",
             "lexical_similarity":"Bm25f","tokenizer":name});
         assert!(serde_json::from_value::<IndexMetaObject>(meta).is_err(), "{name}");
     }

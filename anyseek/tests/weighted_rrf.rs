@@ -26,7 +26,7 @@ fn document(body: &str, vector: serde_json::Value) -> Document {
     serde_json::from_value(json!({"body":body,"vector":vector})).unwrap()
 }
 fn meta() -> IndexMetaObject {
-    IndexMetaObject { id:0, name:"external_contract".into(), lexical_similarity:LexicalSimilarity::Bm25f,
+    IndexMetaObject { name:"external_contract".into(), lexical_similarity:LexicalSimilarity::Bm25f,
         tokenizer:TokenizerType::TantivySimpleV1,
         text_normalization: anyseek::index::TextNormalization::None,
         field_length_normalization: anyseek::index::FieldLengthNormalization::Shared, stop_words:StopwordType::None, frequent_words:FrequentwordType::None,

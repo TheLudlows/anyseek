@@ -25,7 +25,6 @@ use std::{fs, path::Path, time::Duration};
 
 fn meta() -> IndexMetaObject {
     IndexMetaObject {
-        id: 0,
         name: "realtime_delete_consistency".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

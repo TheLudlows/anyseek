@@ -5,7 +5,6 @@ use anyseek::index::{Clustering, FrequentwordType,
 use anyseek::{record::RecordPartition, vector::Inference};
 fn meta() -> IndexMetaObject {
     IndexMetaObject {
-        id: 0,
         name: "get_nonstored_doc".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,
