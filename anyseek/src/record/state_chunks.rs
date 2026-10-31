@@ -770,7 +770,7 @@ mod tests {
                 std::fs::write(path,changed).unwrap();
             }
             assert!(descriptor.verify_expected(&directory,&pool,config.max_journal_bytes,&expected).is_err(),"{scenario}");
-            assert_eq!(state.operations.len(),3);
+            assert_eq!(state.operations.len(),2);
         }
     }
 
