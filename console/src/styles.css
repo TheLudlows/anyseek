@@ -2069,3 +2069,9 @@ th {
   color: #6479bb;
   margin-bottom: 12px;
 }
+
+.collection-fields { margin-top: 24px; }
+.collection-fields .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.collection-field { border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-top: 12px; }
+.collection-field .form-row { align-items: end; }
+.field-options { display: flex; flex-wrap: wrap; gap: 12px 20px; margin-top: 10px; }

@@ -61,7 +61,7 @@ PATCH collection 发布完整远端 checkpoint 后再回收已覆盖且无 pin �
 
 collection ID、record ID 是字符串业务身份，内部 DocID 不作为 HTTP 身份。所有数据请求使用 `apikey` 请求头。
 
-- 创建：`{operation_id,collection_id,config,embedding_space_id?}`。`config` 包含名称/schema/可选向量配置；向量 collection 要求外部 embedding space 身份。
+- 创建：`{operation_id,collection_id,config,embedding_space_id?}`。`config` 包含名称/schema/可选向量配置；向量由调用方生成；`embedding_space_id` 仅为可选说明，不参与模型调用或向量来源校验。
 - 写入：`{operation_id,record_id,routing_key,expected,document}`。`document` 必须显式提供；对象完整替换，`null` 删除。已有身份不能更换 routing key。
 - `expected` 为 `"Absent"`、`{"Match":N}` 或 `"Any"`。删除后重建继续推进版本，避免旧条件命中新内容。
 - 操作 ID 是 `{epoch,nonce}`，epoch 是自 Unix epoch 起的 UTC 日数。当前日和前一日可重试；正常当日签发至少有 24 小时窗口。控制操作保留 `sys:` nonce 前缀。

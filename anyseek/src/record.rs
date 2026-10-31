@@ -113,7 +113,7 @@ pub struct RecordConfig {
     pub index: IndexMetaObject,
     /// Search schema. `store` controls projections, not authoritative retention.
     pub schema: Vec<SchemaField>,
-    /// Model/space identity, required when vectors are configured.
+    /// Optional caller-provided description of the external embedding space.
     pub embedding_space_id: Option<String>,
     /// Cap on live records plus retained tombstones (no implicit eviction).
     pub max_records: usize,
@@ -161,14 +161,6 @@ pub fn validate_config(config: &RecordConfig) -> Result<(), RecordError> {
     if config.schema.iter().any(|f| temporal::reserved(&f.field)) { return Err(RecordError::Rejected("reserved system time field prefix".into())); }
     crate::vector::validate_vector_schema(&config.index.inference, &config.schema)
         .map_err(RecordError::Rejected)?;
-    if config.schema.iter().any(|f| f.index_vector)
-        && config
-            .embedding_space_id
-            .as_ref()
-            .is_none_or(|s| s.is_empty())
-    {
-        return Err(RecordError::Rejected("embedding_space_id required".into()));
-    }
     let bytes = encode_entry(&Entry::Checkpoint {
         config: config.clone(),
         state: State::default(),
