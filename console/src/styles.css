@@ -2047,3 +2047,9 @@ th {
 .embedding-choice p { overflow-wrap: anywhere; }
 
 .schema-summary .data-table td { white-space: nowrap; }
+
+.markdown-preview { max-height: 320px; overflow: auto; margin: 16px 0; }
+.markdown-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; padding: 12px; }
+.markdown-import .form-grid { margin-top: 16px; }
+.markdown-import .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.markdown-import .form-grid label { display: grid; gap: 8px; }

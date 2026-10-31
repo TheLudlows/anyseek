@@ -178,3 +178,31 @@ test("aborted embedding does not publish generated values or call ingest", async
   assert.equal(storage.get<PendingWrites>("pendingWrites")!.requests[0].embedded, false);
   await assert.rejects(sendWrites(pending, "key", "owner"), /先完成向量生成/);
 });
+
+test("Markdown chunks carry title context through embedding and canonical ingest", async () => {
+  const { chunkMarkdown, markdownDocuments } = await import("../src/markdown.ts");
+  const docs = markdownDocuments(chunkMarkdown("guide.md", "# Guide\n\nIntro\n\n## Install\n\nRun command"), { body: "body", title: "", source: "", index: "" });
+  saveEmbeddingConfig("owner", collection, config, "secret", false);
+  const pending = prepareEmbeddedWrites(JSON.stringify(docs), "owner", collection, config);
+  storage.set("pendingWrites", pending);
+  let modelCalls = 0, writes = 0;
+  globalThis.fetch = async (url, options) => {
+    const body = JSON.parse(String(options?.body));
+    if (String(url) === config.endpoint) {
+      modelCalls++;
+      assert.deepEqual(body.input, docs.map(doc => doc.body));
+      assert.match(body.input[1], /Guide \/ Install/);
+      return modelResponse(docs.length);
+    }
+    writes++;
+    assert.equal(url, "/api/v1/index/docs/ingest");
+    assert.equal(body.records.length, docs.length);
+    assert.deepEqual(body.records.map((r: any) => r.document.body), docs.map(doc => doc.body));
+    assert.ok(body.records.every((r: any) => r.document.vector.length === 2));
+    return receipts(body.records, body.records.map(() => "committed"));
+  };
+  await generatePendingEmbeddings(pending, "owner", collection);
+  await sendWrites(pending, "tenant-secret", "owner");
+  assert.equal(modelCalls, 1); assert.equal(writes, 1);
+  assert.equal(storage.get("pendingWrites"), null);
+});
