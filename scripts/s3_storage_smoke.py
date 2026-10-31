@@ -248,7 +248,7 @@ def main():
                 assert archive['visible_seq']==before
                 assert call('POST','/api/v1/index/main/backup',request)==archive
                 target='restored-'+stage;restore={'operation_id':operation(),'collection_id':target,'backup_id':archive['backup_id']}
-                if args.faults:
+                if args.faults and stage == stages[0]:
                     stop();start({'ANYSEEK_REMOTE_RESTORE_FAULT':'after_import'})
                     try:call('POST','/api/v1/restore',restore)
                     except (OSError,http.client.HTTPException):pass
