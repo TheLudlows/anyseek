@@ -36,9 +36,11 @@ fn encoded_length(value:&Value,limit:u64)->Result<u64,RecordError> {
     let mut counter=Counter{bytes:0,limit};
     serde_json::to_writer(&mut counter,value).map_err(storage)?;Ok(counter.bytes)
 }
+// A full State has at most max_records current bodies and max_records source
+// revisions. Each retained operation has either a document or a vector patch.
 #[cfg(test)]
 fn payload_limit(config:&RecordConfig)->Result<usize,RecordError>{
-    config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(102)).ok_or_else(||storage("payload budget overflow"))
+    config.max_records.checked_mul(2).and_then(|n|n.checked_add(config.max_operations)).ok_or_else(||storage("payload budget overflow"))
 }
 #[cfg(test)]
 fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(&Value)->Result<Vec<u8>,RecordError>)->Result<(RecordConfig,State),RecordError>{
@@ -95,6 +97,22 @@ impl ReferencedState {
 mod tests {
     use super::*;
     use crate::storage::payload_pool::{Budget, Closure, PoolBuilder, PoolReader};
+
+    #[test]
+    fn full_state_payload_bound_counts_sources_and_vector_patches() {
+        let mut config=super::super::tests::config();
+        config.max_records=2;config.max_operations=2;
+        let mut state=serde_json::json!({
+            "records":{"a":{"document":{}},"b":{"document":{"body":"current"}}},
+            "source_revisions":[{"document":{"body":"old1"}},{"document":{"body":"old2"}}],
+            "operations":[{"request":{"document":{"body":"write"}}},
+                {"request":{"document":null,"vector_patch":{"vector":[1,2]}}}]
+        });
+        let mut count=0;visit(&mut state,|_|{count+=1;Ok(())}).unwrap();
+        assert_eq!(count,payload_limit(&config).unwrap());
+        config.max_records=usize::MAX;
+        assert!(payload_limit(&config).is_err());
+    }
 
     fn prepare(root: &Path, config: &RecordConfig, state: &State) -> (ReferencedState, PoolReader, Closure, PathBuf) {
         let directory=root.join("private-payload");std::fs::create_dir(&directory).unwrap();

@@ -133,7 +133,15 @@ fn directory(root:&Path,id:&str)->Result<PathBuf,RecordError>{
     Ok(root.join(format!("anchor-{id}")))
 }
 fn budget(config:&RecordConfig)->Result<Budget,RecordError>{
-    Ok(Budget{bytes:config.max_journal_bytes,objects:64,payloads:config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(102)).ok_or_else(||storage("anchor payload count overflow"))?,body_bytes:config.max_record_bytes})
+    // Unlike one State (2 * max_records + max_operations payload positions),
+    // a closure retains whole objects used by old bases/deltas after history GC.
+    // Current operation counts therefore cannot bound its historical payloads.
+    // Every interned Document/patch is a JSON object, at least two bytes ({}).
+    // The aggregate object byte cap includes headers, so bytes / 2 is a safe
+    // count ceiling even across all 64 objects and a pending full-base rewrite.
+    let payloads=usize::try_from(config.max_journal_bytes / 2)
+        .map_err(|_|storage("anchor payload count overflow"))?;
+    Ok(Budget{bytes:config.max_journal_bytes,objects:64,payloads,body_bytes:config.max_record_bytes})
 }
 // This is an acceptance bound, not yet the final build-time allocator quota.
 fn closure_limit(authority:u64)->Result<u64,RecordError>{authority.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024)).ok_or_else(||storage("anchor closure budget overflow"))}
@@ -833,6 +841,30 @@ mod tests {
         null["fingerprints"][0] = serde_json::Value::Null;
         assert!(serde_json::from_value::<crate::active::ActiveStatistics>(null).is_err());
         package.load(&root, &inner.config, active).await.unwrap();
+    }
+
+    #[test]
+    fn payload_budget_retains_historical_objects_beyond_live_operation_limit() {
+        let root=tempfile::tempdir().unwrap();
+        let mut settings=config();
+        settings.max_records=1;settings.max_operations=1;settings.max_journal_bytes=128;
+        let mut closure=Closure::default();
+        let mut references=Vec::new();
+        for i in 0..4 {
+            let mut pool=PoolBuilder::begin(root.path(),closure,budget(&settings).unwrap(),format!("{i:032x}")).unwrap();
+            pool.retain_prior_closure();
+            let body=if i==0 {b"{}".to_vec()} else {format!("{{\"v\":{i}}}").into_bytes()};
+            references.push((pool.intern(&body).unwrap(),body));
+            closure=pool.finish().unwrap();
+        }
+        // Four historical bodies exceed the three positions in one small State.
+        let reader=PoolReader::open(root.path(),closure.clone(),budget(&settings).unwrap()).unwrap();
+        for (reference,body) in references {assert_eq!(reader.read(&reference).unwrap(),body);}
+        let exact=closure.objects.values().map(|object|object.bytes).sum();
+        settings.max_journal_bytes=exact;
+        assert!(PoolReader::open(root.path(),closure.clone(),budget(&settings).unwrap()).is_ok());
+        settings.max_journal_bytes=exact-1;
+        assert!(PoolReader::open(root.path(),closure,budget(&settings).unwrap()).is_err());
     }
 
     #[tokio::test]

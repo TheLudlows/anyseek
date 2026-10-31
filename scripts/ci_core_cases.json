@@ -169,5 +169,7 @@
   "record::tests::relation_endpoint_delete_and_transitive_proof_recovery",
   "record::history::retention_tests::ordinary_writes_advance_retention_without_dropping_recent_receipts",
   "record::tests::removed_upload_envelope_is_rejected_but_business_generation_is_opaque",
-  "record::tests::previous_document_upload_storage_formats_are_rejected"
+  "record::tests::previous_document_upload_storage_formats_are_rejected",
+  "record::anchor::tests::payload_budget_retains_historical_objects_beyond_live_operation_limit",
+  "record::segment_state::tests::full_state_payload_bound_counts_sources_and_vector_patches"
 ]

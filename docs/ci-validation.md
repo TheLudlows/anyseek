@@ -2,7 +2,7 @@
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
 dependency/core boundaries and the lexical partition;
-on code changes it builds and runs 171 exact bounded core regressions plus the
+on code changes it builds and runs 173 exact bounded core regressions plus the
 small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
 cases fail rather than silently matching zero tests. Integration scales are listed
@@ -104,7 +104,7 @@ unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests
 ## Small and full query fixtures (P1)
 
 Default PR core jobs explicitly select `small` and run six integration targets
-in addition to the 171 exact core cases. The manual matrix explicitly selects
+in addition to the 173 exact core cases. The manual matrix explicitly selects
 `full`, including its four independent Windows lexical jobs. No production
 capacity, scoring, timeout or fault boundary changes.
 
