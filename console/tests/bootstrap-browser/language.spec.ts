@@ -42,9 +42,8 @@ test('mobile language switching works with storage disabled',async({page})=>{
   await page.setViewportSize({width:390,height:844});
   await page.goto('/');
   await page.evaluate(()=>{Storage.prototype.setItem=()=>{throw new Error('blocked');};});
-  await page.getByRole('button',{name:'打开导航'}).click();
   await page.getByLabel('语言 / Language').selectOption('en');
-  await expect(page.getByRole('navigation',{name:'Main navigation'})).toBeVisible();
-  await expect.poll(async()=>page.locator('.sidebar').evaluate(el=>el.getBoundingClientRect().x)).toBe(0);
+  await expect(page.locator('.topbar').getByLabel('语言 / Language')).toHaveValue('en');
+  await expect(page.locator('.sidebar .language-switch')).toHaveCount(0);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 });
