@@ -279,13 +279,23 @@ pub fn validate_vector_schema(inference: &Inference, schema: &[crate::index::Sch
 }
 
 /// Validate caller-supplied values before normalization, quantization or indexing.
+/// Euclidean F32 requires max(abs(value)) * N <= sqrt(f32::MAX) / 32,
+/// where N is the dimension count (next power of two for TurboQuant).
+/// Record's existing maximum of 4096 dimensions is unchanged.
 pub fn validate_embedding(inference: &Inference, embedding: &Embedding) -> Result<(), String> {
-    let Inference::External { dimensions, precision, similarity, .. } = inference else {
+    let Inference::External { dimensions, precision, similarity, quantization } = inference else {
         return Err("vector search requires External inference configuration".into());
     };
     let (len, norm) = match (precision, embedding) {
         (Precision::F32, Embedding::F32(values)) => {
             if values.iter().any(|v| !v.is_finite()) { return Err("vector values must be finite".into()); }
+            if *similarity == VectorSimilarity::Euclidean {
+                let width = if *quantization == Quantization::TurboQuantI8 {
+                    dimensions.checked_next_power_of_two()
+                        .ok_or_else(|| "vector dimensions exceed supported address space".to_string())?
+                } else { *dimensions };
+                validate_euclidean_f32(values, width)?;
+            }
             (values.len(), values.iter().map(|v| v * v).sum::<f32>())
         }
         (Precision::I8, Embedding::I8(values)) => (values.len(), values.iter().map(|v| (*v as f32).powi(2)).sum::<f32>()),
@@ -294,6 +304,26 @@ pub fn validate_embedding(inference: &Inference, embedding: &Embedding) -> Resul
     if len != *dimensions { return Err(format!("vector dimensions must be {dimensions}, got {len}")); }
     if !norm.is_finite() { return Err("vector magnitude exceeds F32 range".into()); }
     if *similarity == VectorSimilarity::Cosine && norm == 0.0 { return Err("cosine vector must have a nonzero norm".into()); }
+    Ok(())
+}
+
+// Let a=max|x| and N be the stored width (including TurboQuant padding).
+// With N<=4096 (the existing Record budget), B=N*a²<=MAX/(1024*N).
+// Raw squared distances are <16B even with conservative rounding bounds.
+// SQ is pinned non-affine for new Records: |q|<=128, scale≈a/127 gives
+// reconstructed norms <1.017B. TQ has at most 12 FWHT stages; rotation/norm
+// rounding and |q|<=128 give reconstructed norms <32.065B and distances
+// <132B+1, including its 1e-8 scale floor. These are well below MAX.
+// Integer dot/norm sums are bounded by 16384*4096. No score clipping or
+// unchecked narrowing is used, and the squared-distance units are unchanged.
+pub(crate) fn validate_euclidean_f32(values: &[f32], width: usize) -> Result<(), String> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err("vector values must be finite".into());
+    }
+    let max = values.iter().fold(0.0f32, |max, value| max.max(value.abs()));
+    if f64::from(max) * width as f64 > f64::from(f32::MAX).sqrt() / 32.0 {
+        return Err("euclidean vector magnitude exceeds the safe F32 arithmetic range".into());
+    }
     Ok(())
 }
 

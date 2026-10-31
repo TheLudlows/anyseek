@@ -186,6 +186,21 @@ def main():
             call('POST','/api/v1/index/vectors/doc',{**patch,'operation_id':operation()},status=409)
             assert call('GET','/api/v1/index/vectors/doc/pending/status')['pending_vector_fields']==[]
             assert len(call('POST','/api/v1/index/vectors/query',{'query_vector':[1,0],'all':True})['hits'])==2
+            # One small Euclidean fixture in this process checks numeric rejections
+            # before acceptance and verifies the collection remains queryable.
+            numeric={**vc,'operation_id':operation(),'collection_id':'numeric',
+                     'embedding_space_id':'fixture-f32-euclidean',
+                     'config':{**vc['config'],'vector':{'dimensions':2,'metric':'Euclidean'}}}
+            call('POST','/api/v1/index',numeric)
+            numeric_write={**vw,'operation_id':operation(),'document':{'body':'alpha','vector':[1e19,0]}}
+            assert call('POST','/api/v1/index/numeric/doc',numeric_write,status=400)['code']=='rejected'
+            call('POST','/api/v1/index/numeric/doc',{**numeric_write,'operation_id':operation(),
+                 'document':{'body':'alpha','vector':[1,0]}})
+            for query in [{'query_vector':[-1e19,0]}, {'query':'alpha','query_vector':[-1e19,0]}]:
+                assert call('POST','/api/v1/index/numeric/query',query,status=400)['code']=='rejected'
+            q=call('POST','/api/v1/index/numeric/query',{'query_vector':[0,0],'all':True,'similarity_threshold':1})
+            assert len(q['hits'])==1 and q['hits'][0]['score']==-1,q
+            call('DELETE','/api/v1/index/numeric',{'operation_id':operation()})
             print('PASS optional vector HTTP: lexical before vector, exact version append-only enrichment, retry and readiness')
             vector_backup=call('POST','/api/v1/index/vectors/backup',{'operation_id':operation()})
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'restored-vectors','backup_id':vector_backup['backup_id']})

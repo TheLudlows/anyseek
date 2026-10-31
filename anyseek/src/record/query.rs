@@ -330,6 +330,49 @@ mod tests {
         .unwrap();
     }
     #[tokio::test]
+    async fn euclidean_cached_rows_and_rebuild_inputs_require_safe_numbers() {
+        use crate::component::{create_index, open_index, Commit};
+        use crate::vector::{Inference, Quantization, VectorHeader};
+        use crate::vector_similarity::VectorSimilarity;
+        for quantization in [Quantization::None, Quantization::ScalarQuantizationI8, Quantization::TurboQuantI8] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = crate::record::tests::config();
+            if let Inference::External { similarity, quantization: q, .. } = &mut config.index.inference {
+                *similarity = VectorSimilarity::Euclidean; *q = quantization;
+            }
+            let schema = super::super::retrieval_schema(&config);
+            let path = root.path().join("component");
+            let index = create_index(&path, config.index.clone(), &schema, &config).await.unwrap();
+            let component = index.read().await.segments[0].vector.clone();
+            let bad = serde_json::from_value(serde_json::json!({"vector":[1e19,0.0]})).unwrap();
+            assert!(component.write().await.append(bad).await.is_err());
+            assert_eq!(component.read().await.indexed_doc_count, 0);
+            component.write().await.append(serde_json::from_value(serde_json::json!({"vector":[1.0,0.0]})).unwrap()).await.unwrap();
+            index.commit().await.unwrap();
+            // Corrupt only numeric row content, retaining valid file structure.
+            // The same lower-level check protects old, authenticated cache data.
+            index.read().await.segments[0].lexical.seal().await.unwrap();
+            drop(component); drop(index);
+            let vector_path = path.join("vectors.bin");
+            let original = std::fs::read(&vector_path).unwrap();
+            let row = 8; // one level, one cluster, one row
+            for value in [f32::INFINITY, 1e19] {
+                let mut bytes = original.clone();
+                if quantization == Quantization::None {
+                    let start = row + size_of::<VectorHeader>();
+                    bytes[start..start+4].copy_from_slice(&value.to_ne_bytes());
+                } else {
+                    let header = bytemuck::pod_read_unaligned::<VectorHeader>(&bytes[row..row+size_of::<VectorHeader>()]);
+                    let header = VectorHeader { scale: value, ..header };
+                    bytes[row..row+size_of::<VectorHeader>()].copy_from_slice(bytemuck::bytes_of(&header));
+                }
+                std::fs::write(&vector_path, bytes).unwrap();
+                assert!(matches!(open_index(&path, &config).await, Err(RecordError::Rejected(_))));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn candidate_and_filter_revalidation_fence_failed_component_after_capture() {
         let temporary = tempfile::tempdir().unwrap();
         let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();

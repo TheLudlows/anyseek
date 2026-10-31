@@ -924,6 +924,17 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
 fn validate_restored_state(config:&RecordConfig,state:&State)->Result<(),RecordError>{
         state.records.validate_counts()?;
     validate_config(config)?;
+    // Older committed input must meet the same numerical contract before the
+    // recovered partition becomes available or a cache rebuild is scheduled.
+    if matches!(config.index.inference, crate::vector::Inference::External { precision: crate::vector::Precision::F32,
+        similarity: crate::vector_similarity::VectorSimilarity::Euclidean, .. }) {
+        for record in state.records.values() {
+            if let Some(document) = &record.document {
+                crate::vector::validate_vectors_in_schema(&config.index.inference, config.schema.iter(), document)
+                    .map_err(RecordError::Rejected)?;
+            }
+        }
+    }
         evidence::validate_history(&state.records, &state.source_revisions).map_err(storage)?;
         locator::validate_history(&state).map_err(storage)?;
         temporal::validate_state(&state)?;

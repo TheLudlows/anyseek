@@ -190,6 +190,7 @@ fn create_component_files(path:&Path,meta:IndexMetaObject,schema:&[SchemaField])
 }
 pub(crate) async fn open_index(path:&Path,config:&crate::record::RecordConfig)->Result<VectorIndexArc,crate::record::RecordError>{
     let (mut index, vector) = open_component_files(path).map_err(crate::record::RecordError::Storage)?;
+    vector.read().await.validate_euclidean_vectors().map_err(crate::record::RecordError::Rejected)?;
     let lexical = crate::record::lexical::runtime::Runtime::open_owned(&path.join("native"), config)
         .await?;
     index.segments.push(RetrievalSegment { vector, lexical });
@@ -244,6 +245,53 @@ impl VectorSegment {
         }
         if vectors!=self.indexed_vector_count || clusters!=self.indexed_cluster_count || (self.vector_levels>0 && last!=self.last_level_vector_file_start_pos) {
             return Err("vector component counters mismatch".into());
+        }
+        Ok(())
+    }
+    // Structural bounds were checked by validate_vectors before this scan. Old
+    // cached rows (including retired rows/medoids) must be safe before scoring.
+    fn validate_euclidean_vectors(&self) -> Result<(), String> {
+        if self.vector_similarity != VectorSimilarity::Euclidean || self.vector_precision != Precision::F32 {
+            return Ok(());
+        }
+        let width = self.vector_dimensions;
+        if width == 0 || width > 4096 { return Err("vector dimension budget exceeded".into()); }
+        if self.quantization == Quantization::ScalarQuantizationI8 && self.max_vector_value != f32::MIN {
+            crate::vector::validate_euclidean_f32(&[self.min_vector_value, self.max_vector_value], width)?;
+            if self.min_vector_value > self.max_vector_value { return Err("invalid euclidean quantization range".into()); }
+        }
+        let precision = if self.quantization == Quantization::None { Precision::F32 } else { Precision::I8 };
+        let size = size_of::<VectorHeader>() + width * if precision == Precision::F32 { 4 } else { 1 };
+        let mut offset = 0;
+        for _ in 0..self.vector_levels {
+            let clusters = u32::from_le_bytes(self.vector_file_mmap[offset..offset+4].try_into().unwrap()) as usize;
+            offset += 4;
+            let mut rows = 0;
+            for _ in 0..clusters {
+                rows += u32::from_le_bytes(self.vector_file_mmap[offset..offset+4].try_into().unwrap()) as usize;
+                offset += 4;
+            }
+            for _ in 0..rows {
+                let row = crate::vector::read_record(&self.vector_file_mmap[offset..offset+size], width, precision);
+                match row.embedding {
+                    crate::vector::EmbeddingView::F32(values) => crate::vector::validate_euclidean_f32(values, width)?,
+                    crate::vector::EmbeddingView::I8(_) => {
+                        let scale = f64::from(row.header.scale);
+                        let norm = f64::from(row.header.norm);
+                        let zero = i64::from(row.header.zero_point).abs();
+                        let sum = i64::from(row.header.sum_q).abs();
+                        // Bound every reconstructed coordinate, including affine
+                        // correction. This also admits zero-scale zero vectors.
+                        let bound = width as f64 * (128 + zero).pow(2) as f64 * scale * scale;
+                        if !scale.is_finite() || scale < 0.0 || !norm.is_finite() || norm < 0.0
+                            || zero > 128 || sum > 128 * width as i64
+                            || norm > f64::from(f32::MAX) / 16.0 || bound > f64::from(f32::MAX) / 16.0 {
+                            return Err("euclidean component exceeds the safe F32 arithmetic range".into());
+                        }
+                    }
+                }
+                offset += size;
+            }
         }
         Ok(())
     }
@@ -315,6 +363,10 @@ impl VectorSegment {
     }
     async fn append_admitted(&mut self, document:Document)->Result<(),String>{
         crate::index::validate_field_values(self.schema_map.values(), &document)?;
+        // Rebuild/replay can enter below the public write validator.
+        if self.vector_similarity == VectorSimilarity::Euclidean && self.vector_precision == Precision::F32 {
+            crate::vector::validate_vectors_in_schema(&self.meta.inference, self.schema_map.values(), &document)?;
+        }
         let ordinal=self.indexed_doc_count;
         if ordinal>0 && ordinal.is_multiple_of(ROARING_BLOCK_SIZE) && self.uncommitted {self.commit_component().await.map_err(|e|e.to_string())?;}
         // The full input is consumed by this call, never stored in the component.
