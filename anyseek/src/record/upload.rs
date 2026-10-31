@@ -234,7 +234,6 @@ pub(super) fn validate_history(
             }
             GenerationCommand::StageBatch { .. } | GenerationCommand::Seal { .. } => {
                 let mut holder = Manifest {
-                    routing_key: manifest.routing_key.clone(),
                     version: 0,
                     used: BTreeSet::new(),
                     active: None,

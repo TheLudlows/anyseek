@@ -29,7 +29,7 @@ pub(super) fn validate_metadata(system:&EvidenceMetadata)->Result<(),RecordError
             return Err(RecordError::Rejected("invalid relation type or finite weight".into()));
         }
         for endpoint in [&edge.from,&edge.to] {
-            if endpoint.locator.is_some() || endpoint.record_id.is_empty() || endpoint.record_id.len()>256 || endpoint.routing_key.is_empty() || endpoint.routing_key.len()>256 || endpoint.version==0 {
+            if endpoint.locator.is_some() || endpoint.record_id.is_empty() || endpoint.record_id.len()>256 || endpoint.version==0 {
                 return Err(RecordError::Rejected("invalid exact relation endpoint".into()));
             }
         }
@@ -41,8 +41,8 @@ pub(super) fn validate_new(records:&state_values::Records,system:&EvidenceMetada
     if system.relation.is_none(){return Ok(());}
     for endpoint in endpoints(system) {
         let target=records.get(&endpoint.record_id).ok_or_else(||RecordError::Rejected("relation endpoint not found in this collection".into()))?;
-        if target.version!=endpoint.version || target.routing_key!=endpoint.routing_key {
-            return Err(RecordError::Conflict("relation endpoint version or route mismatch".into()));
+        if target.version!=endpoint.version {
+            return Err(RecordError::Conflict("relation endpoint version mismatch".into()));
         }
         if target.system.as_ref().is_some_and(|s|s.kind==EvidenceKind::Relation) || !evidence::endpoint_visible(records,&endpoint.record_id)? {
             return Err(RecordError::Rejected("relation requires visible non-relation endpoints".into()));
@@ -183,7 +183,7 @@ pub(super) fn neighbors_view(inner:&Inner,request:NeighborRequest,eligible:impl 
             if seed.locator.is_some() {return Err(RecordError::Rejected("relation seeds cannot contain locators".into()));}
             if !seen.insert(&seed.record_id) {return Err(RecordError::Rejected("duplicate relation seed".into()));}
             let record=inner.state.records.get(&seed.record_id).filter(|r|inner.locations.contains_key(&r.record_id));
-            if record.is_none_or(|r|r.version!=seed.version || r.routing_key!=seed.routing_key || r.system.as_ref().is_some_and(|s|s.kind==EvidenceKind::Relation)) {
+            if record.is_none_or(|r|r.version!=seed.version || r.system.as_ref().is_some_and(|s|s.kind==EvidenceKind::Relation)) {
                 return Err(RecordError::Conflict("seed is not a current visible non-relation version".into()));
             }
         }

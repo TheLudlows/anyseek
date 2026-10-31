@@ -22,7 +22,7 @@ def main():
     summary['resource_stop']={'reason':'preserved 2GiB free-space margin','available_bytes':available};break
    writes=[]
    for row in rows[i:i+25]:
-    d=doc(row);d.pop('date');e.seq+=1;writes.append({'operation_id':op(e.seq),'record_id':d['id'],'routing_key':'benchmark','expected':'Any','document':d})
+    d=doc(row);d.pop('date');e.seq+=1;writes.append({'operation_id':op(e.seq),'record_id':d['id'],'expected':'Any','document':d})
    code,body,ms,_=e.request('POST','/api/v1/index/bench/batch',{'writes':writes},required=False);e.event('batch',offset=i,status=code,ms=ms,response=body);summary['attempted']+=len(writes)
    results=body.get('results',[])
    for j,w in enumerate(writes):

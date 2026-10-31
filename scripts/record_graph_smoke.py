@@ -12,10 +12,10 @@ def exercise(call,restart_with,faults):
     reader=base64.b64encode(os.urandom(32)).decode()
     call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'relation-reader','apikey_base64':reader})
     def write(rid,system,body='relation body'):
-        return {'operation_id':operation(),'record_id':rid,'routing_key':'r','expected':'Absent','document':{'body':body},'system':system}
+        return {'operation_id':operation(),'record_id':rid,'expected':'Absent','document':{'body':body},'system':system}
     def ref(rid):
         record=call('GET',endpoint+'/doc/'+rid)
-        return {'record_id':rid,'routing_key':record['routing_key'],'version':record['version']}
+        return {'record_id':rid,'version':record['version']}
     def edge(rid,left,right):
         return write(rid,{'kind':'relation','relation':{'from':ref(left),'to':ref(right),'relation_type':'knows','weight':.5}})
     def query(rid,**kwargs):
@@ -64,7 +64,7 @@ def exercise(call,restart_with,faults):
     call('GET',endpoint+'/doc/ab',status=404)
     call('POST',endpoint+'/doc',edge('new-ab','a','b'))
     archive=call('POST',endpoint+'/backup',{'operation_id':operation()})
-    deletion={'operation_id':operation(),'record_id':'b','routing_key':'r','expected':{'Match':1},'document':None}
+    deletion={'operation_id':operation(),'record_id':'b','expected':{'Match':1},'document':None}
     call('POST',endpoint+'/doc',deletion)
     assert call('POST',endpoint+'/neighbors',query('a'))['count']['value']==0
     restart_with({})

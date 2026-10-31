@@ -117,7 +117,7 @@ pub(super) fn retained(
         .or_else(|| previous.map(|r| r.temporal.clone()))
         .unwrap_or_default();
     if value.expire_at_ms.is_some()
-        && (request.record_id.len() > 256 || request.routing_key.len() > 256)
+        && request.record_id.len() > 256
     {
         return Err(RecordError::Rejected(
             "TTL identity exceeds reserved expiration budget".into(),
@@ -506,7 +506,7 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
             return Err(storage("missing terminal expiration history"));
         }
         if record.temporal.expire_at_ms.is_some()
-            && (record.record_id.len() > 256 || record.routing_key.len() > 256)
+            && record.record_id.len() > 256
         {
             return Err(storage("TTL identity exceeds reservation"));
         }

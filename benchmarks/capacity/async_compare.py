@@ -114,7 +114,7 @@ def run(engine, rows, queries, out, batch_size):
                 for d in docs:
                     e.seq += 1
                     writes.append({'operation_id': op(e.seq), 'record_id': d['id'],
-                                   'routing_key': 'benchmark', 'expected': 'Any', 'document': d})
+                                    'expected': 'Any', 'document': d})
                 code, result, ms, attempts = request_with_busy_wait(e, 'POST', '/api/v1/index/bench/ingest', {'records': writes})
                 e.event('accept', offset=offset, code=code, result=result, ms=ms)
                 assert code == 200 and len(result['results']) == len(writes), result

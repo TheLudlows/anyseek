@@ -144,7 +144,7 @@ test("creation and i64 import survive lost responses and reload with identical r
     (n, i) =>
       `{"title":"precision ${i}","body":"precision","rank":${n},"measure":1.2500e0,"data":{"n":${n}}}`,
   );
-  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.getByRole("button", { name: "导入数据", exact: true }).first().click();
   await page
     .getByLabel("导入 JSON", { exact: true })
     .fill("[" + docs.join(",") + "]");
@@ -218,7 +218,7 @@ test("creation and i64 import survive lost responses and reload with identical r
   await page
     .getByLabel("导入 JSON", { exact: true })
     .fill(
-      `{"record_id":"${first.record_id}","routing_key":"${first.routing_key}","expected":{"Match":1},"document":${copied}}`,
+      `{"record_id":"${first.record_id}","expected":{"Match":1},"document":${copied}}`,
     );
   await page.getByRole("button", { name: "写入集合", exact: true }).click();
   await expect(
@@ -299,7 +299,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
     await call(`index/${collection}/doc`, {
       operation_id: operation(),
       record_id: id,
-      routing_key: "route",
       expected: "Absent",
       document: { title: id, body: "entity" },
       system: { kind: "entity" },
@@ -307,14 +306,13 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await call(`index/${collection}/doc`, {
     operation_id: operation(),
     record_id: "edge",
-    routing_key: "route",
     expected: "Absent",
     document: { title: "Knows", body: "relation" },
     system: {
       kind: "relation",
       relation: {
-        from: { record_id: "entity_a", routing_key: "route", version: 1 },
-        to: { record_id: "entity_b", routing_key: "route", version: 1 },
+        from: { record_id: "entity_a", version: 1 },
+        to: { record_id: "entity_b", version: 1 },
         relation_type: "knows",
       },
     },
@@ -322,7 +320,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await call(`index/${collection}/doc`, {
     operation_id: operation(),
     record_id: "source",
-    routing_key: "route",
     expected: "Absent",
     document: { title: "Source", body: "sourceword" },
     system: { kind: "source" },
@@ -330,12 +327,11 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await call(`index/${collection}/doc`, {
     operation_id: operation(),
     record_id: "generation",
-    routing_key: "route",
     expected: "Absent",
     generation: {
       action: "stage",
       generation_id: "g1",
-      source: { record_id: "source", routing_key: "route", version: 1 },
+      source: { record_id: "source", version: 1 },
       members: ["chunk_a"],
       chunks: [
         {
@@ -349,7 +345,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
     await call(`index/${collection}/doc`, {
       operation_id: operation(),
       record_id: "page_" + i.toString().padStart(2, "0"),
-      routing_key: "route",
       expected: "Absent",
       document: { title: "分页 " + i, body: "pagination" },
     });
@@ -373,7 +368,7 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await page.getByRole("button", { name: "一跳关系", exact: true }).click();
   await page.getByLabel("请求 JSON", { exact: true }).fill(
     JSON.stringify({
-      seeds: [{ record_id: "entity_a", routing_key: "route", version: 1 }],
+      seeds: [{ record_id: "entity_a", version: 1 }],
       direction: "out",
       relation_types: [],
       per_seed: 10,
@@ -397,7 +392,7 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
         },
         relation_weight: 1,
         neighbors: {
-          seeds: [{ record_id: "entity_a", routing_key: "route", version: 1 }],
+          seeds: [{ record_id: "entity_a", version: 1 }],
           direction: "out",
           relation_types: [],
           per_seed: 10,
@@ -415,7 +410,6 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
   await page.getByLabel("请求 JSON", { exact: true }).fill(
     JSON.stringify({
       record_id: "source",
-      routing_key: "route",
       version: 1,
       locator: { kind: "utf8", field: "body", start: 0, end: 6 },
     }),
@@ -461,7 +455,7 @@ for (const mode of ["Lexical", "Vector", "Hybrid"]) {
     const name = `form_${mode.toLowerCase()}`;
     await dialog.getByLabel("集合名称", { exact: true }).fill(name);
     await dialog.getByLabel("字段 1 名称", { exact: true }).fill("custom_title");
-    await dialog.getByLabel("检索模式", { exact: true }).selectOption(mode);
+    await dialog.getByRole("combobox", { name: /^检索模式/ }).selectOption(mode);
     await expect(dialog.getByLabel("字段 1 名称", { exact: true })).toHaveValue("custom_title");
     await expect(dialog.locator("textarea")).toHaveCount(0);
     await expect(dialog.getByText("Embedding 模型标识", { exact: true })).toHaveCount(0);
@@ -523,14 +517,14 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.reload();
   await expect(page.getByLabel("模型 API Key（可选）", { exact: true })).toHaveValue(modelKey);
   await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "数据", exact: true }).click();
-  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.getByRole("button", { name: "导入数据", exact: true }).first().click();
   await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toBeChecked();
   const source = "[" + Array.from({ length: 11 }, (_, i) => `{"body":"embedding document ${i}","large":9223372036854775807}`).join(",") + "]";
   await page.getByLabel("导入 JSON", { exact: true }).fill(source);
   await page.getByRole("button", { name: "写入集合", exact: true }).click();
   await expect(page.getByText("已确认提交 11 条，索引正在异步更新。", { exact: true })).toBeVisible();
   expect(modelCalls).toBe(2);
-  await page.getByRole("dialog").getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "关闭", exact: true }).first().click();
   await expect.poll(async () => {
     const p = await call(`index/${id}/ingest`);
     return p.vector_seq >= p.committed_seq && p.lexical_seq >= p.committed_seq;
@@ -551,7 +545,7 @@ test("browser-only model configuration, embedded ingest and natural language vec
   expect(queryCalls).toBe(0);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.getByRole("button", { name: "复制 查询向量预览", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("[1,0,0]");
+  await expect.poll(async () => JSON.parse(await page.evaluate(() => navigator.clipboard.readText()))).toEqual([1,0,0]);
   expect(queryCalls).toBe(0);
   await page.getByRole("button", { name: /筛选与参数/ }).click();
   await page.getByText("高级查询参数 · JSON", { exact: true }).click();

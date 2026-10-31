@@ -526,7 +526,7 @@ async fn complete_service_snapshot_drains_owned_lifecycle_work_and_excludes_queu
         );
     }
     let write = |nonce: &str| {
-        serde_json::from_value::<RecordWrite>(json!({"operation_id":OperationId::new(nonce.into()),"record_id":"r","routing_key":"r","expected":"Absent","document":{"body":"alpha"}})).unwrap()
+        serde_json::from_value::<RecordWrite>(json!({"operation_id":OperationId::new(nonce.into()),"record_id":"r","expected":"Absent","document":{"body":"alpha"}})).unwrap()
     };
     let alpha = catalog.listing("alpha").await.unwrap().remove(0);
     let beta = catalog.listing("beta").await.unwrap().remove(0);
@@ -597,7 +597,7 @@ async fn collection_recreation_keeps_generations_receipts_and_backups_separate()
         .await
         .unwrap();
     let write: RecordWrite = serde_json::from_value(json!({
-        "operation_id":OperationId::new("same-write".into()), "record_id":"r", "routing_key":"r",
+        "operation_id":OperationId::new("same-write".into()), "record_id":"r",
         "expected":"Absent", "document":{"body":"old"}
     }))
     .unwrap();

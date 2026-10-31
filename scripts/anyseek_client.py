@@ -79,7 +79,7 @@ class anyseekClient:
         return self.api('POST', '/api/v1/index', request, key)
 
     def write(self, collection_id, request, key=_DEFAULT):
-        """{operation_id, record_id, routing_key, expected, document}; null deletes."""
+        """{operation_id, record_id, expected, document}; null deletes."""
         return self.api('POST', self.collection_path(collection_id) + '/doc', request, key)
 
     def batch(self, collection_id, request, key=_DEFAULT):

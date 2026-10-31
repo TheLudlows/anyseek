@@ -8,7 +8,7 @@
 
 每个向量/元数据组件记录包必须完整保存与 keys 一一对应的 revisions 和 fingerprint（SHA-256）。加载时统一检查数量及活动身份；缺失字段、空 fingerprint 或不一致的身份数量直接拒绝，不保留旧包等待 checkpoint 补全的分支。空组件也显式保存空身份数组。
 
-`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订、generation 与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV15、anchor manifest 6 / 检索 package manifest 3，不读取旧格式、迁移或双写。
+`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订、generation 与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV16、anchor manifest 7 / 检索 package manifest 3，不读取旧格式、迁移或双写。
 
 `record/view.rs` 在同一 partition guard 下检索多个冻结段与可变 tail。更新/墓碑先排除旧版本，再截断 Top-K；各段共享活动 N/df/字段长度上下文，每个通道先形成全局排名再融合。查询、过滤、回表与统计固定同一视图，缺少必要 tail 时失败，不能只搜旧段。
 

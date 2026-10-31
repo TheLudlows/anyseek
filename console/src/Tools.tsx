@@ -27,7 +27,7 @@ const tools = [
     text: "从明确的种子记录出发，查看有界的一跳关系。",
     sample: JSON.stringify(
       {
-        seeds: [{ record_id: "entity_id", routing_key: "route", version: 1 }],
+        seeds: [{ record_id: "entity_id", version: 1 }],
         direction: "out",
         relation_types: [],
         per_seed: 10,
@@ -57,7 +57,7 @@ const tools = [
           relation_weight: 1,
           neighbors: {
             seeds: [
-              { record_id: "entity_id", routing_key: "route", version: 1 },
+              { record_id: "entity_id", version: 1 },
             ],
             direction: "out",
             relation_types: [],
@@ -79,7 +79,6 @@ const tools = [
     sample: JSON.stringify(
       {
         record_id: "source_id",
-        routing_key: "route",
         version: 1,
         locator: { kind: "utf8", field: "body", start: 0, end: 10 },
       },

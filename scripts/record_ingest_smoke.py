@@ -16,7 +16,7 @@ def exercise(call, restart, directory, faults, base, master):
          'config': {'index_name': 'committed', 'schema': [{'field': 'body', 'field_type': 'Text', 'store': True}]}})
 
     def write(identity):
-        return {'operation_id': operation(), 'record_id': identity, 'routing_key': identity,
+        return {'operation_id': operation(), 'record_id': identity,
                 'expected': 'Absent', 'document': {'body': 'alpha ' + identity}}
 
     client = anyseekClient(base)

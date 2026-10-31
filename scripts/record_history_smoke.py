@@ -15,7 +15,7 @@ def exercise(call, restart_with, directory, faults):
     # Removed event quotas must not remain accepted HTTP configuration knobs.
     call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'old-feed',
          'config':{**config,'change_feed':{'max_events':1}}},status=400)
-    ordinary={'operation_id':operation(),'record_id':'normal','routing_key':'r',
+    ordinary={'operation_id':operation(),'record_id':'normal',
               'expected':'Absent','document':{'body':'retained body'}}
     receipt=call('POST',endpoint+'/doc',ordinary)['receipt']
     restart_with({})

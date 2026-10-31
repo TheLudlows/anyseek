@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scoreRows, scoreText } from "../src/scores.ts";
 import type { Hit } from "../src/types.ts";
-const hit: Hit = { record: { record_id: "a", routing_key: "a", version: 1, document: {} }, score: 0.001,
+const hit: Hit = { record: { record_id: "a", version: 1, document: {} }, score: 0.001,
   channels: [{ channel: "lexical", rank: 0, rank_basis: "score", raw_score: 0, rrf_contribution: 0.001 }] };
 test("hybrid missing channels remain absent rather than zero scores", () => {
   const rows = scoreRows(hit, "Hybrid");

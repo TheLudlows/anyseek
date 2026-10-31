@@ -175,5 +175,7 @@
   "storage::sqlite_authority::reclamation::tests::retirement_waits_for_pins_fences_old_publish_and_survives_backup",
   "catalog::tests::cancelled_reclamation_waiter_keeps_lifecycle_guard_until_cleanup_finishes",
   "storage::sqlite_authority::reclamation::tests::reclamation_queries_are_scoped_paged_and_preserve_global_backup_pins",
-  "storage::sqlite_authority::reclamation::tests::targeted_gc_checks_keep_transitive_roots_pins_and_cycles_protected"
+  "storage::sqlite_authority::reclamation::tests::targeted_gc_checks_keep_transitive_roots_pins_and_cycles_protected",
+  "record::tests::record_identity_contract_rejects_removed_routing_field",
+  "record::tests::source_protocol_rejects_old_checkpoint_without_migration"
 ]

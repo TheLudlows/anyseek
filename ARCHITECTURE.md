@@ -80,7 +80,7 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 Tantivy 使用原生词典、postings、位置和固定 Searcher，不另存完整正文，也不决定业务 head。Payload 唯一保存规范原文和原始向量；伴随向量/元数据组件只保存派生文件。S3 对象先完整物化并校验再检索，当前没有直接远端随机读 Directory。
 
-分析身份保留 `xxh64-utf8-v1` helper；全文包记录精确 Tantivy 版本、schema 和分析契约。RecordCheckpointV15、检索 package manifest 3 与私有向量/metadata descriptor 1 是不同结构标签，不是多个提交权威。认证包选择验证完整不可变文件闭包；固定 Searcher、构建、备份和查询 pin 保护仍在使用的文件。
+分析身份保留 `xxh64-utf8-v1` helper；全文包记录精确 Tantivy 版本、schema 和分析契约。RecordCheckpointV16、检索 package manifest 3 与私有向量/metadata descriptor 1 是不同结构标签，不是多个提交权威。认证包选择验证完整不可变文件闭包；固定 Searcher、构建、备份和查询 pin 保护仍在使用的文件。
 
 同步写入等待必要派生应用；异步索引写入单独报告 committed/lexical/vector 水位。查询固定派生拓扑与 evaluation_time，再重验当前 Record 身份、fingerprint 和来源可见性，不要求各异步消费者同时推进。保留 BM25F/邻近度、中文与 N-gram 适配及全局通道排名后的单次 RRF；ANN 和有界候选不保证全库精确召回。
 

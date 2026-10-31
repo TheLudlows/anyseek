@@ -20,9 +20,9 @@ def exercise(call, restart_with, work, faults):
         call('POST', '/api/v1/index', {'operation_id': operation(), 'collection_id': collection,
              'config': {'index_name': 'background index acceptance', 'schema': [{'field': 'body', 'field_type': 'Text'}]}})
         for identity, system in [('source', {'kind': 'source'}), ('derived', {'kind': 'derived',
-             'evidence_refs': [{'record_id': 'source', 'routing_key': 'r', 'version': 1}]})]:
+             'evidence_refs': [{'record_id': 'source',  'version': 1}]})]:
             call('POST', prefix + '/doc', {'operation_id': operation(), 'record_id': identity,
-                 'routing_key': 'r', 'expected': 'Absent', 'document': {'body': 'alpha original'}, 'system': system})
+                  'expected': 'Absent', 'document': {'body': 'alpha original'}, 'system': system})
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             # The accepted job may complete after revocation; its result remains deliverable.
             job = pool.submit(call, 'PATCH', prefix, key=key)
@@ -32,10 +32,10 @@ def exercise(call, restart_with, work, faults):
                     assert not job.done(), 'checkpoint returned before the snapshot pause'
                     assert time.monotonic() < deadline, 'Indexer did not fix its input snapshot'
                     time.sleep(.01)
-                request = {'operation_id': operation(), 'record_id': 'concurrent', 'routing_key': 'r',
+                request = {'operation_id': operation(), 'record_id': 'concurrent',
                            'expected': 'Absent', 'document': {'body': 'alpha concurrent'}}
                 receipt = pool.submit(call, 'POST', prefix + '/doc', request).result(timeout=5)['receipt']
-                deletion = {'operation_id': operation(), 'record_id': 'source', 'routing_key': 'r',
+                deletion = {'operation_id': operation(), 'record_id': 'source',
                             'expected': {'Match': 1}, 'document': None}
                 pool.submit(call, 'PATCH', prefix + '/doc', deletion).result(timeout=5)
                 page = pool.submit(call, 'POST', prefix + '/query', {'query': 'alpha'}).result(timeout=5)

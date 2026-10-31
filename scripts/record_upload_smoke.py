@@ -8,11 +8,11 @@ def exercise(call,restart_with,faults):
     def create(cid):
         endpoint='/api/v1/index/'+cid
         call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':cid,'config':config})
-        call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','routing_key':'r','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
+        call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
         return endpoint
     def command(action,version,**kwargs):
-        return {'operation_id':operation(),'record_id':'doc','routing_key':'r','expected':'Absent' if version==0 else {'Match':version},'generation':{'action':action,'generation_id':'g',**kwargs}}
-    def begin(members):return command('begin',0,source={'record_id':'s','routing_key':'r','version':1},members=members)
+        return {'operation_id':operation(),'record_id':'doc','expected':'Absent' if version==0 else {'Match':version},'generation':{'action':action,'generation_id':'g',**kwargs}}
+    def begin(members):return command('begin',0,source={'record_id':'s','version':1},members=members)
     endpoint=create('multipart');call('POST',endpoint+'/doc',begin(['one','two']))
     first=command('stage_batch',1,chunks=[{'record_id':'two','document':{'body':'multipartword','payload':'x'*600000}}])
     receipt=call('POST',endpoint+'/doc',first)['receipt'];assert receipt['staged_only']

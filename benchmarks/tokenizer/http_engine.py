@@ -94,7 +94,7 @@ class Engine:
         if self.name=='anyseek':
             writes=[]
             for d in docs:
-                self.seq+=1;writes.append({'operation_id':op(self.seq),'record_id':d['id'],'routing_key':'benchmark','expected':'Any','document':d})
+                self.seq+=1;writes.append({'operation_id':op(self.seq),'record_id':d['id'],'expected':'Any','document':d})
             code,data,ms,_=self.request('POST','/api/v1/index/bench/batch',{'writes':writes},required=False)
             failures=[r for r in data.get('results',[]) if r.get('code')!='applied']
             accepted=sum(r.get('code')=='applied' for r in data.get('results',[]))

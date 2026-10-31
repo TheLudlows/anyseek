@@ -36,7 +36,7 @@ def exercise(base, key, request_file):
                            {'field': 'title', 'field_type': 'Text'},
                            {'field': 'body', 'field_type': 'Text'}]}},
             'writes': [{'operation_id': operation_id(), 'record_id': str(i),
-                        'routing_key': str(i), 'expected': 'Absent', 'document': doc}
+                         'expected': 'Absent', 'document': doc}
                        for i, doc in enumerate(documents)],
         }
         with request_file.open('x') as output:

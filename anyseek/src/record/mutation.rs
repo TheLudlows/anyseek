@@ -35,7 +35,6 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         return Err(RecordError::OperationExpired);
     }
     if request.record_id.is_empty()
-        || request.routing_key.is_empty()
         || request.operation_id.nonce.is_empty()
     {
         return Err(RecordError::Rejected("empty identity".into()));
@@ -145,9 +144,6 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         return Err(RecordError::Rejected("source revision budget reserves final deletion slots".into()));
     }
 
-    if previous.is_some_and(|r| r.routing_key != request.routing_key) {
-        return Err(RecordError::Conflict("routing key cannot change".into()));
-    }
     let matches = match request.expected {
         ExpectedVersion::Any => true,
         ExpectedVersion::Absent => previous.is_none_or(|r| r.document.is_none()),
@@ -211,7 +207,6 @@ pub(super) fn projected_record(state: &State, applied: &Applied, document: Optio
     let previous = state.records.get(&applied.request.record_id);
     Record {
         record_id: applied.request.record_id.clone(),
-        routing_key: applied.request.routing_key.clone(),
         version: applied.receipt.version,
         document,
         temporal, ingested_at_ms: if applied.request.document.is_none() { previous.map_or(applied.observed_time_ms, |r| r.ingested_at_ms) } else { applied.observed_time_ms }, expired_at_ms: None,
