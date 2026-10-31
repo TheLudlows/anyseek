@@ -206,6 +206,28 @@ def main():
                 expected=query()
                 print('PASS confirmed SQLite commit + failed local cache append: durable_pending, fenced output, cold recovery and original receipt',flush=True)
             clock.write_text(str(int(clock.read_text())+8*86400000))
+            # Remote history trim publishes asynchronously. Bound this read-only
+            # readiness probe by the existing 60-second request budget; all
+            # original query, cold-recovery and receipt assertions remain below.
+            deadline=time.monotonic()+60
+            probe=urllib.request.Request(base+'/api/v1/index/main/query',
+                data=json.dumps({'query':'alpha','operator':'or'}).encode(),
+                headers={'apikey':tenant_key,'Content-Type':'application/json'},method='POST')
+            for _ in range(600):
+                remaining=deadline-time.monotonic()
+                assert remaining>0,'remote history maintenance readiness deadline'
+                try:
+                    with urllib.request.urlopen(probe,timeout=remaining) as response:
+                        code=response.status;page=json.load(response)
+                except urllib.error.HTTPError as error:
+                    code=error.code;page=json.load(error)
+                assert time.monotonic()<deadline,'remote history maintenance readiness deadline'
+                if code==200:
+                    break
+                assert code==429 and page.get('code')=='busy',(code,page)
+                time.sleep(min(.1,max(0,deadline-time.monotonic())))
+            else:
+                raise AssertionError('remote history maintenance readiness attempt limit')
             assert query()==expected
             cold_restart();assert query()==expected
             print('PASS remote history maintenance and query views survive cache loss',flush=True)
