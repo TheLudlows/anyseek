@@ -35,7 +35,7 @@ export function EmbeddingSettings({ owner, collection }: { owner: string; collec
     finally { if (!controller.signal.aborted) setBusy(false); }
   }
   return <section className="panel embedding-panel">
-    <span className="eyebrow">BROWSER EMBEDDINGS</span>
+
     <h2>{t("浏览器嵌入 ·")}{collection.name}</h2>
     <p className="muted">{t("浏览器直接调用模型服务。地址、模型名称和字段映射只保存在当前浏览器；不会发送给 AnySeek。")}</p>
     <form onSubmit={(e) => {

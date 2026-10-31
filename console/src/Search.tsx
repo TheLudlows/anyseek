@@ -216,7 +216,7 @@ export function Search({
     <>
       <div className="page-heading">
         <div>
-          <span className="eyebrow">SEARCH PLAYGROUND</span>
+
           <h1>{t("检索调试")}</h1>
           <p>{t("探索数据中的关联，找到更准确的结果。")}</p>
         </div>
@@ -241,7 +241,6 @@ export function Search({
               >
                 {m === "Hybrid" && <Sparkles size={13} />}
                 {{ Lexical: t("关键词"), Vector: t("向量"), Hybrid: t("混合") }[m]}
-                <span>{m}</span>
               </button>
             ))}
           </div>
@@ -301,7 +300,7 @@ export function Search({
           {mode !== "Lexical" && !autoEmbed && (
             <div className="vector-entry">
               <label>
-                Query vector
+                {t("查询向量")}
                 <textarea
                   aria-label={t("查询向量")}
                   className="code-input"

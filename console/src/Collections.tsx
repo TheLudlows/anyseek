@@ -58,7 +58,7 @@ export function Collections(props: Props) {
     <>
       <div className="page-heading">
         <div>
-          <span className="eyebrow">YOUR WORKSPACE</span>
+
           <h1>{t("集合")}</h1>
           <p>{t("组织数据，让每一次检索都有据可依。")}</p>
         </div>
@@ -174,7 +174,7 @@ export function Collections(props: Props) {
                       <span
                         className={"tag " + collectionMode(c).toLowerCase()}
                       >
-                        {collectionMode(c)}
+                        {{ Lexical: t("关键词"), Vector: t("向量"), Hybrid: t("混合") }[collectionMode(c)]}
                       </span>
                     </td>
                     <td className="numeric">

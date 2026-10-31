@@ -243,7 +243,7 @@ export function Recovery() {
           <h2>{t("服务备份与恢复")}</h2>
           <p>{t("管理员操作，需要单独提供 Master API Key。")}</p>
         </div>
-        <span className="tag">ADMIN</span>
+        <span className="tag">{t("管理员")}</span>
       </div>
       <div className="tool-body">
         <Notice kind="info">
