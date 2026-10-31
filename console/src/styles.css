@@ -2060,3 +2060,11 @@ th {
 .score-details { margin: 20px 0; }
 .score-details .data-table th, .score-details .data-table td { padding: 10px 8px; white-space: nowrap; }
 .score-basis { display: block; color: var(--muted); margin-top: 4px; }
+
+.language-switch { display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px;color:var(--muted); }
+.language-switch select { width:auto;min-width:100px;padding:6px 9px; }
+.sidebar-bottom > .language-switch { margin:8px 12px 14px; }
+.modal-title .language-switch { margin-left:auto;flex-shrink:0; }
+.modal-title .language-switch span { display:none; }
+html[lang="en"] .row-actions { flex-wrap:wrap; }
+html[lang="en"] .schema-summary .data-table th { white-space:normal;min-width:95px; }

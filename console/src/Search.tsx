@@ -1,3 +1,4 @@
+import { t, getLocale } from "./i18n.ts";
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -74,11 +75,11 @@ export function Search({
   useEffect(() => () => request.current?.abort(), []);
   const currentPreview = preview?.text === query && preview.vector.length === collection.vector_dimensions ? preview : null;
   async function queryEmbedding(signal: AbortSignal) {
-    if (!query.trim()) throw new Error("请输入检索内容。");
-    if (!modelConfig) throw new Error("请先在连接与管理中配置浏览器嵌入服务。");
+    if (!query.trim()) throw new Error(t("请输入检索内容。"));
+    if (!modelConfig) throw new Error(t("请先在连接与管理中配置浏览器嵌入服务。"));
     validateEmbeddingConfig(modelConfig, collection);
     if (currentPreview) return currentPreview.vector;
-    setPhase("正在生成查询向量");
+    setPhase(t("正在生成查询向量"));
     const [embedding] = await embedTexts(modelConfig, embeddingKey(owner, collection.id, modelConfig), [query], collection.vector_dimensions!, signal);
     signal.throwIfAborted();
     setPreview({ text: query, vector: embedding });
@@ -89,7 +90,7 @@ export function Search({
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
-    setError(""); setBusy(true); setPhase("正在生成查询向量");
+    setError(""); setBusy(true); setPhase(t("正在生成查询向量"));
     try { await queryEmbedding(controller.signal); }
     catch (e) { if (!controller.signal.aborted) setError(message(e)); }
     finally { if (!controller.signal.aborted) setBusy(false); }
@@ -97,8 +98,8 @@ export function Search({
   async function build(signal: AbortSignal) {
     const body: Json = JSON.parse(advanced);
     if (!body || typeof body !== "object" || Array.isArray(body))
-      throw new Error("高级参数必须是 JSON 对象。");
-    if ((mode !== "Vector" || autoEmbed) && !query.trim()) throw new Error("请输入检索内容。");
+      throw new Error(t("高级参数必须是 JSON 对象。"));
+    if ((mode !== "Vector" || autoEmbed) && !query.trim()) throw new Error(t("请输入检索内容。"));
     delete body.query;
     delete body.query_vector;
     if (mode !== "Vector") body.query = query;
@@ -109,21 +110,21 @@ export function Search({
         !parsed.length ||
         !parsed.every((n) => typeof n === "number" && Number.isFinite(n))
       )
-        throw new Error("请输入非空的有限数值向量数组。");
+        throw new Error(t("请输入非空的有限数值向量数组。"));
       body.query_vector = parsed;
     }
     const ms = (value: string) => {
       if (!value.trim()) return undefined;
       const n = Number(value);
       if (!Number.isSafeInteger(n))
-        throw new Error("时间筛选须为整数 UTC 毫秒。");
+        throw new Error(t("时间筛选须为整数 UTC 毫秒。"));
       return n;
     };
     const start = ms(from),
       end = ms(until),
       at = ms(valid);
     if (start !== undefined && end !== undefined && start >= end)
-      throw new Error("事件结束时间必须晚于开始时间。");
+      throw new Error(t("事件结束时间必须晚于开始时间。"));
     if (start !== undefined || end !== undefined || at !== undefined)
       body.temporal = {
         event:
@@ -140,7 +141,7 @@ export function Search({
         ? Date.parse(dateUntil + "T00:00:00Z") / 1000 + 86400
         : Number.MAX_SAFE_INTEGER;
       if (!Number.isFinite(a) || !Number.isFinite(b) || a >= b)
-        throw new Error("请选择有效日期范围。");
+        throw new Error(t("请选择有效日期范围。"));
       body.filter = [
         ...(body.filter || []),
         { Timestamp: { field: dateField, filter: { start: a, end: b } } },
@@ -183,7 +184,7 @@ export function Search({
     setSelected(null);
     setBusy(true);
     setResult(null);
-    setPhase("正在检索集合");
+    setPhase(t("正在检索集合"));
     try {
       const source = fresh ? await build(controller.signal) : submitted.current;
       controller.signal.throwIfAborted();
@@ -191,7 +192,7 @@ export function Search({
       if (fresh) { submitted.current = source; submittedMode.current = mode; }
       // offset is appended last and controlled by pagination.
       const body = source.slice(0, -1) + ',"offset":' + next * 10 + "}";
-      setPhase("正在检索集合");
+      setPhase(t("正在检索集合"));
       const response = await api<QueryResult>(
         apiKey,
         collectionPath(collection.id) + "/query",
@@ -216,8 +217,8 @@ export function Search({
       <div className="page-heading">
         <div>
           <span className="eyebrow">SEARCH PLAYGROUND</span>
-          <h1>检索调试</h1>
-          <p>探索数据中的关联，找到更准确的结果。</p>
+          <h1>{t("检索调试")}</h1>
+          <p>{t("探索数据中的关联，找到更准确的结果。")}</p>
         </div>
         <span className="context-pill">
           <span className="status-dot" />
@@ -226,7 +227,7 @@ export function Search({
       </div>
       <section className="panel query-panel">
         <div className="query-top">
-          <div className="segmented" aria-label="检索模式">
+          <div className="segmented" aria-label={t("检索模式")}>
             {(["Lexical", "Vector", "Hybrid"] as Mode[]).map((m) => (
               <button
                 key={m}
@@ -239,7 +240,7 @@ export function Search({
                 onClick={() => setMode(m)}
               >
                 {m === "Hybrid" && <Sparkles size={13} />}
-                {{ Lexical: "关键词", Vector: "向量", Hybrid: "混合" }[m]}
+                {{ Lexical: t("关键词"), Vector: t("向量"), Hybrid: t("混合") }[m]}
                 <span>{m}</span>
               </button>
             ))}
@@ -250,8 +251,7 @@ export function Search({
             aria-expanded={filters}
           >
             <SlidersHorizontal size={15} />
-            筛选与参数
-            <ChevronDown size={13} />
+            {t("筛选与参数")}<ChevronDown size={13} />
           </button>
         </div>
         <form
@@ -263,39 +263,37 @@ export function Search({
           <div className="search-entry">
             <SearchIcon size={21} />
             <input
-              aria-label="检索内容"
+              aria-label={t("检索内容")}
               value={query}
               disabled={busy || (mode === "Vector" && !autoEmbed)}
               onChange={(e) => { setQuery(e.target.value); setPreview(null); }}
               placeholder={
                 mode === "Vector" && !autoEmbed
-                  ? "向量模式使用下方 query vector"
-                  : "输入关键词，探索你的数据…"
+                  ? t("向量模式使用下方 query vector")
+                  : t("输入关键词，探索你的数据…")
               }
             />
             <button className="primary" disabled={busy}>
               {busy ? (
-                <Busy label="检索中" />
+                <Busy label={t("检索中")} />
               ) : (
                 <>
-                  运行检索
-                  <ArrowRight size={15} />
+                  {t("运行检索")}<ArrowRight size={15} />
                 </>
               )}
             </button>
           </div>
           {mode !== "Lexical" && <div className="embedding-choice">
-            <label className="checkbox"><input type="checkbox" checked={autoEmbed} disabled={busy || !modelConfig} onChange={(e) => setAutoEmbed(e.target.checked)} />自动生成查询向量</label>
-            <p className="field-help">{modelConfig ? `${modelConfig.model} · 查询文本将发送至 ${modelConfig.endpoint}` : "在连接与管理中配置本集合的嵌入服务，或在下方粘贴查询向量。"}</p>
+            <label className="checkbox"><input type="checkbox" checked={autoEmbed} disabled={busy || !modelConfig} onChange={(e) => setAutoEmbed(e.target.checked)} />{t("自动生成查询向量")}</label>
+            <p className="field-help">{modelConfig ? t("{0} · 查询文本将发送至 {1}", modelConfig.model, modelConfig.endpoint) : t("在连接与管理中配置本集合的嵌入服务，或在下方粘贴查询向量。")}</p>
           </div>}
           {mode !== "Lexical" && autoEmbed && <div className="vector-entry">
             <button type="button" className="secondary" disabled={busy || !modelConfig || !query.trim()} onClick={previewVector}>
-              生成并预览向量
-            </button>
-            <p className="field-help">仅调用嵌入模型，不执行检索。运行检索将复用预览向量；修改文本后需重新生成。</p>
+              {t("生成并预览向量")}</button>
+            <p className="field-help">{t("仅调用嵌入模型，不执行检索。运行检索将复用预览向量；修改文本后需重新生成。")}</p>
             {currentPreview && <details open>
-              <summary>当前查询向量 · {currentPreview.vector.length} 维</summary>
-              <JsonView value={currentPreview.vector} label="查询向量预览" />
+              <summary>{t("当前查询向量 · {0} 维", currentPreview.vector.length)}</summary>
+              <JsonView value={currentPreview.vector} label={t("查询向量预览")} />
             </details>}
           </div>}
           {mode !== "Lexical" && !autoEmbed && (
@@ -303,7 +301,7 @@ export function Search({
               <label>
                 Query vector
                 <textarea
-                  aria-label="查询向量"
+                  aria-label={t("查询向量")}
                   className="code-input"
                   value={vector}
                   onChange={(e) => setVector(e.target.value)}
@@ -312,8 +310,7 @@ export function Search({
                 />
               </label>
               <p className="field-help">
-                使用与集合相同模型生成的向量
-                {collection.embedding_space_id &&
+                {t("使用与集合相同模型生成的向量")}{collection.embedding_space_id &&
                   `（${collection.embedding_space_id}）`}
                 。
               </p>
@@ -325,30 +322,27 @@ export function Search({
                 <>
                   <div className="form-row">
                     <label>
-                      {dateField} · 起始日期（UTC）
-                      <input
+                      {dateField} {t("· 起始日期（UTC）")}<input
                         type="date"
                         value={dateFrom}
                         onChange={(e) => setDateFrom(e.target.value)}
                       />
                     </label>
                     <label>
-                      截至日期（含当天）
-                      <input
+                      {t("截至日期（含当天）")}<input
                         type="date"
                         value={dateUntil}
                         onChange={(e) => setDateUntil(e.target.value)}
                       />
                     </label>
                     <label>
-                      排序
-                      <select
+                      {t("排序")}<select
                         value={sort}
                         onChange={(e) => setSort(e.target.value)}
                       >
-                        <option value="score">相关度</option>
-                        <option value="new">最新优先</option>
-                        <option value="old">最早优先</option>
+                        <option value="score">{t("相关度")}</option>
+                        <option value="new">{t("最新优先")}</option>
+                        <option value="old">{t("最早优先")}</option>
                       </select>
                     </label>
                   </div>
@@ -356,38 +350,33 @@ export function Search({
               )}
               <div className="form-row">
                 <label>
-                  事件起始 · UTC 毫秒
-                  <input
+                  {t("事件起始 · UTC 毫秒")}<input
                     value={from}
                     onChange={(e) => setFrom(e.target.value)}
-                    placeholder="可选"
+                    placeholder={t("可选")}
                   />
                 </label>
                 <label>
-                  事件结束 · UTC 毫秒
-                  <input
+                  {t("事件结束 · UTC 毫秒")}<input
                     value={until}
                     onChange={(e) => setUntil(e.target.value)}
-                    placeholder="不含此时刻"
+                    placeholder={t("不含此时刻")}
                   />
                 </label>
                 <label>
-                  有效时刻 · UTC 毫秒
-                  <input
+                  {t("有效时刻 · UTC 毫秒")}<input
                     value={valid}
                     onChange={(e) => setValid(e.target.value)}
-                    placeholder="可选"
+                    placeholder={t("可选")}
                   />
                 </label>
               </div>
               <details>
-                <summary>高级查询参数 · JSON</summary>
+                <summary>{t("高级查询参数 · JSON")}</summary>
                 <p className="field-help">
-                  可配置
-                  RRF、字段、过滤条件等。查询文本、向量及分页由上方控制；关系融合可在高级检查中调试。
-                </p>
+                  {t("可配置 RRF、字段、过滤条件等。查询文本、向量及分页由上方控制；关系融合可在高级检查中调试。")}</p>
                 <textarea
-                  aria-label="高级查询参数"
+                  aria-label={t("高级查询参数")}
                   className="code-input"
                   value={advanced}
                   onChange={(e) => setAdvanced(e.target.value)}
@@ -407,44 +396,43 @@ export function Search({
                   setAdvanced("{}");
                 }}
               >
-                重置筛选与参数
-              </button>
+                {t("重置筛选与参数")}</button>
             </div>
           )}
         </form>
         <div className="query-hint">
           <span>
             {mode === "Lexical"
-              ? "关键词匹配 · 精确发现"
+              ? t("关键词匹配 · 精确发现")
               : mode === "Vector"
-                ? "向量相似度 · 语义发现"
-                : "关键词 + 向量 · 融合排序"}
+                ? t("向量相似度 · 语义发现")
+                : t("关键词 + 向量 · 融合排序")}
           </span>
-          <span>Enter 运行检索</span>
+          <span>{t("Enter 运行检索")}</span>
         </div>
       </section>
       <Notice>{error}</Notice>
       {!result && !busy ? (
         <section className="panel search-empty">
           <Empty
-            title="让数据给出答案"
-            text="输入查询并运行检索，在这里查看匹配记录与通道得分。"
+            title={t("让数据给出答案")}
+            text={t("输入查询并运行检索，在这里查看匹配记录与通道得分。")}
           />
           <div className="search-capabilities">
             <span>
-              01 <b>关键词匹配</b>
+              01 <b>{t("关键词匹配")}</b>
             </span>
             <span>
-              02 <b>语义检索</b>
+              02 <b>{t("语义检索")}</b>
             </span>
             <span>
-              03 <b>混合排序</b>
+              03 <b>{t("混合排序")}</b>
             </span>
           </div>
         </section>
       ) : busy ? (
         <section className="panel loading-block">
-          <Busy label={phase || "正在检索集合"} />
+          <Busy label={phase || t("正在检索集合")} />
           <div className="skeleton" />
           <div className="skeleton" />
           <div className="skeleton" />
@@ -455,13 +443,13 @@ export function Search({
             <section className="panel results-panel">
               <div className="results-toolbar">
                 <h2>
-                  检索结果{" "}
+                  {t("检索结果")}{" "}
                   <span className="count-badge">
-                    {total == null ? "总数未知" : total.toLocaleString()}
+                    {total == null ? t("总数未知") : total.toLocaleString(getLocale())}
                   </span>
                 </h2>
                 <span className="muted">
-                  {(result.time / 1e6).toLocaleString(undefined, {
+                  {(result.time / 1e6).toLocaleString(getLocale(), {
                     maximumFractionDigits: 2,
                   })}{" "}
                   ms
@@ -469,8 +457,8 @@ export function Search({
               </div>
               {!result.hits.length ? (
                 <Empty
-                  title="没有找到匹配记录"
-                  text="尝试其他关键词、调整向量或放宽筛选条件。"
+                  title={t("没有找到匹配记录")}
+                  text={t("尝试其他关键词、调整向量或放宽筛选条件。")}
                 />
               ) : (
                 <div className="result-list">
@@ -488,16 +476,16 @@ export function Search({
                       <div>
                         <div className="result-meta">
                           <span className="mono">{hit.record.record_id}</span>
-                          <span title={String(hit.score)}>最终得分 {scoreText(hit.score)}</span>
+                          <span title={String(hit.score)}>{t("最终得分")}{scoreText(hit.score)}</span>
                         </div>
                         <h3>
                           {recordTitle(hit.record)}
                           <ArrowUpRight size={15} />
                         </h3>
-                        <p>{recordBody(hit.record) || "点击查看记录内容"}</p>
+                        <p>{recordBody(hit.record) || t("点击查看记录内容")}</p>
                         <div className="channel-tags">
                           {scoreRows(hit, resultMode).map(({ channel, value }) => (
-                            <span key={channel}>{channelName(channel)}：{value ? scoreText(value.raw_score) : "未进入候选或未启用"}</span>
+                            <span key={channel}>{channelName(channel)}：{value ? scoreText(value.raw_score) : t("未进入候选或未启用")}</span>
                           ))}
                         </div>
                       </div>
@@ -508,23 +496,23 @@ export function Search({
               <div className="pagination">
                 <span>
                   {result.evaluation_time_ms
-                    ? "评估于 " +
-                      new Date(result.evaluation_time_ms).toLocaleTimeString()
+                    ? t("评估于 ") +
+                      new Date(result.evaluation_time_ms).toLocaleTimeString(getLocale())
                     : ""}
                 </span>
                 <div>
                   <button
                     className="secondary compact"
-                    aria-label="上一页结果"
+                    aria-label={t("上一页结果")}
                     disabled={page === 0}
                     onClick={() => run(page - 1, false)}
                   >
                     <ArrowLeft size={14} />
                   </button>
-                  <span>第 {page + 1} 页</span>
+                  <span>{t("第 {0} 页", page + 1)}</span>
                   <button
                     className="secondary compact"
-                    aria-label="下一页结果"
+                    aria-label={t("下一页结果")}
                     disabled={
                       total == null
                         ? result.hits.length < 10

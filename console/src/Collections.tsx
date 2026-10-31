@@ -1,3 +1,4 @@
+import { t, getLocale } from "./i18n.ts";
 import { useState } from "react";
 import {
   ArrowUpRight,
@@ -37,7 +38,7 @@ function schemaFor(mode: Mode) {
     ...(mode === "Lexical" ? [] : [{ field: "vector", field_type: "Json", index_vector: true, index_lexical: false, store: false }]),
   ];
 }
-const fieldTypes = { Text: "文本", String: "字符串", StringSet: "字符串集合", Int: "整数", Float: "小数", Timestamp: "时间戳", Json: "JSON 对象", Binary: "二进制", Vector: "向量" };
+const fieldTypes = () => ({ Text: t("文本"), String: t("字符串"), StringSet: t("字符串集合"), Int: t("整数"), Float: t("小数"), Timestamp: t("时间戳"), Json: t("JSON 对象"), Binary: t("二进制"), Vector: t("向量") });
 
 export function Collections(props: Props) {
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -58,20 +59,18 @@ export function Collections(props: Props) {
       <div className="page-heading">
         <div>
           <span className="eyebrow">YOUR WORKSPACE</span>
-          <h1>集合</h1>
-          <p>组织数据，让每一次检索都有据可依。</p>
+          <h1>{t("集合")}</h1>
+          <p>{t("组织数据，让每一次检索都有据可依。")}</p>
         </div>
         <button className="primary" disabled={!!pendingDelete} onClick={() => setCreating(true)}>
           <Plus size={16} />
-          创建集合
-        </button>
+          {t("创建集合")}</button>
       </div>
       <Notice kind="success">{deletedNotice}</Notice>
       {pendingDelete && <Notice kind="info">
-        集合 {pendingDelete.collection} 有待确认删除。
-        {pendingDelete.owner === props.owner
-          ? <button type="button" className="text-button" onClick={() => setDeleting(pendingDelete.collection)}>继续处理删除</button>
-          : "请切换回原连接处理。"}
+        {t("集合")}{pendingDelete.collection} {t("有待确认删除。")}{pendingDelete.owner === props.owner
+          ? <button type="button" className="text-button" onClick={() => setDeleting(pendingDelete.collection)}>{t("继续处理删除")}</button>
+          : t("请切换回原连接处理。")}
       </Notice>}
       <div className="metrics">
         <div>
@@ -79,8 +78,8 @@ export function Collections(props: Props) {
             <Layers3 size={18} />
           </span>
           <div>
-            <small>集合总数</small>
-            <strong>{props.collections.length.toLocaleString()}</strong>
+            <small>{t("集合总数")}</small>
+            <strong>{props.collections.length.toLocaleString(getLocale())}</strong>
           </div>
         </div>
         <div>
@@ -88,8 +87,8 @@ export function Collections(props: Props) {
             <Database size={18} />
           </span>
           <div>
-            <small>活跃记录</small>
-            <strong>{total.toLocaleString()}</strong>
+            <small>{t("活跃记录")}</small>
+            <strong>{total.toLocaleString(getLocale())}</strong>
           </div>
         </div>
         <div>
@@ -97,11 +96,11 @@ export function Collections(props: Props) {
             <Braces size={18} />
           </span>
           <div>
-            <small>向量集合</small>
+            <small>{t("向量集合")}</small>
             <strong>
               {props.collections
                 .filter((c) => c.schema.some((f) => f.index_vector))
-                .length.toLocaleString()}
+                .length.toLocaleString(getLocale())}
             </strong>
           </div>
         </div>
@@ -110,16 +109,16 @@ export function Collections(props: Props) {
         <div className="panel-toolbar">
           <div>
             <h2>
-              所有集合{" "}
+              {t("所有集合")}{" "}
               <span className="count-badge">{props.collections.length}</span>
             </h2>
-            <p>选择集合，浏览数据或调试检索。</p>
+            <p>{t("选择集合，浏览数据或调试检索。")}</p>
           </div>
           <label className="filter-input">
             <Search size={15} />
             <input
-              aria-label="筛选集合"
-              placeholder="搜索集合名称…"
+              aria-label={t("筛选集合")}
+              placeholder={t("搜索集合名称…")}
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
             />
@@ -127,18 +126,17 @@ export function Collections(props: Props) {
         </div>
         {!list.length ? (
           <Empty
-            title={filter ? "没有匹配的集合" : "创建你的第一个集合"}
+            title={filter ? t("没有匹配的集合") : t("创建你的第一个集合")}
             text={
               filter
-                ? "试试其他名称，或清除筛选条件。"
-                : "先定义数据字段，再导入 JSON，开始检索。"
+                ? t("试试其他名称，或清除筛选条件。")
+                : t("先定义数据字段，再导入 JSON，开始检索。")
             }
             action={
               !filter && (
                 <button className="secondary" onClick={() => setCreating(true)}>
                   <Plus size={15} />
-                  创建集合
-                </button>
+                  {t("创建集合")}</button>
               )
             }
           />
@@ -147,12 +145,12 @@ export function Collections(props: Props) {
             <table>
               <thead>
                 <tr>
-                  <th>集合名称</th>
-                  <th>检索模式</th>
-                  <th>向量维度</th>
-                  <th>活跃记录</th>
-                  <th>字段</th>
-                  <th>操作</th>
+                  <th>{t("集合名称")}</th>
+                  <th>{t("检索模式")}</th>
+                  <th>{t("向量维度")}</th>
+                  <th>{t("活跃记录")}</th>
+                  <th>{t("字段")}</th>
+                  <th>{t("操作")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -181,28 +179,26 @@ export function Collections(props: Props) {
                     </td>
                     <td className="numeric">
                       {c.schema.some((field) => field.index_vector)
-                        ? c.vector_dimensions ? `${c.vector_dimensions} 维` : "未知"
+                        ? c.vector_dimensions ? t("{0} 维", c.vector_dimensions) : t("未知")
                         : "—"}
                     </td>
                     <td className="numeric">
-                      {c.indexed_doc_count.toLocaleString()}
+                      {c.indexed_doc_count.toLocaleString(getLocale())}
                     </td>
-                    <td className="muted">{c.schema.length} 个字段</td>
+                    <td className="muted">{c.schema.length} {t("个字段")}</td>
                     <td>
                       <div className="row-actions">
                         <button
                           className="text-button"
                           onClick={() => setDetail(c)}
                         >
-                          结构
-                        </button>
-                        <button className="text-button danger-text" disabled={!!pendingDelete} onClick={() => setDeleting(c.id)}>删除</button>
+                          {t("结构")}</button>
+                        <button className="text-button danger-text" disabled={!!pendingDelete} onClick={() => setDeleting(c.id)}>{t("删除")}</button>
                         <button
                           className="text-button"
                           onClick={() => props.select(c.id, "search")}
                         >
-                          检索
-                          <ArrowUpRight size={14} />
+                          {t("检索")}<ArrowUpRight size={14} />
                         </button>
                       </div>
                     </td>
@@ -214,31 +210,31 @@ export function Collections(props: Props) {
         )}
         <div className="panel-foot">
           <span className="status-dot" />
-          已连接服务<span className="muted">集合统计来自当前服务响应</span>
+          {t("已连接服务")}<span className="muted">{t("集合统计来自当前服务响应")}</span>
         </div>
       </section>
       <div className="workflow-note">
         <span className="note-line" />
         <p>
-          <strong>从数据到答案</strong>
-          <span>创建集合 → 导入记录 → 调试关键词、向量与混合检索</span>
+          <strong>{t("从数据到答案")}</strong>
+          <span>{t("创建集合 → 导入记录 → 调试关键词、向量与混合检索")}</span>
         </p>
       </div>
       {deleting && <DeleteCollection owner={props.owner} apiKey={props.apiKey} collection={deleting}
         close={() => { setDeleting(null); setPendingDelete(storage.get<PendingDelete>("pendingDelete")); }}
-        deleted={async () => { setDeletedNotice(`集合 ${deleting} 已删除。`); setDetail(null); await props.refresh(); }} />}
+        deleted={async () => { setDeletedNotice(t("集合 {0} 已删除。", deleting)); setDetail(null); await props.refresh(); }} />}
       {creating && (
         <CreateCollection {...props} close={() => setCreating(false)} />
       )}
       {detail && (
         <Modal
-          title={detail.name + " · 集合结构"}
+          title={detail.name + t(" · 集合结构")}
           close={() => setDetail(null)}
         >
           <SchemaTable fields={detail.schema} dimensions={detail.vector_dimensions} />
           <details>
-            <summary>高级服务统计</summary>
-            <JsonView value={{ statistics: detail.statistics, limits: detail.limits }} label="服务统计" />
+            <summary>{t("高级服务统计")}</summary>
+            <JsonView value={{ statistics: detail.statistics, limits: detail.limits }} label={t("服务统计")} />
           </details>
         </Modal>
       )}
@@ -281,33 +277,33 @@ function CreateCollection({
     setBusy(true);
     try {
       if (foreign)
-        throw new Error("保留的创建请求属于另一连接，请用原 API Key 处理。");
+        throw new Error(t("保留的创建请求属于另一连接，请用原 API Key 处理。"));
       let request = pending;
       if (!request) {
         if (!/^[a-z][a-z0-9_-]{0,62}$/.test(name))
           throw new Error(
-            "集合名称须以小写字母开头，包含小写字母、数字、下划线或短横线，最长 63 字符。",
+            t("集合名称须以小写字母开头，包含小写字母、数字、下划线或短横线，最长 63 字符。"),
           );
         const fields = schema.map((f) => ({ ...f, field: f.field.trim() }));
         if (!Array.isArray(fields) || !fields.length)
-          throw new Error("Schema 必须是非空字段数组。");
+          throw new Error(t("Schema 必须是非空字段数组。"));
         if (
           fields.some((f: Json) => !f?.field || !f.field_type) ||
           new Set(fields.map((f: Json) => f.field)).size !== fields.length
         )
-          throw new Error("请为每个字段填写唯一名称和类型。");
+          throw new Error(t("请为每个字段填写唯一名称和类型。"));
         const config: Json = { index_name: name, schema: fields };
         if (mode !== "Lexical") {
           const d = Number(dimensions);
           if (!Number.isInteger(d) || d < 1 || d > 4096)
-            throw new Error("向量维度必须是 1–4096 的整数。");
+            throw new Error(t("向量维度必须是 1–4096 的整数。"));
           if (!fields.some((f: Json) => f.index_vector))
             throw new Error(
-              "请至少添加一个向量字段。",
+              t("请至少添加一个向量字段。"),
             );
           config.vector = { dimensions: d };
         } else if (fields.some((f: Json) => f.index_vector))
-          throw new Error("向量字段需要选择 Vector 或 Hybrid 模式。");
+          throw new Error(t("向量字段需要选择 Vector 或 Hybrid 模式。"));
         request = {
           owner,
           body: JSON.stringify({
@@ -342,30 +338,28 @@ function CreateCollection({
     }
   }
   return (
-    <Modal title="创建集合" close={close} busy={busy}>
+    <Modal title={t("创建集合")} close={close} busy={busy}>
       <form onSubmit={submit}>
-        <p className="modal-intro">为你的数据定义检索方式与字段结构。</p>
+        <p className="modal-intro">{t("为你的数据定义检索方式与字段结构。")}</p>
         {pending && (
           <Notice kind="info">
             {foreign
-              ? "另一连接存在待确认的创建请求。"
-              : "原始创建请求已保留。重试将复用相同配置和 Operation ID。"}
+              ? t("另一连接存在待确认的创建请求。")
+              : t("原始创建请求已保留。重试将复用相同配置和 Operation ID。")}
           </Notice>
         )}
         <fieldset disabled={busy || !!pending}>
           <label>
-            集合名称
-            <input
+            {t("集合名称")}<input
               autoFocus
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="例如 knowledge_base"
+              placeholder={t("例如 knowledge_base")}
               required
             />
           </label>
           <label>
-            检索模式
-            <select
+            {t("检索模式")}<select
               value={mode}
               onChange={(e) => {
                 const next = e.target.value as Mode;
@@ -383,22 +377,21 @@ function CreateCollection({
               }}
             >
               {["Lexical", "Vector", "Hybrid"].map((m) => (
-                <option key={m} value={m}>{({ Lexical: "关键词检索", Vector: "向量检索", Hybrid: "混合检索" } as Record<string, string>)[m]}</option>
+                <option key={m} value={m}>{({ Lexical: t("关键词检索"), Vector: t("向量检索"), Hybrid: t("混合检索") } as Record<string, string>)[m]}</option>
               ))}
             </select>
           </label>
           <p className="field-help">
             {mode === "Lexical"
-              ? "关键词检索，适合精确匹配与全文搜索。"
+              ? t("关键词检索，适合精确匹配与全文搜索。")
               : mode === "Vector"
-                ? "向量相似度检索，需要外部生成 embedding。"
-                : "结合关键词与向量，覆盖字面和语义匹配。"}
+                ? t("向量相似度检索，需要外部生成 embedding。")
+                : t("结合关键词与向量，覆盖字面和语义匹配。")}
           </p>
           {mode !== "Lexical" && (
             <div className="form-row">
               <label>
-                向量维度
-                <input
+                {t("向量维度")}<input
                   type="number"
                   min="1"
                   max="4096"
@@ -410,25 +403,25 @@ function CreateCollection({
             </div>
           )}
           <div className="collection-fields">
-            <div className="section-heading"><h3>数据字段</h3><button type="button" className="secondary" disabled={schema.length >= 64}
-              onClick={() => setSchema([...schema, { field: "", field_type: "Text", index_lexical: mode !== "Vector", store: true }])}>添加字段</button></div>
-            <p className="field-help">字段名称需与写入数据一致。可直接使用下方预设，也可按需调整。</p>
+            <div className="section-heading"><h3>{t("数据字段")}</h3><button type="button" className="secondary" disabled={schema.length >= 64}
+              onClick={() => setSchema([...schema, { field: "", field_type: "Text", index_lexical: mode !== "Vector", store: true }])}>{t("添加字段")}</button></div>
+            <p className="field-help">{t("字段名称需与写入数据一致。可直接使用下方预设，也可按需调整。")}</p>
             {schema.map((field, i) => {
               const update = (patch: Json) => setSchema(schema.map((f, j) => j === i ? { ...f, ...patch } : f));
               const kind = field.index_vector ? "Vector" : field.field_type;
               return <div className="collection-field" key={i}>
                 <div className="form-row">
-                  <label>字段名称<input aria-label={`字段 ${i + 1} 名称`} value={field.field} required onChange={(e) => update({ field: e.target.value })} placeholder="例如 title" /></label>
-                  <label>数据类型<select aria-label={`字段 ${i + 1} 类型`} value={kind} onChange={(e) => {
+                  <label>{t("字段名称")}<input aria-label={t("字段 {0} 名称", i + 1)} value={field.field} required onChange={(e) => update({ field: e.target.value })} placeholder={t("例如 title")} /></label>
+                  <label>{t("数据类型")}<select aria-label={t("字段 {0} 类型", i + 1)} value={kind} onChange={(e) => {
                     const type = e.target.value;
                     update({ field_type: type === "Vector" ? "Json" : type, index_vector: type === "Vector", index_lexical: type === "Text" && mode !== "Vector", filterable: false, store: type !== "Vector" });
-                  }}>{Object.entries(fieldTypes).filter(([type]) => type !== "Vector" || mode !== "Lexical").map(([type, label]) => <option key={type} value={type}>{label}</option>)}</select></label>
-                  <button type="button" className="secondary" aria-label={`删除字段 ${i + 1}`} disabled={schema.length === 1} onClick={() => setSchema(schema.filter((_, j) => j !== i))}>删除</button>
+                  }}>{Object.entries(fieldTypes()).filter(([type]) => type !== "Vector" || mode !== "Lexical").map(([type, label]) => <option key={type} value={type}>{label}</option>)}</select></label>
+                  <button type="button" className="secondary" aria-label={t("删除字段 {0}", i + 1)} disabled={schema.length === 1} onClick={() => setSchema(schema.filter((_, j) => j !== i))}>{t("删除")}</button>
                 </div>
                 <div className="field-options">
-                  {!field.index_vector && mode !== "Vector" && ["Text", "Json"].includes(field.field_type) && <label className="checkbox"><input type="checkbox" aria-label={`字段 ${i + 1} 全文检索`} checked={field.index_lexical ?? field.field_type === "Text"} onChange={(e) => update({ index_lexical: e.target.checked })} />全文检索</label>}
-                  {!field.index_vector && ["String", "StringSet", "Int", "Float", "Timestamp"].includes(field.field_type) && <label className="checkbox"><input type="checkbox" aria-label={`字段 ${i + 1} 过滤排序`} checked={field.filterable ?? false} onChange={(e) => update({ filterable: e.target.checked })} />过滤与排序</label>}
-                  <label className="checkbox"><input type="checkbox" aria-label={`字段 ${i + 1} 返回内容`} checked={field.store ?? !field.index_vector} onChange={(e) => update({ store: e.target.checked })} />在搜索结果中返回</label>
+                  {!field.index_vector && mode !== "Vector" && ["Text", "Json"].includes(field.field_type) && <label className="checkbox"><input type="checkbox" aria-label={t("字段 {0} 全文检索", i + 1)} checked={field.index_lexical ?? field.field_type === "Text"} onChange={(e) => update({ index_lexical: e.target.checked })} />{t("全文检索")}</label>}
+                  {!field.index_vector && ["String", "StringSet", "Int", "Float", "Timestamp"].includes(field.field_type) && <label className="checkbox"><input type="checkbox" aria-label={t("字段 {0} 过滤排序", i + 1)} checked={field.filterable ?? false} onChange={(e) => update({ filterable: e.target.checked })} />{t("过滤与排序")}</label>}
+                  <label className="checkbox"><input type="checkbox" aria-label={t("字段 {0} 返回内容", i + 1)} checked={field.store ?? !field.index_vector} onChange={(e) => update({ store: e.target.checked })} />{t("在搜索结果中返回")}</label>
                 </div>
               </div>;
             })}
@@ -447,8 +440,7 @@ function CreateCollection({
                 setError("");
               }}
             >
-              修改被拒绝的请求
-            </button>
+              {t("修改被拒绝的请求")}</button>
           )}
           <button
             type="button"
@@ -456,15 +448,14 @@ function CreateCollection({
             disabled={busy}
             onClick={close}
           >
-            取消
-          </button>
+            {t("取消")}</button>
           <button className="primary" disabled={busy || !!foreign}>
             {busy ? (
-              <Busy label="正在创建" />
+              <Busy label={t("正在创建")} />
             ) : pending ? (
-              "重试原始创建"
+              t("重试原始创建")
             ) : (
-              "创建集合"
+              t("创建集合")
             )}
           </button>
         </div>

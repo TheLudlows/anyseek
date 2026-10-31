@@ -1,3 +1,4 @@
+import { t } from "./i18n.ts";
 import { storage } from "./api.ts";
 import { apiFieldText, apiJsonText, parseApiJson } from "./json.ts";
 import { prepareDocumentRequests, type PendingWrites } from "./writes.ts";
@@ -6,11 +7,11 @@ import type { Collection } from "./types.ts";
 
 function inputText(document: Record<string, unknown>, fields: string[]) {
   const values = fields.map((field) => document[field]).filter((value) => value != null);
-  if (values.some((value) => typeof value !== "string")) throw new Error("嵌入文本字段必须是字符串。");
+  if (values.some((value) => typeof value !== "string")) throw new Error(t("嵌入文本字段必须是字符串。"));
   const text = values.join("\n").trim();
-  if (!text) throw new Error("记录的所选嵌入字段为空，请填写文本或提供已有向量。");
+  if (!text) throw new Error(t("记录的所选嵌入字段为空，请填写文本或提供已有向量。"));
   if (new TextEncoder().encode(text).length > 30 * 1024)
-    throw new Error("单条嵌入文本超过 30 KiB，请先拆分文本。");
+    throw new Error(t("单条嵌入文本超过 30 KiB，请先拆分文本。"));
   return text;
 }
 function withVector(body: string, field: string, vector: number[]) {
@@ -36,11 +37,11 @@ export function prepareEmbeddedWrites(source: string, owner: string, collection:
 }
 export async function generatePendingEmbeddings(pending: PendingWrites, owner: string, collection: Collection,
   progress: (done: number) => void = () => {}, signal?: AbortSignal) {
-  if (pending.owner !== owner || pending.collection !== collection.id) throw new Error("请回到原连接与集合处理保留的嵌入任务。");
+  if (pending.owner !== owner || pending.collection !== collection.id) throw new Error(t("请回到原连接与集合处理保留的嵌入任务。"));
   if (!pending.embedding) return;
   const { config, dimensions } = pending.embedding;
   validateEmbeddingConfig(config, collection);
-  if (dimensions !== collection.vector_dimensions) throw new Error("集合维度已变化，请检查原集合和保留任务。");
+  if (dimensions !== collection.vector_dimensions) throw new Error(t("集合维度已变化，请检查原集合和保留任务。"));
   const remaining = pending.requests.filter((request) => !request.embedded);
   for (let offset = 0; offset < remaining.length; offset += EMBEDDING_BATCH_SIZE) {
     signal?.throwIfAborted();

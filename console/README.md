@@ -211,3 +211,11 @@ npx playwright test --config playwright.bootstrap.config.ts
 结果卡片显示最终得分和各通道原始分数。点击结果，在“检索打分”表格中查看原始分数、通道内排名、排序依据和 RRF 融合贡献；原始解释 JSON 收起保留。
 
 通道排名从第 1 名展示，仅对应本次候选范围。关键词分和向量分尺度不同，不可直接比较，不代表置信度；融合分是 RRF 贡献之和。未返回的通道标为“未进入候选或未启用”，不伪造零分。界面分数保留 7 位有效数字，原始 JSON 保留服务返回值。
+
+## 界面语言
+
+默认使用中文，可在侧栏底部或弹窗标题栏切换到 English。语言偏好保存在当前浏览器的 `anyseek.language`，刷新后恢复；浏览器禁用存储时仍可切换。切换不会刷新页面或清空表单、连接、待确认请求。
+
+导航、表单、提示与打分详情同步切换；字段名、记录原文与 API JSON 保持原样，未知服务端错误保留原文。标签页标题随语言显示为「AnySeek · 语义空间」或「AnySeek · Semantic Space」。
+
+新增界面文案使用 `t("中文文案")`，在 `src/messages.ts` 补充英文翻译；动态内容使用 `{0}` 等占位符。运行 `npm test` 检查字典与占位符，运行 `npx playwright test --config playwright.bootstrap.config.ts` 验证语言切换和连接流程。

@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { LanguageSwitch } from "./LanguageSwitch.tsx";
+import { getLanguage, subscribeLanguage } from "./i18n.ts";
+import { t } from "./i18n.ts";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   ArrowRight,
   ChevronRight,
@@ -25,10 +28,10 @@ import { Recovery } from "./Tools.tsx";
 import type { Collection } from "./types.ts";
 
 type Section = "collections" | "data" | "search" | "settings";
-const sections = [
-  { id: "collections", name: "集合", icon: Layers3 },
-  { id: "data", name: "数据", icon: Database },
-  { id: "search", name: "检索调试", icon: SearchIcon },
+const sections = () => [
+  { id: "collections", name: t("集合"), icon: Layers3 },
+  { id: "data", name: t("数据"), icon: Database },
+  { id: "search", name: t("检索调试"), icon: SearchIcon },
 ] as const;
 function saved<T>(key: string, fallback: T): T {
   try {
@@ -38,6 +41,7 @@ function saved<T>(key: string, fallback: T): T {
   }
 }
 export default function App() {
+  useSyncExternalStore(subscribeLanguage, getLanguage, () => "zh");
   const [apiKey, setApiKey] = useState(""),
     [owner, setOwner] = useState("");
   const [collections, setCollections] = useState<Collection[]>([]),
@@ -81,7 +85,7 @@ export default function App() {
     setError("");
     try {
       if (!key.trim())
-        throw new Error("请输入服务管理员签发的 Tenant API Key。");
+        throw new Error(t("请输入服务管理员签发的 Tenant API Key。"));
       const fingerprint = await ownerFor(key.trim());
       const list = await api<Collection[]>(key.trim(), "apikey");
       if (attempt !== sequence.current) return;
@@ -150,12 +154,11 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">
-        跳到主要内容
-      </a>
+        {t("跳到主要内容")}</a>
       {mobileOpen && (
         <button
           className="sidebar-scrim"
-          aria-label="关闭导航"
+          aria-label={t("关闭导航")}
           onClick={() => setMobileOpen(false)}
         />
       )}
@@ -170,9 +173,9 @@ export default function App() {
             AnySeek<span className="brand-dot">.</span>
           </span>
         </a>
-        <span className="nav-label">工作空间</span>
-        <nav aria-label="主导航">
-          {sections.map((s) => (
+        <span className="nav-label">{t("工作空间")}</span>
+        <nav aria-label={t("主导航")}>
+          {sections().map((s) => (
             <button
               key={s.id}
               className={section === s.id ? "active" : ""}
@@ -187,23 +190,21 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-bottom">
+          <LanguageSwitch />
           <div className="sidebar-guide">
             <div className="guide-icon">
               <Layers3 size={17} />
             </div>
-            <strong>管理 AI 记忆与知识</strong>
+            <strong>{t("管理 AI 记忆与知识")}</strong>
             <p>
-              从原始记录到精准检索，
-              <br />
-              在同一工作区完成。
-            </p>
+              {t("从原始记录到精准检索，")}<br />
+              {t("在同一工作区完成。")}</p>
             <a
               href="https://github.com/TheLudlows/anyseek/blob/master/console/README.md"
               target="_blank"
               rel="noreferrer"
             >
-              阅读控制台指南
-              <ExternalLink size={12} />
+              {t("阅读控制台指南")}<ExternalLink size={12} />
             </a>
           </div>
           <button
@@ -213,8 +214,7 @@ export default function App() {
             onClick={() => navigate("settings")}
           >
             <Settings2 size={17} />
-            连接与管理
-          </button>
+            {t("连接与管理")}</button>
           <button
             className="connection-card"
             onClick={() => setConnectOpen(true)}
@@ -223,8 +223,8 @@ export default function App() {
               <ShieldCheck size={17} />
             </span>
             <span>
-              <strong>{apiKey ? "服务已连接" : "连接 AnySeek 服务"}</strong>
-              <small>{apiKey ? "Tenant API" : "使用 Tenant API Key"}</small>
+              <strong>{apiKey ? t("服务已连接") : t("连接 AnySeek 服务")}</strong>
+              <small>{apiKey ? "Tenant API" : t("使用 Tenant API Key")}</small>
             </span>
             <ChevronRight size={14} />
           </button>
@@ -235,17 +235,17 @@ export default function App() {
           <div className="breadcrumb">
             <button
               className="icon-button mobile-toggle"
-              aria-label="打开导航"
+              aria-label={t("打开导航")}
               onClick={() => setMobileOpen(true)}
             >
               <Menu size={19} />
             </button>
-            <span>工作空间</span>
+            <span>{t("工作空间")}</span>
             <ChevronRight size={13} />
             <strong>
               {section === "settings"
-                ? "连接与管理"
-                : sections.find((s) => s.id === section)?.name}
+                ? t("连接与管理")
+                : sections().find((s) => s.id === section)?.name}
             </strong>
           </div>
           <div className="topbar-actions">
@@ -253,9 +253,9 @@ export default function App() {
               <>
                 <label className="collection-select">
                   <Layers3 size={14} />
-                  <span className="sr-only">当前集合</span>
+                  <span className="sr-only">{t("当前集合")}</span>
                   <select
-                    aria-label="当前集合"
+                    aria-label={t("当前集合")}
                     value={selected?.id || ""}
                     onChange={(e) => {
                       setCurrent(e.target.value);
@@ -263,8 +263,7 @@ export default function App() {
                     }}
                   >
                     <option value="" disabled>
-                      选择集合
-                    </option>
+                      {t("选择集合")}</option>
                     {collections.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
@@ -274,8 +273,8 @@ export default function App() {
                 </label>
                 <button
                   className="icon-button"
-                  aria-label="刷新集合统计"
-                  title="刷新集合统计"
+                  aria-label={t("刷新集合统计")}
+                  title={t("刷新集合统计")}
                   disabled={busy}
                   onClick={refresh}
                 >
@@ -286,14 +285,14 @@ export default function App() {
             )}
             <a
               className="icon-button"
-              aria-label="打开服务文档"
+              aria-label={t("打开服务文档")}
               href="https://github.com/TheLudlows/anyseek/blob/master/anyseek/src/server/README.md"
               target="_blank"
               rel="noreferrer"
             >
               <CircleHelp size={18} />
             </a>
-            <span className="user-avatar" title="AnySeek 工作区">
+            <span className="user-avatar" title={t("AnySeek 工作区")}>
               A
             </span>
           </div>
@@ -305,36 +304,33 @@ export default function App() {
               <div className="page-heading">
                 <div>
                   <span className="eyebrow">CONNECTION & ADMINISTRATION</span>
-                  <h1>连接与管理</h1>
-                  <p>管理当前浏览器标签页的连接，以及服务备份。</p>
+                  <h1>{t("连接与管理")}</h1>
+                  <p>{t("管理当前浏览器标签页的连接，以及服务备份。")}</p>
                 </div>
               </div>
               <section className="panel connection-panel">
                 <div>
                   <span className="eyebrow">TENANT CONNECTION</span>
-                  <h2>{apiKey ? "服务已连接" : "尚未连接"}</h2>
+                  <h2>{apiKey ? t("服务已连接") : t("尚未连接")}</h2>
                   <p>
-                    API Key 仅保存在当前标签页的会话中；写入重试记录单独保留。
-                  </p>
+                    {t("API Key 仅保存在当前标签页的会话中；写入重试记录单独保留。")}</p>
                 </div>
                 <div className="inline-actions">
                   <button
                     className="secondary"
                     onClick={() => setConnectOpen(true)}
                   >
-                    切换连接
-                  </button>
+                    {t("切换连接")}</button>
                   {apiKey && (
                     <button className="text-button" onClick={disconnect}>
                       <LogOut size={14} />
-                      断开连接
-                    </button>
+                      {t("断开连接")}</button>
                   )}
                 </div>
               </section>
               {apiKey && selected?.schema.some((f) => f.index_vector) ? (
                 <EmbeddingSettings key={owner + selected.id} owner={owner} collection={selected} />
-              ) : apiKey && <section className="panel embedding-panel"><h2>浏览器嵌入</h2><p className="muted">在左侧选择一个含向量字段的集合，配置仅保存在浏览器的模型连接。</p></section>}
+              ) : apiKey && <section className="panel embedding-panel"><h2>{t("浏览器嵌入")}</h2><p className="muted">{t("在左侧选择一个含向量字段的集合，配置仅保存在浏览器的模型连接。")}</p></section>}
               <Recovery />
             </>
           ) : !apiKey ? (
@@ -350,15 +346,14 @@ export default function App() {
           ) : !selected ? (
             <section className="panel">
               <Empty
-                title="先选择一个集合"
-                text="创建集合并定义字段后，即可导入与检索数据。"
+                title={t("先选择一个集合")}
+                text={t("创建集合并定义字段后，即可导入与检索数据。")}
                 action={
                   <button
                     className="primary"
                     onClick={() => navigate("collections")}
                   >
-                    前往集合
-                    <ArrowRight size={15} />
+                    {t("前往集合")}<ArrowRight size={15} />
                   </button>
                 }
               />
@@ -381,10 +376,9 @@ export default function App() {
           )}
           <footer className="main-footer">
             <span>
-              AnySeek<span className="footer-dot">·</span>AI 记忆与知识检索
-            </span>
+              AnySeek<span className="footer-dot">·</span>{t("AI 记忆与知识检索")}</span>
             <span>
-              {selected?.version ? "Engine v" + selected.version : "检索控制台"}
+              {selected?.version ? "Engine v" + selected.version : t("检索控制台")}
               <span className="footer-dot">·</span>Console 1.0
             </span>
           </footer>
@@ -392,13 +386,12 @@ export default function App() {
       </div>
       {connectOpen && (
         <Modal
-          title="连接 AnySeek"
+          title={t("连接 AnySeek")}
           close={() => setConnectOpen(false)}
           busy={busy}
         >
           <p className="modal-intro">
-            使用管理员签发的 Tenant API Key 访问集合。
-          </p>
+            {t("使用管理员签发的 Tenant API Key 访问集合。")}</p>
           <ConnectForm busy={busy} connect={connect} />
           <Notice>{error}</Notice>
         </Modal>
@@ -438,7 +431,7 @@ function ConnectForm({
           autoComplete="off"
           value={key}
           onChange={(e) => setKey(e.target.value)}
-          placeholder="粘贴你的 Tenant API Key"
+          placeholder={t("粘贴你的 Tenant API Key")}
           required
           disabled={busy}
         />
@@ -446,11 +439,10 @@ function ConnectForm({
       <Notice>{error}</Notice>
       <button className="primary" disabled={busy}>
         {busy ? (
-          <Busy label="连接中" />
+          <Busy label={t("连接中")} />
         ) : (
           <>
-            连接服务
-            <ArrowRight size={15} />
+            {t("连接服务")}<ArrowRight size={15} />
           </>
         )}
       </button>
@@ -460,8 +452,7 @@ function ConnectForm({
         disabled={busy}
         onClick={() => setInitialize(true)}
       >
-        首次使用？使用 Master Key 初始化
-      </button>
+        {t("首次使用？使用 Master Key 初始化")}</button>
     </form>
   );
 }
@@ -474,24 +465,19 @@ function Welcome(props: {
       <div className="welcome-copy">
         <span className="eyebrow">WELCOME TO ANYSEEK</span>
         <h1>
-          AI 记忆与知识的
-          <br />
-          检索底座
-        </h1>
-        <p>统一管理记录、向量与关系，通过全文、向量和混合检索访问你的数据。</p>
+          {t("AI 记忆与知识的")}<br />
+          {t("检索底座")}</h1>
+        <p>{t("统一管理记录、向量与关系，通过全文、向量和混合检索访问你的数据。")}</p>
         <div className="welcome-features">
           <span>
             <Layers3 size={16} />
-            统一集合管理
-          </span>
+            {t("统一集合管理")}</span>
           <span>
             <Database size={16} />
-            完整数据表达
-          </span>
+            {t("完整数据表达")}</span>
           <span>
             <SearchIcon size={16} />
-            多路检索调试
-          </span>
+            {t("多路检索调试")}</span>
         </div>
         <div className="welcome-art" aria-hidden="true">
           <div className="art-lines" />
@@ -510,13 +496,12 @@ function Welcome(props: {
         <span className="connect-emblem">
           <ShieldCheck size={23} />
         </span>
-        <h2>连接 AnySeek 服务</h2>
-        <p>连接你的 AnySeek 服务，进入检索工作区。</p>
+        <h2>{t("连接 AnySeek 服务")}</h2>
+        <p>{t("连接你的 AnySeek 服务，进入检索工作区。")}</p>
         <ConnectForm {...props} />
         <div className="welcome-secure">
           <ShieldCheck size={13} />
-          密钥仅用于当前会话
-        </div>
+          {t("密钥仅用于当前会话")}</div>
       </section>
     </div>
   );
