@@ -7,7 +7,6 @@ import {
   ChevronRight,
   CircleHelp,
   Database,
-  ExternalLink,
   Layers3,
   LogOut,
   Menu,
@@ -191,22 +190,6 @@ export default function App() {
         </nav>
         <div className="sidebar-bottom">
           <LanguageSwitch />
-          <div className="sidebar-guide">
-            <div className="guide-icon">
-              <Layers3 size={17} />
-            </div>
-            <strong>{t("管理 AI 记忆与知识")}</strong>
-            <p>
-              {t("从原始记录到精准检索，")}<br />
-              {t("在同一工作区完成。")}</p>
-            <a
-              href="https://github.com/TheLudlows/anyseek/blob/master/console/README.md"
-              target="_blank"
-              rel="noreferrer"
-            >
-              {t("阅读控制台指南")}<ExternalLink size={12} />
-            </a>
-          </div>
           <button
             className={
               "settings-link " + (section === "settings" ? "active" : "")

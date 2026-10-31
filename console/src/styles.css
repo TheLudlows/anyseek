@@ -260,41 +260,6 @@ pre {
   margin-top: auto;
   padding-top: 40px;
 }
-.sidebar-guide {
-  margin: 0 5px 21px;
-  padding: 17px 13px 15px;
-  border: 1px solid #e8ecf4;
-  border-radius: 9px;
-  background: linear-gradient(135deg, #f3f5fc, #fbfcfe);
-}
-.guide-icon {
-  width: 29px;
-  height: 29px;
-  border: 1px solid #e0e5f3;
-  background: #fff9;
-  border-radius: 7px;
-  display: grid;
-  place-items: center;
-  color: #8794c6;
-  margin-bottom: 10px;
-}
-.sidebar-guide strong {
-  font-size: 11px;
-  color: #62708a;
-}
-.sidebar-guide p {
-  font-size: 10px;
-  line-height: 1.9;
-  margin: 6px 0 11px;
-  color: #96a0b2;
-}
-.sidebar-guide a {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 10px;
-  color: #8190b7;
-}
 .settings-link {
   font-size: 11px;
   margin-bottom: 12px;
