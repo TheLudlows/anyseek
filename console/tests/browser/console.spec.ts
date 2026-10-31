@@ -144,7 +144,7 @@ test("creation and i64 import survive lost responses and reload with identical r
     (n, i) =>
       `{"title":"precision ${i}","body":"precision","rank":${n},"measure":1.2500e0,"data":{"n":${n}}}`,
   );
-  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.getByRole("button", { name: "导入数据", exact: true }).first().click();
   await page
     .getByLabel("导入 JSON", { exact: true })
     .fill("[" + docs.join(",") + "]");
@@ -448,7 +448,7 @@ for (const mode of ["Lexical", "Vector", "Hybrid"]) {
     const name = `form_${mode.toLowerCase()}`;
     await dialog.getByLabel("集合名称", { exact: true }).fill(name);
     await dialog.getByLabel("字段 1 名称", { exact: true }).fill("custom_title");
-    await dialog.getByLabel("检索模式", { exact: true }).selectOption(mode);
+    await dialog.getByRole("combobox", { name: /^检索模式/ }).selectOption(mode);
     await expect(dialog.getByLabel("字段 1 名称", { exact: true })).toHaveValue("custom_title");
     await expect(dialog.locator("textarea")).toHaveCount(0);
     await expect(dialog.getByText("Embedding 模型标识", { exact: true })).toHaveCount(0);
@@ -510,7 +510,7 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.reload();
   await expect(page.getByLabel("模型 API Key（可选）", { exact: true })).toHaveValue(modelKey);
   await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "数据", exact: true }).click();
-  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.getByRole("button", { name: "导入数据", exact: true }).first().click();
   await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toBeChecked();
   const source = "[" + Array.from({ length: 11 }, (_, i) => `{"body":"embedding document ${i}","large":9223372036854775807}`).join(",") + "]";
   await page.getByLabel("导入 JSON", { exact: true }).fill(source);
