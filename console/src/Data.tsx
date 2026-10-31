@@ -14,7 +14,6 @@ import { apiFieldText, apiJsonText } from "./json.ts";
 import {
   Busy,
   Empty,
-  JsonView,
   Modal,
   Notice,
   RecordPreview,
@@ -26,6 +25,7 @@ import {
 } from "./writes.ts";
 import { loadEmbeddingConfig } from "./embeddings.ts";
 import { generatePendingEmbeddings, prepareEmbeddedWrites } from "./embedding-writes.ts";
+import { SchemaTable } from "./SchemaTable.tsx";
 import { Tools } from "./Tools.tsx";
 import type { Collection, Json, Page, RecordData } from "./types.ts";
 
@@ -429,7 +429,7 @@ function ImportData({
         </fieldset>
         <details>
           <summary>查看集合字段</summary>
-          <JsonView value={collection.schema} label="Schema" />
+          <SchemaTable fields={collection.schema} dimensions={collection.vector_dimensions} />
         </details>
         {envelope && (
           <details>
