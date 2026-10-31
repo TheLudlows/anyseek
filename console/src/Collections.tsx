@@ -137,6 +137,7 @@ export function Collections(props: Props) {
                 <tr>
                   <th>集合名称</th>
                   <th>检索模式</th>
+                  <th>向量维度</th>
                   <th>活跃记录</th>
                   <th>字段</th>
                   <th>操作</th>
@@ -165,6 +166,11 @@ export function Collections(props: Props) {
                       >
                         {collectionMode(c)}
                       </span>
+                    </td>
+                    <td className="numeric">
+                      {c.schema.some((field) => field.index_vector)
+                        ? c.vector_dimensions ? `${c.vector_dimensions} 维` : "未知"
+                        : "—"}
                     </td>
                     <td className="numeric">
                       {c.indexed_doc_count.toLocaleString()}

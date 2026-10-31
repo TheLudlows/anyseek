@@ -31,7 +31,7 @@ export function SchemaTable({ fields, dimensions }: {
               return (
                 <tr key={field.field}>
                   <td className="mono">{field.field}</td>
-                  <td>{field.index_vector ? `向量（${types[field.field_type] || field.field_type}）` : types[field.field_type] || field.field_type}</td>
+                  <td>{field.index_vector ? dimensions ? `${dimensions} 维向量` : "向量（维度未知）" : types[field.field_type] || field.field_type}</td>
                   <td>{retrieval || "不参与检索"}</td>
                   <td>{field.filterable ? "支持" : "不启用"}</td>
                   <td>{stored ? "返回" : "不返回"}</td>
