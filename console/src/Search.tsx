@@ -8,6 +8,8 @@ import {
   SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
+import { ScoreDetails } from "./ScoreDetails.tsx";
+import { channelName, scoreRows, scoreText } from "./scores.ts";
 import { api, collectionPath, message } from "./api.ts";
 import { embedTexts, embeddingKey, loadEmbeddingConfig, validateEmbeddingConfig } from "./embeddings.ts";
 import { apiFieldText } from "./json.ts";
@@ -34,6 +36,8 @@ export function Search({
   const [modelConfig] = useState(() => loadEmbeddingConfig(owner, collection.id));
   const [autoEmbed, setAutoEmbed] = useState(!!modelConfig);
   const [preview, setPreview] = useState<{ text: string; vector: number[] } | null>(null);
+  const [resultMode, setResultMode] = useState<Mode>("Lexical");
+  const submittedMode = useRef<Mode>("Lexical");
   const [phase, setPhase] = useState("");
   const [mode, setMode] = useState<Mode>(
       collection.schema.some((f) => f.index_vector) &&
@@ -184,7 +188,7 @@ export function Search({
       const source = fresh ? await build(controller.signal) : submitted.current;
       controller.signal.throwIfAborted();
       if (!source) return;
-      if (fresh) submitted.current = source;
+      if (fresh) { submitted.current = source; submittedMode.current = mode; }
       // offset is appended last and controlled by pagination.
       const body = source.slice(0, -1) + ',"offset":' + next * 10 + "}";
       setPhase("正在检索集合");
@@ -197,6 +201,7 @@ export function Search({
       );
       if (!controller.signal.aborted) {
         setResult(response);
+        setResultMode(submittedMode.current);
         setPage(next);
       }
     } catch (e) {
@@ -483,7 +488,7 @@ export function Search({
                       <div>
                         <div className="result-meta">
                           <span className="mono">{hit.record.record_id}</span>
-                          <span>Score {hit.score?.toFixed(4) ?? "—"}</span>
+                          <span title={String(hit.score)}>最终得分 {scoreText(hit.score)}</span>
                         </div>
                         <h3>
                           {recordTitle(hit.record)}
@@ -491,8 +496,8 @@ export function Search({
                         </h3>
                         <p>{recordBody(hit.record) || "点击查看记录内容"}</p>
                         <div className="channel-tags">
-                          {hit.channels?.map((channel, i) => (
-                            <span key={i}>{channel.channel}</span>
+                          {scoreRows(hit, resultMode).map(({ channel, value }) => (
+                            <span key={channel}>{channelName(channel)}：{value ? scoreText(value.raw_score) : "未进入候选或未启用"}</span>
                           ))}
                         </div>
                       </div>
@@ -536,6 +541,7 @@ export function Search({
               <RecordPreview
                 record={selected.record}
                 close={() => setSelected(null)}
+                scoreDetails={<ScoreDetails hit={selected} mode={resultMode} />}
                 explanation={makeExplanation(selected)}
               />
             )}
