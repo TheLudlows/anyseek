@@ -1,8 +1,8 @@
 # anyseek Record HTTP 服务
 
-`POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/ingest/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/doc` 同步语义保留，独立 Intake 日志已移除。详见[异步写入实施](../../../docs/async-ingestion.md)。
+`POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/ingest/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/doc` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
 
-默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [阶段证据](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -65,7 +65,7 @@ collection ID、record ID 是字符串业务身份，内部 DocID 不作为 HTTP
 - 写入：`{operation_id,record_id,routing_key,expected,document}`。`document` 必须显式提供；对象完整替换，`null` 删除。已有身份不能更换 routing key。
 - `expected` 为 `"Absent"`、`{"Match":N}` 或 `"Any"`。删除后重建继续推进版本，避免旧条件命中新内容。
 - 操作 ID 是 `{epoch,nonce}`，epoch 是自 Unix epoch 起的 UTC 日数。当前日和前一日可重试；正常当日签发至少有 24 小时窗口。控制操作保留 `sys:` nonce 前缀。
-- 成功写入表示 durable + visible，不需随后 PATCH。PATCH collection 是在线完整 checkpoint，不是确认写入的第二步，也不会回收 Record 操作账本。
+- 同步 `/doc`、`/batch` 成功表示 durable + visible，不需随后 PATCH。`/ingest` 的 committed 项只保证持久业务结果，索引异步推进。PATCH collection 是在线完整 checkpoint，不是确认写入的第二步；操作历史由保留期限及安全 GC 条件决定，不能通过手工 checkpoint 清空窗口内回执。
 
 发送前保存完整请求。重试必须复用原 ID、原条件和原内容；相同请求返回原回执，更换内容会冲突。不能因查询不到回执或操作过期就重新生成 ID 补写。
 
@@ -79,6 +79,41 @@ collection ID、record ID 是字符串业务身份，内部 DocID 不作为 HTTP
 | `operation_expired`，HTTP 410 | 超出支持窗口；不证明此前没有执行 |
 
 UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响应、刷新、后续拒绝不会解锁未知写入。只有未经历未知结果的明确拒绝才能释放被拒绝项及未发送余项。客户端备份这些待处理请求的方式由调用方负责。
+
+## 异步索引写入
+
+`POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每次 1..64 项；每项携带自己的稳定 Record ID、routing key、条件版本和 Operation ID。文档显式为对象或 null，也可提交 vector_patch 或 generation。HTTP body 仍为 2 MiB；partition 队列按在途项目总数 64 和序列化请求总量 4 MiB 有界准入，超额拒绝。
+
+返回 `atomic:false`、`searchability:"asynchronous"` 和与输入位置对应的 `results`。HTTP 200 只表示本次取得确定的逐项业务结果，不表示每项均成功：
+
+| results[].code | 含义与处理 |
+| --- | --- |
+| committed | 附带持久 Record receipt、operation_id 和 expires_at；不保证全文/向量已消费到 receipt.seq |
+| rejected | 本项明确业务拒绝，error 中保留具体原因；后续项可以继续执行 |
+| outcome_unknown | 本次发布结果不明，保存原请求，恢复后查账或原身份重试 |
+| not_attempted | 本次未尝试权威发布；不否定同身份早先尝试可能已提交 |
+
+中断可返回 429/503，并保留已经确定的逐项回执。先保存并检查响应 body，不以 HTTP 状态整体重建请求或重新分配 Operation ID。HTTP 取消不取消已接管的持久任务。generation staging 的 committed 仅证明私有持久，仍须显式 Publish。
+
+复用下节预先保存的 `requests/write.json`，生成一次批请求文件：
+
+```sh
+python3 - <<'PYCODE'
+import json
+from pathlib import Path
+write = json.loads(Path('requests/write.json').read_text())
+with Path('requests/ingest.json').open('x') as output:
+    json.dump({'records': [write]}, output)
+PYCODE
+curl -X POST "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY" -H 'Content-Type: application/json' --data-binary @requests/ingest.json
+curl "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY"
+```
+
+示例复用同一原始操作，已通过同步接口写入过的请求返回原回执，不创建第二条记录；未知结果直接重发保存的文件。
+
+`GET /api/v1/index/{id}/ingest` 返回 committed_seq、lexical_seq、vector_seq、index_error 和 recovery_required。需要搜索包含某个提交时，检查所需消费者水位至少达到该 receipt.seq，并处理 index_error/recovery_required；各索引水位可以不同，不要求全局统一。恢复必需时 committed_seq 为 null。
+
+`GET /api/v1/index/{id}/ingest/operation/{epoch}/{nonce}` 与原 `/operation/{epoch}/{nonce}` 查询同一 Record 业务回执。缺席或过期不能证明先前未提交。Rust 对应 `commit_writes` 和 `committed_progress`，见[开发指南](../../../docs/development.md#rust-核心库接入)。
 
 ## 可直接执行的 HTTP 示例
 
@@ -142,7 +177,7 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 
 | 边界 | 当前行为 |
 | --- | --- |
-| Record 身份含墓碑、保留操作、候选 | 各 10,000；Record 操作是累计保留上限，checkpoint 不释放额度 |
+| Record 身份含墓碑、保留操作、候选 | 默认身份/操作各 10,000，可显式选有界 100,000 档；候选仍 10,000。操作历史至少保留七天，满足历史水位、epoch 和保护条件后才安全回收 |
 | 操作 / HTTP body / 响应 | 1 MiB / 2 MiB / 16 MiB |
 | Record WAL / 完整 checkpoint | 256 MiB 代预算，完整 checkpoint 另受 16 MiB 单帧限制 |
 | Catalog | 16 MiB 元数据、10,000 操作，仅安全回收过期控制回执 |
@@ -163,9 +198,9 @@ master POST `/api/v1/service-restores`（`{operation_id,backup_id}`）返回**�
 
 部署可设置 `ANYSEEK_{类别}_SLOTS`、`_PER_COLLECTION`、`_BYTES`、`_PER_COLLECTION_BYTES`、`_IO`、`_PER_COLLECTION_IO`，类别取上表大写名称，字节值为十进制字节数。例如 `ANYSEEK_FOREGROUND_PER_COLLECTION=2`。配置必须为正整数、局部不大于全局、每集合字节至少 18 MiB；单类 slots/I/O 不超过 64，前三类 slots 总和不超过 48、CONTROL slots 不超过 8，以保留 catalog 控制余量。非法配置阻止启动。
 
-30 秒截止时间覆盖认证/身份查找及 handler；准入超时且未启动 handler 时返回 Busy，已接管工作超时仍 outcome_unknown。每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲及累积解码 tail 额度跟随实际所有者（包括迭代器和已取出的条目），owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存容量保持原值，服务缓存总额度另行实现。
+30 秒截止时间覆盖认证/身份查找及 handler；准入超时且未启动 handler 时返回 Busy，已接管工作超时仍 outcome_unknown。每个 HTTP 请求保守预留 18 MiB body/输出工作区；构建快照/tail、对象下载和 PUT 副本另计。S3 缓冲及累积解码 tail 额度跟随实际所有者（包括迭代器和已取出的条目），owned task 和已交付传输帧保留原请求准入，取消等待不提前退款。JSON 在增长前检查响应上限；I/O 无额外等待队列。已知未发布的资源拒绝可返回 busy，发布结果未知时继续 outcome_unknown/恢复协议，重试原操作身份。此账目不覆盖所有运行态对象、分配器、mmap/OS 缓存或 SDK 内存，不承诺全进程 RSS、系统 I/O 带宽或完整磁盘硬上限。每 authority 对象缓存为 256 MiB / 4096 块；默认服务各 collection 共用 `metadata.sqlite` 及其旁的对象缓存。物化索引、备份及多 authority 库场景的总占用仍需整体评估。
 
-Service archive/root 清理是明确的离线操作，不提供删除运行根的接口。系统崩溃、文件系统崩溃、断电矩阵尚未验收；原生进程 kill/exit、故障注入与 fsync 调用不能代替。长期物理回收、Record 账本 GC、SQLite 云端协调和分布式留在后续阶段；来源/evidence 与可选向量已实现。
+Service archive/root 清理是明确的离线操作，不提供删除运行根的接口。系统崩溃、文件系统崩溃、断电矩阵尚未验收；原生进程 kill/exit、故障注入与 fsync 调用不能代替。历史回执安全 GC 和已删除集合代次后台回收已有实现；持续运行容量与组合隔离验收、跨主机协调和分布式仍留在后续阶段；来源/evidence 与可选向量已实现。
 
 ## 开发验证
 
@@ -176,7 +211,7 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 # 独立前端浏览器检查：见 console/README.md
 ```
 
-浏览器测试需 Python Playwright 和 Chromium。故障矩阵需先构建 `cargo build -p anyseek --features server,fault-injection`，再运行同一 smoke 脚本的 `--faults`。正常构建默认关闭故障注入。
+浏览器测试在 `console/` 使用 Node.js Playwright 和 Chromium，按[控制台指南](../../../console/README.md#验证)运行。故障矩阵需先构建 `cargo build -p anyseek --features server,fault-injection`，再运行同一 smoke 脚本的 `--faults`。正常构建默认关闭故障注入。
 
 小型调用方示例使用 `scripts/anyseek_client.py`：设置 `ANYSEEK_API_KEY` 后运行 `python3 scripts/index_write_query_smoke.py --port 8080 --requests requests.json`；重复执行同一命令重试保存的请求，不生成新身份。旧 `http_smoke.py` 已由完整 Record smoke 取代。
 

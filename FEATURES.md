@@ -1,6 +1,6 @@
 # 当前功能与边界
 
-HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、generation、时间/TTL、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续回收仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
+HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、generation、时间/TTL、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续运行容量仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
 
 ## 检索和数据
 
@@ -15,7 +15,7 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | 身份和写入 | 稳定 Record ID、不可变 routing key、版本条件、墓碑、防 ABA、原 operation_id 重试 |
 | 原始数据 | 权威状态保留完整 Document 和原始向量；schema.store 控制查询投影，不控制原始数据持久保存 |
 | 浏览 | 空查询浏览活动记录，包括纯向量 collection；iterator 按稳定 ID 分页，visible_seq 改变使 cursor 失效 |
-| 持久化 | 本地 Segment + tail，或 SQLite/S3 对象提交、远端 checkpoint 与 GC；成功写入 durable + visible；真实 S3/系统断电尚待验收 |
+| 持久化 | 本地 Segment + tail，或 SQLite/S3 对象提交、远端 checkpoint 与 GC；同步写入 durable + visible；异步索引入口返回持久业务结果；真实 S3/系统断电尚待验收 |
 | Tenant 认证 | 普通 Key 绑定 Tenant，同租户 Key 访问范围一致；撤销只影响后续认证，数据生命周期独立 |
 | 备份 | collection 独立快照、备份退役、完整 service/catalog 备份、新未启动根恢复 |
 
@@ -44,6 +44,9 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | GET | `/api/v1/index/{id}/doc/{record_id}/status` | 元数据可见原因及 pending_vector_fields，不返回隐藏正文 |
 | GET | `/api/v1/index/{id}/doc/{record_id}/generation` | 文档控制版本、active/staged 身份、租约期限/fence 和清理状态 |
 | GET | `/api/v1/index/{id}/doc/{record_id}` | 原始 Record；可用 `?fields=body,title` 投影 |
+| POST | `/api/v1/index/{id}/ingest` | `{records:[RecordWrite,...]}`，1..64 非原子逐项业务结果；索引异步，HTTP 200 不代表全部成功 |
+| GET | `/api/v1/index/{id}/ingest` | committed/lexical/vector 水位、index_error 和 recovery_required |
+| GET | `/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}` | 查询原 Record 业务回执，缺席不证明未提交 |
 | POST | `/api/v1/index/{id}/query` | Lexical/Vector/Hybrid/空查询；返回 hits[].record |
 | POST | `/api/v1/index/{id}/iterator` | `{cursor?,length?,fields?}`；不支持旧 skip/take 协议 |
 | POST | `/api/v1/index/{id}/evidence` | 受保护精确来源版本的 UTF-8 区间/内联页摘录及摘要 |
@@ -70,11 +73,11 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 
 ## 资源与未完成项
 
-Record 身份（含墓碑）、累计保留操作、候选各最多 10,000；单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record checkpoint 不做幂等账本 GC。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/4，恢复 2/1，后台 2/1，可信控制 8/2，公共/存活 8/8；partition 内部 8。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
+默认 Record 身份（含墓碑）、保留操作各最多 10,000，可显式选 `bounded_100k` 将身份/操作准入提高到 100,000；候选仍最多 10,000。单操作 1 MiB；generation 多批正文累计上限 4 MiB、最多 100 成员，每批独立 WAL，发布只写控制信息。完整 checkpoint 单帧 16 MiB，Record WAL 代 256 MiB；catalog 16 MiB、10,000 操作。Record 历史至少保留七天，过期操作在历史水位、epoch 和来源/generation 保护允许后安全 GC；普通 checkpoint 不清空窗口内回执。请求 body 2 MiB、响应 16 MiB；普通请求全局/每集合 32/16，恢复 2/1，后台 2/1，可信控制 8/2，公共/存活 8/8；partition 内部 16。collection 独立执行，共同快照仍保留全局屏障，Key 撤销不排空已认证工作；分级字节和 I/O 额度见[服务指南](anyseek/src/server/README.md)；请求期限不等于取消已接管的持久任务。
 
 collection backups 最多 32 个；service archives 每源根 4 个，生成恢复根每托管父目录 4 个；完整备份权威 payload 预检 1 GiB。达到边界显式拒绝，不静默淘汰。当前不承诺持续无限运行或长期稳定磁盘占用。
 
-尚未完成：系统/文件系统崩溃与断电验收、Record 操作账本持续 GC、通用任意历史读取、独立时间候选排名、管理型 Blob、真实 S3 服务验收、分布式。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
+尚未完成：系统/文件系统崩溃与断电验收、长期持续运行与回收容量验收、通用任意历史读取、独立时间候选排名、管理型 Blob、真实 S3 服务验收、分布式。模型推理、解析切块及 reflect 由上层提供。低层库不是旧 HTTP/磁盘格式兼容入口。
 
 当前接入以服务指南为准，不提供旧格式迁移。历史裁剪与验证通过 Git 历史和对应 PR/CI 查阅。
 

@@ -1,29 +1,32 @@
 # CI feedback and complete acceptance
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
-repository documentation, dependency/core boundaries and the lexical partition;
-on code changes it builds and runs 157 exact bounded core regressions plus the
+dependency/core boundaries and the lexical partition;
+on code changes it builds and runs 177 exact bounded core regressions plus the
 small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
 cases fail rather than silently matching zero tests. Integration scales are listed
 below. This is fast feedback, **not full acceptance**.
 Documentation-only changes keep static checks but skip the compiled core matrix.
+Markdown file links and anchors need a separate check; the retired brand checker
+is not part of the workflow. Console build/unit checks run for code changes, and
+the Linux core lane runs the standalone browser suite against a disposable API.
+Both core lanes also run local/S3-fixture deleted-generation reclamation checks.
 Generic x86-64 CPU flags permit target caching within each OS; full acceptance
 retains the existing native-CPU configuration and source-only cache policy.
 
 ## Run full acceptance
 
-Before merge, use the existing `ci.yml` workflow entry (the default-branch UI
-may still label it **Retained workspace**) with the PR ref and `full=true`:
+For complete acceptance, use the `PR feedback` (`ci.yml`) workflow entry with
+the candidate ref and `full=true` (replace `YOUR_CANDIDATE_REF`):
 
 ```sh
-gh workflow run ci.yml --ref fix/record-capacity-100k -F full=true
+gh workflow run ci.yml --ref YOUR_CANDIDATE_REF -F full=true
 ```
 
 This explicit command runs the reusable `.github/workflows/full-acceptance.yml`
 from the selected commit, as well as quick checks. Do not run it merely to
-inspect configuration. After the new file exists on master, **Full acceptance
-(manual)** also has its own Run workflow entry. Verify the run's exact head SHA before
+inspect configuration. **Full acceptance (manual)** also has its own Run workflow entry. Verify the run's exact head SHA before
 using its result for review. A later commit requires a new explicit run.
 
 The nine-job matrix is retained, with full-size fixtures, assertions and
@@ -101,7 +104,7 @@ unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests
 ## Small and full query fixtures (P1)
 
 Default PR core jobs explicitly select `small` and run six integration targets
-in addition to the 157 exact core cases. The manual matrix explicitly selects
+in addition to the 177 exact core cases. The manual matrix explicitly selects
 `full`, including its four independent Windows lexical jobs. No production
 capacity, scoring, timeout or fault boundary changes.
 

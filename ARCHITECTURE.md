@@ -1,6 +1,6 @@
 # 当前架构
 
-anyseek 由 Rust 核心库、HTTP API 服务和独立 Web 控制台组成。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。公开数据入口统一为 RecordPartition；内部向量/元数据组件包含可变 tail 与冻结 Segment，其 shard 命名整理由 #94 跟踪。
+anyseek 由 Rust 核心库、HTTP API 服务和独立 Web 控制台组成。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。公开数据入口统一为 RecordPartition；内部向量/元数据组件包含可变 tail 与冻结 Segment，重复逻辑 shard 状态已由 #111 移除。
 
 ## 模块边界
 
@@ -49,13 +49,13 @@ anyseek 由 Rust 核心库、HTTP API 服务和独立 Web 控制台组成。资�
 
 服务根由外部稳定 owner lock 保护。Catalog 和 S3 authority 共用 `metadata.sqlite`，只存协调元数据，不存完整 Record State、正文、原始向量或索引；Catalog 不保留独立持久化日志或名称到生成目录的映射。SQLite 事务不跨对象上传或索引构建。Record checkpoint 保留配置、当前记录、墓碑、逻辑水位和操作账本。backup-*、service-backup-* 是独立快照，完整服务 manifest 和外层完成见证认证目录发布。不同独立服务使用不同 bucket，不创建自动服务 namespace，也不检查 Bucket 归属。
 
-派生 cache-* 中继续使用 schema/index 配置、index.bin、vector.bin、docstore.bin、facet 文件等。启动加载认证 Segment 并重放权威 tail，缺失的派生缓存可重建，不把这组可变文件当作多文件原子事务。原始 Document 和未经归一化的输入向量独立保留，搜索 docstore 的投影不能替代它们。持久词项哈希使用固定 XXH64，当前低层索引格式为 8。
+派生 cache-* 保存 Tantivy 原生文件与向量/元数据组件文件（component.json、vectors.bin、metadata.bin、schema.json 等）。启动加载认证 Segment 并重放权威 tail，缺失的派生缓存可重建，不把这组可变文件当作多文件原子事务。原始 Document 和未经归一化的输入向量独立保留，搜索 docstore 的投影不能替代它们。持久词项哈希使用固定 XXH64，当前低层索引格式为 8。
 
 Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发布并在移动前关闭内部句柄。恢复对已认证的新状态损坏报错，不静默回退旧代或重置为空数据库。低层 commit/close 传播 I/O Result，但仍不是权威事务协议。
 
 ## 当前边界
 
-这是有界单机实现：Record 累计账本默认 10,000 项、checkpoint/状态容量等限制见 [FEATURES](FEATURES.md)。history trim 按保留期限回收操作历史，checkpoint/对象 GC 负责各自闭包；这些不等于已删除集合代次的最终物理回收（#106）。P2 的 source/evidence、generation、TTL、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、服务总缓存预算和完整资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文替换的复用边界见 [Tantivy 评估](docs/tantivy-evaluation.md)。
+这是有界单机实现：Record 累计账本默认 10,000 项、checkpoint/状态容量等限制见 [FEATURES](FEATURES.md)。history trim 按保留期限回收操作历史，checkpoint/对象 GC 负责各自闭包；已删除集合代次的最终物理回收也已由 #109 合入，仍受在途任务、读者和备份保护约束。P2 的 source/evidence、generation、TTL、显式关系和同视图融合已实现。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、整体磁盘/缓存容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
 
 [Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/src/server/README.md) · [许可](LICENSE)
 
@@ -75,3 +75,13 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 物理地址只在捕获的拓扑内表示 `local_ordinal * segments.len() + slot`。tail 旋转、合并和恢复对当前映射整体重排；固定读者继续使用原拓扑，并通过稳定记录身份、revision/fingerprint 和退休 token 重验。拓扑位置不写入共享 Segment 的 `meta.id`，也不充当持久记录身份。
 
 查询仍有界遍历 tail 和有效 Segment，按统一距离、稳定业务 ID 和候选预算做一次全局合并；各 Segment 内保留 ANN 聚类、SIMD 和量化。移除重复数量和位置 ID 不意味着把数据合为单个大文件，也不改变 ANN 的近似召回边界。
+
+## 全文与认证包契约
+
+Tantivy 使用原生词典、postings、位置和固定 Searcher，不另存完整正文，也不决定业务 head。Payload 唯一保存规范原文和原始向量；伴随向量/元数据组件只保存派生文件。S3 对象先完整物化并校验再检索，当前没有直接远端随机读 Directory。
+
+分析身份保留 `xxh64-utf8-v1` helper；全文包记录精确 Tantivy 版本、schema 和分析契约。RecordCheckpointV15、检索 package manifest 3 与私有向量/metadata descriptor 1 是不同结构标签，不是多个提交权威。认证包选择验证完整不可变文件闭包；固定 Searcher、构建、备份和查询 pin 保护仍在使用的文件。
+
+同步写入等待必要派生应用；异步索引写入单独报告 committed/lexical/vector 水位。查询固定派生拓扑与 evaluation_time，再重验当前 Record 身份、fingerprint 和来源可见性，不要求各异步消费者同时推进。保留 BM25F/邻近度、中文与 N-gram 适配及全局通道排名后的单次 RRF；ANN 和有界候选不保证全库精确召回。
+
+只支持新库，无旧倒排格式读取、双写或迁移。跨 AES 手工 fixture、Windows、真实 S3 和断电证据分别以实际执行为准；重新构建派生缓存不等于修改权威格式，也不能据此推断性能提升。

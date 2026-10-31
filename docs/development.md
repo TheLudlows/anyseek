@@ -79,10 +79,23 @@ python3 scripts/s3_acceptance.py --backend real --suite all \
 target/debug/anyseek_server generate_openapi=true
 ```
 
-生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 归可选 `anyseek::server` 模块；Rust 数据访问统一使用 RecordPartition，旧低层 Index API 已移除。参见 [服务指南](../anyseek/src/server/README.md) 和 [Rust 示例](library-examples.md)。
+生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 归可选 `anyseek::server` 模块；Rust 数据访问统一使用 RecordPartition，旧低层 Index API 已移除。参见 [服务指南](../anyseek/src/server/README.md) 和下方 [Rust 接入](#rust-核心库接入)。
 
 ## 验证边界
 
 Linux 与 Windows 都是原生可靠性验收平台；交叉编译不代替 Windows 原生运行。CI 包含真实服务 HTTP、子进程故障、恢复和浏览器流程，但不能代替系统崩溃/断电。后者需要可中断的隔离环境、持久设备和外部已确认写入见证，不自行重启共享环境。
 
 记录每个最终源码版本的命令、结果、失败/忽略项和未运行项。目录或包名调整前的历史计数不可冒充改名后的验证。历史阶段结果通过 Git 历史及对应 PR/CI 查阅，当前测试命令与剩余验收须保持可复现。
+
+## Rust 核心库接入
+
+从本仓库使用 path/git 依赖；核心默认启用 `zh`、`vb`，HTTP/OpenAPI 需另开 `server` feature。例如在应用的 Cargo.toml 中配置仓库路径：
+
+```toml
+[dependencies]
+anyseek = { path = "../anyseek/anyseek" }
+```
+
+配置类型和入口见 [Record API](../anyseek/src/record.rs)、[异步提交与进度](../anyseek/src/record/committed.rs)及[库模块](../anyseek/src/lib.rs)。使用 `RecordPartition::create/open` 管理新库或恢复已有库；`write` 同步应用，`commit_writes` 返回逐项持久业务结果并异步索引。`operation` 查询原回执，`get/query/page` 访问记录；超时和未知结果继续使用保存的原请求与 Operation ID。
+
+生成 `cargo doc -p anyseek --no-deps` 后查看 API 类型与方法；检索语义和重试边界见 [Record 契约](record-model.md)。旧低层 Index API、内部 DocID 和组件文件均不作为应用数据入口。历史完整示例可从 Git 查阅，本页仅维护当前接入方式。
