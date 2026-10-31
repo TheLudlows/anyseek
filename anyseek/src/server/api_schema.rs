@@ -4,7 +4,6 @@
 #![allow(dead_code, missing_docs)]
 use indexmap::IndexMap;
 use serde::Serialize;
-use serde_json::Value;
 use std::ops::Range;
 use utoipa::ToSchema;
 
@@ -214,14 +213,6 @@ pub enum VectorSimilarity {
     Dot,
     /// Euclidean distance (L2)
     Euclidean,
-}
-
-/// One document or a batch of documents.
-#[derive(ToSchema)]
-#[serde(untagged)]
-pub enum WriteDocuments {
-    Single(std::collections::HashMap<String, Value>),
-    Batch(Vec<std::collections::HashMap<String, Value>>),
 }
 
 /// Versioned pre-tokenization rule. None preserves current behavior.

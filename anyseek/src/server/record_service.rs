@@ -1,6 +1,6 @@
 //! Tenant-scoped Record service with durable catalog and collection lifecycle ordering.
 mod admission;
-use crate::api_types::{CreateIndexRequest, FieldRequest, SearchRequestObject};
+use crate::api_types::{CreateIndexRequest, FieldRequest, GetDocumentRequest, SearchRequestObject};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -676,12 +676,6 @@ struct CollectionCreate {
     #[serde(default)]
     embedding_space_id: Option<String>,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReadParams {
-    #[serde(default)]
-    fields: String,
-}
 fn record_config(
     request: CreateIndexRequest,
     embedding_space_id: Option<String>,
@@ -721,7 +715,7 @@ fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics)
     let schema: Vec<FieldRequest> = entry.config.schema.iter().map(FieldRequest::from).collect();
     json!({"id":entry.collection_id,"name":entry.config.index.name,"schema":schema,
         "text_normalization":entry.config.index.text_normalization,"field_length_normalization":entry.config.index.field_length_normalization,
-        "indexed_doc_count":stats.active_records,"committed_doc_count":stats.active_records,"version":crate::VERSION,"statistics":stats,
+        "version":crate::VERSION,"statistics":stats,
         "limits":{"max_records":entry.config.max_records,"max_operations":entry.config.max_operations,"max_journal_bytes":entry.config.max_journal_bytes,"max_candidates":entry.config.max_candidates},
         "vector_dimensions":match &entry.config.index.inference { Inference::External {dimensions,..} => Some(*dimensions), _ => None },
         "embedding_space_id":entry.config.embedding_space_id,"evidence_quarantined":stats.evidence_quarantined})
@@ -974,9 +968,6 @@ async fn ingest_progress(State(s): State<Arc<Service>>, headers: HeaderMap, Path
     }).await?;
     response(progress)
 }
-async fn ingest_operation(state: State<Arc<Service>>, headers: HeaderMap, path: Path<(String,u64,String)>) -> Result<Response, Error> {
-    operation(state, headers, path).await
-}
 
 // Explicit fault binary only, no remote activation path. Pause inside accepted
 // authorized work so HTTP tests can distinguish execution from metadata locking.
@@ -1006,7 +997,7 @@ async fn read(
     State(s): State<Arc<Service>>,
     headers: HeaderMap,
     Path((id, record_id)): Path<(String, String)>,
-    Query(params): Query<ReadParams>,
+    Query(params): Query<GetDocumentRequest>,
 ) -> Result<Response, Error> {
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
@@ -1821,7 +1812,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         )
         .route("/api/v1/index/{id}/doc/{record_id}", get(read))
         .route("/api/v1/index/{id}/ingest", get(ingest_progress).post(ingest))
-        .route("/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}", get(ingest_operation))
         .route("/api/v1/index/{id}/query", post(query))
         .route("/api/v1/index/{id}/iterator", post(iterate))
         .route("/api/v1/index/{id}/evidence",post(evidence_excerpt))
@@ -2060,7 +2050,14 @@ mod tests {
         // A synchronous exact replay joins the asynchronous consumers without creating another durable log.
         partition.write(serde_json::from_value(body["records"][0].clone()).unwrap()).await.unwrap();
         drop(partition);
-        let uri=format!("/api/v1/index/c/ingest/operation/{}/{}",operation.epoch,operation.nonce);
+        let (code, info) = tenant_api(&app,"GET","/api/v1/index/c",headers["apikey"].to_str().unwrap(),None).await;
+        assert_eq!(code,StatusCode::OK);
+        assert_eq!(info["statistics"]["active_records"],1);
+        assert!(info.get("indexed_doc_count").is_none() && info.get("committed_doc_count").is_none());
+        let old_uri=format!("/api/v1/index/c/ingest/operation/{}/{}",operation.epoch,operation.nonce);
+        let response=app.clone().oneshot(axum::http::Request::builder().uri(old_uri).header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::NOT_FOUND);drop(response);
+        let uri=format!("/api/v1/index/c/operation/{}/{}",operation.epoch,operation.nonce);
         let response=app.oneshot(axum::http::Request::builder().uri(uri).header("apikey",headers["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap(); assert_eq!(response.status(),StatusCode::OK);
         let status:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap(); assert_eq!(status["receipt"]["record_id"],"r");
         drop(service); std::fs::remove_dir_all(path).unwrap();
@@ -2162,7 +2159,7 @@ mod tests {
             let received = pending.await.unwrap();
             let text = String::from_utf8_lossy(&received);
             assert!(
-                !text.contains("secret-original") && !text.contains("not_found") && !text.contains("indexed_doc_count"),
+                !text.contains("secret-original") && !text.contains("not_found") && !text.contains("active_records"),
                 "protected body escaped source deletion: {text}"
             );
             server.abort();
@@ -2177,7 +2174,7 @@ mod tests {
         let (service, path, headers) = setup().await;
         let source = json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}});
         write(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&source).unwrap().into()).await.unwrap();
-        let response = read(State(service.clone()), headers.clone(), Path(("c".into(), "s".into())), Query(ReadParams { fields: String::new() })).await.unwrap();
+        let response = read(State(service.clone()), headers.clone(), Path(("c".into(), "s".into())), Query(GetDocumentRequest { fields: String::new() })).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let delete=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","expected":{"Match":1},"document":null});
         write(State(service.clone()), headers, Path("c".into()), serde_json::to_vec(&delete).unwrap().into()).await.unwrap();
@@ -2508,7 +2505,6 @@ fn openapi_document() -> Value {
         ("/api/v1/index/{id}/ingest", "post", "Commit 1..64 independent commands; continue after business rejection; indexes asynchronous",
             Some(json!({"type":"object","additionalProperties":false,"required":["records"],"properties":{"records":{"type":"array","minItems":1,"maxItems":64,"items":{"$ref":"#/components/schemas/RecordWrite"}}}}))),
         ("/api/v1/index/{id}/ingest", "get", "Record committed_seq and asynchronous lexical_seq/vector_seq", None),
-        ("/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}", "get", "Canonical Record receipt by original operation_id; absence does not prove failure", None),
         (
             "/api/v1/index/{id}/operation/{epoch}/{nonce}",
             "get",
@@ -2688,6 +2684,8 @@ fn identity_schemas_and_external_sync_routes_are_strict() {
         assert_eq!(schema["additionalProperties"], false);
     }
     let paths = doc["paths"].as_object().unwrap();
+    assert!(paths.contains_key("/api/v1/index/{id}/operation/{epoch}/{nonce}"));
+    assert!(!paths.contains_key("/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}"));
     assert!(paths.keys().all(|path| !path.contains("/bootstrap") && !path.ends_with("/changes")));
     for path in ["/api/v1/index/{id}/iterator", "/api/v1/index/{id}/doc/{record_id}"] {
         assert!(paths.contains_key(path));

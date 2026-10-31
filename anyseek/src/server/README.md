@@ -1,6 +1,6 @@
 # anyseek Record HTTP 服务
 
-`POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/ingest/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/doc` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
+`POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/doc` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
 
 默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。已实现 P1-A 与 P2 的来源/证据、来源修订、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
 
@@ -80,6 +80,8 @@ collection ID、record ID 是字符串业务身份，内部 DocID 不作为 HTTP
 
 UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响应、刷新、后续拒绝不会解锁未知写入。只有未经历未知结果的明确拒绝才能释放被拒绝项及未发送余项。客户端备份这些待处理请求的方式由调用方负责。
 
+集合活动记录数统一读取 `statistics.active_records`；索引消费进度通过 `/ingest` 查询。
+
 ## 异步索引写入
 
 `POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每次 1..64 项；每项携带自己的稳定 Record ID、条件版本和 Operation ID。文档显式为对象或 null，也可提交 vector_patch。HTTP body 仍为 2 MiB；partition 队列按在途项目总数 64 和序列化请求总量 4 MiB 有界准入，超额拒绝。
@@ -113,7 +115,7 @@ curl "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY"
 
 `GET /api/v1/index/{id}/ingest` 返回 committed_seq、lexical_seq、vector_seq、index_error 和 recovery_required。需要搜索包含某个提交时，检查所需消费者水位至少达到该 receipt.seq，并处理 index_error/recovery_required；各索引水位可以不同，不要求全局统一。恢复必需时 committed_seq 为 null。
 
-`GET /api/v1/index/{id}/ingest/operation/{epoch}/{nonce}` 与原 `/operation/{epoch}/{nonce}` 查询同一 Record 业务回执。缺席或过期不能证明先前未提交。Rust 对应 `commit_writes` 和 `committed_progress`，见[开发指南](../../../docs/development.md#rust-核心库接入)。
+同步写入和异步导入统一通过 `GET /api/v1/index/{id}/operation/{epoch}/{nonce}` 查询 Record 业务回执。缺席或过期不能证明先前未提交。Rust 对应 `commit_writes` 和 `committed_progress`，见[开发指南](../../../docs/development.md#rust-核心库接入)。
 
 ## 可直接执行的 HTTP 示例
 

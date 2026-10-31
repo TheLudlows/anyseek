@@ -13,11 +13,10 @@ export type Collection = {
   id: string;
   name: string;
   schema: SchemaField[];
-  indexed_doc_count: number;
   version: string;
   embedding_space_id?: string;
   vector_dimensions?: number | null;
-  statistics: Json;
+  statistics: { active_records: number; [key: string]: Json };
   limits: Json;
 };
 export type RecordData = {

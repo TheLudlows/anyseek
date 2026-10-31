@@ -67,9 +67,7 @@ async fn fresh(dir: &str) -> RecordPartition {
 }
 
 /// Wait until the async indexer has settled `expected` docs (bounded).
-/// NOTE: `indexed_doc_count` is a high-water mark written when the index
-/// task *starts* (index.rs), so it cannot be used here. Settle on the
-/// observable search state instead: all docs must be visible first.
+/// Observe search visibility directly rather than inferring it from a count.
 async fn settle_search(
     index: &RecordPartition,
     query: &str,

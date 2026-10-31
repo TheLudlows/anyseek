@@ -45,7 +45,6 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 | GET | `/api/v1/index/{id}/doc/{record_id}` | 原始 Record；可用 `?fields=body,title` 投影 |
 | POST | `/api/v1/index/{id}/ingest` | `{records:[RecordWrite,...]}`，1..64 非原子逐项业务结果；索引异步，HTTP 200 不代表全部成功 |
 | GET | `/api/v1/index/{id}/ingest` | committed/lexical/vector 水位、index_error 和 recovery_required |
-| GET | `/api/v1/index/{id}/ingest/operation/{epoch}/{nonce}` | 查询原 Record 业务回执，缺席不证明未提交 |
 | POST | `/api/v1/index/{id}/query` | Lexical/Vector/Hybrid/空查询；返回 hits[].record |
 | POST | `/api/v1/index/{id}/iterator` | `{cursor?,length?,fields?}`；不支持旧 skip/take 协议 |
 | POST | `/api/v1/index/{id}/evidence` | 受保护精确来源版本的 UTF-8 区间/内联页摘录及摘要 |

@@ -91,9 +91,9 @@ class anyseekClient:
         return json.loads(self.request('POST', self.collection_path(collection_id) + '/ingest',
                                        {'records': requests}, key, expected=(200, 429, 503)))
 
-    def ingest_status(self, collection_id, operation, key=_DEFAULT):
+    def operation_status(self, collection_id, operation, key=_DEFAULT):
         """Look up the canonical receipt; absence never proves a failed write."""
-        path = self.collection_path(collection_id) + '/ingest/operation/'
+        path = self.collection_path(collection_id) + '/operation/'
         path += str(operation['epoch']) + '/' + quote(operation['nonce'], safe='')
         return self.api('GET', path, key=key)
 

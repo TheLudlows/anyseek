@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-const collection={id:'docs',name:'中文资料',schema:[{field:'body',field_type:'Text',store:true}],indexed_doc_count:1,version:'1',statistics:{},limits:{}};
+const collection={id:'docs',name:'中文资料',schema:[{field:'body',field_type:'Text',store:true}],version:'1',statistics:{active_records:1},limits:{}};
 test('switching preserves drafts and pending requests; reload remembers language',async({page})=>{
   let calls=0;
   await page.route('**/api/v1/**',async route=>{calls++;await route.fulfill({json:[collection]});});

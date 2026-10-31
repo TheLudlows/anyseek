@@ -20,7 +20,7 @@ function browserStorage() {
 }
 let local: ReturnType<typeof browserStorage>, session: ReturnType<typeof browserStorage>;
 const collection: Collection = {
-  id: "docs", name: "docs", version: "1", indexed_doc_count: 0, vector_dimensions: 2, statistics: {}, limits: {},
+  id: "docs", name: "docs", version: "1", vector_dimensions: 2, statistics: { active_records: 0 }, limits: {},
   schema: [{ field: "body", field_type: "Text" }, { field: "vector", field_type: "Json", index_vector: true }],
 };
 const config: EmbeddingConfig = { endpoint: "https://models.example/v1/embeddings", model: "test-model", textFields: ["body"], vectorField: "vector", requiresKey: true };

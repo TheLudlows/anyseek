@@ -147,7 +147,7 @@ def run(engine, rows, queries, out, batch_size):
                         elapsed_ms=complete_ms, progress=progress)
                 for w in writes:
                     oid = w['operation_id']
-                    status = e.request('GET', f"/api/v1/index/bench/ingest/operation/{oid['epoch']}/{oid['nonce']}")[1]
+                    status = e.request('GET', f"/api/v1/index/bench/operation/{oid['epoch']}/{oid['nonce']}")[1]
                     assert status and status['receipt'], status
                     summary['verified_business_receipts'] += 1
                 e.event('published', progress=progress, business_elapsed_ms=business_ms,

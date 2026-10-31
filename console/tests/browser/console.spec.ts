@@ -63,7 +63,7 @@ test("API-only kernel, connection, real collection list, responsive navigation a
     .getByRole("button", { name: "数据", exact: true })
     .click();
   await expect(
-    page.getByRole("heading", { name: "数据", exact: true }),
+    page.getByRole("heading", { name: /^数据 · /, level: 1 }),
   ).toBeVisible();
   await expect(page.getByRole("table")).toContainText("guide_1");
   await page.screenshot({
@@ -133,7 +133,7 @@ test("creation and i64 import survive lost responses and reload with identical r
   );
   await page.getByRole("button", { name: "重试原始创建" }).click();
   await expect(
-    page.getByRole("heading", { name: "数据", exact: true }),
+    page.getByRole("heading", { name: /^数据 · /, level: 1 }),
   ).toBeVisible();
   expect(creations[0]).toBe(creations[1]);
   const docs = [
@@ -144,7 +144,7 @@ test("creation and i64 import survive lost responses and reload with identical r
     (n, i) =>
       `{"title":"precision ${i}","body":"precision","rank":${n},"measure":1.2500e0,"data":{"n":${n}}}`,
   );
-  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: "数据", exact: true }) }).getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: /^数据 · /, level: 1 }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await page
     .getByLabel("导入 JSON", { exact: true })
     .fill("[" + docs.join(",") + "]");
@@ -165,9 +165,9 @@ test("creation and i64 import survive lost responses and reload with identical r
   ).toBeVisible();
   await page.reload();
   await expect(
-    page.getByRole("heading", { name: "数据", exact: true }),
+    page.getByRole("heading", { name: /^数据 · /, level: 1 }),
   ).toBeVisible();
-  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: "数据", exact: true }) }).getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: /^数据 · /, level: 1 }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await expect(page.getByLabel("导入 JSON", { exact: true })).toBeDisabled();
   await page.route("**/api/v1/index/browser_records/doc", async (route) => {
     writes.push(route.request().postData()!);
@@ -202,7 +202,7 @@ test("creation and i64 import survive lost responses and reload with identical r
   );
   await expect(preview.locator("pre").first()).toContainText("1.25");
   await preview
-    .getByRole("button", { name: "复制 Document JSON", exact: true })
+    .getByRole("button", { name: "复制 文档 JSON", exact: true })
     .click();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
   expect(copied).toBe(docs[0].replace("1.2500e0", "1.25"));
@@ -213,7 +213,7 @@ test("creation and i64 import survive lost responses and reload with identical r
     .getByRole("navigation", { name: "主导航" })
     .getByRole("button", { name: "数据", exact: true })
     .click();
-  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: "数据", exact: true }) }).getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: /^数据 · /, level: 1 }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await page.getByLabel("Record envelope 模式").check();
   await page
     .getByLabel("导入 JSON", { exact: true })
@@ -254,11 +254,11 @@ test("real lexical/vector/hybrid search, empty state, explanations, advanced too
     fullPage: true,
     animations: "disabled",
   });
-  await page.getByRole("button", { name: "向量 Vector", exact: true }).click();
+  await page.getByRole("button", { name: "向量", exact: true }).click();
   await page.getByRole("textbox", { name: "查询向量" }).fill("[1,0,0]");
   await page.getByRole("button", { name: "运行检索", exact: true }).click();
   await expect(page.locator(".result-card")).toHaveCount(4);
-  await page.getByRole("button", { name: "混合 Hybrid", exact: true }).click();
+  await page.getByRole("button", { name: "混合", exact: true }).click();
   await page.getByRole("button", { name: "运行检索", exact: true }).click();
   await expect(page.locator(".result-card").first()).toBeVisible();
   await expect(page.locator(".result-card").first()).toContainText("关键词：");
@@ -267,7 +267,7 @@ test("real lexical/vector/hybrid search, empty state, explanations, advanced too
   await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("最终融合分");
   await expect(page.getByRole("region", { name: "检索打分详情" })).toContainText("融合贡献");
   await page
-    .getByRole("button", { name: "关键词 Lexical", exact: true })
+    .getByRole("button", { name: "关键词", exact: true })
     .click();
   await page
     .getByRole("textbox", { name: "检索内容" })
@@ -490,7 +490,7 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.reload();
   await expect(page.getByLabel("模型 API Key（可选）", { exact: true })).toHaveValue(modelKey);
   await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "数据", exact: true }).click();
-  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: "数据", exact: true }) }).getByRole("button", { name: "导入数据", exact: true }).click();
+  await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: /^数据 · /, level: 1 }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toBeChecked();
   const source = "[" + Array.from({ length: 11 }, (_, i) => `{"body":"embedding document ${i}","large":9223372036854775807}`).join(",") + "]";
   await page.getByLabel("导入 JSON", { exact: true }).fill(source);
@@ -503,7 +503,7 @@ test("browser-only model configuration, embedded ingest and natural language vec
     return p.vector_seq >= p.committed_seq && p.lexical_seq >= p.committed_seq;
   }).toBe(true);
   await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "检索调试", exact: true }).click();
-  await page.getByRole("button", { name: "向量 Vector", exact: true }).click();
+  await page.getByRole("button", { name: "向量", exact: true }).click();
   await page.getByLabel("检索内容", { exact: true }).fill("find documents");
   let queryCalls = 0;
   page.on("request", request => {
