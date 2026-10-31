@@ -178,7 +178,6 @@ impl RemotePersistence {
             match serde_json::from_slice::<Entry>(&entry.payload).map_err(storage)? {
                 Entry::Applied(op)=>apply(&mut state,&op)?,
                 Entry::Expired(event)=>temporal::apply(&mut state,&event)?,
-                Entry::LeaseExpired(event)=>lease::apply(&mut state,&event)?,
                 _=>return Err(storage("unexpected authority or same-sequence event in index suffix")),
             }
         }
@@ -964,32 +963,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unlocked_encoding_expired_generation_lease_cannot_publish() {
-        assert_unlocked_expired_generation_lease_cannot_publish("encode").await;
-    }
-    async fn assert_unlocked_expired_generation_lease_cannot_publish(phase:&str) {
-        use crate::record::tests::{source_write,generation_write,stage_generation};
-        let (p,_store,root,_db,clock)=source().await;
-        let now=clock.0.load(Ordering::SeqCst);
-        p.write(source_write("lease-source","s",&[])).await.unwrap();
-        p.write(generation_write("lease-stage",ExpectedVersion::Absent,stage_generation("g1",&["a","b"]))).await.unwrap();
-        let publish=generation_write("late-publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g1".into()});
-        std::fs::write(root.join(format!(".test-write-{phase}-pause")),b"pause").unwrap();
-        let owner=p.clone();let command=publish.clone();
-        let task=tokio::spawn(async move {owner.write(command).await});
-        wait_write_phase(&root,phase).await;
-        clock.0.store(lease::deadline(now).unwrap()+1,Ordering::SeqCst);
-        std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
-        assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
-        assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
-        crate::record::tests::settle_maintenance(&p).await;
-        assert!(p.get("a").await.unwrap().is_none());
-        let p=cold(p,&root,clock).await;
-        assert!(p.get("b").await.unwrap().is_none());
-        assert!(p.operation(&publish.operation_id).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
     async fn unlocked_upload_preserves_reads_writer_order_checkpoint_and_cancellation() {
         assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("upload").await;
     }
@@ -1000,11 +973,6 @@ mod tests {
     #[tokio::test]
     async fn unlocked_upload_applies_due_source_expiry_before_selecting_candidate() {
         assert_unlocked_applies_due_source_expiry_before_selecting_candidate("upload").await;
-    }
-
-    #[tokio::test]
-    async fn unlocked_upload_expired_generation_lease_cannot_publish() {
-        assert_unlocked_expired_generation_lease_cannot_publish("upload").await;
     }
 
     #[tokio::test]
@@ -1890,24 +1858,6 @@ mod tests {
                 assert_eq!(p.statistics().await.unwrap().visible_seq,2);
             } else {assert!(p.get("a").await.unwrap().is_some());}
         }
-    }
-
-    #[tokio::test]
-    async fn remote_staging_expiration_survives_cache_append_failure() {
-        use super::super::tests::{source_write,generation_write,stage_generation};
-        let (p,_,root,_,clock)=source().await;
-        p.write(source_write("source","s",&[])).await.unwrap();
-        let stage=generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&["a","b"]));
-        let receipt=p.write(stage.clone()).await.unwrap();
-        clock.0.fetch_add(1_800_001,Ordering::SeqCst);
-        std::fs::write(root.join(".test-cache-append-failure"),b"fail cache").unwrap();
-        assert!(matches!(p.generation_status("doc").await,Err(RecordError::DurablePending(3))));
-        assert!(p.output_permit().is_err());
-        let p=cold(p,&root,clock).await;
-        super::super::tests::settle_maintenance(&p).await;
-        assert_eq!(p.generation_status("doc").await.unwrap().unwrap().staged_members,0);
-        assert_eq!(p.write(stage).await.unwrap(),receipt);
-        assert!(p.get("a").await.unwrap().is_none());
     }
 
     #[tokio::test]

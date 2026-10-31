@@ -2,7 +2,7 @@
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
 dependency/core boundaries and the lexical partition;
-on code changes it builds and runs 177 exact bounded core regressions plus the
+on code changes it builds and runs 175 exact bounded core regressions plus the
 small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
 cases fail rather than silently matching zero tests. Integration scales are listed
@@ -104,7 +104,7 @@ unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests
 ## Small and full query fixtures (P1)
 
 Default PR core jobs explicitly select `small` and run six integration targets
-in addition to the 177 exact core cases. The manual matrix explicitly selects
+in addition to the 175 exact core cases. The manual matrix explicitly selects
 `full`, including its four independent Windows lexical jobs. No production
 capacity, scoring, timeout or fault boundary changes.
 
@@ -188,7 +188,6 @@ the same s3-object-store test module (included by `server`).
 | reads, writer ordering, checkpoint and cancellation | seed receipt; two ordered writes; blocked writer/checkpoint; cancelled waiter; cold recovery and exact receipt replay |
 | candidate TTL | deadline +100ms, advance +101ms; Busy; absent receipt; unchanged local/authority sequence; healthy writer; expired retry rejected |
 | source expiry | expired original plus version-matched replacement; Busy; no replacement receipt; source absent before/after cold recovery; retry rejected/conflicted |
-| generation lease expiry | staged two-member generation; clock past lease; Busy; absent publication receipt; members hidden after maintenance/cold recovery |
 
 The common gate wait retains its five-second timeout and polling interval.
 Owner/sequence fencing before persistence and owner/head changes after upload

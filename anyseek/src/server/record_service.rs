@@ -895,9 +895,9 @@ async fn write(
     let value: Value = parse(&bytes)?;
     if !value
         .as_object()
-        .is_some_and(|v| v.contains_key("document") || v.get("vector_patch").is_some_and(Value::is_object) || v.get("generation").is_some_and(Value::is_object))
+        .is_some_and(|v| v.contains_key("document") || v.get("vector_patch").is_some_and(Value::is_object))
     {
-        return Err(bad("document, vector_patch or generation must be explicit; null document means deletion"));
+        return Err(bad("document or vector_patch must be explicit; null document means deletion"));
     }
     let request: RecordWrite = serde_json::from_value(value).map_err(bad)?;
     let key = s.authenticate(&headers).await?;
@@ -923,8 +923,8 @@ struct IngestRequest { records: Vec<RecordWrite> }
 async fn ingest(State(s): State<Arc<Service>>, headers: HeaderMap, Path(id): Path<String>, bytes: Bytes) -> Result<Response, Error> {
     let value: Value = parse(&bytes)?;
     if !value.get("records").and_then(Value::as_array).is_some_and(|records| records.iter().all(|record|
-        record.as_object().is_some_and(|r| r.contains_key("document") || r.get("vector_patch").is_some_and(Value::is_object) || r.get("generation").is_some_and(Value::is_object)))) {
-        return Err(bad("each ingest record requires explicit document, vector_patch or generation"));
+        record.as_object().is_some_and(|r| r.contains_key("document") || r.get("vector_patch").is_some_and(Value::is_object)))) {
+        return Err(bad("each ingest record requires explicit document or vector_patch"));
     }
     let request: IngestRequest = serde_json::from_value(value).map_err(bad)?;
     let key = s.authenticate(&headers).await?;
@@ -992,15 +992,7 @@ async fn pause_authorized_for_test(collection: &str) -> Result<(), RecordError> 
         while path.exists() { tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
     }).await.map_err(|_| RecordError::Busy)
 }
-async fn generation_status(
-    State(s): State<Arc<Service>>, headers: HeaderMap, Path((id, record_id)): Path<(String, String)>,
-) -> Result<Response, Error> {
-    let key = s.authenticate(&headers).await?;
-    let p = s.record(&key, &id).await?;
-    let data = p.output_permit()?;
-    let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move { p.generation_status(&record_id).await }).await?;
-    protected_data(result.map_err(Error::from).and_then(|status| status.ok_or_else(not_found)), Some(data))
-}
+
 async fn record_status(
     State(s): State<Arc<Service>>, headers: HeaderMap, Path((id, record_id)): Path<(String, String)>,
 ) -> Result<Response, Error> {
@@ -1116,10 +1108,10 @@ async fn batch(
         .and_then(Value::as_array)
         .is_some_and(|rows| {
             rows.iter()
-                .all(|r| r.as_object().is_some_and(|o| o.contains_key("document") || o.get("vector_patch").is_some_and(Value::is_object) || o.get("generation").is_some_and(Value::is_object)))
+                .all(|r| r.as_object().is_some_and(|o| o.contains_key("document") || o.get("vector_patch").is_some_and(Value::is_object)))
         })
     {
-        return Err(bad("every write must contain explicit document, vector_patch or generation"));
+        return Err(bad("every write must contain explicit document or vector_patch"));
     }
     let request: BatchRequest = serde_json::from_value(value).map_err(bad)?;
     if request.writes.is_empty() || request.writes.len() > 100 {
@@ -1814,7 +1806,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index", post(create_collection))
         .route("/api/v1/restore", post(restore))
         .route("/api/v1/index/{id}/doc/{record_id}/status", get(record_status))
-        .route("/api/v1/index/{id}/doc/{record_id}/generation", get(generation_status))
         .route("/api/v1/backups", get(list_backups))
         .route("/api/v1/service-backups", post(service_backup))
         .route("/api/v1/service-restores", post(service_restore))
@@ -2030,6 +2021,24 @@ mod tests {
         assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/grants",master,Some(json!({}))).await.0,StatusCode::NOT_FOUND);
         drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
+    #[tokio::test]
+    async fn removed_document_upload_http_rejects_without_mutating_records() {
+        use tower::ServiceExt;
+        let (service,path,headers)=setup().await;
+        let app=router(service.clone());let key=headers["apikey"].to_str().unwrap();
+        let original=json!({"operation_id":OperationId::new("ordinary".into()),"record_id":"r","expected":"Absent","document":{"body":"alpha"}});
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",key,Some(original)).await.0,StatusCode::OK);
+        let removed=json!({"operation_id":OperationId::new("removed".into()),"record_id":"r","expected":{"Match":1},"document":null,"generation":{"action":"abort","generation_id":"g"}});
+        for (endpoint,body) in [("doc",removed.clone()),("batch",json!({"writes":[removed.clone()]})),("ingest",json!({"records":[removed]}))] {
+            assert_eq!(tenant_api(&app,"POST",&format!("/api/v1/index/c/{endpoint}"),key,Some(body)).await.0,StatusCode::BAD_REQUEST);
+        }
+        let response=app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/index/c/doc/r/generation").header("apikey",key).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::NOT_FOUND);drop(response);
+        let partition=service.record("tenant","c").await.unwrap();
+        assert_eq!(partition.get("r").await.unwrap().unwrap().version,1);
+        drop(partition);drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
+    }
+
     #[tokio::test]
     async fn committed_ingest_http_receipts_rejections_and_lookup() {
         use tower::ServiceExt;
@@ -2404,13 +2413,12 @@ fn openapi_document() -> Value {
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
-    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, generation, temporal and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root keep historical credentials disabled. See docs/record-model.md for acceptance limits."});
+    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, temporal and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root keep historical credentials disabled. See docs/record-model.md for acceptance limits."});
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["required"] = json!(["operation_id","record_id","expected"]);
-    schemas.get_mut("RecordWrite").unwrap()["anyOf"] = json!([{"required":["document"]},{"required":["vector_patch"]},{"required":["generation"]}]);
-    schemas.get_mut("RecordWrite").unwrap()["properties"]["generation"] = json!({"type":"object","required":["action","generation_id"],"description":"Stage complete payload, or Begin fixed source/members then StageBatch and Seal manifest_sha256. Publish only sealed complete uploads. Exact control version required; 1 MiB commands, 4 MiB total chunks, 100 members, checkpoint budget also applies. Begin/Stage/StageBatch/Seal/Renew grant 30 minutes; restored owners must Renew. See generation protocol documentation."});
+    schemas.get_mut("RecordWrite").unwrap()["anyOf"] = json!([{"required":["document"]},{"required":["vector_patch"]}]);
     schemas.get_mut("RecordWrite").unwrap()["properties"]["vector_patch"] = json!({"type":"object","minProperties":1,"description":"Fill absent vector fields with exact Match version; omit document/system. Preserves body version."});
     schemas.get_mut("RecordWrite").unwrap()["properties"]["system"] = json!({"$ref":"#/components/schemas/EvidenceMetadata"});
     schemas.insert("TemporalMetadata".into(),json!({"type":"object","additionalProperties":false,"description":"UTC Unix milliseconds. TTL is irreversible; business validity is independent.","properties":{"event_time_ms":{"type":["integer","null"],"minimum":-62135596800000i64,"maximum":253402300799999i64},"valid_from_ms":{"type":["integer","null"]},"valid_to_ms":{"type":["integer","null"]},"expire_at_ms":{"type":["integer","null"],"minimum":0,"maximum":253402300799999i64}}}));
@@ -2434,7 +2442,6 @@ fn openapi_document() -> Value {
         ("/api/v1/live", "get", "Server version", None),
         ("/api/v1/tenants","get","Master: list Tenant IDs",None),
         ("/api/v1/tenants","post","Master: create Tenant",Some(json!({"type":"object","additionalProperties":false,"required":["tenant_id","operation_id"],"properties":{"tenant_id":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$"},"operation_id":{"$ref":"#/components/schemas/OperationId"}}}))),
-        ("/api/v1/index/{id}/doc/{record_id}/generation", "get", "Protected generation control version and staged/visible member counts; never staged bodies", None),
         ("/api/v1/index/{id}/doc/{record_id}/status", "get", "Content-free visibility reason and exact current version; stale bodies remain hidden", None),
         ("/api/v1/apikey", "get", "List collections of the authenticated Tenant", None),
         (
@@ -2604,8 +2611,8 @@ fn openapi_document() -> Value {
                     {"properties":{"code":{"enum":["outcome_unknown","not_attempted"]}},"not":{"required":["receipt"]}}],"properties":{
                 "operation_id":{"$ref":"#/components/schemas/OperationId"},
                 "code":{"enum":["committed","rejected","outcome_unknown","not_attempted"]},
-                "receipt":{"type":"object","required":["staged_only","seq","version","record_id"],"properties":{
-                    "staged_only":{"type":"boolean"},"seq":{"type":"integer","minimum":0},"version":{"type":"integer","minimum":0},"record_id":{"type":"string"}},
+                "receipt":{"type":"object","required":["seq","version","record_id"],"properties":{
+                    "seq":{"type":"integer","minimum":0},"version":{"type":"integer","minimum":0},"record_id":{"type":"string"}},
                     "description":"Present only for committed items: durable Record WriteReceipt"},
                 "error":{"type":"object","description":"Definite business rejection code and message"}}});
             let schema=json!({"type":"object","required":["atomic","searchability","results","error"],"properties":{
@@ -2700,4 +2707,14 @@ fn committed_ingest_schema_has_receipts_and_interrupted_envelopes() {
         assert_eq!(item["oneOf"][0]["required"],json!(["receipt"]));
         assert_eq!(item["properties"]["code"]["enum"],json!(["committed","rejected","outcome_unknown","not_attempted"]));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn document_upload_protocol_is_absent_from_schema() {
+    let doc = openapi_document();
+    assert!(doc["paths"].get("/api/v1/index/{id}/doc/{record_id}/generation").is_none());
+    let write = &doc["components"]["schemas"]["RecordWrite"];
+    assert!(write["properties"].get("generation").is_none());
+    assert_eq!(write["anyOf"], json!([{"required":["document"]},{"required":["vector_patch"]}]));
 }

@@ -66,18 +66,10 @@ impl Context<'_> {
                 if index_bytes>0 && !self.index.can_admit(index_bytes,updates).await {
                     self.stage_stable_tail().await?;
                 }
-                let growth=checkpoint_codec::json_length(&applied)?.checked_mul(3).ok_or_else(||storage("tail state growth overflow"))?;
-                if applied.request.generation.is_some() {
-                    let mut next=self.state.try_clone_with_growth(growth)?;apply(&mut next,&applied)?;
-                    let bytes=checkpoint_codec::length(&self.config, &next)?;
-                    next.admit_bytes(bytes)?;
-                    self.publish_prepared(&applied,bytes,None,Some(next)).await?;
-                } else {
-                    let prepared=state_memory::Prepared::new(&*self.state,&applied)?;
-                    let bytes=mutation::snapshot_after(&*self.state,*self.snapshot_bytes,&applied,&prepared.record)?;
-                    prepared.admit_containers(&mut *self.state,bytes)?;
-                    self.publish_prepared(&applied,bytes,Some(prepared),None).await?;
-                }
+                let prepared=state_memory::Prepared::new(&*self.state,&applied)?;
+                let bytes=mutation::snapshot_after(&*self.state,*self.snapshot_bytes,&applied,&prepared.record)?;
+                prepared.admit_containers(&mut *self.state,bytes)?;
+                self.publish_prepared(&applied,bytes,Some(prepared)).await?;
                 *self.graph_cache=graph::Cache::rebuild(&*self.state)?;
                 return Ok(());
             },
@@ -87,11 +79,6 @@ impl Context<'_> {
                 let retired:Vec<_>=self.locations.keys().filter(|id|visible.get(*id)!=Some(&true)).cloned().collect();
                 for id in retired {let ordinal=self.locations.remove(&id).unwrap();self.index.retire(ordinal).await?;}
                 *self.state=next;
-            },
-            Entry::LeaseExpired(event)=>{
-                let size=checkpoint_codec::json_length(&*self.state)?.checked_add(checkpoint_codec::json_length(&event)?).ok_or_else(||storage("lease state growth overflow"))?;
-                self.state.admit_bytes(size)?;
-                lease::apply(&mut *self.state,&event)?;
             },
             Entry::HistoryTrim(event)=>history::apply_trim(&mut *self.state,&self.config.history,&event)?,
             Entry::Checkpoint{..}|Entry::Anchor(_)=>return Err(storage("unexpected anchor in operation stream")),

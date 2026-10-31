@@ -104,8 +104,7 @@ pub(super) fn retained(
     }
     if request.temporal.is_some()
         && (request.document.is_none()
-            || request.vector_patch.is_some()
-            || request.generation.is_some())
+            || request.vector_patch.is_some())
     {
         return Err(RecordError::Rejected(
             "temporal metadata requires a complete body write".into(),
@@ -137,8 +136,7 @@ pub(super) fn live_ttl(record: &Record) -> bool {
     record.document.is_some() && record.temporal.expire_at_ms.is_some()
 }
 pub(super) fn reserve_bytes(state: &State) -> usize {
-    (state.records.live_ttl_count() + generation::staged_ttl_count(state))
-        * 8192
+    state.records.live_ttl_count() * 8192
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct ExpiredTarget {
@@ -194,7 +192,7 @@ impl Inner {
         // A same-sequence maintenance intent pins its time/floor transition.
         // Do not advance another time event ahead of its authoritative install.
         if self.maintenance_requested.is_some()
-            && (self.maintenance_trim.is_some() || self.state.private_cleanup_pending) {
+            && self.maintenance_trim.is_some() {
             return Err(RecordError::Busy);
         }
         let now = self.clock.now_ms()?;
@@ -210,8 +208,6 @@ impl Inner {
             self.evaluation_time_ms = evaluation;
             return Ok(());
         }
-        self.expire_staging(evaluation).await?;
-        self.cleanup_private().await?;
         self.trim_history(evaluation).await?;
         let mut targets = Vec::new();
         self.state.records.visit_due_ttl(evaluation, |r| targets.push(ExpiredTarget {
@@ -234,7 +230,7 @@ impl Inner {
         let mut candidate = self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;
         apply(&mut candidate, &event)?;
         let snapshot_bytes = checkpoint_codec::length(&self.config, &candidate)?;
-        let reserve = generation::reserve_bytes(&candidate);
+        let reserve = mutation::reserve_bytes(&candidate);
         checkpoint_codec::validate_size(snapshot_bytes, reserve, self.config.max_journal_bytes)
             .map_err(storage)?;
         let bytes = encode_entry(&Entry::Expired(event.clone()))?;
@@ -403,15 +399,14 @@ pub(super) fn filters(filter: TemporalFilter) -> Result<Vec<FacetFilter>, Record
 }
 
 /// Authenticated checkpoint summary of a fully validated committed-time prefix.
-/// Business expiry/lease evidence remains separately retained and checked.
+/// Business expiry evidence remains separately retained and checked.
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RetiredPrefix {pub seq:u64,pub time_ms:u64}
 
 pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
     if state.operations.iter().zip(state.operations.iter().skip(1))
-        .any(|(a,b)|a.receipt.seq>=b.receipt.seq)
-        || state.lease_expirations.windows(2).any(|pair|pair[0].seq>=pair[1].seq) {
+        .any(|(a,b)|a.receipt.seq>=b.receipt.seq) {
         return Err(storage("unordered retained committed history"));
     }
     // Legacy images retain every command/cause. A GC checkpoint may summarize a
@@ -422,7 +417,6 @@ pub(super) fn validate_state(state: &State) -> Result<(), RecordError> {
         .operations
         .iter()
         .map(|op| (op.receipt.seq, op.observed_time_ms))
-        .chain(state.lease_expirations.iter().map(|event|(event.seq,event.evaluation_time_ms)))
         .chain(
             state
                 .expirations

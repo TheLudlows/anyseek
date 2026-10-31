@@ -1000,46 +1000,7 @@ impl Runtime {
             }).await.expect("last owner refunds failed worker admission");
         }
 
-        #[tokio::test]
-        async fn complete_generation_is_admitted_before_rotation_and_recovers_atomically() {
-            use crate::record::tests::{generation_write,stage_generation,source_write};
-            use crate::record::GenerationCommand;
-            for fail in [false,true] {
-                let root=tempfile::tempdir().unwrap();let path=root.path().join("partition");
-                let mut settings=config();settings.max_records=512;settings.max_operations=1024;settings.max_candidates=512;settings.max_record_bytes=64*1024;settings.max_journal_bytes=16*1024*1024;
-                let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
-                p.write(source_write("s","s",&[])).await.unwrap();
-                for i in 0..126 {
-                    p.write(write(&format!("o-{i}"),&format!("r-{i}"),"alpha",ExpectedVersion::Absent)).await.unwrap();
-                }
-                let members=(0..100).map(|i|format!("member-{i}")).collect::<Vec<_>>();
-                p.write(generation_write("stage",ExpectedVersion::Absent,stage_generation("g",&members.iter().map(String::as_str).collect::<Vec<_>>()))).await.unwrap();
-                assert!(p.inner.lock().await.anchor.is_none());
-                assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,0);
-                if fail {p.inner.lock().await.fail_publication_stage=1;}
-                let request=generation_write("publish",ExpectedVersion::Match(1),GenerationCommand::Publish{generation_id:"g".into()});
-                // Derived rotation keeps WAL as the authority. Preserve the exact
-                // publish operation across maintenance admission and unknown results.
-                let result=crate::record::tests::write_after_maintenance(&p,request.clone()).await;
-                {let inner=p.inner.lock().await;
-                    assert!(inner.anchor.is_none(),"derived rotation must not publish a certificate");
-                    assert_eq!(inner.index.components().await.len(),2,"127 + 100 must rotate before publication");}
-                if fail {
-                    assert_eq!(result.unwrap_err(),crate::record::RecordError::DurablePending(129));
-                    assert!(p.generation_status("doc").await.is_err());
-                    assert!(p.search("generationword".into(),None,SearchMode::Lexical,vec![],10).await.is_err());
-                } else {
-                    assert_eq!(result.unwrap().version,2);
-                    assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,100);
-                }
-                drop(p);
-                let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
-                let receipt=p.write(request.clone()).await.unwrap();assert_eq!(receipt.seq,129);assert_eq!(receipt.version,2);
-                assert_eq!(p.write(request).await.unwrap(),receipt);
-                assert_eq!(p.generation_status("doc").await.unwrap().unwrap().visible_members,100);
-                assert_eq!(p.search("generationword".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,100);
-            }
-        }
+
 
         #[tokio::test]
         async fn automatic_tail_rotation_preserves_durable_retry_and_fixed_searcher() {

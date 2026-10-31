@@ -87,7 +87,10 @@ def main():
         commands.append(('object_contract', [cargo, 'test', '-p', 'anyseek', '--lib', '--features', 'server,fault-injection',
                          'real_s3_compatible_contract', '--', '--ignored']))
     if args.suite in ['semantic', 'all']:
-        for section in ['base', 'locator', 'graph', 'temporal', 'upload', 'lease', 'history']:
+        sections = ['base', 'locator', 'graph', 'temporal', 'history', 'ingest']
+        if args.faults:
+            sections += ['indexer', 'authorization']
+        for section in sections:
             commands.append(('record_'+section+'_cold_cache', [sys.executable, '-u', str(root/'scripts/record_service_smoke.py'),
                              '--server', str(binary), '--cold-restarts', '--section', section] + (['--faults'] if args.faults else [])))
     if args.suite in ['storage', 'all']:

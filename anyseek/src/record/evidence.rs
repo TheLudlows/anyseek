@@ -37,7 +37,7 @@ pub struct EvidenceRef {
 }
 /// Engine-validated metadata, distinct from arbitrary business document fields.
 /// Sources support exact-version updates; derived recomputation uses a new
-/// identity. Generations, TTL and history are separate implementation slices.
+/// identity. TTL and history are separate implementation slices.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceMetadata {
@@ -81,7 +81,7 @@ fn visit(
     }
     let mut height = 0;
     let result = if let Some(record) = records.get(id) {
-        let mut visible = record.document.is_some() && !record.retired_generation;
+        let mut visible = record.document.is_some();
         if let Some(system) = &record.system {
             super::graph::validate_metadata(system)?;
             if system.evidence_refs.len() > MAX_REFERENCES {
@@ -280,7 +280,6 @@ pub(super) fn status(records: &state_values::Records, id: &str) -> Result<Eviden
         let Some(record) = records.get(id) else { unavailable = true; continue; };
         deleted |= record.document.is_none() && record.expired_at_ms.is_none();
         expired |= record.expired_at_ms.is_some();
-        stale |= record.retired_generation;
         if let Some(system) = &record.system {
             for (reference,typed) in system.evidence_refs.iter().map(|r|(r,true)).chain(super::graph::endpoints(system).map(|r|(r,false))) {
                 match records.get(&reference.record_id) {

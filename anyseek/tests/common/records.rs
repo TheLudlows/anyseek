@@ -30,7 +30,7 @@ pub async fn insert(partition: &RecordPartition, docs: Vec<Document>) -> Result<
         write(partition,RecordWrite {
             operation_id: OperationId::new(format!("insert-{id}")), record_id: id,
              expected: ExpectedVersion::Absent,
-            document: Some(document), vector_patch: None, generation: None, temporal: None, system: None,
+            document: Some(document), vector_patch: None, temporal: None, system: None,
         }).await?;
     }
     Ok(())
@@ -43,7 +43,7 @@ pub async fn delete(partition: &RecordPartition, ids: Vec<usize>) {
                 operation_id: OperationId::new(format!("delete-{id}-{}", record.version)),
                 record_id: id,
                 expected: ExpectedVersion::Match(record.version), document: None,
-                vector_patch: None, generation: None, temporal: None, system: None,
+                vector_patch: None, temporal: None, system: None,
             }).await.unwrap();
         }
     }
@@ -52,7 +52,7 @@ pub async fn update(partition: &RecordPartition, ordinal: usize, document: Docum
     let id=format!("{ordinal:020}");let old=partition.get(&id).await.unwrap().unwrap();
     write(partition,RecordWrite {operation_id:OperationId::new(format!("update-{id}-{}",old.version)),record_id:id,
         expected:ExpectedVersion::Match(old.version),document:Some(document),
-        vector_patch:None,generation:None,temporal:None,system:None}).await.unwrap();
+        vector_patch:None,temporal:None,system:None}).await.unwrap();
 }
 pub async fn clear(partition: &RecordPartition) {
     let total=partition.statistics().await.unwrap().retained_identities;

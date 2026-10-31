@@ -283,7 +283,7 @@ impl Consumer {
             .lock()
             .map_err(|_| RecordError::RecoveryRequired)?;
         // Native updates are independently limited to 128 per mutable tail;
-        // bound delete/staging-only batches too, even when no postings change.
+        // bound delete-only batches too, even when no postings change.
         if queue.batches.len() >= 128 {
             return Err(RecordError::Busy);
         }

@@ -112,7 +112,7 @@ async fn stale_identity_after_clear_cannot_delete_new_records() {
     let stale=RecordWrite {
         operation_id:OperationId::new("stale-version".into()),record_id:"00000000000000000000".into(),
         expected:ExpectedVersion::Match(1),document:None,
-        vector_patch:None,generation:None,temporal:None,system:None,
+        vector_patch:None,temporal:None,system:None,
     };
     assert!(matches!(index.write(stale.clone()).await,Err(anyseek::record::RecordError::Conflict(_))));
     // Absent describes logical absence, including a tombstone. It does not reset

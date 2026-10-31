@@ -73,12 +73,11 @@ test("document requests preserve i64 boundaries, nested numbers, exponents and e
   );
 });
 
-test("envelopes retain raw expected version and generation; IDs remain editor-owned", () => {
+test("envelopes retain raw expected version and document; IDs remain editor-owned", () => {
   const source =
-    '{"record_id":"r","expected":{"Match":9007199254740993},"document":{"rank":-9223372036854775808},"generation":{"action":"stage","members":[]}}';
+    '{"record_id":"r","expected":{"Match":9007199254740993},"document":{"rank":-9223372036854775808}}';
   const [request] = prepareDocumentRequests(source, true);
   assert.ok(request.body.startsWith(source.slice(0, -1) + ',"operation_id":'));
-  assert.equal(request.staging, true);
   for (const raw of [
     "",
     "null",

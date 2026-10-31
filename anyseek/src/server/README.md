@@ -2,7 +2,7 @@
 
 `POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/ingest/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/doc` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
 
-默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。已实现 P1-A 与 P2 的来源/证据、来源修订、generation 多批上传/整代发布、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。已实现 P1-A 与 P2 的来源/证据、来源修订、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
 
 ## 构建与启动
 
@@ -82,7 +82,7 @@ UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响�
 
 ## 异步索引写入
 
-`POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每次 1..64 项；每项携带自己的稳定 Record ID、条件版本和 Operation ID。文档显式为对象或 null，也可提交 vector_patch 或 generation。HTTP body 仍为 2 MiB；partition 队列按在途项目总数 64 和序列化请求总量 4 MiB 有界准入，超额拒绝。
+`POST /api/v1/index/{id}/ingest` 接收 `{"records":[RecordWrite,...]}`，每次 1..64 项；每项携带自己的稳定 Record ID、条件版本和 Operation ID。文档显式为对象或 null，也可提交 vector_patch。HTTP body 仍为 2 MiB；partition 队列按在途项目总数 64 和序列化请求总量 4 MiB 有界准入，超额拒绝。
 
 返回 `atomic:false`、`searchability:"asynchronous"` 和与输入位置对应的 `results`。HTTP 200 只表示本次取得确定的逐项业务结果，不表示每项均成功：
 
@@ -93,7 +93,7 @@ UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响�
 | outcome_unknown | 本次发布结果不明，保存原请求，恢复后查账或原身份重试 |
 | not_attempted | 本次未尝试权威发布；不否定同身份早先尝试可能已提交 |
 
-中断可返回 429/503，并保留已经确定的逐项回执。先保存并检查响应 body，不以 HTTP 状态整体重建请求或重新分配 Operation ID。HTTP 取消不取消已接管的持久任务。generation staging 的 committed 仅证明私有持久，仍须显式 Publish。
+中断可返回 429/503，并保留已经确定的逐项回执。先保存并检查响应 body，不以 HTTP 状态整体重建请求或重新分配 Operation ID。HTTP 取消不取消已接管的持久任务。
 
 复用下节预先保存的 `requests/write.json`，生成一次批请求文件：
 
@@ -240,7 +240,7 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 
 `GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样检查 Tenant/集合代次和输出数据有效性。状态包括 visible、stale、deleted、unavailable、quarantined。
 
-当前 Record 权威 journal 使用 RecordCheckpointV16、RecordAppliedV14 和 RecordHistoryTrimV13 等显式标签，拒绝旧格式，不提供升级迁移。低层搜索索引格式 8 与权威 journal 版本不是同一概念。
+当前 Record 权威 journal 使用 RecordCheckpointV17、RecordAppliedV15 和 RecordHistoryTrimV13 等显式标签，拒绝旧格式，不提供升级迁移。低层搜索索引格式 8 与权威 journal 版本不是同一概念。
 
 
 ### 可选向量与后补
@@ -250,19 +250,9 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[Record 语义](../../../docs/record-model.md)。
 
 
-### 文档 generation
-
-使用同一写入端点，record_id 代表独立文档 control ID，省略 document/system/vector_patch，传入 generation：
-
-- Stage：`{action:"stage",generation_id,source:{record_id,version},members:[成员ID],chunks:[{record_id,document,evidence_refs?}]}`。清单必须完整，1..100 成员，来源必须为同一集合内的精确可见版本；首次 expected 为 Absent，后续 Match 当前 control version。单次 envelope 仍受 1 MiB 上限。
-- Publish/Abort：`{action:"publish"或"abort",generation_id}`，必须 Match control version。成功 staging 回执 `staged_only:true`，表示仅持久、不可搜索；首次 stage version 1，publish 后 version 2。替换前重新验证来源及最终依赖可见性。
-- `GET /api/v1/index/{id}/doc/{record_id}/generation` 只返回版本、active/staged 身份和成员数。已发布成员保持精确证据并支持向量后补；换代使旧代及其派生隐藏。Abort 释放未发布成员 ID，generation ID 不可复用。
-
-Web UI envelope 模式可运行上述流程并保存原操作重试。完整示例、预留预算、恢复与验证边界见[Record 语义](../../../docs/record-model.md)。
-
 ## 时间条件与不可逆 TTL
 
-系统时间元数据使用 UTC Unix **毫秒**，与用户 schema 中既有 `Timestamp` 秒字段分开。完整 Record 写入和 generation 的每个 chunk 可携带：
+系统时间元数据使用 UTC Unix **毫秒**，与用户 schema 中既有 `Timestamp` 秒字段分开。完整 Record 写入可携带：
 
 ```json
 {"temporal":{"event_time_ms":1735689600000,"valid_from_ms":1735689600000,"valid_to_ms":1767225600000,"expire_at_ms":1893456000000}}
@@ -275,7 +265,7 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 通过现有 RecordWrite 创建 `system:{"kind":"entity"}`，或 `system:{"kind":"relation","relation":{"from":{"record_id":"a","version":1},"to":{"record_id":"b","version":1},"relation_type":"knows","weight":0.5}}`。正文仍在 document；weight 可选，仅为调用方声明，不自动改变检索分数。evidence_refs 单独声明证据，端点不自动视为内容证据。
 
-端点必须是同 collection/partition 当前可见的精确非关系版本。关系与双端的来源、generation、TTL 共同控制可见性；端点替换、删除和 ABA 不会把旧边重新绑定。实体/关系正文可以 Match 精确更新，但 system 声明不可变，重算或重绑定使用新 Record ID。
+端点必须是同 collection/partition 当前可见的精确非关系版本。关系与双端的来源、TTL 共同控制可见性；端点替换、删除和 ABA 不会把旧边重新绑定。实体/关系正文可以 Match 精确更新，但 system 声明不可变，重算或重绑定使用新 Record ID。
 
 - `POST /api/v1/index/{id}/entities`：`{"cursor":null,"length":100}`，稳定 ID 分页；视图变化拒绝旧 cursor。
 - `POST /api/v1/index/{id}/neighbors`：`{"seeds":[{"record_id":"a","version":1}],"direction":"both","relation_types":[],"per_seed":128,"max_candidates":1000,"allow_partial":false}`。
@@ -286,15 +276,9 @@ Web UI envelope 模式可运行上述流程并保存原操作重试。完整示�
 
 ## 精确来源摘录
 
-`POST /api/v1/index/{id}/evidence` 接受 `{record_id,version,locator}`。locator 可为 `{"kind":"utf8","field":"body","start":0,"end":5}`（UTF-8 字节半开区间，必须字符边界），或 `{"kind":"page","field":"pages","page":1}`（源字段为字符串数组、一基页码）。仅定位已持久内联 Source，不下载 URL 或解析 PDF；关系 endpoints/seeds 不接受 locator。派生 evidence_refs 和 generation source 可携带该定位。
+`POST /api/v1/index/{id}/evidence` 接受 `{record_id,version,locator}`。locator 可为 `{"kind":"utf8","field":"body","start":0,"end":5}`（UTF-8 字节半开区间，必须字符边界），或 `{"kind":"page","field":"pages","page":1}`（源字段为字符串数组、一基页码）。仅定位已持久内联 Source，不下载 URL 或解析 PDF；关系 endpoints/seeds 不接受 locator。派生 evidence_refs 可携带该定位。
 
 响应返回选中文本及完整字段/页的 SHA-256、固定 text/plain UTF-8 表示、精确 reference、共同水位与时间。Source 修订后可显式读取保留旧修订，普通 stale 派生仍隐藏；当前 source 已删除/过期/隔离时拒绝摘录，Tenant/集合代次和输出数据有效性检查继续适用。定位写入和恢复均校验范围。UI 记录页可输入精确 reference 查看摘录。分平台结果见实施记录第 20 节。
-
-## staging 租约与私有清理
-
-Stage 获得 30 分钟租约，期限为持久可信 UTC 毫秒时间 + 1800000。使用 `generation:{"action":"renew","generation_id":"g"}` 及精确 `expected:{"Match":当前控制版本}` 续租；回执 staged_only=true，不发布成员。generation 状态返回 lease_expires_at_ms、lease_fence、lease_requires_renewal、private_cleanup_pending。Publish/Abort/Renew 共用 control version fencing；到期不可续租，新建需新 generation ID。同 owner 重启保留剩余期限；普通 backup 不改变 live owner 的 scope 或 lease。独立副本的 scope 变化仍受 lease fencing 检查及证据隔离约束。
-
-Abort/到期持久退休后，只释放未发布私有 Stage/StageBatch 正文，保留规范化请求摘要和原回执；原 operation_id 重试返回原成功结果但不复活 staging。后续请求安全 checkpoint/reclaim，删除旧 WAL 失败保持 pending、未知发布 fence；不是普通历史 GC，也不删除已有备份。UI 记录页可检查租约，通过原编辑器提交 renew 并保留精确重试请求。多批上传从 Begin 起提供租约，每个成功新批次续租；详见后文。历史验证见实施记录第 21 节。
 
 ## 同视图关系融合
 
@@ -310,21 +294,6 @@ All channels share one locked partition view, evaluation time, active corpus and
 
 `fusion.count_relation="candidate_window"` and `fusion.candidates` describe the unique candidate union before pagination. Neither `count_total` nor `relation_complete` implies exact corpus recall. `relation_complete` only covers adjacency traversal; without `allow_partial`, exhaustion rejects the entire request, otherwise `relation_reason` identifies the limit. ANN stays approximate. Output is limited to 4 MiB and uses the same field projection, authorization and deletion barriers as ordinary queries. No persistent format changes are introduced by fusion.
 
-## 有界多批 generation 上传
-
-A generation may use the existing complete `stage`, or `begin` → `stage_batch` (one or more) → `seal` → `publish`. Every command is an ordinary Record envelope with stable `operation_id`, document `record_id`, and exact `expected` control version (`Absent` only for the initial document). Commands increment that control version. Preserve the original request for retry; an old successful retry does not append members or extend the lease again.
-
-```json
-{"record_id":"doc","expected":"Absent","operation_id":{"epoch":20747,"nonce":"begin-example"},"generation":{"action":"begin","generation_id":"g","source":{"record_id":"source","version":1},"members":["a","b"]}}
-```
-
-Use a current operation epoch, not the example value. Next send `generation:{"action":"stage_batch","generation_id":"g","chunks":[{"record_id":"a","document":{"body":"first chunk"}}]}` with `expected:{"Match":1}`, then the batch for `b` with Match 2. Members are reserved at Begin; unknown/duplicate members, changed source, stale control version and expired/unrenewed owner scope are rejected. Body replacement within an upload is not supported: abort it and start a new generation identity.
-
-Read `GET .../doc/doc/generation`. It reports received/expected members, `sealed` and `manifest_sha256`, without private bodies. Seal with `generation:{"action":"seal","generation_id":"g","manifest_sha256":"<verified current status digest>"}` and Match 3. Incomplete membership or a different digest fails without sealing. Publish with Match 4. Seal and Publish contain no chunk payload. UI uses these same envelopes and displays staging success as durable, not searchable.
-
-Digest encoding is SHA-256 over the engine's recursively key-sorted compact UTF-8 JSON object `{source,members,chunks}`, where `chunks` is keyed by member ID and contains the typed chunks (including default temporal/evidence fields). `members` retains declared order; batch arrival order does not affect the digest or publication order. This is the V12 engine encoding, not a claim of RFC 8785/JCS compatibility. A client can inspect the server's digest then seal that exact version; it must not reuse a digest from another control version.
-
-Single commands remain limited to 1 MiB, received chunk JSON to 4 MiB per generation, and declared members to 100. A partition's identity, operation and complete checkpoint limits can reject earlier. This is bounded multipart ingestion, not unlimited streaming or a raw-file Blob service. All active staging and retained history remain within the existing bounded checkpoint model. Begin, each successful new batch, Seal and Renew grant a 30-minute lease; exact retries do not renew it. A new restored owner must explicitly Renew before further batches, Seal or Publish. Abort/expiry discard every unpublished batch body while preserving request digests and receipts; safe checkpoint/WAL retirement finishes physical cleanup. Published content and its history are not removed by private cleanup. V11 and other older formats are rejected; no migration is provided.
 
 ## 逐命中检索解释
 

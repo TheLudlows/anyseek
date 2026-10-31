@@ -10,21 +10,15 @@ pub(super) fn visit(state: &mut Value, mut body: impl FnMut(&mut Value)->Result<
         if let Some(document)=value.get_mut("document") {if !document.is_null(){body(document)?;}}
         Ok(())
     }
-    fn chunks(value:&mut Value, body:&mut impl FnMut(&mut Value)->Result<(),RecordError>)->Result<(),RecordError>{
-        if let Some(chunks)=value.get_mut("chunks").and_then(Value::as_array_mut){for chunk in chunks {record(chunk,body)?;}}
-        Ok(())
-    }
+
     if let Some(records)=state.get_mut("records").and_then(Value::as_object_mut){for value in records.values_mut(){record(value,&mut body)?;}}
     if let Some(history)=state.get_mut("source_revisions").and_then(Value::as_array_mut){for value in history{record(value,&mut body)?;}}
     if let Some(operations)=state.get_mut("operations").and_then(Value::as_array_mut){for op in operations{
         let request=op.get_mut("request").ok_or_else(||storage("missing prepared request"))?;
         record(request,&mut body)?;
         if let Some(patch)=request.get_mut("vector_patch"){if !patch.is_null(){body(patch)?;}}
-        if let Some(generation)=request.get_mut("generation"){chunks(generation,&mut body)?;}
     }}
-    if let Some(generations)=state.get_mut("generations").and_then(Value::as_object_mut){for manifest in generations.values_mut(){
-        if let Some(staged)=manifest.get_mut("staged"){chunks(staged,&mut body)?;}
-    }}
+
     Ok(())
 }
 // Count encoded metadata without allocating another full JSON buffer.
@@ -42,9 +36,11 @@ fn encoded_length(value:&Value,limit:u64)->Result<u64,RecordError> {
     let mut counter=Counter{bytes:0,limit};
     serde_json::to_writer(&mut counter,value).map_err(storage)?;Ok(counter.bytes)
 }
+// A full State has at most max_records current bodies and max_records source
+// revisions. Each retained operation has either a document or a vector patch.
 #[cfg(test)]
 fn payload_limit(config:&RecordConfig)->Result<usize,RecordError>{
-    config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(102)).ok_or_else(||storage("payload budget overflow"))
+    config.max_records.checked_mul(2).and_then(|n|n.checked_add(config.max_operations)).ok_or_else(||storage("payload budget overflow"))
 }
 #[cfg(test)]
 fn hydrate(config:RecordConfig,mut wire:Value,max_bytes:u64,mut read:impl FnMut(&Value)->Result<Vec<u8>,RecordError>)->Result<(RecordConfig,State),RecordError>{
@@ -101,6 +97,22 @@ impl ReferencedState {
 mod tests {
     use super::*;
     use crate::storage::payload_pool::{Budget, Closure, PoolBuilder, PoolReader};
+
+    #[test]
+    fn full_state_payload_bound_counts_sources_and_vector_patches() {
+        let mut config=super::super::tests::config();
+        config.max_records=2;config.max_operations=2;
+        let mut state=serde_json::json!({
+            "records":{"a":{"document":{}},"b":{"document":{"body":"current"}}},
+            "source_revisions":[{"document":{"body":"old1"}},{"document":{"body":"old2"}}],
+            "operations":[{"request":{"document":{"body":"write"}}},
+                {"request":{"document":null,"vector_patch":{"vector":[1,2]}}}]
+        });
+        let mut count=0;visit(&mut state,|_|{count+=1;Ok(())}).unwrap();
+        assert_eq!(count,payload_limit(&config).unwrap());
+        config.max_records=usize::MAX;
+        assert!(payload_limit(&config).is_err());
+    }
 
     fn prepare(root: &Path, config: &RecordConfig, state: &State) -> (ReferencedState, PoolReader, Closure, PathBuf) {
         let directory=root.join("private-payload");std::fs::create_dir(&directory).unwrap();
@@ -168,8 +180,8 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
-    async fn referenced_state_keeps_history_private_chunks_and_same_version_vector_patch() {
-        use super::super::tests::{path,config,source_write,write,generation_write,stage_generation};
+    async fn referenced_state_keeps_history_and_same_version_vector_patch() {
+        use super::super::tests::{path,config,source_write,write};
         let root=path(); let settings=config();
         let partition=RecordPartition::create(&root,settings.clone()).await.unwrap();
         let mut source=source_write("source","s",&[]);
@@ -180,7 +192,6 @@ mod tests {
         patch.document=None;
         patch.vector_patch=Some(serde_json::from_value(serde_json::json!({"vector":[7.0,0.0]})).unwrap());
         assert_eq!(partition.write(patch.clone()).await.unwrap().version,1);
-        partition.write(generation_write("private",ExpectedVersion::Absent,stage_generation("g",&["a","b"]))).await.unwrap();
         let mut revision=write("revision","s","changed",ExpectedVersion::Match(1));
         revision.document.as_mut().unwrap().shift_remove("vector");
         partition.write(revision).await.unwrap();
@@ -196,9 +207,6 @@ mod tests {
         assert_eq!(state.operations[0].request.document,original);
         assert_eq!(state.source_revisions[0].document.as_ref().unwrap()["vector"],serde_json::json!([7.0,0.0]));
         assert_eq!(state.records["s"].version,2);
-        // Neither the current source nor its historical revision can expose staged bodies.
-        assert!(!state.records.contains_key("a"));
-        assert_eq!(state.generations["doc"].staged.as_ref().unwrap().chunks.len(),2);
         drop(pool);drop(inner);drop(partition);std::fs::remove_dir_all(root).unwrap();
     }
 

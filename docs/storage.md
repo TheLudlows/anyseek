@@ -8,11 +8,11 @@
 
 每个向量/元数据组件记录包必须完整保存与 keys 一一对应的 revisions 和 fingerprint（SHA-256）。加载时统一检查数量及活动身份；缺失字段、空 fingerprint 或不一致的身份数量直接拒绝，不保留旧包等待 checkpoint 补全的分支。空组件也显式保存空身份数组。
 
-`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订、generation 与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV16、anchor manifest 7 / 检索 package manifest 3，不读取旧格式、迁移或双写。
+`record/anchor.rs` 认证不可变 anchor、Segment 和 payload 闭包。完整原始 Document（含输入向量）保存在规范 payload pool；记录、来源修订与操作回执通过引用共享。派生 Segment 不再存一份完整搜索正文，量化向量不能替代原始输入。全文使用锁定的 Tantivy 0.27.0 原生包，向量/元数据使用独立组件；旧低层 Index API 已移除，数据访问统一使用 RecordPartition。仅支持新库的 RecordCheckpointV17、anchor manifest 8 / 检索 package manifest 3，不读取旧格式、迁移或双写。
 
 `record/view.rs` 在同一 partition guard 下检索多个冻结段与可变 tail。更新/墓碑先排除旧版本，再截断 Top-K；各段共享活动 N/df/字段长度上下文，每个通道先形成全局排名再融合。查询、过滤、回表与统计固定同一视图，缺少必要 tail 时失败，不能只搜旧段。
 
-Flush 复用未变冻结段、冻结当前 tail；compaction 重建完整等价闭包。写入前按整个业务操作的原生成员数进行准入，超过 tail 的 128 次更新额度时先完成认证轮换；generation 不会因轮换而拆成多个业务提交。先完成构建、校验及同步，再发布选择证书，最后安装内存共同视图。发布后应用失败保持 fenced，恢复只采用认证选择结果。构建拒绝不得改变当前选择；退休失败可以重试，不回滚已提交状态。
+Flush 复用未变冻结段、冻结当前 tail；compaction 重建完整等价闭包。写入前按整个业务操作的原生成员数进行准入，超过 tail 的 128 次更新额度时先完成认证轮换。先完成构建、校验及同步，再发布选择证书，最后安装内存共同视图。发布后应用失败保持 fenced，恢复只采用认证选择结果。构建拒绝不得改变当前选择；退休失败可以重试，不回滚已提交状态。
 
 本地读者/构建由 partition guard 和包 pin 保护；固定 Searcher、原生 worker 与 mmap 使用的文件在最后一个持有者退出前不能删除。备份导出独立权威，不借用将被源端 GC 的可变路径。构建与回收有显式预算，当前仍保留完整内存 State 与保守准入，不承诺全进程 RSS 硬上限。
 
@@ -69,11 +69,11 @@ C3-1 已合入。C3-2 已通过 PR #78 合入，提供前台/恢复/后台分级
 
 ## 2. 日志与回执历史保留
 
-完整 checkpoint 包含版本、删除、来源/generation、原始数据引用、操作回执、回执历史 GC 切点及 generation 恢复隔离身份和 staging 恢复状态，因此 `log_base_seq` 可推进至该 checkpoint cut。新 WAL 链从新 base 开始；旧链的不可变 predecessor 边不修改，仍被备份或其他 pin 保护时不能删除。
+完整 checkpoint 包含版本、删除、来源、原始数据引用、操作回执、回执历史 GC 切点及历史恢复 scope，因此 `log_base_seq` 可推进至该 checkpoint cut。新 WAL 链从新 base 开始；旧链的不可变 predecessor 边不修改，仍被备份或其他 pin 保护时不能删除。
 
-内部历史裁剪通过**同序号完整 checkpoint**认证 GC 切点和时间水位；冷恢复仍得到相同边界，不额外消耗业务序号。回执 GC 同时检查历史保留期、当前/前一 UTC 日重试窗口和存活 generation 的来源证明。当前格式使用 `history` 和 `RecordHistoryTrimV13`，移除旧通知配额占位字段与旧裁剪算法；旧库、WAL 和备份明确拒绝，不做迁移。恢复隔离身份仍用于阻止旧 staging 在新 owner 下未经 renew 直接发布。外部 bootstrap/changes 同步接口已移除。
+内部历史裁剪通过**同序号完整 checkpoint**认证 GC 切点和时间水位；冷恢复仍得到相同边界，不额外消耗业务序号。回执 GC 同时检查历史保留期、当前/前一 UTC 日重试窗口。当前格式使用 `RecordCheckpointV17`、`RecordAppliedV15`、`RecordAnchorV4`、`history` 和 `RecordHistoryTrimV13`，移除旧通知配额占位字段与旧裁剪算法；旧库、WAL 和备份明确拒绝，不做迁移。外部 bootstrap/changes 同步接口已移除。
 
-物理删除不只看 indexed seq：checkpoint 已保存的幂等/staging/来源及历史裁剪状态、当前根、完整依赖图、读者/构建/备份 pin 必须共同满足。当前单机读者和构建受 partition guard 保护；多节点租约/外部 indexer 尚不在本批。
+物理删除不只看 indexed seq：checkpoint 已保存的幂等/来源及历史裁剪状态、当前根、完整依赖图、读者/构建/备份 pin 必须共同满足。当前单机读者和构建受 partition guard 保护；多节点租约/外部 indexer 尚不在本批。
 
 ## 3. 上传、依赖与 GC
 
@@ -103,7 +103,7 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 Tenant、
 
 恢复到新 collection 时，不复制一份能独立 GC 的原对象引用权威。先用不服务、不运行 GC 的临时导入库重放原 cut，再把验证后的规范文件复制到**目标集合新代次的对象 ID**，发布目标独立 checkpoint。原库和恢复目标因此可以独立压缩、退休备份和回收；重复恢复不能回退恢复目标后续写入。
 
-恢复保留 Record 版本、tombstone、原始向量和操作回执。独立快照不自动获得当前删除历史权威：保留 `independent_snapshot`，隔离受保护证据并更换 generation 恢复隔离身份；不包含服务凭据。
+恢复保留 Record 版本、tombstone、原始向量和操作回执。独立快照不自动获得当前删除历史权威：保留 `independent_snapshot`，隔离受保护证据并更换 历史恢复 scope；不包含服务凭据。
 
 完整服务归档复用既有 catalog/本地不可变归档协议，新增对 S3 collection backup 的私有物化输入。该归档包含完整独立数据，不依赖源 bucket 继续保留那些 collection backup pin。恢复服务禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发 Key；在 S3 模式首次启动时，已认证的独立归档被发布到目标独立 bucket。归档中的 collection backup 仍可再次恢复。
 
@@ -115,16 +115,16 @@ metadata snapshot 和 descriptor 使用不可变对象；备份 ID 按 Tenant、
 
 checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包；S3 模式由 SQLite 选择远端 manifest，旧 owner epoch 和失败后的输出 fencing 继续防止陈旧写者或不可信响应。
 
-独立备份恢复校验源闭包，在目标集合新代次（完整服务恢复使用独立 bucket） 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新 generation 恢复隔离身份，不自动恢复历史普通 Key；typed evidence 保持隔离，不能据旧备份证明后续没有删除。
+独立备份恢复校验源闭包，在目标集合新代次（完整服务恢复使用独立 bucket） 发布完整远端状态后才由 catalog 激活。恢复保留版本和回执、更新 历史恢复 scope，不自动恢复历史普通 Key；typed evidence 保持隔离，不能据旧备份证明后续没有删除。
 
 完整服务归档保留 collection 与其备份的恢复输入；普通 restore 的持久意图、备份 pin、私有目录清理和安全对象 GC 仍然有效。
 
-维护审计的发布点与失败边界如下。普通写入、TTL 和 staging 租约过期共用缓存追加入口；SQLite 已明确提交成功时，缓存追加失败返回 `durable_pending` 并保持输出封锁，重开恢复原回执。SQLite 提交结果未知仍为 `outcome_unknown`，不能据此另发新操作。
+维护审计的发布点与失败边界如下。普通写入和 TTL共用缓存追加入口；SQLite 已明确提交成功时，缓存追加失败返回 `durable_pending` 并保持输出封锁，重开恢复原回执。SQLite 提交结果未知仍为 `outcome_unknown`，不能据此另发新操作。
 
 | 路径 | 持久发布与恢复依据 | 失败/重试边界 |
 | --- | --- | --- |
-| 普通写入、TTL、租约过期 | 不可变 WAL + SQLite head/回执 | 提交后缓存失败不回滚、不开放旧输出；无缓存重放 |
-| flush、compaction、历史裁剪、私有 staging 清理、seal | 完整对象闭包 + SQLite 所选 manifest | 同序号维护也必须远端认证；失败保持 fenced |
+| 普通写入、TTL | 不可变 WAL + SQLite head/回执 | 提交后缓存失败不回滚、不开放旧输出；无缓存重放 |
+| flush、compaction、历史裁剪、seal | 完整对象闭包 + SQLite 所选 manifest | 同序号维护也必须远端认证；失败保持 fenced |
 | 冷启动 | 独占权威 owner 锁，认证 bootstrap/manifest/tail | 新建缓存前校验 bootstrap 预算、配置与初始序号；错误不发布缓存目录 |
 | 备份与指针 | SQLite 中原 ID 的 snapshot/pin + 不可变 descriptor | 中断重试维持原 cut；指针第 32 槽仍可修复 |
 | 恢复、服务归档 | 校验源闭包，目标集合新代次（完整服务恢复使用独立 bucket）；typed evidence 保持隔离 | catalog 激活前完成目标远端发布；归档包含 retained 源 |

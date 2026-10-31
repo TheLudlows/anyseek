@@ -14,8 +14,7 @@ pub(super) enum PreparedWrite {
         bytes: Vec<u8>,
         snapshot_bytes: usize,
         reserve_bytes: usize,
-        candidate: Option<State>,
-        planning: Vec<crate::storage::build_budget::MemoryLease>,
+        _planning: Vec<crate::storage::build_budget::MemoryLease>,
     },
 }
 
@@ -56,7 +55,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     {
         let comparison=(checkpoint_codec::json_length(&old.request)? as u64).checked_mul(32).ok_or_else(||storage("retry comparison estimate overflow"))?;
         let _comparison=crate::storage::build_budget::reserve_memory(comparison).map_err(storage)?;
-        return if lease::same_request(old,&request)?
+        return if serde_json::to_value(&old.request).map_err(storage)? == serde_json::to_value(&request).map_err(storage)?
         {
             Ok(PreparedWrite::Replay(old.receipt.clone()))
         } else {
@@ -69,15 +68,6 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     // record body, which may have grown since that operation was committed.
     let prior_bytes=state.records.get(&request.record_id).map(checkpoint_codec::json_length).transpose()?.unwrap_or(0) as u64;
     let _prior_plan=crate::storage::build_budget::reserve_memory(prior_bytes.checked_mul(32).ok_or_else(||storage("planner prior estimate overflow"))?).map_err(storage)?;
-    if request.generation.is_some() {
-        let mut prepared=generation::prepare(state,config,request,epoch,evaluation_time_ms)?;
-        if let PreparedWrite::Append{planning,..}=&mut prepared {planning.extend([_request_plan,_prior_plan]);}
-        return Ok(prepared);
-    }
-    if state.generations.contains_key(&request.record_id)
-        || (!state.records.contains_key(&request.record_id) && generation::occupied(state, &request.record_id)) {
-        return Err(RecordError::Conflict("identity reserved by generation".into()));
-    }
     if state.evidence_quarantined
         && (request.system.is_some()
             || request.temporal.as_ref().is_some_and(|t| t.expire_at_ms.is_some())
@@ -115,12 +105,12 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
             .is_some_and(|r| r.system.is_some());
     let creating_typed =
         request.system.is_some() && !state.records.contains_key(&request.record_id);
-    let reserved_slots = generation::reserve_slots(state) + usize::from(creating_typed) - usize::from(deleting_typed);
+    let reserved_slots = state.records.live_typed_count() + usize::from(creating_typed) - usize::from(deleting_typed);
     // 8 KiB covers JSON escaping of bounded IDs/nonce, envelope, receipt, and
     // journal frame overhead. No evidence edges are copied into delete requests.
     let previous_ttl=state.records.get(&request.record_id).is_some_and(temporal::live_ttl);
     let next_ttl=next_document.is_some() && temporal.expire_at_ms.is_some();
-    let reserve_bytes = reserved_slots * 8192 + generation::reserved(state) * 32768
+    let reserve_bytes = reserved_slots * 8192
         + temporal::reserve_bytes(state) + usize::from(next_ttl)*8192 - usize::from(previous_ttl)*8192;
     if serde_json::to_vec(&request).map_err(storage)?.len() > config.max_record_bytes
         || state
@@ -152,7 +142,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
     if !matches {
         return Err(RecordError::Conflict("version precondition failed".into()));
     }
-    if previous.is_none() && state.records.len() + state.generations.len() + generation::reserved(state) >= config.max_records {
+    if previous.is_none() && state.records.len() >= config.max_records {
         return Err(RecordError::Rejected("identity budget exceeded".into()));
     }
     if let Some(document) = &next_document {
@@ -164,7 +154,6 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         .map_err(RecordError::Rejected)?;
     }
     let receipt = WriteReceipt {
-        staged_only: false,
         seq: state
             .seq
             .checked_add(1)
@@ -175,8 +164,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         record_id: request.record_id.clone(),
     };
     if next_ttl && receipt.version == u64::MAX { return Err(RecordError::Rejected("TTL requires a reserved tombstone version".into())); }
-    let applied = Applied { request_digest:None,
-        request,
+    let applied = Applied { request,
         receipt: receipt.clone(),
         observed_epoch: epoch,
         observed_time_ms: evaluation_time_ms,
@@ -196,8 +184,7 @@ pub(super) fn prepare_at(state:&State, config:&RecordConfig, current_snapshot_by
         bytes,
         snapshot_bytes,
         reserve_bytes,
-        candidate: None,
-        planning: vec![_request_plan,_prior_plan],
+        _planning: vec![_request_plan,_prior_plan],
     })
 }
 
@@ -210,8 +197,6 @@ pub(super) fn projected_record(state: &State, applied: &Applied, document: Optio
         version: applied.receipt.version,
         document,
         temporal, ingested_at_ms: if applied.request.document.is_none() { previous.map_or(applied.observed_time_ms, |r| r.ingested_at_ms) } else { applied.observed_time_ms }, expired_at_ms: None,
-        retired_generation: previous.is_some_and(|r| r.retired_generation),
-        generation_member: previous.and_then(|r| r.generation_member.clone()),
         system: applied
             .request
             .system
@@ -235,7 +220,7 @@ pub(super) fn snapshot_after(state: &State, before: usize, applied: &Applied, ne
 
 #[cfg(test)]
 pub(super) fn replay_checkpoint_size(state: &State, before: usize, applied: &Applied) -> Result<usize, RecordError> {
-    if applied.request.generation.is_some() || state.seq.checked_add(1)!=Some(applied.receipt.seq) || applied.receipt.record_id!=applied.request.record_id || applied.observed_time_ms<state.time_watermark_ms {
+    if state.seq.checked_add(1)!=Some(applied.receipt.seq) || applied.receipt.record_id!=applied.request.record_id || applied.observed_time_ms<state.time_watermark_ms {
         return Err(storage("invalid ordinary replay size transition"));
     }
     let previous=state.records.get(&applied.request.record_id);
@@ -254,8 +239,7 @@ mod replay_size_tests {
         for (i,epoch) in [100,99].into_iter().enumerate() {
             let mut request=super::super::tests::write(&format!("epoch-{i}"),"r","alpha",ExpectedVersion::Any);
             request.operation_id.epoch=epoch;
-            let applied=Applied{request_digest:None,
-                receipt:WriteReceipt{staged_only:false,seq:i as u64+1,version:i as u64+1,record_id:"r".into()},
+            let applied=Applied{receipt:WriteReceipt{seq:i as u64+1,version:i as u64+1,record_id:"r".into()},
                 request,observed_epoch:epoch,observed_time_ms:99+i as u64};
             let bytes=replay_checkpoint_size(&state,before,&applied).unwrap();
             apply(&mut state,&applied).unwrap();
@@ -278,7 +262,7 @@ mod replay_size_tests {
             if i==0 {request.document.as_mut().unwrap().insert("opaque".into(),serde_json::json!("large\n繁體".repeat(8192)));}
             if i==102 {request.document=None;}
             let previous=state.records.get(&id);
-            let applied=Applied{request_digest:None,receipt:WriteReceipt{staged_only:false,seq:state.seq+1,version:previous.map_or(1,|r|r.version+1),record_id:id},request,observed_epoch:9+i/10,observed_time_ms:99+i};
+            let applied=Applied{receipt:WriteReceipt{seq:state.seq+1,version:previous.map_or(1,|r|r.version+1),record_id:id},request,observed_epoch:9+i/10,observed_time_ms:99+i};
             let bytes=replay_checkpoint_size(&state,before,&applied).unwrap();
             apply(&mut state,&applied).unwrap();
             let wire=encode_entry(&Entry::Checkpoint{config:config.clone(),state:state.clone()}).unwrap();
@@ -290,8 +274,13 @@ mod replay_size_tests {
     #[test]
     fn malformed_replay_sequence_and_size_fail_closed() {
         let mut state=State::default();let request=super::super::tests::write("op","id","alpha",ExpectedVersion::Any);
-        let mut applied=Applied{request_digest:None,receipt:WriteReceipt{staged_only:false,seq:1,version:1,record_id:"id".into()},request,observed_epoch:1,observed_time_ms:1};
+        let mut applied=Applied{receipt:WriteReceipt{seq:1,version:1,record_id:"id".into()},request,observed_epoch:1,observed_time_ms:1};
         apply(&mut state,&applied).unwrap();assert!(replay_checkpoint_size(&state,0,&applied).is_err());
         applied.receipt.seq=2;applied.receipt.version=2;applied.request.operation_id=OperationId::new("next".into());assert!(replay_checkpoint_size(&state,0,&applied).is_err());
     }
+}
+
+/// Reserve durable typed deletion and TTL decisions.
+pub(super) fn reserve_bytes(state: &State) -> usize {
+    state.records.live_typed_count() * 8192 + temporal::reserve_bytes(state)
 }

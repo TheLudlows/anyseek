@@ -14,7 +14,7 @@ anyseek 是有界单机记录与检索底座：一层 Record WAL、SQLite 协调
 | 向量组件所有权 | [#111](https://github.com/TheLudlows/anyseek/pull/111) 已合入 `e9599d1`：#94 移除重复逻辑 shard 状态，保留 tail/冻结 Segment、ANN 和全局 Top-K；[对照记录](benchmarks/vector-segments/README.md)不宣称性能收益 |
 | 独立控制台 | [#112](https://github.com/TheLudlows/anyseek/pull/112) 已合入 `71a44bc`：React/TypeScript/Vite，Rust 只提供 API；原始数字与原请求身份保留、真实 API 浏览器测试 |
 | 启动与文档清理 | [#113](https://github.com/TheLudlows/anyseek/pull/113) 已合入 `f029f08`：UI 启动说明与品牌检查脚本移除；[#114](https://github.com/TheLudlows/anyseek/pull/114) 已合入 `761ec13`：文档精简与依赖更新 |
-| 历史与容量 | Record history trim、过期操作安全 GC、WAL/对象 GC 和 staging 清理已有实现；默认 1 万身份/保留操作，可显式选有界 10 万档，受保留期限、状态内存及字节预算约束 |
+| 历史与容量 | Record history trim、过期操作安全 GC、WAL/对象 GC 已有实现；默认 1 万身份/保留操作，可显式选有界 10 万档，受保留期限、状态内存及字节预算约束 |
 
 ## 验收证据与未运行项
 

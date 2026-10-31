@@ -8,7 +8,7 @@ def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','upload','lease','history','indexer','authorization','ingest']);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--server',required=True);parser.add_argument('--startup-timeout',type=float,default=15.0,help='local service readiness deadline in seconds (cold S3 uses at least 120)');parser.add_argument('--faults',action='store_true');parser.add_argument('--cold-restarts',action='store_true');parser.add_argument('--section',choices=['base','locator','graph','temporal','history','indexer','authorization','ingest']);args=parser.parse_args()
     binary=str(pathlib.Path(args.server).resolve())
     with tempfile.TemporaryDirectory(prefix='anyseek-service-', dir=os.environ.get('ANYSEEK_TEST_ROOT')) as tmp:
         root=pathlib.Path(tmp)/'data'
@@ -83,9 +83,6 @@ def main():
                 exercise(call,restart_with,root.parent,args.faults,base,tenant_key)
             elif name in ['temporal','history','indexer','authorization']:
                 exercise(call,restart_with,root.parent,args.faults)
-            elif name=='lease':
-                exercise(call,restart_with,root.parent,False)
-                if args.faults:exercise(call,restart_with,root.parent,True,only_faults=True)
             else:exercise(call,restart_with,args.faults)
         try:
             if args.faults:
@@ -277,60 +274,6 @@ def main():
             assert call('GET','/api/v1/index/revisions/doc/i/status',key=keys['b'])['visibility']=='deleted'
             call('DELETE','/api/v1/index/revisions',{'operation_id':operation()})
             print('PASS source revisions HTTP: conditional update/retry, transitive stale, counts, restart, deletion and status authorization')
-            # Real generation staging, whole-set replacement and delayed vectors.
-            call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'generations','embedding_space_id':'generation-f32','config':{'index_name':'Generations','schema':[{'field':'body','field_type':'Text'},{'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}})
-            call('POST','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'gs','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
-            def genstage(doc,gid,ids,expected,source='gs'):
-                return {'operation_id':operation(),'record_id':doc,'expected':expected,'generation':{'action':'stage','generation_id':gid,'source':{'record_id':source,'version':1},'members':ids,'chunks':[{'record_id':rid,'document':{'body':'generationword '+gid}} for rid in ids]}}
-            def genpublish(doc,gid,version):
-                return {'operation_id':operation(),'record_id':doc,'expected':{'Match':version},'generation':{'action':'publish','generation_id':gid}}
-            gs=genstage('gd','g1',['ga','gb'],'Absent')
-            staged=call('POST','/api/v1/index/generations/doc',gs,key=keys['b'])['receipt'];assert staged['staged_only']
-            assert call('POST','/api/v1/index/generations/doc',gs)['receipt']==staged
-            assert call('POST','/api/v1/index/generations/query',{'query':'generationword'})['count_total']==0
-            call('GET','/api/v1/index/generations/doc/ga',status=404)
-            call('PATCH','/api/v1/index/generations');restart()
-            assert call('GET','/api/v1/index/generations/doc/gd/generation')['staged_members']==2
-            gp=genpublish('gd','g1',1)
-            assert not call('POST','/api/v1/index/generations/doc',gp,key=keys['b'])['receipt']['staged_only']
-            assert call('POST','/api/v1/index/generations/query',{'query':'generationword'})['count_total']==2
-            call('POST','/api/v1/index/generations/doc',genstage('gd','g2',['gc','gd2'],{'Match':2}))
-            assert {h['record']['record_id'] for h in call('POST','/api/v1/index/generations/query',{'query':'generationword'})['hits']}=={'ga','gb'}
-            gp2=genpublish('gd','g2',3);published=call('POST','/api/v1/index/generations/doc',gp2)['receipt']
-            restart();assert call('POST','/api/v1/index/generations/doc',gp2)['receipt']==published
-            assert {h['record']['record_id'] for h in call('POST','/api/v1/index/generations/query',{'query':'generationword'})['hits']}=={'gc','gd2'}
-            assert call('GET','/api/v1/index/generations/doc/ga/status')['visibility']=='stale'
-            call('POST','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'gc','expected':{'Match':1},'vector_patch':{'vector':[1,0]}})
-            assert len(call('POST','/api/v1/index/generations/query',{'query_vector':[1,0],'all':True})['hits'])==1
-            call('POST','/api/v1/index/generations/doc',genstage('gd','g3',['ge','gf'],{'Match':4}))
-            assert call('GET','/api/v1/index/generations/doc/gd/generation',key=keys['b'])['staged_members']==2
-            call('DELETE','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'gs','expected':{'Match':1},'document':None})
-            assert call('POST','/api/v1/index/generations/query',{'query':'generationword'})['count_total']==0
-            call('POST','/api/v1/index/generations/doc',genpublish('gd','g3',5),status=409)
-            print('PASS generation HTTP: durable hidden staging, whole-set switch, retry/restart, optional vectors, source delete and Tenant-scoped status')
-            if args.faults:
-                import http.client
-                call('POST','/api/v1/index/generations/doc',{'operation_id':operation(),'record_id':'fault-source','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
-                for action in ['stage','publish']:
-                    for fault in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
-                        doc=action+'-'+fault;ids=[doc+'-a',doc+'-b']
-                        stage=genstage(doc,'g1',ids,'Absent','fault-source');publish=genpublish(doc,'g1',1)
-                        if action=='publish':call('POST','/api/v1/index/generations/doc',stage)
-                        command=stage if action=='stage' else publish
-                        process.kill();process.wait(timeout=20)
-                        start({'ANYSEEK_RECORD_FAULT':fault,'ANYSEEK_RECORD_FAULT_NONCE':command['operation_id']['nonce']})
-                        if fault.startswith('crash_'):
-                            try:call('POST','/api/v1/index/generations/doc',command)
-                            except (OSError,http.client.HTTPException):pass
-                            else:raise AssertionError('expected generation transport loss')
-                            process.wait(timeout=20);assert process.returncode==86
-                        else:assert call('POST','/api/v1/index/generations/doc',command,status=503)['code'] in ['outcome_unknown','durable_pending']
-                        restart();receipt=call('POST','/api/v1/index/generations/doc',command)['receipt']
-                        assert receipt['staged_only']==(action=='stage')
-                        status=call('GET','/api/v1/index/generations/doc/'+doc+'/generation')
-                        assert status['visible_members']==(0 if action=='stage' else 2)
-                        for rid in ids:call('GET','/api/v1/index/generations/doc/'+rid,status=404 if action=='stage' else 200)
-                print('PASS generation HTTP faults: stage stays hidden, publish recovers complete members at all four durable/response boundaries')
             # P2 immutable source/evidence through the same authorized Record API.
             ec={'operation_id':operation(),'collection_id':'evidence','config':{'index_name':'Evidence','schema':[{'field':'body','field_type':'Text','store':True}]}}
             call('POST','/api/v1/index',ec)
@@ -523,8 +466,6 @@ def main():
                 call('GET','/api/v1/index/shared',status=403)
                 call('GET','/api/v1/index/evidence/doc/direct',status=404)
                 assert call('GET','/api/v1/index/evidence')['evidence_quarantined'] is True
-                manifest=call('GET','/api/v1/index/generations/doc/gd/generation');assert manifest['staged_members']==2 and manifest['visible_members']==0
-                call('POST','/api/v1/index/generations/doc',genpublish('gd','g3',5),status=400)
                 call('POST','/api/v1/apikey',add_key,status=409)
                 old=add_key['operation_id'];call('GET',f"/api/v1/catalog/operation/{old['epoch']}/{old['nonce']}",status=409)
                 assert call('POST','/api/v1/index/after-source-delete/doc',writes[0])['receipt']['version']==1
@@ -575,11 +516,6 @@ def main():
             from record_graph_smoke import exercise as graph_exercise
             graph_exercise(call,restart_with,args.faults)
             temporal_exercise(call,restart_with,root.parent,args.faults)
-            from record_upload_smoke import exercise as upload_exercise
-            upload_exercise(call,restart_with,args.faults)
-            from record_lease_smoke import exercise as lease_exercise
-            lease_exercise(call,restart_with,root.parent,False)
-            if args.faults:lease_exercise(call,restart_with,root.parent,True,only_faults=True)
             from record_history_smoke import exercise as history_exercise
             history_exercise(call,restart_with,root.parent,args.faults)
         except Exception:

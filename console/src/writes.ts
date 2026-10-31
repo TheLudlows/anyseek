@@ -51,13 +51,12 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
       const doc = docs[i];
       if (
         (!Object.hasOwn(doc, "document") &&
-          !Object.hasOwn(doc, "vector_patch") &&
-          !Object.hasOwn(doc, "generation")) ||
+          !Object.hasOwn(doc, "vector_patch")) ||
         !doc.record_id ||
         !doc.expected
       )
         throw new Error(
-          t("Record envelope 需要 record_id、expected，以及 document、vector_patch 或 generation。"),
+          t("Record envelope 需要 record_id、expected，以及 document 或 vector_patch。"),
         );
       if (Object.hasOwn(doc, "operation_id"))
         throw new Error(t("Operation ID 由控制台管理，请移除此字段。"));
@@ -67,9 +66,6 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
           ',"operation_id":' +
           JSON.stringify(newOperationId()) +
           "}",
-        staging: ["stage", "begin", "stage_batch", "seal", "renew"].includes(
-          doc.generation?.action,
-        ),
       };
     }
     const id = newIdentity();
@@ -80,14 +76,13 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
     });
     return {
       body: header.slice(0, -1) + ',"document":' + raw + "}",
-      staging: false,
     };
   });
 }
 export type PendingWrites = {
   owner: string;
   collection: string;
-  requests: { body: string; staging: boolean; embedded?: boolean;
+  requests: { body: string; embedded?: boolean;
     outcome?: "committed" | "rejected" | "unknown" | "not_attempted" }[];
   delivery?: "ingest";
   embedding?: { config: EmbeddingConfig; dimensions: number };
