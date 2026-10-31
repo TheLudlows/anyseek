@@ -101,16 +101,15 @@ test("creation and i64 import survive lost responses and reload with identical r
     .first()
     .click();
   await page.getByLabel("集合名称", { exact: true }).fill("browser_records");
-  await page.getByText("字段结构 · Schema", { exact: true }).click();
-  await page.getByLabel("字段结构 JSON").fill(
-    JSON.stringify([
-      { field: "title", field_type: "Text" },
-      { field: "body", field_type: "Text" },
-      { field: "rank", field_type: "Int", filterable: true },
-      { field: "measure", field_type: "Float" },
-      { field: "data", field_type: "Json" },
-    ]),
-  );
+  await page.getByLabel("字段 3 名称", { exact: true }).fill("rank");
+  await page.getByLabel("字段 3 类型", { exact: true }).selectOption("Int");
+  await page.getByLabel("字段 3 过滤排序", { exact: true }).check();
+  await page.getByRole("button", { name: "添加字段", exact: true }).click();
+  await page.getByLabel("字段 4 名称", { exact: true }).fill("measure");
+  await page.getByLabel("字段 4 类型", { exact: true }).selectOption("Float");
+  await page.getByRole("button", { name: "添加字段", exact: true }).click();
+  await page.getByLabel("字段 5 名称", { exact: true }).fill("data");
+  await page.getByLabel("字段 5 类型", { exact: true }).selectOption("Json");
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "创建集合", exact: true })
@@ -446,3 +445,25 @@ test("real cursor pagination, relation/evidence/generation tools and administrat
     await page.evaluate(() => JSON.stringify(sessionStorage)),
   ).not.toContain(process.env.ANYSEEK_TEST_MASTER!);
 });
+
+for (const mode of ["Lexical", "Vector", "Hybrid"]) {
+  test(`field form creates ${mode} collection without model name`, async ({ page }) => {
+    await login(page);
+    await page.getByRole("button", { name: "创建集合", exact: true }).first().click();
+    const dialog = page.getByRole("dialog");
+    const name = `form_${mode.toLowerCase()}`;
+    await dialog.getByLabel("集合名称", { exact: true }).fill(name);
+    await dialog.getByLabel("字段 1 名称", { exact: true }).fill("custom_title");
+    await dialog.getByLabel("检索模式", { exact: true }).selectOption(mode);
+    await expect(dialog.getByLabel("字段 1 名称", { exact: true })).toHaveValue("custom_title");
+    await expect(dialog.locator("textarea")).toHaveCount(0);
+    await expect(dialog.getByText("Embedding 模型标识", { exact: true })).toHaveCount(0);
+    if (mode !== "Lexical") await dialog.getByLabel("向量维度", { exact: true }).fill("2");
+    const sent = page.waitForRequest((r) => r.method() === "POST" && r.url().endsWith("/api/v1/index"));
+    await dialog.getByRole("button", { name: "创建集合", exact: true }).click();
+    expect((await sent).postDataJSON()).not.toHaveProperty("embedding_space_id");
+    await expect(dialog).toHaveCount(0);
+    const info = await call(`index/${name}`);
+    expect(info.schema[0].field).toBe("custom_title");
+  });
+}

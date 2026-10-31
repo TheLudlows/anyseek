@@ -27,27 +27,15 @@ export function collectionMode(c: Collection): Mode {
     : "Lexical";
 }
 function schemaFor(mode: Mode) {
-  return JSON.stringify(
-    [
-      {
-        field: "title",
-        field_type: "Text",
-        ...(mode === "Vector" ? { index_lexical: false } : {}),
-      },
-      {
-        field: "body",
-        field_type: "Text",
-        ...(mode === "Vector" ? { index_lexical: false } : {}),
-      },
-      { field: "url", field_type: "Text", index_lexical: false },
-      ...(mode === "Lexical"
-        ? []
-        : [{ field: "vector", field_type: "Json", index_vector: true }]),
-    ],
-    null,
-    2,
-  );
+  return [
+    { field: "title", field_type: "Text", index_lexical: mode !== "Vector", store: true },
+    { field: "body", field_type: "Text", index_lexical: mode !== "Vector", store: true },
+    { field: "url", field_type: "Text", index_lexical: false, store: true },
+    ...(mode === "Lexical" ? [] : [{ field: "vector", field_type: "Json", index_vector: true, index_lexical: false, store: false }]),
+  ];
 }
+const fieldTypes = { Text: "文本", String: "字符串", StringSet: "字符串集合", Int: "整数", Float: "小数", Timestamp: "时间戳", Json: "JSON 对象", Binary: "二进制", Vector: "向量" };
+
 export function Collections(props: Props) {
   const [filter, setFilter] = useState(""),
     [creating, setCreating] = useState(false),
@@ -257,13 +245,10 @@ function CreateCollection({
           : "Vector"
         : "Lexical",
     );
-  const [schema, setSchema] = useState(
-    saved ? JSON.stringify(saved.config.schema, null, 2) : schemaFor("Lexical"),
-  );
+  const [schema, setSchema] = useState<Json[]>(saved?.config.schema || schemaFor("Lexical"));
   const [dimensions, setDimensions] = useState(
       String(saved?.config.vector?.dimensions || 384),
-    ),
-    [model, setModel] = useState(saved?.embedding_space_id || "");
+    );
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const foreign = pending && pending.owner !== owner;
@@ -280,7 +265,7 @@ function CreateCollection({
           throw new Error(
             "集合名称须以小写字母开头，包含小写字母、数字、下划线或短横线，最长 63 字符。",
           );
-        const fields = JSON.parse(schema);
+        const fields = schema.map((f) => ({ ...f, field: f.field.trim() }));
         if (!Array.isArray(fields) || !fields.length)
           throw new Error("Schema 必须是非空字段数组。");
         if (
@@ -293,9 +278,9 @@ function CreateCollection({
           const d = Number(dimensions);
           if (!Number.isInteger(d) || d < 1 || d > 4096)
             throw new Error("向量维度必须是 1–4096 的整数。");
-          if (!model.trim() || !fields.some((f: Json) => f.index_vector))
+          if (!fields.some((f: Json) => f.index_vector))
             throw new Error(
-              "请提供 embedding 模型标识，并在 Schema 中指定向量字段。",
+              "请至少添加一个向量字段。",
             );
           config.vector = { dimensions: d };
         } else if (fields.some((f: Json) => f.index_vector))
@@ -306,7 +291,6 @@ function CreateCollection({
             operation_id: newOperationId(),
             collection_id: name,
             config,
-            ...(mode !== "Lexical" ? { embedding_space_id: model.trim() } : {}),
           }),
         };
         storage.set("pendingCreate", request);
@@ -363,11 +347,20 @@ function CreateCollection({
               onChange={(e) => {
                 const next = e.target.value as Mode;
                 setMode(next);
-                setSchema(schemaFor(next));
+                setSchema((fields) => {
+                  const ordinary = fields.filter((f) => !f.index_vector).map((f) => ({ ...f,
+                    index_lexical: next === "Vector" ? false : mode === "Vector" && f.field_type === "Text" ? true : f.index_lexical,
+                  }));
+                  if (next === "Lexical") return ordinary.length ? ordinary : schemaFor(next);
+                  const vectors = fields.filter((f) => f.index_vector);
+                  let vectorName = "vector";
+                  while (ordinary.some((f) => f.field === vectorName)) vectorName += "_";
+                  return [...ordinary, ...(vectors.length ? vectors : [{ field: vectorName, field_type: "Json", index_vector: true, index_lexical: false, store: false }])];
+                });
               }}
             >
               {["Lexical", "Vector", "Hybrid"].map((m) => (
-                <option key={m}>{m}</option>
+                <option key={m} value={m}>{({ Lexical: "关键词检索", Vector: "向量检索", Hybrid: "混合检索" } as Record<string, string>)[m]}</option>
               ))}
             </select>
           </label>
@@ -391,31 +384,32 @@ function CreateCollection({
                   required
                 />
               </label>
-              <label>
-                Embedding 模型标识
-                <input
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder="例如 bge-small-zh-v1.5"
-                  required
-                />
-              </label>
             </div>
           )}
-          <details>
-            <summary>字段结构 · Schema</summary>
-            <label className="sr-only" htmlFor="create-schema">
-              字段结构 JSON
-            </label>
-            <textarea
-              id="create-schema"
-              className="code-input"
-              rows={12}
-              value={schema}
-              onChange={(e) => setSchema(e.target.value)}
-              spellCheck={false}
-            />
-          </details>
+          <div className="collection-fields">
+            <div className="section-heading"><h3>数据字段</h3><button type="button" className="secondary" disabled={schema.length >= 64}
+              onClick={() => setSchema([...schema, { field: "", field_type: "Text", index_lexical: mode !== "Vector", store: true }])}>添加字段</button></div>
+            <p className="field-help">字段名称需与写入数据一致。可直接使用下方预设，也可按需调整。</p>
+            {schema.map((field, i) => {
+              const update = (patch: Json) => setSchema(schema.map((f, j) => j === i ? { ...f, ...patch } : f));
+              const kind = field.index_vector ? "Vector" : field.field_type;
+              return <div className="collection-field" key={i}>
+                <div className="form-row">
+                  <label>字段名称<input aria-label={`字段 ${i + 1} 名称`} value={field.field} required onChange={(e) => update({ field: e.target.value })} placeholder="例如 title" /></label>
+                  <label>数据类型<select aria-label={`字段 ${i + 1} 类型`} value={kind} onChange={(e) => {
+                    const type = e.target.value;
+                    update({ field_type: type === "Vector" ? "Json" : type, index_vector: type === "Vector", index_lexical: type === "Text" && mode !== "Vector", filterable: false, store: type !== "Vector" });
+                  }}>{Object.entries(fieldTypes).filter(([type]) => type !== "Vector" || mode !== "Lexical").map(([type, label]) => <option key={type} value={type}>{label}</option>)}</select></label>
+                  <button type="button" className="secondary" aria-label={`删除字段 ${i + 1}`} disabled={schema.length === 1} onClick={() => setSchema(schema.filter((_, j) => j !== i))}>删除</button>
+                </div>
+                <div className="field-options">
+                  {!field.index_vector && mode !== "Vector" && ["Text", "Json"].includes(field.field_type) && <label className="checkbox"><input type="checkbox" aria-label={`字段 ${i + 1} 全文检索`} checked={field.index_lexical ?? field.field_type === "Text"} onChange={(e) => update({ index_lexical: e.target.checked })} />全文检索</label>}
+                  {!field.index_vector && ["String", "StringSet", "Int", "Float", "Timestamp"].includes(field.field_type) && <label className="checkbox"><input type="checkbox" aria-label={`字段 ${i + 1} 过滤排序`} checked={field.filterable ?? false} onChange={(e) => update({ filterable: e.target.checked })} />过滤与排序</label>}
+                  <label className="checkbox"><input type="checkbox" aria-label={`字段 ${i + 1} 返回内容`} checked={field.store ?? !field.index_vector} onChange={(e) => update({ store: e.target.checked })} />在搜索结果中返回</label>
+                </div>
+              </div>;
+            })}
+          </div>
         </fieldset>
         <Notice>{error}</Notice>
         <div className="modal-actions">
