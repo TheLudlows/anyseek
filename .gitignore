@@ -29,6 +29,9 @@ anyseek/tests/index_docid3_*/
 __pycache__/
 *.py[cod]
 
+# Local Claude Code tooling
+.cac/
+
 # Standalone console
 console/node_modules/
 console/dist/
