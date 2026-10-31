@@ -1,38 +1,32 @@
 # anyseek 当前状态
 
-## 当前状态（2026-10-30）
+## 当前主干（2026-10-31）
 
-主干基线 `9c9e5d2` 已合入 #90/#98/#102：一层 Record WAL、持久业务结果与异步索引、Tenant/Collection 模型和 SQLite 协调元数据已生效。本分支实施 #103/#104/#105，后续代次回收、性能调查和向量组件整理分别见 #106/#107/#94；以下历史验证数字不代表本分支已通过。
+核对基线为 `761ec13476018a98e26ebc71583df3ffac2d0643`（#114 合入后）。本次更新只修正文档链接、当前状态和使用说明；历史阶段的测试计数保留在 Git 历史及对应 PR，不作为该基线的全量验收结果。
 
-本分支已提交 [PR #108](https://github.com/TheLudlows/anyseek/pull/108)，尚未合入。本地通过 171 项有界核心回归、27 项相关集成测试、9 项 doctest、9 项 Node 回归、CLI 校验、真实 HTTP base/committed-ingest，以及默认/无默认特性的独立核心构建。server 全 targets 编译、文档/词法分区静态检查和改动 Python 语法检查通过。另行运行的 fingerprint、查询、合并/消费专项及连续 2305 次更新后恢复用例通过；跨 AES 手工测试仍 ignored。GitHub CI、Windows、真实云 S3 和系统断电未计为本地验收通过。
+anyseek 是有界单机记录与检索底座：一层 Record WAL、SQLite 协调元数据、Tenant/Collection 身份、Tantivy 全文和独立向量/元数据组件已经生效。同步 `/doc`、`/batch` 与异步索引 `/ingest` 同时存在，成功含义按入口区分，见[服务指南](anyseek/src/server/README.md#异步索引写入)。
 
-当前接口以[服务指南](anyseek/src/server/README.md)和[异步写入](docs/async-ingestion.md)为准，后续优先级见[路线](docs/roadmap.md)。不提供旧格式迁移升级。
-
-## 历史实施与验证记录
-
-
-2026-10-30，本分支基于 `b22484a`（#98/#101 已合入）进行确认范围的实现简化：删除 Record 历史格式迁移、旧配额占位和旧裁剪算法；Catalog 只保留一次完整更新校验；恢复使用来源 cut/hash 和必要旧 Operation ID 隔离，不复制完整旧 Catalog；HTTP 认证上下文复用，去掉仅解析集合的 owned task，实际操作继续复核代次。现有业务能力、来源数据保护、HTTP 故障矩阵及 #94 的 shard 工作不变。**格式不兼容：Catalog 4、RecordCheckpointV15、RecordAppliedV13、RecordHistoryTrimV13、anchor manifest 6、完整服务归档 2；旧库/WAL/备份拒绝读取，不提供迁移。**
-
-本轮本地验证：171 个有界核心用例通过，服务端 21 项、调整的三组集成测试通过；Catalog 16 项和旧 checkpoint 拒绝回归通过。本地 HTTP 基础故障、授权、Indexer、committed-ingest，以及 S3 fixture 无缓存基础/历史回归和独立 bucket 完整服务恢复通过。默认及无默认特性核心编译、文档链接和 Python 语法检查通过。全量 library 扩展回归运行至长后缀用例时因构建磁盘占满而停止，未计为通过；已清理旧构建产物并完成上述有界验证。Windows、真实云 S3、硬断电和全量手工验收不推定通过，等待本轮 PR CI。下文为历史记录。
-
-2026-10-30，本分支已同步 master `7c0f88a`（PR #100 的 CI 精简），继续实施 [#98](https://github.com/TheLudlows/anyseek/issues/98)：Catalog 与 S3 authority 共用 SQLite，Key 绑定最小 Tenant，移除 Grant/revision/纯凭据撤销屏障。集合同名重建分配内部新代次，句柄、缓存、回执、备份和 GC 按代次隔离；本地目录由 Tenant/集合名/代次直接派生，不再持久化目录映射或自动 `s3-namespace`。对象使用 `anyseek/{tenant_id}/{collection_id}/...`，代次编码进对象 ID。完整服务恢复使用独立 bucket，历史普通 Key 禁用。不增加 RBAC、Bucket 检查或旧格式迁移。最终验收进行中，PR #99 仍为 Draft。下文为历史记录。
-
-本轮本地验证：Catalog 16 项、存储 74 项、远端 checkpoint 44 项、服务端 20 项通过；基础 HTTP 故障回归、S3 fixture 无缓存 HTTP 和独立 bucket 完整服务恢复通过；独立 core 双配置、9 项 Node 文档精度回归通过。fixture 同名重建/对象隔离/冷重启通过；完整 S3 storage 流程仍在推进时钟后的维护查询收到基线已有的 429 Busy，未放宽断言。真实云 S3、硬断电和本轮 Windows CI 尚不计为验收通过。
-
-2026-10-28：#86/#87 已合入 master `50f8839`。本轮已实现稳定索引身份、认证时间前缀与接收日志持续回收、有界对象登记，以及脱离权威 checkpoint 的全文/向量派生缓存合并。202 只表示命令持久接收；业务回执和两类索引水位分别核验。已按用户要求发布 [Draft PR #88](https://github.com/TheLudlows/anyseek/pull/88)，随后小步完成增量计数、TTL 下界、固定 cut 来源捕获、owned Compact/原生包复用及本地、远端锁外接收快照。远端首次 stale 后使用新命令背压及 pending 排空保障维护机会；普通远端追加仍持 Spool 锁跨网络。两次基准暴露的共享 I/O 配额问题已按 Journal、checkpoint、索引、接收/终态和回收分步修复并通过专项；最终冻结 `adc15e2` 已完成 35 targets，556 通过、0 失败、13 忽略；独立 core 双配置与 9 项 doctest 通过。最新 `1359d7e` 固定产物的同数据同资源 Meilisearch 对比已完成双方 2305 文档、393 查询及重启核验，必需维护阶段覆盖完整；AnySeek 索引水位 p99 929 ms 的长尾仍明确保留，小规模串行结果不代表饱和吞吐或相关性质量，结果统一记录在[异步写入实施](docs/async-ingestion.md)。真实 S3 和硬断电尚未验收。下方保留历史验收记录，不代表本轮结果。
-
-核验日期：2026-10-25。已验收代码 SHA 为 `94d0a60079ae7b8604223b130559bc14004816fe`（[CI 9/9 成功](https://github.com/TheLudlows/anyseek/actions/runs/40063214949)）；后续仅文档提交不改变该代码验收结论。[PR #81](https://github.com/TheLudlows/anyseek/pull/81) 已将生产全文替换为 Tantivy 0.27.0，数据访问统一使用 `RecordPartition`，仅支持新库；已合入 `6d28798`，主干 [CI 9/9](https://github.com/TheLudlows/anyseek/actions/runs/40080424776) 通过。预算调整已由 PR #83 合入 `702c385`；标准分词器已由 [PR #84](https://github.com/TheLudlows/anyseek/pull/84) 合入 `34dc46f`；下表平台数字仍是 #80 历史验收。
-
-| 范围 | 状态 |
+| 已合入工作 | 当前实现与证据 |
 | --- | --- |
-| Record / P2 | 稳定身份、版本、幂等、来源与证据、generation、TTL、显式关系和输出授权屏障已实现 |
-| 持久化 | 本地认证发布、SQLite/S3 唯一协调权威、不可变包、恢复、备份和安全 GC 已实现 |
-| #80 全文替换 | 原生 Tantivy 构建与固定 Searcher；独立向量/元数据组件；活动统计和正式评分契约保留；旧全文引擎及公开低层 API 已删除 |
-| Indexer / 缓存 / 准入 | 有界后台构建、每 authority 校验缓存、collection 授权屏障与分级资源预算已实现 |
-| 平台验证 | Linux 全目标 341 passed / 13 ignored；Windows 常规 337 + 四个独立大用例 = 341 passed / 13 ignored；双平台 no-default 各 198 passed，两组 doctest 各 9 passed；HTTP、备份/GC、授权和 S3 fixture 全部通过 |
-| 尚未验收 | 真实 S3、系统/文件系统崩溃及硬断电、手工跨 AES 验证 |
-| 核心剩余 | Record 操作账本持续 GC、完整 State 驻内存限制、全服务缓存总额、组合资源隔离验收 |
+| 写入及身份收敛 | #90/#98/#102：持久业务回执与异步索引；普通 Key 认证 Tenant，Catalog 与 S3 authority 共用 SQLite，移除 User/Grant/namespace；必要协调状态与规范 Payload 分离 |
+| 检索契约清理 | [#108](https://github.com/TheLudlows/anyseek/pull/108) 已合入 `3754b28`：#103 fingerprint 检查、#104 Hybrid/RRF 入口统一及 #105 无效配置/测试清理；不再列为待实施 |
+| 已删除集合代次回收 | [#109](https://github.com/TheLudlows/anyseek/pull/109) 已合入 `84280a7`：#106 有界后台回收、本地 trash 恢复、S3 head/pin/依赖保护、迟到对象删除重试；保护未释放时继续 pending |
+| 向量组件所有权 | [#111](https://github.com/TheLudlows/anyseek/pull/111) 已合入 `e9599d1`：#94 移除重复逻辑 shard 状态，保留 tail/冻结 Segment、ANN 和全局 Top-K；[对照记录](benchmarks/vector-segments/README.md)不宣称性能收益 |
+| 独立控制台 | [#112](https://github.com/TheLudlows/anyseek/pull/112) 已合入 `71a44bc`：React/TypeScript/Vite，Rust 只提供 API；原始数字与原请求身份保留、真实 API 浏览器测试 |
+| 启动与文档清理 | [#113](https://github.com/TheLudlows/anyseek/pull/113) 已合入 `f029f08`：UI 启动说明与品牌检查脚本移除；[#114](https://github.com/TheLudlows/anyseek/pull/114) 已合入 `761ec13`：文档精简与依赖更新 |
+| 历史与容量 | Record history trim、过期操作安全 GC、WAL/对象 GC 和 staging 清理已有实现；默认 1 万身份/保留操作，可显式选有界 10 万档，受保留期限、状态内存及字节预算约束 |
 
-SQLite 保存必要协调元数据，Payload 唯一保存原始正文与向量，Segment 保存派生检索数据；不增加重复正文、向量或倒排镜像。S3 模式必须保留 SQLite 权威库及其 WAL、owner 锁文件，不能仅靠 bucket 恢复权威。
+## 验收证据与未运行项
 
-下一步建议及完成标准集中在[路线](docs/roadmap.md)，能力与限制见[项目全貌](docs/project-overview.md)，使用见[服务指南](anyseek/src/server/README.md)。不实施旧格式迁移，不引入模型，性能验证仅使用本轮冻结最终版本；不承诺无限容量、跨主机 HA 或权威卷丢失零 RPO。[#57](https://github.com/TheLudlows/anyseek/issues/57) 仍开放。
+- 基线前一主干 `f029f08c` 的 [PR feedback](https://github.com/TheLudlows/anyseek/actions/runs/41152427079) 已成功；它不能替代 #114 的依赖更新验证。
+- 基线 `761ec134` 的 [PR feedback](https://github.com/TheLudlows/anyseek/actions/runs/41153915721) 单独跟踪。完整矩阵仅手工运行，快速 CI 成功不等于全量验收；准确命令和覆盖范围见 [CI 指南](docs/ci-validation.md)。
+- 本次文档修订验证相对文件链接、章节锚点及文档与代码入口的一致性，不重新宣称 Rust、Windows、S3 或浏览器回归全部通过。
+- 真实云 S3 endpoint、系统/文件系统崩溃、硬断电及手工跨 AES 验证仍需实际环境证据。fixture、进程退出和编译通过均不能替代。
+
+## 使用边界与下一步
+
+完整逻辑 State 仍驻内存；10 万档是准入上界，不是任意数据形态的容量承诺。操作历史至少保留七天，窗口内持续更新也会消耗额度；删除不立即释放所有身份、证据或备份保护。已实现回收不等于长期稳定磁盘占用已经验收。
+
+S3 模式必须保留 `metadata.sqlite`、SQLite WAL 和 owner 锁文件，不能只凭 bucket 重建权威。SQLite 为单主机持久卷，不提供跨主机 HA 或权威卷丢失零 RPO。不支持旧格式读取、升级或迁移。
+
+当前接口与限制以[服务指南](anyseek/src/server/README.md)为准；剩余工作统一维护在[路线](docs/roadmap.md)，模块职责见[架构](ARCHITECTURE.md)。

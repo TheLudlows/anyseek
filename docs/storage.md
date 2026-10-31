@@ -133,12 +133,12 @@ checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包�
 ## 验证入口与边界
 
 - `cargo test --workspace --features server --all-targets`：Record/catalog、Segment、SQLite、上传/依赖/GC 和现有检索回归。
-- `scripts/record_service_smoke.py`：默认本地后端、HTTP/UI、授权与恢复；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 与 `*.object-cache` 两类缓存。
+- `scripts/record_service_smoke.py`：默认本地后端、HTTP、授权与恢复；独立 UI 浏览器流程见[控制台指南](../console/README.md#验证)；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 与 `*.object-cache` 两类缓存。
 - `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、历史 GC 切点、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
 - `scripts/s3_acceptance.py`：统一执行上述存储矩阵、七组共享语义与不可变对象/共同备份合同；`--backend real` 只接受专用测试配置。命令及报告边界见[开发指南](development.md)。
-- [PR #74 CI](https://github.com/TheLudlows/anyseek/actions/runs/39814329888) 对最终 head `eb9431a3` 的五个任务全部通过，包含 Linux/Windows 原生持久化和 S3 语义/合同；合入源码为 `afbe323d`，与测试 head 的 Git tree 完全相同。主干 `a36e71e0` 的 [CI 五项也已通过](https://github.com/TheLudlows/anyseek/actions/runs/39884779455)；开发分支另行验收。
+- 当前提交的 CI 状态、历史证据和未运行项集中在 [STATUS](../STATUS.md)；完整矩阵的触发及覆盖范围见 [CI 指南](ci-validation.md)。旧阶段 CI 不替代当前源码与依赖变更的验证。
 
-HTTP fixture 不等于真实 S3 服务认证。本轮先交付合同工具与用例，实际 endpoint 尚未运行；最终修改的 PR 原生 Linux/Windows CI 已通过；主干 `a36e71e0` CI 已核对；开发分支 CI 与实际目标后端验收仍待完成。系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
+HTTP fixture 不等于真实 S3 服务认证，实际 endpoint、系统/文件系统崩溃与硬断电单独待验收。SQLite 为单主机持久卷权威，不提供跨主机 HA 或权威卷丢失零 RPO。
 
 Catalog 管理操作在写事务之前仅做一次完整预算/可恢复性校验。完整服务归档格式为 2；恢复只保留源 Catalog cut/hash、来源身份及必要旧 Operation ID 隔离，不再复制完整历史 Catalog 或 Key 验证材料。HTTP 中间件在读取 body 前认证一次，已认证上下文供 handler 和 owned 工作复用；集合实际执行仍在生命周期屏障内检查代次。
 

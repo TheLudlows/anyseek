@@ -12,7 +12,7 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 
 | 能力 | 当前行为 |
 | --- | --- |
-| 可信记录 | 稳定 Record ID、条件版本、防 ABA、原 operation_id 幂等重试；成功写入持久且可见，未知结果明确区分 |
+| 可信记录 | 稳定 Record ID、条件版本、防 ABA、原 operation_id 幂等重试；同步写入持久且可见，异步索引入口返回持久业务结果；未知结果明确区分 |
 | 来源与证据 | 精确来源版本、内联文本/页码定位、直接及间接依赖；来源删除立即隐藏，修订后的旧派生内容 stale 默认隐藏 |
 | 文档发布 | 有界多批 staging、租约和清理、完整 generation 原子发布；正文可先发布，向量按精确版本后补 |
 | 共同检索 | 全文 BM25F、外部向量、元数据/时间过滤、显式一跳关系融合、稳定排序和逐命中解释 |
@@ -24,11 +24,11 @@ anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、
 ## 边界与后续路线
 
 - 当前每个 collection 一个持久 partition，不支持跨 collection 事务或来源依赖。
-- Record 身份、累计保留操作和候选各有 10,000 上限；单操作 1 MiB，checkpoint 单帧 16 MiB。多批 generation 累计正文最多 4 MiB、100 成员，仍受整体预算限制；不承诺无限写入或稳定磁盘占用。
+- 默认 Record 身份、保留操作各有 10,000 上限，可显式选有界 100,000 档；候选上限仍为 10,000；单操作 1 MiB，checkpoint 单帧 16 MiB。多批 generation 累计正文最多 4 MiB、100 成员，仍受整体预算限制；不承诺无限写入或稳定磁盘占用。
 - ANN 与有界融合不等于全库精确召回；预算不足、未知写入、过期游标均有明确结果，不能将其当作完整成功。
 - 独立备份不证明后续没有删除；恢复隔离与授权重新建立是独立条件，不提供强制绕过。保存 URL 不等于托管或备份外部文件。
 - Linux/Windows 原生与进程故障测试不能替代系统崩溃或断电验收，后者仍未完成。各 SHA 的验证结论见 [当前状态](STATUS.md) 与阶段记录。
-- 不可变 Segment、compaction、SQLite/S3 提交、远端 checkpoint、安全回收和共同备份已合入。维护路径审计与真实 S3 后端验收仍在推进；Indexer/cache 与 collection 扩展见[后续路线](docs/roadmap.md)。
+- 不可变 Segment、compaction、SQLite/S3 提交、远端 checkpoint、安全回收和共同备份已合入。维护路径审计与真实 S3 后端验收仍在推进；持续运行与容量验收见[后续路线](docs/roadmap.md)。
 - 不提供旧磁盘格式升级或迁移，不运行模型，不自动解析或抽取知识。
 
 ## 快速开始
@@ -82,7 +82,7 @@ HTTP 使用 `/api/v1`、`apikey` 请求头和 JSON。创建 collection 时声明
 - [HTTP 请求示例](anyseek/src/server/test_api.rest)与[服务契约](anyseek/src/server/README.md)：记录、generation、查询、授权、备份等完整流程。
 - `POST /api/v1/index/{id}/query`：文本、向量或混合查询；空对象浏览可见记录。
 - `target/debug/anyseek_server generate_openapi=true`：在可执行文件旁生成 OpenAPI JSON/YAML。
-- [Rust 库示例](docs/library-examples.md)：从本仓库使用 path/git 依赖；统一使用 RecordPartition 访问数据；旧低层 Index API 已移除。
+- [Rust 库接入](docs/development.md#rust-核心库接入)：从本仓库使用 path/git 依赖；统一使用 RecordPartition 访问数据；旧低层 Index API 已移除。
 
 单 package 同时提供核心库与 `anyseek_server` 二进制；服务须显式启用 `server` feature，默认库依赖不包含 HTTP/OpenAPI。
 
