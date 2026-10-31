@@ -1841,9 +1841,41 @@ mod tests {
         p.inner.lock().await.clock=clock.clone(); (clock,now)
     }
     pub(super) async fn wait_maintenance_idle(p:&RecordPartition) {
-        tokio::time::timeout(std::time::Duration::from_secs(20),async {
+        maintenance_idle_with_deadline(p,std::time::Duration::from_secs(20)).await
+            .unwrap_or_else(|diagnostic|panic!("{diagnostic}"));
+    }
+    async fn maintenance_idle_with_deadline(p:&RecordPartition,deadline:std::time::Duration)->Result<(),String> {
+        let started=std::time::Instant::now();
+        if tokio::time::timeout(deadline,async {
             while p.inner.lock().await.maintenance_scheduled {tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
-        }).await.unwrap();
+        }).await.is_ok() {return Ok(());}
+        // Diagnostics must not wait for the same locks that may have timed out.
+        let writer=if p.writer.try_lock().is_ok(){"available"}else{"held"};
+        let state=match p.inner.try_lock() {
+            Ok(inner)=>format!("inner_lock=available maintenance_scheduled={} maintenance_requested={:?} background={} healthy={} seq={}",
+                inner.maintenance_scheduled,inner.maintenance_requested,inner.background.is_some(),inner.healthy,inner.state.seq),
+            Err(_)=>"inner_lock=held maintenance_state=unavailable".into(),
+        };
+        Err(format!("maintenance idle deadline exceeded: deadline_ms={} elapsed_ms={} writer_lock={writer} {state}",
+            deadline.as_millis(),started.elapsed().as_millis()))
+    }
+    #[tokio::test]
+    async fn maintenance_timeout_diagnostics_do_not_wait_for_held_locks() {
+        let temporary=tempfile::tempdir().unwrap();
+        let p=RecordPartition::create(&temporary.path().join("records"),config()).await.unwrap();
+        let writer=p.writer.lock().await;
+        let mut inner=p.inner.lock().await;
+        inner.maintenance_scheduled=true;
+        let diagnostic=tokio::time::timeout(std::time::Duration::from_secs(1),
+            maintenance_idle_with_deadline(&p,std::time::Duration::from_millis(10))).await.unwrap().unwrap_err();
+        assert!(diagnostic.contains("writer_lock=held"),"{diagnostic}");
+        assert!(diagnostic.contains("inner_lock=held maintenance_state=unavailable"),"{diagnostic}");
+        drop(inner);drop(writer);
+        let diagnostic=maintenance_idle_with_deadline(&p,std::time::Duration::from_millis(10)).await.unwrap_err();
+        assert!(diagnostic.contains("maintenance_scheduled=true"),"{diagnostic}");
+        assert!(diagnostic.contains("background=false healthy=true seq=0"),"{diagnostic}");
+        p.inner.lock().await.maintenance_scheduled=false;
+        maintenance_idle_with_deadline(&p,std::time::Duration::from_millis(10)).await.unwrap();
     }
     #[tokio::test]
     async fn unlocked_encoding_local_ttl_revalidation_and_wal_recovery() {

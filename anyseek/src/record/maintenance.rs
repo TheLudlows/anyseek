@@ -28,14 +28,22 @@ mod tests {
     use super::*;
     struct Timings;
     impl log::Log for Timings {
-        fn enabled(&self,metadata:&log::Metadata<'_>)->bool {metadata.level()<=log::Level::Info}
+        fn enabled(&self,metadata:&log::Metadata<'_>)->bool {metadata.level()<=log::Level::Debug}
         fn log(&self,record:&log::Record<'_>) {
             if self.enabled(record.metadata()) && record.args().to_string().starts_with("record_maintenance") {
                 // Test evidence is an opt-in file, never library terminal output.
+                // Open once: repeated Windows file opens would perturb the timing
+                // being diagnosed. Unbuffered writes retain the last entered phase
+                // even when the test unwinds before the worker finishes.
                 use std::io::Write;
-                if let Some(path)=std::env::var_os("ANYSEEK_TEST_PHASE_TIMINGS") {
-                    if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                        let _=writeln!(file,"{}",record.args());
+                static FILE:std::sync::LazyLock<Option<std::sync::Mutex<std::fs::File>>>=std::sync::LazyLock::new(|| {
+                    let path=std::env::var_os("ANYSEEK_TEST_PHASE_TIMINGS")?;
+                    std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(std::sync::Mutex::new)
+                });
+                if let Some(file)=FILE.as_ref() {
+                    if let Ok(mut file)=file.lock() {
+                        static START:std::sync::LazyLock<Instant>=std::sync::LazyLock::new(Instant::now);
+                        let _=writeln!(file,"{} trace_elapsed_us={}",record.args(),START.elapsed().as_micros());
                     }
                 }
             }
@@ -44,7 +52,7 @@ mod tests {
     }
     pub(super) fn trace_timings() {
         static LOGGER:Timings=Timings;
-        if std::env::var_os("ANYSEEK_TEST_PHASE_TIMINGS").is_some() && log::set_logger(&LOGGER).is_ok() {log::set_max_level(log::LevelFilter::Info);}
+        if std::env::var_os("ANYSEEK_TEST_PHASE_TIMINGS").is_some() && log::set_logger(&LOGGER).is_ok() {log::set_max_level(log::LevelFilter::Debug);}
     }
     #[tokio::test]
     async fn native_hard_pressure_returns_busy_before_accepting_and_worker_makes_progress() {
@@ -366,6 +374,11 @@ impl RecordPartition {
         if !inner.healthy || inner.maintenance_requested.is_none()
             || inner.background.is_some() || inner.maintenance_scheduled {return;}
         inner.maintenance_scheduled=true;
+        #[cfg(test)]
+        {
+            tests::trace_timings();
+            log::info!("record_maintenance event=scheduled seq={} cause={:?}",inner.state.seq,inner.maintenance_requested);
+        }
         let job=if inner.maintenance_requested==Some(cache_merge::CAUSE) {
             self.start_cache_merge_job(std::time::Duration::from_secs(300))
         } else {self.start_index_job(std::time::Duration::from_secs(300),true)};
