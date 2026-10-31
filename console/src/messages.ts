@@ -1,4 +1,8 @@
 export const english: Record<string, string> = {
+  "重新填写 Tenant": "Edit tenant name",
+  "无法清除原初始化请求，请检查浏览器存储设置后重试。": "Could not clear the initialization request. Check browser storage settings and try again.",
+  "名称已锁定，以便重试原请求。尚未开始签发普通 Key，可重新填写；这只清除本地请求，不会删除服务端可能已创建的 Tenant。": "The name is locked for retrying the original request. Key issuance has not started, so you can edit it. This only clears the local request; any tenant already created on the server remains.",
+  "已进入普通 Key 签发流程，Tenant 名称不能修改。请继续重试原请求或保存已签发的 Key。": "Key issuance has started, so the tenant name cannot be changed. Retry the original request or save the issued key.",
   "输入关键词；留空可浏览记录…": "Enter keywords, or leave blank to browse records…",
   "集合": "Collections",
   "数据": "Data",

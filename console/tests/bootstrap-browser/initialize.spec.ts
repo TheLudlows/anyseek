@@ -33,6 +33,10 @@ for (const fail of ["none", "tenant", "key", "connect"]) {
     await page.getByRole("button", { name: "确认初始化", exact: true }).click();
     if (fail === "tenant" || fail === "key") {
       await expect(page.getByRole("alert").last()).toBeVisible();
+      if (fail === "key") {
+        await expect(page.getByRole("button", {name: "重新填写 Tenant", exact: true})).toHaveCount(0);
+        await expect(page.getByLabel("Tenant 名称", {exact: true})).toBeDisabled();
+      }
       await page.getByRole("button", { name: "返回普通 Key 连接" }).click();
       await page.reload();
       await page
@@ -159,4 +163,49 @@ test("master rejection preserves request and mobile initialization fits viewport
     path: "test-results/bootstrap-mobile.png",
     fullPage: true,
   });
+});
+
+test("tenant conflict can be edited after reload without issuing a key for the old tenant", async ({ page }) => {
+  const calls: {path: string; body: Record<string, unknown>}[] = [];
+  await page.route("**/api/v1/**", async route => {
+    const path = route.request().url().split("/api/v1/")[1];
+    const body = route.request().postDataJSON();
+    calls.push({path, body});
+    await route.fulfill({status: body.tenant_id === "new_tenant" ? 409 : 200, json: {seq: 1}});
+  });
+  await open(page);
+  await fill(page);
+  await page.getByRole("button", {name: "确认初始化", exact:true}).click();
+  await expect(page.getByLabel("Tenant 名称", {exact:true})).toBeDisabled();
+  await page.reload();
+  await page.getByRole("button", {name:"首次使用？使用 Master Key 初始化"}).click();
+  await expect(page.getByLabel("Tenant 名称", {exact:true})).toBeDisabled();
+  await page.getByRole("button", {name:"重新填写 Tenant", exact:true}).click();
+  await expect(page.getByLabel("Tenant 名称", {exact:true})).toBeEditable();
+  expect(await page.evaluate(() => sessionStorage.getItem("anyseek.bootstrap"))).toBeNull();
+  await expect(page.getByRole("checkbox")).not.toBeChecked();
+  await page.getByLabel("Tenant 名称", {exact:true}).fill("another_tenant");
+  await page.getByLabel("Master Key", {exact:true}).fill(master);
+  await page.getByRole("checkbox").check();
+  await page.getByRole("button", {name:"确认初始化", exact:true}).click();
+  await expect(page.getByLabel("新 Tenant API Key")).toBeVisible();
+  expect(calls.map(call => [call.path, call.body.tenant_id])).toEqual([
+    ["tenants", "new_tenant"], ["tenants", "another_tenant"], ["apikey", "another_tenant"],
+  ]);
+  expect(calls[0].body.operation_id).not.toBe(calls[1].body.operation_id);
+  await expect(page.getByRole("button", {name:"重新填写 Tenant", exact:true})).toHaveCount(0);
+});
+
+test("failure to clear storage keeps the original tenant request locked", async ({ page }) => {
+  await page.route("**/api/v1/**", route => route.fulfill({status:401, json:{}}));
+  await open(page);
+  await fill(page);
+  await page.getByRole("button", {name:"确认初始化", exact:true}).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  const saved = await page.evaluate(() => sessionStorage.getItem("anyseek.bootstrap"));
+  await page.evaluate(() => { Storage.prototype.removeItem = () => { throw new Error("blocked"); }; });
+  await page.getByRole("button", {name:"重新填写 Tenant", exact:true}).click();
+  await expect(page.getByRole("alert")).toContainText("无法清除原初始化请求");
+  await expect(page.getByLabel("Tenant 名称", {exact:true})).toBeDisabled();
+  expect(await page.evaluate(() => sessionStorage.getItem("anyseek.bootstrap"))).toBe(saved);
 });

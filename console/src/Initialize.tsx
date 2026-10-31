@@ -26,6 +26,20 @@ export function Initialize({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const locked = useRef(false);
+  function editTenant() {
+    if (locked.current || pending?.stage !== "tenant") return;
+    try {
+      // No key request has been sent at this stage. Remove persistence first:
+      // if storage fails, keep the original request locked and retryable.
+      clearBootstrap();
+      setPending(null);
+      setMaster("");
+      setConfirmed(false);
+      setError("");
+    } catch {
+      setError(t("无法清除原初始化请求，请检查浏览器存储设置后重试。"));
+    }
+  }
   async function submit() {
     if (locked.current || !confirmed) return;
     locked.current = true;
@@ -85,6 +99,21 @@ export function Initialize({
       </label>
       <p className="field-help">
         {t("以小写字母开头，仅含小写字母、数字、下划线或连字符。创建后不能改名或删除。")}</p>
+      {pending?.stage === "tenant" && (
+        <div>
+          <p className="field-help">
+            {t("名称已锁定，以便重试原请求。尚未开始签发普通 Key，可重新填写；这只清除本地请求，不会删除服务端可能已创建的 Tenant。")}
+          </p>
+          <button type="button" className="text-button" disabled={busy} onClick={editTenant}>
+            {t("重新填写 Tenant")}
+          </button>
+        </div>
+      )}
+      {pending && pending.stage !== "tenant" && (
+        <p className="field-help">
+          {t("已进入普通 Key 签发流程，Tenant 名称不能修改。请继续重试原请求或保存已签发的 Key。")}
+        </p>
+      )}
       {pending?.stage !== "connect" && (
         <label>
           Master Key
