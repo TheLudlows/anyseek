@@ -13,7 +13,6 @@ use std::{fs, path::Path};
 
 fn meta() -> IndexMetaObject {
     IndexMetaObject {
-        id: 0,
         name: "union_count_cross_block".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

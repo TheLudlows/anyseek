@@ -32,7 +32,6 @@ async fn test_01_create_index() {
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
 
     let meta = IndexMetaObject {
-        id: 0,
         name: "test_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,
@@ -47,8 +46,8 @@ async fn test_01_create_index() {
 
     let segment_number_bits1 = 11;
     let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
-    let result = index_arc.configuration().await.unwrap().index.id;
-    assert_eq!(result, 0);
+    let result = index_arc.configuration().await.unwrap().index.name;
+    assert_eq!(result, "test_index");
 
 }
 
@@ -313,7 +312,6 @@ async fn test_09_create_index_vector_supplied() {
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
 
     let meta = IndexMetaObject {
-        id: 0,
         name: "test_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,
@@ -333,8 +331,8 @@ async fn test_09_create_index_vector_supplied() {
 
     let segment_number_bits1 = 11;
     let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
-    let result = index_arc.configuration().await.unwrap().index.id;
-    assert_eq!(result, 0);
+    let result = index_arc.configuration().await.unwrap().index.name;
+    assert_eq!(result, "test_index");
 
 }
 
@@ -402,7 +400,6 @@ async fn test_12_create_index_vector_external() {
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
 
     let meta = IndexMetaObject {
-        id: 0,
         name: "test_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,
@@ -422,8 +419,8 @@ async fn test_12_create_index_vector_external() {
 
     let segment_number_bits1 = 11;
     let index_arc = records::create(index_path, meta, (&schema).to_vec()).await;
-    let result = index_arc.configuration().await.unwrap().index.id;
-    assert_eq!(result, 0);
+    let result = index_arc.configuration().await.unwrap().index.name;
+    assert_eq!(result, "test_index");
 
 }
 
@@ -503,7 +500,6 @@ async fn test_15_filter_scope() {
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
 
     let meta = IndexMetaObject {
-        id: 1,
         name: "test_facet_index".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

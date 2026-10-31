@@ -18,7 +18,6 @@ async fn fresh(label: &str, ngrams: u8) -> (RecordPartition, PathBuf) {
     let path = std::env::temp_dir().join(format!("anyseek-t2s-{label}-{}", std::process::id()));
     assert!(!path.exists());
     let meta = IndexMetaObject {
-        id: 0,
         name: label.into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: if label.starts_with("simple-") {

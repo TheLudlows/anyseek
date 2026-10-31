@@ -242,7 +242,7 @@ Web UI 的显式 Record envelope 选项支持上述内容及删除，自动保�
 
 `GET /api/v1/index/{collection_id}/doc/{record_id}/status` 返回 `record_id/version/visibility/visible_seq`，只返回状态，不提供隐藏正文；同样检查 Tenant/集合代次和输出数据有效性。状态包括 visible、stale、deleted、unavailable、quarantined。
 
-当前 Record 权威 journal 使用 RecordCheckpointV17、RecordAppliedV15 和 RecordHistoryTrimV13 等显式标签，拒绝旧格式，不提供升级迁移。低层搜索索引格式 8 与权威 journal 版本不是同一概念。
+当前 Record 权威 journal 使用 RecordCheckpointV18、RecordAppliedV15 和 RecordHistoryTrimV13 等显式标签，拒绝旧格式，不提供升级迁移。私有向量/metadata descriptor 使用格式 3，与权威 journal 标签分别校验。
 
 
 ### 可选向量与后补

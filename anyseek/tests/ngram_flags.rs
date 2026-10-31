@@ -89,7 +89,6 @@ async fn check_mask(mask: u8, similarity: LexicalSimilarity) {
     ]))
     .unwrap();
     let meta = IndexMetaObject {
-        id: 0,
         name: "ngram_flags".into(),
         lexical_similarity: similarity,
         tokenizer: TokenizerType::TantivySimpleV1,

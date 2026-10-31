@@ -15,7 +15,6 @@ async fn boosted_single_term_matches_formula_in_every_state() {
         std::env::temp_dir().join(format!("anyseek-realtime-boost-{}", std::process::id()));
     assert!(!path.exists());
     let meta = IndexMetaObject {
-        id: 0,
         name: "boost".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

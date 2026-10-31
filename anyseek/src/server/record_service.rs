@@ -690,7 +690,6 @@ fn record_config(
     Ok(RecordConfig {
         history: Default::default(),
         index: IndexMetaObject {
-            id: 0,
             name: request.index_name,
             lexical_similarity: LexicalSimilarity::Bm25fProximity,
             tokenizer: request.tokenizer,

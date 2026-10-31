@@ -873,7 +873,6 @@ mod tests {
         let path = std::env::temp_dir().join(format!("anyseek-zh-tail-{}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         let meta = IndexMetaObject {
-            id: 0,
             name: "zh-tail".into(),
             lexical_similarity: LexicalSimilarity::Bm25fProximity,
             tokenizer: TokenizerType::JiebaMixedV1,

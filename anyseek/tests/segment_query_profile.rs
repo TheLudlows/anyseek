@@ -10,7 +10,7 @@ use std::{path::PathBuf, time::Instant};
 async fn segment_query_profile() {
     let output = PathBuf::from(std::env::var("ANYSEEK_SEGMENT_PROFILE_OUTPUT").expect("output file"));
     let temporary = tempfile::tempdir().unwrap(); let root = temporary.path().join("records");
-    let meta = serde_json::from_value(json!({"id":0,"name":"profile","lexical_similarity":"Bm25f",
+    let meta = serde_json::from_value(json!({"name":"profile","lexical_similarity":"Bm25f",
         "tokenizer":"TantivySimpleV1","stop_words":"None","frequent_words":"None","ngram_indexing":0,
         "clustering":"None","inference":{"External":{"dimensions":3,"precision":"F32","quantization":"None","similarity":"Cosine"}}})).unwrap();
     let schema = serde_json::from_value(json!([

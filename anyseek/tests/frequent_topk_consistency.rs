@@ -30,7 +30,6 @@ async fn frequent_terms_topk_returns_results() {
     [{"field":"title","field_type":"Text","store":false,"index_lexical":true}]"#;
     let schema: Vec<anyseek::index::SchemaField> = serde_json::from_str(schema_json).unwrap();
     let meta = IndexMetaObject {
-        id: 0,
         name: "repro".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

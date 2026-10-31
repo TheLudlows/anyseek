@@ -37,7 +37,6 @@ use std::{fs, path::Path};
 
 fn meta() -> IndexMetaObject {
     IndexMetaObject {
-        id: 0,
         name: "union_topk_fill_ranking".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

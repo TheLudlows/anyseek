@@ -26,7 +26,6 @@ impl Rng {
 
 fn meta() -> IndexMetaObject {
     IndexMetaObject {
-        id: 0,
         name: "bitmap_delete_consistency".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

@@ -12,7 +12,6 @@ use std::{fs, path::Path};
 
 fn meta() -> IndexMetaObject {
     IndexMetaObject {
-        id: 0,
         name: "union_count_plus_one".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,

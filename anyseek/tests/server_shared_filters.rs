@@ -187,7 +187,6 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
     ));
     let _ = fs::remove_dir_all(&path);
     let meta = IndexMetaObject {
-        id: 0,
         name: "shared_filters".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,
@@ -274,7 +273,6 @@ async fn shared_filters_before_topk_realtime_commit_reopen_update_delete() {
 
 fn meta() -> IndexMetaObject {
     IndexMetaObject {
-        id: 0,
         name: "shared_filters".into(),
         lexical_similarity: LexicalSimilarity::Bm25f,
         tokenizer: TokenizerType::TantivySimpleV1,
