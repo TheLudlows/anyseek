@@ -467,3 +467,81 @@ for (const mode of ["Lexical", "Vector", "Hybrid"]) {
     expect(info.schema[0].field).toBe("custom_title");
   });
 }
+
+test("browser-only model configuration, embedded ingest and natural language vector search", async ({ page }) => {
+  const id = "browser_embeddings";
+  await call("index", {
+    operation_id: operation(), collection_id: id,
+    config: { index_name: id, schema: [
+      { field: "body", field_type: "Text" },
+      { field: "vector", field_type: "Json", index_vector: true },
+    ], vector: { dimensions: 3 } },
+  });
+  expect((await call(`index/${id}`)).vector_dimensions).toBe(3);
+  let modelCalls = 0;
+  const modelKey = "browser-only-model-secret";
+  await page.route("https://model.example.test/v1/embeddings", async (route) => {
+    const request = route.request();
+    if (request.method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type,authorization", "access-control-allow-methods": "POST" } });
+      return;
+    }
+    modelCalls++;
+    expect(request.headers().authorization).toBe("Bearer " + modelKey);
+    expect(request.headers()).not.toHaveProperty("apikey");
+    const body = request.postDataJSON();
+    expect(body.model).toBe("test-embedding-model");
+    await route.fulfill({ contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify({
+      data: body.input.map((_: string, index: number) => ({ index, embedding: [1, 0, 0] })).reverse(),
+    }) });
+  });
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.startsWith("/api/v1/")) {
+      expect(request.postData() || "").not.toContain(modelKey);
+      expect(request.postData() || "").not.toContain("model.example.test");
+      expect(request.headers().authorization).toBeUndefined();
+    }
+  });
+  await login(page);
+  await page.getByLabel("当前集合", { exact: true }).selectOption(id);
+  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  await page.getByLabel("Embeddings API 地址", { exact: true }).fill("https://model.example.test/v1/embeddings");
+  await page.getByLabel("模型名称", { exact: true }).fill("test-embedding-model");
+  await page.getByLabel("模型 API Key（可选）", { exact: true }).fill(modelKey);
+  await page.getByLabel("在当前标签页会话中记住模型 Key", { exact: true }).check();
+  await page.getByRole("button", { name: "测试连接", exact: true }).click();
+  await expect(page.getByText("连接成功，返回 3 维向量。请保存配置后使用。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "保存本地配置", exact: true }).click();
+  expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(modelKey);
+  await page.reload();
+  await expect(page.getByLabel("模型 API Key（可选）", { exact: true })).toHaveValue(modelKey);
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "数据", exact: true }).click();
+  await page.getByRole("button", { name: "导入数据", exact: true }).click();
+  await expect(page.getByLabel("自动生成缺失的向量", { exact: true })).toBeChecked();
+  const source = "[" + Array.from({ length: 11 }, (_, i) => `{"body":"embedding document ${i}","large":9223372036854775807}`).join(",") + "]";
+  await page.getByLabel("导入 JSON", { exact: true }).fill(source);
+  await page.getByRole("button", { name: "写入集合", exact: true }).click();
+  await expect(page.getByText("已确认提交 11 条，索引正在异步更新。", { exact: true })).toBeVisible();
+  expect(modelCalls).toBe(2);
+  await page.getByRole("dialog").getByRole("button", { name: "关闭", exact: true }).click();
+  await expect.poll(async () => {
+    const p = await call(`index/${id}/ingest`);
+    return p.vector_seq >= p.committed_seq && p.lexical_seq >= p.committed_seq;
+  }).toBe(true);
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "检索调试", exact: true }).click();
+  await page.getByRole("button", { name: "向量 Vector", exact: true }).click();
+  await page.getByLabel("检索内容", { exact: true }).fill("find documents");
+  await page.getByRole("button", { name: /筛选与参数/ }).click();
+  await page.getByText("高级查询参数 · JSON", { exact: true }).click();
+  await page.getByLabel("高级查询参数", { exact: true }).fill('{"all":true}');
+  await page.getByRole("button", { name: "运行检索", exact: true }).click();
+  await expect(page.locator(".result-card")).toHaveCount(10);
+  expect(modelCalls).toBe(3);
+  await page.getByRole("button", { name: "下一页结果", exact: true }).click();
+  await expect(page.locator(".result-card")).toHaveCount(1);
+  expect(modelCalls).toBe(3);
+  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  await page.getByRole("button", { name: "清除本地模型配置", exact: true }).click();
+  expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("anyseek.embedding.")))).toEqual([]);
+  expect(await page.evaluate(() => JSON.stringify(sessionStorage))).not.toContain(modelKey);
+});

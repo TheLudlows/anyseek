@@ -9,6 +9,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { api, collectionPath, message } from "./api.ts";
+import { embedTexts, embeddingKey, loadEmbeddingConfig, validateEmbeddingConfig } from "./embeddings.ts";
 import { apiFieldText } from "./json.ts";
 import {
   Busy,
@@ -23,10 +24,15 @@ import type { Collection, Hit, Json, Mode, QueryResult } from "./types.ts";
 export function Search({
   collection,
   apiKey,
+  owner,
 }: {
   collection: Collection;
   apiKey: string;
+  owner: string;
 }) {
+  const [modelConfig] = useState(() => loadEmbeddingConfig(owner, collection.id));
+  const [autoEmbed, setAutoEmbed] = useState(!!modelConfig);
+  const [phase, setPhase] = useState("");
   const [mode, setMode] = useState<Mode>(
       collection.schema.some((f) => f.index_vector) &&
         !collection.schema.some(
@@ -60,15 +66,15 @@ export function Search({
   );
   const hasVector = collection.schema.some((f) => f.index_vector);
   useEffect(() => () => request.current?.abort(), []);
-  function build() {
+  async function build(signal: AbortSignal) {
     const body: Json = JSON.parse(advanced);
     if (!body || typeof body !== "object" || Array.isArray(body))
       throw new Error("高级参数必须是 JSON 对象。");
-    if (mode !== "Vector" && !query.trim()) throw new Error("请输入检索内容。");
+    if ((mode !== "Vector" || autoEmbed) && !query.trim()) throw new Error("请输入检索内容。");
     delete body.query;
     delete body.query_vector;
     if (mode !== "Vector") body.query = query;
-    if (mode !== "Lexical") {
+    if (mode !== "Lexical" && !autoEmbed) {
       const parsed = JSON.parse(vector);
       if (
         !Array.isArray(parsed) ||
@@ -135,6 +141,13 @@ export function Search({
       "filter",
       "sort",
     ]);
+    if (mode !== "Lexical" && autoEmbed) {
+      if (!modelConfig) throw new Error("请先在连接与管理中配置浏览器嵌入服务。");
+      validateEmbeddingConfig(modelConfig, collection);
+      setPhase("正在生成查询向量");
+      const [embedding] = await embedTexts(modelConfig, embeddingKey(owner, collection.id, modelConfig), [query], collection.vector_dimensions!, signal);
+      body.query_vector = embedding;
+    }
     // Source-preserving JSON rewrite for advanced parameters is provided below.
     return mergeQuerySource(original, body, controlled);
   }
@@ -144,14 +157,17 @@ export function Search({
     request.current = controller;
     setError("");
     setSelected(null);
+    setBusy(true);
+    setResult(null);
+    setPhase("正在检索集合");
     try {
-      const source = fresh ? build() : submitted.current;
+      const source = fresh ? await build(controller.signal) : submitted.current;
+      controller.signal.throwIfAborted();
       if (!source) return;
       if (fresh) submitted.current = source;
       // offset is appended last and controlled by pagination.
       const body = source.slice(0, -1) + ',"offset":' + next * 10 + "}";
-      setBusy(true);
-      setResult(null);
+      setPhase("正在检索集合");
       const response = await api<QueryResult>(
         apiKey,
         collectionPath(collection.id) + "/query",
@@ -224,10 +240,10 @@ export function Search({
             <input
               aria-label="检索内容"
               value={query}
-              disabled={mode === "Vector"}
+              disabled={busy || (mode === "Vector" && !autoEmbed)}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={
-                mode === "Vector"
+                mode === "Vector" && !autoEmbed
                   ? "向量模式使用下方 query vector"
                   : "输入关键词，探索你的数据…"
               }
@@ -243,7 +259,11 @@ export function Search({
               )}
             </button>
           </div>
-          {mode !== "Lexical" && (
+          {mode !== "Lexical" && <div className="embedding-choice">
+            <label className="checkbox"><input type="checkbox" checked={autoEmbed} disabled={busy || !modelConfig} onChange={(e) => setAutoEmbed(e.target.checked)} />自动生成查询向量</label>
+            <p className="field-help">{modelConfig ? `${modelConfig.model} · 查询文本将发送至 ${modelConfig.endpoint}` : "在连接与管理中配置本集合的嵌入服务，或在下方粘贴查询向量。"}</p>
+          </div>}
+          {mode !== "Lexical" && !autoEmbed && (
             <div className="vector-entry">
               <label>
                 Query vector
@@ -389,7 +409,7 @@ export function Search({
         </section>
       ) : busy ? (
         <section className="panel loading-block">
-          <Busy label="正在检索集合" />
+          <Busy label={phase || "正在检索集合"} />
           <div className="skeleton" />
           <div className="skeleton" />
           <div className="skeleton" />

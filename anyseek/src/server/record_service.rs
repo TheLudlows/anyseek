@@ -723,6 +723,7 @@ fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics)
         "text_normalization":entry.config.index.text_normalization,"field_length_normalization":entry.config.index.field_length_normalization,
         "indexed_doc_count":stats.active_records,"committed_doc_count":stats.active_records,"version":crate::VERSION,"statistics":stats,
         "limits":{"max_records":entry.config.max_records,"max_operations":entry.config.max_operations,"max_journal_bytes":entry.config.max_journal_bytes,"max_candidates":entry.config.max_candidates},
+        "vector_dimensions":match &entry.config.index.inference { Inference::External {dimensions,..} => Some(*dimensions), _ => None },
         "embedding_space_id":entry.config.embedding_space_id,"evidence_quarantined":stats.evidence_quarantined})
 }
 #[derive(Deserialize)]

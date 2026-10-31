@@ -6,6 +6,8 @@ import {
   newOperationId,
   storage,
 } from "./api.ts";
+import { sendIngest } from "./ingest.ts";
+import type { EmbeddingConfig } from "./embeddings.ts";
 import type { Json } from "./types.ts";
 
 export function documentJsonSlices(text: string, parsed: Json): string[] {
@@ -86,7 +88,10 @@ export function prepareDocumentRequests(source: string, envelopeMode = false) {
 export type PendingWrites = {
   owner: string;
   collection: string;
-  requests: { body: string; staging: boolean }[];
+  requests: { body: string; staging: boolean; embedded?: boolean;
+    outcome?: "committed" | "rejected" | "unknown" | "not_attempted" }[];
+  delivery?: "ingest";
+  embedding?: { config: EmbeddingConfig; dimensions: number };
   completed: number;
   unresolved: boolean;
   rejected?: boolean;
@@ -99,6 +104,7 @@ export async function sendWrites(
 ) {
   if (pending.owner !== owner)
     throw new Error("保留的写入属于另一连接，请使用原 API Key 处理。");
+  if (pending.delivery === "ingest") return sendIngest(pending, key, progress);
   for (let i = pending.completed; i < pending.requests.length; i++) {
     const previouslyUnresolved = pending.unresolved;
     pending.unresolved = true;

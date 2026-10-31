@@ -15,6 +15,7 @@ export type Collection = {
   indexed_doc_count: number;
   version: string;
   embedding_space_id?: string;
+  vector_dimensions?: number | null;
   statistics: Json;
   limits: Json;
 };
