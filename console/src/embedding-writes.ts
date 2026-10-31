@@ -1,5 +1,5 @@
 import { t } from "./i18n.ts";
-import { storage } from "./api.ts";
+import { savePendingWrites } from "./pending-writes.ts";
 import { apiFieldText, apiJsonText, parseApiJson } from "./json.ts";
 import { prepareDocumentRequests, type PendingWrites } from "./writes.ts";
 import { EMBEDDING_BATCH_SIZE, embedTexts, embeddingKey, validateEmbeddingConfig, validateVector, type EmbeddingConfig } from "./embeddings.ts";
@@ -52,7 +52,7 @@ export async function generatePendingEmbeddings(pending: PendingWrites, owner: s
       request.body = withVector(request.body, config.vectorField, vectors[i]);
       request.embedded = true;
     });
-    storage.set("pendingWrites", pending);
+    savePendingWrites(pending);
     progress(pending.requests.filter((request) => request.embedded).length);
   }
 }
