@@ -184,6 +184,19 @@ pub(crate) async fn search(
         .iter()
         .map(|f| if indexed_fields == 1 { 1.0 } else { f.boost })
         .collect::<Vec<_>>();
+    // Lexical (including browse) has no score threshold. Hybrid/ANN retains
+    // its channel counts, threshold evaluation and existing fusion contract.
+    if !hybrid && result_type == ResultType::Count {
+        super::scoring::validate_bounds(&plan.scores, &boosts, snapshots[0].fields.len(), MAX_POPULATION)?;
+        let count = corpus.count(plan.predicate.as_ref(), |id| allowed.contains(id))?;
+        return Ok(ResultObject {
+            original_query: text.clone(),
+            query: text,
+            query_terms: plan.query_terms,
+            result_count_total: count,
+            ..Default::default()
+        });
+    }
     let lexical_counts = std::cell::RefCell::new(vec![0usize; n]);
     let (lex_count, hits) = corpus.score_groups(
         plan.predicate.as_ref(),
