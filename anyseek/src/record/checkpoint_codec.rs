@@ -196,53 +196,50 @@ mod tests {
         }
         assert!(json_fits(&Invalid,u64::MAX).is_err());
     }
-    #[tokio::test]
-    async fn borrowed_checkpoint_matches_existing_wire_bytes_and_digest() {
-        let root = tempfile::tempdir().unwrap();
-        let p = RecordPartition::create(
-            &root.path().join("partition"),
-            super::super::tests::config(),
-        )
-        .await
-        .unwrap();
+    #[test]
+    fn borrowed_checkpoint_matches_existing_wire_bytes_and_digest() {
+        let config = super::super::tests::config();
+        let mut state = State::default();
         for i in 0..3 {
-            p.write(super::super::tests::write(
+            let request = super::super::tests::write(
                 &format!("op-{i}"),
                 &format!("id-{i}"),
                 "繁體 alpha \\\"\n\0 beta",
                 ExpectedVersion::Absent,
-            ))
-            .await
-            .unwrap();
+            );
+            let epoch = request.operation_id.epoch;
+            let mutation::PreparedWrite::Append { applied, .. } = mutation::prepare_at(
+                &state, &config, length(&config, &state).unwrap(), request, epoch, epoch,
+            ).unwrap() else { panic!("new operation") };
+            apply(&mut state, &applied).unwrap();
         }
-        let inner = p.inner.lock().await;
-        assert_eq!(inner.state.operation_lookup.len(), 3);
+        assert_eq!(state.operation_lookup.len(), 3);
         let owned = encode_entry(&Entry::Checkpoint {
-            config: inner.config.clone(),
-            state: inner.state.clone(),
+            config: config.clone(),
+            state: state.clone(),
         })
         .unwrap();
         let borrowed = serde_json::to_vec(&BorrowedEntry::Checkpoint {
-            config: &inner.config,
-            state: &inner.state,
+            config: &config,
+            state: &state,
         })
         .unwrap();
         assert_eq!(
             borrowed, owned,
             "wire format and insertion order must not change"
         );
-        assert_eq!(length(&inner.config, &inner.state).unwrap(), owned.len());
+        assert_eq!(length(&config, &state).unwrap(), owned.len());
         assert_eq!(
-            digest(&inner.config, &inner.state).unwrap(),
+            digest(&config, &state).unwrap(),
             <[u8; 32]>::from(Sha256::digest(&owned))
         );
-        let encoding = StateEncoding::new(&inner.state).unwrap();
-        assert_eq!(encoding.checkpoint_length(&inner.config).unwrap(), owned.len());
-        let state_bytes = serde_json::to_vec(&inner.state).unwrap();
+        let encoding = StateEncoding::new(&state).unwrap();
+        assert_eq!(encoding.checkpoint_length(&config).unwrap(), owned.len());
+        let state_bytes = serde_json::to_vec(&state).unwrap();
         assert_eq!(encoding.length(), state_bytes.len());
         assert_eq!(encoding.digest(), <[u8; 32]>::from(Sha256::digest(&state_bytes)));
         assert_eq!(
-            json_digest(&inner.state).unwrap(),
+            json_digest(&state).unwrap(),
             <[u8; 32]>::from(Sha256::digest(&state_bytes))
         );
     }

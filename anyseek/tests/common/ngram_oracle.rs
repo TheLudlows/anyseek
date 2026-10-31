@@ -155,53 +155,48 @@ pub async fn exercise(proximity: bool) {
                             (3, "\"the of and\""),
                             (4, "\"the of and anchor\""),
                         ] {
-                            for realtime in [false, true] {
-                                for explicit in [false, true] {
-                                    let r = index
-                                        .query(RecordQuery {
-                                            text: q.into(), vector: None, temporal: None, query_type: QueryType::Union, mode: SearchMode::Lexical, offset: 0, length: 100, result_type: ResultType::TopkCount, fields: vec![], filters: vec![], sort:
-                                            if explicit {
-                                                vec![ResultSort {
-                                                    field: "_score".into(),
-                                                    order: SortOrder::Descending,
-                                                }]
-                                            } else {
-                                                vec![]
-                                            },
-                                        }).await.unwrap();
+                            for explicit in [false, true] {
+                                let r = index
+                                    .query(RecordQuery {
+                                        text: q.into(), vector: None, temporal: None, query_type: QueryType::Union, mode: SearchMode::Lexical, offset: 0, length: 100, result_type: ResultType::TopkCount, fields: vec![], filters: vec![], sort:
+                                        if explicit {
+                                            vec![ResultSort {
+                                                field: "_score".into(),
+                                                order: SortOrder::Descending,
+                                            }]
+                                        } else {
+                                            vec![]
+                                        },
+                                    }).await.unwrap();
 
-                                    let visible = true; // Successful Record writes are durable and visible.
-                                    let want_ids = if !visible {
-                                        vec![]
-                                    } else if extra_match {
-                                        vec![0, 4]
-                                    } else {
-                                        vec![0]
-                                    };
-                                    assert_eq!(
-                                        r.hits.iter().map(|x| x.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(),
-                                        want_ids,
-                                        "{label} stage={stage} q={q}"
+                                let want_ids = if extra_match {
+                                    vec![0, 4]
+                                } else {
+                                    vec![0]
+                                };
+                                assert_eq!(
+                                    r.hits.iter().map(|x| x.record.record_id.parse::<usize>().unwrap()).collect::<Vec<_>>(),
+                                    want_ids,
+                                    "{label} stage={stage} q={q}"
+                                );
+                                assert_eq!(r.count_total, want_ids.len());
+                                for hit in r.hits {
+                                    let want = expected(
+                                        fields,
+                                        policy,
+                                        proximity,
+                                        mask,
+                                        words,
+                                        extra_match,
                                     );
-                                    assert_eq!(r.count_total, want_ids.len());
-                                    for hit in r.hits {
-                                        let want = expected(
-                                            fields,
-                                            policy,
-                                            proximity,
-                                            mask,
-                                            words,
-                                            extra_match,
-                                        );
-                                        let got = hit.score as f64;
-                                        assert!(
-                                            got.is_finite(),
-                                            "{label} stage={stage} q={q} nonfinite score={got}"
-                                        );
-                                        checked += 1;
-                                        if (got - want).abs() > 2e-5 * want.abs().max(1.0) {
-                                            failures.push(format!("{label} stage={stage} rt={realtime} explicit={explicit} q={q} got={got} want={want}"));
-                                        }
+                                    let got = hit.score as f64;
+                                    assert!(
+                                        got.is_finite(),
+                                        "{label} stage={stage} q={q} nonfinite score={got}"
+                                    );
+                                    checked += 1;
+                                    if (got - want).abs() > 2e-5 * want.abs().max(1.0) {
+                                        failures.push(format!("{label} stage={stage} explicit={explicit} q={q} got={got} want={want}"));
                                     }
                                 }
                             }
