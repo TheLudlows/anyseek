@@ -340,7 +340,7 @@ impl Catalog {
                 // archive. Private snapshots carry certified immutable packages;
                 // no live cache is copied. Per-partition closure budgets also apply.
                 let mut total = serde_json::to_vec(&inner.state).map_err(storage)?.len() as u64;
-                for entry in inner.state.collections.values() {
+                for entry in inner.state.collections.values().filter(|entry| !entry.reclaiming) {
                     if entry.deleted
                         && !entry.initialized
                         && !source_root.join(&entry.directory()).exists()
@@ -386,11 +386,12 @@ impl Catalog {
                 let stage = staging(&target)?;
                 let mut archived = inner.state.clone();
                 archived.service_snapshot = Some((identity.clone(), false));
+                archived.collections.retain(|_, entry| !entry.reclaiming);
                 drop(Catalog::create_state(&stage, archived).await?);
                 let mut record_seqs = BTreeMap::new();
                 let mut absent_collections = std::collections::BTreeSet::new();
                 let mut objects = BTreeMap::from([(String::new(), object_hash(&stage)?)]);
-                for entry in inner.state.collections.values() {
+                for entry in inner.state.collections.values().filter(|entry| !entry.reclaiming) {
                     if entry.deleted
                         && !entry.initialized
                         && !source_root.join(&entry.directory()).exists()
