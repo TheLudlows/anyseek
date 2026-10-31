@@ -69,6 +69,8 @@ jobs:
       - name: Verify standalone core boundary
         if: steps.scope.outputs.code == 'true'
         run: python3 scripts/check_core_boundary.py
+      - name: Verify S3 semantic suite coverage
+        run: python3 scripts/test_s3_acceptance.py
       - name: Verify full-size lexical partition remains complete
         run: python3 scripts/check_lexical_partition.py --source-only
       - name: Verify retired dependencies removed

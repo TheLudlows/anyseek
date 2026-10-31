@@ -39,7 +39,7 @@ pub struct EvidenceRef {
 }
 /// Engine-validated metadata, distinct from arbitrary business document fields.
 /// Sources support exact-version updates; derived recomputation uses a new
-/// identity. Generations, TTL and history are separate implementation slices.
+/// identity. TTL and history are separate implementation slices.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceMetadata {
