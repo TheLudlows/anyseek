@@ -2,7 +2,8 @@
 
 | 目的 | 文档 |
 | --- | --- |
-| 启动与 API | [README](../README.md)、[服务指南](../anyseek/src/server/README.md)、[请求示例](../anyseek/src/server/test_api.rest) |
+| API 启动与接入 | [README](../README.md)、[服务指南](../anyseek/src/server/README.md)、[请求示例](../anyseek/src/server/test_api.rest) |
+| UI 启动与部署 | [控制台指南](../console/README.md)：本地运行、API 地址配置、远程访问、构建与部署 |
 | 轻量写入新目标 | [异步接收实施、接口、验收与后续](async-ingestion.md) |
 | 当前能力 | [状态](../STATUS.md)、[功能与边界](../FEATURES.md)、[架构](../ARCHITECTURE.md) |
 | 全貌与决策 | [项目全貌与下一步建议](project-overview.md)、[Tantivy 已落地设计](tantivy-evaluation.md) |

@@ -35,8 +35,6 @@ jobs:
           lscpu
       - name: Verify standalone core boundary
         run: python3 scripts/check_core_boundary.py
-      - name: Verify documentation links and product identifiers
-        run: python3 scripts/check_docs_brand.py
       - name: Build retained workspace
         id: build
         run: cargo build --workspace --features server

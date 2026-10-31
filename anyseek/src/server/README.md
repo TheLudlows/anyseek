@@ -24,6 +24,18 @@ target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 
 只接受 `name=value`；未知、重复、非法参数返回非零状态。核心使用 `log`，服务支持 `RUST_LOG`。Ctrl-C/SIGINT/SIGTERM 停止接收请求并等待连接结束；成功写入已持久，不依靠退出时提交派生索引才成立。默认 secret 不适合部署，必须配置自己的值。
 
+## 启动 Web UI
+
+保持 API 服务运行，在另一个终端从仓库根启动独立控制台，需要 Node.js 24 和 npm：
+
+```sh
+cd console
+npm ci
+npm run dev
+```
+
+打开 `http://127.0.0.1:5173`，用上面签发的 Tenant API Key 连接。UI 默认代理到 `http://127.0.0.1:8080`；API 地址配置、远程访问及生产部署统一见 [UI 启动与部署](../../../console/README.md)。
+
 ## S3 后端（显式启用）
 
 `server` feature 包含 S3 支持；默认仍为 `local`。启用新部署示例：

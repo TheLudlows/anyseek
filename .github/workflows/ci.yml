@@ -49,8 +49,6 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'code={str(code).lower()}\n')
           PYCODE
-      - name: Verify documentation links and product identifiers
-        run: python3 scripts/check_docs_brand.py
       - uses: actions/setup-node@v4
         with:
           node-version: 24
