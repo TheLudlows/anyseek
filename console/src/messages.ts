@@ -1,4 +1,5 @@
 export const english: Record<string, string> = {
+  "输入关键词；留空可浏览记录…": "Enter keywords, or leave blank to browse records…",
   "集合": "Collections",
   "数据": "Data",
   "检索调试": "Search playground",
