@@ -538,7 +538,7 @@ test("browser-only model configuration, embedded ingest and natural language vec
   expect(queryCalls).toBe(0);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.getByRole("button", { name: "复制 查询向量预览", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("[1,0,0]");
+  await expect.poll(async () => JSON.parse(await page.evaluate(() => navigator.clipboard.readText()))).toEqual([1,0,0]);
   expect(queryCalls).toBe(0);
   await page.getByRole("button", { name: /筛选与参数/ }).click();
   await page.getByText("高级查询参数 · JSON", { exact: true }).click();

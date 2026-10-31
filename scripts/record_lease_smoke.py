@@ -5,20 +5,17 @@ import time
 from record_service_smoke import operation
 
 
-def exercise(call,restart_with,directory,faults,only_faults=False,*,tenant_key):
+def exercise(call,restart_with,directory,faults,only_faults=False):
     now=int(time.time()*1000);clock_file=directory/'lease-clock-ms'
     def clock(value):
         pending=clock_file.with_suffix('.next');pending.write_text(str(value));os.replace(pending,clock_file)
     clock(now);env={'ANYSEEK_TEST_CLOCK_FILE':str(clock_file)} if faults else {}
     restart_with(env)
     config={'index_name':'Leases','schema':[{'field':'body','field_type':'Text','store':True}]}
-    directories={}
     def create(cid):
         endpoint='/api/v1/index/'+cid
         oid=operation()
         call('POST','/api/v1/index',{'operation_id':oid,'collection_id':cid,'config':config})
-        seq=call('GET',f"/api/v1/catalog/operation/{oid['epoch']}/{oid['nonce']}",key=tenant_key)['receipt']['seq']
-        directories[endpoint]=f'collections/test/{cid}/{seq:016x}'
         call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','expected':'Absent','document':{'body':'source'},'system':{'kind':'source'}})
         return endpoint
     def stage(g='g',expected='Absent'):
@@ -38,7 +35,8 @@ def exercise(call,restart_with,directory,faults,only_faults=False,*,tenant_key):
         # Arm only this collection after recovery. A global cleanup fault would
         # correctly fence S3 cold startup while it materializes old checkpoints,
         # before the private-abort path under test can run.
-        cache=directory/'data'/directories[endpoint]
+        collection=directory/'data'/'collections'/'test'/endpoint.rsplit('/',1)[1]
+        cache,=(p for p in collection.iterdir() if p.is_dir() and not p.name.startswith('.'))
         cleanup_fault=cache/'.test-cleanup-failure'
         cleanup_fault.write_text('fail this collection old-generation retirement')
         call('POST',endpoint+'/doc',command('abort',1))
