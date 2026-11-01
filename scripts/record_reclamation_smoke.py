@@ -47,16 +47,16 @@ def main():
         log = open(Path(temporary) / 'server.log', 'w+')
         process = None
 
-        def call(method, path, body=None, key=tenant, expected=(200,)):
+        def call(method, path, body=None, key=tenant, status=200):
             request = urllib.request.Request(base + path, method=method,
                 data=None if body is None else json.dumps(body).encode(),
                 headers={'apikey': key, 'Content-Type': 'application/json'})
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
-                    status, raw = response.status, response.read()
+                    code, raw = response.status, response.read()
             except urllib.error.HTTPError as error:
-                status, raw = error.code, error.read()
-            assert status in expected, (method, path, status, raw)
+                code, raw = error.code, error.read()
+            assert code in (status if isinstance(status, tuple) else (status,)), (method, path, code, status, raw)
             return json.loads(raw)
 
         def wait(predicate):
