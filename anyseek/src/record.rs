@@ -313,6 +313,7 @@ struct Inner {
     background: Option<indexer::Tail>,
     maintenance_requested:Option<&'static str>,
     maintenance_scheduled:bool,
+    maintenance_pending:bool,
     maintenance_compacted_bytes:Option<u64>,
     maintenance_trim:Option<history::Trim>,
     anchor:Option<anchor::Reference>,
@@ -1292,7 +1293,7 @@ impl RecordPartition {
             indexes: index_consumers::Cursors::recovered(0),
             output: output.clone(),
             inner: Arc::new(Mutex::new(Inner {
-                background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_compacted_bytes:None,maintenance_trim:None,anchor:None,payloads:Default::default(),
+                background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_pending:false,maintenance_compacted_bytes:None,maintenance_trim:None,anchor:None,payloads:Default::default(),
                 journal,
                 config,
                 state,
@@ -1395,7 +1396,7 @@ impl RecordPartition {
             revision: 0, fenced: false,
         }));
         let mut inner=Inner {
-                background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_compacted_bytes:None,maintenance_trim:None,anchor:selected,payloads,
+                background:None,maintenance_requested:None,maintenance_scheduled:false,maintenance_pending:false,maintenance_compacted_bytes:None,maintenance_trim:None,anchor:selected,payloads,
                 journal,
                 config,
                 state,

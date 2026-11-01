@@ -63,6 +63,8 @@
   "record::remote_checkpoint::tests::joint_closure_admits_once_and_rejects_duplicate_or_over_budget",
   "record::remote_checkpoint::tests::index_only_cas_faults_preserve_selected_cut_and_receipts",
   "record::remote_checkpoint::tests::index_only_backup_gc_and_same_sequence_checkpoint_preserve_history",
+  "record::maintenance::tests::worker_rejection_retries_without_client_traffic",
+  "record::maintenance::pending::tests::pending_admission_is_bounded_deduplicated_and_does_not_retain_incarnations",
   "record::maintenance::tests::native_hard_pressure_returns_busy_before_accepting_and_worker_makes_progress",
   "record::indexer::tests::catchup_proof_releases_live_lock_and_rechecks_new_suffix",
   "record::indexer::tests::catchup_install_rechecks_same_sequence_history_trim",

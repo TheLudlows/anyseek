@@ -95,11 +95,17 @@ impl RecordPartition {
         self.start_owned_index_job(MAX_DEADLINE,JobMode::Compact)
     }
     fn start_owned_index_job(&self,timeout:Duration,mode:JobMode)->Result<IndexJob,RecordError> {
-        let automatic=mode==JobMode::Automatic;
         if timeout.is_zero() || timeout > MAX_DEADLINE {
             return Err(RecordError::Rejected("index build deadline must be within 1ns..=300s".into()));
         }
         let worker = WORKERS.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
+        self.start_index_job_with_worker(timeout,mode,worker)
+    }
+    pub(super) fn start_automatic_with_worker(&self,worker:tokio::sync::OwnedSemaphorePermit)->Result<IndexJob,RecordError> {
+        self.start_index_job_with_worker(MAX_DEADLINE,JobMode::Automatic,worker)
+    }
+    fn start_index_job_with_worker(&self,timeout:Duration,mode:JobMode,worker:tokio::sync::OwnedSemaphorePermit)->Result<IndexJob,RecordError> {
+        let automatic=mode==JobMode::Automatic;
         let admission = self.admission.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
         let writer = self.writer.clone();
         let recovery_writer = writer.clone();
@@ -444,7 +450,8 @@ impl RecordPartition {
             }
           };
           if automatic {
-              let outcome=match &result {Ok(_)=>"installed",Err(RecordError::Busy)=>"busy",Err(RecordError::RecoveryRequired)=>"recovery_required",Err(RecordError::DurablePending(_))=>"durable_pending",Err(RecordError::OutcomeUnknown(_))=>"outcome_unknown",Err(_)=>"failed"};
+              #[cfg(test)]
+              let outcome=maintenance::worker_outcome(&result);
               #[cfg(test)]
               log::info!("record_maintenance event=worker_result outcome={outcome}");
               #[cfg(test)]
@@ -457,7 +464,7 @@ impl RecordPartition {
               let mut inner=recovery.lock().await;
               #[cfg(test)]
               drop(waiting);
-              log::info!("record_maintenance event=worker_finished outcome={} seq={}",outcome,inner.state.seq);
+              maintenance::log_worker_result(&result,inner.state.seq);
               inner.maintenance_scheduled=false;
               if result.is_ok(){inner.maintenance_requested=None;inner.maintenance_trim=None;inner.maintenance_compacted_bytes=Some(inner.journal.physical_bytes());}
           }
