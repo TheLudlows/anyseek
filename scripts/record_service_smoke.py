@@ -121,6 +121,12 @@ def main():
             for query, expected in [({'query':'alpha'},2), ({'query':'"alpha beta"'},1), ({'query':'alpha -beta'},1), ({'query':'missing'},0), ({'query':''},3), ({'query':'','filter':[{'Timestamp':{'field':'date','filter':{'start':2,'end':3}}}],'sort':[{'field':'date','order':'Ascending'}]},1)]:
                 q=call('POST','/api/v1/index/shared/query',{**query,'length':0},key=keys['b']);assert q['count_total']==expected and q['hits']==[],q
             q=call('POST','/api/v1/index/shared/query',{'query':'','sort':[{'field':'date','order':'Ascending'}],'offset':1,'length':1,'fields':['title']},key=keys['b']);assert q['hits'][0]['record']['record_id']=='r0' and q['hits'][0]['record']['document']=={'title':'Title 0'},q
+            omitted=call('POST','/api/v1/index/shared/query',{'query':'alpha beta'},key=keys['b'])
+            empty=call('POST','/api/v1/index/shared/query',{'query':'alpha beta','fields':[]},key=keys['b'])
+            assert omitted['hits']==empty['hits']
+            assert set(empty['hits'][0]['record']['document'])=={'body','title','date'}
+            hidden=call('POST','/api/v1/index/shared/query',{'query':'alpha beta','fields':['unindexed']},key=keys['b'])
+            assert hidden['hits'][0]['record']['document']=={}
             q=call('POST','/api/v1/index/shared/query',{'query':'','filter':[{'Timestamp':{'field':'date','filter':{'start':2,'end':3}}}]},key=keys['b']);assert [h['record']['record_id'] for h in q['hits']]==['r0'],q
             write_one(call, '/api/v1/index/shared', {**writes[0],'operation_id':operation(),'routing_key':'obsolete'}, key=keys['b'], status=400)
             # Removed aliases must not accept writes; reads remain covered below.

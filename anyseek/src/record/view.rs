@@ -662,7 +662,7 @@ mod tests {
                 result
                     .hits
                     .into_iter()
-                    .map(|hit| (hit.record.record_id, hit.record.version, hit.score))
+                    .map(|hit| (hit.record.record_id.clone(), hit.record.version, hit.score))
                     .collect::<Vec<_>>()
             };
             assert_eq!(hits(actual), hits(expected));

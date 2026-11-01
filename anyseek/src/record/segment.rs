@@ -200,7 +200,7 @@ mod tests {
                     let root=root_index.read().await;let shard=root.segments[hit.doc_id%2].vector.read().await;
                     mapped.push((shard.active.as_ref().unwrap().keys[hit.doc_id/2].clone(),hit.score));
                 }
-                let wanted:Vec<_>=expected.hits.into_iter().map(|hit|(hit.record.record_id,hit.score)).collect();
+                let wanted:Vec<_>=expected.hits.into_iter().map(|hit|(hit.record.record_id.clone(),hit.score)).collect();
                 if mode == SearchMode::Lexical && order.first().is_some_and(|s| s.field == "_score") {
                     // Different scores: b has the least term density, then e,
                     // then a's repeated alpha. Ascending score must keep b.

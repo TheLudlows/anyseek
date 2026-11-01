@@ -25,10 +25,16 @@ async fn vector_io_waits_before_identity_and_metadata_growth() {
     // Force capacity growth with one row rather than a 65K-row workload.
     component.write().await.facets_file_mmap = memmap2::MmapOptions::new().len(1).map_anon().unwrap();
     let held = scope.io().unwrap(); let cursors = Cursors::default();
-    let mut pending = Box::pin(scope.clone().run(engine.append(input(&config),&cursors)));
+    let queued = scope.clone().run(async { input(&config) }).await;
+    let bytes = queued._memory.bytes();
+    let remaining = scope.bytes(2048 * 1024 * 1024 - bytes).unwrap();
+    assert!(scope.bytes(1).is_err());
+    let mut pending = Box::pin(scope.clone().run(engine.append(queued,&cursors)));
     assert!(tokio::time::timeout(std::time::Duration::from_millis(20),&mut pending).await.is_err());
     assert!(component.try_read().is_err(), "guard acquired before I/O wait");
     drop(pending); // Cancellation before admission cannot change identity or mmap.
+    assert!(scope.bytes(bytes).is_ok(), "cancelled input releases its retained lease");
+    drop(remaining);
     { let shard = component.read().await;
       assert_eq!(shard.active.as_ref().unwrap().keys.len(),0);
       assert_eq!(shard.indexed_doc_count,0); assert_eq!(shard.facets_file_mmap.len(),1); assert!(!shard.failed); }
@@ -66,7 +72,12 @@ async fn vector_real_metadata_io_failure_still_fences_component_and_cursor() {
       shard.facets_file_mmap = memmap2::MmapOptions::new().len(1).map_anon().unwrap();
       shard.readonly_metadata_for_test(); }
     let cursors = Cursors::default();
-    assert!(scope.clone().run(engine.append(input(&config),&cursors)).await.is_err());
+    let queued = scope.clone().run(async { input(&config) }).await;
+    let bytes = queued._memory.bytes();
+    let remaining = scope.bytes(2048 * 1024 * 1024 - bytes).unwrap();
+    assert!(scope.clone().run(engine.append(queued,&cursors)).await.is_err());
+    assert!(scope.bytes(bytes).is_ok(), "failed consumer releases its input");
+    drop(remaining);
     assert!(component.read().await.failed); assert!(cursors.error().is_some());
     assert_eq!(cursors.vector.load(Ordering::Acquire),0);
     assert!(scope.io().is_ok());
@@ -124,4 +135,39 @@ async fn successor_component_creation_waits_before_touching_candidate_and_keeps_
     scope.clone().run(index.commit()).await.unwrap();
     assert_eq!(index.read().await.segments[0].vector.read().await.indexed_doc_count,1);
     assert!(cursors.error().is_none()); assert!(scope.io().is_ok());
+}
+
+#[tokio::test(flavor="current_thread")]
+async fn queued_projection_ignores_unindexed_body_and_rolls_back_partial_admission() {
+    let (_root,index,config,_engine,scope) = fixture().await;
+    let native = index.read().await.segments[0].lexical.clone();
+    scope.clone().run(async {
+        let small: Document = serde_json::from_value(serde_json::json!({
+            "body":"alpha", "vector":[2.0,0.0], "number":42, "payload":"a"
+        })).unwrap();
+        let mut large = small.clone();
+        large.insert("payload".into(), serde_json::json!("x".repeat(256 * 1024)));
+        let identity = || lexical::Identity { id:"row".into(), version:1, revision:1 };
+        let lexical = Input::admitted(&native, identity(), &small).unwrap();
+        let vector = Input::vector(&config, identity(), 0, &small).unwrap();
+        let large_lexical = Input::admitted(&native, identity(), &large).unwrap();
+        let large_vector = Input::vector(&config, identity(), 0, &large).unwrap();
+        assert_eq!(lexical.document, large_lexical.document);
+        assert_eq!(vector.document, large_vector.document);
+        assert_eq!(lexical._memory.bytes(), large_lexical._memory.bytes());
+        assert_eq!(vector._memory.bytes(), large_vector._memory.bytes());
+        assert!(build_budget::document_estimate(&large, &[]).unwrap()
+            > build_budget::document_estimate(&small, &[]).unwrap() + 8 * 1024 * 1024 - 1024);
+        let bytes = vector._memory.bytes();
+        drop((lexical, vector, large_lexical, large_vector));
+        let remaining = scope.bytes(2048 * 1024 * 1024 - bytes).unwrap();
+        let partial = (|| -> Result<Vec<Input>, RecordError> {
+            let first = Input::vector(&config, identity(), 0, &large)?;
+            let second = Input::admitted(&native, identity(), &large)?;
+            Ok(vec![first, second])
+        })();
+        assert!(partial.is_err());
+        assert!(scope.bytes(bytes).is_ok(), "failed second projection drops the first");
+        drop(remaining);
+    }).await;
 }

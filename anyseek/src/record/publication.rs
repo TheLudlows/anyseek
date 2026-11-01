@@ -9,7 +9,13 @@ use super::*;
 impl replay::Context<'_> {
     pub(super) async fn publish_prepared(&mut self,applied:&Applied,snapshot_bytes:usize,prepared:Option<state_memory::Prepared>)->Result<(),RecordError>{
         let receipt = &applied.receipt;
-        let document = enrichment::document(self.state.records.get(&receipt.record_id), &applied.request)?;
+        // Prepared owns the complete canonical document. Borrow it instead of
+        // making an additional enrichment copy during index publication.
+        let prepared = prepared.ok_or_else(|| {
+            log::error!("Record prepared ownership missing at sequence {}", receipt.seq);
+            RecordError::DurablePending(receipt.seq)
+        })?;
+        let document = prepared.record.document.as_ref();
         let hiding = applied.request.vector_patch.is_none() && (self
                 .state
                 .records
@@ -24,7 +30,21 @@ impl replay::Context<'_> {
         // Updating the source replaces its own ordinal but keeps the new source visible.
         if document.is_some() { affected.remove(&receipt.record_id); }
         let old_location = self.locations.get(&receipt.record_id).copied();
-        if let Some(document) = &document {
+        if let Some(document) = document {
+            // Admit the full temporal/index input before cloning it. Four
+            // bounded synthetic time fields add at most 8 KiB at the same 32x
+            // logical expansion. Queue projections and analysis own other leases.
+            let (_input, _scope) = (|| -> Result<_, RecordError> {
+                let bytes = build_budget::document_estimate(document, &[])?
+                    .checked_add(8192).ok_or_else(|| storage("index input estimate overflow"))?;
+                let input = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
+                let scope = crate::resources::Scope::current()
+                    .map(|scope| scope.bytes(bytes)).transpose().map_err(storage)?;
+                Ok((input, scope))
+            })().map_err(|error| {
+                log::error!("Record input admission failed at sequence {}: {:?}", receipt.seq, error);
+                RecordError::DurablePending(receipt.seq)
+            })?;
             let id=self.index.append(receipt.record_id.clone(),receipt.version,receipt.seq,temporal::indexed(document, &temporal::retained(self.state.records.get(&receipt.record_id), &applied.request, applied.observed_time_ms).map_err(|_| RecordError::DurablePending(receipt.seq))?, if applied.request.vector_patch.is_some() { self.state.records[&receipt.record_id].ingested_at_ms } else { applied.observed_time_ms })).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
             #[cfg(test)]
             if self.fail_publication_stage == 1 {
@@ -48,7 +68,7 @@ impl replay::Context<'_> {
         if self.fail_publication_stage == 2 {
             return Err(RecordError::DurablePending(receipt.seq));
         }
-        apply_prepared(&mut *self.state, applied, prepared).map_err(|_| RecordError::DurablePending(receipt.seq))?;
+        apply_prepared(&mut *self.state, applied, Some(prepared)).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         self.graph_cache.insert(&self.state.records[&receipt.record_id]).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         *self.snapshot_bytes = snapshot_bytes;
         #[cfg(test)]

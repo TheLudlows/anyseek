@@ -651,7 +651,7 @@ async fn native_unigram_bm25f_matches_record_scores_at_the_vector_cut() {
         let expected: Vec<_> = expected
             .hits
             .into_iter()
-            .map(|h| (h.record.record_id, h.score))
+            .map(|h| (h.record.record_id.clone(), h.score))
             .collect();
         assert_eq!(actual, expected);
         assert_eq!(vectors.hits.len(), 4);
