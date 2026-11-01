@@ -197,31 +197,6 @@ pub(crate) async fn search(
             ..Default::default()
         });
     }
-    let lexical_counts = std::cell::RefCell::new(vec![0usize; n]);
-    let (lex_count, hits) = corpus.score_groups(
-        plan.predicate.as_ref(),
-        &plan.scores,
-        &boosts,
-        config.index.field_length_normalization.clone(),
-        MAX_POPULATION,
-        |id| {
-            if !allowed.contains(id) { return false; }
-            lexical_counts.borrow_mut()[locations[id] % n] += 1;
-            true
-        },
-    )?;
-    let mut lexical = hits
-        .into_iter()
-        .map(|hit| crate::min_heap::Result {
-            doc_id: locations[&hit.identity],
-            score: hit.score,
-            #[cfg(feature = "vb")]
-            lexical_score: hit.score,
-            #[cfg(feature = "vb")]
-            source: crate::vector::ResultSource::Lexical,
-            ..Default::default()
-        })
-        .collect::<Vec<_>>();
     let sorts = sort
         .iter()
         .filter_map(|s| {
@@ -239,7 +214,34 @@ pub(crate) async fn search(
     let order = |a: crate::min_heap::Result, b: crate::min_heap::Result| {
         crate::min_heap::result_ordering_root(&shards, text.is_empty(), &sorts, b, a)
     };
-    lexical.sort_by(|a, b| order(*a, *b));
+    // The same user ordering selects candidates and orders the final result.
+    // Hybrid reranks this bounded lexical set by score only before global RRF.
+    let limit = if hybrid { rrf.keyword_candidates.unwrap_or(offset + length) }
+        else { offset + length }.min(MAX_POPULATION);
+    let mut candidates = std::collections::BinaryHeap::new();
+    let lexical_counts = std::cell::RefCell::new(vec![0usize; n]);
+    let lex_count = corpus.collect_scores(
+        plan.predicate.as_ref(), &plan.scores, &boosts,
+        config.index.field_length_normalization.clone(),
+        |id| {
+            if !allowed.contains(id) { return false; }
+            lexical_counts.borrow_mut()[locations[id] % n] += 1;
+            true
+        },
+        |identity, score| {
+            let hit = crate::min_heap::Result {
+                doc_id: locations[identity], score,
+                #[cfg(feature = "vb")]
+                lexical_score: score,
+                #[cfg(feature = "vb")]
+                source: crate::vector::ResultSource::Lexical,
+                ..Default::default()
+            };
+            Candidate { hit, order: &order }.retain(&mut candidates, limit);
+        },
+    )?;
+    let mut lexical = candidates.into_sorted_vec().into_iter()
+        .map(|candidate| candidate.hit).collect::<Vec<_>>();
     let mut result = ResultObject {
         original_query: text.clone(),
         query: text.clone(),
@@ -249,7 +251,6 @@ pub(crate) async fn search(
     };
     if hybrid {
         let mut fused = BTreeMap::<usize, crate::min_heap::Result>::new();
-        lexical.truncate(rrf.keyword_candidates.unwrap_or(offset + length));
         lexical.sort_by(|a, b| {
             crate::min_heap::rank_with_segments(&shards, b.score, b.doc_id, a.score, a.doc_id)
         });
@@ -345,4 +346,67 @@ fn validate_selection(
         }
     }
     Ok(())
+}
+
+// BinaryHeap keeps the worst retained candidate at the root. The ordering is
+// the existing final-result comparator (Less means better), including facets
+// and stable business IDs; no per-hit identity allocation is needed.
+struct Candidate<'a> {
+    hit: crate::min_heap::Result,
+    order: &'a dyn Fn(crate::min_heap::Result, crate::min_heap::Result) -> std::cmp::Ordering,
+}
+impl PartialEq for Candidate<'_> {
+    fn eq(&self, other: &Self) -> bool { self.cmp(other).is_eq() }
+}
+impl Eq for Candidate<'_> {}
+impl PartialOrd for Candidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for Candidate<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering { (self.order)(self.hit, other.hit) }
+}
+
+impl<'a> Candidate<'a> {
+    fn retain(self, heap: &mut std::collections::BinaryHeap<Self>, limit: usize) {
+        if heap.len() < limit {
+            heap.push(self);
+        } else if let Some(mut worst) = heap.peek_mut() {
+            if self.cmp(&worst).is_lt() { *worst = self; }
+        }
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_candidates_match_full_sort() {
+        let order = |a: crate::min_heap::Result, b: crate::min_heap::Result| {
+            crate::min_heap::rank_ordering(b.score, b.doc_id, a.score, a.doc_id)
+        };
+        // Reverse identities force replacements at equal scores. Ascending scores
+        // force replacements too; neither traversal may grow storage with hits.
+        for tied in [false, true] {
+            let full = (0..4096).rev().map(|doc_id| crate::min_heap::Result {
+                doc_id, score: if tied { 1.0 } else { (4096 - doc_id) as f32 },
+                ..Default::default()
+            }).collect::<Vec<_>>();
+            let mut expected = full.clone();
+            expected.sort_by(|a, b| order(*a, *b));
+            for limit in [0, 1, 37] {
+                let mut heap = std::collections::BinaryHeap::new();
+                for hit in &full {
+                    Candidate { hit: *hit, order: &order }.retain(&mut heap, limit);
+                    assert!(heap.len() <= limit);
+                    assert!(heap.capacity() <= (2 * limit).max(4));
+                }
+                let actual = heap.into_sorted_vec();
+                assert_eq!(actual.len(), limit);
+                for (actual, expected) in actual.iter().zip(&expected) {
+                    assert_eq!((actual.hit.doc_id, actual.hit.score), (expected.doc_id, expected.score));
+                }
+            }
+        }
+    }
 }

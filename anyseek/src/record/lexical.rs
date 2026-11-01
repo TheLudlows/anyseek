@@ -519,6 +519,7 @@ impl Bm25StatisticsProvider for ActiveView<'_> {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq)]
 pub(super) struct Hit {
     pub identity: Identity,

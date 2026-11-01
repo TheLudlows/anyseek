@@ -5,7 +5,7 @@ use anyseek::record::{RecordPartition, RecordQuery};
 use anyseek::{
     index::{Clustering, Document, FrequentwordType, IndexMetaObject, LexicalSimilarity,
         NgramSet, SchemaField, StopwordType, TokenizerType},
-    search::{RrfOptions, QueryType,  ResultType, SearchMode},
+    search::{RrfOptions, QueryType, ResultType, SearchMode, ResultSort, SortOrder},
     vector::{Embedding, Inference, Precision, Quantization},
     vector_similarity::{AnnMode, VectorSimilarity},
 };
@@ -19,6 +19,7 @@ fn inference() -> Inference {
 fn schema() -> Vec<SchemaField> {
     serde_json::from_value(json!([
         {"field":"body","field_type":"Text","store":true,"index_lexical":true},
+        {"field":"priority","field_type":"Int","store":true,"facet":true,"index_lexical":false},
         {"field":"vector","field_type":"Json","store":true,"index_lexical":false,"index_vector":true}
     ])).unwrap()
 }
@@ -70,7 +71,11 @@ async fn weighted_global_shards() {
         // Each component contains at most six candidates in the three-component case.
         for component in 0..shards {
             let start = component * (18 / shards);
-            records::insert(&index, (start..start + 18 / shards).map(|i| document(if i % 2 == 0 {"alpha"} else {"beta"}, json!([1,0,0]))).collect()).await.unwrap();
+            records::insert(&index, (start..start + 18 / shards).map(|i| {
+                let mut doc = document(if i % 2 == 0 {"alpha"} else {"beta"}, json!([1,0,0]));
+                doc.insert("priority".into(), json!(i));
+                doc
+            }).collect()).await.unwrap();
             if component + 1 < shards { index.compact_journal().await.unwrap(); }
         }
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -110,6 +115,27 @@ async fn weighted_global_shards() {
         assert_eq!(page_default.hits.iter().map(|hit| (hit.record.record_id.parse::<usize>().unwrap(),hit.score.to_bits())).collect::<Vec<_>>(), expected.iter().skip(1).map(|(id,score)| (*id,score.to_bits())).collect::<Vec<_>>());
         let options = RrfOptions { constant:5.0, keyword_weight:0.5, vector_weight:1.0, keyword_candidates:Some(2), vector_candidates:Some(3) };
         let result = query(&index, weighted(options), vector.clone()).await;
+        // User facet order selects lexical IDs 16,14 despite their late score
+        // ranks. Global score/ID reranking assigns 14 rank 0 and 16 rank 1;
+        // vector candidates remain 0,1,2. Final facet order pages [16,14,2,1,0].
+        let sorted = index.query(RecordQuery {
+            text:"alpha".into(), vector:vector.clone(), query_type:QueryType::Union,
+            mode:weighted(options), offset:1, length:2, result_type:ResultType::TopkCount,
+            fields:vec![], filters:vec![], temporal:None,
+            sort:vec![ResultSort { field:"priority".into(), order:SortOrder::Descending }],
+        }).await.unwrap();
+        assert_eq!(sorted.count_total, 18);
+        assert_eq!(sorted.hits.iter().map(|hit| (hit.record.record_id.parse::<usize>().unwrap(), hit.score))
+            .collect::<Vec<_>>(), vec![(14, 0.5/5.0), (2, 1.0/7.0)]);
+        for (hit, channel, rank) in [(&sorted.hits[0], "lexical", 0), (&sorted.hits[1], "vector", 2)] {
+            assert_eq!(hit.channels.len(), 1);
+            let explanation = &hit.channels[0];
+            assert_eq!((explanation.channel.as_str(), explanation.rank, explanation.rank_basis.as_str()),
+                (channel, rank, "score"));
+            assert_eq!(explanation.rrf_contribution, Some(hit.score));
+            assert!(explanation.raw_score.unwrap().is_finite());
+        }
+
         // Keyword ranks: 0,2. Vector ranks: 0,1,2. Missing keyword hit 1 contributes only vector.
         let scores: std::collections::BTreeMap<_,_> = result.hits.iter().map(|r|(r.record.record_id.parse::<usize>().unwrap(),r.score)).collect();
         assert_eq!(scores.len(),3);
