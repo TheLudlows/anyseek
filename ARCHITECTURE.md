@@ -21,7 +21,7 @@ AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 
 
 ## 写入与查询
 
-`commit_writes` 与 HTTP `/ingest` 在业务判定和权威持久提交后逐项返回 committed、rejected、outcome_unknown 或 not_attempted；只有 committed 带业务回执。全文与向量消费者异步推进，持久提交不保证对应索引已可查。`/doc`、`/batch` 与 Rust `write` 继续提供同步写入入口。只有一层 Record WAL，不再维护独立 Intake 日志。
+`commit_writes` 与 HTTP `/ingest` 在业务判定和权威持久提交后逐项返回 committed、rejected、outcome_unknown 或 not_attempted；只有 committed 带业务回执。全文与向量消费者异步推进，持久提交不保证对应索引已可查。`/batch` 提供唯一同步 HTTP 写入入口，内部复用 `RecordPartition::write`。只有一层 Record WAL，不再维护独立 Intake 日志。
 
 查询短暂持有 Record guard 捕获派生拓扑，在 guard 外评分，完成后重验当前记录版本、fingerprint、删除及来源可见性。组件变化不依靠物理 ordinal 充当稳定身份。纯向量 collection 也能按 metadata 浏览；普通查询允许观察不同消费者的进度，提交与各索引水位分别表达。
 

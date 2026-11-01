@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from anyseek_client import write_one
 
 
 def main():
@@ -46,16 +47,16 @@ def main():
         log = open(Path(temporary) / 'server.log', 'w+')
         process = None
 
-        def call(method, path, body=None, key=tenant, expected=(200,)):
+        def call(method, path, body=None, key=tenant, status=200):
             request = urllib.request.Request(base + path, method=method,
                 data=None if body is None else json.dumps(body).encode(),
                 headers={'apikey': key, 'Content-Type': 'application/json'})
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
-                    status, raw = response.status, response.read()
+                    code, raw = response.status, response.read()
             except urllib.error.HTTPError as error:
-                status, raw = error.code, error.read()
-            assert status in expected, (method, path, status, raw)
+                code, raw = error.code, error.read()
+            assert code in (status if isinstance(status, tuple) else (status,)), (method, path, code, status, raw)
             return json.loads(raw)
 
         def wait(predicate):
@@ -89,7 +90,7 @@ def main():
             create = {'operation_id': operation(), 'collection_id': 'c',
                       'config': {'index_name': 'reclamation', 'schema': [{'field': 'body', 'field_type': 'Text'}]}}
             call('POST', '/api/v1/index', create)
-            call('POST', '/api/v1/index/c/doc', {'operation_id': operation(), 'record_id': 'r',
+            write_one(call, '/api/v1/index/c', {'operation_id': operation(), 'record_id': 'r',
                                                'expected': 'Absent', 'document': {'body': 'old'}})
             old = metadata()[0]
             generation = f"{old['generation']:016x}"
@@ -99,7 +100,7 @@ def main():
             call('DELETE', '/api/v1/index/c', delete)
             create['operation_id'] = operation()
             call('POST', '/api/v1/index', create)
-            call('POST', '/api/v1/index/c/doc', {'operation_id': operation(), 'record_id': 'r',
+            write_one(call, '/api/v1/index/c', {'operation_id': operation(), 'record_id': 'r',
                                                'expected': 'Absent', 'document': {'body': 'new'}})
             time.sleep(1.2)
             assert old_path.exists(), 'live backup must protect the deleted incarnation'

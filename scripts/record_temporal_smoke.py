@@ -8,6 +8,7 @@ import os
 import time
 import urllib.error
 from record_service_smoke import operation
+from anyseek_client import write_one
 
 
 def exercise(call, restart_with, directory, faults):
@@ -30,9 +31,9 @@ def exercise(call, restart_with, directory, faults):
     source = {'operation_id': operation(), 'record_id': 's',  'expected': 'Absent',
               'document': {'body': 'temporal source'}, 'system': {'kind': 'source'},
               'temporal': {'event_time_ms': 100, 'valid_from_ms': 100, 'valid_to_ms': 200, 'expire_at_ms': now + (100 if faults else 86400000)}}
-    receipt = call('POST', endpoint + '/doc', source)['receipt']
+    receipt = write_one(call, endpoint, source)['receipt']
     for rid, parent in [('d', 's'), ('i', 'd')]:
-        call('POST', endpoint + '/doc', {'operation_id': operation(), 'record_id': rid,  'expected': 'Absent',
+        write_one(call, endpoint, {'operation_id': operation(), 'record_id': rid,  'expected': 'Absent',
              'document': {'body': 'temporal derived'}, 'system': {'kind': 'derived', 'evidence_refs': [{'record_id': parent,  'version': 1}]}})
     query = {'query': 'temporal', 'temporal': {'event': {'from_ms': 100, 'to_ms': 101}, 'valid_at_ms': 100}}
     result = call('POST', endpoint + '/query', query)
@@ -51,8 +52,8 @@ def exercise(call, restart_with, directory, faults):
             call('GET', endpoint + '/doc/' + rid, status=404)
             assert call('GET', endpoint + '/doc/' + rid + '/status')['visibility'] == 'expired'
         assert call('POST', endpoint + '/query', {})['statistics']['active_records'] == 0
-        assert call('POST', endpoint + '/doc', source)['receipt'] == receipt
-        call('POST', endpoint + '/doc', {**source, 'operation_id': operation(), 'expected': {'Match': 2}, 'temporal': {'expire_at_ms': now + 10000}}, status=400)
+        assert write_one(call, endpoint, source)['receipt'] == receipt
+        write_one(call, endpoint, {**source, 'operation_id': operation(), 'expected': {'Match': 2}, 'temporal': {'expire_at_ms': now + 10000}}, status=400)
         # Restart and clock-uncertainty keep expired records absent; a backward
         # jump cannot restore data, and a larger jump is rejected as uncertain.
         assert call('POST', endpoint + '/query', {})['count_total'] == 0
@@ -69,7 +70,7 @@ def exercise(call, restart_with, directory, faults):
             endpoint = '/api/v1/index/' + cid
             call('POST', '/api/v1/index', {'operation_id': operation(), 'collection_id': cid, 'config': config})
             write = {**source, 'operation_id': operation(), 'temporal': {'expire_at_ms': now + 200}}
-            original = call('POST', endpoint + '/doc', write)['receipt']
+            original = write_one(call, endpoint, write)['receipt']
             restart_with({**env, 'ANYSEEK_TEMPORAL_FAULT': stage})
             clock(now + 200)
             if stage.startswith('crash_'):
@@ -86,7 +87,7 @@ def exercise(call, restart_with, directory, faults):
             restart_with(env)
             assert call('POST', endpoint + '/query', {})['count_total'] == 0
             assert call('GET', endpoint + '/doc/s/status')['version'] == 2
-            assert call('POST', endpoint + '/doc', write)['receipt'] == original
+            assert write_one(call, endpoint, write)['receipt'] == original
             # Keep the trusted clock monotonic across fixtures.
             now += 1000
             clock(now + 101)

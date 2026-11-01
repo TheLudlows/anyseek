@@ -1,6 +1,6 @@
 # anyseek Record HTTP 服务
 
-`POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/doc` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
+`POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/batch` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
 
 默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。已实现 P1-A 与 P2 的来源/证据、来源修订、可选向量、TTL、实体/关系融合及逐命中解释。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
 
@@ -65,7 +65,7 @@ collection ID、record ID 是字符串业务身份，内部 DocID 不作为 HTTP
 - 写入：`{operation_id,record_id,expected,document}`。`document` 必须显式提供；对象完整替换，`null` 删除。
 - `expected` 为 `"Absent"`、`{"Match":N}` 或 `"Any"`。删除后重建继续推进版本，避免旧条件命中新内容。
 - 操作 ID 是 `{epoch,nonce}`，epoch 是自 Unix epoch 起的 UTC 日数。当前日和前一日可重试；正常当日签发至少有 24 小时窗口。控制操作保留 `sys:` nonce 前缀。
-- 同步 `/doc`、`/batch` 成功表示 durable + visible，不需随后 PATCH。`/ingest` 的 committed 项只保证持久业务结果，索引异步推进。PATCH collection 是在线完整 checkpoint，不是确认写入的第二步；操作历史由保留期限及安全 GC 条件决定，不能通过手工 checkpoint 清空窗口内回执。
+- 同步 `/batch` 成功表示 durable + visible，不需随后 PATCH。`/ingest` 的 committed 项只保证持久业务结果，索引异步推进。PATCH collection 是在线完整 checkpoint，不是确认写入的第二步；操作历史由保留期限及安全 GC 条件决定，不能通过手工 checkpoint 清空窗口内回执。
 
 发送前保存完整请求。重试必须复用原 ID、原条件和原内容；相同请求返回原回执，更换内容会冲突。不能因查询不到回执或操作过期就重新生成 ID 补写。
 
@@ -81,6 +81,12 @@ collection ID、record ID 是字符串业务身份，内部 DocID 不作为 HTTP
 UI 在发送前将原请求和未确认状态保存到 sessionStorage；丢响应、刷新、后续拒绝不会解锁未知写入。只有未经历未知结果的明确拒绝才能释放被拒绝项及未发送余项。客户端备份这些待处理请求的方式由调用方负责。
 
 集合活动记录数统一读取 `statistics.active_records`；索引消费进度通过 `/ingest` 查询。
+
+## 同步写入
+
+同步写入只提供 `POST /api/v1/index/{id}/batch`，单条也使用 `{"writes":[RecordWrite]}`；不再提供 `/doc` 的 POST/PATCH/DELETE 写入别名。读取 `/doc/{record_id}` 与状态查询保留。支持新增、expected 条件更新、显式 `document:null` 删除和 `vector_patch` 补写。
+
+每批 1..100 项，按序独立执行，非事务；已成功项不会回滚。外层非 2xx 是请求级失败；HTTP 200 仍须逐项检查 `results`：只有 `code=applied` 且带 `receipt` 才确认持久且可见。`conflict`/`rejected` 后继续；`outcome_unknown`、`durable_pending`、恢复要求或存储故障停止后续，尾部返回 `not_attempted`。结果未知不等于失败，重试必须保留原 Operation ID 和完整 RecordWrite。浏览器已有待确认请求只添加 batch 外层，不改变原始数字或身份。
 
 ## 异步索引写入
 
@@ -132,15 +138,15 @@ op = lambda: {'epoch':int(time.time()//86400), 'nonce':uuid.uuid4().hex}
 requests = {
     'create': {'operation_id':op(), 'collection_id':'demo', 'config':{
         'index_name':'Demo', 'schema':[{'field':'body','field_type':'Text'}]}},
-    'write': {'operation_id':op(), 'record_id':'welcome',
-              'expected':'Absent', 'document':{'body':'hello search'}}
+    'write': {'writes':[{'operation_id':op(), 'record_id':'welcome',
+              'expected':'Absent', 'document':{'body':'hello search'}}]}
 }
 for name, request in requests.items():
     with (Path('requests')/(name+'.json')).open('x') as output:
         json.dump(request, output)
 PY
 curl -X POST "$BASE/api/v1/index" -H "apikey: $API_KEY" -H 'Content-Type: application/json' --data-binary @requests/create.json
-curl -X POST "$BASE/api/v1/index/demo/doc" -H "apikey: $API_KEY" -H 'Content-Type: application/json' --data-binary @requests/write.json
+curl -X POST "$BASE/api/v1/index/demo/batch" -H "apikey: $API_KEY" -H 'Content-Type: application/json' --data-binary @requests/write.json
 curl -X POST "$BASE/api/v1/index/demo/query" -H "apikey: $API_KEY" -H 'Content-Type: application/json' -d '{"query":"hello"}'
 curl "$BASE/api/v1/index/demo/doc/welcome" -H "apikey: $API_KEY"
 ```
@@ -223,7 +229,7 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 
 当前来源、删除隐藏与独立恢复已合入；历史平台结果与系统断电限制见 [Record 语义](../../../docs/record-model.md)。
 
-沿用 `POST /api/v1/index/{collection_id}/doc`，在完整 Record 请求上增加可选 `system`：
+使用 `POST /api/v1/index/{collection_id}/batch`，将以下 RecordWrite 放入 `writes` 数组；完整 Record 请求可增加 `system`：
 
 ```json
 {

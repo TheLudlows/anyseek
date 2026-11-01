@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import uuid
 
-from anyseek_client import anyseekClient, check, operation_id
+from anyseek_client import anyseekClient, check, operation_id, WriteError
 
 
 def exercise(base, key, request_file):
@@ -47,6 +47,12 @@ def exercise(base, key, request_file):
     check(client.create_collection(saved['create'])['collection_id'] == collection, 'collection ID mismatch')
     receipt = client.write(collection, saved['writes'][0])
     check(client.write(collection, saved['writes'][0]) == receipt, 'retry changed receipt')
+    try:
+        client.write(collection, {**saved['writes'][0], 'operation_id': operation_id()})
+    except WriteError as error:
+        check(error.code == 'conflict' and error.status == 409, f'wrong item failure: {error.result}')
+    else:
+        raise AssertionError('HTTP 200 conflict was treated as success')
     result = client.batch(collection, {'writes': saved['writes'][1:]})
     check(not result['atomic'] and all(r['code'] == 'applied' for r in result['results']), f'batch failed: {result}')
     # No explicit checkpoint is needed for durability or visibility.

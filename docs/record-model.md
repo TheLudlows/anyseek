@@ -14,7 +14,7 @@ HTTP 请求、字段、配额和操作示例以[服务指南](../anyseek/src/ser
 
 | 结果 | 语义与处理 |
 | --- | --- |
-| 同步 `/doc`、`/batch`、Rust `write` 成功 | 权威已持久且同步派生应用完成 |
+| 同步 `/batch` 逐项 applied 回执、内部 `write` 成功 | 权威已持久且同步派生应用完成 |
 | `/ingest`、Rust `commit_writes` 的 committed 项 | 权威业务结果已持久，全文/向量异步消费；不保证该序号已经可搜索，见[进度与重试](../anyseek/src/server/README.md#异步索引写入) |
 | rejected / conflict / busy | 描述本次校验、条件或准入结果；不解除早先未知状态 |
 | outcome_unknown | 持久化或响应结果不明确；恢复后以原身份查账/重试 |

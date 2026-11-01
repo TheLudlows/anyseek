@@ -4,6 +4,7 @@ import concurrent.futures
 import os
 import time
 from record_service_smoke import operation
+from anyseek_client import write_one
 
 
 def exercise(call, restart_with, work, faults):
@@ -21,7 +22,7 @@ def exercise(call, restart_with, work, faults):
              'config': {'index_name': 'background index acceptance', 'schema': [{'field': 'body', 'field_type': 'Text'}]}})
         for identity, system in [('source', {'kind': 'source'}), ('derived', {'kind': 'derived',
              'evidence_refs': [{'record_id': 'source',  'version': 1}]})]:
-            call('POST', prefix + '/doc', {'operation_id': operation(), 'record_id': identity,
+            write_one(call, prefix, {'operation_id': operation(), 'record_id': identity,
                   'expected': 'Absent', 'document': {'body': 'alpha original'}, 'system': system})
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             # The accepted job may complete after revocation; its result remains deliverable.
@@ -34,10 +35,10 @@ def exercise(call, restart_with, work, faults):
                     time.sleep(.01)
                 request = {'operation_id': operation(), 'record_id': 'concurrent',
                            'expected': 'Absent', 'document': {'body': 'alpha concurrent'}}
-                receipt = pool.submit(call, 'POST', prefix + '/doc', request).result(timeout=5)['receipt']
+                receipt = pool.submit(write_one, call, prefix, request).result(timeout=5)['receipt']
                 deletion = {'operation_id': operation(), 'record_id': 'source',
                             'expected': {'Match': 1}, 'document': None}
-                pool.submit(call, 'PATCH', prefix + '/doc', deletion).result(timeout=5)
+                pool.submit(write_one, call, prefix, deletion).result(timeout=5)
                 page = pool.submit(call, 'POST', prefix + '/query', {'query': 'alpha'}).result(timeout=5)
                 assert [hit['record']['record_id'] for hit in page['hits']] == ['concurrent'], page
                 pool.submit(call, 'DELETE', '/api/v1/apikey', {'operation_id': operation(),
@@ -47,7 +48,7 @@ def exercise(call, restart_with, work, faults):
                 pause.unlink(missing_ok=True)
             job.result(timeout=30)
         restart_with({})
-        assert call('POST', prefix + '/doc', request)['receipt'] == receipt
+        assert write_one(call, prefix, request)['receipt'] == receipt
         page = call('POST', prefix + '/query', {'query': 'alpha'})
         assert [hit['record']['record_id'] for hit in page['hits']] == ['concurrent'], page
         call('POST', prefix + '/query', {'query': 'alpha'}, key=key, status=403)

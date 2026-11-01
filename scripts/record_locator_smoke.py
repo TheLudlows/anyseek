@@ -4,13 +4,14 @@ import hashlib
 import http.client
 import os
 from record_service_smoke import operation
+from anyseek_client import write_one
 
 
 def exercise(call,restart_with,faults):
     endpoint='/api/v1/index/locators'
     call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'locators','config':{'index_name':'Locators','schema':[{'field':'body','field_type':'Text','store':True}]}})
     source={'operation_id':operation(),'record_id':'s','expected':'Absent','document':{'body':'A中éZ','pages':['第一页','page two']},'system':{'kind':'source'}}
-    call('POST',endpoint+'/doc',source)
+    write_one(call, endpoint, source)
     ref={'record_id':'s','version':1,'locator':{'kind':'utf8','field':'body','start':1,'end':6}}
     excerpt=call('POST',endpoint+'/evidence',ref)
     assert excerpt['text']=='中é' and excerpt['content_sha256']==hashlib.sha256('A中éZ'.encode()).hexdigest()
@@ -19,22 +20,22 @@ def exercise(call,restart_with,faults):
     def derived(rid,reference=ref):
         return {'operation_id':operation(),'record_id':rid,'expected':'Absent','document':{'body':'located proof'},'system':{'kind':'derived','evidence_refs':[reference]}}
     bad={**ref,'locator':{**ref['locator'],'start':2}}
-    call('POST',endpoint+'/doc',derived('bad',bad),status=400)
-    request=derived('d');receipt=call('POST',endpoint+'/doc',request)['receipt']
-    assert call('POST',endpoint+'/doc',request)['receipt']==receipt
+    write_one(call, endpoint, derived('bad',bad), status=400)
+    request=derived('d');receipt=write_one(call, endpoint, request)['receipt']
+    assert write_one(call, endpoint, request)['receipt']==receipt
     if faults:
         for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
             request=derived('d-'+stage)
             restart_with({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':request['operation_id']['nonce']})
             if stage.startswith('crash_'):
-                try:call('POST',endpoint+'/doc',request)
+                try:write_one(call, endpoint, request)
                 except (OSError,http.client.HTTPException):pass
                 else:raise AssertionError('expected located evidence process exit')
-            else:assert call('POST',endpoint+'/doc',request,status=503)['code'] in ('outcome_unknown','durable_pending')
-            restart_with({});receipt=call('POST',endpoint+'/doc',request)['receipt']
-            assert call('POST',endpoint+'/doc',request)['receipt']==receipt
+            else:assert write_one(call, endpoint, request, status=503)['code'] in ('outcome_unknown','durable_pending')
+            restart_with({});receipt=write_one(call, endpoint, request)['receipt']
+            assert write_one(call, endpoint, request)['receipt']==receipt
             assert call('POST',endpoint+'/evidence',ref)['text']=='中é'
-    call('POST',endpoint+'/doc',{**source,'operation_id':operation(),'expected':{'Match':1},'document':{'body':'new'}})
+    write_one(call, endpoint, {**source,'operation_id':operation(),'expected':{'Match':1},'document':{'body':'new'}})
     call('GET',endpoint+'/doc/d',status=404)
     assert call('POST',endpoint+'/evidence',ref)['content_sha256']==excerpt['content_sha256']
     call('PATCH',endpoint,{})
@@ -45,7 +46,7 @@ def exercise(call,restart_with,faults):
     call('DELETE','/api/v1/apikey',{'operation_id':operation(),'key_id':'locator-reader'})
     call('POST',endpoint+'/evidence',ref,key=reader,status=403)
     archive=call('POST',endpoint+'/backup',{'operation_id':operation()})
-    call('POST',endpoint+'/doc',{'operation_id':operation(),'record_id':'s','expected':{'Match':2},'document':None})
+    write_one(call, endpoint, {'operation_id':operation(),'record_id':'s','expected':{'Match':2},'document':None})
     call('POST',endpoint+'/evidence',ref,status=409)
     call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'locators-copy','backup_id':archive['backup_id']})
     call('POST','/api/v1/index/locators-copy/evidence',ref,status=409)

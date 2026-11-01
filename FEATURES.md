@@ -40,7 +40,6 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 | GET | `/api/v1/index/{id}` | 配置和活动统计 |
 | PATCH | `/api/v1/index/{id}` | 在线完整 checkpoint，返回 visible_seq |
 | DELETE | `/api/v1/index/{id}` | Tenant Key 删除自己的集合，body `{operation_id}` |
-| POST/PATCH/DELETE | `/api/v1/index/{id}/doc` | 条件 RecordWrite；对象完整替换、显式 document:null 删除、vector_patch 后补 |
 | GET | `/api/v1/index/{id}/doc/{record_id}/status` | 元数据可见原因及 pending_vector_fields，不返回隐藏正文 |
 | GET | `/api/v1/index/{id}/doc/{record_id}` | 原始 Record；可用 `?fields=body,title` 投影 |
 | POST | `/api/v1/index/{id}/ingest` | `{records:[RecordWrite,...]}`，1..64 非原子逐项业务结果；索引异步，HTTP 200 不代表全部成功 |
@@ -51,7 +50,7 @@ HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低�
 | POST | `/api/v1/index/{id}/entities` | 稳定 ID 实体目录，同视图分页 |
 | POST | `/api/v1/index/{id}/neighbors` | 精确版本 seeds、有预算一跳、exact/window 计数 |
 | POST | `/api/v1/index/{id}/delete-plan` | all/ids/lexical query 选择；返回精确版本目标 |
-| POST | `/api/v1/index/{id}/batch` | `{writes:[...]}`，1..100 独立操作，非原子 |
+| POST | `/api/v1/index/{id}/batch` | `{writes:[...]}`，单条或 1..100 独立条件写入、删除、vector_patch；逐项回执，非原子 |
 | GET | `/api/v1/index/{id}/operation/{epoch}/{nonce}` | 已授权数据回执查询，缺席不证明失败 |
 | GET | `/api/v1/catalog/operation/{epoch}/{nonce}` | master 控制操作查询 |
 | POST | `/api/v1/index/{id}/backup` | 独立 collection 快照；同操作 ID 保留原快照 |

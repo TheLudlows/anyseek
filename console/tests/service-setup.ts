@@ -76,7 +76,10 @@ export default async function setup() {
       });
       if (!response.ok)
         throw new Error("Fixture API " + path + ": " + (await response.text()));
-      return response.json();
+      const result = await response.json();
+      if (path.endsWith("/batch") && !result.results.every((row: {code: string; receipt?: object}) => row.code === "applied" && row.receipt))
+        throw new Error("Fixture batch failed: " + JSON.stringify(result));
+      return result;
     };
     await post(
       "tenants",
@@ -146,7 +149,7 @@ export default async function setup() {
       ],
     ];
     for (let i = 0; i < documents.length; i++)
-      await post("index/knowledge_base/doc", {
+      await post("index/knowledge_base/batch", { writes: [{
         operation_id: operation(),
         record_id: "guide_" + (i + 1),
         expected: "Absent",
@@ -156,7 +159,7 @@ export default async function setup() {
           vector: [1, 0, i / 10],
           url: "https://example.com/guide/" + (i + 1),
         },
-      });
+      }] });
     process.env.ANYSEEK_TEST_KEY = key;
     process.env.ANYSEEK_TEST_MASTER = master;
     return stop;
