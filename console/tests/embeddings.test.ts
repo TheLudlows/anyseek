@@ -1,8 +1,9 @@
 import { beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  clearEmbeddingConfig, clearEmbeddingKeys, embedTexts, embeddingKey,
-  loadEmbeddingConfig, saveEmbeddingConfig, validateEmbeddingConfig,
+  clearEmbeddingConfig, clearEmbeddingKeys, clearEmbeddingService, embedTexts, embeddingKey,
+  loadEmbeddingConfig, loadEmbeddingService, saveEmbeddingConfig, saveEmbeddingMapping,
+  saveEmbeddingService, sessionEmbeddingKey, validateEmbeddingConfig,
   type EmbeddingConfig,
 } from "../src/embeddings.ts";
 import { generatePendingEmbeddings, prepareEmbeddedWrites } from "../src/embedding-writes.ts";
@@ -43,7 +44,7 @@ test("config is local, secrets stay in memory or opted-in session and never cros
   assert.equal(session.length, 0);
   assert.equal(embeddingKey("owner", collection.id, config), "model-secret");
   assert.equal(embeddingKey("other", collection.id, config), "");
-  assert.equal(embeddingKey("owner", "other", config), "");
+  assert.equal(embeddingKey("owner", "other", config), "model-secret");
   assert.equal(embeddingKey("owner", collection.id, { ...config, endpoint: "https://other.example/embeddings" }), "");
   assert.equal(loadEmbeddingConfig("other", collection.id), null);
   assert.ok(!JSON.stringify([...local.data]).includes("secret"));
@@ -55,6 +56,73 @@ test("config is local, secrets stay in memory or opted-in session and never cros
   assert.ok(loadEmbeddingConfig("owner", collection.id));
   clearEmbeddingConfig("owner", collection.id);
   assert.equal(loadEmbeddingConfig("owner", collection.id), null);
+  assert.ok(loadEmbeddingService("owner"));
+});
+
+test("one shared service supports independent collection mappings and survives clearing a collection", () => {
+  const service = saveEmbeddingService("owner", config, "shared-key", true);
+  assert.equal(loadEmbeddingConfig("owner", collection.id), null);
+  assert.deepEqual(loadEmbeddingService("owner"), service);
+  assert.equal(loadEmbeddingService("other"), null);
+  saveEmbeddingMapping("owner", collection, { ...service, textFields: ["body"], vectorField: "vector" });
+  const second = { ...collection, id: "articles", schema: [
+    { field: "content", field_type: "String" }, { field: "embedding", field_type: "Json", index_vector: true },
+  ] };
+  const mapping = saveEmbeddingMapping("owner", second, { ...service, textFields: ["content"], vectorField: "embedding" });
+  assert.deepEqual(loadEmbeddingConfig("owner", second.id), mapping);
+  assert.deepEqual(loadEmbeddingConfig("owner", collection.id)?.textFields, ["body"]);
+  assert.equal(embeddingKey("owner", second.id, mapping), "shared-key");
+  assert.equal(sessionEmbeddingKey("owner", second.id, mapping), true);
+  clearEmbeddingConfig("owner", collection.id);
+  assert.equal(embeddingKey("owner", second.id, mapping), "shared-key");
+  assert.ok(loadEmbeddingService("owner"));
+  assert.ok(loadEmbeddingConfig("owner", second.id));
+  clearEmbeddingService("owner");
+  assert.equal(loadEmbeddingService("owner"), null);
+  assert.equal(embeddingKey("owner", second.id, mapping), "");
+  assert.ok(loadEmbeddingConfig("owner", second.id));
+});
+
+test("shared model edits preserve existing collection and pending request snapshots and credentials", () => {
+  const old = saveEmbeddingConfig("owner", collection, config, "old-key", true);
+  const pending = prepareEmbeddedWrites('{"body":"original text"}', "owner", collection, old);
+  const original = JSON.stringify(pending);
+  const updated = saveEmbeddingService("owner", { ...config, model: "new-model" }, "new-key", false);
+  assert.equal(loadEmbeddingService("owner")?.model, "new-model");
+  assert.deepEqual(loadEmbeddingConfig("owner", collection.id), old);
+  assert.equal(JSON.stringify(pending), original);
+  assert.equal(embeddingKey("owner", collection.id, old), "old-key");
+  assert.equal(embeddingKey("owner", collection.id, updated), "new-key");
+  saveEmbeddingMapping("owner", collection, { ...old, ...updated });
+  assert.equal(loadEmbeddingConfig("owner", collection.id)?.model, "new-model");
+  assert.equal(pending.embedding?.config.model, "test-model");
+});
+
+test("legacy collection settings and session keys remain usable without an implicit migration", () => {
+  const scope = 'anyseek.embedding.["owner","docs"]';
+  local.setItem(scope, JSON.stringify(config));
+  const legacyKey = scope + ".key." + JSON.stringify([config.endpoint, config.model]);
+  session.setItem(legacyKey, "legacy-key");
+  assert.deepEqual(loadEmbeddingConfig("owner", collection.id), config);
+  assert.equal(loadEmbeddingService("owner"), null);
+  assert.equal(embeddingKey("owner", collection.id, config), "legacy-key");
+  assert.equal(embeddingKey("owner", "other", config), "");
+  saveEmbeddingService("owner", config, "new-key", false);
+  assert.equal(embeddingKey("owner", collection.id, config), "new-key");
+  assert.equal(sessionEmbeddingKey("owner", collection.id, config), false);
+  clearEmbeddingKeys("owner");
+  assert.equal(session.length, 0);
+  assert.equal(embeddingKey("owner", collection.id, config), "");
+  assert.ok(loadEmbeddingConfig("owner", collection.id));
+});
+
+test("standalone service testing discovers dimensions and rejects empty or invalid vectors", async () => {
+  globalThis.fetch = async () => modelResponse(1);
+  assert.deepEqual(await embedTexts(config, "key", ["test"], undefined), [[0.5, 1]]);
+  for (const embedding of [[], [null], ["1"]]) {
+    globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ index: 0, embedding }] }));
+    await assert.rejects(embedTexts(config, "key", ["test"], undefined));
+  }
 });
 
 test("model calls omit service credentials, cookies and redirects; reversed indexed rows are reordered", async () => {

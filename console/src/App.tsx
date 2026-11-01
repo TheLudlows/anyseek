@@ -312,9 +312,8 @@ export default function App() {
                   )}
                 </div>
               </section>
-              {apiKey && selected?.schema.some((f) => f.index_vector) ? (
-                <EmbeddingSettings key={owner + selected.id} owner={owner} collection={selected} />
-              ) : apiKey && <section className="panel embedding-panel"><h2>{t("浏览器嵌入")}</h2><p className="muted">{t("在左侧选择一个含向量字段的集合，配置仅保存在浏览器的模型连接。")}</p></section>}
+              {apiKey && <EmbeddingSettings key={owner + (selected?.id || "")} owner={owner}
+                collection={selected?.schema.some((f) => f.index_vector) ? selected : undefined} />}
               <Recovery />
             </>
           ) : !apiKey ? (
