@@ -48,4 +48,4 @@ and hybrid retrieval are not expanded into a full-corpus field-sort scan.
 Regression coverage includes more tied candidates than K, forward/reverse/
 permuted input orders, signed zeros, duplicate IDs, threshold equality, zero K,
 single/three shards, realtime lexical results, pagination, explicit multi-field
-sorting and repeated C1/C4 lexical/vector/hybrid requests (core and HTTP).
+sorting and repeated C1/C4 lexical/vector/hybrid requests (retrieval modules and HTTP).

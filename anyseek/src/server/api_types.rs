@@ -114,7 +114,7 @@ impl QueryOperator {
 }
 
 impl SearchRequestObject {
-    /// Resolve the public operator to the core query type.
+    /// Resolve the public operator to the internal query type.
     pub fn query_type(&self) -> QueryType {
         self.operator.query_type()
     }

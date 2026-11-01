@@ -49,20 +49,20 @@ API 已运行时只需执行本步骤。`npm ci` 用于首次安装或锁文件�
 
 选择含 Json 向量字段的集合，在“连接与管理 → 浏览器嵌入”填写完整的 OpenAI 兼容 embeddings API 地址（例如 `https://model.example.com/v1/embeddings`）、模型名称和可选模型 Key；勾选文本字段并选择目标向量字段。先测试连接，再保存本地配置。
 
-- UI 直接向模型地址发送 `{model,input:[文本…],encoding_format:"float"}`，按响应 `data[].index` 对齐向量；验证数量、有限数值和集合维度。内核不调用模型、不保存模型地址和密钥，集合接口仅补充只读 `vector_dimensions`。
+- UI 直接向模型地址发送 `{model,input:[文本…],encoding_format:"float"}`，按响应 `data[].index` 对齐向量；验证数量、有限数值和集合维度。AnySeek 服务不调用模型、不保存模型地址和密钥，集合接口仅补充只读 `vector_dimensions`。
 - 地址、模型名称和字段映射保存在当前控制台来源的 localStorage，按连接 Key 的指纹和集合隔离；不同 Key 不自动共享，即便属于同一 Tenant。切换浏览器或清理站点数据后需重新配置。同一控制台代理到另一服务时，请清除旧配置并重新连接。
 - 模型 Key 默认仅在内存中；可选择在当前标签页 sessionStorage 中记住以跨刷新使用。切换或断开 AnySeek 连接时清除旧连接的模型 Key。提供“清除本地模型配置”，待处理导入仍保留原配置快照以便继续重试；模型 Key 从不进入 localStorage 或 AnySeek 请求。
 - 普通 JSON 导入可启用“自动生成缺失的向量”。按所选顺序用换行拼接文本，已有目标向量保留并校验；不自动覆盖。Record envelope 继续发送原请求，不自动生成向量。
 - 单条嵌入文本最多 30 KiB，每批最多 16 条，串行调用，单次超时 60 秒。模型自身的 token 限制仍需遵守。已生成的向量、原始数字文本和 operation ID 存入现有会话重试记录；中断后只生成缺失批次，再按请求大小通过 `/ingest` 分批提交。逐项处理 committed/rejected/outcome_unknown/not_attempted，即使 HTTP 非 2xx 也保留已确认回执。未知结果不能直接丢弃或换 ID 重写。
 - 自动嵌入的写入成功表示已持久提交，索引异步推进；导入窗口显示提交、全文和向量进度，可手动刷新。向量/混合检索可输入自然语言自动生成查询向量，翻页复用同一个查询向量；仍可切换到手工输入。
 
-浏览器会把所选文本和自然语言查询发送给配置的模型服务；模型服务必须允许当前控制台来源的 CORS（POST、Content-Type、Authorization）。HTTPS 控制台应连接 HTTPS 模型服务。浏览器无法绕过服务端 CORS；本功能不提供内核代理。模型请求不携带 AnySeek Key、Cookie 或 referrer，并拒绝重定向。模型名称和维度相同也不保证向量空间相同，变更模型后需自行重新生成已有数据向量。
+浏览器会把所选文本和自然语言查询发送给配置的模型服务；模型服务必须允许当前控制台来源的 CORS（POST、Content-Type、Authorization）。HTTPS 控制台应连接 HTTPS 模型服务。浏览器无法绕过服务端 CORS；本功能不提供模型请求代理。模型请求不携带 AnySeek Key、Cookie 或 referrer，并拒绝重定向。模型名称和维度相同也不保证向量空间相同，变更模型后需自行重新生成已有数据向量。
 
 本地配置不进入服务备份。关闭标签页、清除会话或 operation ID 过期可能影响未确认任务的重试，请先处理保留任务。首版不包含切片、浏览器本地模型、自动重试模型限流或多模型路由。
 
 ## 配置 API 地址
 
-浏览器始终请求当前 UI 域名下的 `/api`，由前端服务器转发到 AnySeek。API 地址由启动前端服务器的环境配置决定，不在浏览器填写，不需要修改内核 CORS。
+浏览器始终请求当前 UI 域名下的 `/api`，由前端服务器转发到 AnySeek。API 地址由启动前端服务器的环境配置决定，不在浏览器填写，不需要修改 AnySeek 服务的 CORS。
 
 | 场景 | 配置项 | 默认值 | 生效时机 |
 | --- | --- | --- | --- |
@@ -157,7 +157,7 @@ Tenant API Key 保存在当前标签页的 sessionStorage，Master Key 不保存
 从仓库根先构建服务，再运行前端验证：
 
 ```sh
-cargo build --features server --bin anyseek_server
+cargo build --bin anyseek_server
 cd console
 npm ci
 npm test
@@ -168,7 +168,7 @@ npm run test:browser
 
 浏览器测试会启动独立临时数据根的真实 API（127.0.0.1:18180）和 Vite（127.0.0.1:4173），不连接用户服务，也不使用配置中的 S3 bucket。请保持这两个端口空闲。可通过 `ANYSEEK_SERVER` 指定服务二进制绝对路径，通过 `CHROMIUM_PATH` 指定已安装的 Chromium。
 
-测试覆盖内核静态路由清理、连接与集合创建、创建回包丢失、i64 导入/回包丢失/刷新重试/精确复制/条件编辑、三种真实检索、空态、高级入口及移动端。截图位于 `test-results/screenshots/`；失败时保留 trace。
+测试覆盖服务静态路由清理、连接与集合创建、创建回包丢失、i64 导入/回包丢失/刷新重试/精确复制/条件编辑、三种真实检索、空态、高级入口及移动端。截图位于 `test-results/screenshots/`；失败时保留 trace。
 
 首次初始化的隔离浏览器测试使用 mock API，不需要启动 Rust 服务：
 

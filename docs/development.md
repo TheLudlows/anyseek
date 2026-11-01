@@ -1,6 +1,6 @@
 # anyseek 开发与验证
 
-仅有一个 `anyseek` Cargo package：核心库位于 `anyseek/src/`，服务实现及 HTTP 契约位于 `anyseek/src/server/`，独立 Web 控制台位于 `console/`，使用 Node.js 24/React/TypeScript/Vite；Rust 服务不嵌入任何前端资源。默认关闭 `server` feature；嵌入库不引入 HTTP/OpenAPI/服务日志依赖。使用本仓库 path/git 依赖；本次改名不表示已向 crates.io 发布。实际远端为 `TheLudlows/anyseek`。
+AnySeek 是服务产品，仓库仅有一个 `anyseek` Cargo package。存储和检索模块位于 `anyseek/src/`，HTTP 实现位于 `anyseek/src/server/`；`lib.rs` 用于内部模块组织和集成测试复用。独立 Web 控制台位于 `console/`，使用 Node.js 24/React/TypeScript/Vite，Rust 服务不嵌入前端资源。默认构建包含 HTTP、OpenAPI、服务日志及本地/S3 存储，不提供独立库发行入口。仓库为 `TheLudlows/anyseek`。
 
 ## 本地运行
 
@@ -21,19 +21,18 @@ npm run dev
 ```sh
 cargo check -p anyseek
 cargo check -p anyseek --no-default-features
-cargo build --workspace --features server
-cargo test --workspace --features server --all-targets
-cargo test -p anyseek --lib
-cargo test -p anyseek --no-default-features --lib
+cargo build --workspace
+cargo test --workspace --all-targets
+cargo test -p anyseek --no-default-features --lib --bins
 cargo test --workspace --doc
 cargo doc --workspace --no-deps
-python3 scripts/check_core_boundary.py
+python3 scripts/check_console_boundary.py
 npm ci --prefix console
 npm test --prefix console
 npm run build --prefix console
 ```
 
-核心默认启用 `zh`、`vb`。独立边界脚本验证核心可脱离 HTTP 依赖构建；不是新的 SDK 或模型运行时。`.cargo/config.toml` 使用本机 CPU 指令，不将这类产物跨不同 CPU runner 复用。
+仓库根运行 `cargo build` 构建服务；`cargo run -- <name=value...>` 启动服务；`cargo test` 包含服务与模块的单元测试、集成测试和 doctest。默认启用 `zh`（中文分词）、`vb`（结果诊断），`--no-default-features` 关闭这两项，仍构建完整服务。`fault-injection` 仅用于显式故障测试构建。前端边界脚本检查静态资源未嵌入 Rust 服务。`.cargo/config.toml` 使用本机 CPU 指令，不将这类产物跨不同 CPU runner 复用。
 
 ## 真实 HTTP 与浏览器
 
@@ -42,19 +41,19 @@ npm run build --prefix console
 ```sh
 (cd console && npx playwright install chromium && npm run test:browser)
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
-cargo build -p anyseek --features server,fault-injection
+cargo build -p anyseek --features fault-injection
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server --faults
 python3 scripts/s3_storage_smoke.py --server target/debug/anyseek_server --faults
 ```
 
-Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测试；测试后重新 `cargo build --workspace --features server` 得到默认二进制。测试环境变量前缀为 `ANYSEEK_`（例如 `ANYSEEK_TEST_ROOT`）；正常服务主密钥仍为 `MASTER_KEY_SECRET`。
+Windows 使用 `target/debug/anyseek_server.exe`。fault-injection 仅用于测试；测试后重新 `cargo build --workspace ` 得到默认二进制。测试环境变量前缀为 `ANYSEEK_`（例如 `ANYSEEK_TEST_ROOT`）；正常服务主密钥仍为 `MASTER_KEY_SECRET`。
 
 ## S3 无缓存与合同验收
 
 统一入口复用现有测试，不维护第二份业务语义。`semantic` 分为 base、locator、graph、temporal、history、ingest 六个隔离服务根；启用 `--faults` 时另运行 indexer、authorization 两个要求故障注入的分组；每次重启删除 `collections/*/*/*` 与 `*.object-cache` 两类缓存目录，保留 SQLite 协调元数据和 owner 锁文件。`storage` 覆盖 checkpoint、GC、共同备份、恢复中断；`contract` 运行显式 ignored 的对象合同测试，覆盖条件创建竞争、不可变重试、读回/HEAD、hash/长度、缺失/超限、旧 owner、共同备份原 cut 及删除。`all` 顺序运行三类。完整服务恢复使用第二个独立测试 bucket，真实后端需额外设置 `ANYSEEK_S3_TEST_RESTORE_BUCKET`；fixture 自动提供第二个 bucket。
 
 ```sh
-cargo build -p anyseek --features server,fault-injection
+cargo build -p anyseek --features fault-injection
 python3 scripts/s3_acceptance.py --backend fixture --suite all \
   --server target/debug/anyseek_server --faults --report target/s3-acceptance.json
 ```
@@ -79,7 +78,7 @@ python3 scripts/s3_acceptance.py --backend real --suite all \
 target/debug/anyseek_server generate_openapi=true
 ```
 
-生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 归可选 `anyseek::server` 模块；Rust 数据访问统一使用 RecordPartition，旧低层 Index API 已移除。参见 [服务指南](../anyseek/src/server/README.md) 和下方 [Rust 接入](#rust-核心库接入)。
+生成文件位于可执行文件旁，通常为 `target/debug/openapi.json`、`openapi.yml`。HTTP DTO 和 schema 位于 `anyseek::server` 模块，数据请求由内部 RecordPartition 处理。外部调用通过 HTTP API，参见 [服务指南](../anyseek/src/server/README.md)。
 
 ## 验证边界
 
@@ -87,15 +86,6 @@ Linux 与 Windows 都是原生可靠性验收平台；交叉编译不代替 Wind
 
 记录每个最终源码版本的命令、结果、失败/忽略项和未运行项。目录或包名调整前的历史计数不可冒充改名后的验证。历史阶段结果通过 Git 历史及对应 PR/CI 查阅，当前测试命令与剩余验收须保持可复现。
 
-## Rust 核心库接入
+## 服务内部模块
 
-从本仓库使用 path/git 依赖；核心默认启用 `zh`、`vb`，HTTP/OpenAPI 需另开 `server` feature。例如在应用的 Cargo.toml 中配置仓库路径：
-
-```toml
-[dependencies]
-anyseek = { path = "../anyseek/anyseek" }
-```
-
-配置类型和入口见 [Record API](../anyseek/src/record.rs)、[异步提交与进度](../anyseek/src/record/committed.rs)及[库模块](../anyseek/src/lib.rs)。使用 `RecordPartition::create/open` 管理新库或恢复已有库；`write` 同步应用，`commit_writes` 返回逐项持久业务结果并异步索引。`operation` 查询原回执，`get/query/page` 访问记录；超时和未知结果继续使用保存的原请求与 Operation ID。
-
-生成 `cargo doc -p anyseek --no-deps` 后查看 API 类型与方法；检索语义和重试边界见 [Record 契约](record-model.md)。旧低层 Index API、内部 DocID 和组件文件均不作为应用数据入口。历史完整示例可从 Git 查阅，本页仅维护当前接入方式。
+[RecordPartition](../anyseek/src/record.rs) 负责记录持久化和检索，[异步索引实现](../anyseek/src/record/committed.rs) 负责持久业务结果与索引进度。`lib.rs` 让服务二进制和集成测试复用这些模块。`cargo doc -p anyseek --no-deps` 用于查看内部类型和方法；服务对外契约以 HTTP API 为准，语义和重试边界见 [Record 契约](record-model.md)。

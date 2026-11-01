@@ -16,7 +16,7 @@ SMALL = {
     'late_matching_document_remains_in_top2',
 }
 COMMAND = ['cargo', 'test', '-p', 'anyseek', '--test', 'lexical_correctness',
-           '--features', 'server,fault-injection']
+           '--features', 'fault-injection']
 
 
 def main():

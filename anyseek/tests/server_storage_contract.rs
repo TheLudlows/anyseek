@@ -1,4 +1,3 @@
-#![cfg(feature = "server")]
 
 // Retired storage options fail explicitly; retained API defaults are stable.
 use anyseek::server::api_types::CreateIndexRequest;

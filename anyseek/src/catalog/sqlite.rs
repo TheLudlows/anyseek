@@ -442,7 +442,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "s3-object-store")]
     #[tokio::test]
     async fn sqlite_catalog_transactions_leave_shared_record_authority_tables_intact() {
         use crate::storage::sqlite_authority::SqliteAuthority;

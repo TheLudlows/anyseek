@@ -4,7 +4,7 @@
 
 核对基线为 `761ec13476018a98e26ebc71583df3ffac2d0643`（#114 合入后）。本次更新只修正文档链接、当前状态和使用说明；历史阶段的测试计数保留在 Git 历史及对应 PR，不作为该基线的全量验收结果。
 
-anyseek 是有界单机记录与检索底座：一层 Record WAL、SQLite 协调元数据、Tenant/Collection 身份、Tantivy 全文和独立向量/元数据组件已经生效。同步 `/doc`、`/batch` 与异步索引 `/ingest` 同时存在，成功含义按入口区分，见[服务指南](anyseek/src/server/README.md#异步索引写入)。
+AnySeek 是有界单机记录与检索服务：一层 Record WAL、SQLite 协调元数据、Tenant/Collection 身份、Tantivy 全文和独立向量/元数据组件已经生效。同步 `/doc`、`/batch` 与异步索引 `/ingest` 同时存在，成功含义按入口区分，见[服务指南](anyseek/src/server/README.md#异步索引写入)。
 
 | 已合入工作 | 当前实现与证据 |
 | --- | --- |

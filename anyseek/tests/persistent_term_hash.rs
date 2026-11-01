@@ -16,7 +16,7 @@ use std::{collections::BTreeMap, path::Path};
 fn config(normalization: TextNormalization) -> (IndexMetaObject, Vec<anyseek::index::SchemaField>) {
     let meta = IndexMetaObject {
         name:"stable-term-hash".into(), lexical_similarity:LexicalSimilarity::Bm25fProximity,
-        tokenizer:TokenizerType::JiebaMixedV1, text_normalization:normalization,
+        tokenizer:TokenizerType::default(), text_normalization:normalization,
         field_length_normalization:FieldLengthNormalization::PerField,
         stop_words:StopwordType::None, frequent_words:FrequentwordType::English,
         ngram_indexing:127, clustering:Clustering::None, inference:Inference::None,

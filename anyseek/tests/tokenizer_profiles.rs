@@ -36,7 +36,6 @@ fn supported_profiles_roundtrip_and_feature_defaults_are_stable() {
     }
 }
 
-#[cfg(feature = "server")]
 #[test]
 fn api_rejects_retired_profiles_and_preserves_default() {
     use anyseek::server::api_types::CreateIndexRequest;
@@ -53,7 +52,6 @@ fn api_rejects_retired_profiles_and_preserves_default() {
     }
 }
 
-#[cfg(feature = "server")]
 #[test]
 fn openapi_exposes_only_enabled_standard_profiles() {
     use anyseek::server::api_types::CreateIndexRequest;

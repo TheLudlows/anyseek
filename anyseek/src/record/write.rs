@@ -66,7 +66,6 @@ struct PreparedBatch {
     hides_evidence: bool,
 }
 
-#[cfg(feature = "s3-object-store")]
 struct RemoteUpload {
     store: crate::storage::s3_compatible::S3CompatibleStore,
     path: std::path::PathBuf,
@@ -76,13 +75,11 @@ struct RemoteUpload {
     #[cfg(test)]
     root: std::path::PathBuf,
 }
-#[cfg(feature = "s3-object-store")]
 struct UploadedBatch {
     head: crate::storage::sqlite_authority::PartitionHead,
     block: crate::storage::object_log::ObjectLogBlock,
     reference: crate::storage::sqlite_authority::ObjectRef,
 }
-#[cfg(feature = "s3-object-store")]
 impl RemoteUpload {
     async fn upload(self) -> Result<UploadedBatch, RecordError> {
         #[cfg(test)]
@@ -140,7 +137,6 @@ impl RemoteUpload {
         })
     }
 }
-#[cfg(feature = "s3-object-store")]
 impl UploadedBatch {
     async fn publish(self, remote: &mut RemotePersistence) -> Result<(), RecordError> {
         if remote.partition_id != self.head.partition_id
@@ -180,7 +176,6 @@ impl UploadedBatch {
         }
     }
 }
-#[cfg(feature = "s3-object-store")]
 impl Inner {
     async fn prepare_remote_batch(
         &self,
@@ -330,7 +325,6 @@ impl RecordPartition {
                         return Err(error.clone());
                     }
                 }
-                #[cfg(feature = "s3-object-store")]
                 let result = match prepared {
                     Ok(prepared) => {
                         let upload = inner.prepare_remote_batch(&prepared).await;
@@ -352,11 +346,6 @@ impl RecordPartition {
                             Err(error) => Err(error),
                         }
                     }
-                    Err(error) => Err(error),
-                };
-                #[cfg(not(feature = "s3-object-store"))]
-                let result = match prepared {
-                    Ok(prepared) => inner.commit_batch(prepared, &mut scope).await,
                     Err(error) => Err(error),
                 };
                 let stop = match &result {
@@ -560,7 +549,6 @@ impl RecordPartition {
                         RecordError::Busy
                     });
                 }
-                #[cfg(feature = "s3-object-store")]
                 if let Some(remote) = inner.remote.as_ref() {
                     let mut entries: Vec<_> = plans
                         .iter()
@@ -694,7 +682,7 @@ impl Inner {
         &mut self,
         prepared: PreparedBatch,
         scope: &mut AttemptScope,
-        #[cfg(feature = "s3-object-store")] uploaded: Option<UploadedBatch>,
+        uploaded: Option<UploadedBatch>,
     ) -> Result<BatchResult, RecordError> {
         if !self.healthy || self.state.seq != prepared.base_seq {
             return Err(RecordError::RecoveryRequired);
@@ -764,7 +752,6 @@ impl Inner {
             .enumerate()
             .filter_map(|(i, result)| result.as_ref().ok().filter(|r| r.seq > base_seq).map(|_| i))
             .collect();
-        #[cfg(feature = "s3-object-store")]
         if let Some(uploaded) = uploaded {
             let remote = self.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
             uploaded.publish(remote).await?;

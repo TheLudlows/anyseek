@@ -15,7 +15,7 @@ def main():
     # One feature/profile build, then invoke its test binary without more cargo builds.
     with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
         subprocess.run(["cargo", "test", "-p", "anyseek", "--lib", "--locked",
-                        "--features", "server", "--no-run", "--message-format=json"],
+                        "--no-run", "--message-format=json"],
                        cwd=root, stdout=output, check=True)
         output.seek(0)
         binaries = []

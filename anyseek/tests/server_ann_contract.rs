@@ -1,4 +1,3 @@
-#![cfg(feature = "server")]
 use anyseek::search::SearchMode;
 use anyseek::vector_similarity::AnnMode;
 use anyseek::server::api_types::SearchRequestObject;

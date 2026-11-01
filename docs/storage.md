@@ -132,7 +132,7 @@ checkpoint 与索引尾段封存仍通过 anchor 发布协议选择权威闭包�
 
 ## 验证入口与边界
 
-- `cargo test --workspace --features server --all-targets`：Record/catalog、Segment、SQLite、上传/依赖/GC 和现有检索回归。
+- `cargo test --workspace --all-targets`：Record/catalog、Segment、SQLite、上传/依赖/GC 和现有检索回归。
 - `scripts/record_service_smoke.py`：默认本地后端、HTTP、授权与恢复；独立 UI 浏览器流程见[控制台指南](../console/README.md#验证)；`--cold-restarts --section …` 将同一组语义用于 S3，每次重启删除 collection 与 `*.object-cache` 两类缓存。
 - `scripts/s3_storage_smoke.py --faults`：真实服务进程连接可丢弃 HTTP 测试后端，覆盖远端发布前后、缓存追加失败、无缓存查询、历史 GC 切点、四个备份中断边界、恢复重试、独立 GC 和完整服务归档。
 - `scripts/s3_acceptance.py`：统一执行上述存储矩阵、七组共享语义与不可变对象/共同备份合同；`--backend real` 只接受专用测试配置。命令及报告边界见[开发指南](development.md)。

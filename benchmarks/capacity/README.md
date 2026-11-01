@@ -26,7 +26,7 @@ semantic equivalence to Meili all/last or an exhaustive recall measurement.
 python3 benchmarks/capacity/prepare.py \
   --corpus miracl-corpus-v1.0-zh \
   --out artifacts/benchmark/capacity/data
-cargo build --locked -p anyseek --release --features server --bin anyseek_server
+cargo build --locked -p anyseek --release  --bin anyseek_server
 python3 benchmarks/capacity/baseline.py \
   --revision "$(git rev-parse HEAD)" \
   --binary target/release/anyseek_server \

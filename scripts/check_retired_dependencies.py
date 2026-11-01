@@ -39,6 +39,6 @@ while pending:
     pending.extend(d['pkg'] for d in nodes[current]['deps'])
 assert not dictionary_only & {by_id[p]['name'] for p in seen}, 'dictionary codec escaped Jieba'
 assert not any(dependency['name'] == 'aho-corasick' for dependency in core['dependencies']), 'direct highlighter dependency remains'
-# The tokenizer retains regex-syntax; optional API dependencies are checked separately.
+# The tokenizer retains regex-syntax; HTTP dependencies are part of the service.
 print('PASS no direct highlighter dependency')
 print('PASS no PDF/CSV/directory parser or query rewriting dependencies in resolved graph')

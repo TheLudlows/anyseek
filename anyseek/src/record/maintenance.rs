@@ -193,7 +193,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature="s3-object-store")]
     #[tokio::test]
     async fn receipt_gc_remote_checkpoint_cold_recovery_preserves_time_prefix() {
         use super::super::tests::{config,write,wait_maintenance_idle};
@@ -326,7 +325,6 @@ impl SourceProof {
         memory.grow((inner.index.pending_seals.len() as u64).checked_mul((2*std::mem::size_of::<segment::Package>()) as u64).ok_or_else(||storage("source package inventory overflow"))?).map_err(storage)?;
         Ok(Self{anchor:inner.anchor.clone(),pending:inner.index.pending_seals.clone(),frames,_memory:memory})
     }
-    #[cfg(feature="s3-object-store")]
     pub(super) async fn verify_remote(&self,remote:&remote_checkpoint::RemoteBuild,root:&Path,config:&RecordConfig)->Result<(),RecordError> {
         remote.verify_source(root,self.anchor.as_ref(),&self.frames,config.max_journal_bytes).await
     }
