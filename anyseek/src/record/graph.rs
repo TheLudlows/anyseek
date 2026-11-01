@@ -109,9 +109,9 @@ pub struct NeighborHit {
     /// Visible seed identity from the request.
     pub seed_id:String,
     /// Current visible edge, with original metadata/body.
-    pub edge:Record,
+    pub edge:QueryRecord,
     /// Current visible endpoint record.
-    pub neighbor:Record,
+    pub neighbor:QueryRecord,
 }
 /// A common-view bounded expansion. Count is visible paths, not unique nodes.
 #[derive(Clone,Debug,Serialize)]
@@ -146,7 +146,7 @@ impl RecordPartition {
         let _admission=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let inner=self.inner.lock().await;
         if !inner.healthy{return Err(RecordError::RecoveryRequired);}
-        neighbors_view(&inner, request, |_| true)
+        neighbors_view(&inner, request, |_| true, false)
     }
 
     /// Stable-ID entity directory; a changed view invalidates ordinary paging.
@@ -174,7 +174,7 @@ impl RecordPartition {
 
 // Caller owns the partition view. Eligibility uses the same compiled metadata
 // predicate as text/vector retrieval and is applied before per-seed ranking.
-pub(super) fn neighbors_view(inner:&Inner,request:NeighborRequest,eligible:impl Fn(&str)->bool)->Result<NeighborPage,RecordError> {
+pub(super) fn neighbors_view(inner:&Inner,request:NeighborRequest,eligible:impl Fn(&str)->bool, metadata_only:bool)->Result<NeighborPage,RecordError> {
         if request.seeds.is_empty() || request.seeds.len()>32 || !(1..=128).contains(&request.per_seed) || request.max_candidates==0 || request.max_candidates>inner.config.max_candidates || request.relation_types.len()>16 || request.relation_types.iter().any(|t|t.is_empty()||t.len()>128) {
             return Err(RecordError::Rejected("invalid one-hop resource bounds".into()));
         }
@@ -213,9 +213,16 @@ pub(super) fn neighbors_view(inner:&Inner,request:NeighborRequest,eligible:impl 
                 if !request.relation_types.is_empty()&&!request.relation_types.contains(&metadata.relation_type){continue;}
                 if !eligible(neighbor_id) {continue;}
                 if count==request.per_seed {reason=Some("per_seed_limit".into());break 'seeds;}
-                let hit=NeighborHit{seed_id:seed.record_id.clone(),edge:edge.clone(),neighbor:inner.state.records[neighbor_id].clone()};
-                let size=serde_json::to_vec(&hit).map_err(storage)?.len();
+                // Preserve the original full-row byte window even when fusion
+                // needs only identities; count without allocating serialized bodies.
+                #[derive(Serialize)]
+                struct BorrowedHit<'a> { seed_id: &'a str, edge: &'a Record, neighbor: &'a Record }
+                let neighbor = &inner.state.records[neighbor_id];
+                let size=checkpoint_codec::json_length(&BorrowedHit { seed_id:&seed.record_id, edge, neighbor })?;
                 if bytes.saturating_add(size)>4*1024*1024 {reason=Some("response_budget".into());break 'seeds;}
+                let fields = metadata_only.then_some([].as_slice());
+                let hit=NeighborHit { seed_id:seed.record_id.clone(),
+                    edge:QueryRecord::copy(edge, fields)?, neighbor:QueryRecord::copy(neighbor, fields)? };
                 bytes+=size;hits.push(hit);count+=1;
             }
         }

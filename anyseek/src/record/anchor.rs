@@ -1423,7 +1423,7 @@ mod tests {
             for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() }] {
                 let got=counted(&p,mode.clone()).await;let want=counted(&oracle,mode).await;
                 assert_eq!(got.visible_seq,seq);assert_eq!(got.count_total,want.count_total);
-                let hits=|v:RecordSearch|v.hits.into_iter().map(|h|(h.record.record_id,h.record.version,h.score)).collect::<Vec<_>>();
+                let hits=|v:RecordSearch|v.hits.into_iter().map(|h|(h.record.record_id.clone(),h.record.version,h.score)).collect::<Vec<_>>();
                 assert_eq!(hits(got),hits(want),"round {round}");
             }
             drop(p);p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
@@ -1509,7 +1509,7 @@ mod tests {
         let before=query(&partition,mode.clone()).await;
         partition.compact_journal().await.unwrap();
         let after=query(&partition,mode.clone()).await;
-        let scores=|r:RecordSearch|r.hits.into_iter().map(|h|(h.record.record_id,h.score)).collect::<Vec<_>>();
+        let scores=|r:RecordSearch|r.hits.into_iter().map(|h|(h.record.record_id.clone(),h.score)).collect::<Vec<_>>();
         assert_eq!(scores(before),scores(after));
         let reference={let inner=partition.inner.lock().await;inner.anchor.clone().unwrap()};
         let selected=directory(&root,&reference.id).unwrap();

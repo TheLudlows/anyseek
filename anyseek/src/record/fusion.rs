@@ -36,27 +36,15 @@ impl RecordPartition {
         query: RecordQuery,
         options: RelationFusion,
     ) -> Result<RecordSearch, RecordError> {
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RecordError::Busy)?;
-        let partition = self.clone();
-        crate::resources::spawn(async move {
-            let _permit = permit;
-            let result = partition.fuse_independent(query, options).await;
-            partition.kick_maintenance().await;
-            result
-        })
-        .await
-        .map_err(storage)?
+        self.query_output(query, Some(options), None).await
     }
 }
 impl RecordPartition {
-    async fn fuse_independent(
+    pub(super) async fn fuse_independent(
         &self,
         query: RecordQuery,
         options: RelationFusion,
+        output_fields: Option<&[String]>,
     ) -> Result<RecordSearch, RecordError> {
         let (limit, barrier) = {
             let mut inner = self.inner.lock().await;
@@ -152,7 +140,7 @@ impl RecordPartition {
             }
             graph::neighbors_view(&inner, options.neighbors, |id| {
                 selection.as_ref().is_none_or(|selection| selection.allows(id))
-            })?
+            }, true)?
         };
         let mut scores = BTreeMap::<String, f32>::new();
         let mut versions = BTreeMap::<String, u64>::new();
@@ -206,7 +194,7 @@ impl RecordPartition {
                     fields: query.fields.clone(),
                     filters: filters.clone(),
                     sort: vec![],
-                })
+                }, Some(&[]))
                 .await?;
             if is_lexical {
                 terms = result.query_terms;
@@ -227,7 +215,7 @@ impl RecordPartition {
                         raw_score: Some(hit.score),
                         rrf_contribution: Some(contribution),
                     });
-                *scores.entry(hit.record.record_id).or_default() += contribution;
+                *scores.entry(hit.record.record_id.clone()).or_default() += contribution;
             }
         }
         let mut seen = BTreeSet::new();
@@ -275,12 +263,12 @@ impl RecordPartition {
             })
             .skip(query.offset)
             .take(query.length)
-            .map(|(id, score)| RecordHit {
+            .map(|(id, score)| Ok(RecordHit {
                 channels: explanations.remove(&id).unwrap_or_default(),
-                record: inner.state.records[&id].clone(),
+                record: QueryRecord::copy(&inner.state.records[&id], output_fields)?,
                 score,
-            })
-            .collect();
+            }))
+            .collect::<Result<Vec<_>, RecordError>>()?;
         let result = RecordSearch {
             fusion: Some(FusionWindow {
                 count_relation: "candidate_window".into(),
@@ -295,7 +283,7 @@ impl RecordPartition {
             hits,
             statistics: inner.statistics(),
         };
-        if serde_json::to_vec(&result).map_err(storage)?.len() > 4 * 1024 * 1024 {
+        if checkpoint_codec::json_length(&result)? > 4 * 1024 * 1024 {
             return Err(reject("fusion response exceeds byte budget"));
         }
         barrier.deliver(|| ())?;

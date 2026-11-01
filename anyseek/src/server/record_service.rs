@@ -1139,7 +1139,7 @@ async fn deletion_plan(
                     query_type:query.query_type(), offset:0, length:entry.config.max_candidates, result_type:anyseek::search::ResultType::TopkCount,
                     fields:query.field_filter, filters:query.facet_filter, sort:vec![] }).await?;
                 if result.hits.len() != result.count_total { return Err(bad("deletion selection exceeds candidate budget")); }
-                (result.visible_seq, result.hits.into_iter().map(|hit| hit.record).collect::<Vec<_>>())
+                (result.visible_seq, result.hits.into_iter().map(|hit| (hit.record.record_id.clone(), hit.record.version)).collect::<Vec<_>>())
             }
             selection => {
                 let mut page = p.page(None, entry.config.max_candidates).await?;
@@ -1148,10 +1148,10 @@ async fn deletion_plan(
                     if record_ids.len() > entry.config.max_candidates { return Err(bad("identity selection exceeds budget")); }
                     page.records.retain(|record| record_ids.contains(&record.record_id));
                 }
-                (page.visible_seq, page.records)
+                (page.visible_seq, page.records.into_iter().map(|r| (r.record_id, r.version)).collect())
             }
         };
-        let targets: Vec<_> = records.into_iter().map(|r| json!({"record_id":r.record_id,"expected":{"Match":r.version},"document":null})).collect();
+        let targets: Vec<_> = records.into_iter().map(|(id, version)| json!({"record_id":id,"expected":{"Match":version},"document":null})).collect();
         Ok::<_,Error>(json!({"visible_seq":seq,"targets":targets,"atomic":false,"instruction":"Persist targets with one original operation_id each before executing /batch; retries must reuse the saved requests, never regenerate the selection."}))
     }).await?;
     protected_data(result, Some(data))
@@ -1677,11 +1677,38 @@ async fn query(
         let start=std::time::Instant::now();
         let vector=request.query_vector.as_ref().map(|value|anyseek::vector::parse_external_embedding(value,&entry.config.index.inference)).transpose().map_err(bad)?;
         let query=RecordQuery{temporal:request.temporal.clone(),text:request.query_string.clone(),vector,mode,query_type:request.query_type(),offset:request.offset,length:request.length,result_type:request.result_type(),fields:request.field_filter,filters:request.facet_filter,sort:request.result_sort};
-        let result=match request.relation_fusion {Some(options)=>p.query_with_relations(query,options).await?,None=>p.query(query).await?};
-        let hits:Vec<_>=result.hits.into_iter().map(|mut hit|{if let Some(doc)=hit.record.document.as_mut(){doc.retain(|field,_|entry.config.schema.iter().any(|f|f.field==*field&&f.store)&&(request.fields.is_empty()||request.fields.contains(field)));}hit}).collect();
-        Ok::<_,Error>(json!({"original_query":request.query_string,"query":request.query_string,"time":start.elapsed().as_nanos(),"offset":request.offset,"length":request.length,"count":hits.len(),"count_total":request.count.then_some(result.count_total),"query_terms":result.query_terms,"hits":hits,"visible_seq":result.visible_seq,"evaluation_time_ms":result.evaluation_time_ms,"statistics":result.statistics,"fusion":result.fusion}))
+        let fields = entry.config.schema.iter().filter(|f| f.store &&
+            (request.fields.is_empty() || request.fields.contains(&f.field)))
+            .map(|f| f.field.clone()).collect();
+        let result=anyseek::server::query_records(&p,query,request.relation_fusion,fields).await?;
+        // Serialize directly from the admitted result. A serde_json::Value here
+        // would duplicate every selected field before response encoding.
+        Ok::<_,Error>(QueryResponse {
+            original_query: request.query_string.clone(), query: request.query_string,
+            time:start.elapsed().as_nanos(), offset:request.offset, length:request.length,
+            count:result.hits.len(), count_total:request.count.then_some(result.count_total),
+            query_terms:result.query_terms, hits:result.hits, visible_seq:result.visible_seq,
+            evaluation_time_ms:result.evaluation_time_ms, statistics:result.statistics, fusion:result.fusion,
+        })
     }).await?;
     protected_data(result, Some(data))
+}
+
+#[derive(Serialize)]
+struct QueryResponse {
+    original_query: String,
+    query: String,
+    time: u128,
+    offset: usize,
+    length: usize,
+    count: usize,
+    count_total: Option<usize>,
+    query_terms: Vec<String>,
+    hits: Vec<anyseek::record::RecordHit>,
+    visible_seq: u64,
+    evaluation_time_ms: u64,
+    statistics: anyseek::record::RecordStatistics,
+    fusion: Option<anyseek::record::FusionWindow>,
 }
 
 // Keep source/data validity checks at headers and body handoff; no credential recheck.
@@ -2350,16 +2377,30 @@ mod tests {
     #[tokio::test]
     async fn service_owned_response_retains_scope_before_middleware_handoff() {
         use http_body::Body as _;
-        let (service,path,_) = setup().await;
+        let (service,path,headers) = setup().await;
+        let p = service.record("tenant", "c").await.unwrap();
+        let request: RecordWrite = serde_json::from_value(json!({
+            "operation_id":OperationId::new("query-owner".into()), "record_id":"r", "expected":"Absent",
+            "document":{"body":"x".repeat(256 * 1024)}
+        })).unwrap();
+        p.write(request).await.unwrap();
         let governor = Arc::new(Governor::default());
-        let scope = governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap();
-        let response = scope.run(async { protected(Ok("pending output")).unwrap() }).await;
+        let scope = governor.admit("a".into(),anyseek::resources::Lane::Foreground,508 * 1024 * 1024).unwrap();
+        let full = scope.clone().run(query(State(service.clone()), headers.clone(), Path("c".into()),
+            serde_json::to_vec(&json!({"query":""})).unwrap().into())).await.unwrap();
+        assert_eq!(full.status(), StatusCode::TOO_MANY_REQUESTS);
+        drop(full);
+        let response = scope.run(query(State(service.clone()), headers, Path("c".into()),
+            serde_json::to_vec(&json!({"query":"", "fields":["missing"]})).unwrap().into())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         let mut others = Vec::new();
         for _ in 0..15 { others.push(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).unwrap()); }
         assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_err());
         let mut body = response.into_body();
         let bytes = std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await.unwrap().unwrap().into_data().unwrap();
         drop(body);
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["hits"][0]["record"]["document"], json!({}));
         assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_err());
         drop(bytes);
         assert!(governor.admit("a".into(),anyseek::resources::Lane::Foreground,0).is_ok());

@@ -39,6 +39,8 @@ pub use committed::{CommittedBatch, CommittedItem, CommittedProgress};
 mod index_consumers;
 mod publication;
 mod query;
+mod query_output;
+pub use query_output::QueryRecord;
 mod replay;
 mod indexer;
 mod maintenance;
@@ -598,8 +600,9 @@ pub struct RecordPage {
 pub struct RecordHit {
     /// Per-channel observed ranking evidence, with unmodified raw scores.
     pub channels: Vec<crate::search::ChannelExplanation>,
-    /// The exact original record corresponding to the ranked candidate.
-    pub record: Record,
+    /// Current record metadata and admitted document fields. Core queries keep
+    /// the full document; the HTTP service supplies its stored-field allowlist.
+    pub record: QueryRecord,
     /// Existing engine score (BM25, vector, or RRF according to query mode).
     pub score: f32,
 }
@@ -1521,11 +1524,17 @@ impl RecordPartition {
     }
     /// Retrieve independent cache observations, then revalidate current records.
     pub async fn query(&self, query: RecordQuery) -> Result<RecordSearch, RecordError> {
+        self.query_output(query, None, None).await
+    }
+    pub(crate) async fn query_output(&self, query: RecordQuery, relations: Option<RelationFusion>, fields: Option<Vec<String>>) -> Result<RecordSearch, RecordError> {
         let permit=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let partition=self.clone();
         crate::resources::spawn(async move {
             let _permit=permit;
-            let result=partition.query_independent(query).await;
+            let result=match relations {
+                Some(options) => partition.fuse_independent(query, options, fields.as_deref()).await,
+                None => partition.query_independent(query, fields.as_deref()).await,
+            };
             partition.kick_maintenance().await;
             result
         }).await.map_err(storage)?
@@ -3781,7 +3790,7 @@ mod tests {
             .unwrap()
             .hits
             .into_iter()
-            .map(|hit| (hit.record.record_id, hit.score.to_bits()))
+            .map(|hit| (hit.record.record_id.clone(), hit.score.to_bits()))
             .collect()
     }
 
@@ -4021,7 +4030,7 @@ mod tests {
         let scores = |r: RecordSearch| {
             r.hits
                 .into_iter()
-                .map(|h| (h.record.record_id, h.score.to_bits()))
+                .map(|h| (h.record.record_id.clone(), h.score.to_bits()))
                 .collect::<Vec<_>>()
         };
         assert_eq!(scores(actual), scores(expected));
@@ -4460,7 +4469,7 @@ impl Inner {
                     let channels=if let Some(channel)=channel {vec![crate::search::ChannelExplanation{channel:channel.into(),rank:offset+rank,rank_basis:rank_basis.into(),raw_score:if channel=="browse"{None}else{Some(hit.score)},rrf_contribution:None}]}else{result.explanations.remove(&hit.doc_id).ok_or_else(||storage("hybrid candidate explanation missing"))?};
                     hits.push(RecordHit {
                         channels,
-                        record: self.state.records[id].clone(),
+                        record: QueryRecord::copy(&self.state.records[id], None)?,
                         score: hit.score,
                     });
                 }

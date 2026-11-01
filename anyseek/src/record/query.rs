@@ -92,6 +92,8 @@ impl Handle {
     pub async fn capture(index: &VectorIndexArc, length: usize) -> Result<Self, RecordError> {
         let root = index.read().await;
         let metadata = checkpoint_codec::json_length(&(&root.meta, &root.schema_map))? as u64;
+        // Handle/candidate scaffolding only. Result documents are measured and
+        // admitted separately before copying, with leases owned by QueryRecord.
         let buffers = (length as u64)
             .checked_mul(2048)
             .and_then(|n| n.checked_add(65536))
@@ -157,6 +159,7 @@ impl RecordPartition {
     pub(super) async fn query_independent(
         &self,
         mut query: RecordQuery,
+        output_fields: Option<&[String]>,
     ) -> Result<RecordSearch, RecordError> {
         let (handle, evaluation, barrier, root) = {
             let mut inner = self.inner.lock().await;
@@ -260,7 +263,7 @@ impl RecordPartition {
             };
             hits.push(RecordHit {
                 channels,
-                record: record.clone(),
+                record: QueryRecord::copy(record, output_fields)?,
                 score: candidate.hit.score,
             });
         }
@@ -375,8 +378,13 @@ mod tests {
     #[tokio::test]
     async fn candidate_and_filter_revalidation_fence_failed_component_after_capture() {
         let temporary = tempfile::tempdir().unwrap();
-        let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
-        p.write(write("a", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
+        let mut settings = config();
+        settings.max_record_bytes = 1024 * 1024;
+        settings.max_journal_bytes = 64 * 1024 * 1024;
+        let p = RecordPartition::create(&temporary.path().join("records"), settings).await.unwrap();
+        let mut request = write("a", "a", "alpha", ExpectedVersion::Absent);
+        request.document.as_mut().unwrap().insert("payload".into(), serde_json::json!("x".repeat(1024 * 1024 - 1024)));
+        p.write(request).await.unwrap();
         let inner = p.inner.lock().await;
         let handle = inner.index.capture_query(10).await.unwrap();
         let mut selection = handle.filter(&[]).await.unwrap();
@@ -396,7 +404,24 @@ mod tests {
         components[0].write().await.failed = false;
         let scope = Arc::new(crate::resources::Governor::default())
             .admit("query-bytes".into(), crate::resources::Lane::Foreground, 512 * 1024 * 1024).unwrap();
-        assert!(matches!(scope.run(Handle::capture(&handle.index, 10)).await, Err(RecordError::Busy)));
+        assert!(matches!(scope.clone().run(Handle::capture(&handle.index, 10)).await, Err(RecordError::Busy)));
+        drop(inner);
+        drop(scope);
+        let scope = Arc::new(crate::resources::Governor::default())
+            .admit("output-bytes".into(), crate::resources::Lane::Foreground, 496 * 1024 * 1024).unwrap();
+        let query = || RecordQuery { temporal:None, text:"alpha".into(), vector:None,
+            mode:SearchMode::Lexical, query_type:QueryType::Union, offset:0, length:10,
+            result_type:ResultType::TopkCount, fields:vec![], filters:vec![], sort:vec![] };
+        let projected = scope.clone().run(p.query_output(query(), None, Some(vec!["body".into()]))).await.unwrap();
+        assert_eq!(projected.count_total, 1);
+        assert_eq!(projected.hits[0].record.document.as_ref().unwrap().len(), 1);
+        assert_eq!(projected.hits[0].record.document.as_ref().unwrap()["body"], "alpha");
+        assert!(matches!(scope.clone().run(p.query(query())).await, Err(RecordError::Busy)),
+            "full body copy must be rejected by its real output size");
+        drop(projected);
+        let complete = p.query(query()).await.unwrap();
+        assert_eq!(complete.hits[0].record.document.as_ref().unwrap()["payload"].as_str().unwrap().len(), 1024 * 1024 - 1024);
+
 
     }
 
