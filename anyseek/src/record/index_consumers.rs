@@ -53,7 +53,10 @@ impl Input {
     ) -> Result<Self, RecordError> {
         // Copy only lexical fields. Vectors and canonical bodies remain owned by
         // their respective components and Record; this is transient work input.
-        let bytes = build_budget::document_estimate(document, &native.config.schema)?;
+        let bytes = build_budget::component_estimate(document, native.config.schema.iter()
+            .filter(|f| f.index_lexical).map(|f| f.field.as_str()))?
+            .checked_add(build_budget::identity_estimate(&identity.id)?)
+            .ok_or_else(|| storage("queued input estimate overflow"))?;
         let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
         let scope = crate::resources::Scope::current()
             .map(|scope| scope.retained_io().bytes(bytes))
@@ -86,14 +89,18 @@ impl Input {
         ordinal: usize,
         document: &Document,
     ) -> Result<Self, RecordError> {
-        let bytes = build_budget::document_estimate(document, &[])?;
+        let schema = retrieval_schema(config);
+        let bytes = build_budget::component_estimate(document, schema.iter()
+            .filter(|f| f.index_vector || f.facet).map(|f| f.field.as_str()))?
+            .checked_add(build_budget::identity_estimate(&identity.id)?)
+            .ok_or_else(|| storage("queued input estimate overflow"))?;
         let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(storage)?;
         let scope = crate::resources::Scope::current()
             .map(|scope| scope.retained_io().bytes(bytes))
             .transpose()
             .map_err(storage)?;
         let fingerprint = Some(crate::active::fingerprint(document).map_err(storage)?);
-        let document = retrieval_schema(config)
+        let document = schema
             .into_iter()
             .filter(|f| f.index_vector || f.facet)
             .filter_map(|field| {
