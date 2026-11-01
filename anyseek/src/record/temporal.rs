@@ -185,7 +185,7 @@ pub(super) fn apply(state: &mut State, event: &Expiration) -> Result<(), RecordE
     Ok(())
 }
 impl Inner {
-    pub(super) async fn advance_time(&mut self) -> Result<(), RecordError> {
+    fn trusted_evaluation_time(&self) -> Result<u64, RecordError> {
         if !self.healthy {
             return Err(RecordError::RecoveryRequired);
         }
@@ -199,9 +199,29 @@ impl Inner {
         if now > MAX_TIME || now.saturating_add(CLOCK_TOLERANCE) < self.state.time_watermark_ms {
             return Err(RecordError::ClockUncertain);
         }
-        let evaluation = now
-            .max(self.evaluation_time_ms)
-            .max(self.state.time_watermark_ms);
+        Ok(now.max(self.evaluation_time_ms).max(self.state.time_watermark_ms))
+    }
+
+    fn try_advance_time_without_maintenance(&mut self) -> bool {
+        // Do not pass a pending maintenance intent, even during off-lock I/O.
+        if self.maintenance_requested.is_some() || self.maintenance_trim.is_some() {
+            return false;
+        }
+        let Ok(evaluation) = self.trusted_evaluation_time() else { return false; };
+        if !self.state.independent_snapshot
+            && (self.state.records.may_have_due_ttl(evaluation)
+                || history::committed_floor(&self.state, evaluation, self.config.history.retention_ms).is_some())
+        {
+            return false;
+        }
+        // Only the transient view time changes. No State, WAL, index, output
+        // barrier or prepared write is changed while another writer owns them.
+        self.evaluation_time_ms = evaluation;
+        true
+    }
+
+    pub(super) async fn advance_time(&mut self) -> Result<(), RecordError> {
+        let evaluation = self.trusted_evaluation_time()?;
         // Archived authority is immutable. Protected bodies remain quarantined;
         // only a live owner created from independent authority may expire them.
         if self.state.independent_snapshot {
@@ -293,6 +313,8 @@ impl Inner {
 impl RecordPartition {
     /// Drain due expirations durably before issuing a new data view. Cancellation
     /// leaves the owned executor running. Existing fixed-time views may finish.
+    /// With trusted time and no maintenance due, only the inner guard is needed;
+    /// reads need not queue behind a writer performing off-lock I/O.
     pub async fn advance_time(&self) -> Result<(), RecordError> {
         let admission = self
             .admission
@@ -303,7 +325,18 @@ impl RecordPartition {
         let writer = self.writer.clone();
         let partition=self.clone();
         crate::resources::spawn(async move {
-                let result={let _permit=admission;let _writer=writer.lock().await;owner.lock().await.advance_time().await};
+                let result = {
+                    let _permit = admission;
+                    let advanced = owner.lock().await.try_advance_time_without_maintenance();
+                    if advanced {
+                        Ok(())
+                    } else {
+                        // Release inner before joining writer order; recheck time
+                        // and maintenance against the state selected by that writer.
+                        let _writer = writer.lock().await;
+                        owner.lock().await.advance_time().await
+                    }
+                };
                 partition.kick_maintenance().await;
                 result
             })

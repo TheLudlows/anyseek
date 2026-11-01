@@ -882,11 +882,12 @@ mod tests {
     }
     #[tokio::test]
     async fn unlocked_encoding_preserves_reads_writer_order_checkpoint_and_cancellation() {
-        assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("encode").await;
+        assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("encode", false).await;
     }
-    async fn assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation(phase:&str) {
+    async fn assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation(phase:&str, ttl:bool) {
         let (p,_store,root,_db,clock)=source().await;
-        let seed=write("seed","seed","seed",ExpectedVersion::Absent);
+        let mut seed=write("seed","seed","seed",ExpectedVersion::Absent);
+        if ttl { seed.temporal=Some(TemporalMetadata {expire_at_ms:Some(clock.0.load(Ordering::SeqCst)+100),..Default::default()}); }
         let receipt=p.write(seed.clone()).await.unwrap();
         std::fs::write(root.join(format!(".test-write-{phase}-pause")),b"pause").unwrap();
         let first=write("off-lock-a","r","alpha",ExpectedVersion::Absent);
@@ -895,6 +896,15 @@ mod tests {
         wait_write_phase(&root,phase).await;
         assert_eq!(tokio::time::timeout(Duration::from_secs(1),p.operation(&seed.operation_id)).await.unwrap().unwrap(),Some(receipt));
         assert!(p.operation(&first.operation_id).await.unwrap().is_none());
+        // The upload/encoding owns writer but releases inner. Published reads
+        // with no due maintenance must finish before that writer is released.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            assert_eq!(p.get("seed").await.unwrap().unwrap().version, 1);
+            let page=p.page(None,10).await.unwrap();
+            assert_eq!(page.records.len(),1);
+            assert_eq!(page.records[0].record_id,"seed");
+            assert_eq!(p.statistics().await.unwrap().active_records,1);
+        }).await.expect("reads queued behind a writer without due maintenance");
         let second=write("off-lock-b","r","beta",ExpectedVersion::Match(1));
         let owner=p.clone();let request=second.clone();
         let second_task=tokio::spawn(async move {owner.write(request).await});
@@ -952,6 +962,9 @@ mod tests {
         let task=tokio::spawn(async move {owner.write(command).await});
         wait_write_phase(&root,phase).await;
         clock.0.store(now+101,Ordering::SeqCst);
+        // Due TTL must still wait for writer, never return the stale body.
+        // Dropping this waiter must not cancel its accepted time transition.
+        assert!(tokio::time::timeout(Duration::from_millis(30),p.get("r")).await.is_err());
         std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
         assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
@@ -964,7 +977,9 @@ mod tests {
 
     #[tokio::test]
     async fn unlocked_upload_preserves_reads_writer_order_checkpoint_and_cancellation() {
-        assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("upload").await;
+        for ttl in [false,true] {
+            assert_unlocked_preserves_reads_writer_order_checkpoint_and_cancellation("upload", ttl).await;
+        }
     }
     #[tokio::test]
     async fn unlocked_upload_discards_candidate_after_ttl_passes() {
@@ -1215,8 +1230,18 @@ mod tests {
         let request=write("seed","seed","alpha",ExpectedVersion::Absent);
         let receipt=p.write(request.clone()).await.unwrap();
         let future=clock.0.load(Ordering::SeqCst)+p.inner.lock().await.config.history.retention_ms+1;
+        std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
+        let before=clock.0.load(Ordering::SeqCst);
         clock.0.store(future,Ordering::SeqCst);
-        assert!(matches!(p.advance_time().await,Err(RecordError::Busy)));
+        // History alone (no TTL) must take the serial maintenance route.
+        assert!(matches!(p.statistics().await,Err(RecordError::Busy)));
+        // Even when the clock no longer makes history due, the pinned trim
+        // intent must prevent a read from passing its authoritative install.
+        clock.0.store(before,Ordering::SeqCst);
+        assert!(matches!(p.page(None,10).await,Err(RecordError::Busy)));
+        assert_eq!(p.inner.lock().await.state.history.floor,0);
+        clock.0.store(future,Ordering::SeqCst);
+        std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(20),async {
             while p.inner.lock().await.maintenance_scheduled {tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
         }).await.unwrap();

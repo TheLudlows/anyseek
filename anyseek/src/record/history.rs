@@ -47,7 +47,7 @@ pub(super) struct Trim {
 /// Every command is a committed position.
 /// Ordinary operations, TTL expirations and the retired prefix carry
 /// authenticated committed times used to advance retention.
-fn committed_floor(state:&State,at:u64,retention:u64)->Option<u64> {
+pub(super) fn committed_floor(state:&State,at:u64,retention:u64)->Option<u64> {
     let cutoff=at.checked_sub(retention)?;
     fn last_before(len:usize,mut entry:impl FnMut(usize)->(u64,u64),cutoff:u64)->Option<u64> {
         let (mut low,mut high)=(0,len);
