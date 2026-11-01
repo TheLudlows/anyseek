@@ -11,18 +11,9 @@ use anyseek::record::{RecordPartition, RecordQuery};
 // (observed: 14/100 on uniform low-score docs, 1/100 on disjoint docid-sorted
 // corpora).
 //
-// Oracle strategy (no reimplementation of BM25): run the exact same engine at
-// two truncation levels. With `length == total hits`, the heap is never
-// full, so no candidate is ever vetoed and the result is the precise global
-// ranking. The truncated `top_k` run must behave like an exact top-`k`
-// selection over that global ranking: it returns exactly `k` hits, contains
-// every hit whose score is strictly above the `k`th-best score, and contains
-// no hit strictly below it. Doc identity at the exact-score tie boundary may
-// legitimately differ between two deterministic-but-arbitrary tie selections,
-// so the assertion is deliberately tie-tolerant.
-//
-// On top of that, a corpus with a strict score gap at the truncation boundary
-// locks the exact doc set. Ties inside the selected set do not change membership.
+// Compare bounded selection against the complete ranking, including stable IDs
+// at equal-score boundaries. The separate native scoring probes retain a
+// full-candidate sort oracle independent of the bounded collector.
 //
 // Self-contained (own index directories), deterministic, no sleeps.
 
@@ -77,37 +68,15 @@ async fn fresh(dir: &str) -> RecordPartition {
     records::create(path, meta(), (&schema()).to_vec()).await
 }
 
-/// Assert `topk` equals a valid exact top-`k` of the full ranking `oracle`.
-/// Tie-tolerant: only the score threshold structure is compared.
+/// The exact prefix includes stable identity order at equal-score boundaries.
 fn assert_valid_topk(topk: &RecordSearch, oracle: &RecordSearch) {
     let k = topk.hits.len();
     assert!(k > 0, "top_k run returned nothing");
-    assert_eq!(
-        topk.count_total, oracle.count_total,
-        "hit totals disagree between the truncated and full runs"
-    );
-
-    let mut scores: Vec<f32> = oracle.hits.iter().map(|r| r.score).collect();
-    scores.sort_by(|a, b| b.partial_cmp(a).unwrap());
-    let threshold = scores[k - 1];
-    let strictly_better = scores.iter().filter(|s| **s > threshold).count();
-
-    let above = topk.hits.iter().filter(|r| r.score > threshold).count();
-    let below = topk.hits.iter().filter(|r| r.score < threshold).count();
-    assert_eq!(
-        above, strictly_better,
-        "top-{} misses {}-size strictly-better group; threshold={threshold}",
-        k, strictly_better
-    );
-    assert_eq!(
-        below, 0,
-        "top-{} returned {below} hits below the kth-best score {threshold}",
-        k
-    );
-
-    for w in topk.hits.windows(2) {
-        assert!(w[0].score >= w[1].score, "results not sorted desc");
-    }
+    assert_eq!(topk.count_total, oracle.count_total);
+    let rows = |result: &RecordSearch| result.hits.iter()
+        .map(|hit| (hit.record.record_id.clone(), hit.score.to_bits())).collect::<Vec<_>>();
+    assert_eq!(rows(topk), rows(oracle)[..k]);
+    assert!(topk.hits.windows(2).all(|pair| pair[0].score >= pair[1].score));
 }
 
 /// Sorted multiset of (doc_id, exact f32 score bits). Exact membership comparisons
@@ -194,6 +163,10 @@ async fn scan32_sparse_uniform_fills_heap() {
     let topk = search(&index, &query, 0, 100, ResultType::Topk).await;
     assert_eq!(topk.hits.len(), 100, "scan_32 under-filled the heap");
     assert_valid_topk(&topk, &oracle);
+    // Equal frequency and length: all scores tie, independently requiring the
+    // earliest business IDs, not arbitrary members at the cutoff.
+    assert_eq!(topk.hits.iter().map(|hit| hit.record.record_id.parse::<usize>().unwrap())
+        .collect::<Vec<_>>(), (0..100).collect::<Vec<_>>());
 
 
 }

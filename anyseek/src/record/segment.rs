@@ -189,7 +189,7 @@ mod tests {
         let second=b.inner.lock().await.index.test_index().read().await.segments[0].clone();
         {let mut root=root_index.write().await;root.segments.push(second);}
         for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() }] {
-            for order in [vec![],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Ascending}],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}]] {
+            for order in [vec![],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Ascending}],vec![ResultSort{field:"_id".into(),order:crate::search::SortOrder::Descending}],vec![ResultSort{field:"_score".into(),order:crate::search::SortOrder::Ascending}]] {
               for (offset,length) in [(0,10),(0,1),(1,1)] {
                 let vector=if mode==SearchMode::Lexical{None}else{Some(Embedding::F32(vec![1.0,0.0]))};
                 let expected=oracle.query(RecordQuery{temporal:None,text:"alpha".into(),vector:vector.clone(),mode:mode.clone(),query_type:QueryType::Union,offset,length,result_type:ResultType::TopkCount,fields:vec![],filters:vec![],sort:order.clone()}).await.unwrap();
@@ -201,6 +201,12 @@ mod tests {
                     mapped.push((shard.active.as_ref().unwrap().keys[hit.doc_id/2].clone(),hit.score));
                 }
                 let wanted:Vec<_>=expected.hits.into_iter().map(|hit|(hit.record.record_id,hit.score)).collect();
+                if mode == SearchMode::Lexical && order.first().is_some_and(|s| s.field == "_score") {
+                    // Different scores: b has the least term density, then e,
+                    // then a's repeated alpha. Ascending score must keep b.
+                    assert_eq!(mapped.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+                        ["b", "e", "a"].into_iter().skip(offset).take(length).collect::<Vec<_>>());
+                }
                 assert_eq!(mapped,wanted,"{mode:?} order={order:?} offset={offset} length={length}");
                 assert_eq!(actual.result_count_total,expected.count_total);
               }
