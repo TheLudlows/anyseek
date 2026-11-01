@@ -485,7 +485,8 @@ test("browser-only model configuration, embedded ingest and natural language vec
   await page.getByLabel("在当前标签页会话中记住模型 Key", { exact: true }).check();
   await page.getByRole("button", { name: "测试连接", exact: true }).click();
   await expect(page.getByText("连接成功，返回 3 维向量。请保存配置后使用。", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "保存本地配置", exact: true }).click();
+  await page.getByRole("button", { name: "保存公共模型配置", exact: true }).click();
+  await page.getByRole("button", { name: "保存集合字段映射", exact: true }).click();
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(modelKey);
   await page.reload();
   await expect(page.getByLabel("模型 API Key（可选）", { exact: true })).toHaveValue(modelKey);
@@ -563,7 +564,77 @@ test("browser-only model configuration, embedded ingest and natural language vec
   expect(modelCalls).toBe(4);
   expect(queryCalls).toBe(2);
   await page.getByRole("button", { name: "连接与管理", exact: true }).click();
-  await page.getByRole("button", { name: "清除本地模型配置", exact: true }).click();
+  await page.getByRole("button", { name: "清除集合字段映射", exact: true }).click();
+  // Collection cleanup must preserve the service and its shared credential.
+  expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.endsWith(".service")))).toHaveLength(1);
+  expect(await page.evaluate(() => JSON.stringify(sessionStorage))).toContain(modelKey);
+  await page.getByRole("button", { name: "清除公共模型配置", exact: true }).click();
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("anyseek.embedding.")))).toEqual([]);
   expect(await page.evaluate(() => JSON.stringify(sessionStorage))).not.toContain(modelKey);
+});
+
+test("shared embedding service is configured once and reused with independent collection mappings", async ({ page }) => {
+  const endpoint = "https://shared-model.example.test/v1/embeddings";
+  const modelKey = "shared-browser-model-secret";
+  let modelCalls = 0;
+  await page.route(endpoint, async route => {
+    if (route.request().method() === "OPTIONS") {
+      await route.fulfill({ status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type,authorization", "access-control-allow-methods": "POST" } });
+      return;
+    }
+    expect(route.request().headers().authorization).toBe("Bearer " + modelKey);
+    expect(route.request().postDataJSON().model).toBe("shared-model");
+    modelCalls++;
+    await route.fulfill({ contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify({ data: [{ index: 0, embedding: [1, 0, 0] }] }) });
+  });
+  await login(page);
+  await page.getByLabel("当前集合", { exact: true }).selectOption("product_docs");
+  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  // A lexical collection has no vector mapping but can configure the shared service.
+  await expect(page.getByRole("heading", { name: "公共嵌入服务", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "保存集合字段映射", exact: true })).toHaveCount(0);
+  await page.getByLabel("Embeddings API 地址", { exact: true }).fill(endpoint);
+  await page.getByLabel("模型名称", { exact: true }).fill("shared-model");
+  await page.getByLabel("模型 API Key（可选）", { exact: true }).fill(modelKey);
+  await page.getByLabel("在当前标签页会话中记住模型 Key", { exact: true }).check();
+  await page.getByRole("button", { name: "测试连接", exact: true }).click();
+  await expect(page.getByText("连接成功，返回 3 维向量。请保存配置后使用。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "保存公共模型配置", exact: true }).click();
+  const mappings: Record<string, string[]> = { knowledge_base: ["body"], support_cases: ["title", "body"] };
+  for (const [id, fields] of Object.entries(mappings)) {
+    await page.getByLabel("当前集合", { exact: true }).selectOption(id);
+    await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+    await expect(page.getByLabel("Embeddings API 地址", { exact: true })).toHaveValue(endpoint);
+    await expect(page.getByLabel("模型名称", { exact: true })).toHaveValue("shared-model");
+    await expect(page.getByLabel("模型 API Key（可选）", { exact: true })).toHaveValue(modelKey);
+    for (const field of ["title", "body", "url"])
+      await page.getByLabel(field, { exact: true }).setChecked(fields.includes(field));
+    await page.getByRole("button", { name: "保存集合字段映射", exact: true }).click();
+    await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "检索调试", exact: true }).click();
+    await page.getByRole("button", { name: "向量", exact: true }).click();
+    await page.getByLabel("检索内容", { exact: true }).fill("shared service query");
+    await page.getByRole("button", { name: "生成并预览向量", exact: true }).click();
+    await expect(page.getByText("当前查询向量 · 3 维", { exact: true })).toBeVisible();
+  }
+  expect(modelCalls).toBe(3);
+  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  await page.getByLabel("模型名称", { exact: true }).fill("replacement-model");
+  await page.getByRole("button", { name: "保存公共模型配置", exact: true }).click();
+  await expect(page.getByText(`当前集合使用：shared-model · ${endpoint}`, { exact: true })).toBeVisible();
+  const configs = await page.evaluate(() => Object.entries(localStorage)
+    .filter(([key]) => key.startsWith("anyseek.embedding.")).map(([, value]) => JSON.parse(value)));
+  expect(configs.find(c => c.textFields?.length === 1)?.textFields).toEqual(["body"]);
+  expect(configs.find(c => c.textFields?.length === 2)?.textFields).toEqual(["title", "body"]);
+  expect(configs.filter(c => c.vectorField).map(c => c.model)).toEqual(["shared-model", "shared-model"]);
+  expect(configs.find(c => !c.vectorField)?.model).toBe("replacement-model");
+  await page.getByRole("button", { name: "清除集合字段映射", exact: true }).click();
+  await page.getByLabel("当前集合", { exact: true }).selectOption("knowledge_base");
+  await page.getByRole("button", { name: "连接与管理", exact: true }).click();
+  await expect(page.getByText(`当前集合使用：shared-model · ${endpoint}`, { exact: true })).toBeVisible();
+  await mkdir("test-results/screenshots", { recursive: true });
+  await page.screenshot({ path: "test-results/screenshots/shared-embeddings.png", fullPage: true, animations: "disabled" });
+  await page.reload();
+  await expect(page.getByLabel("模型名称", { exact: true })).toHaveValue("replacement-model");
+  await expect(page.getByText(`当前集合使用：shared-model · ${endpoint}`, { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(modelKey);
 });
