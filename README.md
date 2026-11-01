@@ -1,6 +1,6 @@
 # anyseek
 
-**面向 AI 记忆与知识的通用存储和检索底座。** 将原始记录、来源证据、版本、时间与显式关系放在同一个可恢复、可检索的数据视图中，通过 Rust 核心库、HTTP API 和独立 Web 控制台使用。
+**面向 AI 记忆与知识的通用存储和检索服务。** 将原始记录、来源证据、版本、时间与显式关系放在同一个可恢复、可检索的数据视图中，通过 HTTP API 和独立 Web 控制台使用。
 
 anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、切块、embedding、实体抽取及记忆反思/重算由上层应用完成。自定义内容保存在 `document`，引擎管理稳定身份和系统元数据。
 
@@ -40,7 +40,7 @@ API 和 UI 分别启动。API 需要 Rust 工具链，UI 需要 Node.js 24 和 n
 从 [TheLudlows/anyseek](https://github.com/TheLudlows/anyseek) 获取源码，在仓库根构建：
 
 ```sh
-cargo build --workspace --features server
+cargo build --workspace
 ```
 
 Linux / macOS，在第一个终端运行：
@@ -82,14 +82,13 @@ HTTP 使用 `/api/v1`、`apikey` 请求头和 JSON。创建 collection 时声明
 - [HTTP 请求示例](anyseek/src/server/test_api.rest)与[服务契约](anyseek/src/server/README.md)：记录、查询、授权、备份等完整流程。
 - `POST /api/v1/index/{id}/query`：文本、向量或混合查询；空对象浏览可见记录。
 - `target/debug/anyseek_server generate_openapi=true`：在可执行文件旁生成 OpenAPI JSON/YAML。
-- [Rust 库接入](docs/development.md#rust-核心库接入)：从本仓库使用 path/git 依赖；统一使用 RecordPartition 访问数据；旧低层 Index API 已移除。
 
-单 package 同时提供核心库与 `anyseek_server` 二进制；服务须显式启用 `server` feature，默认库依赖不包含 HTTP/OpenAPI。
+单个 `anyseek` package 构建 `anyseek_server` 服务。仓库根运行 `cargo build` 即构建服务，`cargo run -- <name=value...>` 启动服务，`cargo test` 运行模块、服务及集成测试。HTTP API 和本地/S3 存储始终可用；`--no-default-features` 仅关闭中文分词与结果诊断。
 
 ## 开发与设计
 
 ```sh
-cargo test --workspace --features server --all-targets
+cargo test --workspace --all-targets
 ```
 
-[开发与验证指南](docs/development.md)包含独立核心、rustdoc、HTTP/Chromium 和故障测试命令。[Record 语义](docs/record-model.md)与[存储协议](docs/storage.md)说明现行不变量；[后续路线](docs/roadmap.md)列出剩余工作。
+[开发与验证指南](docs/development.md)包含服务构建、rustdoc、HTTP/Chromium 和故障测试命令。[Record 语义](docs/record-model.md)与[存储协议](docs/storage.md)说明现行不变量；[后续路线](docs/roadmap.md)列出剩余工作。

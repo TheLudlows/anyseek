@@ -27,7 +27,6 @@ impl RecordPartition {
 
     /// Release a deleted S3 incarnation after its local owner/root was retired.
     /// The caller must retain the Catalog lifecycle and service owner guards.
-    #[cfg(feature = "s3-object-store")]
     pub async fn reclaim_deleted_s3(config: S3CompatibleRecordConfig, limit: usize) -> Result<bool, RecordError> {
         if limit == 0 || limit > 64 { return Err(RecordError::Rejected("invalid reclamation batch".into())); }
         let (store, mut authority) = remote(&config)?;
@@ -46,7 +45,6 @@ impl RecordPartition {
 
     /// Retry monotonic object tombstones across all service incarnations. This
     /// includes ambiguous old PUTs after the Catalog incarnation row is gone.
-    #[cfg(feature = "s3-object-store")]
     pub async fn retry_s3_deletions(config: S3CompatibleRecordConfig, after: String) -> Result<String, RecordError> {
         let (store, mut authority) = remote(&config)?;
         let objects = authority.retired_objects_page(&after, 16).map_err(storage)?;
@@ -59,7 +57,6 @@ impl RecordPartition {
     }
 }
 
-#[cfg(feature = "s3-object-store")]
 fn remote(config: &S3CompatibleRecordConfig) -> Result<(
     crate::storage::s3_compatible::S3CompatibleStore,
     crate::storage::sqlite_authority::SqliteAuthority,

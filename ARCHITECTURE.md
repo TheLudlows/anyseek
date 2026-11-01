@@ -1,6 +1,6 @@
 # 当前架构
 
-anyseek 由 Rust 核心库、HTTP API 服务和独立 Web 控制台组成。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。公开数据入口统一为 RecordPartition；内部向量/元数据组件包含可变 tail 与冻结 Segment，重复逻辑 shard 状态已由 #111 移除。
+AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 控制台使用。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。HTTP 数据请求统一交由内部 RecordPartition 处理；内部向量/元数据组件包含可变 tail 与冻结 Segment，重复逻辑 shard 状态已由 #111 移除。
 
 ## 模块边界
 
@@ -17,7 +17,7 @@ anyseek 由 Rust 核心库、HTTP API 服务和独立 Web 控制台组成。资�
 | 活动身份 | `active.rs` | 向量/元数据记录身份、fingerprint 和活动 ordinal；全文统计由 Tantivy 固定 Searcher 管理 |
 | 过滤/分词 | `metadata_filter.rs`、`tokenizer.rs` | 共享元数据判定与文本处理 |
 
-路径相对于核心或服务的 src。`api_types.rs` 和 `api_schema.rs` 保留服务公共配置/查询 DTO 及 OpenAPI 描述；核心不依赖 HTTP schema。默认启动仅挂载 Record 服务，不保留独立的旧 HTTP/key/index 管理实现。
+存储和检索模块位于 `anyseek/src/`，HTTP 实现位于 `anyseek/src/server/`。`api_types.rs` 和 `api_schema.rs` 定义服务配置/查询 DTO 及 OpenAPI 描述。默认启动仅挂载 Record 服务，不保留独立的旧 HTTP/key/index 管理实现。
 
 ## 写入与查询
 

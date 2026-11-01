@@ -37,7 +37,6 @@ struct Plan {
     source:Option<maintenance::SourceCapture>,
     native:Option<anchor::NativeReuse>,
     intent:maintenance::Intent,
-    #[cfg(feature="s3-object-store")]
     remote:Option<remote_checkpoint::RemoteBuild>,
 }
 struct Candidate {
@@ -165,12 +164,10 @@ impl RecordPartition {
                     inner.state.try_clone().map_err(|e|storage(format!("stage=index_snapshot_clone {e}")))?};
                 let base=serde_json::to_vec(&inner.anchor).map_err(storage)?;
                 let intent=maintenance::Intent::capture(&inner,automatic)?;
-                #[cfg(feature="s3-object-store")]
                 let remote = match inner.remote.as_mut() {
                     Some(remote) => Some(remote.begin_background_build(timeout).await?),
                     None => None,
                 };
-                #[cfg(feature="s3-object-store")]
                 if remote.as_ref().is_some_and(|r|r.build.cut_seq!=inner.state.seq) {
                     if let (Some(active),Some(captured))=(inner.remote.as_mut(),remote.as_ref()) {
                         if let Err(error)=active.authority.lock().await.cancel_index_build(&captured.build) {
@@ -183,12 +180,12 @@ impl RecordPartition {
                 }
                 let result = Plan {source,native,intent,root,config:inner.config.clone(),snapshot,prior:inner.payloads.clone(),
                     base,disk,memory,resources,
-                    #[cfg(feature="s3-object-store")] remote};
+                    remote};
                 inner.background = Some(Tail{id,entries:Vec::new(),bytes:0,max_bytes:tail_bytes,overflowed:false,revision:0});
                 result
             };
             let Plan{source,native,intent,root,config,mut snapshot,prior,base,disk,memory,resources:_resources,
-                #[cfg(feature="s3-object-store")] remote} = plan;
+                remote} = plan;
             let cut = snapshot.seq;
             #[cfg(any(test,feature="fault-injection"))]
             pause(&root,timeout).await;
@@ -202,7 +199,6 @@ impl RecordPartition {
                             RecordError::RecoveryRequired
                         }else{error}
                     })?;
-                    #[cfg(feature="s3-object-store")]
                     if let Some(remote)=&remote {
                         source.verify_remote(remote,&root,&config).await.map_err(|error| {
                             if matches!(error,RecordError::Busy){error}else{
@@ -249,7 +245,6 @@ impl RecordPartition {
                     state:loaded.state,index,ordinals,locations,
                 };
                 crash_boundary("prepared");
-                #[cfg(feature="s3-object-store")]
                 let manifest = match &remote {
                     Some(remote) => {
                         let remaining=timeout.checked_sub(started.elapsed()).ok_or(RecordError::Busy)?;
@@ -317,7 +312,6 @@ impl RecordPartition {
                     let mut output = inner.output.write().map_err(|_|RecordError::RecoveryRequired)?;
                     let old = output.fenced; output.fenced = true; old
                 };
-                #[cfg(feature="s3-object-store")]
                 if let (Some(remote),Some(manifest)) = (&remote,manifest) {
                     let expected_seq=inner.state.seq;
                     let active = inner.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
@@ -355,7 +349,6 @@ impl RecordPartition {
                     })
                 }else{journal_result};
                 if let Err(error) = journal_result {
-                    #[cfg(feature="s3-object-store")]
                     if remote.is_some() { return Err(RecordError::DurablePending(inner.state.seq)); }
                     if matches!(error,CreateError::NotPublished(_)) {
                         inner.healthy = true;
@@ -405,7 +398,6 @@ impl RecordPartition {
                 inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
             }
             if inner.background.as_ref().is_some_and(|t|t.id==id) { inner.background = None; }
-            #[cfg(feature="s3-object-store")]
             if let Some(remote) = &remote {
                 let current=if let Some(active)=inner.remote.as_ref() {
                     active.authority.lock().await.read_head(&remote.build.partition_id)

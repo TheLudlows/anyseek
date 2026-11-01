@@ -63,7 +63,7 @@ the HTTP `rrf` object reject null. Unknown RRF fields are rejected.
 
 Explicit budgets held fixed across pages keep the fusion candidate pool fixed.
 With omitted budgets it can change with `offset + length`, as before. Count-only
-core requests retain existing count semantics; hybrid totals remain the existing
+internal requests retain existing count semantics; hybrid totals remain the existing
 sum of per-component maxima of channel counts, not an exact union or fused-candidate count.
 HTTP vector/hybrid requests still require positive output length. Filters,
 realtime visibility, explicit final sort and vector thresholds retain existing

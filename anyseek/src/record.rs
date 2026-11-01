@@ -57,7 +57,6 @@ mod anchor;
 mod anchor_image;
 mod package_pins;
 mod reclamation;
-#[cfg(feature="s3-object-store")]
 mod remote_checkpoint;
 pub(crate) mod build_budget;
 mod view;
@@ -327,7 +326,6 @@ struct Inner {
     evaluation_time_ms: u64,
     graph_cache: graph::Cache,
     output: Arc<std::sync::RwLock<output::OutputState>>,
-    #[cfg(feature = "s3-object-store")]
     remote: Option<RemotePersistence>,
     #[cfg(test)]
     fail_after_durable: bool,
@@ -344,7 +342,6 @@ impl Drop for Inner {
         if let Ok(mut state) = self.output.write() { state.fenced = true; }
     }
 }
-#[cfg(feature = "s3-object-store")]
 struct RemotePersistence {
     store: crate::storage::s3_compatible::S3CompatibleStore,
     authority: tokio::sync::Mutex<crate::storage::sqlite_authority::SqliteAuthority>,
@@ -360,7 +357,6 @@ struct RemotePersistence {
 /// Credentials are runtime-only and are never written into SQLite or backup metadata.
 /// Reads use a discardable verified object cache beside `authority_path`, bounded
 /// to 256 MiB / 4096 blocks per authority. Cache failure falls back to the backend.
-#[cfg(feature = "s3-object-store")]
 pub struct S3CompatibleRecordConfig {
     pub authority_path: PathBuf,
     pub partition_id: String,
@@ -376,14 +372,10 @@ pub struct S3CompatibleRecordConfig {
     pub max_tail_bytes: usize,
 }
 
-#[cfg(feature = "s3-object-store")]
 #[derive(Debug)]
 enum RemoteCommitError { Busy, Unknown(String) }
-#[cfg(feature = "s3-object-store")]
 impl From<String> for RemoteCommitError { fn from(error: String) -> Self { Self::Unknown(error) } }
-#[cfg(feature = "s3-object-store")]
 impl From<&str> for RemoteCommitError { fn from(error: &str) -> Self { Self::Unknown(error.into()) } }
-#[cfg(feature = "s3-object-store")]
 impl From<crate::storage::object_log::TailError> for RemoteCommitError {
     fn from(error: crate::storage::object_log::TailError) -> Self {
         match error {
@@ -394,13 +386,11 @@ impl From<crate::storage::object_log::TailError> for RemoteCommitError {
         }
     }
 }
-#[cfg(feature = "s3-object-store")]
 impl std::fmt::Display for RemoteCommitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self { Self::Busy => f.write_str("resource budget exhausted before commit publication"), Self::Unknown(error) => f.write_str(error) }
     }
 }
-#[cfg(feature = "s3-object-store")]
 impl RemotePersistence {
     fn open(config: &S3CompatibleRecordConfig) -> Result<Self, RecordError> {
         if !crate::storage::object_keys::valid_partition(&config.partition_id)
@@ -564,7 +554,6 @@ impl RemotePersistence {
     }
 }
 
-#[cfg(feature = "s3-object-store")]
 fn unix_time_ms_i64() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0)
 }
@@ -722,7 +711,6 @@ impl Inner {
             Err(error) => Err(error),
         };
         if let Err(error) = result {
-            #[cfg(feature="s3-object-store")]
             if self.remote.is_some() { return Err(RecordError::DurablePending(seq)); }
             let _ = seq;
             return Err(RecordError::OutcomeUnknown(error.to_string()));
@@ -1008,7 +996,6 @@ impl RecordPartition {
     /// Create a Record partition whose accepted writes are committed to S3 + SQLite
     /// before local journal/index publication. The local journal remains a rebuildable
     /// cache; use open_s3 after restart to reconcile any remotely committed tail.
-    #[cfg(feature = "s3-object-store")]
     pub async fn create_s3(
         path: &Path,
         config: RecordConfig,
@@ -1094,7 +1081,6 @@ impl RecordPartition {
     /// before making its read view available. A missing/corrupt committed object
     /// fails closed if neither the backend nor an authenticated exact-reference
     /// cache copy supplies it. A cached journal never selects the current head.
-    #[cfg(feature = "s3-object-store")]
     pub async fn open_s3(
         path: &Path,
         config: RecordConfig,
@@ -1107,7 +1093,6 @@ impl RecordPartition {
     /// Rebuild the local journal/index cache from the remote bootstrap and committed
     /// log when the local directory is missing, or reconcile its missing remote tail.
     /// Kept separate so crash recovery can be tested with an in-memory object store.
-    #[cfg(feature = "s3-object-store")]
     async fn open_s3_with_remote(
         path: &Path,
         max_journal_bytes: u64,
@@ -1159,7 +1144,6 @@ impl RecordPartition {
     /// Create an immutable joint S3/SQLite backup. The returned JSON descriptor
     /// is a small local pointer; the metadata snapshot and all payload objects remain
     /// in object storage. The source authority pins the complete reachable closure.
-    #[cfg(feature = "s3-object-store")]
     pub async fn create_s3_backup(
         &self,
         backup_id: &str,
@@ -1187,7 +1171,6 @@ impl RecordPartition {
     }
 
     /// Retry pending remote retirement/deletion under the single owner's guard.
-    #[cfg(feature="s3-object-store")]
     pub async fn collect_s3_garbage(&self)->Result<usize,RecordError> {
         let writer=self.writer.clone();
         let owner=self.inner.clone();
@@ -1202,7 +1185,6 @@ impl RecordPartition {
     }
 
     /// Release a retained joint backup's pins only after its descriptor has been retired.
-    #[cfg(feature = "s3-object-store")]
     pub async fn release_s3_backup_pins(&self, backup_id: &str) -> Result<usize, RecordError> {
         let mut inner = self.inner.lock().await;
         let remote = inner.remote.as_mut().ok_or_else(|| RecordError::Rejected(
@@ -1213,7 +1195,6 @@ impl RecordPartition {
     }
 
     /// Release backup pins after the catalog has permanently retired the backup.
-    #[cfg(feature = "s3-object-store")]
     pub async fn retire_s3_backup(
         authority_path: &Path,
         backup_id: &str,
@@ -1231,7 +1212,6 @@ impl RecordPartition {
 
     /// Delete the backup descriptor and metadata snapshot after all authority copies
     /// have released this backup's payload pins.
-    #[cfg(feature = "s3-object-store")]
     pub async fn delete_s3_backup_metadata(
         authority_path: &Path,
         bundle_json: &str,
@@ -1269,7 +1249,6 @@ impl RecordPartition {
 
     /// Restore a joint S3/SQLite backup into an empty authority database, verify its
     /// complete object closure, then reconstruct the local journal/index cache.
-    #[cfg(feature = "s3-object-store")]
     pub async fn restore_s3_backup(
         path: &Path,
         config: RecordConfig,
@@ -1327,7 +1306,6 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 graph_cache: graph::Cache::default(),
                 output,
-                #[cfg(feature = "s3-object-store")]
                 remote: None,
                 #[cfg(test)]
                 fail_after_durable: false,
@@ -1427,7 +1405,6 @@ impl RecordPartition {
                 evaluation_time_ms: 0,
                 graph_cache,
                 output:output.clone(),
-                #[cfg(feature = "s3-object-store")]
                 remote: None,
                 #[cfg(test)]
                 fail_after_durable: false,
@@ -4174,7 +4151,6 @@ mod tests {
         drop(partition);
         std::fs::remove_dir_all(path).unwrap();
     }
-    #[cfg(feature = "s3-object-store")]
     #[tokio::test]
     async fn s3_partition_rebuilds_missing_local_cache_from_bootstrap_and_log() {
         use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
@@ -4258,7 +4234,6 @@ mod tests {
         let _=std::fs::remove_file(authority_path.with_extension("sqlite-shm"));
     }
 
-    #[cfg(feature = "s3-object-store")]
     #[test]
     fn remote_record_only_typed_admission_is_a_definite_refusal() {
         use crate::storage::object_log::TailError;
@@ -4270,7 +4245,6 @@ mod tests {
         assert!(matches!(RemoteCommitError::from(TailError::ObjectStore(backend)), RemoteCommitError::Unknown(_)));
     }
 
-    #[cfg(feature = "s3-object-store")]
     #[tokio::test(flavor = "current_thread")]
     async fn remote_record_upload_admission_refuses_before_put_and_keeps_writer_usable() {
         use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
@@ -4310,7 +4284,6 @@ mod tests {
         assert_eq!(query(&p, SearchMode::Lexical).await.hits.len(), 1);
     }
 
-    #[cfg(feature = "s3-object-store")]
     #[tokio::test]
     async fn sqlite_committed_remote_tail_recovers_before_local_journal_append() {
         use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};

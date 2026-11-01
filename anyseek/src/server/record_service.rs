@@ -571,7 +571,7 @@ impl Service {
     async fn authenticate(&self, headers: &HeaderMap) -> Result<String, Error> {
         match AUTHENTICATED.try_with(Clone::clone) {
             Ok(principal) => Ok(principal),
-            // Direct library/handler tests do not enter the HTTP middleware.
+            // Direct module/handler tests do not enter the HTTP middleware.
             Err(_) => self.authenticate_credentials(headers).await,
         }
     }
@@ -679,7 +679,7 @@ struct CollectionCreate {
     #[serde(default)]
     embedding_space_id: Option<String>,
 }
-// Reuse the shared operation contract without coupling the core record type to OpenAPI.
+// Reuse the shared operation contract without coupling the internal record type to OpenAPI.
 fn operation_id_schema() -> utoipa::openapi::Ref {
     utoipa::openapi::Ref::from_schema_name("OperationId")
 }

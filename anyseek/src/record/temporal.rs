@@ -235,7 +235,6 @@ impl Inner {
             .map_err(storage)?;
         let bytes = encode_entry(&Entry::Expired(event.clone()))?;
         self.ensure_journal_room(bytes.len(),reserve).await?;
-        #[cfg(feature="s3-object-store")]
         self.ensure_remote_tail_room(event.seq,&format!("system:expired:{}",event.seq),&bytes).await?;
         self.validate_journal_room(bytes.len(),reserve)?;
         self.healthy = false;
@@ -243,7 +242,6 @@ impl Inner {
             .write()
             .map_err(|_| RecordError::RecoveryRequired)?
             .fenced = true;
-        #[cfg(feature = "s3-object-store")]
         if let Some(remote) = self.remote.as_mut() {
             remote.commit_entry(event.seq, format!("system:expired:{}", event.seq), &bytes)
                 .await.map_err(|error|RecordError::OutcomeUnknown(error.to_string()))?;

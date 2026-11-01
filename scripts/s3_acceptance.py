@@ -84,7 +84,7 @@ def main():
         cargo = shutil.which('cargo')
         if not cargo:
             parser.error('cargo is required for the contract suite')
-        commands.append(('object_contract', [cargo, 'test', '-p', 'anyseek', '--lib', '--features', 'server,fault-injection',
+        commands.append(('object_contract', [cargo, 'test', '-p', 'anyseek', '--lib', '--features', 'fault-injection',
                          'real_s3_compatible_contract', '--', '--ignored']))
     if args.suite in ['semantic', 'all']:
         sections = ['base', 'locator', 'graph', 'temporal', 'history', 'ingest']

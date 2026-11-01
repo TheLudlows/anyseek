@@ -1,4 +1,3 @@
-#![cfg(feature = "server")]
 use anyseek::record::RecordSearch;
 #[path = "common/records.rs"] mod records;
 use anyseek::record::{RecordPartition, RecordQuery};

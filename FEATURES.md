@@ -1,6 +1,6 @@
 # 当前功能与边界
 
-HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、时间/TTL、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续运行容量仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
+HTTP/Web UI 数据请求统一由服务内部的 Record/catalog 处理；旧低层全文 Rust API 已删除。P1-A 及 P2 来源/证据、时间/TTL、实体/关系、同视图融合和解释批次已合入；系统断电与长期持续运行容量仍未验收。[服务使用](anyseek/src/server/README.md) · [架构](ARCHITECTURE.md) · [状态与证据](STATUS.md)
 
 ## 检索和数据
 
@@ -65,9 +65,9 @@ HTTP/Web UI 和 Rust 数据访问统一使用 Record/catalog；旧低层全文 R
 
 ## Web UI 和工具
 
-独立 `console/` 使用 React/TypeScript/Vite，Rust 只保留 API，静态资源不再嵌入内核。UI 提供实体目录/一跳关系检查；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、原始记录/JSON 预览与复制、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通同步写入确认后直接可见；异步 ingest 的索引进度独立推进。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 Tenant/Key 或逐条更新/删除管理页面。
+独立 `console/` 使用 React/TypeScript/Vite，Rust 只保留 API，静态资源不嵌入服务。UI 提供实体目录/一跳关系检查；保留连接、创建/选择 collection、JSON 粘贴/文件输入、Lexical/Vector/Hybrid 搜索、外部向量、分页、原始记录/JSON 预览与复制、日期过滤和排序。创建/写入发送前保存原请求；未知结果在刷新或后续拒绝后仍保留身份。普通同步写入确认后直接可见；异步 ingest 的索引进度独立推进。界面不再做 POST 后 PATCH 提交。master 可在 UI 发起完整服务备份与新根恢复；没有通用 Tenant/Key 或逐条更新/删除管理页面。
 
-完整冒烟为 `scripts/record_service_smoke.py`，浏览器验证在 `console/` 运行 `npm run test:browser`，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 留在可选 `anyseek::server` 模块。
+完整冒烟为 `scripts/record_service_smoke.py`，浏览器验证在 `console/` 运行 `npm run test:browser`，显式 fault-injection 构建可运行 `--faults`。`scripts/anyseek_client.py` 和 `index_write_query_smoke.py` 使用新 Record 请求，后者发送前保存请求文件。OpenAPI 通过 `generate_openapi=true` 生成；HTTP 类型和 schema 位于 `anyseek::server` 模块。
 
 ## 资源与未完成项
 

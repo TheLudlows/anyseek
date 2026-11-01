@@ -358,6 +358,6 @@ mod tests {
     }
 }
 
-#[cfg(all(test,feature="s3-object-store"))]
+#[cfg(test)]
 #[path="cache_merge_remote_tests.rs"]
 mod remote_tests;

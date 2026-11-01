@@ -1,7 +1,7 @@
 # CI feedback and complete acceptance
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
-dependency/core boundaries and the lexical partition;
+retired dependencies, console asset separation and the lexical partition;
 on code changes it builds and runs 174 exact bounded core regressions plus the
 small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
@@ -51,7 +51,7 @@ Measured run `40301847907` at `a08456b`:
 | --- | ---: |
 | Linux Persistence total | 94m 39s |
 | Its retained integration contracts | 56m 42s |
-| Its no-default-feature core | 11m 45s |
+| Its no-default-feature build (historical) | 11m 45s |
 | Its HTTP process fault matrix | 14m 13s |
 | build-and-smoke total | 71m 25s |
 | Its workspace all-targets | 61m 50s |
@@ -81,15 +81,15 @@ remain available without a second copy of the test logic.
 
 | Coverage | Owner in full acceptance |
 | --- | --- |
-| Linux all 33 integration targets, default zh/vb + server (no fault hooks) | build-and-smoke: workspace all-targets |
-| Linux library + service unit tests with server/fault-injection | Persistence: explicit --lib --bins |
-| Windows integration with server/fault-injection | Persistence remainder + four lexical matrix jobs |
-| Both OS no-default library and default/no-default doctests | Persistence, unchanged |
+| Linux all integration targets, default zh/vb (no fault hooks) | build-and-smoke: workspace all-targets |
+| Linux module + service unit tests with fault-injection | Persistence: explicit --lib --bins |
+| Windows integration with fault-injection | Persistence remainder + four lexical matrix jobs |
+| Both OS no-default service unit tests and default/no-default doctests | Persistence |
 | Linux normal HTTP + browser / Windows normal HTTP | build-and-smoke / Persistence |
 | Both OS fault HTTP and S3 fixtures | Persistence and S3 jobs, unchanged |
 
 The removed Linux integration rerun had no integration test conditional on
-`fault-injection`; server and zh feature-specific tests still run in the Linux
+`fault-injection`; HTTP and zh-specific tests still run in the Linux
 all-targets owner. Fault-feature library and binary tests remain on Linux, and
 fault-feature integrations remain on Windows. This is a deliberate coverage
 assignment, not a claim that different feature combinations are identical.
@@ -148,9 +148,9 @@ remain unchanged and neither is ignored:
 - `record::cache_merge::tests::repeated_updates_beyond_sixteen_tails_recover_from_original_wal`
 - `record::cache_merge::remote_tests::remote_long_suffix_merges_caches_without_replacing_anchor_and_cold_recovers`
 
-Manual `build-and-smoke` runs both with workspace/server all-targets. Persistence
-also includes both in Linux server/fault-injection lib tests and Windows
-server/fault-injection `--tests` (library unit tests are included). They retain the
+Manual `build-and-smoke` runs both with workspace all-targets. Persistence
+also includes both in Linux fault-injection lib tests and Windows
+fault-injection `--tests` (library unit tests are included). They retain the
 long-tail boundary evidence; the default suite retains bounded cache recovery,
 batch/crash, idempotency, owner-lock, TTL and queue coverage. Other historical
 cases remain because their age alone does not establish duplicate assertions.
@@ -163,7 +163,7 @@ reduction in total CI wall time; compilation and other jobs remain.
 Full acceptance avoids only these established repeats:
 
 - S3 job's filtered `remote_checkpoint::tests` rerun: the persistence jobs run
-  the same tests with the same `server,fault-injection` features on both OSes.
+  the same tests with the same `fault-injection` features on both OSes.
   S3 HTTP fixture contract and semantic suites remain.
 - Linux persistence normal HTTP smoke and its standalone service build:
   `build-and-smoke` runs normal HTTP acceptance; standalone console browser checks
@@ -171,8 +171,8 @@ Full acceptance avoids only these established repeats:
   persistence builds its own fault-enabled service before all later consumers.
   Windows normal HTTP, both OS fault HTTP, Indexer and authorization remain.
 - Linux filtered server `record_service::tests` and `resources::tests` reruns:
-  workspace/server all-targets already owns these same-feature tests. Windows
-  filtered tests and distinct s3-object-store `resource_` coverage remain.
+  workspace all-targets already owns these same-feature tests. Windows
+  filtered tests and object-buffer `resource_` coverage remain.
 
 No test timeouts, fixtures, sharding or cache policy change in this trimming.
 
@@ -182,7 +182,7 @@ The four `unlocked_encoding_*` / `unlocked_upload_*` pairs in
 `record/remote_checkpoint.rs` retain all eight individually selected test names.
 Each pair now calls one assertion helper with its original `encode` or `upload`
 pause point; normalized bodies were identical before extraction. Both run under
-the same s3-object-store test module (included by `server`).
+the same object-store test module (always included in service builds).
 
 | Shared scenario | Inputs and assertions retained at both pause points |
 | --- | --- |
@@ -224,7 +224,7 @@ Windows matrix names and remainder exclusions are updated together and guarded
 by `check_lexical_partition.py`. No production algorithm or data scale changes.
 
 Local before/after observation for this cleanup (one run each, not a benchmark):
-Linux x86-64, rustc 1.99.1, native CPU debug/test profile, `--features server`,
+Linux x86-64, rustc 1.99.1, native CPU debug/test profile (historical service-enabled build),
 `ANYSEEK_TEST_SCALE=small`, `--test-threads=1 --nocapture`. Both runs passed all
 six tests; compilation is excluded. Existing progress logs give these summed
 phase times (rounded to milliseconds):

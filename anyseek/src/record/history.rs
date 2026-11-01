@@ -92,7 +92,6 @@ impl Inner {
             floor,
             at,
         };
-        #[cfg(feature="s3-object-store")]
         if self.remote.is_some() {
             self.maintenance_trim.get_or_insert(trim);
             return Err(self.request_checkpoint("remote_history_trim"));

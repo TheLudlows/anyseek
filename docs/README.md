@@ -8,7 +8,7 @@
 | 当前能力 | [状态](../STATUS.md)、[功能与边界](../FEATURES.md)、[架构](../ARCHITECTURE.md) |
 | 全貌与决策 | [项目全貌与下一步建议](project-overview.md)、[全文与包契约](../ARCHITECTURE.md#全文与认证包契约) |
 | 一致性与持久化 | [Record 语义](record-model.md)、[存储协议](storage.md) |
-| 开发与后续 | [开发与验证](development.md)、[Rust 接入](development.md#rust-核心库接入)、[后续路线](roadmap.md) |
+| 开发与后续 | [开发与验证](development.md)、[后续路线](roadmap.md) |
 | 检索配置 | [N-gram](../NGRAM_SEARCH.md)、[文本归一化](text-normalization.md)、[字段长度](field-length-normalization.md) |
 | 排序与词项 | [Weighted RRF](weighted-rrf.md)、[稳定排序](stable-ranking.md)、[分析身份与包契约](../ARCHITECTURE.md#全文与认证包契约) |
 | 数据与来源 | [MIRACL 语料](../miracl-corpus-v1.0-zh/README.md)、[许可证](../LICENSE) |

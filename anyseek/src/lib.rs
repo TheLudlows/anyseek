@@ -1,11 +1,9 @@
 #![crate_type = "lib"]
 #![crate_name = "anyseek"]
 
-//! # anyseek core
-//! Lexical, external-vector and hybrid search.
-//! Use a path or git dependency on this repository. Models and document parsing run externally.
-//! Metadata fields support filtering and sorting; aggregate counts, histograms and extrema
-//! are no longer exposed. See the repository's docs/library-examples.md for current examples.
+//! Internal modules for the AnySeek record storage and search service.
+//! The service exposes an HTTP API; models and document parsing run externally.
+//! This crate also supports integration tests of storage and retrieval behavior.
 
 #![warn(
     missing_docs,
@@ -14,10 +12,6 @@
     trivial_numeric_casts,
     unused_qualifications
 )]
-
-/// Include the retained library examples in documentation.
-#[cfg_attr(doctest, doc = include_str!("../../docs/library-examples.md"))]
-pub struct ReadmeDoctests;
 
 use std::sync::LazyLock;
 
@@ -67,6 +61,5 @@ pub mod resources;
 
 mod active;
 
-/// Optional HTTP contracts; the core never depends on this module.
-#[cfg(feature = "server")]
+/// HTTP request, response and OpenAPI contracts for the service.
 pub mod server;

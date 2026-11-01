@@ -7,7 +7,7 @@
 ## 构建与启动
 
 ```sh
-cargo build --workspace --features server
+cargo build
 export MASTER_KEY_SECRET='replace-with-your-private-secret'
 target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 ```
@@ -22,7 +22,7 @@ target/debug/anyseek_server local_ip=127.0.0.1 local_port=8080
 | `default_nprobe` | `200`；正整数，请求可覆盖 |
 | `generate_openapi` | `false`；`true` 输出实际路由的 JSON/YAML 后退出 |
 
-只接受 `name=value`；未知、重复、非法参数返回非零状态。核心使用 `log`，服务支持 `RUST_LOG`。Ctrl-C/SIGINT/SIGTERM 停止接收请求并等待连接结束；成功写入已持久，不依靠退出时提交派生索引才成立。默认 secret 不适合部署，必须配置自己的值。
+只接受 `name=value`；未知、重复、非法参数返回非零状态。服务使用 `log`，通过 `RUST_LOG` 配置日志。Ctrl-C/SIGINT/SIGTERM 停止接收请求并等待连接结束；成功写入已持久，不依靠退出时提交派生索引才成立。默认 secret 不适合部署，必须配置自己的值。
 
 ## 启动 Web UI
 
@@ -38,7 +38,7 @@ npm run dev
 
 ## S3 后端（显式启用）
 
-`server` feature 包含 S3 支持；默认仍为 `local`。启用新部署示例：
+服务构建始终包含 S3 支持；运行时默认使用 `local` 后端。启用新部署示例：
 
 ```sh
 export ANYSEEK_STORAGE_BACKEND=s3
@@ -115,7 +115,7 @@ curl "$BASE/api/v1/index/demo/ingest" -H "apikey: $API_KEY"
 
 `GET /api/v1/index/{id}/ingest` 返回 committed_seq、lexical_seq、vector_seq、index_error 和 recovery_required。需要搜索包含某个提交时，检查所需消费者水位至少达到该 receipt.seq，并处理 index_error/recovery_required；各索引水位可以不同，不要求全局统一。恢复必需时 committed_seq 为 null。
 
-同步写入和异步导入统一通过 `GET /api/v1/index/{id}/operation/{epoch}/{nonce}` 查询 Record 业务回执。缺席或过期不能证明先前未提交。Rust 对应 `commit_writes` 和 `committed_progress`，见[开发指南](../../../docs/development.md#rust-核心库接入)。
+同步写入和异步导入统一通过 `GET /api/v1/index/{id}/operation/{epoch}/{nonce}` 查询 Record 业务回执。缺席或过期不能证明先前未提交。实现对应 `commit_writes` 和 `committed_progress`，见[服务内部模块](../../../docs/development.md#服务内部模块)。
 
 ## 可直接执行的 HTTP 示例
 
@@ -207,13 +207,13 @@ Service archive/root 清理是明确的离线操作，不提供删除运行根�
 ## 开发验证
 
 ```sh
-cargo test --workspace --features server --all-targets
-python3 scripts/check_core_boundary.py
+cargo test --workspace --all-targets
+python3 scripts/check_console_boundary.py
 python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 # 独立前端浏览器检查：见 console/README.md
 ```
 
-浏览器测试在 `console/` 使用 Node.js Playwright 和 Chromium，按[控制台指南](../../../console/README.md#验证)运行。故障矩阵需先构建 `cargo build -p anyseek --features server,fault-injection`，再运行同一 smoke 脚本的 `--faults`。正常构建默认关闭故障注入。
+浏览器测试在 `console/` 使用 Node.js Playwright 和 Chromium，按[控制台指南](../../../console/README.md#验证)运行。故障矩阵需先构建 `cargo build -p anyseek --features fault-injection`，再运行同一 smoke 脚本的 `--faults`。正常构建默认关闭故障注入。
 
 小型调用方示例使用 `scripts/anyseek_client.py`：设置 `ANYSEEK_API_KEY` 后运行 `python3 scripts/index_write_query_smoke.py --port 8080 --requests requests.json`；重复执行同一命令重试保存的请求，不生成新身份。旧 `http_smoke.py` 已由完整 Record smoke 取代。
 

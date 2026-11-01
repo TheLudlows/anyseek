@@ -4,7 +4,7 @@ version = "3.4.1"
 authors = ["Wolf Garbe <wolf.garbe@seekstorm.com>"]
 license = "Apache-2.0"
 categories = ["database-implementations", "data-structures"]
-description = """Vector & lexical search engine library & multi-tenancy server"""
+description = """Multi-tenant record storage and search service"""
 documentation = "https://github.com/TheLudlows/anyseek#readme"
 homepage = "https://github.com/TheLudlows/anyseek"
 repository = "https://github.com/TheLudlows/anyseek"
@@ -12,23 +12,21 @@ readme = "../README.md"
 keywords = ["search", "information", "retrieval"]
 edition = "2024"
 publish = false
+default-run = "anyseek_server"
 
 [features]
 # Optional features: zh=Chinese word segmentation, vb=result diagnostics.
-# You can also disable all default features and re-enable them case-wise in your toml with: anyseek = { path = "../anyseek", default-features = false, features = ["zh"] }
+# --no-default-features disables Chinese segmentation and result diagnostics.
+# HTTP and local/S3 storage are always part of the service.
 default = ["zh","vb"]
 zh = ["dep:tantivy-jieba", "dep:jieba-rs"]
 vb = []
 # Explicit test binaries only; no remote activation endpoint.
 fault-injection = []
-# HTTP dependencies are absent from the default core dependency graph.
-s3-object-store = ["dep:object_store"]
-server = ["dep:http-body", "dep:env_logger", "dep:axum", "dep:utoipa", "s3-object-store"]
 
 [[bin]]
 name = "anyseek_server"
 path = "src/server/main.rs"
-required-features = ["server"]
 
 [lib]
 name = "anyseek"
@@ -39,12 +37,12 @@ tantivy = { version = "=0.27.0", default-features = false, features = ["mmap", "
 tantivy-jieba = { version = "=0.21.0", optional = true }
 # Pin dictionary/algorithm identity, including the adapter's transitive dependency.
 jieba-rs = { version = "=0.11.0", optional = true }
-http-body = { version = "1", optional = true }
-env_logger = { version = "0.11", optional = true }
-axum = { version = "0.8", optional = true, default-features = false, features = ["http1", "http2", "json", "query", "tokio", "matched-path"] }
-utoipa = { version = "6.0.0", optional = true, features = ["preserve_order", "preserve_path_order", "yaml", "indexmap"] }
+http-body = "1"
+env_logger = "0.11"
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "query", "tokio", "matched-path"] }
+utoipa = { version = "6.0.0", features = ["preserve_order", "preserve_path_order", "yaml", "indexmap"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
-object_store = { version = "0.12", optional = true, default-features = false, features = ["aws"] }
+object_store = { version = "0.12", default-features = false, features = ["aws"] }
 xxhash-rust = { version = "=0.8.15", default-features = false, features = ["xxh64"] }
 log = "0.4"
 serde = { version = "1.0.229", features = ["derive"] }

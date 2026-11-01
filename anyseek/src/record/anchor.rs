@@ -217,10 +217,8 @@ impl Frozen {
     }
 }
 impl Reference {
-    #[cfg(any(test,feature="s3-object-store"))]
     pub(super) fn identity(&self)->&str {&self.id}
     pub(super) fn retained_packages(&self)->&[segment::Package] {&self.segments}
-    #[cfg(feature="s3-object-store")]
     pub(super) fn remote_files(&self,payloads:&Closure)->Result<Vec<(String,u64,[u8;32])>,RecordError>{
         let mut result=Vec::new();
         for file in &self.files {result.push((format!("anchor-{}/{}",self.id,file.path),file.bytes,file.sha256));}
@@ -522,7 +520,6 @@ impl Reference {
         let statistics:Statistics=serde_json::from_slice(&read_bounded(&path.join("statistics"),closure_limit(authority_budget)?)?).map_err(storage)?;
         Self::load_parts(root,config,state,payloads,&self.segments,statistics.segments).await
     }
-    #[cfg(feature="s3-object-store")]
     pub(super) async fn verify_derived_parts(root:&Path,config:&RecordConfig,state:&State,
         segments:&[segment::Package],statistics:Vec<crate::active::ActiveStatistics>)->Result<(),RecordError> {
         let verified=Self::load_parts(root,config,state,Closure::default(),segments,statistics).await?;
@@ -579,7 +576,6 @@ impl Inner {
 }
 
 impl Inner {
-    #[cfg(any(test,feature="s3-object-store"))]
     pub(super) async fn publish_anchor(&mut self)->Result<u64,RecordError>{
         self.publish_anchor_candidate(None,true).await
     }
@@ -665,7 +661,6 @@ impl Inner {
     async fn prepare_and_publish_anchor(&mut self,candidate:Option<State>,reuse:bool)->Result<u64,RecordError>{
         self.index.drain_batch_prefix(self.state.seq).await?;
         let _phase=maintenance::Phase::new("full_checkpoint",self.state.seq);
-        #[cfg(feature="s3-object-store")]
         if let Some(remote)=self.remote.as_ref() {
             if let Err(error)=remote.verify_seal_inputs(self.anchor.as_ref(),self.state.seq,&mut self.journal,self.config.max_journal_bytes).await {
                 if matches!(error,RecordError::Busy){return Err(error);}
@@ -730,7 +725,6 @@ impl Inner {
         PartitionJournal::validate_initial(payload.len(),self.config.max_journal_bytes).map_err(storage)?;
         let fenced=self.output.read().map_err(|_|RecordError::RecoveryRequired)?.fenced;
         self.healthy=false;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;
-        #[cfg(feature="s3-object-store")]
         if let Some(remote)=self.remote.as_mut() {
             remote.publish_anchor(&root,&reference,&loaded.payloads,next_seq,self.config.max_journal_bytes,false).await?;
         }
@@ -752,7 +746,6 @@ impl Inner {
         match journal_result{
             Ok(())=>{},
             Err(error@CreateError::NotPublished(_))=>{
-                #[cfg(feature="s3-object-store")]
                 if self.remote.is_some() {return Err(RecordError::DurablePending(next_seq));}
                 self.healthy=true;self.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=fenced;
                 return Err(creation_error(error));
@@ -769,7 +762,6 @@ impl Inner {
             std::fs::write(root.join(".test-anchor-gc-failure"), b"injected retirement failure").map_err(storage)?;
         }
         if let Err(error)=self.reclaim_anchor_objects().await {log::warn!("anchor certified; object retirement pending: {error}");}
-        #[cfg(feature="s3-object-store")]
         if let Some(remote)=self.remote.as_mut() {
             if let Err(error)=remote.collect_objects().await {log::warn!("remote object collection pending: {error}");}
         }
