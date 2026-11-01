@@ -93,14 +93,17 @@ export async function sendWrites(
     const batch = [pending.requests[i]];
     const unknownBefore = beginWriteAttempt(pending, batch);
     try {
-      await api(
+      const response = await api<{ results?: { code: string; status?: number; message?: string; receipt?: unknown }[] }>(
         key,
-        collectionPath(pending.collection) + "/doc",
-        pending.requests[i].body,
+        collectionPath(pending.collection) + "/batch",
+        '{"writes":[' + pending.requests[i].body + "]}",
       );
+      const result = response?.results?.length === 1 ? response.results[0] : undefined;
+      if (result?.code !== "applied" || !result.receipt)
+        throw new ApiError(result?.message || "Write was not confirmed", result?.status, result?.code);
     } catch (error) {
       const outcome = error instanceof ApiError && ["rejected", "conflict"].includes(error.code)
-        ? "rejected" : "unknown";
+        ? "rejected" : error instanceof ApiError && error.code === "not_attempted" ? "not_attempted" : "unknown";
       finishWriteAttempt(pending, batch, unknownBefore, [outcome]);
       throw error;
     }

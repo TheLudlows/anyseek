@@ -96,8 +96,8 @@ class Engine:
             for d in docs:
                 self.seq+=1;writes.append({'operation_id':op(self.seq),'record_id':d['id'],'expected':'Any','document':d})
             code,data,ms,_=self.request('POST','/api/v1/index/bench/batch',{'writes':writes},required=False)
-            failures=[r for r in data.get('results',[]) if r.get('code')!='applied']
-            accepted=sum(r.get('code')=='applied' for r in data.get('results',[]))
+            failures=[r for r in data.get('results',[]) if r.get('code')!='applied' or not r.get('receipt')]
+            accepted=sum(r.get('code')=='applied' and bool(r.get('receipt')) for r in data.get('results',[]))
             self.event('write',count=len(docs),accepted=accepted,status=code,ms=ms,result=data)
             if code!=200 or failures or accepted!=len(docs):raise RuntimeError(('write rejected',code,failures or data))
         else:

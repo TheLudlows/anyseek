@@ -4,6 +4,7 @@ import concurrent.futures
 import os
 import time
 from record_service_smoke import operation
+from anyseek_client import write_one
 
 
 def exercise(call, restart_with, work, faults):
@@ -22,7 +23,7 @@ def exercise(call, restart_with, work, faults):
                    'expected': 'Absent', 'document': {'body': 'alpha accepted'}}
         pause.write_text('pause accepted operation')
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            first = pool.submit(call, 'POST', '/api/v1/index/slow/doc', request, key=key, status=200)
+            first = pool.submit(write_one, call, '/api/v1/index/slow', request, key=key, status=200)
             try:
                 deadline = time.monotonic() + 10
                 while not started.exists():
@@ -32,7 +33,7 @@ def exercise(call, restart_with, work, faults):
                 # Each assertion needs to finish while the first write is paused.
                 other = {'operation_id': operation(), 'record_id': 'parallel',
                          'expected': 'Absent', 'document': {'body': 'beta independent'}}
-                receipt = pool.submit(call, 'POST', '/api/v1/index/other/doc', other).result(timeout=5)['receipt']
+                receipt = pool.submit(write_one, call, '/api/v1/index/other', other).result(timeout=5)['receipt']
                 page = pool.submit(call, 'POST', '/api/v1/index/other/query', {'query': 'beta'}).result(timeout=5)
                 assert page['hits'][0]['record']['record_id'] == 'parallel', page
                 revoke = pool.submit(call, 'DELETE', '/api/v1/apikey',
@@ -44,12 +45,12 @@ def exercise(call, restart_with, work, faults):
                 pause.unlink(missing_ok=True)
             first.result(timeout=30)
             revoke.result(timeout=30)
-        call('POST', '/api/v1/index/slow/doc', {**request, 'operation_id': operation(), 'record_id': 'denied'}, key=key, status=403)
+        write_one(call, '/api/v1/index/slow', {**request, 'operation_id': operation(), 'record_id': 'denied'}, key=key, status=403)
         assert call('GET', '/api/v1/index/slow/doc/accepted')['version'] == 1
-        accepted = call('POST', '/api/v1/index/slow/doc', request)['receipt']
+        accepted = write_one(call, '/api/v1/index/slow', request)['receipt']
         restart_with({})
-        assert call('POST', '/api/v1/index/slow/doc', request)['receipt'] == accepted
-        assert call('POST', '/api/v1/index/other/doc', other)['receipt'] == receipt
+        assert write_one(call, '/api/v1/index/slow', request)['receipt'] == accepted
+        assert write_one(call, '/api/v1/index/other', other)['receipt'] == receipt
         call('GET', '/api/v1/index/slow/doc/accepted', key=key, status=403)
         print('PASS authorization HTTP: unrelated collection progress, credential revoke, accepted write and receipts survive restart', flush=True)
     finally:

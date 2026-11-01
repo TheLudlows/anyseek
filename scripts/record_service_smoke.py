@@ -4,6 +4,8 @@ Uses a fresh data root, never accesses a running user server. No SDK required.
 """
 import argparse, base64, hashlib, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error, uuid
 
+from anyseek_client import write_one
+
 def operation():
     return {'epoch':int(time.time()//86400),'nonce':uuid.uuid4().hex}
 
@@ -112,23 +114,28 @@ def main():
             writes=[]
             for i,(body,date) in enumerate([('alpha beta',2),('alpha',1),('gamma',3)]):
                 w={'operation_id':operation(),'record_id':f'r{i}','expected':'Absent','document':{'body':body,'title':f'Title {i}','date':date,'unindexed':{'original':[1,2,3]}}}
-                writes.append(w);r=call('POST','/api/v1/index/shared/doc',w,key=keys['a']);assert r['receipt']['version']==1
-            assert call('POST','/api/v1/index/shared/doc',writes[0],key=keys['b'])['receipt']['version']==1
+                writes.append(w);r=write_one(call, '/api/v1/index/shared', w, key=keys['a']);assert r['receipt']['version']==1
+            assert write_one(call, '/api/v1/index/shared', writes[0], key=keys['b'])['receipt']['version']==1
             q=call('POST','/api/v1/index/shared/query',{'query':'alpha beta'},key=keys['b']);assert q['count_total']==1 and q['hits'][0]['record']['record_id']=='r0',q
             q=call('POST','/api/v1/index/shared/query',{'query':'alpha beta','operator':'or'},key=keys['b']);assert q['count_total']==2,q
             for query, expected in [({'query':'alpha'},2), ({'query':'"alpha beta"'},1), ({'query':'alpha -beta'},1), ({'query':'missing'},0), ({'query':''},3), ({'query':'','filter':[{'Timestamp':{'field':'date','filter':{'start':2,'end':3}}}],'sort':[{'field':'date','order':'Ascending'}]},1)]:
                 q=call('POST','/api/v1/index/shared/query',{**query,'length':0},key=keys['b']);assert q['count_total']==expected and q['hits']==[],q
             q=call('POST','/api/v1/index/shared/query',{'query':'','sort':[{'field':'date','order':'Ascending'}],'offset':1,'length':1,'fields':['title']},key=keys['b']);assert q['hits'][0]['record']['record_id']=='r0' and q['hits'][0]['record']['document']=={'title':'Title 0'},q
             q=call('POST','/api/v1/index/shared/query',{'query':'','filter':[{'Timestamp':{'field':'date','filter':{'start':2,'end':3}}}]},key=keys['b']);assert [h['record']['record_id'] for h in q['hits']]==['r0'],q
-            call('POST','/api/v1/index/shared/doc',{**writes[0],'operation_id':operation(),'routing_key':'obsolete'},key=keys['b'],status=400)
+            write_one(call, '/api/v1/index/shared', {**writes[0],'operation_id':operation(),'routing_key':'obsolete'}, key=keys['b'], status=400)
+            # Removed aliases must not accept writes; reads remain covered below.
+            for method in ['POST','PATCH','DELETE']:
+                call(method,'/api/v1/index/shared/doc',writes[0],key=keys['b'],status=404)
+            for rows in [[], [writes[0]] * 101]:
+                call('POST','/api/v1/index/shared/batch',{'writes':rows},key=keys['b'],status=400)
             replacement={**writes[0],'operation_id':operation(),'expected':{'Match':1},'document':{'body':'delta','title':'Replacement','date':2}}
-            receipt=call('PATCH','/api/v1/index/shared/doc',replacement,key=keys['b'])['receipt'];assert receipt['version']==2 and receipt['record_id']=='r0'
-            stale={**replacement,'operation_id':operation()};assert call('PATCH','/api/v1/index/shared/doc',stale,key=keys['a'],status=409)['code']=='conflict'
+            receipt=write_one(call, '/api/v1/index/shared', replacement, key=keys['b'])['receipt'];assert receipt['version']==2 and receipt['record_id']=='r0'
+            stale={**replacement,'operation_id':operation()};assert write_one(call, '/api/v1/index/shared', stale, key=keys['a'], status=409)['code']=='conflict'
             # Lose the entire HTTP response. Retry only the original identity;
             # a status miss is deliberately not interpreted as known failure.
             uncertain={**writes[0],'operation_id':operation(),'record_id':'response-loss','expected':'Absent'}
-            raw=json.dumps(uncertain).encode();client=socket.create_connection(('127.0.0.1',port));client.sendall(f'POST /api/v1/index/shared/doc HTTP/1.1\r\nHost: localhost\r\napikey: {keys["a"]}\r\nContent-Type: application/json\r\nContent-Length: {len(raw)}\r\nConnection: close\r\n\r\n'.encode()+raw);client.close()
-            confirmed=call('POST','/api/v1/index/shared/doc',uncertain,key=keys['b'])['receipt'];assert confirmed['version']==1
+            raw=json.dumps({"writes":[uncertain]}).encode();client=socket.create_connection(('127.0.0.1',port));client.sendall(f'POST /api/v1/index/shared/batch HTTP/1.1\r\nHost: localhost\r\napikey: {keys["a"]}\r\nContent-Type: application/json\r\nContent-Length: {len(raw)}\r\nConnection: close\r\n\r\n'.encode()+raw);client.close()
+            confirmed=write_one(call, '/api/v1/index/shared', uncertain, key=keys['b'])['receipt'];assert confirmed['version']==1
             call('PATCH','/api/v1/index/shared',key=keys['b'])
             restart()
             assert call('GET','/api/v1/index/shared/doc/r1',key=keys['b'])['document']['unindexed']=={'original':[1,2,3]}
@@ -140,20 +147,20 @@ def main():
             restart();call('GET','/api/v1/index/shared',key=keys['a'],status=403)
             assert call('GET','/api/v1/index/shared',key=keys['b'])['statistics']['active_records']==4
             deletion={**replacement,'operation_id':operation(),'expected':{'Match':2},'document':None}
-            assert call('DELETE','/api/v1/index/shared/doc',deletion,key=keys['b'])['receipt']['version']==3
+            assert write_one(call, '/api/v1/index/shared', deletion, key=keys['b'])['receipt']['version']==3
             call('GET','/api/v1/index/shared/doc/r0',key=keys['b'],status=404)
             recreate={**writes[0],'operation_id':operation(),'expected':'Absent'}
-            assert call('POST','/api/v1/index/shared/doc',recreate,key=keys['b'])['receipt']['version']==4
+            assert write_one(call, '/api/v1/index/shared', recreate, key=keys['b'])['receipt']['version']==4
             cross_collection={**recreate,'source_collection':'other'}
-            call('POST','/api/v1/index/shared/doc',cross_collection,key=keys['b'],status=400)
+            write_one(call, '/api/v1/index/shared', cross_collection, key=keys['b'], status=400)
             future={**writes[0],'operation_id':{'epoch':int(time.time()//86400)+1,'nonce':'future'}}
-            assert call('POST','/api/v1/index/shared/doc',future,key=keys['b'],status=410)['code']=='operation_expired'
+            assert write_one(call, '/api/v1/index/shared', future, key=keys['b'], status=410)['code']=='operation_expired'
             # Invalid collection names are rejected before data lookup.
             call('GET','/api/v1/index/0',key=keys['b'],status=400)
             vc={'operation_id':operation(),'collection_id':'vectors','embedding_space_id':'fixture-f32-cosine','config':{'index_name':'Vectors','schema':[{'field':'body','field_type':'Text'},{'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}}
             call('POST','/api/v1/index',vc)
             vw={'operation_id':operation(),'record_id':'v','expected':'Absent','document':{'body':'alpha','vector':[2,0]}}
-            call('POST','/api/v1/index/vectors/doc',vw)
+            write_one(call, '/api/v1/index/vectors', vw)
             for query in [{'query_vector':[1,0],'all':True},{'query':'alpha','query_vector':[1,0],'rrf':{}}]:
                 q=call('POST','/api/v1/index/vectors/query',query);assert q['hits'][0]['record']['record_id']=='v',q
                 hit=q['hits'][0];channels=hit['channels'];assert all(c['rank']==0 and c['raw_score'] is not None for c in channels)
@@ -176,15 +183,15 @@ def main():
 
             assert call('GET','/api/v1/index/vectors/doc/v')['document']['vector']==[2,0]
             pending={**vw,'operation_id':operation(),'record_id':'pending','document':{'body':'pendingword'}}
-            call('POST','/api/v1/index/vectors/doc',pending)
+            write_one(call, '/api/v1/index/vectors', pending)
             assert call('POST','/api/v1/index/vectors/query',{'query':'pendingword'})['count_total']==1
             assert len(call('POST','/api/v1/index/vectors/query',{'query_vector':[1,0],'all':True})['hits'])==1
             assert call('GET','/api/v1/index/vectors/doc/pending/status')['pending_vector_fields']==['vector']
             patch={'operation_id':operation(),'record_id':'pending','expected':{'Match':1},'vector_patch':{'vector':[2,0]}}
-            enriched=call('POST','/api/v1/index/vectors/doc',patch)['receipt']
+            enriched=write_one(call, '/api/v1/index/vectors', patch)['receipt']
             assert enriched['version']==1
-            assert call('POST','/api/v1/index/vectors/doc',patch)['receipt']==enriched
-            call('POST','/api/v1/index/vectors/doc',{**patch,'operation_id':operation()},status=409)
+            assert write_one(call, '/api/v1/index/vectors', patch)['receipt']==enriched
+            write_one(call, '/api/v1/index/vectors', {**patch,'operation_id':operation()}, status=409)
             assert call('GET','/api/v1/index/vectors/doc/pending/status')['pending_vector_fields']==[]
             assert len(call('POST','/api/v1/index/vectors/query',{'query_vector':[1,0],'all':True})['hits'])==2
             # One small Euclidean fixture in this process checks numeric rejections
@@ -194,8 +201,8 @@ def main():
                      'config':{**vc['config'],'vector':{'dimensions':2,'metric':'Euclidean'}}}
             call('POST','/api/v1/index',numeric)
             numeric_write={**vw,'operation_id':operation(),'document':{'body':'alpha','vector':[1e19,0]}}
-            assert call('POST','/api/v1/index/numeric/doc',numeric_write,status=400)['code']=='rejected'
-            call('POST','/api/v1/index/numeric/doc',{**numeric_write,'operation_id':operation(),
+            assert write_one(call, '/api/v1/index/numeric', numeric_write, status=400)['code']=='rejected'
+            write_one(call, '/api/v1/index/numeric', {**numeric_write,'operation_id':operation(),
                  'document':{'body':'alpha','vector':[1,0]}})
             for query in [{'query_vector':[-1e19,0]}, {'query':'alpha','query_vector':[-1e19,0]}]:
                 assert call('POST','/api/v1/index/numeric/query',query,status=400)['code']=='rejected'
@@ -211,19 +218,19 @@ def main():
                 import http.client
                 for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
                     rid='patch-'+stage
-                    call('POST','/api/v1/index/vectors/doc',{**pending,'operation_id':operation(),'record_id':rid})
+                    write_one(call, '/api/v1/index/vectors', {**pending,'operation_id':operation(),'record_id':rid})
                     enrichment={**patch,'operation_id':operation(),'record_id':rid}
                     process.kill();process.wait(timeout=20)
                     start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':enrichment['operation_id']['nonce']})
                     if stage.startswith('crash_'):
-                        try:call('POST','/api/v1/index/vectors/doc',enrichment)
+                        try:write_one(call, '/api/v1/index/vectors', enrichment)
                         except (OSError,http.client.HTTPException):pass
                         else:raise AssertionError('expected vector patch transport loss')
                         process.wait(timeout=20);assert process.returncode==86
                     else:
-                        assert call('POST','/api/v1/index/vectors/doc',enrichment,status=503)['code'] in ['outcome_unknown','durable_pending']
+                        assert write_one(call, '/api/v1/index/vectors', enrichment, status=503)['code'] in ['outcome_unknown','durable_pending']
                     restart()
-                    assert call('POST','/api/v1/index/vectors/doc',enrichment)['receipt']['version']==1
+                    assert write_one(call, '/api/v1/index/vectors', enrichment)['receipt']['version']==1
                     assert call('GET','/api/v1/index/vectors/doc/'+rid+'/status')['pending_vector_fields']==[]
                 print('PASS vector enrichment HTTP faults: exact body version and receipt across uncertain/pending/process exits')
 
@@ -237,7 +244,7 @@ def main():
             assert len(plan['targets'])==3
             saved=[{**t,'operation_id':operation()} for t in plan['targets']]
             updated={**recreate,'operation_id':operation(),'expected':{'Match':4},'document':{'body':'replacement survives stale delete'}}
-            call('POST','/api/v1/index/shared/doc',updated,key=keys['b'])
+            write_one(call, '/api/v1/index/shared', updated, key=keys['b'])
             call('POST','/api/v1/index/shared/iterator',{'cursor':page['next'],'length':2},key=keys['b'],status=409)
             results=call('POST','/api/v1/index/shared/batch',{'writes':saved},key=keys['b'])
             assert not results['atomic'] and [r['code'] for r in results['results']].count('conflict')==1
@@ -281,14 +288,14 @@ def main():
             # Source revisions preserve bodies while invalidating direct/indirect evidence.
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'revisions','config':{'index_name':'Revisions','schema':[{'field':'body','field_type':'Text','store':True}]}})
             src={'operation_id':operation(),'record_id':'s','expected':'Absent','document':{'body':'revisionword old'},'system':{'kind':'source'}}
-            call('POST','/api/v1/index/revisions/doc',src)
+            write_one(call, '/api/v1/index/revisions', src)
             for rid,parent in [('d','s'),('i','d')]:
-                call('POST','/api/v1/index/revisions/doc',{**src,'operation_id':operation(),'record_id':rid,'system':{'kind':'derived','evidence_refs':[{'record_id':parent,'version':1}]}})
+                write_one(call, '/api/v1/index/revisions', {**src,'operation_id':operation(),'record_id':rid,'system':{'kind':'derived','evidence_refs':[{'record_id':parent,'version':1}]}})
             update={**src,'operation_id':operation(),'expected':{'Match':1},'document':{'body':'revisionword new'}}
-            receipt=call('POST','/api/v1/index/revisions/doc',update,key=keys['b'])['receipt']
+            receipt=write_one(call, '/api/v1/index/revisions', update, key=keys['b'])['receipt']
             assert receipt['version']==2
-            assert call('POST','/api/v1/index/revisions/doc',update)['receipt']==receipt
-            call('POST','/api/v1/index/revisions/doc',{**update,'operation_id':operation()},status=409)
+            assert write_one(call, '/api/v1/index/revisions', update)['receipt']==receipt
+            write_one(call, '/api/v1/index/revisions', {**update,'operation_id':operation()}, status=409)
             for rid in ['d','i']:
                 status=call('GET','/api/v1/index/revisions/doc/'+rid+'/status',key=keys['b'])
                 assert status['visibility']=='stale' and 'document' not in status
@@ -296,8 +303,8 @@ def main():
             assert call('POST','/api/v1/index/revisions/query',{'query':'revisionword'})['count_total']==1
             call('PATCH','/api/v1/index/revisions');restart()
             assert call('GET','/api/v1/index/revisions/doc/i/status')['visibility']=='stale'
-            assert call('POST','/api/v1/index/revisions/doc',update)['receipt']==receipt
-            call('DELETE','/api/v1/index/revisions/doc',{'operation_id':operation(),'record_id':'s','expected':{'Match':2},'document':None})
+            assert write_one(call, '/api/v1/index/revisions', update)['receipt']==receipt
+            write_one(call, '/api/v1/index/revisions', {'operation_id':operation(),'record_id':'s','expected':{'Match':2},'document':None})
             assert call('GET','/api/v1/index/revisions/doc/i/status')['visibility']=='deleted'
             assert call('GET','/api/v1/index/revisions/doc/i/status',key=keys['b'])['visibility']=='deleted'
             call('DELETE','/api/v1/index/revisions',{'operation_id':operation()})
@@ -308,19 +315,19 @@ def main():
             source={'operation_id':operation(),'record_id':'source','expected':'Absent','document':{'body':'evidenceword original'},'system':{'kind':'source'}}
             direct={**source,'operation_id':operation(),'record_id':'direct','system':{'kind':'derived','evidence_refs':[{'record_id':'source','version':1}]}}
             indirect={**direct,'operation_id':operation(),'record_id':'indirect','system':{'kind':'derived','evidence_refs':[{'record_id':'direct','version':1}]}}
-            for w in [source,direct,indirect]:call('POST','/api/v1/index/evidence/doc',w,key=keys['b'])
+            for w in [source,direct,indirect]:write_one(call, '/api/v1/index/evidence', w, key=keys['b'])
             assert call('POST','/api/v1/index/evidence/query',{'query':'evidenceword'})['count_total']==3
             early=call('POST','/api/v1/index/evidence/backup',{'operation_id':operation()})
             delete={'operation_id':operation(),'record_id':'source','expected':{'Match':1},'document':None}
-            receipt=call('DELETE','/api/v1/index/evidence/doc',delete)['receipt']
-            assert call('DELETE','/api/v1/index/evidence/doc',delete,key=keys['b'])['receipt']==receipt
+            receipt=write_one(call, '/api/v1/index/evidence', delete)['receipt']
+            assert write_one(call, '/api/v1/index/evidence', delete, key=keys['b'])['receipt']==receipt
             for rid in ['source','direct','indirect']:call('GET','/api/v1/index/evidence/doc/'+rid,key=keys['b'],status=404)
             assert call('POST','/api/v1/index/evidence/query',{'query':'evidenceword'},key=keys['b'])['hits']==[]
             assert call('POST','/api/v1/index/evidence/iterator',{},key=keys['b'])['statistics']['active_records']==0
-            call('POST','/api/v1/index/evidence/doc',{**source,'operation_id':operation()},status=400)
-            call('POST','/api/v1/index/evidence/doc',{**direct,'operation_id':operation(),'record_id':'late'},status=409)
+            write_one(call, '/api/v1/index/evidence', {**source,'operation_id':operation()}, status=400)
+            write_one(call, '/api/v1/index/evidence', {**direct,'operation_id':operation(),'record_id':'late'}, status=409)
             badscope={**direct,'operation_id':operation(),'record_id':'bad','system':{'kind':'derived','evidence_refs':[{'collection_id':'other','record_id':'source','version':1}]}}
-            call('POST','/api/v1/index/evidence/doc',badscope,status=400)
+            write_one(call, '/api/v1/index/evidence', badscope, status=400)
             call('PATCH','/api/v1/index/evidence');restart()
             assert call('POST','/api/v1/index/evidence/query',{},key=keys['b'])['hits']==[]
             restored_evidence=call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'evidence-old','backup_id':early['backup_id']})
@@ -332,38 +339,38 @@ def main():
                 import http.client
                 for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
                     sid='source-'+stage;did='derived-'+stage
-                    call('POST','/api/v1/index/evidence/doc',{**source,'operation_id':operation(),'record_id':sid})
-                    call('POST','/api/v1/index/evidence/doc',{**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'version':1}]}})
+                    write_one(call, '/api/v1/index/evidence', {**source,'operation_id':operation(),'record_id':sid})
+                    write_one(call, '/api/v1/index/evidence', {**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'version':1}]}})
                     deletion={**delete,'operation_id':operation(),'record_id':sid}
                     process.kill();process.wait(timeout=20)
                     start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':deletion['operation_id']['nonce']})
                     if stage.startswith('crash_'):
-                        try:call('DELETE','/api/v1/index/evidence/doc',deletion)
+                        try:write_one(call, '/api/v1/index/evidence', deletion)
                         except (OSError,http.client.HTTPException):pass
                         else:raise AssertionError('expected source delete transport loss')
                         process.wait(timeout=20);assert process.returncode==86
                     else:
-                        assert call('DELETE','/api/v1/index/evidence/doc',deletion,status=503)['code'] in ['outcome_unknown','durable_pending']
+                        assert write_one(call, '/api/v1/index/evidence', deletion, status=503)['code'] in ['outcome_unknown','durable_pending']
                         call('GET','/api/v1/index/evidence/doc/'+did,status=503)
                     restart();call('GET','/api/v1/index/evidence/doc/'+did,status=404)
-                    assert call('DELETE','/api/v1/index/evidence/doc',deletion)['receipt']['version']==2
+                    assert write_one(call, '/api/v1/index/evidence', deletion)['receipt']['version']==2
                 print('PASS source HTTP faults: unknown/durable pending/process loss recover deletion and retry without derived resurrection')
                 for stage in ['after_append_unknown','after_durable','crash_after_durable','crash_after_visible']:
                     sid='revision-'+stage;did='revision-derived-'+stage
-                    call('POST','/api/v1/index/evidence/doc',{**source,'operation_id':operation(),'record_id':sid})
-                    call('POST','/api/v1/index/evidence/doc',{**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'version':1}]}})
+                    write_one(call, '/api/v1/index/evidence', {**source,'operation_id':operation(),'record_id':sid})
+                    write_one(call, '/api/v1/index/evidence', {**direct,'operation_id':operation(),'record_id':did,'system':{'kind':'derived','evidence_refs':[{'record_id':sid,'version':1}]}})
                     revision={**source,'operation_id':operation(),'record_id':sid,'expected':{'Match':1},'document':{'body':'revised content'}}
                     process.kill();process.wait(timeout=20)
                     start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':revision['operation_id']['nonce']})
                     if stage.startswith('crash_'):
-                        try:call('POST','/api/v1/index/evidence/doc',revision)
+                        try:write_one(call, '/api/v1/index/evidence', revision)
                         except (OSError,http.client.HTTPException):pass
                         else:raise AssertionError('expected source update transport loss')
                         process.wait(timeout=20);assert process.returncode==86
                     else:
-                        assert call('POST','/api/v1/index/evidence/doc',revision,status=503)['code'] in ['outcome_unknown','durable_pending']
+                        assert write_one(call, '/api/v1/index/evidence', revision, status=503)['code'] in ['outcome_unknown','durable_pending']
                     restart()
-                    assert call('POST','/api/v1/index/evidence/doc',revision)['receipt']['version']==2
+                    assert write_one(call, '/api/v1/index/evidence', revision)['receipt']['version']==2
                     assert call('GET','/api/v1/index/evidence/doc/'+did+'/status')['visibility']=='stale'
                     call('GET','/api/v1/index/evidence/doc/'+did,status=404)
                 print('PASS source revision HTTP faults: unknown/durable pending/process loss preserve stale and exact retry')
@@ -376,7 +383,7 @@ def main():
                     process.kill();process.wait(timeout=20)
                     start({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':w['operation_id']['nonce']})
                     if stage.startswith('crash_'):
-                        try: call('POST','/api/v1/index/after-source-delete/doc',w)
+                        try: write_one(call, '/api/v1/index/after-source-delete', w)
                         except (OSError,http.client.HTTPException): pass
                         else: raise AssertionError('expected transport loss at '+stage)
                         process.wait(timeout=20);assert process.returncode==86
@@ -392,8 +399,8 @@ def main():
                     restart()
                     oid=w['operation_id'];status=call('GET',f'/api/v1/index/after-source-delete/operation/{oid["epoch"]}/{oid["nonce"]}')
                     assert bool(status['receipt']) == (stage!='before_append'),(stage,status)
-                    first=call('POST','/api/v1/index/after-source-delete/doc',w)['receipt']
-                    assert first['version']==1 and call('POST','/api/v1/index/after-source-delete/doc',w)['receipt']==first
+                    first=write_one(call, '/api/v1/index/after-source-delete', w)['receipt']
+                    assert first['version']==1 and write_one(call, '/api/v1/index/after-source-delete', w)['receipt']==first
                     if stage!='before_append':call('GET','/api/v1/index/after-source-delete/doc/'+later['record_id'],status=404)
                 # Independent snapshots are fully certified in a private root.
                 # Exercise both sides of its final atomic publication. Initial
@@ -496,7 +503,7 @@ def main():
                 assert call('GET','/api/v1/index/evidence')['evidence_quarantined'] is True
                 call('POST','/api/v1/apikey',add_key,status=409)
                 old=add_key['operation_id'];call('GET',f"/api/v1/catalog/operation/{old['epoch']}/{old['nonce']}",status=409)
-                assert call('POST','/api/v1/index/after-source-delete/doc',writes[0])['receipt']['version']==1
+                assert write_one(call, '/api/v1/index/after-source-delete', writes[0])['receipt']['version']==1
                 # A copied independent collection snapshot is usable after root recovery.
                 copied=next(iter(whole['snapshot']['collection_backups']))
                 call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'from-copied-backup','backup_id':copied})

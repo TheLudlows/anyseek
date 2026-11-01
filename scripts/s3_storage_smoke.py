@@ -6,6 +6,8 @@ Real mode requires explicit ANYSEEK_S3_TEST_* configuration and a disposable buc
 """
 import argparse, hashlib, http.server, os, subprocess, sys, threading, urllib.parse
 
+from anyseek_client import write_one
+
 class S3(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     disable_nagle_algorithm = True
@@ -165,15 +167,15 @@ def main():
             config={'index_name':'S3','schema':[{'field':'body','field_type':'Text'},
                 {'field':'vector','field_type':'Json','index_vector':True}],'vector':{'dimensions':2}}
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config})
-            original=write('first','a','alpha old');receipt=call('POST','/api/v1/index/main/doc',original)['receipt']
-            call('POST','/api/v1/index/main/doc',write('b','b','alpha beta'))
+            original=write('first','a','alpha old');receipt=write_one(call, '/api/v1/index/main', original)['receipt']
+            write_one(call, '/api/v1/index/main', write('b','b','alpha beta'))
             call('PATCH','/api/v1/index/main')
-            call('POST','/api/v1/index/main/doc',write('update','a','alpha updated',{'Match':1}))
+            write_one(call, '/api/v1/index/main', write('update','a','alpha updated',{'Match':1}))
             deletion=write('delete','b','',{'Match':1});deletion['document']=None
-            call('DELETE','/api/v1/index/main/doc',deletion)
-            call('POST','/api/v1/index/main/doc',write('tail','c','alpha tail'))
+            write_one(call, '/api/v1/index/main', deletion)
+            write_one(call, '/api/v1/index/main', write('tail','c','alpha tail'))
             expected=query();cold_restart();assert query()==expected
-            assert call('POST','/api/v1/index/main/doc',original)['receipt']==receipt
+            assert write_one(call, '/api/v1/index/main', original)['receipt']==receipt
             call('GET','/api/v1/index/main/doc/b',status=404)
             print('PASS S3 checkpoint + unindexed tail: cold cache, update/delete, lexical/vector/hybrid and original receipt',flush=True)
             # Same collection name in another tenant must select different S3 objects.
@@ -182,7 +184,7 @@ def main():
             call('POST','/api/v1/apikey',{'operation_id':operation(),'tenant_id':'other','key_id':'other','apikey_base64':other_key})
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config},key=other_key)
             assert call('GET','/api/v1/index/main',key=other_key)['statistics']['active_records']==0
-            call('POST','/api/v1/index/main/doc',write('foreign','a','foreign tenant'),key=other_key)
+            write_one(call, '/api/v1/index/main', write('foreign','a','foreign tenant'), key=other_key)
             assert call('GET','/api/v1/index/main/doc/a',key=other_key)['version']==1
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
             foreign_backup=call('POST','/api/v1/index/main/backup',{'operation_id':operation()},key=other_key)
@@ -193,12 +195,12 @@ def main():
             print('PASS S3 Tenant isolation: same-name collections, separate objects, backup ownership and cold restart',flush=True)
             # Reuse the public name and operation ID, never its old lifecycle objects.
             old_write=write('old-generation','same','old incarnation')
-            call('POST','/api/v1/index/main/doc',old_write,key=other_key)
+            write_one(call, '/api/v1/index/main', old_write, key=other_key)
             deleted={'operation_id':operation()}
             call('DELETE','/api/v1/index/main',deleted,key=other_key)
             call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':'main','embedding_space_id':'fixture','config':config},key=other_key)
             fresh={**old_write,'document':{'body':'new incarnation','vector':[2,0]}}
-            assert call('POST','/api/v1/index/main/doc',fresh,key=other_key)['receipt']['version']==1
+            assert write_one(call, '/api/v1/index/main', fresh, key=other_key)['receipt']['version']==1
             call('DELETE','/api/v1/index/main',deleted,key=other_key)
             cold_restart()
             assert call('GET','/api/v1/index/main/doc/same',key=other_key)['document']['body']=='new incarnation'
@@ -220,11 +222,11 @@ def main():
                 print('PASS S3 checkpoint real process exits before/after SQLite publication',flush=True)
                 stop();start({'ANYSEEK_CACHE_APPEND_FAULT':'1'})
                 cache_write=write('cache-failure','cache-failure','alpha remotely committed')
-                pending=call('POST','/api/v1/index/main/doc',cache_write,status=503)
+                pending=write_one(call, '/api/v1/index/main', cache_write, status=503)
                 assert pending['code']=='durable_pending',pending
                 call('POST','/api/v1/index/main/query',{},status=503)
                 cold_restart()
-                assert call('POST','/api/v1/index/main/doc',cache_write)['receipt']['version']==1
+                assert write_one(call, '/api/v1/index/main', cache_write)['receipt']['version']==1
                 assert call('GET','/api/v1/index/main/doc/cache-failure')['document']['body']=='alpha remotely committed'
                 expected=query()
                 print('PASS confirmed SQLite commit + failed local cache append: durable_pending, fenced output, cold recovery and original receipt',flush=True)
@@ -244,7 +246,7 @@ def main():
                     except (OSError,http.client.HTTPException):pass
                     else:raise AssertionError('expected backup process exit')
                     assert process.wait(timeout=30)==92;start()
-                    call('POST','/api/v1/index/main/doc',write(stage,'later-'+stage,'alpha later'))
+                    write_one(call, '/api/v1/index/main', write(stage,'later-'+stage,'alpha later'))
                     call('PATCH','/api/v1/index/main')
                 archive=call('POST','/api/v1/index/main/backup',request)
                 assert archive['visible_seq']==before
@@ -258,7 +260,7 @@ def main():
                     assert process.wait(timeout=30)==93;start()
                 call('POST','/api/v1/restore',restore)
                 assert call('GET',f'/api/v1/index/{target}/doc/a')['version']==2
-                assert call('POST',f'/api/v1/index/{target}/doc',original)['receipt']==receipt
+                assert write_one(call, f'/api/v1/index/{target}', original)['receipt']==receipt
                 retired=call('DELETE','/api/v1/backups/'+archive['backup_id'],{'operation_id':operation()})
                 assert not retired['cleanup_pending'],retired
                 call('PATCH','/api/v1/index/main');cold_restart()

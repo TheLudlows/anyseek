@@ -3,6 +3,7 @@ import base64
 import os
 import http.client
 from record_service_smoke import operation
+from anyseek_client import write_one
 
 
 def exercise(call,restart_with,faults):
@@ -25,10 +26,10 @@ def exercise(call,restart_with,faults):
         request.update(kwargs)
         return request
     a=write('a',{'kind':'entity'});b=write('b',{'kind':'entity'})
-    call('POST',endpoint+'/doc',a);call('POST',endpoint+'/doc',b)
-    ab=edge('ab','a','b');receipt=call('POST',endpoint+'/doc',ab)['receipt']
-    assert call('POST',endpoint+'/doc',ab)['receipt']==receipt
-    call('POST',endpoint+'/doc',edge('ba','b','a'))
+    write_one(call, endpoint, a);write_one(call, endpoint, b)
+    ab=edge('ab','a','b');receipt=write_one(call, endpoint, ab)['receipt']
+    assert write_one(call, endpoint, ab)['receipt']==receipt
+    write_one(call, endpoint, edge('ba','b','a'))
     assert len(call('POST',endpoint+'/entities',{},key=reader)['records'])==2
     result=call('POST',endpoint+'/neighbors',query('a'),key=reader)
     assert result['complete'] and result['count']=={'value':2,'relation':'exact'}
@@ -54,18 +55,18 @@ def exercise(call,restart_with,faults):
     partial=call('POST',endpoint+'/neighbors',query('a',per_seed=1,allow_partial=True))
     assert not partial['complete'] and partial['count']=={'value':1,'relation':'window'}
     bad=edge('cross','a','b');bad['system']['relation']['to']['collection_id']='other'
-    call('POST',endpoint+'/doc',bad,status=400)
+    write_one(call, endpoint, bad, status=400)
     bad=edge('stale','a','b');bad['system']['relation']['to']['version']=99
-    call('POST',endpoint+'/doc',bad,status=409)
+    write_one(call, endpoint, bad, status=409)
     # A fixed endpoint version must never silently follow a replacement.
-    call('POST',endpoint+'/doc',{**a,'operation_id':operation(),'expected':{'Match':1},'document':{'body':'new entity'}})
+    write_one(call, endpoint, {**a,'operation_id':operation(),'expected':{'Match':1},'document':{'body':'new entity'}})
     assert call('POST',endpoint+'/neighbors',query('a'))['count']['value']==0
     assert call('POST',endpoint+'/query',{})['statistics']['active_records']==2
     call('GET',endpoint+'/doc/ab',status=404)
-    call('POST',endpoint+'/doc',edge('new-ab','a','b'))
+    write_one(call, endpoint, edge('new-ab','a','b'))
     archive=call('POST',endpoint+'/backup',{'operation_id':operation()})
     deletion={'operation_id':operation(),'record_id':'b','expected':{'Match':1},'document':None}
-    call('POST',endpoint+'/doc',deletion)
+    write_one(call, endpoint, deletion)
     assert call('POST',endpoint+'/neighbors',query('a'))['count']['value']==0
     restart_with({})
     assert not any(h['record']['record_id']=='b' for h in call('POST',endpoint+'/query',fused())['hits'])
@@ -82,14 +83,14 @@ def exercise(call,restart_with,faults):
             request=edge('self-'+stage,'a','a')
             restart_with({'ANYSEEK_RECORD_FAULT':stage,'ANYSEEK_RECORD_FAULT_NONCE':request['operation_id']['nonce']})
             if stage.startswith('crash_'):
-                try:call('POST',endpoint+'/doc',request)
+                try:write_one(call, endpoint, request)
                 except (OSError,http.client.HTTPException):pass
                 else:raise AssertionError('expected graph write process exit')
             else:
-                assert call('POST',endpoint+'/doc',request,status=503)['code'] in ('outcome_unknown','durable_pending')
+                assert write_one(call, endpoint, request, status=503)['code'] in ('outcome_unknown','durable_pending')
             restart_with({})
-            first=call('POST',endpoint+'/doc',request)['receipt']
-            assert call('POST',endpoint+'/doc',request)['receipt']==first
+            first=write_one(call, endpoint, request)['receipt']
+            assert write_one(call, endpoint, request)['receipt']==first
             ids=[row['edge']['record_id'] for row in call('POST',endpoint+'/neighbors',query('a'))['hits']]
             assert ids.count(request['record_id'])==1
             fusion=call('POST',endpoint+'/query',fused())

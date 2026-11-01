@@ -24,7 +24,10 @@ const call = async (path: string, body?: object) => {
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   expect(response.status, await response.clone().text()).toBe(200);
-  return response.json();
+  const result = await response.json();
+  if (path.endsWith("/batch"))
+    expect(result.results.every((item: {code: string; receipt?: object}) => item.code === "applied" && item.receipt)).toBe(true);
+  return result;
 };
 
 test("API-only kernel, connection, real collection list, responsive navigation and screenshots", async ({
@@ -150,7 +153,7 @@ test("creation and i64 import survive lost responses and reload with identical r
     .fill("[" + docs.join(",") + "]");
   const writes: string[] = [];
   await page.route(
-    "**/api/v1/index/browser_records/doc",
+    "**/api/v1/index/browser_records/batch",
     async (route) => {
       writes.push(route.request().postData()!);
       const response = await route.fetch();
@@ -169,7 +172,7 @@ test("creation and i64 import survive lost responses and reload with identical r
   ).toBeVisible();
   await page.locator(".page-heading").filter({ has: page.getByRole("heading", { name: /^数据 · /, level: 1 }) }).getByRole("button", { name: "导入数据", exact: true }).click();
   await expect(page.getByLabel("导入 JSON", { exact: true })).toBeDisabled();
-  await page.route("**/api/v1/index/browser_records/doc", async (route) => {
+  await page.route("**/api/v1/index/browser_records/batch", async (route) => {
     writes.push(route.request().postData()!);
     await route.continue();
   });
@@ -181,7 +184,7 @@ test("creation and i64 import survive lost responses and reload with identical r
   writes
     .slice(1)
     .forEach((body, i) =>
-      expect(body.endsWith('"document":' + docs[i] + "}")).toBe(true),
+      expect(body.endsWith('"document":' + docs[i] + "}]}")).toBe(true),
     );
   await page
     .getByRole("dialog")
@@ -206,7 +209,7 @@ test("creation and i64 import survive lost responses and reload with identical r
     .click();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
   expect(copied).toBe(docs[0].replace("1.2500e0", "1.25"));
-  const first = JSON.parse(writes[0]);
+  const first = JSON.parse(writes[0]).writes[0];
   const original = await call("index/browser_records/doc/" + first.record_id);
   expect(original.record_id).toBe(first.record_id);
   await page
@@ -292,14 +295,14 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
 }) => {
   const collection = "product_docs";
   for (const id of ["entity_a", "entity_b"])
-    await call(`index/${collection}/doc`, {
+    await call(`index/${collection}/batch`, { writes: [{
       operation_id: operation(),
       record_id: id,
       expected: "Absent",
       document: { title: id, body: "entity" },
       system: { kind: "entity" },
-    });
-  await call(`index/${collection}/doc`, {
+    }] });
+  await call(`index/${collection}/batch`, { writes: [{
     operation_id: operation(),
     record_id: "edge",
     expected: "Absent",
@@ -312,21 +315,21 @@ test("real cursor pagination, relation/evidence tools and administrator backup/r
         relation_type: "knows",
       },
     },
-  });
-  await call(`index/${collection}/doc`, {
+  }] });
+  await call(`index/${collection}/batch`, { writes: [{
     operation_id: operation(),
     record_id: "source",
     expected: "Absent",
     document: { title: "Source", body: "sourceword" },
     system: { kind: "source" },
-  });
+  }] });
   for (let i = 0; i < 20; i++)
-    await call(`index/${collection}/doc`, {
+    await call(`index/${collection}/batch`, { writes: [{
       operation_id: operation(),
       record_id: "page_" + i.toString().padStart(2, "0"),
       expected: "Absent",
       document: { title: "分页 " + i, body: "pagination" },
-    });
+    }] });
   await login(page);
   await page.getByLabel("当前集合", { exact: true }).selectOption(collection);
   await page

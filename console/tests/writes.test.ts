@@ -128,9 +128,10 @@ test("partial transport failure, reload and retry reuse byte-identical original 
   const request = pending(),
     sent: string[] = [];
   globalThis.fetch = async (_url, options) => {
+    assert.equal(_url, "/api/v1/index/precision/batch");
     sent.push(String(options?.body));
     if (sent.length === 2) throw new Error("connection lost");
-    return new Response("{}");
+    return new Response('{"results":[{"code":"applied","receipt":{"record_id":"r"}}]}');
   };
   await assert.rejects(sendWrites(request, "key", "owner"));
   let saved = storage.get<PendingWrites>("pendingWrites")!;
@@ -155,33 +156,34 @@ test("partial transport failure, reload and retry reuse byte-identical original 
   }
   globalThis.fetch = async (_url, options) => {
     sent.push(String(options?.body));
-    return new Response("{}");
+    return new Response('{"results":[{"code":"applied","receipt":{"record_id":"r"}}]}');
   };
   await sendWrites(saved, "key", "owner");
   assert.equal(sent[1], sent[2]);
   assert.equal(storage.get("pendingWrites"), null);
 });
 
-test("first known rejection is discardable; unsent records do not dispatch", async () => {
-  const request = pending();
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls++;
-    return new Response('{"code":"rejected","message":"invalid"}', {
-      status: 400,
-    });
-  };
-  await assert.rejects(sendWrites(request, "key", "owner"));
-  assert.equal(calls, 1);
-  assert.equal(request.rejected, true);
-  assert.equal(request.unresolved, false);
+test("single batch item failures never count HTTP 200 as success or dispatch the tail", async () => {
+  for (const code of ["conflict", "rejected", "outcome_unknown", "durable_pending", "recovery_required", "storage", "not_attempted"]) {
+    const request = pending();
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return new Response(JSON.stringify({ results: [{ code, status: code === "conflict" ? 409 : 503 }] }));
+    };
+    await assert.rejects(sendWrites(request, "key", "owner"), (error: unknown) => error instanceof ApiError && error.code === code);
+    assert.equal(calls, 1);
+    assert.equal(request.completed, 0);
+    assert.equal(request.rejected, ["conflict", "rejected"].includes(code));
+    assert.equal(request.unresolved, !["conflict", "rejected", "not_attempted"].includes(code));
+  }
 });
 
 test("failure to persist the identity prevents dispatch; other connections cannot replay it", async () => {
   let calls = 0;
   globalThis.fetch = async () => {
     calls++;
-    return new Response("{}");
+    return new Response('{"results":[{"code":"applied","receipt":{"record_id":"r"}}]}');
   };
   await assert.rejects(sendWrites(pending(), "other-key", "other-owner"));
   const old = sessionStorage.setItem;
@@ -212,10 +214,10 @@ test("saved /doc prefix and unresolved flags from before per-request outcomes re
   assert.equal(restored.rejected, false);
   globalThis.fetch = async (_url, options) => {
     sent.push(String(options?.body));
-    return new Response("{}");
+    return new Response('{"results":[{"code":"applied","receipt":{"record_id":"r"}}]}');
   };
   await sendWrites(restored, "key", "owner");
-  assert.deepEqual(sent, [legacy.requests[1].body, legacy.requests[1].body, legacy.requests[2].body]);
+  assert.deepEqual(sent, [legacy.requests[1].body, legacy.requests[1].body, legacy.requests[2].body].map(body => '{"writes":[' + body + "]}"));
   assert.equal(loadPendingWrites(), null);
 });
 
@@ -227,12 +229,12 @@ test("both transports retain persisted unknown identity if saving a confirmation
     const original = request.requests[0].body;
     const setItem = sessionStorage.setItem;
     globalThis.fetch = async (_url, options) => {
-      assert.equal(options?.body, delivery ? '{"records":[' + original + "]}" : original);
+      assert.equal(options?.body, delivery ? '{"records":[' + original + "]}" : '{"writes":[' + original + "]}");
       // Dispatch was saved, but the confirmation cannot be persisted.
       sessionStorage.setItem = () => { throw new Error("confirmation quota"); };
       const record = JSON.parse(original);
       return new Response(delivery ? JSON.stringify({ results: [{ operation_id: record.operation_id,
-        code: "committed", receipt: { record_id: record.record_id } }] }) : "{}");
+        code: "committed", receipt: { record_id: record.record_id } }] }) : JSON.stringify({ results: [{ code: "applied", receipt: { record_id: record.record_id } }] }));
     };
     await assert.rejects(sendWrites(request, "key", "owner"), /confirmation quota/);
     sessionStorage.setItem = setItem;

@@ -3,6 +3,7 @@ import http.client
 import os
 import time
 from record_service_smoke import operation
+from anyseek_client import write_one
 
 
 def exercise(call, restart_with, directory, faults):
@@ -17,9 +18,9 @@ def exercise(call, restart_with, directory, faults):
          'config':{**config,'change_feed':{'max_events':1}}},status=400)
     ordinary={'operation_id':operation(),'record_id':'normal',
               'expected':'Absent','document':{'body':'retained body'}}
-    receipt=call('POST',endpoint+'/doc',ordinary)['receipt']
+    receipt=write_one(call, endpoint, ordinary)['receipt']
     restart_with({})
-    assert call('POST',endpoint+'/doc',ordinary)['receipt']==receipt
+    assert write_one(call, endpoint, ordinary)['receipt']==receipt
     assert call('GET',endpoint+'/doc/normal')['document']==ordinary['document']
     assert len(call('POST',endpoint+'/iterator',{})['records'])==1
     print('PASS removed sync routes: 404, rejected legacy HTTP config, get/iterator and receipt retry after restart')
@@ -37,7 +38,7 @@ def exercise(call, restart_with, directory, faults):
         cid='history-trim-'+str(index);target='/api/v1/index/'+cid
         call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':cid,'config':config})
         request={**ordinary,'operation_id':operation()}
-        receipt=call('POST',target+'/doc',request)['receipt']
+        receipt=write_one(call, target, request)['receipt']
         clock(now+7*86400000-1)
         assert call('GET',target+'/doc/normal')['document']==ordinary['document']
         clock(now+7*86400000)
@@ -51,7 +52,7 @@ def exercise(call, restart_with, directory, faults):
             if os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3':assert code=='durable_pending'
             else:assert code in ('outcome_unknown','durable_pending')
         restart_with(env)
-        assert call('POST',target+'/doc',request)['receipt']==receipt
+        assert write_one(call, target, request)['receipt']==receipt
         assert call('GET',target+'/doc/normal')['document']==ordinary['document']
     boundary='SQLite-confirmed durable pending/process exit' if os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3' else 'unknown/durable/process exit'
     print('PASS history trim faults: seven-day boundary, '+boundary+' recovery, retained retry receipt and current record')

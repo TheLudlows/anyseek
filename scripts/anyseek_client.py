@@ -80,7 +80,10 @@ class anyseekClient:
 
     def write(self, collection_id, request, key=_DEFAULT):
         """{operation_id, record_id, expected, document}; null deletes."""
-        return self.api('POST', self.collection_path(collection_id) + '/doc', request, key)
+        result = self.batch(collection_id, {'writes': [request]}, key)['results'][0]
+        if result.get('code') != 'applied' or not result.get('receipt'):
+            raise WriteError(result)
+        return result
 
     def batch(self, collection_id, request, key=_DEFAULT):
         """{writes:[RecordWrite,...]}; inspect each result, not an atomic transaction."""
@@ -108,3 +111,26 @@ class anyseekClient:
     def query(self, collection_id, request, key=_DEFAULT):
         """Returns hits[].record, visible_seq and optional count_total."""
         return self.api('POST', self.collection_path(collection_id) + '/query', request, key)
+
+
+class WriteError(Exception):
+    """Per-item failure; transport/outer HTTP failures remain separate."""
+    def __init__(self, result):
+        self.result = result
+        self.code = result.get('code')
+        self.status = result.get('status')
+        super().__init__(result.get('message', self.code))
+
+
+def write_one(call, path, request, status=200, **kwargs):
+    """Smoke fixture: assert outer HTTP separately from the single item outcome."""
+    envelope = call('POST', path + '/batch', {'writes': [request]},
+                    status=(200, status) if isinstance(status, int) else (200, *status), **kwargs)
+    if 'results' not in envelope:
+        check(status != 200, f'outer request failure: {envelope}')
+        return envelope
+    check(len(envelope['results']) == 1, 'single write requires one result')
+    result = envelope['results'][0]
+    actual = 200 if result.get('code') == 'applied' and result.get('receipt') else result.get('status')
+    check(actual in (status if isinstance(status, tuple) else (status,)), f'item expected {status}: {result}')
+    return result

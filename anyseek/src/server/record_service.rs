@@ -886,36 +886,6 @@ async fn info(
         .await?;
     protected_data(value.map_err(Into::into), Some(data))
 }
-async fn write(
-    State(s): State<Arc<Service>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    bytes: Bytes,
-) -> Result<Response, Error> {
-    let value: Value = parse(&bytes)?;
-    if !value
-        .as_object()
-        .is_some_and(|v| v.contains_key("document") || v.get("vector_patch").is_some_and(Value::is_object))
-    {
-        return Err(bad("document or vector_patch must be explicit; null document means deletion"));
-    }
-    let request: RecordWrite = serde_json::from_value(value).map_err(bad)?;
-    let key = s.authenticate(&headers).await?;
-    let p = s.record(&key, &id).await?;
-    let operation_id = request.operation_id.clone();
-    #[cfg(feature = "fault-injection")]
-    let pause_collection = id.clone();
-    let result = s
-        .catalog
-        .authorized_generation(key, id, p.generation, move |_| async move {
-            #[cfg(feature = "fault-injection")]
-            pause_authorized_for_test(&pause_collection).await?;
-            p.write(request).await
-        })
-        .await?;
-    protected(result.map(|receipt|json!({"receipt":receipt,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()})).map_err(Into::into))
-}
-
 // Committed non-atomic ingestion; derived indexes are asynchronous.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1116,7 +1086,11 @@ async fn batch(
     }
     let key = s.authenticate(&headers).await?;
     let p = s.record(&key, &id).await?;
+    #[cfg(feature = "fault-injection")]
+    let pause_collection = id.clone();
     let result = s.catalog.authorized_generation(key, id, p.generation, move |_| async move {
+        #[cfg(feature = "fault-injection")]
+        pause_authorized_for_test(&pause_collection).await?;
         let mut rows = Vec::new();
         let mut stopped = false;
         for write in request.writes {
@@ -1131,9 +1105,9 @@ async fn batch(
                 }
             }
         }
-        json!({"atomic":false,"results":rows})
+        Ok::<_, RecordError>(json!({"atomic":false,"results":rows}))
     }).await?;
-    response(result)
+    response(result.map_err(Error::from)?)
 }
 #[derive(Deserialize)]
 #[serde(tag = "select", rename_all = "snake_case", deny_unknown_fields)]
@@ -1812,10 +1786,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
             "/api/v1/index/{id}",
             get(info).patch(checkpoint).delete(delete_collection),
         )
-        .route(
-            "/api/v1/index/{id}/doc",
-            post(write).patch(write).delete(write),
-        )
         .route("/api/v1/index/{id}/doc/{record_id}", get(read))
         .route("/api/v1/index/{id}/ingest", get(ingest_progress).post(ingest))
         .route("/api/v1/index/{id}/query", post(query))
@@ -1999,7 +1969,7 @@ mod tests {
         let key = headers["apikey"].to_str().unwrap();
         let old = service.record("tenant", "c").await.unwrap();
         let command = json!({"operation_id":OperationId::new("write-once".into()),"record_id":"r","expected":"Absent","document":{"body":"old"}});
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",key,Some(command.clone())).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/batch",key,Some(json!({"writes":[command.clone()]}))).await.0,StatusCode::OK);
         let backup = json!({"operation_id":OperationId::new("same-backup".into())});
         let (status, before) = tenant_api(&app,"POST","/api/v1/index/c/backup",key,Some(backup.clone())).await;
         assert_eq!(status,StatusCode::OK);
@@ -2012,7 +1982,7 @@ mod tests {
         assert!(service.catalog.authorized_generation("tenant".into(),"c".into(),old.generation,
             |_|async{panic!("old handle ran against replacement")}).await.is_err());
         let mut fresh = command.clone(); fresh["document"]["body"]=json!("new");
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",key,Some(fresh)).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/batch",key,Some(json!({"writes":[fresh]}))).await.0,StatusCode::OK);
         let (status, after) = tenant_api(&app,"POST","/api/v1/index/c/backup",key,Some(backup)).await;
         assert_eq!(status,StatusCode::OK); assert_ne!(before["backup_id"],after["backup_id"]);
         // Replaying the old delete cannot remove the replacement from the live cache.
@@ -2053,9 +2023,9 @@ mod tests {
         let create=json!({"collection_id":"c","config":{"index_name":"other","schema":[{"field":"body","field_type":"Text"}]},"operation_id":op("create")});
         assert_eq!(tenant_api(&app,"POST","/api/v1/index",&other,Some(create)).await.0,StatusCode::OK);
         let write=json!({"operation_id":op("write"),"record_id":"r","expected":"Absent","document":{"body":"tenant private"}});
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",tenant,Some(write.clone())).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/batch",tenant,Some(json!({"writes":[write.clone()]}))).await.0,StatusCode::OK);
         assert_eq!(tenant_api(&app,"GET","/api/v1/index/c/doc/r",&other,None).await.0,StatusCode::NOT_FOUND);
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",&other,Some(write)).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/batch",&other,Some(json!({"writes":[write]}))).await.0,StatusCode::OK);
         let (status,backup)=tenant_api(&app,"POST","/api/v1/index/c/backup",tenant,Some(json!({"operation_id":op("backup")}))).await;
         assert_eq!(status,StatusCode::OK);
         let restore=json!({"collection_id":"copy","backup_id":backup["backup_id"],"operation_id":op("restore")});
@@ -2074,9 +2044,9 @@ mod tests {
         let (service,path,headers)=setup().await;
         let app=router(service.clone());let key=headers["apikey"].to_str().unwrap();
         let original=json!({"operation_id":OperationId::new("ordinary".into()),"record_id":"r","expected":"Absent","document":{"body":"alpha"}});
-        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/doc",key,Some(original)).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/batch",key,Some(json!({"writes":[original]}))).await.0,StatusCode::OK);
         let removed=json!({"operation_id":OperationId::new("removed".into()),"record_id":"r","expected":{"Match":1},"document":null,"generation":{"action":"abort","generation_id":"g"}});
-        for (endpoint,body) in [("doc",removed.clone()),("batch",json!({"writes":[removed.clone()]})),("ingest",json!({"records":[removed]}))] {
+        for (endpoint,body) in [("batch",json!({"writes":[removed.clone()]})),("ingest",json!({"records":[removed]}))] {
             assert_eq!(tenant_api(&app,"POST",&format!("/api/v1/index/c/{endpoint}"),key,Some(body)).await.0,StatusCode::BAD_REQUEST);
         }
         let response=app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/index/c/doc/r/generation").header("apikey",key).body(Body::empty()).unwrap()).await.unwrap();
@@ -2130,12 +2100,12 @@ mod tests {
                 operation_id:OperationId::new("revoke-before-handler".into()),
                 command:CatalogCommand::RevokeKey{key_id:"a".into()},
             }).await.unwrap();
-            Ok::<_,std::io::Error>(Bytes::from(serde_json::to_vec(&json!({
+            Ok::<_,std::io::Error>(Bytes::from(serde_json::to_vec(&json!({"writes":[{
                 "operation_id":OperationId::new("accepted-body".into()),"record_id":"r",
                 "expected":"Absent","document":{"body":"alpha"}
-            })).unwrap()))
+            }]})).unwrap()))
         }));
-        let request=axum::http::Request::builder().method("POST").uri("/api/v1/index/c/doc")
+        let request=axum::http::Request::builder().method("POST").uri("/api/v1/index/c/batch")
             .header("apikey",headers["apikey"].clone()).body(body).unwrap();
         let response=app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(),StatusCode::OK);
@@ -2173,7 +2143,7 @@ mod tests {
                 json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}}),
                 json!({"operation_id":OperationId::new("derived".into()),"record_id":"r","expected":"Absent","document":{"body":"secret-original"},"system":{"kind":"derived","evidence_refs":[{"record_id":"s","version":1}]}}),
             ] {
-                write(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&doc).unwrap().into()).await.unwrap();
+                batch(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&json!({"writes":[doc]})).unwrap().into()).await.unwrap();
             }
             let entered = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
@@ -2209,8 +2179,8 @@ mod tests {
             ));
             entered.notified().await;
             let body =
-                json!({"operation_id":OperationId::new("delete-source".into()),"record_id":"s","expected":{"Match":1},"document":null}).to_string();
-            let acknowledgment=raw(address,format!("DELETE /api/v1/index/c/doc HTTP/1.1\r\nHost: localhost\r\napikey: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",headers["apikey"].to_str().unwrap(),body.len())).await;
+                json!({"writes":[{"operation_id":OperationId::new("delete-source".into()),"record_id":"s","expected":{"Match":1},"document":null}]}).to_string();
+            let acknowledgment=raw(address,format!("POST /api/v1/index/c/batch HTTP/1.1\r\nHost: localhost\r\napikey: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",headers["apikey"].to_str().unwrap(),body.len())).await;
             assert!(String::from_utf8_lossy(&acknowledgment).starts_with("HTTP/1.1 200"));
             release.notify_one();
             let received = pending.await.unwrap();
@@ -2230,11 +2200,11 @@ mod tests {
         use http_body::Body as _;
         let (service, path, headers) = setup().await;
         let source = json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}});
-        write(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&source).unwrap().into()).await.unwrap();
+        batch(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&json!({"writes":[source]})).unwrap().into()).await.unwrap();
         let response = read(State(service.clone()), headers.clone(), Path(("c".into(), "s".into())), Query(GetDocumentRequest { fields: String::new() })).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let delete=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","expected":{"Match":1},"document":null});
-        write(State(service.clone()), headers, Path("c".into()), serde_json::to_vec(&delete).unwrap().into()).await.unwrap();
+        batch(State(service.clone()), headers, Path("c".into()), serde_json::to_vec(&json!({"writes":[delete]})).unwrap().into()).await.unwrap();
         let mut body=response.into_body();
         let frame=std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await;
         assert!(matches!(frame, Some(Err(_))));
@@ -2246,11 +2216,11 @@ mod tests {
         use http_body::Body as _;
         let (service,path,headers)=setup().await;
         let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
-        write(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&source).unwrap().into()).await.unwrap();
+        batch(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&json!({"writes":[source]})).unwrap().into()).await.unwrap();
         let record=service.record("tenant","c").await.unwrap(); let data=record.output_permit().unwrap();
         // A real deletion invalidates the captured data permit without a public test hook.
         let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","expected":{"Match":1},"document":null});
-        write(State(service.clone()),headers,Path("c".into()),serde_json::to_vec(&deletion).unwrap().into()).await.unwrap();
+        batch(State(service.clone()),headers,Path("c".into()),serde_json::to_vec(&json!({"writes":[deletion]})).unwrap().into()).await.unwrap();
         assert!(protected_data(Ok(json!({"body":"secret"})),Some(data.clone())).is_err());
         assert!(protected_data::<Value>(Err(bad("other error")),Some(data.clone())).is_err());
         for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
@@ -2337,7 +2307,7 @@ mod tests {
             }
         }
         let refused = app.clone().oneshot(axum::http::Request::builder().method("POST")
-            .uri("/api/v1/index/%63/doc").header("apikey", &key).body(Body::new(NeverRead)).unwrap()).await.unwrap();
+            .uri("/api/v1/index/%63/batch").header("apikey", &key).body(Body::new(NeverRead)).unwrap()).await.unwrap();
         assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
         let other = app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/index/d")
             .header("apikey", tenant["apikey"].clone()).body(Body::empty()).unwrap()).await.unwrap();
@@ -2409,7 +2379,7 @@ mod tests {
                 panic!("timed-out admission must never consume a body")
             }
         }
-        let request = axum::http::Request::builder().method("POST").uri("/api/v1/index/c/doc")
+        let request = axum::http::Request::builder().method("POST").uri("/api/v1/index/c/batch")
             .header("apikey",headers["apikey"].clone()).body(Body::new(NeverRead)).unwrap();
         let response = tokio::time::timeout(std::time::Duration::from_secs(2), app.clone().oneshot(request)).await.unwrap().unwrap();
         assert_eq!(response.status(),StatusCode::TOO_MANY_REQUESTS);
@@ -2528,24 +2498,6 @@ fn openapi_document() -> Value {
         ),
 
         (
-            "/api/v1/index/{id}/doc",
-            "post",
-            "Durable conditional replacement or deletion",
-            Some(json!({"$ref":"#/components/schemas/RecordWrite"})),
-        ),
-        (
-            "/api/v1/index/{id}/doc",
-            "patch",
-            "Durable conditional replacement or deletion",
-            Some(json!({"$ref":"#/components/schemas/RecordWrite"})),
-        ),
-        (
-            "/api/v1/index/{id}/doc",
-            "delete",
-            "Durable conditional deletion (document:null)",
-            Some(json!({"$ref":"#/components/schemas/RecordWrite"})),
-        ),
-        (
             "/api/v1/index/{id}/doc/{record_id}",
             "get",
             "Read original record envelope",
@@ -2586,7 +2538,7 @@ fn openapi_document() -> Value {
         (
             "/api/v1/index/{id}/batch",
             "post",
-            "1..100 independent writes; per-item outcomes; no batch atomicity",
+            "Synchronous create, conditional replacement, deletion or vector patch; 1..100 independent writes; inspect applied receipts and item errors even on HTTP 200; no atomicity",
             Some(
                 json!({"type":"object","required":["writes"],"properties":{"writes":{"type":"array","minItems":1,"maxItems":100,"items":{"$ref":"#/components/schemas/RecordWrite"}}}}),
             ),
@@ -2733,6 +2685,8 @@ fn unread_admission_refusal_closes_only_http1_connections() {
 #[test]
 fn identity_schemas_and_external_sync_routes_are_strict() {
     let doc = openapi_document();
+    assert!(doc["paths"].get("/api/v1/index/{id}/doc").is_none());
+    assert!(doc["paths"].get("/api/v1/index/{id}/batch").is_some());
     for name in ["RecordWrite", "EvidenceRef"] {
         let schema = &doc["components"]["schemas"][name];
         assert!(schema["properties"].get("routing_key").is_none());
