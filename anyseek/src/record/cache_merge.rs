@@ -122,6 +122,9 @@ impl RecordPartition {
     pub(super) fn start_cache_merge_job(&self,timeout:Duration)->Result<IndexJob,RecordError> {
         if timeout.is_zero() || timeout>Duration::from_secs(300) {return Err(RecordError::Rejected("invalid cache merge deadline".into()));}
         let worker=indexer::WORKERS.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
+        self.start_cache_merge_with_worker(timeout,worker)
+    }
+    pub(super) fn start_cache_merge_with_worker(&self,timeout:Duration,worker:tokio::sync::OwnedSemaphorePermit)->Result<IndexJob,RecordError> {
         let admission=self.admission.clone().try_acquire_owned().map_err(|_|RecordError::Busy)?;
         let writer=self.writer.clone();
         let owner=self.inner.clone();
@@ -196,6 +199,7 @@ impl RecordPartition {
             let _cleanup_phase=maintenance::Phase::new("cache_merge_cleanup_locked",inner.state.seq);
             if inner.background.as_ref().is_some_and(|tail|tail.id==id){inner.background=None;}
             inner.maintenance_scheduled=false;
+            maintenance::log_worker_result(&result,inner.state.seq);
             if matches!(result,Err(RecordError::RecoveryRequired)) {
                 inner.healthy=false;
                 inner.output.write().map_err(|_|RecordError::RecoveryRequired)?.fenced=true;

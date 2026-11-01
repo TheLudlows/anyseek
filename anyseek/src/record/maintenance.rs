@@ -55,6 +55,44 @@ mod tests {
         if std::env::var_os("ANYSEEK_TEST_PHASE_TIMINGS").is_some() && log::set_logger(&LOGGER).is_ok() {log::set_max_level(log::LevelFilter::Debug);}
     }
     #[tokio::test]
+    async fn worker_rejection_retries_without_client_traffic() {
+        let root=tempfile::tempdir().unwrap();
+        let hot=RecordPartition::create(&root.path().join("hot"),super::super::tests::config()).await.unwrap();
+        let cold=RecordPartition::create(&root.path().join("cold"),super::super::tests::config()).await.unwrap();
+        let second=RecordPartition::create(&root.path().join("second"),super::super::tests::config()).await.unwrap();
+        let workers=indexer::WORKERS.clone().acquire_many_owned(2).await.unwrap();
+        for p in [&hot,&cold,&second] {
+            p.inner.lock().await.request_checkpoint("test_worker_pressure");
+            p.kick_maintenance().await;
+            assert!(p.inner.lock().await.maintenance_requested.is_some());
+        }
+        // Repeated hot requests must deduplicate while the cold collection waits.
+        for _ in 0..32 {hot.kick_maintenance().await;}
+        drop(workers);
+        let hot_load=tokio::spawn(async move {
+            super::super::tests::wait_maintenance_idle(&hot).await;
+            for i in 0..8 {
+                let expected=if i==0 {ExpectedVersion::Absent}else{ExpectedVersion::Match(i)};
+                hot.write(super::super::tests::write(&format!("hot-{i}"),"hot","alpha",expected)).await.unwrap();
+                hot.inner.lock().await.request_checkpoint("test_hot_checkpoint");
+                hot.kick_maintenance().await;
+                super::super::tests::wait_maintenance_idle(&hot).await;
+                assert!(hot.inner.lock().await.maintenance_requested.is_none());
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {
+            for p in [&cold,&second] {
+                loop {
+                    if p.inner.lock().await.maintenance_requested.is_none(){break;}
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+            hot_load.await.unwrap();
+        }).await.expect("cold maintenance must progress without a new request under bounded hot load");
+        assert!(!cold.inner.lock().await.maintenance_pending);
+    }
+
+    #[tokio::test]
     async fn native_hard_pressure_returns_busy_before_accepting_and_worker_makes_progress() {
         trace_timings();
         use super::super::tests::{config,path,write};
@@ -65,7 +103,10 @@ mod tests {
             p.write(write(&format!("op-{i}"),"existing","alpha",expected)).await.unwrap();
         }
         std::fs::write(root.join(".test-cache-merge-pause"),b"pause").unwrap();
+        let workers=indexer::WORKERS.clone().acquire_many_owned(2).await.unwrap();
         p.write(write("op-1024","existing","alpha",ExpectedVersion::Match(1024))).await.unwrap();
+        assert!(p.inner.lock().await.maintenance_pending);
+        drop(workers);
         tokio::time::timeout(std::time::Duration::from_secs(5),async {
             while !root.join(".test-cache-merge-started").exists(){tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
         }).await.unwrap();
@@ -370,7 +411,7 @@ impl RecordPartition {
     pub(super) async fn kick_maintenance(&self) {
         let mut inner=self.inner.lock().await;
         if !inner.healthy || inner.maintenance_requested.is_none()
-            || inner.background.is_some() || inner.maintenance_scheduled {return;}
+            || inner.background.is_some() || inner.maintenance_scheduled || inner.maintenance_pending {return;}
         inner.maintenance_scheduled=true;
         #[cfg(test)]
         {
@@ -381,8 +422,15 @@ impl RecordPartition {
             self.start_cache_merge_job(std::time::Duration::from_secs(300))
         } else {self.start_index_job(std::time::Duration::from_secs(300),true)};
         match job {
-            Ok(job)=>drop(job),
-            Err(error)=>{inner.maintenance_scheduled=false;log::debug!("record_maintenance event=admission_deferred error={error}");}
+            Ok(job)=>{
+                log::info!("record_maintenance event=worker_started seq={}",inner.state.seq);
+                drop(job);
+            },
+            Err(RecordError::Busy)=>{
+                inner.maintenance_pending=self.defer_maintenance();
+                inner.maintenance_scheduled=inner.maintenance_pending;
+            }
+            Err(error)=>{inner.maintenance_scheduled=false;log::warn!("record_maintenance event=admission_failed error={error}");}
         }
     }
 }
@@ -460,3 +508,20 @@ pub(super) fn collect_operations(state:&mut State,epoch:u64)->Result<(),RecordEr
 #[cfg(test)]
 #[path = "maintenance_gc_tests.rs"]
 mod gc_tests;
+
+#[path = "maintenance_pending.rs"]
+mod pending;
+
+pub(super) fn worker_outcome(result:&Result<u64,RecordError>)->&'static str {
+    match result {
+        Ok(_)=>"installed",Err(RecordError::Busy)=>"execution_busy",
+        Err(RecordError::RecoveryRequired)=>"recovery_required",
+        Err(RecordError::DurablePending(_))=>"durable_pending",
+        Err(RecordError::OutcomeUnknown(_))=>"outcome_unknown",Err(_)=>"failed",
+    }
+}
+pub(super) fn log_worker_result(result:&Result<u64,RecordError>,seq:u64) {
+    let outcome=worker_outcome(result);
+    if result.is_ok() {log::info!("record_maintenance event=worker_finished outcome={outcome} seq={seq}");}
+    else {log::warn!("record_maintenance event=worker_finished outcome={outcome} seq={seq} action=inspect_then_retry_checkpoint");}
+}

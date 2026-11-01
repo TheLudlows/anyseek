@@ -151,3 +151,11 @@ Catalog 先持久记录 reclaiming 意图，新完整服务备份排除该代次
 S3 先撤销旧 owner 的构建状态并确认 pins 已释放，再退役该代次的 head，删除业务回执/构建/恢复元数据及已清理对象的依赖边。待删对象由 SQLite 按 key 游标分页；每次 DELETE 前及登记完成前，校验活动 head 并沿目标对象的反向依赖检查 head/pin 可达性，不再反复加载完整待删列表。每轮最多清理 16 条依赖边。旧 partition 身份保留最小墓碑，禁止旧发布或同身份重建。未知 PUT 的墓碑在 Catalog 代次记录删除后仍由有界服务 sweep 重试，防止迟到对象永久遗留；这些协调墓碑不属于可以直接清空的历史残留。批次限制文件/对象/依赖边处理数和返回的候选数量，校验成本仍随活动 head 和相关依赖图增长，不能据此承诺整进程 CPU 或 RSS 硬上限。
 
 物理清理完成后删除 Catalog 的旧代次行，保留期限内管理回执和持久 epoch 拒绝规则。旧任务、旧 GC 和旧删除回执不能修改同名新代次。普通客户端仅携带名称，仍须在删除/重建时停止旧请求与重试。真实云 S3、系统掉电和 Windows 验收分别记录，不由本地 fixture 推定通过。
+
+### 自动维护额度等待
+
+进程仍最多同时执行两个维护 worker。自动维护首次被 worker 或集合准入额度拒绝后，最多保存 64 个按集合实例去重的待办；使用现有 worker semaphore 的 FIFO 等待与释放唤醒，不需要新的客户端请求。集合准入或同集合已有构建暂不可用时，释放 worker 并退避 100ms。每个待办最多等待 300 秒，等待时仅持弱引用，不持有 owner、reader/build pin，也不会按路径重新打开已删除或换代的集合。已接受的构建继续遵守原有 owned-task 和发布保护语义。
+
+`record_maintenance` 日志区分 `admission_deferred`、`admission_backoff`、`retry_started` 和 `worker_finished`；重试日志包含待办年龄 `age_ms` 与尝试次数 `attempts`，完成日志区分安装成功、执行 Busy、恢复要求及其他失败。上限已满或等待超时分别记录 `retry_capacity_exhausted`、`retry_stopped`，保留维护意图并停止自动等待。已启动的执行失败不自动循环重试。
+
+运维看到上述停止或失败事件时，应先确认额度恢复，排查存储/恢复错误；需要恢复时先走现有恢复流程，然后对该集合重试授权的 `PATCH /api/v1/index/{id}` checkpoint（库调用为 `index_committed`）。成功的显式 checkpoint 会再次触发尚未完成的自动维护。容量超过 64、作业长期不完成或持续拒绝的负载不承诺自动公平或完成时限；FIFO 保证仅适用于已经接纳且尚未超时的 worker 等待。
