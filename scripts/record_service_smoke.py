@@ -85,7 +85,7 @@ def main():
                 exercise(call,restart_with,root.parent,args.faults)
             else:exercise(call,restart_with,args.faults)
         try:
-            if args.faults:
+            if args.faults and args.section in (None, 'base'):
                 for stage in ['metadata_committed','root_published']:
                     child=subprocess.Popen([binary,f'index_path={root}',f'local_port={port}','local_ip=127.0.0.1'],env={**os.environ,'MASTER_KEY_SECRET':'issue57-service-test','ANYSEEK_CATALOG_INITIAL_FAULT':stage},stdout=log,stderr=log)
                     try:

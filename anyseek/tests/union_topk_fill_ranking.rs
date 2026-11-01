@@ -206,7 +206,7 @@ async fn scan32_sparse_uniform_fills_heap() {
 async fn scan32_score_gap_exact_selection() {
     let index = fresh("tests/index_scan32_score_gap/").await;
 
-    let words: Vec<String> = (1..=11).map(|i| format!("d{i:02}")).collect();
+    let words: Vec<String> = (1..=13).map(|i| format!("d{i:02}")).collect();
     let mut docs = vec![];
     // Each doc contains all query terms. Equal-size length tiers keep the
     // top-100 boundary between tiers rather than inside a tied group.
@@ -243,6 +243,14 @@ async fn scan32_score_gap_exact_selection() {
         "score-gap top-100 must match the global ranking exactly"
     );
 
+    // The same long query must page through the global order, including IDs
+    // within tied score tiers; comparing scores alone cannot detect a wrong page.
+    let page = search(&index, &query, 30, 40, ResultType::Topk).await;
+    let rows = |result: &anyseek::record::RecordSearch| result.hits.iter()
+        .map(|hit| (hit.record.record_id.clone(), hit.score.to_bits()))
+        .collect::<Vec<_>>();
+    assert_eq!(page.hits.len(), 40);
+    assert_eq!(rows(&page), rows(&oracle)[30..70]);
 
 }
 
@@ -291,39 +299,6 @@ async fn scan32_topkcount_and_topk_agree() {
         .map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score.to_bits()))
         .collect();
     assert_eq!(strict_key(&a), strict_key(&b));
-
-
-}
-
-/// Pagination sanity on the fixed path: an offset slice of a scan_32 ranking
-/// must match the corresponding slice of the full ranking's scores.
-#[tokio::test]
-async fn scan32_pagination_is_consistent() {
-    let index = fresh("tests/index_scan32_pagination/").await;
-
-    let words: Vec<String> = (1..=13).map(|i| format!("p{i:02}")).collect();
-    let mut docs = vec![];
-    for i in 0..250 {
-        let title = format!("{} doc{i}", words.join(" "));
-        docs.push(doc(&title));
-    }
-    records::insert(&index, docs).await.unwrap();
-    index.compact_journal().await.unwrap();
-
-    let query = words.join(" ");
-    let full = search(&index, &query, 0, 250, ResultType::Topk).await;
-    let page = search(&index, &query, 30, 40, ResultType::Topk).await;
-
-    assert_eq!(page.hits.len(), 40);
-    let pa: Vec<u32> = page.hits.iter().map(|r| r.score.to_bits()).collect();
-    let fb: Vec<u32> = full.hits[30..70]
-        .iter()
-        .map(|r| r.score.to_bits())
-        .collect();
-    assert_eq!(
-        pa, fb,
-        "pagination scores must match the full ranking slice"
-    );
 
 
 }

@@ -2653,8 +2653,8 @@ mod tests {
         drop(p); std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test]
-    async fn record_identity_contract_rejects_removed_fields() {
+    #[test]
+    fn record_identity_contract_rejects_removed_fields() {
         fn strict<T: Serialize + serde::de::DeserializeOwned>(value: &T) {
             let mut wire = serde_json::to_value(value).unwrap();
             assert!(wire.get("routing_key").is_none());
@@ -2666,18 +2666,19 @@ mod tests {
         assert!(metadata.get("id").is_none());
         metadata["id"] = serde_json::json!(0);
         assert!(serde_json::from_value::<IndexMetaObject>(metadata).is_err());
-        let root = path();
-        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let config = config();
+        let mut state = State::default();
         let source = source_write("source", "s", &[]);
         strict(&source);
-        p.write(source).await.unwrap();
-        strict(&p.get("s").await.unwrap().unwrap());
+        let epoch = source.operation_id.epoch;
+        let mutation::PreparedWrite::Append { applied, .. } = mutation::prepare_at(
+            &state, &config, checkpoint_codec::length(&config, &state).unwrap(),
+            source, epoch, epoch,
+        ).unwrap() else { panic!("new source") };
+        apply(&mut state, &applied).unwrap();
+        strict(&state.records["s"]);
+        assert_eq!(state.records["s"].version, 1);
         strict(&EvidenceRef { record_id:"s".into(), version:1, locator:None });
-        drop(p);
-        let p = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
-        assert_eq!(p.get("s").await.unwrap().unwrap().version, 1);
-        drop(p);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

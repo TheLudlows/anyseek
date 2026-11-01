@@ -1320,29 +1320,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_checkpoint_rejects_corrupt_remote_wal_without_replacing_head() {
-        let (p,backend,_root,_db,_clock)=source().await;
-        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
-        let before={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
-            let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head};
-        assert!(before.manifest.is_none());
-        use object_store::ObjectStore;
-        backend.put(&object_store::path::Path::from(before.wal_tip.as_ref().unwrap().key.clone()),object_store::PutPayload::from_static(b"corrupt")).await.unwrap();
-        assert!(p.compact_journal().await.is_err());
-        let inner=p.inner.lock().await;
-        assert!(!inner.healthy);
-        let remote=inner.remote.as_ref().unwrap();
-        assert_eq!(remote.authority.lock().await.read_head("source").unwrap().unwrap(),before);
-    }
-    #[tokio::test]
     async fn compact_owned_job_authenticates_remote_wal_before_and_after_anchor() {
         for anchored in [false,true] {
             let (p,backend,_root,_db,_clock)=source().await;
             p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
-            if anchored {p.start_compact_job().unwrap().finish().await.unwrap();}
-            p.write(write("second","b","beta",ExpectedVersion::Absent)).await.unwrap();
+            if anchored {
+                p.start_compact_job().unwrap().finish().await.unwrap();
+                p.write(write("second","b","beta",ExpectedVersion::Absent)).await.unwrap();
+            }
             let before={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
                 let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();head};
+            assert_eq!(before.manifest.is_some(), anchored);
             use object_store::ObjectStore;
             backend.put(&object_store::path::Path::from(before.wal_tip.as_ref().unwrap().key.clone()),object_store::PutPayload::from_static(b"corrupt")).await.unwrap();
             assert!(matches!(p.start_compact_job().unwrap().finish().await,Err(RecordError::RecoveryRequired)));

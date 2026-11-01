@@ -49,14 +49,16 @@ async fn frequent_terms_topk_returns_results() {
     // Both scales retain 100%/50% document frequencies and >10 matches.
     // Full scale retains the original 3000 records; legacy frequent-word
     // fast-path thresholds are not a current engine contract.
+    let mut docs = Vec::with_capacity(population);
     for i in 0..population {
         let mut t = String::from("common ");
         if i % 2 == 0 {
             t.push_str("half ");
         }
         let doc: Document = serde_json::from_str(&format!(r#"{{"title":"{t}"}}"#)).unwrap();
-        records::insert(&index_arc, vec![doc]).await.unwrap();
+        docs.push(doc);
     }
+    records::insert(&index_arc, docs).await.unwrap();
     index_arc.compact_journal().await.unwrap();
 
     // Intersection Topk must not come back empty despite many matches.

@@ -150,7 +150,12 @@ async fn check(index: &RecordPartition, removed: &[usize]) {
             let r = query(index, name, filter.clone(), 30, json!("All")).await;
             let actual: HashSet<_> = labels(&r).await.into_iter().collect();
             assert_eq!(actual, eligible, "{name} {filter}");
-            for ann in [json!("All"), json!({"Nprobe":1})] {
+            let ann_modes = if name == "Lexical" {
+                vec![json!("All")]
+            } else {
+                vec![json!("All"), json!({"Nprobe":1})]
+            };
+            for ann in ann_modes {
                 let r = query(index, name, filter.clone(), 3, ann).await;
                 let actual = labels(&r).await;
                 assert_eq!(

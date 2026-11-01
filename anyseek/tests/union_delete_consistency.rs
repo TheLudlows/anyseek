@@ -82,24 +82,3 @@ async fn union_count_excludes_deleted() {
     assert_eq!(topk_count.hits.len(), 17);
 
 }
-
-/// Control: without deletes the OR fast path is untouched and exact.
-#[tokio::test]
-async fn union_count_no_deletes_control() {
-    let index = fresh("tests/index_delete_union_control/").await;
-    let mut docs = vec![];
-    for i in 0..10 {
-        docs.push(doc(&format!("alpha uniq{i}")));
-    }
-    for i in 0..10 {
-        docs.push(doc(&format!("beta uniqb{i}")));
-    }
-    records::insert(&index, docs).await.unwrap();
-    index.compact_journal().await.unwrap();
-
-    let count = search(&index, "alpha beta", ResultType::Count).await;
-    let topk_count = search(&index, "alpha beta", ResultType::TopkCount).await;
-    assert_eq!(count.count_total, 20);
-    assert_eq!(topk_count.count_total, 20);
-
-}

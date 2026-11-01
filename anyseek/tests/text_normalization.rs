@@ -48,13 +48,12 @@ async fn fresh(label: &str, rule: TextNormalization, ngrams: u8) -> (RecordParti
 async fn add(index: &RecordPartition, docs: &[&str]) {
     records::append(index, docs.iter().map(|body| serde_json::from_value(json!({"body":body})).unwrap()).collect()).await;
 }
-async fn rows(index: &RecordPartition, q: &str, realtime: bool) -> Vec<(usize, f32)> {
-    rows_sorted(index, q, realtime, false).await
+async fn rows(index: &RecordPartition, q: &str) -> Vec<(usize, f32)> {
+    rows_sorted(index, q, false).await
 }
 async fn rows_sorted(
     index: &RecordPartition,
     q: &str,
-    _realtime: bool,
     explicit: bool,
 ) -> Vec<(usize, f32)> {
     let r = index
@@ -74,8 +73,8 @@ async fn rows_sorted(
 
     r.hits.iter().map(|r| (r.record.record_id.parse::<usize>().unwrap(), r.score)).collect()
 }
-async fn ids(index: &RecordPartition, q: &str, realtime: bool) -> BTreeSet<usize> {
-    rows(index, q, realtime)
+async fn ids(index: &RecordPartition, q: &str) -> BTreeSet<usize> {
+    rows(index, q)
         .await
         .into_iter()
         .map(|r| r.0)
@@ -109,7 +108,6 @@ async fn t2s_phrases_original_utf8_ngram_and_reopen() {
                 drop(index);
                 index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
             }
-            let rt = stage == 0;
             assert_eq!(
                 index.configuration().await.unwrap().index.text_normalization,
                 TextNormalization::OpenCcT2s1_1_9
@@ -132,20 +130,20 @@ async fn t2s_phrases_original_utf8_ngram_and_reopen() {
                 ("臺灣\0頭髮", "台湾\0头发"),
             ] {
                 assert_eq!(
-                    rows(&index, traditional, rt).await,
-                    rows(&index, simplified, rt).await,
+                    rows(&index, traditional).await,
+                    rows(&index, simplified).await,
                     "{traditional}, stage={stage}, mask={mask}"
                 );
             }
-            assert_eq!(ids(&index, "乾隆", rt).await, [0].into_iter().collect());
+            assert_eq!(ids(&index, "乾隆").await, [0].into_iter().collect());
             assert_eq!(
-                ids(&index, "OpenAI2026", rt).await,
+                ids(&index, "OpenAI2026").await,
                 [0, 1].into_iter().collect()
             );
-            assert_eq!(ids(&index, "軟體", rt).await, [2].into_iter().collect());
-            assert_eq!(ids(&index, "软件", rt).await, [3].into_iter().collect());
+            assert_eq!(ids(&index, "軟體").await, [2].into_iter().collect());
+            assert_eq!(ids(&index, "软件").await, [3].into_iter().collect());
             assert_eq!(
-                ids(&index, "\"the of and 臺灣\"", rt).await,
+                ids(&index, "\"the of and 臺灣\"").await,
                 [6, 7].into_iter().collect()
             );
         }
@@ -160,8 +158,8 @@ async fn none_default_and_persisted_rule_are_explicit() {
     add(&index, &["臺灣", "台湾"]).await;
     index.compact_journal().await.unwrap();
     assert_ne!(
-        ids(&index, "臺灣", false).await,
-        ids(&index, "台湾", false).await
+        ids(&index, "臺灣").await,
+        ids(&index, "台湾").await
     );
     let mut value = serde_json::to_value(index.configuration().await.unwrap().index.clone()).unwrap();
     value.as_object_mut().unwrap().remove("text_normalization");
@@ -215,7 +213,6 @@ async fn not_filter_has_independent_membership_and_tf_oracle() {
                             let result = rows_sorted(
                                 &index,
                                 &format!("{second} -{negative}"),
-                                stage == 0,
                                 explicit,
                             )
                             .await;
@@ -277,30 +274,24 @@ async fn nul_suffix_alone_has_independent_hits_in_every_state() {
                     drop(index);
                     index = RecordPartition::open(&path, JOURNAL_LIMIT).await.unwrap();
                 }
-                for rt in [false, true] {
-                    let want: BTreeSet<usize> = if false {
-                        BTreeSet::new()
-                    } else {
-                        [0].into_iter().collect()
-                    };
-                    // Neither query contains NUL or the shared prefix: truncating both
-                    // query/document sides cannot make this independent assertion pass.
-                    assert_eq!(
-                        ids(&index, "头发", rt).await,
-                        want,
-                        "stage={stage} rt={rt} mask={mask}"
-                    );
-                    let want: BTreeSet<usize> = if stage >= 2 {
-                        [2].into_iter().collect()
-                    } else {
-                        BTreeSet::new()
-                    };
-                    assert_eq!(
-                        ids(&index, "后缀", rt).await,
-                        want,
-                        "stage={stage} rt={rt} mask={mask}"
-                    );
-                }
+                let want: BTreeSet<usize> = [0].into_iter().collect();
+                // Neither query contains NUL or the shared prefix: truncating both
+                // query/document sides cannot make this independent assertion pass.
+                assert_eq!(
+                    ids(&index, "头发").await,
+                    want,
+                    "stage={stage} mask={mask}"
+                );
+                let want: BTreeSet<usize> = if stage >= 2 {
+                    [2].into_iter().collect()
+                } else {
+                    BTreeSet::new()
+                };
+                assert_eq!(
+                    ids(&index, "后缀").await,
+                    want,
+                    "stage={stage} mask={mask}"
+                );
                 for (i, original) in docs.iter().enumerate() {
                     let stored = index.get(&format!("{:020}", i)).await.unwrap().unwrap().document.unwrap();
                     assert_eq!(

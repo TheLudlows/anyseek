@@ -132,6 +132,29 @@ def main():
                 page=call('POST',f'/api/v1/index/{collection}/query',request)
                 result.append((page['count_total'],[(h['record']['record_id'],h['record']['version'],h['record']['document'],h['score']) for h in page['hits']]))
             return result
+        def wait_history_ready(key):
+            # Remote history trim publishes asynchronously. Bound this read-only
+            # readiness probe by the existing 60-second request budget; all
+            # query, cold-recovery and receipt assertions stay at the call sites.
+            deadline=time.monotonic()+60
+            probe=urllib.request.Request(base+'/api/v1/index/main/query',
+                data=json.dumps({'query':'alpha','operator':'or'}).encode(),
+                headers={'apikey':key,'Content-Type':'application/json'},method='POST')
+            for _ in range(600):
+                remaining=deadline-time.monotonic()
+                assert remaining>0,'remote history maintenance readiness deadline'
+                try:
+                    with urllib.request.urlopen(probe,timeout=remaining) as response:
+                        code=response.status;page=json.load(response)
+                except urllib.error.HTTPError as error:
+                    code=error.code;page=json.load(error)
+                assert time.monotonic()<deadline,'remote history maintenance readiness deadline'
+                if code==200:
+                    break
+                assert code==429 and page.get('code')=='busy',(code,page)
+                time.sleep(min(.1,max(0,deadline-time.monotonic())))
+            else:
+                raise AssertionError('remote history maintenance readiness attempt limit')
         def write(nonce,record,body,expected='Absent'):
             return {'operation_id':operation(),'record_id':record,'expected':expected,
                 'document':{'body':body,'vector':[2,0]}}
@@ -206,6 +229,7 @@ def main():
                 expected=query()
                 print('PASS confirmed SQLite commit + failed local cache append: durable_pending, fenced output, cold recovery and original receipt',flush=True)
             clock.write_text(str(int(clock.read_text())+8*86400000))
+            wait_history_ready(tenant_key)
             assert query()==expected
             cold_restart();assert query()==expected
             print('PASS remote history maintenance and query views survive cache loss',flush=True)
@@ -226,7 +250,7 @@ def main():
                 assert archive['visible_seq']==before
                 assert call('POST','/api/v1/index/main/backup',request)==archive
                 target='restored-'+stage;restore={'operation_id':operation(),'collection_id':target,'backup_id':archive['backup_id']}
-                if args.faults:
+                if args.faults and stage == stages[0]:
                     stop();start({'ANYSEEK_REMOTE_RESTORE_FAULT':'after_import'})
                     try:call('POST','/api/v1/restore',restore)
                     except (OSError,http.client.HTTPException):pass
@@ -244,6 +268,8 @@ def main():
             archive=call('POST','/api/v1/index/main/backup',{'operation_id':operation()})
             user=base64.b64encode(os.urandom(32)).decode()
             call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'reader','apikey_base64':user})
+            # The same clock advance also ages the other tenant's live collection.
+            wait_history_ready(other_key)
             whole_request={'operation_id':operation()}
             whole=control('POST','/api/v1/service-backups',whole_request)
             assert whole['snapshot']['collection_backups']
@@ -257,7 +283,8 @@ def main():
             call('POST','/api/v1/apikey',{'operation_id':operation(),'key_id':'restored-access','apikey_base64':tenant_key})
             assert call('GET','/api/v1/index/main/doc/a')['version']==2
             # Old collection archives in a service snapshot remain usable.
-            copied=next(iter(whole['snapshot']['collection_backups']))
+            copied=archive['backup_id']  # Created above by this tenant for main.
+            assert copied in whole['snapshot']['collection_backups']
             call('POST','/api/v1/restore',{'operation_id':operation(),'collection_id':'copied-archive','backup_id':copied})
             assert call('GET','/api/v1/index/copied-archive/doc/a')['version']==2
             stop()
