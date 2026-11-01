@@ -94,12 +94,12 @@ pub fn embedding_to_json(embedding: Embedding) -> Value {
 pub fn embedding_to_bytes_be(embedding: &Embedding) -> Vec<u8> {
     match embedding {
         Embedding::F32(v) => {
-            let mut byte_array = Vec::with_capacity(size_of_val(v));
+            let mut byte_array = Vec::with_capacity(size_of_val(v.as_slice()));
             byte_array.extend(v.iter().flat_map(|v| v.to_be_bytes()));
             byte_array
         }
         Embedding::I8(v) => {
-            let mut byte_array = Vec::with_capacity(size_of_val(v));
+            let mut byte_array = Vec::with_capacity(size_of_val(v.as_slice()));
             byte_array.extend(v.iter().flat_map(|v| v.to_be_bytes()));
             byte_array
         }

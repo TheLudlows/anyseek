@@ -6,7 +6,7 @@ use anyseek::{
     index::{Clustering, Document, FrequentwordType, IndexMetaObject,
         LexicalSimilarity, NgramSet, SchemaField, StopwordType, TokenizerType},
     search::{QueryType,  ResultType, SearchMode},
-    vector::{embedding_to_bytes_be, parse_external_embedding, validate_embedding, validate_vector_schema,
+    vector::{embedding_from_bytes_be, embedding_to_bytes_be, parse_external_embedding, validate_embedding, validate_vector_schema,
         Embedding, Inference, Precision, Quantization},
     vector_similarity::{AnnMode, VectorSimilarity},
     utils::encode_bytes_to_base64_string,
@@ -40,6 +40,22 @@ async fn try_query(index: &RecordPartition, mode: SearchMode, vector: Option<Emb
 async fn query(index: &RecordPartition, mode: SearchMode, vector: Option<Embedding>) -> RecordSearch {try_query(index,mode,vector).await.unwrap()}
 #[test]
 fn external_config_and_numeric_validation() {
+    // Network encoding also supports empty payloads, independently of schema validation.
+    for dimensions in [0, 3, 768] {
+        for (embedding, precision, expected) in [
+            (Embedding::F32(vec![-1.5; dimensions]), Precision::F32, [0xbf, 0xc0, 0, 0].repeat(dimensions)),
+            (Embedding::I8(vec![-128; dimensions]), Precision::I8, vec![0x80; dimensions]),
+        ] {
+            let bytes = embedding_to_bytes_be(&embedding);
+            assert_eq!(bytes, expected);
+            let decoded = embedding_from_bytes_be(&bytes, precision, dimensions, cfg!(target_endian = "little")).unwrap();
+            match (embedding, decoded) {
+                (Embedding::F32(a), Embedding::F32(b)) => assert_eq!(a, b),
+                (Embedding::I8(a), Embedding::I8(b)) => assert_eq!(a, b),
+                _ => panic!("encoding changed precision"),
+            }
+        }
+    }
     assert!(validate_vector_schema(&inference(), &schema()).is_ok());
     assert!(validate_vector_schema(&Inference::None, &schema()).is_err());
     let mut text = schema(); text[1].field_type = anyseek::index::FieldType::Text;

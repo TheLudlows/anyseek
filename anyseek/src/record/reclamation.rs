@@ -83,6 +83,7 @@ mod tests {
         let p = RecordPartition::create(&path, config()).await.unwrap();
         p.write(write("a", "a", "alpha", ExpectedVersion::Absent)).await.unwrap();
         assert_eq!(RecordPartition::reclaim_deleted_files(&path, 0).await, Err(RecordError::Busy));
+        drop(package_pins::Pin::acquire(&[path.join("owner")]).unwrap());
         drop(p);
         let scope = Arc::new(crate::resources::Governor::default()).admit("reclaim-test".into(),crate::resources::Lane::Background,0).unwrap();
         let held = crate::resources::hold_io_for_test(&scope).await;
