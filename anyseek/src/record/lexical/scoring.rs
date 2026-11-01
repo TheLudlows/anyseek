@@ -158,14 +158,13 @@ impl ActiveView<'_> {
     ) -> Result<(usize, Vec<Hit>), RecordError> {
         validate_bounds(groups, boosts, self.snapshot.fields.len(), limit)?;
         let statistics = QueryStatistics::build(&[self], groups, boosts.len(), normalization)?;
-        self.score_groups_in(
-            &statistics,
-            query,
-            groups,
-            boosts,
-            limit,
-            accepts,
-        )
+        let mut hits = Vec::new();
+        let count = self.score_groups_in(
+            &statistics, query, groups, boosts, accepts,
+            &mut |identity, score| hits.push(Hit { identity: identity.clone(), score }),
+        )?;
+        sort_probe_hits(&mut hits, limit);
+        Ok((count, hits))
     }
 
     fn score_groups_in(
@@ -174,11 +173,11 @@ impl ActiveView<'_> {
         query: &dyn Query,
         groups: &[super::query::ScoreGroup],
         boosts: &[f32],
-        limit: usize,
         accepts: impl Fn(&Identity) -> bool,
-    ) -> Result<(usize, Vec<Hit>), RecordError> {
+        collect: &mut impl FnMut(&Identity, f32),
+    ) -> Result<usize, RecordError> {
         if self.live.is_empty() {
-            return Ok((0, Vec::new()));
+            return Ok(0);
         }
         let QueryStatistics { terms, slots, averages, idfs } = statistics;
         // Tantivy executes the complete Boolean/phrase predicate, but cannot
@@ -188,7 +187,6 @@ impl ActiveView<'_> {
                 &self.snapshot.searcher,
             ))
             .map_err(storage)?;
-        let mut hits: Vec<Hit> = Vec::new();
         let mut count = 0;
         for (segment_id, segment) in self.snapshot.searcher.segment_readers().iter().enumerate() {
             let mut postings = Vec::new();
@@ -254,23 +252,12 @@ impl ActiveView<'_> {
                     if !score.is_finite() {
                         return Err(storage("nonfinite BM25F score"));
                     }
-                    let hit = Hit {
-                        identity: identity.clone(),
-                        score,
-                    };
-                    let position = hits.partition_point(|old| {
-                        old.score > hit.score
-                            || (old.score == hit.score && old.identity < hit.identity)
-                    });
-                    if position < limit {
-                        hits.insert(position, hit);
-                        hits.truncate(limit);
-                    }
+                    collect(identity, score);
                 }
                 scorer.advance();
             }
         }
-        Ok((count, hits))
+        Ok(count)
     }
 }
 
@@ -354,6 +341,31 @@ impl<'a> CorpusView<'a> {
         Ok(count)
     }
 
+    /// Stream every accepted score into one query-owned collector across all views.
+    pub(super) fn collect_scores(
+        &self,
+        query: &dyn Query,
+        groups: &[super::query::ScoreGroup],
+        boosts: &[f32],
+        normalization: FieldLengthNormalization,
+        accepts: impl Fn(&Identity) -> bool,
+        mut collect: impl FnMut(&Identity, f32),
+    ) -> Result<usize, RecordError> {
+        validate_bounds(groups, boosts, self.views[0].snapshot.fields.len(), 0)?;
+        let references: Vec<_> = self.views.iter().collect();
+        let statistics = QueryStatistics::build(&references, groups, boosts.len(), normalization)?;
+        let mut count = 0usize;
+        for view in &self.views {
+            let matched = view.score_groups_in(
+                &statistics, query, groups, boosts, &accepts, &mut collect,
+            )?;
+            count = count.checked_add(matched)
+                .ok_or_else(|| storage("native corpus count overflow"))?;
+        }
+        Ok(count)
+    }
+
+    #[cfg(test)]
     pub(super) fn score_groups(
         &self,
         query: &dyn Query,
@@ -363,36 +375,19 @@ impl<'a> CorpusView<'a> {
         limit: usize,
         accepts: impl Fn(&Identity) -> bool,
     ) -> Result<(usize, Vec<Hit>), RecordError> {
-        if limit > MAX_POPULATION {
-            return Err(storage("native corpus candidate budget exceeded"));
-        }
         validate_bounds(groups, boosts, self.views[0].snapshot.fields.len(), limit)?;
-        let references: Vec<_> = self.views.iter().collect();
-        let statistics = QueryStatistics::build(&references, groups, boosts.len(), normalization)?;
-        let mut count = 0usize;
-        let mut hits: Vec<Hit> = Vec::new();
-        for view in &self.views {
-            let (matched, candidates) = view.score_groups_in(
-                &statistics,
-                query,
-                groups,
-                boosts,
-                limit,
-                &accepts,
-            )?;
-            count = count
-                .checked_add(matched)
-                .ok_or_else(|| storage("native corpus count overflow"))?;
-            for hit in candidates {
-                let at = hits.partition_point(|old| {
-                    old.score > hit.score || (old.score == hit.score && old.identity < hit.identity)
-                });
-                if at < limit {
-                    hits.insert(at, hit);
-                    hits.truncate(limit);
-                }
-            }
-        }
+        let mut hits = Vec::new();
+        let count = self.collect_scores(query, groups, boosts, normalization, accepts,
+            |identity, score| hits.push(Hit { identity: identity.clone(), score }))?;
+        sort_probe_hits(&mut hits, limit);
         Ok((count, hits))
     }
+}
+
+// Full-candidate oracle for the native scoring probes, independent of the heap.
+#[cfg(test)]
+fn sort_probe_hits(hits: &mut Vec<Hit>, limit: usize) {
+    hits.sort_by(|a, b| crate::min_heap::score_ordering(b.score, a.score)
+        .then_with(|| a.identity.cmp(&b.identity)));
+    hits.truncate(limit);
 }
