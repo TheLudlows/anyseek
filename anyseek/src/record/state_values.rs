@@ -158,8 +158,11 @@ pub(super) struct Records {
     bytes: usize,
 }
 impl Records {
+    pub(super) fn may_have_due_ttl(&self, evaluation: u64) -> bool {
+        self.ttl_deadline_lower_bound.is_some_and(|deadline| deadline <= evaluation)
+    }
     pub(super) fn visit_due_ttl(&mut self, evaluation: u64, mut visit: impl FnMut(&Record)) -> bool {
-        if self.ttl_deadline_lower_bound.is_none_or(|deadline| deadline > evaluation) { return false; }
+        if !self.may_have_due_ttl(evaluation) { return false; }
         let mut earliest = None;
         for record in self.values.values() {
             if !temporal::live_ttl(record) { continue; }
