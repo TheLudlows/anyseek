@@ -1838,6 +1838,156 @@ mod tests {
         let clock=Arc::new(TestClock(std::sync::atomic::AtomicU64::new(now)));
         p.inner.lock().await.clock=clock.clone(); (clock,now)
     }
+    async fn wait_time_marker(root: &Path, name: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !root.join(name).exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.expect("time boundary test marker");
+    }
+
+    #[tokio::test]
+    async fn query_time_fast_path_does_not_wait_for_off_lock_writer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let p = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
+        let (clock, now) = test_clock(&p).await;
+        p.write(entity_write("seed", "a")).await.unwrap();
+        let writer = p.writer.lock().await;
+        clock.set(now + 1);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                .await.unwrap().hits.len(), 1);
+            p.query_with_relations(fusion_query(), fusion_options()).await.unwrap();
+            p.advance_time().await.unwrap();
+        }).await.expect("non-mutating time checks must not join writer queue");
+        let inner = p.inner.lock().await;
+        assert_eq!(inner.state.seq, 1);
+        assert_eq!(inner.state.time_watermark_ms, now);
+        assert_eq!(inner.evaluation_time_ms, now + 1);
+        drop(inner);
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn query_time_transitions_wait_for_planning_writer_and_preserve_basis_proof() {
+        for ttl in [false, true] {
+            for fusion in [false, true] {
+                let temporary = tempfile::tempdir().unwrap();
+                let root = temporary.path().join("records");
+                let settings = config();
+                let p = RecordPartition::create(&root, settings.clone()).await.unwrap();
+                let (clock, now) = test_clock(&p).await;
+                p.write(entity_write("seed", "a")).await.unwrap();
+                let mut expiring = write("other", "other", "alpha", ExpectedVersion::Absent);
+                if ttl {
+                    expiring.temporal = Some(TemporalMetadata { expire_at_ms: Some(now + 100), ..Default::default() });
+                }
+                p.write(expiring).await.unwrap();
+                std::fs::write(root.join(".test-write-encode-pause"), b"pause").unwrap();
+                std::fs::write(root.join(".test-time-observe-wait"), b"observe").unwrap();
+                let owner = p.clone();
+                let writing = tokio::spawn(async move {
+                    owner.write(write("candidate", "candidate", "beta", ExpectedVersion::Absent)).await
+                });
+                wait_time_marker(&root, ".test-write-encode-started").await;
+                clock.set(if ttl { now + 100 } else { now + settings.history.retention_ms + 1 });
+                let owner = p.clone();
+                let reading = tokio::spawn(async move {
+                    if fusion { owner.query_with_relations(fusion_query(), fusion_options()).await }
+                    else { owner.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await }
+                });
+                wait_time_marker(&root, ".test-time-writer-waiting").await;
+                {
+                    let inner = tokio::time::timeout(std::time::Duration::from_secs(3), p.inner.lock())
+                        .await.expect("waiting query must release Inner");
+                    assert_eq!(inner.state.seq, 2);
+                    assert_eq!(inner.state.history.floor, 0);
+                    assert_eq!(inner.state.time_watermark_ms, now);
+                    assert!(inner.healthy);
+                }
+                assert!(!reading.is_finished());
+                std::fs::remove_file(root.join(".test-write-encode-pause")).unwrap();
+                assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5), writing)
+                    .await.unwrap().unwrap(), Err(RecordError::Busy)), "commit must reject its stale basis");
+                tokio::time::timeout(std::time::Duration::from_secs(5), reading).await.unwrap().unwrap().unwrap();
+                {
+                    let inner = p.inner.lock().await;
+                    assert!(inner.healthy);
+                    assert_eq!(inner.state.seq, if ttl { 3 } else { 2 });
+                    if !ttl { assert_eq!(inner.state.history.floor, 2); }
+                    assert!(!inner.state.records.contains_key("candidate"));
+                }
+                drop(p);
+                let reopened = RecordPartition::open(&root, settings.max_journal_bytes).await.unwrap();
+                let inner = reopened.inner.lock().await;
+                assert_eq!(inner.state.seq, if ttl { 3 } else { 2 });
+                assert!(!inner.state.records.contains_key("candidate"));
+                if ttl { assert!(inner.state.records["other"].expired_at_ms.is_some()); }
+                else { assert_eq!(inner.state.history.floor, 2); }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn query_final_time_revalidation_waits_and_survives_cancelled_last_caller() {
+        for cancel in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("records");
+            let settings = config();
+            let p = RecordPartition::create(&root, settings.clone()).await.unwrap();
+            let (clock, now) = test_clock(&p).await;
+            let mut request = write("seed", "a", "alpha", ExpectedVersion::Absent);
+            request.temporal = Some(TemporalMetadata { expire_at_ms: Some(now + 100), ..Default::default() });
+            p.write(request).await.unwrap();
+            std::fs::write(root.join(".test-query-candidates-pause"), b"pause").unwrap();
+            std::fs::write(root.join(".test-time-observe-wait"), b"observe").unwrap();
+            let owner = p.clone();
+            let reading = tokio::spawn(async move {
+                owner.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await
+            });
+            wait_time_marker(&root, ".test-query-candidates-pause-entered").await;
+            // Model off-lock upload: writer stays owned, while Inner is available.
+            let writer = p.writer.lock().await;
+            clock.set(now + 100);
+            std::fs::remove_file(root.join(".test-query-candidates-pause")).unwrap();
+            wait_time_marker(&root, ".test-time-writer-waiting").await;
+            assert_eq!(p.inner.lock().await.state.seq, 1);
+            assert!(!reading.is_finished());
+            let owner = Arc::downgrade(&p.inner);
+            if cancel {
+                reading.abort();
+                assert!(reading.await.unwrap_err().is_cancelled());
+                drop(writer);
+                drop(p);
+            } else {
+                drop(writer);
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), reading).await.unwrap().unwrap().unwrap();
+                assert!(result.hits.is_empty(), "scored row must expire before final output");
+                drop(p);
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while owner.upgrade().is_some() { tokio::task::yield_now().await; }
+            }).await.expect("owned query must finish and release its partition after caller cancellation");
+            // Weak::upgrade can fail while Inner's destructor is still releasing
+            // its file owners. Wait for actual close, not just the strong count.
+            let reopened = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    match RecordPartition::open(&root, settings.max_journal_bytes).await {
+                        Ok(partition) => break partition,
+                        Err(RecordError::Storage(error)) if error.contains("lock acquisition failed")
+                            && error.contains("operation would block") => {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                        Err(error) => panic!("unexpected reopen failure: {error:?}"),
+                    }
+                }
+            }).await.expect("cancelled owned query must release the physical partition lock");
+            let inner = reopened.inner.lock().await;
+            assert_eq!(inner.state.seq, 2);
+            assert_eq!(inner.state.records["a"].expired_at_ms, Some(now + 100));
+        }
+    }
+
     pub(super) async fn wait_maintenance_idle(p:&RecordPartition) {
         maintenance_idle_with_deadline(p,std::time::Duration::from_secs(20)).await
             .unwrap_or_else(|diagnostic|panic!("{diagnostic}"));

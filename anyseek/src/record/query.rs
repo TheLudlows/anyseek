@@ -162,8 +162,7 @@ impl RecordPartition {
         output_fields: Option<&[String]>,
     ) -> Result<RecordSearch, RecordError> {
         let (handle, evaluation, barrier, root) = {
-            let mut inner = self.inner.lock().await;
-            inner.advance_time().await?;
+            let inner = self.lock_current_time().await?;
             if !inner.healthy || self.indexes.error().is_some()
             {
                 return Err(RecordError::RecoveryRequired);
@@ -223,8 +222,7 @@ impl RecordPartition {
             .await?;
         #[cfg(test)]
         pause(&root, ".test-query-candidates-pause").await?;
-        let mut inner = self.inner.lock().await;
-        inner.advance_time().await?;
+        let inner = self.lock_current_time().await?;
         if !inner.healthy || self.indexes.error().is_some() {
             return Err(RecordError::RecoveryRequired);
         }

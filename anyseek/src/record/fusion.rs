@@ -47,8 +47,7 @@ impl RecordPartition {
         output_fields: Option<&[String]>,
     ) -> Result<RecordSearch, RecordError> {
         let (limit, barrier) = {
-            let mut inner = self.inner.lock().await;
-            inner.advance_time().await?;
+            let inner = self.lock_current_time().await?;
             if !inner.healthy || self.indexes.error().is_some()
             {
                 return Err(RecordError::RecoveryRequired);
@@ -128,8 +127,7 @@ impl RecordPartition {
             Some(handle.filter(&filters).await?)
         };
         let neighbors = {
-            let mut inner = self.inner.lock().await;
-            inner.advance_time().await?;
+            let inner = self.lock_current_time().await?;
             if !inner.healthy || self.indexes.error().is_some()
             {
                 return Err(RecordError::RecoveryRequired);
@@ -246,8 +244,7 @@ impl RecordPartition {
         let count = scores.len();
         let mut ranks: Vec<_> = scores.into_iter().collect();
         ranks.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let mut inner = self.inner.lock().await;
-        inner.advance_time().await?;
+        let inner = self.lock_current_time().await?;
         if !inner.healthy || self.indexes.error().is_some() {
             return Err(RecordError::RecoveryRequired);
         }

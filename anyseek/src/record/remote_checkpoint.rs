@@ -904,6 +904,8 @@ mod tests {
             assert_eq!(page.records.len(),1);
             assert_eq!(page.records[0].record_id,"seed");
             assert_eq!(p.statistics().await.unwrap().active_records,1);
+            assert_eq!(p.search("seed".into(), None, SearchMode::Lexical, vec![], 10)
+                .await.unwrap().hits.len(), 1);
         }).await.expect("reads queued behind a writer without due maintenance");
         let second=write("off-lock-b","r","beta",ExpectedVersion::Match(1));
         let owner=p.clone();let request=second.clone();
@@ -965,6 +967,8 @@ mod tests {
         // Due TTL must still wait for writer, never return the stale body.
         // Dropping this waiter must not cancel its accepted time transition.
         assert!(tokio::time::timeout(Duration::from_millis(30),p.get("r")).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(30),
+            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)).await.is_err());
         std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
         assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());

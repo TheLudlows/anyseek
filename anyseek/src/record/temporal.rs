@@ -311,6 +311,31 @@ impl Inner {
     }
 }
 impl RecordPartition {
+    /// Select a current view without letting read-triggered durable transitions
+    /// bypass writer ownership. Call only from an owned executor: cancellation
+    /// must not interrupt a transition after its durable append has started.
+    /// The returned guard closes the time-check/capture gap. Never wait for the
+    /// writer while holding Inner; callers already owning writer use Inner's
+    /// advance_time directly instead.
+    pub(super) async fn lock_current_time(&self) -> Result<tokio::sync::MutexGuard<'_, Inner>, RecordError> {
+        let mut inner = self.inner.lock().await;
+        if inner.try_advance_time_without_maintenance() {
+            return Ok(inner);
+        }
+        #[cfg(test)]
+        if inner.journal.root().join(".test-time-observe-wait").exists() {
+            std::fs::write(inner.journal.root().join(".test-time-writer-waiting"), b"waiting")
+                .map_err(storage)?;
+        }
+        drop(inner);
+        let _writer = self.writer.lock().await;
+        let mut inner = self.inner.lock().await;
+        inner.advance_time().await?;
+        // Release writer on return, but keep Inner through the caller's capture
+        // or final revalidation. No other State transition can enter that gap.
+        Ok(inner)
+    }
+
     /// Drain due expirations durably before issuing a new data view. Cancellation
     /// leaves the owned executor running. Existing fixed-time views may finish.
     /// With trusted time and no maintenance due, only the inner guard is needed;
@@ -321,21 +346,11 @@ impl RecordPartition {
             .clone()
             .try_acquire_owned()
             .map_err(|_| RecordError::Busy)?;
-        let owner = self.inner.clone();
-        let writer = self.writer.clone();
         let partition=self.clone();
         crate::resources::spawn(async move {
                 let result = {
                     let _permit = admission;
-                    let advanced = owner.lock().await.try_advance_time_without_maintenance();
-                    if advanced {
-                        Ok(())
-                    } else {
-                        // Release inner before joining writer order; recheck time
-                        // and maintenance against the state selected by that writer.
-                        let _writer = writer.lock().await;
-                        owner.lock().await.advance_time().await
-                    }
+                    partition.lock_current_time().await.map(drop)
                 };
                 partition.kick_maintenance().await;
                 result

@@ -632,7 +632,7 @@ impl RecordPartition {
         // Replay the captured basis and the identical append prefix used by shadow.
         // By induction each step has the same prior record (including vector patches
         // and retained source revisions), so its immutable Prepared owners are reusable.
-        // Readers can advance live time during planning; commit_batch still revalidates
+        // View time can advance during planning; commit_batch still revalidates
         // base_state and TTL before any publication of these prepared values.
         let mut prior = base_state.try_clone()?;
         let mut hides_evidence = false;
@@ -689,7 +689,8 @@ impl Inner {
         }
         // Wall time can move while uploading even though this task owns the writer.
         // Apply due transitions before selecting the candidate, then discard any
-        // candidate whose business basis or own TTL has become stale.
+        // candidate whose business basis or own TTL has become stale. Full proof
+        // is intentional: HistoryTrim can change floor/time without changing seq.
         self.advance_time().await?;
         if state_proof::verify(&self.config, &prepared.base_state, &self.state).is_err()
             || prepared
