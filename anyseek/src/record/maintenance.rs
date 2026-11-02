@@ -523,5 +523,5 @@ pub(super) fn worker_outcome(result:&Result<u64,RecordError>)->&'static str {
 pub(super) fn log_worker_result(result:&Result<u64,RecordError>,seq:u64) {
     let outcome=worker_outcome(result);
     if result.is_ok() {log::info!("record_maintenance event=worker_finished outcome={outcome} seq={seq}");}
-    else {log::warn!("record_maintenance event=worker_finished outcome={outcome} seq={seq} action=inspect_then_retry_checkpoint");}
+    else if let Err(error)=result {log::warn!("record_maintenance event=worker_finished outcome={outcome} seq={seq} error={error} action=inspect_then_retry_checkpoint");}
 }
