@@ -33,7 +33,10 @@ def main():
     assert set(names) <= available, sorted(set(names) - available)
     for name in names:
         print(f"START {name}", flush=True)
-        trace_case = name == "record::maintenance::tests::receipt_gc_remote_checkpoint_cold_recovery_preserves_time_prefix"
+        trace_case = name in {
+            "record::maintenance::tests::receipt_gc_remote_checkpoint_cold_recovery_preserves_time_prefix",
+            "record::maintenance::tests::worker_rejection_retries_without_client_traffic",
+        }
         with (tempfile.TemporaryDirectory(prefix="anyseek-maintenance-trace-") if trace_case else nullcontext()) as directory:
             trace = Path(directory) / "phases.log" if directory else None
             env = os.environ.copy() if trace else None
