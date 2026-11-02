@@ -83,6 +83,7 @@
   "record::maintenance::tests::receipt_gc_checkpoint_recovery_resolves_publication_failures",
   "record::maintenance::tests::receipt_gc_preserves_history_and_retry_window_and_persists_rollback_floor",
   "record::lexical::runtime::tests::independent_merge_preserves_cut_identities_fixed_readers_and_reopen",
+  "record::lexical::runtime::tests::bulk_analysis_drains_compact_before_inventory_without_losing_readers",
   "record::lexical::runtime::tests::independent_merge_admits_small_batches_with_large_record_limit",
   "record::lexical::runtime::tests::failed_independent_merge_preserves_published_reader_and_fences_writer",
   "record::lexical::runtime::tests::cancelled_independent_merge_fences_append_and_owned_worker_finishes",
