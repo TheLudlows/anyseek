@@ -22,7 +22,9 @@ python3 scripts/release_panic_smoke.py --probe target/release/examples/runtime_p
 The vector case acknowledges a write while its consumer is paused, panics after
 mutating the vector component, requires SIGABRT, reopens, and checks receipt
 replay. The queue case panics before publication, checks both submitted commands
-were absent, and retries the original ID. These small local tests do not prove
+were absent, and retries the original ID. A third case panics after publication
+but before delivering receipts, then resolves the unknown outcome using the same
+operation IDs. These small local tests do not prove
 S3 crash recovery or every possible publication boundary. Fault markers exist
 only in the explicit fault-injection build; no remote activation API is added.
 

@@ -177,5 +177,7 @@
   "record::tests::record_identity_contract_rejects_removed_fields",
   "record::tests::source_protocol_rejects_old_checkpoint_without_migration",
   "record::query::blocking_scoring_keeps_single_thread_timer_and_small_task_responsive",
-  "record::index_consumers::io_tests::consumer_fault_matrix_keeps_authority_but_rejects_all_search_channels"
+  "record::index_consumers::io_tests::consumer_fault_matrix_keeps_authority_but_rejects_all_search_channels",
+  "record::query::cancelled_scoring_retains_request_slot_until_worker_finishes",
+  "record::indexer::cancelled_checkpoint_retains_writer_and_io_until_blocking_transaction_finishes"
 ]

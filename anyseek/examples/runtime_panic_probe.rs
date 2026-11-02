@@ -55,15 +55,16 @@ async fn main() {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             std::process::exit(70); // panic hook failed to fire
         }
-        "queue" => {
+        "queue" | "unknown" => {
             let p = RecordPartition::open(root, config().max_journal_bytes).await.unwrap();
-            std::fs::write(root.join(".test-committed-panic"), b"panic").unwrap();
+            let marker = if args[1] == "unknown" { ".test-committed-panic-after-publication" } else { ".test-committed-panic" };
+            std::fs::write(root.join(marker), b"panic").unwrap();
             let _ = p.commit_writes(vec![write("tail", "tail", "alpha", ExpectedVersion::Absent),
                 write("remaining", "remaining", "alpha", ExpectedVersion::Absent)]).await;
             std::process::exit(70);
         }
-        "verify-vector" | "verify-queue" => {
-            for marker in [".test-vector-consumer-panic-after-append", ".test-committed-panic"] {
+        "verify-vector" | "verify-queue" | "verify-unknown" => {
+            for marker in [".test-vector-consumer-panic-after-append", ".test-committed-panic", ".test-committed-panic-after-publication"] {
                 let _ = std::fs::remove_file(root.join(marker));
             }
             let p = RecordPartition::open(root, config().max_journal_bytes).await.unwrap();
@@ -72,6 +73,9 @@ async fn main() {
             if args[1] == "verify-vector" {
                 assert_eq!(tail.unwrap().seq, 2);
                 assert_eq!(std::fs::read(root.join("acknowledged")).unwrap(), b"2");
+            } else if args[1] == "verify-unknown" {
+                assert_eq!(tail.unwrap().seq, 2);
+                assert_eq!(p.operation(&OperationId::new("remaining".into())).await.unwrap().unwrap().seq, 3);
             } else {
                 assert!(tail.is_none());
                 assert!(p.get("remaining").await.unwrap().is_none());

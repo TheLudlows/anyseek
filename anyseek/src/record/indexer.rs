@@ -342,11 +342,15 @@ impl RecordPartition {
                 // The existing two-job admission bounds these workers. Move the
                 // journal owner and writer guard together; caller cancellation
                 // cannot release either while a filesystem transaction runs.
+                #[cfg(test)] let journal_root = root.clone();
                 let (returned_inner, _writer, journal_result) = tokio::task::spawn_blocking(move || {
                     let mut install = || {
                         let _phase = maintenance::Phase::new("background_journal_install_locked", inner.state.seq);
                         let Inner { journal, background, .. } = &mut *inner;
-                        let mut install = || journal.checkpoint_with_tail(&certificate, &background.as_ref().unwrap().entries);
+                        let mut install = || {
+                            #[cfg(test)] blocking_journal_pause(&journal_root);
+                            journal.checkpoint_with_tail(&certificate, &background.as_ref().unwrap().entries)
+                        };
                         match permit {
                             Ok(Some(permit)) => permit.run(install),
                             Ok(None) => install(),
@@ -909,4 +913,47 @@ mod tests {
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
+}
+
+#[cfg(test)]
+fn blocking_journal_pause(root: &Path) {
+    let marker = root.join(".test-blocking-journal-pause");
+    if !marker.exists() { return; }
+    std::fs::write(marker.with_extension("started"), b"ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_checkpoint_retains_writer_and_io_until_blocking_transaction_finishes() {
+    use super::tests::{config, write};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(write("checkpoint", "row", "alpha", ExpectedVersion::Absent)).await.unwrap();
+    let scope = Arc::new(crate::resources::Governor::default())
+        .admit("checkpoint-blocking".into(), crate::resources::Lane::Background, 0).unwrap();
+    let marker = root.join(".test-blocking-journal-pause");
+    std::fs::write(&marker, b"pause").unwrap();
+    let caller = { let p = p.clone(); let scope = scope.clone();
+        tokio::spawn(async move { scope.run(p.compact_journal()).await }) };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    let start = Instant::now();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(start.elapsed() < Duration::from_secs(1));
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(p.writer.try_lock().is_err());
+    assert!(p.inner.try_lock().is_err());
+    assert!(scope.io().is_err());
+    std::fs::remove_file(marker).unwrap();
+    let writer = tokio::time::timeout(Duration::from_secs(5), p.writer.lock()).await.unwrap();
+    assert!(scope.io().is_ok());
+    drop(writer);
+    assert_eq!(p.write(write("checkpoint", "row", "alpha", ExpectedVersion::Absent)).await.unwrap().seq, 1);
 }

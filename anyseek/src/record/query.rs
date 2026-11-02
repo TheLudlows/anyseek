@@ -695,3 +695,30 @@ async fn blocking_scoring_keeps_single_thread_timer_and_small_task_responsive() 
     std::fs::remove_file(marker).unwrap();
     assert_eq!(task.await.unwrap().unwrap().hits.len(), 1);
 }
+
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_scoring_retains_request_slot_until_worker_finishes() {
+    use super::tests::{config, write};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(write("cancel", "row", "alpha", ExpectedVersion::Absent)).await.unwrap();
+    let available = p.admission.available_permits();
+    let marker = root.join(".test-blocking-scoring-pause");
+    std::fs::write(&marker, b"pause").unwrap();
+    let caller = { let p = p.clone(); tokio::spawn(async move {
+        p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await
+    }) };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(p.admission.available_permits(), available - 1);
+    std::fs::remove_file(marker).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while p.admission.available_permits() != available { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
+}
