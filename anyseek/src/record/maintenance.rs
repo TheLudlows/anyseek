@@ -69,6 +69,8 @@ mod tests {
         // Repeated hot requests must deduplicate while the cold collection waits.
         for _ in 0..32 {hot.kick_maintenance().await;}
         drop(workers);
+        let completed=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hot_completed=completed.clone();
         let hot_load=tokio::spawn(async move {
             super::super::tests::wait_maintenance_idle(&hot).await;
             for i in 0..8 {
@@ -78,9 +80,10 @@ mod tests {
                 hot.kick_maintenance().await;
                 super::super::tests::wait_maintenance_idle(&hot).await;
                 assert!(hot.inner.lock().await.maintenance_requested.is_none());
+                hot_completed.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
             }
         });
-        tokio::time::timeout(std::time::Duration::from_secs(10),async {
+        let result=tokio::time::timeout(std::time::Duration::from_secs(10),async {
             for p in [&cold,&second] {
                 loop {
                     if p.inner.lock().await.maintenance_requested.is_none(){break;}
@@ -88,7 +91,11 @@ mod tests {
                 }
             }
             hot_load.await.unwrap();
-        }).await.expect("cold maintenance must progress without a new request under bounded hot load");
+        }).await;
+        assert!(result.is_ok(),"cold maintenance must progress without a new request under bounded hot load: {result:?}; cold_requested={:?} second_requested={:?} hot_completed={}",
+            cold.inner.try_lock().map(|inner|inner.maintenance_requested.is_some()),
+            second.inner.try_lock().map(|inner|inner.maintenance_requested.is_some()),
+            completed.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!cold.inner.lock().await.maintenance_pending);
     }
 
@@ -523,5 +530,5 @@ pub(super) fn worker_outcome(result:&Result<u64,RecordError>)->&'static str {
 pub(super) fn log_worker_result(result:&Result<u64,RecordError>,seq:u64) {
     let outcome=worker_outcome(result);
     if result.is_ok() {log::info!("record_maintenance event=worker_finished outcome={outcome} seq={seq}");}
-    else {log::warn!("record_maintenance event=worker_finished outcome={outcome} seq={seq} action=inspect_then_retry_checkpoint");}
+    else if let Err(error)=result {log::warn!("record_maintenance event=worker_finished outcome={outcome} seq={seq} error={error} action=inspect_then_retry_checkpoint");}
 }

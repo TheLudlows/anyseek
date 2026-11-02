@@ -905,7 +905,7 @@ async fn build_records_at(path:&Path,cache:&Path,config:&RecordConfig,sequence:u
             .await
             .map_err(storage)?;
     }
-    native.flush().await?;
+    native.finish_build().await?;
     index.commit().await.map_err(storage)?;
     index.read().await.segments[0].vector.write().await.build_input_covered=false;
     Ok((

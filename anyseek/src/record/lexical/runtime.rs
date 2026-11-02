@@ -419,6 +419,11 @@ impl Runtime {
     /// Record state or acquiring its publication guard. Fixed readers retain
     /// their old Searcher; the replacement keeps the identical logical cut.
     pub(crate) async fn merge_small_segments(self: &Arc<Self>) -> Result<(), RecordError> {
+        self.merge_small_segments_once().await.map(|_| ())
+    }
+    // Each successful pass reduces the segment count. Admission and the 128-row
+    // input bound are shared with tail maintenance; no unbounded full-index merge.
+    async fn merge_small_segments_once(self: &Arc<Self>) -> Result<bool, RecordError> {
         let data = OwnedData { guard: self.data.clone().lock_owned().await, _owner: self.clone(), unacknowledged: false };
         let (data, prepared) = self.blocking(data, |owner, data| {
             if data.write_state != WriteState::Writable {
@@ -479,12 +484,30 @@ impl Runtime {
             });
             Ok(Some(worker))
         }).await?;
-        let Some(worker) = prepared else { return Ok(()); };
+        let Some(worker) = prepared else { return Ok(false); };
         worker.await.map_err(storage)??;
         self.blocking(data, |owner, data| {
                 owner.flush_locked(data)?;
                 data.write_state = WriteState::Writable;
                 Ok(())
+        }).await?;
+        Ok(true)
+    }
+    /// Finish a private bulk build before collecting its immutable file inventory.
+    /// Analysis-budget drains create committed native segments even though no
+    /// Record cut has been published. Compact them with the existing bounded
+    /// worker, then let Tantivy reclaim only files no tracked reader uses.
+    pub(crate) async fn finish_build(self: &Arc<Self>) -> Result<(), RecordError> {
+        self.flush().await?;
+        while self.merge_small_segments_once().await? {}
+        let data = OwnedData { guard: self.data.clone().lock_owned().await, _owner: self.clone(), unacknowledged: false };
+        self.blocking(data, |_, data| {
+            if let Some(writer) = &data.writer {
+                // Managed-directory GC consults all live SegmentMeta references,
+                // including fixed Searchers; never unlink an inventory by hand.
+                writer.garbage_collect_files().wait().map_err(storage)?;
+            }
+            Ok(())
         }).await?;
         Ok(())
     }
@@ -788,6 +811,50 @@ impl Runtime {
             assert!(!crate::record::package_pins::retire_if_unpinned(&package,||{panic!("live Searcher must protect package")}).unwrap());
             drop(held);drop(capacity);
             assert!(crate::record::package_pins::retire_if_unpinned(&package,||Ok(())).unwrap());
+        }
+
+        #[tokio::test]
+        async fn bulk_analysis_drains_compact_before_inventory_without_losing_readers() {
+            let root = tempfile::tempdir().unwrap();
+            let package = root.path().join("package");
+            std::fs::create_dir(&package).unwrap();
+            let mut settings = config();
+            settings.max_record_bytes = 1024 * 1024;
+            settings.max_journal_bytes = 256 * 1024 * 1024;
+            settings.schema.retain(|field| field.index_lexical);
+            settings.max_records = 10_000;
+            settings.max_operations = 10_000;
+            let native = Runtime::create(&package.join("native"), &settings).unwrap();
+            let text = "alpha beta gamma delta epsilon zeta eta theta ".repeat(191);
+            let document = serde_json::from_value(serde_json::json!({"body":text})).unwrap();
+            // Real analysis-budget drains, not a synthetic lowered inventory cap.
+            for i in 0..4000 {
+                native.append(Identity { id: format!("r-{i}"), version: 1, revision: i+1 }, &document, false).await.unwrap();
+            }
+            native.flush().await.unwrap();
+            // Count entries without reading the live writer's locked file on Windows.
+            // Production certifies inventory only after seal; that check stays below.
+            let files = std::fs::read_dir(package.join("native")).unwrap()
+                .map(|entry|entry.unwrap()).filter(|entry|entry.file_type().unwrap().is_file()).count();
+            assert!(files > 1024, "expected real inventory overflow, got {files} files");
+            let held = native.snapshot().await.unwrap();
+            native.finish_build().await.unwrap();
+            let compacted = native.snapshot().await.unwrap();
+            assert_eq!(compacted.identities, held.identities);
+            assert_eq!(compacted.cut, held.cut);
+            assert!(compacted.searcher.segment_readers().len() < held.searcher.segment_readers().len());
+            assert_eq!(held.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 4000);
+            // Only releasing the fixed reader makes its superseded files eligible.
+            drop(held);
+            native.finish_build().await.unwrap();
+            native.seal().await.unwrap();
+            assert!(crate::record::segment::files(&package, 256*1024*1024).is_ok());
+            drop(compacted);
+            drop(native);
+            let reopened = Runtime::open(&package.join("native"), &settings).unwrap();
+            let view = reopened.snapshot().await.unwrap();
+            assert_eq!(view.identities.len(), 4000);
+            assert_eq!(view.searcher.search(&tantivy::query::AllQuery, &tantivy::collector::Count).unwrap(), 4000);
         }
 
         #[tokio::test]
