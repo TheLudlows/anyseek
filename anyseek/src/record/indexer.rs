@@ -264,7 +264,7 @@ impl RecordPartition {
                 // without the foreground lock. A versioned recheck closes the gap.
                 let mut consumed=0usize;
                 let mut rounds=0usize;
-                let (_writer,mut inner)=loop {
+                let (writer_guard,mut inner)=loop {
                     rounds+=1;
                     if rounds>8 || started.elapsed()>=timeout {return Err(RecordError::Busy);}
                     let (raw,mut expected,revision,entry_count,entry_bytes,_raw,_decoded)={
@@ -296,8 +296,8 @@ impl RecordPartition {
                     consumed=entry_count;
                     #[cfg(test)]
                     pause_catchup(&root,timeout).await;
-                    let writer_guard=writer.lock().await;
-                    let inner=owner.lock().await;
+                    let writer_guard=writer.clone().lock_owned().await;
+                    let inner=owner.clone().lock_owned().await;
                     let _check_phase=maintenance::Phase::new("candidate_recheck_locked",inner.state.seq);
                     if !inner.healthy {return Err(RecordError::RecoveryRequired);}
                     if started.elapsed()>=timeout || serde_json::to_vec(&inner.anchor).map_err(storage)?!=base {return Err(RecordError::Busy);}
@@ -332,22 +332,38 @@ impl RecordPartition {
                 crash_boundary("authority");
                 // Borrow fields separately: the complete suffix is durably staged
                 // before the new local generation acquires its certificate.
-                let journal_result = {
-                    let _phase=maintenance::Phase::new("background_journal_install_locked",inner.state.seq);
-                    #[cfg(test)] pause_journal_install(&root).await;
-                    let permit = match crate::resources::Scope::current() {
-                        Some(scope) => scope.journal_io().await.map(Some)
-                            .map_err(|error| CreateError::NotPublished(std::io::Error::other(error))),
-                        None => Ok(None),
-                    };
-                    let Inner{journal,background,..} = &mut *inner;
-                    let mut install = || journal.checkpoint_with_tail(&certificate,&background.as_ref().unwrap().entries);
-                    match permit {
-                        Ok(Some(permit)) => permit.run(install),
-                        Ok(None) => install(),
-                        Err(error) => Err(error),
-                    }
+                #[cfg(test)] pause_journal_install(&root).await;
+                let context = crate::resources::Scope::current();
+                let permit = match &context {
+                    Some(scope) => scope.journal_io().await.map(Some)
+                        .map_err(|error| CreateError::NotPublished(std::io::Error::other(error))),
+                    None => Ok(None),
                 };
+                // The existing two-job admission bounds these workers. Move the
+                // journal owner and writer guard together; caller cancellation
+                // cannot release either while a filesystem transaction runs.
+                #[cfg(test)] let journal_root = root.clone();
+                let (returned_inner, _writer, journal_result) = tokio::task::spawn_blocking(move || {
+                    let mut install = || {
+                        let _phase = maintenance::Phase::new("background_journal_install_locked", inner.state.seq);
+                        let Inner { journal, background, .. } = &mut *inner;
+                        let mut install = || {
+                            #[cfg(test)] blocking_journal_pause(&journal_root);
+                            journal.checkpoint_with_tail(&certificate, &background.as_ref().unwrap().entries)
+                        };
+                        match permit {
+                            Ok(Some(permit)) => permit.run(install),
+                            Ok(None) => install(),
+                            Err(error) => Err(error),
+                        }
+                    };
+                    let result = match context {
+                        Some(context) => context.run_sync(install),
+                        None => install(),
+                    };
+                    (inner, writer_guard, result)
+                }).await.map_err(|error| RecordError::OutcomeUnknown(error.to_string()))?;
+                let mut inner = returned_inner;
                 #[cfg(test)]
                 let journal_result=if mode==JobMode::Compact && root.join(".test-checkpoint-before-certificate").exists() {
                     journal_result.map_err(|error|match error {
@@ -897,4 +913,44 @@ mod tests {
         drop(p);std::fs::remove_dir_all(root).unwrap();
     }
 
+}
+
+#[cfg(test)]
+fn blocking_journal_pause(root: &Path) {
+    let marker = root.join(".test-blocking-journal-pause");
+    if !marker.exists() { return; }
+    std::fs::write(marker.with_extension("started"), b"ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_checkpoint_retains_writer_and_io_until_blocking_transaction_finishes() {
+    use super::tests::{config, write};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(write("checkpoint", "row", "alpha", ExpectedVersion::Absent)).await.unwrap();
+    let scope = Arc::new(crate::resources::Governor::default())
+        .admit("checkpoint-blocking".into(), crate::resources::Lane::Background, 0).unwrap();
+    let marker = root.join(".test-blocking-journal-pause");
+    std::fs::write(&marker, b"pause").unwrap();
+    let caller = { let p = p.clone(); let scope = scope.clone();
+        tokio::spawn(async move { scope.run(p.compact_journal()).await }) };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(p.writer.try_lock().is_err());
+    assert!(p.inner.try_lock().is_err());
+    assert!(scope.io().is_err());
+    std::fs::remove_file(marker).unwrap();
+    let writer = tokio::time::timeout(Duration::from_secs(5), p.writer.lock()).await.unwrap();
+    assert!(scope.io().is_ok());
+    drop(writer);
+    assert_eq!(p.write(write("checkpoint", "row", "alpha", ExpectedVersion::Absent)).await.unwrap().seq, 1);
 }

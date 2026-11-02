@@ -171,3 +171,42 @@ async fn queued_projection_ignores_unindexed_body_and_rolls_back_partial_admissi
         drop(remaining);
     }).await;
 }
+
+#[tokio::test]
+async fn consumer_fault_matrix_keeps_authority_but_rejects_all_search_channels() {
+    use crate::record::tests::{config, write};
+    use crate::vector_similarity::AnnMode;
+    for lane in ["lexical", "vector"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("records");
+        let p = RecordPartition::create(&root, config()).await.unwrap();
+        let marker = root.join(format!(".test-{lane}-consumer-fail"));
+        std::fs::write(&marker, b"fail").unwrap();
+        let request = write("fault-matrix", "row", "alpha", ExpectedVersion::Absent);
+        let batch = p.commit_writes(vec![request.clone()]).await.unwrap();
+        assert!(matches!(&batch.results[..], [CommittedItem::Committed(r)] if r.seq == 1));
+        assert!(p.inner.lock().await.index.drain_indexes().await.is_err());
+        let progress = p.committed_progress().await;
+        assert_eq!(progress.committed_seq, Some(1));
+        assert!(!progress.recovery_required);
+        assert!(progress.index_error.is_some());
+        assert_eq!(if lane == "lexical" { progress.lexical_seq } else { progress.vector_seq }, 0);
+        assert!(p.operation(&request.operation_id).await.unwrap().is_some());
+        assert!(p.get("row").await.unwrap().is_some());
+        for mode in [SearchMode::Lexical,
+            SearchMode::Vector { similarity_threshold: None, ann_mode: AnnMode::All },
+            SearchMode::Hybrid { similarity_threshold: None, ann_mode: AnnMode::All, rrf: Default::default() }] {
+            assert!(matches!(p.search("alpha".into(), Some(Embedding::F32(vec![1.0, 0.0])), mode, vec![], 10).await,
+                Err(RecordError::RecoveryRequired)));
+        }
+        std::fs::remove_file(marker).unwrap();
+        let owner = Arc::downgrade(&p.inner);
+        drop(p);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while owner.strong_count() != 0 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let reopened = RecordPartition::open(&root, config().max_journal_bytes).await.unwrap();
+        assert_eq!(reopened.write(request).await.unwrap().seq, 1);
+        assert_eq!(reopened.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
+    }
+}

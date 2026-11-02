@@ -145,7 +145,7 @@ impl Engine {
                     .unwrap()
                     .join(".test-vector-consumer-fail-after-append")
                     .exists();
-                #[cfg(test)]
+                #[cfg(any(test, feature = "fault-injection"))]
                 let panic_after = Path::new(&index.read().await.index_path_string)
                     .parent()
                     .unwrap()
@@ -179,7 +179,7 @@ impl Engine {
                     }
                     shard.active.as_mut().unwrap().append_identity(input.identity.id, input.identity.version, input.identity.revision, input.fingerprint.ok_or_else(|| storage("vector fingerprint missing"))?);
                     shard.append(input.document).await.map_err(storage)?;
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "fault-injection"))]
                     if panic_after {
                         panic!("injected vector panic after append");
                     }

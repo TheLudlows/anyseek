@@ -200,24 +200,45 @@ impl RecordPartition {
             "score"
         };
         let offset = query.offset;
-        let mut result = lexical::runtime_query::search(
-            &handle.index,
-            query.text,
-            query.vector,
-            query.mode,
-            query.query_type,
-            query.offset,
-            query.length,
-            query.result_type,
-            query.fields,
-            query.filters,
-            query.sort,
-            lexical::Cut {
-                sequence: u64::MAX,
-                evaluation_time_ms: evaluation,
-            },
-        )
-        .await?;
+        // query_output already owns partition admission and the service resource
+        // scope. Keep that admission until this one blocking worker joins; do
+        // not impose a second process-wide limit across unrelated collections.
+        let context = crate::resources::Scope::current();
+        let runtime = tokio::runtime::Handle::current();
+        let owner = self.clone();
+        #[cfg(test)] let scoring_root = root.clone();
+        let (handle, result) = tokio::task::spawn_blocking(move || {
+            let _owner = owner;
+            #[cfg(test)]
+            blocking_scoring_pause(&scoring_root);
+            let work = async move {
+                let result = lexical::runtime_query::search(
+                    &handle.index,
+                    query.text,
+                    query.vector,
+                    query.mode,
+                    query.query_type,
+                    query.offset,
+                    query.length,
+                    query.result_type,
+                    query.fields,
+                    query.filters,
+                    query.sort,
+                    lexical::Cut {
+                        sequence: u64::MAX,
+                        evaluation_time_ms: evaluation,
+                    },
+                ).await;
+                (handle, result)
+            };
+            runtime.block_on(async move {
+                match context {
+                    Some(context) => context.run(work).await,
+                    None => work.await,
+                }
+            })
+        }).await.map_err(storage)?;
+        let mut result = result?;
         let candidates = handle
             .candidates(std::mem::take(&mut result.results))
             .await?;
@@ -629,4 +650,71 @@ mod tests {
             Err(RecordError::RecoveryRequired)
         ));
     }
+}
+
+#[cfg(test)]
+fn blocking_scoring_pause(root: &Path) {
+    let marker = root.join(".test-blocking-scoring-pause");
+    if !marker.exists() { return; }
+    std::fs::write(marker.with_extension("started"), b"ready").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn blocking_scoring_keeps_single_thread_timer_and_small_task_responsive() {
+    use super::tests::{config, write};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(write("timer", "row", "alpha", ExpectedVersion::Absent)).await.unwrap();
+    let marker = root.join(".test-blocking-scoring-pause");
+    std::fs::write(&marker, b"pause").unwrap();
+    let task = { let p = p.clone(); tokio::spawn(async move {
+        p.query_independent(RecordQuery {
+            text: "alpha".into(), vector: None, query_type: QueryType::Intersection,
+            mode: SearchMode::Lexical, offset: 0, length: 10, result_type: ResultType::TopkCount,
+            fields: vec![], filters: vec![], sort: vec![], temporal: None,
+        }, None).await
+    }) };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+        let start = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
+        assert!(!task.is_finished());
+    }).await.unwrap();
+    std::fs::remove_file(marker).unwrap();
+    assert_eq!(task.await.unwrap().unwrap().hits.len(), 1);
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_scoring_retains_request_slot_until_worker_finishes() {
+    use super::tests::{config, write};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("records");
+    let p = RecordPartition::create(&root, config()).await.unwrap();
+    p.write(write("cancel", "row", "alpha", ExpectedVersion::Absent)).await.unwrap();
+    let available = p.admission.available_permits();
+    let marker = root.join(".test-blocking-scoring-pause");
+    std::fs::write(&marker, b"pause").unwrap();
+    let caller = { let p = p.clone(); tokio::spawn(async move {
+        p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await
+    }) };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert_eq!(p.admission.available_permits(), available - 1);
+    std::fs::remove_file(marker).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while p.admission.available_permits() != available { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 1);
 }
