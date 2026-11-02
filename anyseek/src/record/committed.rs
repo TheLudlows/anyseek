@@ -183,6 +183,10 @@ async fn run_queue(partition: RecordPartition) -> Vec<Delivery> {
         for request in &mut group {
             requests.append(&mut request.requests);
         }
+        #[cfg(feature = "fault-injection")]
+        if partition.inner.lock().await.journal.root().join(".test-committed-panic").exists() {
+            panic!("injected committed worker panic before publication");
+        }
         let result = execute(partition.clone(), requests).await;
         let count = group.iter().map(|r| r.count).sum::<usize>();
         let bytes = group.iter().map(|r| r.bytes).sum::<usize>();

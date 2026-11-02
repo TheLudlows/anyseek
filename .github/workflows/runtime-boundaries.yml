@@ -1,0 +1,31 @@
+name: Runtime fault boundaries
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'anyseek/src/record/query.rs'
+      - 'anyseek/src/record/indexer.rs'
+      - 'anyseek/src/record/index_consumers.rs'
+      - 'anyseek/src/record/committed.rs'
+      - 'anyseek/examples/runtime_panic_probe.rs'
+      - 'scripts/release_panic_smoke.py'
+      - '.github/workflows/runtime-boundaries.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: runtime-boundaries-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  release-panic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build actual production panic strategy
+        run: cargo build -p anyseek --locked --release --features fault-injection --example runtime_panic_probe
+      - name: Verify abort and recovery in subprocesses
+        run: |
+          ulimit -c 0
+          python3 scripts/release_panic_smoke.py --probe target/release/examples/runtime_panic_probe
