@@ -54,21 +54,20 @@ this document does not claim unexecuted tests passed.
 
 ## Blocking execution
 
-Query scoring runs on blocking workers with a process-wide limit of eight
-admitted scorers and no waiting admission queue. Exhaustion returns Busy. Each
-worker retains the query handle (including package pins and memory), partition
-owner and resource scope. The outer owned query keeps its existing request slot
-until the worker joins, including after client cancellation. Result identity,
-source and TTL checks still run against current authority after scoring.
+Each query moves its search execution to one blocking worker. The existing
+service governor (global and per-collection limits) and partition admission bound
+accepted requests; no second fixed scoring semaphore is introduced. The owned
+query retains admission, resource scope, query handles and package pins until the
+worker joins, even after client cancellation. Result identity, source and TTL
+checks still run against current authority after scoring.
 
-Checkpoint journal installation runs on a blocking worker under the existing
-two-job maintenance admission. It carries the owned partition and writer guards,
-resource scope and journal I/O loan through completion. The transaction still
-holds the publication lock; this removes executor starvation, not lock contention
-or the remaining maintenance pause. Definite versus unknown publication results
-retain their existing recovery handling.
+Checkpoint journal installation moves its owned partition/writer guards and I/O
+loan to a blocking worker under the existing two-job maintenance admission. It
+still holds the publication lock: executor offloading does not remove that lock
+pause. Publication errors retain their existing recovery handling.
 
-Scheduling tests should measure a timer and a small task while a scoring or
-journal transaction is deliberately held, and verify cancellation retains quota
-until worker completion. End-to-end latency/throughput measurements remain
-separate from functional correctness; no numerical improvement is asserted here.
+Small regressions check scoring responsiveness on a single-thread runtime and
+query/checkpoint ownership after cancellation. The checkpoint test verifies locks
+and I/O ownership only; it does not measure executor scheduling or throughput.
+Release panic subprocesses run in the existing manual full-acceptance workflow,
+not an additional PR workflow. No latency or throughput improvement is claimed.

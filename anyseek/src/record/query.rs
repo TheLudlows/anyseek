@@ -200,39 +200,35 @@ impl RecordPartition {
             "score"
         };
         let offset = query.offset;
-        // Admission precedes spawning: no unbounded blocking-pool queue. The
-        // owned query task retains its request permit until this worker joins.
-        static SCORERS: std::sync::LazyLock<Arc<Semaphore>> =
-            std::sync::LazyLock::new(|| Arc::new(Semaphore::new(8)));
-        let scorer = SCORERS.clone().try_acquire_owned().map_err(|_| RecordError::Busy)?;
+        // query_output already owns partition admission and the service resource
+        // scope. Keep that admission until this one blocking worker joins; do
+        // not impose a second process-wide limit across unrelated collections.
         let context = crate::resources::Scope::current();
         let runtime = tokio::runtime::Handle::current();
         let owner = self.clone();
         #[cfg(test)] let scoring_root = root.clone();
         let (handle, result) = tokio::task::spawn_blocking(move || {
-            let _scorer = scorer;
             let _owner = owner;
             #[cfg(test)]
             blocking_scoring_pause(&scoring_root);
             let work = async move {
                 let result = lexical::runtime_query::search(
-            &handle.index,
-            query.text,
-            query.vector,
-            query.mode,
-            query.query_type,
-            query.offset,
-            query.length,
-            query.result_type,
-            query.fields,
-            query.filters,
-            query.sort,
-            lexical::Cut {
-                sequence: u64::MAX,
-                evaluation_time_ms: evaluation,
-            },
-        )
-                .await;
+                    &handle.index,
+                    query.text,
+                    query.vector,
+                    query.mode,
+                    query.query_type,
+                    query.offset,
+                    query.length,
+                    query.result_type,
+                    query.fields,
+                    query.filters,
+                    query.sort,
+                    lexical::Cut {
+                        sequence: u64::MAX,
+                        evaluation_time_ms: evaluation,
+                    },
+                ).await;
                 (handle, result)
             };
             runtime.block_on(async move {

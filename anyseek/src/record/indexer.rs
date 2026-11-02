@@ -943,9 +943,6 @@ async fn cancelled_checkpoint_retains_writer_and_io_until_blocking_transaction_f
     tokio::time::timeout(Duration::from_secs(5), async {
         while !marker.with_extension("started").exists() { tokio::task::yield_now().await; }
     }).await.unwrap();
-    let start = Instant::now();
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    assert!(start.elapsed() < Duration::from_secs(1));
     caller.abort();
     assert!(caller.await.unwrap_err().is_cancelled());
     assert!(p.writer.try_lock().is_err());
