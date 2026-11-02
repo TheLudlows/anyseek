@@ -967,10 +967,16 @@ mod tests {
         // Due TTL must still wait for writer, never return the stale body.
         // Dropping this waiter must not cancel its accepted time transition.
         assert!(tokio::time::timeout(Duration::from_millis(30),p.get("r")).await.is_err());
-        assert!(tokio::time::timeout(Duration::from_millis(30),
-            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)).await.is_err());
+        let owner = p.clone();
+        let mut search = tokio::spawn(async move {
+            owner.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut search).await.is_err());
         std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
+        // Join the lock-free scoring owner before cold() removes its files.
+        let result = tokio::time::timeout(Duration::from_secs(5), search).await.unwrap().unwrap().unwrap();
+        assert!(result.hits.is_empty());
         assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
         assert!(p.get("r").await.unwrap().is_none());
         let p=cold(p,&root,clock).await;
