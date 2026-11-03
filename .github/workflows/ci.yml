@@ -130,6 +130,7 @@ jobs:
         run: cargo test -p anyseek --locked --bin anyseek_server committed_ingest_
       - name: Service persistence fences and shutdown ownership
         if: matrix.lane == 'core'
+        shell: bash
         run: |
           cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::service_data_fence_preserves_persistence_errors -- --exact
           cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::shutdown_
