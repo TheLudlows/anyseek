@@ -2186,12 +2186,39 @@ mod tests {
         bytes
     }
 
+    #[cfg(feature = "fault-injection")]
     #[tokio::test]
     async fn service_data_fence_preserves_persistence_errors() {
         use http_body::Body as _;
+        // Isolate the existing fault environment from parallel service tests.
+        if std::env::var_os("ANYSEEK_SERVICE_FENCE_CHILD").is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","record_service::tests::service_data_fence_preserves_persistence_errors","--nocapture"])
+                .env("ANYSEEK_SERVICE_FENCE_CHILD","1")
+                .env("ANYSEEK_RECORD_FAULT_NONCE","service-fence-failure")
+                .env("ANYSEEK_RECORD_FAULT","after_durable")
+                .output().unwrap();
+            assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),"{output:?}");
+            return;
+        }
         let (service,path,_headers)=setup().await;
         let record=service.record("tenant","c").await.unwrap();
         let data=record.output_permit().unwrap();
+        assert!(data.deliver(||()).is_ok());
+        let prepared_bodies=[
+            protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).unwrap().into_body(),
+            protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).unwrap().into_body(),
+        ];
+        let request=serde_json::from_value(json!({"operation_id":OperationId::new("service-fence-failure".into()),
+            "record_id":"r","expected":"Absent","document":{"body":"alpha"}})).unwrap();
+        assert_eq!(record.write(request).await.unwrap_err(),RecordError::DurablePending(1));
+        assert_eq!(data.deliver(||()),Err(RecordError::RecoveryRequired));
+        assert!(matches!(record.output_permit(),Err(RecordError::RecoveryRequired)));
+        assert!(protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).is_err());
+        assert!(protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).is_err());
+        for mut body in prepared_bodies {
+            assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Err(_))));
+        }
         for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
             let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
@@ -2427,7 +2454,7 @@ fn openapi_document() -> Value {
     schemas.get_mut("RecordWrite").unwrap()["required"] = json!(["operation_id","record_id","expected"]);
     schemas.get_mut("RecordWrite").unwrap()["anyOf"] = json!([{"required":["document"]},{"required":["vector_patch"]}]);
     schemas.get_mut("RecordWrite").unwrap()["properties"]["vector_patch"] = json!({"type":"object","minProperties":1,"description":"Fill absent vector fields with exact Match version; omit document. Preserves body version."});
-    schemas.insert("TemporalMetadata".into(),json!({"type":"object","additionalProperties":false,"description":"UTC Unix milliseconds. TTL is irreversible; business validity is independent.","properties":{"event_time_ms":{"type":["integer","null"],"minimum":-62135596800000i64,"maximum":253402300799999i64},"valid_from_ms":{"type":["integer","null"]},"valid_to_ms":{"type":["integer","null"]},"expire_at_ms":{"type":["integer","null"],"minimum":0,"maximum":253402300799999i64}}}));
+    schemas.insert("TemporalMetadata".into(),json!({"type":"object","additionalProperties":false,"description":"UTC Unix milliseconds. TTL excludes expired bodies from retrieval; background maintenance reclaims them durably. Within a process evaluation time does not move backwards. After restart only the persisted time floor remains: an uncollected body may become visible again if wall-clock rollback crosses its deadline. TTL is not a privacy-erasure guarantee; business validity is independent.","properties":{"event_time_ms":{"type":["integer","null"],"minimum":-62135596800000i64,"maximum":253402300799999i64},"valid_from_ms":{"type":["integer","null"]},"valid_to_ms":{"type":["integer","null"]},"expire_at_ms":{"type":["integer","null"],"minimum":0,"maximum":253402300799999i64}}}));
     schemas.insert("TimeRange".into(),json!({"type":"object","additionalProperties":false,"description":"Half-open [from_ms,to_ms); missing endpoints are unbounded.","properties":{"from_ms":{"type":["integer","null"]},"to_ms":{"type":["integer","null"]}}}));
     schemas.insert("TemporalFilter".into(),json!({"type":"object","additionalProperties":false,"properties":{"event":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"ingested":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"valid_at_ms":{"type":["integer","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]});
