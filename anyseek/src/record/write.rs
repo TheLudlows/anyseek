@@ -56,12 +56,15 @@ pub(super) enum IndexDelivery {
     Asynchronous,
 }
 
-struct PreparedBatch {
+// This borrow is the ordinary write's basis proof. The owned writer was acquired
+// before capture and cannot be released until this batch is consumed/discarded.
+// All live canonical mutators use this same mutex; see docs/record-write-proof.md.
+struct PreparedBatch<'writer> {
+    _writer: &'writer tokio::sync::OwnedMutexGuard<()>,
     plans: Vec<mutation::PreparedWrite>,
     publication: Vec<Option<state_memory::Prepared>>,
     result: BatchResult,
     base_seq: u64,
-    base_state: State,
     expires_at: Option<u64>,
 }
 
@@ -178,7 +181,7 @@ impl UploadedBatch {
 impl Inner {
     async fn prepare_remote_batch(
         &self,
-        prepared: &PreparedBatch,
+        prepared: &PreparedBatch<'_>,
     ) -> Result<Option<RemoteUpload>, RecordError> {
         use sha2::{Digest, Sha256};
         let Some(remote) = self.remote.as_ref() else {
@@ -281,7 +284,7 @@ impl RecordPartition {
         crate::resources::spawn(async move {
             let _permit = permit;
             let _memory = memory;
-            let writer = partition.writer.lock().await;
+            let writer = partition.writer.clone().lock_owned().await;
             let mut scope = AttemptScope::default();
             let result = std::panic::AssertUnwindSafe(async {
                 let mut inner = partition.inner.lock().await;
@@ -299,7 +302,7 @@ impl RecordPartition {
                     inner.index.drain_indexes().await?;
                 }
                 drop(inner);
-                let prepared = partition.prepare_batch(requests).await;
+                let prepared = partition.prepare_batch(&writer, requests).await;
                 inner = partition.inner.lock().await;
                 if let Ok(prepared) = &prepared {
                     scope.replayed = prepared
@@ -334,14 +337,14 @@ impl RecordPartition {
                                 inner = partition.inner.lock().await;
                                 match uploaded {
                                     Ok(uploaded) => {
-                                        inner
-                                            .commit_batch(prepared, &mut scope, Some(uploaded))
+                                        partition
+                                            .commit_batch(&mut inner, prepared, &mut scope, Some(uploaded))
                                             .await
                                     }
                                     Err(error) => Err(error),
                                 }
                             }
-                            Ok(None) => inner.commit_batch(prepared, &mut scope, None).await,
+                            Ok(None) => partition.commit_batch(&mut inner, prepared, &mut scope, None).await,
                             Err(error) => Err(error),
                         }
                     }
@@ -442,18 +445,23 @@ impl Inner {
 }
 
 impl RecordPartition {
-    async fn prepare_batch(
+    async fn prepare_batch<'writer>(
         &self,
+        writer: &'writer tokio::sync::OwnedMutexGuard<()>,
         requests: Vec<RecordWrite>,
-    ) -> Result<PreparedBatch, RecordError> {
-        // The caller retains writer ownership throughout capture, planning and commit.
+    ) -> Result<PreparedBatch<'writer>, RecordError> {
+        // A guard from another partition cannot authorize this captured basis.
+        if !Arc::ptr_eq(tokio::sync::OwnedMutexGuard::mutex(writer), &self.writer) {
+            return Err(RecordError::RecoveryRequired);
+        }
+        // Keep helper calls here canonical-read-only: index rotation, admission
+        // and checkpoint requests may change derived state, never install State.
         let inner = self.inner.lock().await;
         let config = inner.config.clone();
         let evaluation_time_ms = inner.evaluation_time_ms;
         #[cfg(test)]
         let root = inner.journal.root().to_path_buf();
         let base_seq = inner.state.seq;
-        let base_state = inner.state.try_clone()?;
         let mut shadow = inner.state.try_clone()?;
         let mut snapshot = inner.snapshot_bytes;
         let mut plans = Vec::new();
@@ -625,11 +633,11 @@ impl RecordPartition {
         let mut inner = self.inner.lock().await;
         if plans.is_empty() {
             return Ok(PreparedBatch {
+                _writer: writer,
                 plans,
                 publication: Vec::new(),
                 result,
                 base_seq,
-                base_state,
                 expires_at: None,
             });
         }
@@ -637,35 +645,42 @@ impl RecordPartition {
         inner.state.admit_containers(container_bound)?;
         drop(shadow);
         Ok(PreparedBatch {
+            _writer: writer,
             plans,
             publication,
             result,
             base_seq,
-            base_state,
             expires_at,
         })
     }
 }
 
-impl Inner {
+impl RecordPartition {
     async fn commit_batch(
-        &mut self,
-        prepared: PreparedBatch,
+        &self,
+        guard: &mut tokio::sync::MutexGuard<'_, Inner>,
+        prepared: PreparedBatch<'_>,
         scope: &mut AttemptScope,
         uploaded: Option<UploadedBatch>,
     ) -> Result<BatchResult, RecordError> {
-        if !self.healthy || self.state.seq != prepared.base_seq {
+        // Bind both borrowed guards to this partition before touching authority.
+        // A held writer for another partition, or another Inner, is insufficient.
+        if !Arc::ptr_eq(tokio::sync::OwnedMutexGuard::mutex(prepared._writer), &self.writer)
+            || !std::ptr::eq(tokio::sync::MutexGuard::mutex(guard), self.inner.as_ref()) {
+            return Err(RecordError::RecoveryRequired);
+        }
+        let inner=&mut **guard;
+        if !inner.healthy || inner.state.seq != prepared.base_seq {
             return Err(RecordError::RecoveryRequired);
         }
         // Wall time can move while uploading even though this task owns the writer.
         // Reobserve time before selecting the candidate, then discard any
         // candidate whose captured basis or own TTL has become stale.
-        self.observe_time()?;
-        if state_proof::verify(&self.config, &prepared.base_state, &self.state).is_err()
-            || prepared
-                .expires_at
-                .is_some_and(|deadline| deadline <= self.evaluation_time_ms)
-        {
+        inner.observe_time()?;
+        // The borrowed writer excludes canonical basis changes, including
+        // same-sequence trim/GC/install. This is ownership, not seq equality or
+        // a cached validity claim. Time and independent failure fences can move.
+        if prepared.expires_at.is_some_and(|deadline| deadline <= inner.evaluation_time_ms) {
             return Err(RecordError::Busy);
         }
         let PreparedBatch {
@@ -701,9 +716,9 @@ impl Inner {
         if injected.as_deref() == Some("before_append") {
             return Err(RecordError::Rejected("injected before append".into()));
         }
-        self.healthy = false;
+        inner.healthy = false;
         {
-            let mut output = self
+            let mut output = inner
                 .output
                 .write()
                 .map_err(|_| RecordError::RecoveryRequired)?;
@@ -716,10 +731,10 @@ impl Inner {
             .filter_map(|(i, result)| result.as_ref().ok().filter(|r| r.seq > base_seq).map(|_| i))
             .collect();
         if let Some(uploaded) = uploaded {
-            let remote = self.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
+            let remote = inner.remote.as_mut().ok_or(RecordError::RecoveryRequired)?;
             uploaded.publish(remote).await?;
         }
-        self.append_operations(&payloads, sequence).await?;
+        inner.append_operations(&payloads, sequence).await?;
         #[cfg(feature = "fault-injection")]
         if let Some(path) = std::env::var_os("ANYSEEK_RECORD_BATCH_TRACE") {
             use std::io::Write;
@@ -742,7 +757,7 @@ impl Inner {
             _ => {}
         }
         #[cfg(test)]
-        if self.fail_after_durable {
+        if inner.fail_after_durable {
             return Err(RecordError::DurablePending(sequence));
         }
         for (plan, prepared) in plans.into_iter().zip(publication) {
@@ -752,12 +767,12 @@ impl Inner {
                 ..
             } = plan
             {
-                self.publish_prepared(&applied, snapshot_bytes, prepared)
+                inner.publish_prepared(&applied, snapshot_bytes, prepared)
                     .await?;
             }
         }
-        self.healthy = true;
-        self.output
+        inner.healthy = true;
+        inner.output
             .write()
             .map_err(|_| RecordError::RecoveryRequired)?
             .fenced = false;
@@ -795,6 +810,55 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
+    async fn planning_requires_the_same_partition_writer() {
+        let root=tempfile::tempdir().unwrap();
+        let a=RecordPartition::create(&root.path().join("a"),config()).await.unwrap();
+        let b=RecordPartition::create(&root.path().join("b"),config()).await.unwrap();
+        let wrong=b.writer.clone().lock_owned().await;
+        let request=write("new","r","alpha",ExpectedVersion::Absent);
+        assert!(matches!(a.prepare_batch(&wrong,vec![request.clone()]).await,Err(RecordError::RecoveryRequired)));
+        drop(wrong);
+        let writer=a.writer.clone().lock_owned().await;
+        let mut target=b.inner.lock().await;
+        let mut scope=AttemptScope::default();
+        let prepared=a.prepare_batch(&writer,vec![request.clone()]).await.unwrap();
+        assert!(matches!(a.commit_batch(&mut target,prepared,&mut scope,None).await,Err(RecordError::RecoveryRequired)),"wrong Inner guard");
+        let prepared=a.prepare_batch(&writer,vec![request.clone()]).await.unwrap();
+        assert!(matches!(b.commit_batch(&mut target,prepared,&mut scope,None).await,Err(RecordError::RecoveryRequired)),"wrong writer guard");
+        drop(target);drop(writer);
+        assert_eq!(a.write(request).await.unwrap().seq,1);
+        assert_eq!(b.write(write("other","r","beta",ExpectedVersion::Absent)).await.unwrap().seq,1);
+    }
+
+    #[tokio::test]
+    async fn planning_excludes_history_install_but_allows_read_time() {
+        struct Clock(std::sync::atomic::AtomicU64);
+        impl temporal::Clock for Clock {fn now_ms(&self)->Result<u64,RecordError>{Ok(self.0.load(Ordering::SeqCst))}}
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("records");
+        let settings=config();let p=RecordPartition::create(&path,settings.clone()).await.unwrap();
+        let clock=Arc::new(Clock(std::sync::atomic::AtomicU64::new(1000)));
+        p.inner.lock().await.clock=clock.clone();
+        p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
+        std::fs::write(path.join(".test-write-encode-pause"),b"pause").unwrap();
+        let request=write("second","b","beta",ExpectedVersion::Absent);
+        let pending={let p=p.clone();let request=request.clone();tokio::spawn(async move {p.write(request).await})};
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !path.join(".test-write-encode-started").exists(){tokio::task::yield_now().await;}
+        }).await.unwrap();
+        clock.0.store(1001+settings.history.retention_ms,Ordering::SeqCst);
+        assert_eq!(p.statistics().await.unwrap().visible_seq,1);
+        p.maintenance_tick().await;
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.history.floor,0);assert!(inner.maintenance_scheduled);}
+        assert!(p.writer.try_lock().is_err());
+        std::fs::remove_file(path.join(".test-write-encode-pause")).unwrap();
+        let receipt=pending.await.unwrap().unwrap();assert_eq!(receipt.seq,2);
+        crate::record::tests::wait_maintenance_idle(&p).await;
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,2);assert_eq!(inner.state.history.floor,2);}
+        drop(p);let p=RecordPartition::open(&path,settings.max_journal_bytes).await.unwrap();
+        assert_eq!(p.write(request).await.unwrap(),receipt);
+    }
+
+    #[tokio::test]
     async fn batch_reuses_ordered_values_across_vector_patch_and_body_updates() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("records");
@@ -813,9 +877,10 @@ mod tests {
 
         // Compare every retained value with an independent sequential projection,
         // including the vector-only revision followed by an ordinary source update.
-        let prepared = p.prepare_batch(requests.clone()).await.unwrap();
+        let writer=p.writer.clone().lock_owned().await;
+        let mut oracle=p.inner.lock().await.state.try_clone().unwrap();
+        let prepared = p.prepare_batch(&writer, requests.clone()).await.unwrap();
         assert_eq!(prepared.publication.len(), 4);
-        let mut oracle = prepared.base_state.try_clone().unwrap();
         for (plan, retained) in prepared.plans.iter().zip(&prepared.publication) {
             let mutation::PreparedWrite::Append { applied, .. } = plan else { panic!("append expected") };
             apply(&mut oracle, applied).unwrap();
@@ -824,7 +889,7 @@ mod tests {
                 serde_json::to_value(oracle.records.get(&applied.request.record_id).unwrap()).unwrap());
             assert_eq!(serde_json::to_value(&retained.operation).unwrap(), serde_json::to_value(oracle.operations.last().unwrap()).unwrap());
         }
-        drop(prepared);
+        drop(prepared);drop(writer);
         let result = p.execute_writes(requests.clone(), IndexDelivery::Asynchronous).await.unwrap();
         assert_eq!(result.results.len(), 5);
         assert!(matches!(result.results[4], Err(RecordError::Conflict(_))));

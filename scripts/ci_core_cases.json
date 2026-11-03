@@ -180,5 +180,7 @@
   "record::tests::ttl_extension_before_deadline_and_competing_late_updates",
   "record::tests::ttl_backup_cut_is_immutable_and_long_identity_rejected",
   "record::query::tests::candidate_deadline_is_rechecked_after_scoring_without_persistence",
-  "record::remote_checkpoint::tests::automatic_ttl_checkpoint_progresses_when_remote_tail_is_full"
+  "record::remote_checkpoint::tests::automatic_ttl_checkpoint_progresses_when_remote_tail_is_full",
+  "record::write::tests::planning_requires_the_same_partition_writer",
+  "record::write::tests::planning_excludes_history_install_but_allows_read_time"
 ]
