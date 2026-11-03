@@ -132,27 +132,25 @@ impl RetrievalView {
                 .filter(|v| *v < budget.max_address_slots)
                 .ok_or_else(|| RecordError::Rejected("segment address budget exceeded".into()))
         };
-        let mut mapped = Vec::new();
-        for (physical, key) in ordinals
+        // The remap increases in physical order, so the final checked address
+        // bounds every nonempty slot in the replacement vector.
+        let mut mapped_length = 0;
+        for (physical, _) in ordinals
             .iter()
             .enumerate()
             .filter(|(_, key)| !key.is_empty())
         {
             let address = remap(physical)?;
-            if mapped.len() <= address {
-                mapped
-                    .try_reserve(address + 1 - mapped.len())
-                    .map_err(storage)?;
-                mapped.resize(address + 1, String::new());
-            }
-            mapped[address] = key.clone();
+            mapped_length = address + 1;
         }
-        let mut next_locations = BTreeMap::new();
+        let mut mapped = Vec::new();
+        mapped.try_reserve_exact(mapped_length).map_err(storage)?;
+        mapped.resize(mapped_length, String::new());
         for (key, address) in locations.iter() {
             if ordinals.get(*address) != Some(key) {
                 return Err(storage("inconsistent live record location"));
             }
-            next_locations.insert(key.clone(), remap(*address)?);
+            remap(*address)?;
         }
         // Lock every component before modifying anything. Cancellation while
         // acquiring locks leaves the current context and addresses unchanged.
@@ -175,8 +173,17 @@ impl RetrievalView {
         drop(shards);
         root.segments.insert(0, tail_segment);
 
+        // Both containers are exclusively borrowed. Every address was checked
+        // above with these unchanged previous/next values. Recompute the same
+        // injective mapping without allocation or a fallible step after handoff.
+        for (physical, key) in ordinals.iter_mut().enumerate().filter(|(_, key)| !key.is_empty()) {
+            let address = (physical / previous) * next + (physical % previous) + 1;
+            mapped[address] = std::mem::take(key);
+        }
+        for address in locations.values_mut() {
+            *address = (*address / previous) * next + (*address % previous) + 1;
+        }
         *ordinals = mapped;
-        *locations = next_locations;
         self.tail = new_tail;
         self.lexical = None; // predecessor was drained before seal
         self.vector=None; self.reserved_rows=None; self.retired.clear();
@@ -604,6 +611,14 @@ mod tests {
                 locations,
                 ..
             } = &mut *inner;
+            let previous = index.query.read().await.segments.len();
+            let before = ordinals.clone();
+            let before_locations = locations.clone();
+            if previous > 1 {
+                assert!(before.iter().any(String::is_empty), "exercise sparse interleaved slots");
+                assert!(before.iter().filter(|key| !key.is_empty()).count() > locations.len(),
+                    "exercise a retained obsolete physical version");
+            }
             index
                 .rotate_tail(
                     tail,
@@ -616,12 +631,19 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            let address = |old: usize| (old / previous) * (previous + 1) + (old % previous) + 1;
+            let expected = before.iter().enumerate().filter(|(_, key)| !key.is_empty())
+                .map(|(old, key)| (address(old), key.clone())).collect::<BTreeMap<_, _>>();
+            assert_eq!(ordinals.iter().enumerate().filter(|(_, key)| !key.is_empty())
+                .map(|(slot, key)| (slot, key.clone())).collect::<BTreeMap<_, _>>(), expected);
+            assert_eq!(*locations, before_locations.into_iter().map(|(key, old)| (key, address(old))).collect());
         }
+        let unicode_id = "条目".repeat(8);
         both(&partition, &oracle, write("initial","s","plain original",ExpectedVersion::Absent)).await;
         both(
             &partition,
             &oracle,
-            write("peer","d","plain original",ExpectedVersion::Absent),
+            write("peer",&unicode_id,"plain original",ExpectedVersion::Absent),
         )
         .await;
         both(
@@ -653,7 +675,7 @@ mod tests {
         let mut delete = write("delete-target", "s", "", ExpectedVersion::Match(1));
         delete.document = None;
         both(&partition, &oracle, delete).await;
-        assert!(partition.get("d").await.unwrap().is_some());
+        assert!(partition.get(&unicode_id).await.unwrap().is_some());
         for mode in [
             SearchMode::Lexical,
             SearchMode::Vector {

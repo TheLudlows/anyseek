@@ -493,11 +493,21 @@ mod tests {
         let gate=".test-query-candidates-pause";std::fs::write(root.join(gate),b"pause").unwrap();
         let pending={let p=p.clone();tokio::spawn(async move {p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await})};
         entered(&root,gate).await;
+        // Model encoding/upload: writer is held, but Inner remains available.
+        let writer = p.writer.lock().await;
         clock.0.store(1100,std::sync::atomic::Ordering::SeqCst);
         std::fs::remove_file(root.join(gate)).unwrap();
-        let result=pending.await.unwrap().unwrap();assert!(result.hits.is_empty());
+        let result=tokio::time::timeout(std::time::Duration::from_secs(3),pending)
+            .await.expect("final TTL revalidation must not wait for writer").unwrap().unwrap();
+        assert!(result.hits.is_empty());
         assert_eq!(result.statistics.active_records,0);
-        assert_eq!(p.inner.lock().await.state.seq,1,"deadline revalidation is read-only");
+        let inner = p.inner.lock().await;
+        assert_eq!(inner.state.seq,1,"deadline revalidation is read-only");
+        assert_eq!(inner.state.time_watermark_ms,1000);
+        assert!(inner.state.records["a"].document.is_some());
+        assert!(inner.state.records["a"].expired_at_ms.is_none());
+        drop(inner);
+        drop(writer);
     }
 
     #[tokio::test]

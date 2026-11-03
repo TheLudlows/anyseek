@@ -2,7 +2,7 @@
 
 `POST /api/v1/index/{id}/ingest` 在业务判定和持久提交后返回非原子的逐项结果。HTTP 200 不代表全部成功，只有 `code=committed` 且带 Record `receipt` 的项成功；明确拒绝后继续处理后续项。429／503 保留已有回执，并区分 `outcome_unknown` 与 `not_attempted`。索引异步，可检查 `committed_seq`、`lexical_seq`、`vector_seq` 和 `index_error`；`/operation/{epoch}/{nonce}` 查询 Record 回执。现有 `/batch` 同步语义保留，独立 Intake 日志已移除。详见下方[异步索引写入](#异步索引写入)。
 
-默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供全文、向量和混合检索 API；Web 控制台位于独立的 `console/`，不嵌入服务。提供稳定记录、可选向量、时间过滤、全文/向量混合及逐命中解释；[职责收敛状态](../../../docs/engine-scope.md)记录本地内核整理及验证边界。A/P3 本地 Segment、compaction 与安全回收已合入；系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md) 与 [Record 契约](../../../docs/record-model.md) 区分实现和验收。
+默认服务通过 `record_service.rs` 使用 SQLite Catalog 和 Record partition，提供稳定记录、可选向量、时间过滤、全文/向量混合及逐命中解释；Web 控制台位于独立的 `console/`，不嵌入服务。本地 Segment、compaction 与安全回收已合入，系统崩溃/断电验收仍未完成。[当前状态](../../../STATUS.md)记录实现与验证证据，[Record 契约](../../../docs/record-model.md)说明职责与一致性边界。
 
 ## 构建与启动
 
@@ -165,7 +165,7 @@ POST `iterator` 接收 `{cursor?,length?,fields?}`，按稳定 ID 正向分页�
 
 Tenant 由 master 创建和查询（POST/GET `/api/v1/tenants`），普通 Key 只能由 master 签发或撤销。普通 Key 认证成功后由服务端确定 Tenant，不接受客户端声明的 Tenant 作为数据访问身份。同 Tenant 的有效 Key 对其所有集合拥有相同访问范围，不提供 User、Project、Collection Grant、角色或共享授权。
 
-DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销凭据；不会删除 Tenant 或集合，也不影响本租户其他有效 Key。撤销后新请求认证失败，已经通过认证开始执行的操作和响应允许完成；不再进行凭据撤销的 body frame 复核。来源删除等数据有效性保护仍在输出时检查。
+DELETE `/api/v1/apikey` 使用 `{operation_id,key_id}` 撤销凭据；不会删除 Tenant 或集合，也不影响本租户其他有效 Key。撤销后新请求认证失败，已经通过认证开始执行的操作和响应允许完成；不再进行凭据撤销的 body frame 复核。数据失败 fence 仍在响应及 body frame 交付时检查。
 
 普通 Tenant Key 可 DELETE `/api/v1/index/{id}`（`{operation_id}`）删除自己的集合。删除后可同名重建；新集合获得内部新代次，客户端不用传代次。旧后台工作、回执、备份身份和 GC 不会作用于新代次。删除和重建前，客户端须停止旧请求及其重试；仅携带名称的旧请求无法与新集合请求区分。物理回收仍延后执行。
 
@@ -251,7 +251,7 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 
 检索在捕获时刻过滤 TTL，并在评分后按最新时间重验候选，期间到期可能短页；count_total 是捕获索引的观测数，不是最终时刻精确总数。后台回收前的过期索引仍可能影响 BM25 语料统计。分页跨越最早 TTL 会使 continuation 冲突，需要重启遍历。
 
-`/doc/{record_id}/status` 保留当前技术版本、visible/deleted/expired 状态和 pending_vector_fields。完整边界与当前验证状态见[职责收敛说明](../../../docs/engine-scope.md)。
+`/doc/{record_id}/status` 保留当前技术版本、visible/deleted/expired 状态和 pending_vector_fields。完整边界见[Record 契约](../../../docs/record-model.md)，验证状态见 [STATUS](../../../STATUS.md)。
 
 ### 回执保留边界
 

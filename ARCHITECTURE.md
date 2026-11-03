@@ -1,6 +1,6 @@
 # 当前架构
 
-本文描述职责收敛后的本地分支；尚未发布或合入主干。实现与验证边界见[引擎边界](docs/engine-scope.md)。
+本文描述当前主干的模块和运行边界；合入与验证证据见 [STATUS](STATUS.md)，业务契约见 [Record 语义](docs/record-model.md)。主干合入不代表已发布版本。
 
 AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 控制台使用。资源模型为 Tenant → Collection → Partition → Segment；每个 collection 一个持久 partition。HTTP 数据请求统一交由内部 RecordPartition 处理；内部向量/元数据组件包含可变 tail 与冻结 Segment，重复逻辑 shard 状态已由 #111 移除。
 
@@ -27,6 +27,8 @@ AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 
 
 查询短暂持有 Record guard 捕获派生拓扑，在 guard 外评分，完成后重验当前记录版本、fingerprint、删除及 TTL 可见性。组件变化不依靠物理 ordinal 充当稳定身份。纯向量 collection 也能按 metadata 浏览；普通查询允许观察不同消费者的进度，提交与各索引水位分别表达。
 
+纯全文 Count、默认排序及仅按 `_id`/`_score` 排序在捕获身份和固定 Searcher 后释放向量/元数据组件读锁，再做分析、统计与评分；Hybrid 和字段排序仍保持原组件锁路径。正文在候选评分及身份重验后按输出字段复制，不随全体候选参与评分。
+
 服务根据文本/向量选择 Lexical、Vector、Hybrid。Hybrid 两路候选通过 RRF 融合，支持权重和各路预算；ANN 可能因簇探测返回不足 K。候选窗口计数和候选内字段重排不等于全库精确结果。查询原始数据经 schema.store 和 fields 投影后输出；直接读取和 iterator 可返回完整权威 Record。
 
 ## 技术版本与时间可见性
@@ -35,9 +37,9 @@ AnySeek 是 Rust 实现的存储和检索服务，通过 HTTP API 和独立 Web 
 
 正文替换、删除和向量后补仍受技术版本、fingerprint 及 Absent/Any/Match 条件保护，旧向量不能补到新正文。全文和向量的通用 RRF 保留。
 
-TTL 在读取时排除到期正文，最终候选重验使用最新进程评估时间；后台经原持久协议回收，允许 ID 复用并递增版本。读取不持久转换 TTL/history。重启仅保留持久时间下界，未回收正文可能因墙钟回退重新可见，TTL 不承诺隐私删除。分页与计数边界见[引擎说明](docs/engine-scope.md)。
+TTL 在读取时排除到期正文，最终候选重验使用最新进程评估时间；后台经原持久协议回收，允许 ID 复用并递增版本。读取不持久转换 TTL/history。重启仅保留持久时间下界，未回收正文可能因墙钟回退重新可见，TTL 不承诺隐私删除。分页与计数边界见[Record 契约](docs/record-model.md#时间ttl-与查询视图)。
 
-普通写从规划前到持久发布和清理结束持有同一 partition writer；PreparedBatch 绑定实际 writer/Inner 锁身份，避免普通提交复制完整 base 后再全量比较。仍保留完整 shadow、准入/时间/远端权威/失败封锁；恢复和维护完整 proof 继续保留，详见[写入证明](docs/record-write-proof.md)。
+普通写从规划前到持久发布和清理结束持有同一 partition writer；PreparedBatch 绑定实际 writer/Inner 锁身份，PlanningView 只保留本批成功前缀并读取被修改的记录与回执。普通写不复制 full base/shadow，也不执行全量基准 proof；准入、时间、远端权威和失败封锁继续检查。历史回执检查和切段仍可能遍历保留状态，恢复和维护继续完整 proof，详见[写入证明](docs/record-write-proof.md)。
 
 ## 认证与生命周期
 
@@ -49,6 +51,8 @@ TTL 在读取时排除到期正文，最终候选重验使用最新进程评估�
 
 集合恢复只占用空闲名称并分配新代次。完整服务恢复发布到新未启动根，使用独立 bucket，禁用历史普通 Key，由目标 master 为已有 Tenant 重新签发。独立备份保留独立恢复 scope，不能证明备份之后没有删除；不提供跨服务自动灾备入口。
 
+服务关闭先停止准入，再等待已接受请求、后台消费者和阻塞工作完成，关闭原生 writer 并释放资源，最后释放根锁。取消等待不代表关闭完成；不强制新增 checkpoint 或 TTL/GC 工作，详见[运行故障与关闭边界](docs/runtime-fault-boundaries.md#service-shutdown)。
+
 ## 权威与派生文件
 
 服务根由外部稳定 owner lock 保护。Catalog 和 S3 authority 共用 `metadata.sqlite`，只存协调元数据，不存完整 Record State、正文、原始向量或索引；Catalog 不保留独立持久化日志或名称到生成目录的映射。SQLite 事务不跨对象上传或索引构建。Record checkpoint 保留配置、当前记录、墓碑、逻辑水位和操作账本。backup-*、service-backup-* 是独立快照，完整服务 manifest 和外层完成见证认证目录发布。不同独立服务使用不同 bucket，不创建自动服务 namespace，也不检查 Bucket 归属。
@@ -59,7 +63,7 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 
 ## 当前边界
 
-这是有界单机实现：Record 累计账本默认 10,000 项、checkpoint/状态容量等限制见 [FEATURES](FEATURES.md)。history trim 按保留期限回收操作历史，checkpoint/对象 GC 负责各自闭包；已删除集合代次的最终物理回收也已由 #109 合入，仍受在途任务、读者和备份保护约束。本地分支已移除专用 source/evidence、来源历史和业务关系模型，TTL 使用读取过滤与后台回收；通用全文/向量融合保留。不可变段、compaction、SQLite/S3 checkpoint、安全回收、维护修复、后台 Indexer、校验缓存和分级资源准入已合入。真实 S3、系统断电、整体磁盘/缓存容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。整体能力与优先级建议见[项目全貌](docs/project-overview.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
+这是有界单机实现：Record 身份和保留操作默认各 10,000 项，可显式选有界 100,000 档，详见 [FEATURES](FEATURES.md)。完整逻辑 State 仍驻内存；history trim、checkpoint/对象 GC 和已删除集合代次回收继续受保留期限、在途任务、读者及备份保护约束。专用来源历史和业务关系模型已移出内核，通用全文/向量融合保留。真实 S3、系统断电、长期容量和组合资源隔离验收仍未完成；分布式未实现。原生进程故障测试不能替代主机掉电验收。优先级统一见[后续路线](docs/roadmap.md)，全文与认证包边界见[下节契约](#全文与认证包契约)。
 
 [Record 语义](docs/record-model.md) · [存储协议](docs/storage.md) · [服务契约](anyseek/src/server/README.md) · [许可](LICENSE)
 
@@ -74,7 +78,7 @@ Linux 同步文件和父目录；Windows 以同卷无覆盖目录移动完成发
 | VectorSegment | 自己的向量/metadata 文件与 mmap、ANN 聚类/量化、物理行身份和活动 mask、构建内存租约 | 单组件构建、冻结、合并及最终释放 |
 | Tantivy runtime | 全文 postings、固定 Searcher、原生统计及文件引用 | 全文消费与固定读者 |
 
-`VectorIndex` 的 `meta`、schema、量化/距离/SIMD 参数是逻辑查询配置，`record_lexical` 与 `segments` 在同一读取拓扑中一一对应。Segment 中的同类配置用于本地文件解释与构建，不是独立逻辑索引的可变配置。其 `indexed_*`、`committed_doc_count`、`uncommitted`、`failed` 描述单组件构建进度；`active`、`delete_hashset` 和退休 token 是 Record 权威可见性的派生读取状态。`path`、向量及 metadata 文件/mmap、facet 字典、`block_vector_buffer`、层级偏移、维度/精度/量化范围属于物理 Segment；`build_reservation` 与 `build_input_covered` 随组件构建及引用释放。冻结后文件不可变，派生可见性 mask 仍可因 Record 更新而退休旧行。
+`VectorIndex` 的 `meta`、schema、量化/距离/SIMD 参数是逻辑查询配置，`segments` 中每个 `RetrievalSegment` 配对保存 lexical runtime 与 vector component。Segment 中的同类配置用于本地文件解释与构建，不是独立逻辑索引的可变配置。其 `indexed_*`、`committed_doc_count`、`uncommitted`、`failed` 描述单组件构建进度；`active`、`delete_hashset` 和退休 token 是 Record 权威可见性的派生读取状态。`path`、向量及 metadata 文件/mmap、facet 字典、`block_vector_buffer`、层级偏移、维度/精度/量化范围属于物理 Segment；`build_reservation` 与 `build_input_covered` 随组件构建及引用释放。冻结后文件不可变，派生可见性 mask 仍可因 Record 更新而退休旧行。
 
 物理地址只在捕获的拓扑内表示 `local_ordinal * segments.len() + slot`。tail 旋转、合并和恢复对当前映射整体重排；固定读者继续使用原拓扑，并通过稳定记录身份、revision/fingerprint 和退休 token 重验。拓扑位置不写入共享 Segment 的 `meta.id`，也不充当持久记录身份。
 

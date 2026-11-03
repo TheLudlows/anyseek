@@ -6,9 +6,9 @@
 | UI 启动与部署 | [控制台指南](../console/README.md)：本地运行、API 地址配置、远程访问、构建与部署 |
 | 异步索引写入 | [业务结果、进度与重试](../anyseek/src/server/README.md#异步索引写入) |
 | 当前能力 | [状态](../STATUS.md)、[功能与边界](../FEATURES.md)、[架构](../ARCHITECTURE.md) |
-| 全貌与决策 | [项目全貌与下一步建议](project-overview.md)、[全文与包契约](../ARCHITECTURE.md#全文与认证包契约) |
-| 一致性与持久化 | [Record 语义](record-model.md)、[存储协议](storage.md) |
-| 开发与后续 | [开发与验证](development.md)、[后续路线](roadmap.md) |
+| 一致性与持久化 | [Record 语义](record-model.md)、[普通写入证明](record-write-proof.md)、[存储协议](storage.md) |
+| 故障与关闭 | [失败边界与服务排空](runtime-fault-boundaries.md) |
+| 开发与后续 | [开发与验证](development.md)、[CI 验收](ci-validation.md)、[后续路线](roadmap.md) |
 | 检索配置 | [N-gram](../NGRAM_SEARCH.md)、[文本归一化](text-normalization.md)、[字段长度](field-length-normalization.md) |
 | 排序与词项 | [Weighted RRF](weighted-rrf.md)、[稳定排序](stable-ranking.md)、[分析身份与包契约](../ARCHITECTURE.md#全文与认证包契约) |
 | 数据与来源 | [MIRACL 语料](../miracl-corpus-v1.0-zh/README.md)、[许可证](../LICENSE) |

@@ -169,7 +169,9 @@ pub(super) struct Prepared {
 }
 impl Prepared {
     pub(super) fn new(state: &State, applied: &Applied) -> Result<Self, RecordError> {
-        let prior=state.records.get(&applied.request.record_id);
+        Self::from_previous(state.records.get(&applied.request.record_id), applied)
+    }
+    pub(super) fn from_previous(prior: Option<&Record>, applied: &Applied) -> Result<Self, RecordError> {
         let applied_bytes=checkpoint_codec::json_length(applied)?;
         let prior_bytes=prior.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
         // Separate bounded allocations: new record projection, retained request
@@ -179,7 +181,7 @@ impl Prepared {
         }).collect::<Result<Vec<_>,_>>()?;
         let document=enrichment::document(prior,&applied.request)?;
         let temporal=temporal::retained(prior,&applied.request,applied.observed_time_ms)?;
-        let record=mutation::projected_record(state,applied,document,temporal);
+        let record=mutation::projected_record(prior,applied,document,temporal);
         let record=Shared::from_parts(record,&mut admission)?;
         let operation=Shared::copy_from_parts(applied,&mut admission)?;
         Ok(Self{record,operation})

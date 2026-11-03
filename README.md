@@ -2,9 +2,9 @@
 
 **可靠、可更新的全文与向量检索引擎。** 保存原文、向量和普通元数据，通过 HTTP API 与独立控制台进行批量写入、查询、替换和删除。
 
-anyseek 负责稳定身份、可靠提交、恢复、异步索引和检索；文档解析、切块、Embedding、来源版本管理、证据依赖、记忆反思和重算由上层应用负责。来源和章节信息可作为普通 `document` 字段保存。职责收敛的实施状态见[引擎边界](docs/engine-scope.md)。
+anyseek 负责稳定身份、可靠提交、恢复、异步索引和检索；文档解析、切块、Embedding、来源版本管理、证据依赖、记忆反思和重算由上层应用负责。来源和章节信息可作为普通 `document` 字段保存。具体边界见[Record 契约](docs/record-model.md)。
 
-[服务指南](anyseek/src/server/README.md) · [UI 启动与部署](console/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
+[服务指南](anyseek/src/server/README.md) · [UI 启动与部署](console/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [后续路线](docs/roadmap.md) · [文档索引](docs/README.md)
 
 ## 当前能力
 

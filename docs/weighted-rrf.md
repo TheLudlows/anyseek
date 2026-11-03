@@ -13,7 +13,6 @@ The single mode validates all weights and candidate budgets through the same pat
 Storage/query access uses `RecordPartition`; the
 retired low-level IndexArc/Search/Commit API is not available. The current
 Tantivy package format is for new databases; it does not read legacy indexes.
-Relation fusion takes its RRF settings from `RelationFusion`; its Rust query mode must use default Hybrid settings, and HTTP rejects a second `rrf` object.
 The HTTP API accepts an optional `rrf` object only with nonempty query text and a
 query vector:
 
@@ -77,10 +76,9 @@ claimed without measurement on the same frozen corpus and vectors.
 
 Neither default nor explicit windows guarantee whole-corpus fused recall. ANN
 can also omit candidates. Ordinary `RecordSearch` has no generic completeness
-boolean: `count_total` is mode-specific, not a completeness certificate. For
-relation fusion, `fusion.count_relation="candidate_window"` describes the bounded
-candidate union, while `relation_complete` describes adjacency traversal only.
-A complete adjacency traversal does not imply complete lexical/vector recall.
+boolean: `count_total` is mode-specific, not a completeness certificate.
+Relation traversal and relation fusion are application responsibilities; no
+`RelationFusion`, `relation_complete` or relation-count interface remains.
 
 ## Evaluation boundary
 

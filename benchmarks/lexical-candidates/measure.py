@@ -269,6 +269,8 @@ def run_phase(server, query, expected, count, concurrency, output, metadata, all
                'server_latency': quantiles([v[1] for v in values])}
     if alloc0:
         assert alloc1[0] > alloc0[0] and alloc1[1] > alloc0[1], 'allocation counters did not advance'
+        summary['allocation_counters_before'] = alloc0
+        summary['allocation_counters_after'] = alloc1
         summary['allocation_calls_per_request'] = (alloc1[0]-alloc0[0])/count
         summary['requested_allocation_bytes_per_request'] = (alloc1[1]-alloc0[1])/count
     for latency, server_latency in values:
@@ -289,8 +291,17 @@ def main():
     ap.add_argument('--allocation', action='store_true')
     ap.add_argument('--seed-root', type=Path)
     args = ap.parse_args()
+    if not __debug__:
+        ap.error('correctness checks require assertions; do not use python -O')
+    if args.rounds <= 0 or args.requests <= 0 or len(set(args.sizes)) != len(args.sizes):
+        ap.error('rounds/requests must be positive and sizes must be unique')
+    if any(n < 256 or n % 8 for n in args.sizes):
+        ap.error('sizes must be >= 256 and divisible by 8')
+    if len(os.sched_getaffinity(0)) < 3:
+        ap.error('at least three available logical CPUs are required')
     out = args.out.resolve()
-    out.mkdir(parents=True, exist_ok=True)
+    # Refuse even an empty existing directory before touching any evidence.
+    out.mkdir(parents=True, exist_ok=False)
     available_cpus = sorted(os.sched_getaffinity(0))
     cpus = available_cpus[:2]
     if len(available_cpus) > 2:
