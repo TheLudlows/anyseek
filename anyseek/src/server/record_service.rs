@@ -1923,9 +1923,18 @@ mod tests {
     async fn committed_ingest_engine_boundary_keeps_plain_metadata() {
         let (service,path,headers)=setup().await;
         let app=router(service.clone());let key=headers["apikey"].to_str().unwrap();
+        let partition=service.record("tenant","c").await.unwrap();
+        #[cfg(feature="fault-injection")]
+        let consumer_root=path.join(service.catalog.collection_entry("tenant","c").await.unwrap().directory());
+        #[cfg(feature="fault-injection")]
+        for lane in ["lexical","vector"] {
+            std::fs::write(consumer_root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();
+        }
+        let mut replay_request:Option<RecordWrite>=None;
         for (route,array,id) in [("batch","writes","a"),("ingest","records","b")] {
             let write=json!({"operation_id":OperationId::new(format!("plain-{id}")),"record_id":id,"expected":"Absent",
                 "document":{"body":"alpha","document_id":"upstream","chunk_index":3,"source_id":"s","source_version":7,"system":{"kind":"source"}}});
+            if route=="ingest" {replay_request=Some(serde_json::from_value(write.clone()).unwrap());}
             let mut value=json!({});value[array]=json!([write]);
             let (status,_)=tenant_api(&app,"POST",&format!("/api/v1/index/c/{route}"),key,Some(value)).await;
             assert_eq!(status,StatusCode::OK);
@@ -1936,7 +1945,6 @@ mod tests {
                 assert_eq!(status,StatusCode::BAD_REQUEST);
             }
         }
-        let partition=service.record("tenant","c").await.unwrap();
         assert_eq!(partition.committed_progress().await.committed_seq,Some(2));
         let original=partition.get("a").await.unwrap().unwrap();
         assert_eq!(original.document.unwrap()["source_version"],7);
@@ -1949,6 +1957,27 @@ mod tests {
         }
         assert_eq!(tenant_api(&app,"GET","/api/v1/index/c/doc/a/status",key,None).await.0,StatusCode::OK);
         assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/query",key,Some(json!({"query":"alpha","relation_fusion":{}}))).await.0,StatusCode::BAD_REQUEST);
+        #[cfg(feature="fault-injection")]
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !["lexical","vector"].iter().all(|lane|consumer_root.join(format!(".test-{lane}-consumer-started")).exists()) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.expect("both owned consumers entered the pause");
+        // Ingest acknowledges durability, not consumer completion. Replay the
+        // identical request synchronously to join both workers before deleting
+        // their directory; no new operation or checkpoint is needed.
+        let owner=partition.clone();let request=replay_request.unwrap();
+        #[allow(unused_mut)]
+        let mut replay=tokio::spawn(async move {owner.write(request).await});
+        #[cfg(feature="fault-injection")]
+        {
+            let blocked=tokio::time::timeout(std::time::Duration::from_millis(50),&mut replay).await.is_err();
+            for lane in ["lexical","vector"] {std::fs::remove_file(consumer_root.join(format!(".test-{lane}-consumer-pause"))).unwrap();}
+            assert!(blocked,"synchronous replay must join the paused consumers");
+        }
+        let receipt=tokio::time::timeout(std::time::Duration::from_secs(10),replay).await.unwrap().unwrap().unwrap();
+        assert_eq!((receipt.seq,receipt.version),(2,1));
+        assert_eq!(partition.committed_progress().await.committed_seq,Some(2));
         drop(partition);drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
