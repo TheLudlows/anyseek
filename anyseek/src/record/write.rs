@@ -63,7 +63,6 @@ struct PreparedBatch {
     base_seq: u64,
     base_state: State,
     expires_at: Option<u64>,
-    hides_evidence: bool,
 }
 
 struct RemoteUpload {
@@ -289,7 +288,7 @@ impl RecordPartition {
                 if !inner.healthy {
                     return Err(RecordError::RecoveryRequired);
                 }
-                inner.advance_time().await?;
+                inner.observe_time()?;
                 let asynchronous = matches!(delivery, IndexDelivery::Asynchronous);
                 if asynchronous {
                     inner
@@ -466,6 +465,7 @@ impl RecordPartition {
         let mut growth_total = 0u64;
         let mut updates_total = 0usize;
         let mut journal_bytes = 0usize;
+        let mut expires_at:Option<u64>=None;
         let mut container_bound = inner.state.container_bytes(snapshot)?;
         drop(inner);
         for request in requests {
@@ -585,9 +585,16 @@ impl RecordPartition {
                         }
                     }
                 }
+                // Only this command's read/constructed rows can affect its
+                // TTL decision. Unrelated expired bodies await background GC.
+                let prior_deadline=shadow.records.get(&applied.request.record_id)
+                    .filter(|r|temporal::visible(r,evaluation_time_ms)).and_then(|r|r.temporal.expire_at_ms);
                 let prepared = state_memory::Prepared::new(&shadow, applied)?;
                 prepared.admit_containers(&mut shadow, *snapshot_bytes)?;
                 apply_prepared(&mut shadow, applied, Some(prepared.clone()))?;
+                let next_deadline=shadow.records.get(&applied.request.record_id)
+                    .filter(|r|r.document.is_some()).and_then(|r|r.temporal.expire_at_ms);
+                expires_at=[expires_at,prior_deadline,next_deadline].into_iter().flatten().min();
                 snapshot = *snapshot_bytes;
                 container_bound = container_bound.max(shadow.container_bytes(snapshot)?);
                 growth_total = total;
@@ -624,46 +631,10 @@ impl RecordPartition {
                 base_seq,
                 base_state,
                 expires_at: None,
-                hides_evidence: false,
             });
         }
         // Admit live container growth before persistence. Values are separately owned.
         inner.state.admit_containers(container_bound)?;
-        // Replay the captured basis and the identical append prefix used by shadow.
-        // By induction each step has the same prior record (including vector patches
-        // and retained source revisions), so its immutable Prepared owners are reusable.
-        // Readers can advance live time during planning; commit_batch still revalidates
-        // base_state and TTL before any publication of these prepared values.
-        let mut prior = base_state.try_clone()?;
-        let mut hides_evidence = false;
-        for (plan, prepared) in plans.iter().zip(&publication) {
-            if let mutation::PreparedWrite::Append {
-                applied,
-                snapshot_bytes,
-                ..
-            } = plan
-            {
-                // Evaluate against each preceding planned state, including sources
-                // created earlier in this batch. Ordinary writes remain revalidatable.
-                hides_evidence |= prior
-                    .records
-                    .get(&applied.request.record_id)
-                    .is_some_and(|r| r.system.is_some())
-                    || (applied.request.vector_patch.is_none()
-                        && inner.graph_cache.references(&applied.request.record_id));
-                let prepared = prepared.as_ref().ok_or_else(|| storage("missing batch ownership"))?;
-                prepared.admit_containers(&mut prior, *snapshot_bytes)?;
-                apply_prepared(&mut prior, applied, Some(prepared.clone()))?;
-            }
-        }
-        drop(prior);
-        let expires_at =
-            shadow
-                .records
-                .values()
-                .filter(|record| record.document.is_some())
-                .filter_map(|record| record.temporal.expire_at_ms)
-                .min();
         drop(shadow);
         Ok(PreparedBatch {
             plans,
@@ -672,7 +643,6 @@ impl RecordPartition {
             base_seq,
             base_state,
             expires_at,
-            hides_evidence,
         })
     }
 }
@@ -688,9 +658,9 @@ impl Inner {
             return Err(RecordError::RecoveryRequired);
         }
         // Wall time can move while uploading even though this task owns the writer.
-        // Apply due transitions before selecting the candidate, then discard any
-        // candidate whose business basis or own TTL has become stale.
-        self.advance_time().await?;
+        // Reobserve time before selecting the candidate, then discard any
+        // candidate whose captured basis or own TTL has become stale.
+        self.observe_time()?;
         if state_proof::verify(&self.config, &prepared.base_state, &self.state).is_err()
             || prepared
                 .expires_at
@@ -703,7 +673,6 @@ impl Inner {
             publication,
             result,
             base_seq,
-            hides_evidence,
             ..
         } = prepared;
         if plans.is_empty() {
@@ -739,12 +708,6 @@ impl Inner {
                 .write()
                 .map_err(|_| RecordError::RecoveryRequired)?;
             output.fenced = true;
-            if hides_evidence {
-                output.revision = output
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| storage("data barrier revision exhausted"))?;
-            }
         }
         scope.persistence_attempted = result
             .results
@@ -832,18 +795,18 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
-    async fn batch_reuses_ordered_values_across_vector_patch_and_source_updates() {
+    async fn batch_reuses_ordered_values_across_vector_patch_and_body_updates() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("records");
         let settings = config();
         let p = RecordPartition::create(&root, settings.clone()).await.unwrap();
-        let mut source = crate::record::tests::source_write("source", "s", &[]);
+        let mut source = crate::record::tests::write("source","s","evidence original",ExpectedVersion::Absent);
         source.document.as_mut().unwrap().remove("vector");
         let mut patch = write("patch", "s", "", ExpectedVersion::Match(1));
         patch.document = None;
         patch.vector_patch = Some(serde_json::from_value(serde_json::json!({"vector":[2.0,0.0]})).unwrap());
         let update = write("update", "s", "updated", ExpectedVersion::Match(1));
-        let derived = crate::record::tests::source_write("derived", "d", &[("s", 2)]);
+        let derived = crate::record::tests::write("derived","d","evidence original",ExpectedVersion::Absent);
         let conflict = write("conflict", "s", "bad", ExpectedVersion::Match(1));
         let suffix = write("suffix", "unused", "unused", ExpectedVersion::Absent);
         let requests = vec![source, patch, update, derived, conflict, suffix];

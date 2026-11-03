@@ -8,7 +8,7 @@ pub(super) struct OutputState {
     pub fenced: bool,
 }
 /// A bounded response may use an old complete read view, but may not cross a
-/// source deletion/failure boundary. Combine with authorization at handoff.
+/// failed authority publication boundary. Combine with authorization at handoff.
 #[derive(Clone)]
 pub struct DataOutputPermit {
     states: Vec<(Arc<RwLock<OutputState>>, u64)>,

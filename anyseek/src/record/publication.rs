@@ -16,19 +16,6 @@ impl replay::Context<'_> {
             RecordError::DurablePending(receipt.seq)
         })?;
         let document = prepared.record.document.as_ref();
-        let hiding = applied.request.vector_patch.is_none() && (self
-                .state
-                .records
-                .get(&receipt.record_id)
-                .is_some_and(|r| r.system.is_some()) || self.graph_cache.references(&receipt.record_id));
-        let mut affected = if hiding {
-            evidence::descendants(&self.state.records, &receipt.record_id)
-                .map_err(|_| RecordError::DurablePending(receipt.seq))?
-        } else {
-            std::collections::BTreeSet::new()
-        };
-        // Updating the source replaces its own ordinal but keeps the new source visible.
-        if document.is_some() { affected.remove(&receipt.record_id); }
         let old_location = self.locations.get(&receipt.record_id).copied();
         if let Some(document) = document {
             // Admit the full temporal/index input before cloning it. Four
@@ -59,17 +46,11 @@ impl replay::Context<'_> {
         if let Some(old_id) = old_location {
             self.index.retire(old_id).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
         }
-        for id in affected {
-            if let Some(ordinal) = self.locations.remove(&id) {
-                self.index.retire(ordinal).await.map_err(|error| { log::error!("Record component publication failed at sequence {}: {:?}", receipt.seq, error); RecordError::DurablePending(receipt.seq) })?;
-            }
-        }
         #[cfg(test)]
         if self.fail_publication_stage == 2 {
             return Err(RecordError::DurablePending(receipt.seq));
         }
         apply_prepared(&mut *self.state, applied, Some(prepared)).map_err(|_| RecordError::DurablePending(receipt.seq))?;
-        self.graph_cache.insert(&self.state.records[&receipt.record_id]).map_err(|_| RecordError::DurablePending(receipt.seq))?;
         *self.snapshot_bytes = snapshot_bytes;
         #[cfg(test)]
         assert_eq!(

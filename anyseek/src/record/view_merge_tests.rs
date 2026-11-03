@@ -1,5 +1,5 @@
 use super::*;
-use crate::record::tests::{config, source_write, write};
+use crate::record::tests::{config, write};
 
 async fn freeze(p: &RecordPartition) {
     let mut inner = p.inner.lock().await;
@@ -122,33 +122,7 @@ async fn merge_keeps_unconsumed_tail_addresses_and_live_tokens() {
     assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 5);
 }
 
-#[tokio::test]
-async fn source_cascade_after_merge_fences_old_output_and_masks_new_queries() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = temporary.path().join("records");
-    let p = RecordPartition::create(&root, config()).await.unwrap();
-    p.write(source_write("s", "s", &[])).await.unwrap();
-    p.write(source_write("d", "d", &[("s", 1)])).await.unwrap();
-    freeze(&p).await;
-    p.write(source_write("i", "i", &[("d", 1)])).await.unwrap();
-    p.write(write("ordinary", "ordinary", "evidence original", ExpectedVersion::Absent)).await.unwrap();
-    freeze(&p).await;
-    let gate = ".test-query-candidates-pause";
-    std::fs::write(root.join(gate), b"pause").unwrap();
-    let held = { let p = p.clone(); tokio::spawn(async move {
-        p.search("evidence".into(), None, SearchMode::Lexical, vec![], 10).await
-    }) };
-    entered(&root, gate).await;
-    let (sources, candidate) = prepare(&p).await;
-    install(&p, &sources, candidate).await;
-    let mut delete = write("delete-source", "s", "", ExpectedVersion::Match(1)); delete.document = None;
-    p.write(delete).await.unwrap();
-    std::fs::remove_file(root.join(gate)).unwrap();
-    assert!(matches!(held.await.unwrap(), Err(RecordError::RecoveryRequired)));
-    let found = p.search("evidence".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap();
-    assert_eq!(found.hits.len(), 1);
-    assert_eq!(found.hits[0].record.record_id, "ordinary");
-}
+
 
 #[tokio::test]
 async fn merge_rejection_keeps_addresses_and_reader_pins_protect_retired_files() {

@@ -15,7 +15,7 @@ anyseek 负责稳定身份、可靠提交、恢复、异步索引和检索；文
 | 可信记录 | 稳定 Record ID、条件版本、防 ABA、原 operation_id 幂等重试；同步写入持久且可见，异步索引入口返回持久业务结果；未知结果明确区分 |
 | 文档发布 | 记录逐批写入、逐步可查；向量按精确版本后补，不提供整文原子发布 |
 | 共同检索 | 全文 BM25F、外部向量、元数据/时间过滤、稳定排序和逐命中解释 |
-| 时间与生命周期 | 固定查询 evaluation_time、不可逆 TTL |
+| 时间与生命周期 | 固定查询 evaluation_time、TTL 到期过滤与后台回收 |
 | 授权与恢复 | API Key 认证 Tenant，同租户 Key 访问一致；撤销拒绝后续认证，数据生命周期独立；WAL/checkpoint、备份与独立恢复 |
 
 [独立控制台](console/README.md)支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。

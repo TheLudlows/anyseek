@@ -73,7 +73,7 @@ async fn receipt_gc_background_catchup_keeps_newly_expired_history_receipt() {
         while !path.join(".test-indexer-started").exists() { tokio::task::yield_now().await; }
     }).await.unwrap();
     clock.0.store(now + 2 * day, std::sync::atomic::Ordering::SeqCst);
-    p.inner.lock().await.advance_time().await.unwrap();
+    {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
     assert_eq!(p.inner.lock().await.state.history.floor, 2);
     std::fs::remove_file(path.join(".test-indexer-pause")).unwrap();
     job.finish().await.unwrap();

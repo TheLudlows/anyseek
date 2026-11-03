@@ -32,7 +32,7 @@ def exercise(call, restart_with, directory, faults):
               'document': {'body': 'temporal source'},
               'temporal': {'event_time_ms': 100, 'valid_from_ms': 100, 'valid_to_ms': 200, 'expire_at_ms': now + (100 if faults else 86400000)}}
     receipt = write_one(call, endpoint, source)['receipt']
-    for rid, parent in [('d', 's'), ('i', 'd')]:
+    for rid, _parent in [('d', 's'), ('i', 'd')]:
         write_one(call, endpoint, {'operation_id': operation(), 'record_id': rid,  'expected': 'Absent',
              'document': {'body': 'temporal peer'}, 'temporal': {'expire_at_ms': source['temporal']['expire_at_ms']}})
     query = {'query': 'temporal', 'temporal': {'event': {'from_ms': 100, 'to_ms': 101}, 'valid_at_ms': 100}}
@@ -47,22 +47,33 @@ def exercise(call, restart_with, directory, faults):
     restart_with(env)
     assert call('POST', endpoint + '/query', query)['count_total'] == 1
     if faults:
+        def reclaimed(target, version):
+            deadline=time.monotonic()+30
+            while time.monotonic()<deadline:
+                result=call('GET',target+'/doc/s/status',status=(200,503))
+                if result.get('version',0)>=version:return result
+                if 'code' in result:assert result['code']=='recovery_required',result
+                time.sleep(.05)
+            raise AssertionError(('background TTL reclaim deadline',target,result))
+
         clock(now + 100)
         for rid in ['s', 'd', 'i']:
             call('GET', endpoint + '/doc/' + rid, status=404)
         assert call('POST', endpoint + '/query', {})['statistics']['active_records'] == 0
         assert write_one(call, endpoint, source)['receipt'] == receipt
-        write_one(call, endpoint, {**source, 'operation_id': operation(), 'expected': {'Match': 2}, 'temporal': {'expire_at_ms': now + 10000}}, status=409)
-        # Restart and clock-uncertainty keep expired records absent; a backward
-        # jump cannot restore data, and a larger jump is rejected as uncertain.
-        assert call('POST', endpoint + '/query', {})['count_total'] == 0
+        # Wait for background persistence before checking the persisted floor.
+        # Reads themselves only filter; the version changes only after GC.
+        reclaimed(endpoint,2)
         restart_with(env)
         assert call('POST', endpoint + '/query', {})['count_total'] == 0
-        clock(now - 300001)  # Larger backward jump is rejected; it cannot restore expired data.
+        clock(now - 300001)
         assert call('POST', endpoint + '/query', {}, status=503)['code'] == 'clock_uncertain'
         clock(now + 101)
         assert call('POST', endpoint + '/query', {})['count_total'] == 0
-        print('PASS temporal HTTP: fixed view, independent expiry, no revival, original retry and restart')
+        reuse={**source,'operation_id':operation(),'expected':'Absent','temporal':None}
+        assert write_one(call,endpoint,reuse)['receipt']['version']==3
+        assert call('GET',endpoint+'/doc/s')['document']==source['document']
+        print('PASS temporal HTTP: logical filtering, background reclaim, durable floor, ID reuse and original retry')
         for stage in ['after_append_unknown', 'after_durable', 'crash_after_durable', 'crash_after_visible']:
             # All commands use the same controlled time; no sleep determines expiry.
             cid = 'ttl-' + stage.replace('_', '-')
@@ -71,18 +82,25 @@ def exercise(call, restart_with, directory, faults):
             write = {**source, 'operation_id': operation(), 'temporal': {'expire_at_ms': now + 200}}
             original = write_one(call, endpoint, write)['receipt']
             restart_with({**env, 'ANYSEEK_TEMPORAL_FAULT': stage})
+            # Reopen loads partitions lazily. Capture it while still live, then
+            # move the clock; the service sweep, not a query, attempts expiry.
+            call('GET',endpoint+'/doc/s')
             clock(now + 200)
-            if stage.startswith('crash_'):
+            deadline=time.monotonic()+30
+            observed=False
+            while time.monotonic()<deadline:
                 try:
-                    call('POST', endpoint + '/query', {})
-                except (OSError, http.client.HTTPException):
-                    pass
-                else:
-                    raise AssertionError('expected temporal process exit')
-            else:
-                code = call('POST', endpoint + '/query', {}, status=503)['code']
-                assert code == ('outcome_unknown' if stage == 'after_append_unknown' else 'durable_pending'), (stage, code)
-                call('GET', endpoint + '/doc/s', status=503)
+                    result=call('GET',endpoint+'/doc/s',status=(404,503))
+                except (OSError,http.client.HTTPException):
+                    if not stage.startswith('crash_'):raise
+                    observed=True;break
+                if 'code' in result and result['code']=='recovery_required':
+                    # Background owns persistence. Fresh reads report the fence,
+                    # not the worker's unknown/durable_pending result envelope.
+                    if not stage.startswith('crash_'):observed=True;break
+                else:assert result.get('code')=='not_found',result
+                time.sleep(.05)
+            assert observed,('background temporal fault deadline',stage)
             restart_with(env)
             assert call('POST', endpoint + '/query', {})['count_total'] == 0
             call('GET', endpoint + '/doc/s', status=404)
@@ -90,7 +108,7 @@ def exercise(call, restart_with, directory, faults):
             # Keep the trusted clock monotonic across fixtures.
             now += 1000
             clock(now + 101)
-        print('PASS temporal HTTP fault matrix: append unknown, durable pending, exit after durable/visible, terminal replay')
+        print('PASS temporal HTTP fault matrix: append unknown, durable pending, exit after durable/visible, background fence and replay')
     else:
         print('PASS temporal HTTP: ranges, missing event, valid interval boundary, count-only, common time and restart')
     # Retire fixtures before returning to the real clock; a large test jump is

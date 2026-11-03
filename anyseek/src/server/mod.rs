@@ -10,5 +10,5 @@ pub async fn query_records(
     query: crate::record::RecordQuery,
     fields: Vec<String>,
 ) -> Result<crate::record::RecordSearch, crate::record::RecordError> {
-    partition.query_output(query, None, Some(fields)).await
+    partition.query_output(query, Some(fields)).await
 }

@@ -313,7 +313,7 @@ impl Reference {
             },
         };
         let payloads=pool.finish().map_err(storage)?;
-        let manifest=Manifest{format:8,seq:state.seq,state:referenced,payloads};
+        let manifest=Manifest{format:9,seq:state.seq,state:referenced,payloads};
         // Chain count is not a byte bound: repeated descriptors/long references
         // may exhaust a small configured authority before MAX_DELTAS. Measure
         // without constructing an encoded Vec or writing an oversized manifest.
@@ -438,7 +438,7 @@ impl Reference {
         let path=directory(root,&self.id)?;
         if files(&path,closure_limit(authority_budget)?)?.as_slice()!=self.files.as_slice(){return Err(storage("anchor closure checksum mismatch"));}
         let (manifest,mut manifest_lease)=read_manifest(&path.join("manifest"),authority_budget)?;
-        if manifest.format!=8{return Err(storage("unsupported anchor format"));}
+        if manifest.format!=9{return Err(storage("unsupported anchor format"));}
         let owners=manifest.state.owners()?;
         if owners.last()!=Some(&self.id.as_str()) || self.state_blocks.len()+1!=owners.len() {
             return Err(storage("state block closure count or head mismatch"));
@@ -528,8 +528,8 @@ impl Reference {
     async fn load_parts(root:&Path,config:&RecordConfig,state:&State,payloads:Closure,
         segments:&[segment::Package],statistics:Vec<crate::active::ActiveStatistics>)->Result<VerifiedView,RecordError>{
         if statistics.len()!=segments.len(){return Err(storage("segment statistics closure mismatch"));}
-        let visible=evidence::visibility(&state.records)?;
-        let expected:std::collections::BTreeSet<_>=state.records.values().filter(|r|visible.get(&r.record_id)==Some(&true)&&!(state.evidence_quarantined&&temporal::protected(r))).map(|r|r.record_id.clone()).collect();
+        let visible=visibility::visible_records(&state.records)?;
+        let expected:std::collections::BTreeSet<_>=state.records.values().filter(|r|visible.get(&r.record_id)==Some(&true)).map(|r|r.record_id.clone()).collect();
         let n=segments.len();let mut locations=BTreeMap::new();let mut ordinals=Vec::new();let mut live=std::collections::BTreeSet::new();let mut indexes=Vec::new();
         let address_budget=config.max_records.checked_add(config.max_operations).and_then(|n|n.checked_mul(64)).ok_or_else(||storage("address budget overflow"))?;
         for (slot,(segment,active)) in segments.iter().zip(statistics).enumerate(){
@@ -1185,7 +1185,7 @@ mod tests {
             let selected={
                 let mut inner=p.inner.lock().await;inner.maintain_index_tail().await.unwrap();
                 let selected=inner.anchor.as_ref().unwrap().id.clone();
-                if target=="wal" {inner.journal.append(br#"{"RecordHistoryTrimV13":{"previous":0,"floor":999999,"at":0}}"#).unwrap();}
+                if target=="wal" {inner.journal.append(br#"{"RecordHistoryTrimV14":{"previous":0,"floor":999999,"at":0}}"#).unwrap();}
                 else {
                     let file=match target {
                         "payload"=>path.join(format!("payload-{}",inner.payloads.objects.keys().next().unwrap())),
@@ -1444,10 +1444,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multisegment_source_cascade_and_corrupt_selected_object_fail_closed() {
-        use super::super::tests::source_write;
+    async fn multisegment_delete_and_corrupt_selected_object_fail_closed() {
         let root=path();let settings=config();let p=RecordPartition::create(&root,settings.clone()).await.unwrap();
-        for mut request in [source_write("s","s",&[]),source_write("d","d",&[("s",1)]),source_write("e","e",&[("d",1)])] {
+        for mut request in [write("s","s","alpha",ExpectedVersion::Absent),write("d","d","alpha",ExpectedVersion::Absent),write("e","e","alpha",ExpectedVersion::Absent)] {
             if request.record_id=="d" {request.document.as_mut().unwrap().shift_remove("vector");}
             p.write(request).await.unwrap();p.compact_journal().await.unwrap();
         }
@@ -1458,14 +1457,16 @@ mod tests {
         assert_eq!(p.statistics().await.unwrap().physical_versions,4);
         let mut deletion=write("delete","s","",ExpectedVersion::Match(1));deletion.document=None;
         let receipt=p.write(deletion.clone()).await.unwrap();
-        for id in ["s","d","e"]{assert!(p.get(id).await.unwrap().is_none());}
+        assert!(p.get("s").await.unwrap().is_none());
+        for id in ["d","e"]{assert!(p.get(id).await.unwrap().is_some());}
         p.compact_journal().await.unwrap();
         drop(p);let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
-        for id in ["s","d","e"]{assert!(p.get(id).await.unwrap().is_none());}
+        assert!(p.get("s").await.unwrap().is_none());
+        for id in ["d","e"]{assert!(p.get(id).await.unwrap().is_some());}
         assert_eq!(p.write(deletion).await.unwrap(),receipt);
-        assert_eq!(p.statistics().await.unwrap().active_records,0);
+        assert_eq!(p.statistics().await.unwrap().active_records,2);
         assert_eq!(p.write(patch).await.unwrap().version,1);
-        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() }] {assert!(query(&p,mode).await.hits.is_empty());}
+        for mode in [SearchMode::Lexical,SearchMode::Vector{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All},SearchMode::Hybrid{similarity_threshold:None,ann_mode:crate::vector_similarity::AnnMode::All, rrf: Default::default() }] {assert_eq!(query(&p,mode).await.hits.len(),2);}
         let selected=p.inner.lock().await.anchor.as_ref().unwrap().segments[0].path(&root).unwrap();
         drop(p);
         std::fs::write(selected.join("unselected-extra"),b"corrupt certified closure").unwrap();

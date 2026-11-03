@@ -188,7 +188,7 @@ the same object-store test module (always included in service builds).
 | --- | --- |
 | reads, writer ordering, checkpoint and cancellation | seed receipt; two ordered writes; blocked writer/checkpoint; cancelled waiter; cold recovery and exact receipt replay |
 | candidate TTL | deadline +100ms, advance +101ms; Busy; absent receipt; unchanged local/authority sequence; healthy writer; expired retry rejected |
-| source expiry | expired original plus version-matched replacement; Busy; no replacement receipt; source absent before/after cold recovery; retry rejected/conflicted |
+| TTL during planning/upload | inherited deadline crossing returns Busy with no new receipt; reads filter without persistence or writer wait; a fresh full replacement may reuse the unchanged technical version after expiry |
 
 The common gate wait retains its five-second timeout and polling interval.
 Owner/sequence fencing before persistence and owner/head changes after upload

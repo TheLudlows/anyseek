@@ -275,7 +275,7 @@ mod tests {
             inner.replay_context().replay(Entry::Applied(applied)).await.unwrap();
             history::validate_state(&inner.state).unwrap();
         }
-        assert!(matches!(p.write(write("next","next","beta",ExpectedVersion::Absent)).await,Err(RecordError::Busy)));
+        p.maintenance_tick().await;
         wait_maintenance_idle(&p).await;
         assert_eq!(p.inner.lock().await.state.operations.len(),1);
         drop(p);
@@ -415,8 +415,23 @@ impl Inner {
     }
 }
 impl RecordPartition {
+    /// A bounded service sweep may ask for expiry/history reclamation. Busy
+    /// partitions are skipped; logical TTL exclusion does not depend on this.
+    pub async fn maintenance_tick(&self) {
+        let Ok(mut inner)=self.inner.try_lock() else {return;};
+        if !inner.healthy {return;}
+        let Ok(evaluation)=inner.observe_time() else {return;};
+        if inner.state.records.may_have_due_ttl(evaluation)
+            || history::committed_floor(&inner.state,evaluation,inner.config.history.retention_ms).is_some() {
+            inner.maintenance_requested.get_or_insert("time_reclamation");
+        }
+        self.schedule_maintenance(&mut inner);
+    }
     pub(super) async fn kick_maintenance(&self) {
         let mut inner=self.inner.lock().await;
+        self.schedule_maintenance(&mut inner);
+    }
+    fn schedule_maintenance(&self,inner:&mut Inner) {
         if !inner.healthy || inner.maintenance_requested.is_none()
             || inner.background.is_some() || inner.maintenance_scheduled || inner.maintenance_pending {return;}
         inner.maintenance_scheduled=true;

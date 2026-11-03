@@ -237,14 +237,18 @@ python3 scripts/record_service_smoke.py --server target/debug/anyseek_server
 状态接口返回 `pending_vector_fields`。真实 Web UI 的 envelope 模式支持该请求；可选向量契约见[Record 语义](../../../docs/record-model.md)。
 
 
-## 时间条件与不可逆 TTL
+## 时间条件与 TTL
 
-系统时间元数据使用 UTC Unix **毫秒**，与用户 schema 中既有 `Timestamp` 秒字段分开。完整 Record 写入可携带：
+系统时间元数据使用 UTC Unix **毫秒**，与用户 schema 中既有 Timestamp 秒字段分开。完整 Record 写入可携带：
 
 ```json
 {"temporal":{"event_time_ms":1735689600000,"valid_from_ms":1735689600000,"valid_to_ms":1767225600000,"expire_at_ms":1893456000000}}
 ```
 
-`temporal` 是系统元数据，不放入自定义 `document`。业务有效期是半开区间 `[Record 语义](../../../docs/record-model.md)。
+业务有效期是半开区间 [valid_from_ms,valid_to_ms)，不隐式产生 TTL。到达 expire_at_ms 后，按 ID、分页及检索排除正文；读请求不持久推进过期或历史裁剪。后台有界维护另行写入过期墓碑并回收索引，没有固定完成时限。已到期身份允许完整正文重用，版本递增；Absent 匹配无当前有效正文，Match 仍比较技术版本，旧向量补写不能匹配新正文。省略 temporal 时仅继承尚有效正文的元数据，重用已到期身份默认清除旧 TTL。
 
-`/doc/{record_id}/status` 保留为技术状态接口，用于当前版本和 pending_vector_fields；专用来源业务状态将在内核阶段移除。
+本进程观察时间不回退。重启仅保留已持久化的写入/维护水位；尚未回收的到期正文可能因墙钟回退跨过 deadline 而重新可见。大幅时间偏差返回 clock_uncertain。正文还可存在于 WAL 和备份中，TTL 不承诺隐私删除。
+
+检索在捕获时刻过滤 TTL，并在评分后按最新时间重验候选，期间到期可能短页；count_total 是捕获索引的观测数，不是最终时刻精确总数。后台回收前的过期索引仍可能影响 BM25 语料统计。分页跨越最早 TTL 会使 continuation 冲突，需要重启遍历。
+
+`/doc/{record_id}/status` 保留当前技术版本、visible/deleted/expired 状态和 pending_vector_fields。完整边界与当前验证状态见[职责收敛说明](../../../docs/engine-scope.md)。

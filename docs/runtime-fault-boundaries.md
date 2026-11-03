@@ -58,7 +58,7 @@ Each query moves its search execution to one blocking worker. The existing
 service governor (global and per-collection limits) and partition admission bound
 accepted requests; no second fixed scoring semaphore is introduced. The owned
 query retains admission, resource scope, query handles and package pins until the
-worker joins, even after client cancellation. Result identity, source and TTL
+worker joins, even after client cancellation. Result identity and TTL
 checks still run against current authority after scoring.
 
 Checkpoint journal installation moves its owned partition/writer guards and I/O

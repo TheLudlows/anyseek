@@ -33,7 +33,6 @@ impl RecordPartition {
             validate_restored_state(&config,&state)?;
             if !state.independent_snapshot || state.seq!=expected_seq {return Err(storage("certified archive cut mismatch"));}
             state.history.scope=format!("{:032x}",rand::random::<u128>());
-            state.evidence_quarantined|=state.records.values().any(temporal::protected);
             create(&destination,config,state).await?;
             drop(journal);
             Ok(())

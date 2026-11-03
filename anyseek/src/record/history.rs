@@ -148,7 +148,7 @@ impl Inner {
 #[cfg(test)]
 mod retention_tests {
     use super::*;
-    use crate::record::tests::{config,source_write,write};
+    use crate::record::tests::{config,write};
 
     fn apply_at(state:&mut State,settings:&RecordConfig,mut request:RecordWrite,at:u64) {
         request.operation_id.epoch=at/86_400_000;
@@ -167,7 +167,7 @@ mod retention_tests {
         drop(initial);
         let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let beginning=now-8*86_400_000;
-        apply_at(&mut state,&settings,source_write("source","s",&[]),beginning);
+        apply_at(&mut state,&settings,write("source","s","evidence original",ExpectedVersion::Absent),beginning);
         apply_at(&mut state,&settings,write("initial", "ordinary", "alpha", ExpectedVersion::Absent),beginning);
         for i in 1..=768u64 {
             apply_at(&mut state,&settings,write(&format!("update-{i}"),"ordinary","alpha",ExpectedVersion::Match(i)),beginning+i*900_000);

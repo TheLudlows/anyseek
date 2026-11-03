@@ -62,9 +62,9 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
         .ok_or_else(||storage("recovery cache inventory overflow")))?;
     let inventory=crate::storage::build_budget::reserve_memory(inventory_bytes).map_err(storage)?;
     let inventory_scope=crate::resources::Scope::current().map(|scope|scope.bytes(inventory_bytes)).transpose().map_err(storage)?;
-    let visible=evidence::visibility(&state.records)?;
+    let visible=visibility::visible_records(&state.records)?;
     let records=state.records.values().filter(|record|visible.get(&record.record_id)==Some(&true)
-        && !(state.evidence_quarantined&&temporal::protected(record))).collect::<Vec<_>>();
+        ).collect::<Vec<_>>();
     let mut indexes=Vec::new();
     for chunk in records.chunks(capacity::PACKAGE_RECORDS) {
         if indexes.len()>=capacity::segments(config){return Err(storage("recovery component population exceeded"));}

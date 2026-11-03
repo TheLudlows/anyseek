@@ -11,14 +11,13 @@ pub(super) struct Context<'a> {
     pub ordinals:&'a mut Vec<String>,
     pub locations:&'a mut BTreeMap<String,usize>,
     pub snapshot_bytes:&'a mut usize,
-    pub graph_cache:&'a mut graph::Cache,
     #[cfg(test)] pub fail_publication_stage:u8,
 }
 impl Inner {
     pub(super) fn replay_context(&mut self)->Context<'_> {
         Context {root:self.journal.root(),config:&self.config,state:&mut self.state,
             index:&mut self.index,ordinals:&mut self.ordinals,locations:&mut self.locations,
-            snapshot_bytes:&mut self.snapshot_bytes,graph_cache:&mut self.graph_cache,
+            snapshot_bytes:&mut self.snapshot_bytes,
             #[cfg(test)] fail_publication_stage:self.fail_publication_stage}
     }
 }
@@ -76,12 +75,11 @@ impl Context<'_> {
                 let bytes=mutation::snapshot_after(&*self.state,*self.snapshot_bytes,&applied,&prepared.record)?;
                 prepared.admit_containers(&mut *self.state,bytes)?;
                 self.publish_prepared(&applied,bytes,Some(prepared)).await?;
-                *self.graph_cache=graph::Cache::rebuild(&*self.state)?;
                 return Ok(());
             },
             Entry::Expired(event)=>{
                 let mut next=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;temporal::apply(&mut next,&event)?;
-                let visible=evidence::visibility(&next.records)?;
+                let visible=visibility::visible_records(&next.records)?;
                 let retired:Vec<_>=self.locations.keys().filter(|id|visible.get(*id)!=Some(&true)).cloned().collect();
                 for id in retired {let ordinal=self.locations.remove(&id).unwrap();self.index.retire(ordinal).await?;}
                 *self.state=next;
@@ -89,7 +87,6 @@ impl Context<'_> {
             Entry::HistoryTrim(event)=>history::apply_trim(&mut *self.state,&self.config.history,&event)?,
             Entry::Checkpoint{..}|Entry::Anchor(_)=>return Err(storage("unexpected anchor in operation stream")),
         }
-        *self.graph_cache=graph::Cache::rebuild(&*self.state)?;
         *self.snapshot_bytes=checkpoint_codec::length(&self.config, &*self.state)?;
         Ok(())
     }

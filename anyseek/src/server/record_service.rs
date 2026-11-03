@@ -270,6 +270,7 @@ impl Service {
         let weak = Arc::downgrade(service);
         tokio::spawn(async move {
             let mut generation = 0;
+            let mut live_cursor=String::new();
             let mut object_cursor = String::new();
             let mut next_sweep = tokio::time::Instant::now();
             loop {
@@ -280,6 +281,13 @@ impl Service {
                     Err(_) => continue,
                 };
                 let result = scope.run(async {
+                    // One loaded live partition per tick. Do not retain a map
+                    // guard or whole inventory while scheduling maintenance.
+                    let next=service.records.try_read().ok().and_then(|records| {
+                        records.range((std::ops::Bound::Excluded(live_cursor.clone()),std::ops::Bound::Unbounded))
+                            .next().or_else(||records.iter().next()).map(|(key,p)|(key.clone(),p.clone()))
+                    });
+                    if let Some((key,partition))=next {live_cursor=key;partition.maintenance_tick().await;}
                     let collection = async {
                         if let Some(entry) = service.catalog.next_deleted_collection(generation).await? {
                             generation = entry.generation;
@@ -733,7 +741,7 @@ fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics)
         "version":crate::VERSION,"statistics":stats,
         "limits":{"max_records":entry.config.max_records,"max_operations":entry.config.max_operations,"max_journal_bytes":entry.config.max_journal_bytes,"max_candidates":entry.config.max_candidates},
         "vector_dimensions":match &entry.config.index.inference { Inference::External {dimensions,..} => Some(*dimensions), _ => None },
-        "embedding_space_id":entry.config.embedding_space_id,"evidence_quarantined":stats.evidence_quarantined})
+        "embedding_space_id":entry.config.embedding_space_id})
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1574,8 +1582,7 @@ async fn restore(
         let entry = s.catalog.collections().await?.into_iter().find(|e|e.tenant_id==key && e.collection_id==id && e.generation==receipt.seq).ok_or_else(not_found)?;
         if entry.deleted { return Err(bad("restored collection has since been deleted")); }
         s.finish_collection(entry).await?;
-        let stats = s.record(&key, &id).await?.statistics().await?;
-        response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds(),"evidence_quarantined":stats.evidence_quarantined}))
+        response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()}))
     }).await
 }
 
@@ -2182,15 +2189,9 @@ mod tests {
     #[tokio::test]
     async fn service_data_fence_preserves_persistence_errors() {
         use http_body::Body as _;
-        let (service,path,headers)=setup().await;
-        let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
-        service.record("tenant","c").await.unwrap().write(serde_json::from_value(source).unwrap()).await.unwrap();
-        let record=service.record("tenant","c").await.unwrap(); let data=record.output_permit().unwrap();
-        // A real deletion invalidates the captured data permit without a public test hook.
-        let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","expected":{"Match":1},"document":null});
-        batch(State(service.clone()),headers,Path("c".into()),serde_json::to_vec(&json!({"writes":[deletion]})).unwrap().into()).await.unwrap();
-        assert!(protected_data(Ok(json!({"body":"secret"})),Some(data.clone())).is_err());
-        assert!(protected_data::<Value>(Err(bad("other error")),Some(data.clone())).is_err());
+        let (service,path,_headers)=setup().await;
+        let record=service.record("tenant","c").await.unwrap();
+        let data=record.output_permit().unwrap();
         for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
             let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
