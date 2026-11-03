@@ -39,20 +39,25 @@ def exercise(call, restart_with, directory, faults):
         call('POST','/api/v1/index',{'operation_id':operation(),'collection_id':cid,'config':config})
         request={**ordinary,'operation_id':operation()}
         receipt=write_one(call, target, request)['receipt']
-        clock(now+7*86400000-1)
+        clock(now+2*86400000-1)
         assert call('GET',target+'/doc/normal')['document']==ordinary['document']
-        clock(now+7*86400000)
+        clock(now+2*86400000)
         restart_with({**env,'ANYSEEK_HISTORY_TRIM_FAULT':stage})
-        if stage.startswith('crash_'):
-            try:call('GET',target+'/doc/normal')
-            except (OSError,http.client.HTTPException):pass
-            else:raise AssertionError('expected trim process exit')
-        else:
-            code=call('GET',target+'/doc/normal',status=503)['code']
-            if os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3':assert code=='durable_pending'
-            else:assert code in ('outcome_unknown','durable_pending')
+        # Load the partition, then wait for the bounded service sweep. Reads do
+        # not trim history or receive the background worker's result envelope.
+        deadline=time.monotonic()+30;observed=False
+        while time.monotonic()<deadline:
+            try:result=call('GET',target+'/doc/normal',status=(200,503))
+            except (OSError,http.client.HTTPException):
+                if not stage.startswith('crash_'):raise
+                observed=True;break
+            if result.get('code')=='recovery_required':
+                if not stage.startswith('crash_'):observed=True;break
+            else:assert result.get('document')==ordinary['document'],result
+            time.sleep(.05)
+        assert observed,('background history fault deadline',stage)
         restart_with(env)
         assert write_one(call, target, request)['receipt']==receipt
         assert call('GET',target+'/doc/normal')['document']==ordinary['document']
-    boundary='SQLite-confirmed durable pending/process exit' if os.environ.get('ANYSEEK_STORAGE_BACKEND')=='s3' else 'unknown/durable/process exit'
-    print('PASS history trim faults: seven-day boundary, '+boundary+' recovery, retained retry receipt and current record')
+    boundary='background fence/process exit'
+    print('PASS history trim faults: two-day default boundary, '+boundary+' recovery, retained retry receipt and current record')

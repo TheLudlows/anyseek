@@ -1,25 +1,24 @@
 # anyseek
 
-**面向 AI 记忆与知识的通用存储和检索服务。** 将原始记录、来源证据、版本、时间与显式关系放在同一个可恢复、可检索的数据视图中，通过 HTTP API 和独立 Web 控制台使用。
+**可靠、可更新的全文与向量检索引擎。** 保存原文、向量和普通元数据，通过 HTTP API 与独立控制台进行批量写入、查询、替换和删除。
 
-anyseek 负责保存、校验、检索和恢复；模型推理、文档解析、切块、embedding、实体抽取及记忆反思/重算由上层应用完成。自定义内容保存在 `document`，引擎管理稳定身份和系统元数据。
+anyseek 负责稳定身份、可靠提交、恢复、异步索引和检索；文档解析、切块、Embedding、来源版本管理、证据依赖、记忆反思和重算由上层应用负责。来源和章节信息可作为普通 `document` 字段保存。职责收敛的实施状态见[引擎边界](docs/engine-scope.md)。
 
 [服务指南](anyseek/src/server/README.md) · [UI 启动与部署](console/README.md) · [功能与限制](FEATURES.md) · [当前架构](ARCHITECTURE.md) · [项目全貌与下一步](docs/project-overview.md) · [文档索引](docs/README.md)
 
 ## 当前能力
 
-当前是 **有界单机实现**，P1-A 与已界定 P2 功能批次已经合入：
+当前是 **有界单机实现**：
 
 | 能力 | 当前行为 |
 | --- | --- |
 | 可信记录 | 稳定 Record ID、条件版本、防 ABA、原 operation_id 幂等重试；同步写入持久且可见，异步索引入口返回持久业务结果；未知结果明确区分 |
-| 来源与证据 | 精确来源版本、内联文本/页码定位、直接及间接依赖；来源删除立即隐藏，修订后的旧派生内容 stale 默认隐藏 |
 | 文档发布 | 记录逐批写入、逐步可查；向量按精确版本后补，不提供整文原子发布 |
-| 共同检索 | 全文 BM25F、外部向量、元数据/时间过滤、显式一跳关系融合、稳定排序和逐命中解释 |
-| 时间与生命周期 | 固定查询 evaluation_time、不可逆 TTL |
+| 共同检索 | 全文 BM25F、外部向量、元数据/时间过滤、稳定排序和逐命中解释 |
+| 时间与生命周期 | 固定查询 evaluation_time、TTL 到期过滤与后台回收 |
 | 授权与恢复 | API Key 认证 Tenant，同租户 Key 访问一致；撤销拒绝后续认证，数据生命周期独立；WAL/checkpoint、备份与独立恢复 |
 
-[独立控制台](console/README.md)支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览，以及来源、关系等检查入口。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。
+[独立控制台](console/README.md)支持连接、collection 创建、JSON/Record 写入与原请求重试、搜索和预览。完整请求与操作限制见 [服务指南](anyseek/src/server/README.md)。
 
 ## 边界与后续路线
 

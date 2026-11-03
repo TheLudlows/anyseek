@@ -375,7 +375,7 @@ export function Search({
               <details>
                 <summary>{t("高级查询参数 · JSON")}</summary>
                 <p className="field-help">
-                  {t("可配置 RRF、字段、过滤条件等。查询文本、向量及分页由上方控制；关系融合可在高级检查中调试。")}</p>
+                  {t("可配置 RRF、字段、过滤条件等。查询文本、向量及分页由上方控制。")}</p>
                 <textarea
                   aria-label={t("高级查询参数")}
                   className="code-input"

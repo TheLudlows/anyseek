@@ -572,8 +572,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_record_writes_and_source_barriers_span_two_frozen_shards_and_tail() {
-        use super::super::tests::{config, path, query, source_write, write};
+    async fn real_record_writes_and_deletes_span_two_frozen_shards_and_tail() {
+        use super::super::tests::{config, path, query, write};
         let root = path();
         let reference = path();
         let partition = RecordPartition::create(&root, config()).await.unwrap();
@@ -607,11 +607,11 @@ mod tests {
                 .await
                 .unwrap();
         }
-        both(&partition, &oracle, source_write("source", "s", &[])).await;
+        both(&partition, &oracle, write("initial","s","plain original",ExpectedVersion::Absent)).await;
         both(
             &partition,
             &oracle,
-            source_write("derived", "d", &[("s", 1)]),
+            write("peer","d","plain original",ExpectedVersion::Absent),
         )
         .await;
         both(
@@ -640,10 +640,10 @@ mod tests {
             write("third", "c", "alpha omega", ExpectedVersion::Absent),
         )
         .await;
-        let mut delete = write("source-delete", "s", "", ExpectedVersion::Match(1));
+        let mut delete = write("delete-target", "s", "", ExpectedVersion::Match(1));
         delete.document = None;
         both(&partition, &oracle, delete).await;
-        assert!(partition.get("d").await.unwrap().is_none());
+        assert!(partition.get("d").await.unwrap().is_some());
         for mode in [
             SearchMode::Lexical,
             SearchMode::Vector {

@@ -685,7 +685,6 @@ impl RecordPartition {
             inner.remote = None;
             let mut next = inner.state.try_clone()?;
             next.independent_snapshot = true;
-            next.evidence_quarantined |= next.records.values().any(temporal::protected);
             next.history.scope = Sha256::digest(format!("restore:{}", target.partition_id))
                 .iter()
                 .take(16)
@@ -766,7 +765,7 @@ mod tests {
         assert!(super::admit_checkpoint_chunks(&files, 0, 100).is_err());
     }
 
-    use super::super::tests::{config, path, query, write, source_write};
+    use super::super::tests::{config, path, query, write};
     use super::*;
     use crate::storage::{s3_compatible::S3CompatibleStore, sqlite_authority::SqliteAuthority};
     use object_store::memory::InMemory;
@@ -947,10 +946,10 @@ mod tests {
         assert!(matches!(p.write(request).await,Err(RecordError::Rejected(_))));
     }
     #[tokio::test]
-    async fn unlocked_encoding_applies_due_source_expiry_before_selecting_candidate() {
-        assert_unlocked_applies_due_source_expiry_before_selecting_candidate("encode").await;
+    async fn unlocked_encoding_revalidates_ttl_without_read_persistence() {
+        assert_unlocked_revalidates_ttl_without_read_persistence("encode").await;
     }
-    async fn assert_unlocked_applies_due_source_expiry_before_selecting_candidate(phase:&str) {
+    async fn assert_unlocked_revalidates_ttl_without_read_persistence(phase:&str) {
         let (p,_store,root,_db,clock)=source().await;
         let now=clock.0.load(Ordering::SeqCst);
         let mut original=write("ttl-original","r","alpha",ExpectedVersion::Absent);
@@ -962,9 +961,8 @@ mod tests {
         let task=tokio::spawn(async move {owner.write(command).await});
         wait_write_phase(&root,phase).await;
         clock.0.store(now+101,Ordering::SeqCst);
-        // Due TTL must still wait for writer, never return the stale body.
-        // Dropping this waiter must not cancel its accepted time transition.
-        assert!(tokio::time::timeout(Duration::from_millis(30),p.get("r")).await.is_err());
+        // Logical TTL does not wait for the writer or attempt remote persistence.
+        assert!(tokio::time::timeout(Duration::from_millis(100),p.get("r")).await.unwrap().unwrap().is_none());
         std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
         assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
@@ -972,7 +970,10 @@ mod tests {
         let p=cold(p,&root,clock).await;
         assert!(p.get("r").await.unwrap().is_none());
         assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
-        assert!(matches!(p.write(replacement).await,Err(RecordError::Rejected(_)|RecordError::Conflict(_))));
+        // No durable expiry ran. The technical version still matches; a new
+        // full replacement may reuse it and omission clears the elapsed TTL.
+        let receipt=p.write(replacement).await.unwrap();assert_eq!(receipt.version,2);
+        assert!(p.get("r").await.unwrap().unwrap().temporal.expire_at_ms.is_none());
     }
 
     #[tokio::test]
@@ -986,8 +987,8 @@ mod tests {
         assert_unlocked_discards_candidate_after_ttl_passes("upload").await;
     }
     #[tokio::test]
-    async fn unlocked_upload_applies_due_source_expiry_before_selecting_candidate() {
-        assert_unlocked_applies_due_source_expiry_before_selecting_candidate("upload").await;
+    async fn unlocked_upload_revalidates_ttl_without_read_persistence() {
+        assert_unlocked_revalidates_ttl_without_read_persistence("upload").await;
     }
 
     #[tokio::test]
@@ -1233,12 +1234,16 @@ mod tests {
         std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
         let before=clock.0.load(Ordering::SeqCst);
         clock.0.store(future,Ordering::SeqCst);
-        // History alone (no TTL) must take the serial maintenance route.
-        assert!(matches!(p.statistics().await,Err(RecordError::Busy)));
-        // Even when the clock no longer makes history due, the pinned trim
-        // intent must prevent a read from passing its authoritative install.
+        // History is scheduled independently of reads and is still installed
+        // through the authenticated checkpoint. A pending trim does not alter
+        // visible records or block a read-only view.
+        assert_eq!(p.statistics().await.unwrap().visible_seq,receipt.seq);
+        p.maintenance_tick().await;
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while !root.join(".test-indexer-started").exists(){tokio::task::yield_now().await;}
+        }).await.unwrap();
         clock.0.store(before,Ordering::SeqCst);
-        assert!(matches!(p.page(None,10).await,Err(RecordError::Busy)));
+        assert_eq!(p.page(None,10).await.unwrap().records.len(),1);
         assert_eq!(p.inner.lock().await.state.history.floor,0);
         clock.0.store(future,Ordering::SeqCst);
         std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
@@ -1316,6 +1321,30 @@ mod tests {
         assert!(matches!(p.write(write("too-big","c","alpha",ExpectedVersion::Absent)).await,Err(RecordError::Rejected(_))));
         assert_eq!(p.statistics().await.unwrap().visible_seq,before);
         assert!(p.inner.lock().await.healthy);
+    }
+
+    #[tokio::test]
+    async fn automatic_ttl_checkpoint_progresses_when_remote_tail_is_full() {
+        let (p,_store,root,_db,clock)=source().await;
+        p.inner.lock().await.remote.as_mut().unwrap().max_tail_blocks=64;
+        let now=clock.0.load(Ordering::SeqCst);
+        let mut request=write("ttl","r","alpha",ExpectedVersion::Absent);
+        request.temporal=Some(TemporalMetadata{expire_at_ms:Some(now+100),..Default::default()});
+        let receipt=p.write(request.clone()).await.unwrap();
+        let tail_bytes={let inner=p.inner.lock().await;let remote=inner.remote.as_ref().unwrap();
+            let authority=remote.authority.lock().await;let head=authority.read_head("source").unwrap().unwrap();authority.retained_tail_size(&head).unwrap().1};
+        p.inner.lock().await.remote.as_mut().unwrap().max_tail_bytes=tail_bytes as usize;
+        clock.0.store(now+100,Ordering::SeqCst);
+        assert!(p.get("r").await.unwrap().is_none());
+        // The expiry append cannot fit beside the retained write. The first
+        // owned job must checkpoint it rather than fail before capturing a cut.
+        p.start_index_job(Duration::from_secs(20),true).unwrap().finish().await.unwrap();
+        {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,1);assert!(inner.state.records["r"].document.is_some());
+            let remote=inner.remote.as_ref().unwrap();let head=remote.authority.lock().await.read_head("source").unwrap().unwrap();assert_eq!(head.log_base_seq,1);}
+        p.start_index_job(Duration::from_secs(20),true).unwrap().finish().await.unwrap();
+        assert_eq!(p.inner.lock().await.state.records["r"].version,2);
+        let p=cold(p,&root,clock).await;
+        assert!(p.get("r").await.unwrap().is_none());assert_eq!(p.write(request).await.unwrap(),receipt);
     }
 
     #[tokio::test]
@@ -1428,14 +1457,14 @@ mod tests {
         results
     }
     #[tokio::test]
-    async fn cache_corruption_and_loss_preserve_checkpoint_tail_and_hidden_evidence() {
+    async fn cache_corruption_and_loss_preserve_checkpoint_tail_and_independent_records() {
         let (p,_,root,db,clock) = source().await;
-        p.write(source_write("source","s",&[])).await.unwrap();
-        p.write(source_write("derived","d",&[("s",1)])).await.unwrap();
+        p.write(write("initial","s","plain original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("peer","d","plain original",ExpectedVersion::Absent)).await.unwrap();
         p.compact_journal().await.unwrap();
         let request = write("tail","a","alpha tail",ExpectedVersion::Absent);
         let receipt = p.write(request.clone()).await.unwrap();
-        let mut deletion = write("delete-source","s","",ExpectedVersion::Match(1)); deletion.document = None;
+        let mut deletion = write("delete-target","s","",ExpectedVersion::Match(1)); deletion.document = None;
         p.write(deletion).await.unwrap();
         let expected = scores(&p).await;
         let cache_root = db.with_extension("object-cache");
@@ -1458,22 +1487,22 @@ mod tests {
         assert!(damaged > 0);
         let p = cold(p, &root, clock.clone()).await;
         assert_eq!(scores(&p).await, expected);
-        assert!(p.get("d").await.unwrap().is_none());
+        assert!(p.get("d").await.unwrap().is_some());
         assert_eq!(p.write(request.clone()).await.unwrap(), receipt);
         std::fs::remove_dir_all(&cache_root).unwrap();
         let p = cold(p, &root, clock).await;
         assert_eq!(scores(&p).await, expected);
-        assert!(p.get("d").await.unwrap().is_none());
+        assert!(p.get("d").await.unwrap().is_some());
         assert_eq!(p.write(request).await.unwrap(), receipt);
         drop(p);
         let _ = std::fs::remove_dir_all(cache_root);
     }
 
     #[tokio::test]
-    async fn background_index_keeps_new_commits_and_hidden_evidence_after_cache_loss() {
+    async fn background_index_keeps_new_commits_and_deletions_after_cache_loss() {
         let (p,_,root,_,clock)=source().await;
-        p.write(source_write("source","s",&[])).await.unwrap();
-        p.write(source_write("derived","d",&[("s",1)])).await.unwrap();
+        p.write(write("initial","s","plain original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("peer","d","plain original",ExpectedVersion::Absent)).await.unwrap();
         std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
         let job=p.start_index_committed(std::time::Duration::from_secs(30)).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5),async {
@@ -1481,7 +1510,7 @@ mod tests {
         }).await.unwrap();
         let request=write("concurrent","a","alpha revised",ExpectedVersion::Absent);
         let receipt=p.write(request.clone()).await.unwrap();
-        let mut deletion=write("delete-source","s","",ExpectedVersion::Match(1));deletion.document=None;
+        let mut deletion=write("delete-target","s","",ExpectedVersion::Match(1));deletion.document=None;
         p.write(deletion).await.unwrap();
         let expected=scores(&p).await;
         assert!(matches!(p.collect_s3_garbage().await,Err(RecordError::Busy)));
@@ -1496,7 +1525,7 @@ mod tests {
         p.collect_s3_garbage().await.unwrap();
         let p=cold(p,&root,clock).await;
         assert_eq!(scores(&p).await,expected);
-        assert!(p.get("d").await.unwrap().is_none());
+        assert!(p.get("d").await.unwrap().is_some());
         assert_eq!(p.write(request).await.unwrap(),receipt);
         p.compact_journal().await.unwrap();
     }
@@ -1860,7 +1889,14 @@ mod tests {
             }
             let permit=p.output_permit().unwrap();
             std::fs::write(root.join(".test-cache-append-failure"),b"fail cache").unwrap();
-            let failed=if expiration {p.statistics().await.map(|_|())} else {p.write(request.clone()).await.map(|_|())};
+            let failed=if expiration {
+                // Reads only filter TTL; reclamation belongs to an owned
+                // maintenance job and must retain the confirmed-remote error.
+                assert_eq!(p.statistics().await.unwrap().visible_seq,1);
+                assert!(p.get("a").await.unwrap().is_none());
+                assert!(permit.deliver(||()).is_ok());
+                p.start_index_job(Duration::from_secs(20),true).unwrap().finish().await.map(|_|())
+            } else {p.write(request.clone()).await.map(|_|())};
             assert_eq!(failed,Err(RecordError::DurablePending(if expiration {2} else {1})));
             assert!(permit.deliver(||()).is_err());
             assert!(p.output_permit().is_err());

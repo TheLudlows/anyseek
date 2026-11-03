@@ -62,9 +62,9 @@ pub(super) async fn rebuild_recovery_view(root:&Path,config:&RecordConfig,state:
         .ok_or_else(||storage("recovery cache inventory overflow")))?;
     let inventory=crate::storage::build_budget::reserve_memory(inventory_bytes).map_err(storage)?;
     let inventory_scope=crate::resources::Scope::current().map(|scope|scope.bytes(inventory_bytes)).transpose().map_err(storage)?;
-    let visible=evidence::visibility(&state.records)?;
+    let visible=visibility::visible_records(&state.records)?;
     let records=state.records.values().filter(|record|visible.get(&record.record_id)==Some(&true)
-        && !(state.evidence_quarantined&&temporal::protected(record))).collect::<Vec<_>>();
+        ).collect::<Vec<_>>();
     let mut indexes=Vec::new();
     for chunk in records.chunks(capacity::PACKAGE_RECORDS) {
         if indexes.len()>=capacity::segments(config){return Err(storage("recovery component population exceeded"));}
@@ -318,8 +318,11 @@ mod tests {
         }
         crate::record::tests::wait_maintenance_idle(&p).await;
         {let inner=p.inner.lock().await;assert_eq!(inner.anchor.as_ref().unwrap().identity(),certificate,"cache merges must not replace the checkpoint");assert!(inner.index.components().await.len()<=capacity::segments(&settings)+1);}
+        log::info!("record_maintenance marker=long_suffix_before_drop");
         drop(p);
+        log::info!("record_maintenance marker=long_suffix_before_open");
         let p=RecordPartition::open(&root,settings.max_journal_bytes).await.unwrap();
+        log::info!("record_maintenance marker=long_suffix_after_open");
         assert_eq!(p.get("same").await.unwrap().unwrap().version,2305);
         assert_eq!(p.search("terminal".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,1);
         assert_eq!(p.search("alpha".into(),None,SearchMode::Lexical,vec![],10).await.unwrap().count_total,0);

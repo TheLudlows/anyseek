@@ -20,7 +20,7 @@ use std::path::Path;
         RecordWrite {
             vector_patch: None,
             temporal: None,
-            system: None,            operation_id: OperationId::new(nonce.into()),
+            operation_id: OperationId::new(nonce.into()),
             record_id: id.into(),
             expected,
             document: Some(

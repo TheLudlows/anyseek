@@ -33,8 +33,7 @@ impl QueryRecord {
         // Value/string containers; fixed overhead covers field names and the row.
         // This is explicit buffer admission, not an allocator/RSS hard limit.
         let bytes = (checkpoint_codec::json_length(&(&record.record_id, record.version,
-            &document, &record.temporal, record.ingested_at_ms, record.expired_at_ms,
-            &record.system))? as u64).checked_mul(32).and_then(|n| n.checked_add(1024))
+            &document, &record.temporal, record.ingested_at_ms, record.expired_at_ms))? as u64).checked_mul(32).and_then(|n| n.checked_add(1024))
             .ok_or(RecordError::Busy)?;
         let memory = crate::storage::build_budget::reserve_memory(bytes).map_err(|_| RecordError::Busy)?;
         let scope = crate::resources::Scope::current().map(|s| s.bytes(bytes))
@@ -44,7 +43,7 @@ impl QueryRecord {
             document: record.document.as_ref().map(|doc| doc.iter()
                 .filter(|(name, _)| selected(name)).map(|(k,v)| (k.clone(),v.clone())).collect()),
             temporal: record.temporal.clone(), ingested_at_ms: record.ingested_at_ms,
-            expired_at_ms: record.expired_at_ms, system: record.system.clone(),
+            expired_at_ms: record.expired_at_ms,
         };
         Ok(Self(Arc::new(Owner { record, _memory: memory, _scope: scope })))
     }
@@ -60,7 +59,7 @@ mod tests {
                 "title":"small", "rank":i64::MAX, "body":"x".repeat(256 * 1024),
                 "vector":vec![1.0; 4096]
             })).unwrap()), temporal:Default::default(), ingested_at_ms:0,
-            expired_at_ms:None, system:None };
+            expired_at_ms:None, };
         let scope = Arc::new(crate::resources::Governor::default())
             .admit("result-owner".into(), crate::resources::Lane::Foreground, 0).unwrap();
         scope.clone().run(async {

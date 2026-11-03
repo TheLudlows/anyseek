@@ -44,7 +44,6 @@ struct Candidate {
     index: view::RetrievalView,
     ordinals: Vec<String>,
     locations: BTreeMap<String, usize>,
-    graph: graph::Cache,
     snapshot_bytes: usize,
 }
 impl Candidate {
@@ -53,7 +52,6 @@ impl Candidate {
         std::mem::swap(&mut self.index, &mut inner.index);
         std::mem::swap(&mut self.ordinals, &mut inner.ordinals);
         std::mem::swap(&mut self.locations, &mut inner.locations);
-        std::mem::swap(&mut self.graph, &mut inner.graph_cache);
         std::mem::swap(&mut self.snapshot_bytes, &mut inner.snapshot_bytes);
     }
 }
@@ -135,7 +133,26 @@ impl RecordPartition {
                 if !inner.healthy { return Err(RecordError::RecoveryRequired); }
                 if inner.background.is_some() { return Err(RecordError::Busy); }
                 inner.index.drain_indexes().await?;
-                if mode==JobMode::VectorIndex {inner.advance_time().await?;}
+                if automatic {
+                    let evaluation=inner.observe_time()?;
+                    match inner.trim_history(evaluation).await {
+                        Ok(())=>{},
+                        Err(RecordError::Busy) if inner.maintenance_trim.is_some()=>{},
+                        Err(error)=>return Err(error),
+                    }
+                    if inner.maintenance_trim.is_none() {
+                        match inner.expire_due().await {
+                            Ok(())=>{},
+                            // A full WAL/remote tail needs this checkpoint before
+                            // it can admit an expiry command. Only a healthy,
+                            // pre-persistence Busy can defer expiry to the next sweep.
+                            Err(RecordError::Busy) if inner.healthy=>{},
+                            Err(error)=>return Err(error),
+                        }
+                    }
+                }
+
+                if mode==JobMode::VectorIndex {inner.observe_time()?;}
                 inner.reclaim_anchor_objects().await?;
                 let estimate = (inner.snapshot_bytes as u64).checked_mul(4)
                     .ok_or_else(||storage("index snapshot estimate overflow"))?;
@@ -246,7 +263,6 @@ impl RecordPartition {
                         .and_then(|n|n.checked_mul(64)).ok_or_else(||storage("index address budget overflow"))?,
                 }).await?;
                 let mut candidate = Candidate {
-                    graph:graph::Cache::rebuild(&loaded.state)?,
                     snapshot_bytes:checkpoint_codec::length(&config, &loaded.state)?,
                     state:loaded.state,index,ordinals,locations,
                 };
@@ -286,7 +302,7 @@ impl RecordPartition {
                         let _phase=maintenance::Phase::new("background_replay_and_proof",expected.seq);
                         let mut context=replay::Context {root:&root,config:&config,state:&mut candidate.state,
                             index:&mut candidate.index,ordinals:&mut candidate.ordinals,locations:&mut candidate.locations,
-                            snapshot_bytes:&mut candidate.snapshot_bytes,graph_cache:&mut candidate.graph,
+                            snapshot_bytes:&mut candidate.snapshot_bytes,
                             #[cfg(test)] fail_publication_stage:0};
                         for bytes in raw {context.replay(serde_json::from_slice(&bytes).map_err(storage)?).await?;}
                         intent.apply(&mut expected,&config)?;
@@ -534,7 +550,7 @@ pub(super) async fn pause_journal_install(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::tests::{config,path,write,source_write,query};
+    use super::super::tests::{config,path,write,query};
     #[tokio::test(flavor = "current_thread")]
     async fn compact_native_probe_releases_io_before_waiting_for_shard_statistics() {
         use std::{future::Future, io::Write, task::Poll};
@@ -683,6 +699,9 @@ mod tests {
         {let inner=p.inner.lock().await;assert_eq!(inner.state.time_watermark_ms,1_000);assert_eq!(inner.state.history.floor,0);}
         let request=write("second","b","beta",ExpectedVersion::Absent);
         let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
+        // Foreground writes no longer trim history. Explicitly perform the
+        // authenticated same-sequence maintenance transition during the build.
+        {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
         {let inner=p.inner.lock().await;assert_eq!(inner.state.history.floor,1);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
         let completion=job.handle.abort_handle();drop(job);drop(p);
         assert!(RecordPartition::open(&root,config().max_journal_bytes).await.is_err());
@@ -738,7 +757,7 @@ mod tests {
         let request=write("second","b","beta",ExpectedVersion::Absent);
         let receipt=tokio::time::timeout(Duration::from_secs(2),p.write(request.clone())).await.unwrap().unwrap();
         p.inner.lock().await.clock=Arc::new(Fixed(1_001+settings.history.retention_ms));
-        p.advance_time().await.unwrap();
+        {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
         {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,2);assert_eq!(inner.state.history.floor,2);assert_eq!(inner.background.as_ref().unwrap().revision,2);}
         let completion=job.handle.abort_handle();drop(job);drop(p);
         assert!(RecordPartition::open(&root,settings.max_journal_bytes).await.is_err());
@@ -785,7 +804,7 @@ mod tests {
         }).await.unwrap();
         let seq=p.inner.lock().await.state.seq;
         p.inner.lock().await.clock=Arc::new(Fixed(1_001+config().history.retention_ms));
-        p.advance_time().await.unwrap();
+        {let _writer=p.writer.lock().await;let mut inner=p.inner.lock().await;let at=inner.observe_time().unwrap();inner.trim_history(at).await.unwrap();}
         {let inner=p.inner.lock().await;assert_eq!(inner.state.seq,seq);assert_eq!(inner.state.history.floor,seq);assert_eq!(inner.background.as_ref().unwrap().revision,1);}
         std::fs::remove_file(root.join(".test-indexer-catchup-pause")).unwrap();
         assert_eq!(job.finish().await.unwrap(),seq);
@@ -797,8 +816,8 @@ mod tests {
     #[tokio::test]
     async fn background_index_cut_keeps_concurrent_writes_deletes_receipts_and_output_barrier() {
         let root=path();let p=RecordPartition::create(&root,config()).await.unwrap();
-        p.write(source_write("source","s",&[])).await.unwrap();
-        p.write(source_write("derived","d",&[("s",1)])).await.unwrap();
+        p.write(write("initial","s","plain original",ExpectedVersion::Absent)).await.unwrap();
+        p.write(write("peer","d","plain original",ExpectedVersion::Absent)).await.unwrap();
         p.write(write("first","a","alpha",ExpectedVersion::Absent)).await.unwrap();
         let output=p.output_permit().unwrap();
         std::fs::write(root.join(".test-indexer-pause"),b"pause").unwrap();
@@ -807,10 +826,10 @@ mod tests {
         assert!(matches!(p.index_committed(Duration::from_secs(1)).await,Err(RecordError::Busy)));
         let update=write("second","a","alpha revised",ExpectedVersion::Match(1));
         let receipt=p.write(update.clone()).await.unwrap();
-        let mut delete=write("delete-source","s","",ExpectedVersion::Match(1));delete.document=None;
+        let mut delete=write("delete-target","s","",ExpectedVersion::Match(1));delete.document=None;
         p.write(delete).await.unwrap();
-        assert!(p.get("d").await.unwrap().is_none());
-        assert!(output.deliver(||()).is_err());
+        assert!(p.get("d").await.unwrap().is_some());
+        assert!(output.deliver(||()).is_ok());
         p.write(write("third","b","alpha beta",ExpectedVersion::Absent)).await.unwrap();
         let before=query(&p,SearchMode::Lexical).await;
         std::fs::remove_file(root.join(".test-indexer-pause")).unwrap();
@@ -819,11 +838,11 @@ mod tests {
         assert_eq!(before.visible_seq,after.visible_seq);
         assert_eq!(before.count_total,after.count_total);
         assert_eq!(p.write(update.clone()).await.unwrap(),receipt);
-        assert!(p.get("d").await.unwrap().is_none());
+        assert!(p.get("d").await.unwrap().is_some());
         drop(p);let p=RecordPartition::open(&root,config().max_journal_bytes).await.unwrap();
         assert_eq!(p.write(update).await.unwrap(),receipt);
         assert_eq!(query(&p,SearchMode::Lexical).await.count_total,after.count_total);
-        assert!(p.get("d").await.unwrap().is_none());
+        assert!(p.get("d").await.unwrap().is_some());
         // Following incremental foreground flush must match the installed view.
         p.compact_journal().await.unwrap();drop(p);std::fs::remove_dir_all(root).unwrap();
     }

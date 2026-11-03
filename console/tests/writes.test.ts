@@ -98,6 +98,13 @@ test("envelopes retain raw expected version and document; IDs remain editor-owne
   );
 });
 
+test("source metadata remains plain document data and typed envelopes are rejected", () => {
+  const source = '{"record_id":"r","expected":"Any","document":{"source_id":"s","source_version":7,"chunk_index":3,"system":{"kind":"source"}}}';
+  assert.equal(JSON.parse(prepareDocumentRequests(source, true)[0].body).document.source_version, 7);
+  for (const system of [null, { kind: "source" }, { kind: "derived", evidence_refs: [] }])
+    assert.throws(() => prepareDocumentRequests(JSON.stringify({record_id:"r",expected:"Any",document:{},system}), true));
+});
+
 test("response JSON and individual fields retain exact numeric source tokens", () => {
   const raw =
     '{"visible_seq":9007199254740993,"next":{"visible_seq":9007199254740993,"after":"r"},"record":{"document":{"rank":9223372036854775807,"measure":1.2500e0,"data":{"n":-9223372036854775808}}}}';

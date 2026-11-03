@@ -2,7 +2,7 @@
 
 `PR feedback` runs on pull requests, master pushes and manual dispatch. It checks
 retired dependencies, console asset separation and the lexical partition;
-on code changes it builds and runs 174 exact bounded core regressions plus the
+on code changes it builds and runs the exact bounded core regression list plus the
 small query integration matrix on Linux and Windows, then builds the service with the same features and generates its
 OpenAPI schema. The case list is `scripts/ci_core_cases.json`; missing or renamed
 cases fail rather than silently matching zero tests. Integration scales are listed
@@ -12,6 +12,9 @@ Markdown file links and anchors need a separate check; the retired brand checker
 is not part of the workflow. Console build/unit checks run for code changes, and
 the Linux core lane runs the standalone browser suite against a disposable API.
 Both core lanes also run local/S3-fixture deleted-generation reclamation checks.
+The service persistence-error/fence case is invoked explicitly with
+`fault-injection` on both OSes; the normal service build and OpenAPI smoke keep
+the default feature set.
 Generic x86-64 CPU flags permit target caching within each OS; full acceptance
 retains the existing native-CPU configuration and source-only cache policy.
 
@@ -104,7 +107,7 @@ unchanged, as are HTTP repeated operation replay and separate Indexer/auth tests
 ## Small and full query fixtures (P1)
 
 Default PR core jobs explicitly select `small` and run six integration targets
-in addition to the 174 exact core cases. The manual matrix explicitly selects
+in addition to the exact core case list. The manual matrix explicitly selects
 `full`, including its four independent Windows lexical jobs. No production
 capacity, scoring, timeout or fault boundary changes.
 
@@ -188,7 +191,7 @@ the same object-store test module (always included in service builds).
 | --- | --- |
 | reads, writer ordering, checkpoint and cancellation | seed receipt; two ordered writes; blocked writer/checkpoint; cancelled waiter; cold recovery and exact receipt replay |
 | candidate TTL | deadline +100ms, advance +101ms; Busy; absent receipt; unchanged local/authority sequence; healthy writer; expired retry rejected |
-| source expiry | expired original plus version-matched replacement; Busy; no replacement receipt; source absent before/after cold recovery; retry rejected/conflicted |
+| TTL during planning/upload | inherited deadline crossing returns Busy with no new receipt; reads filter without persistence or writer wait; a fresh full replacement may reuse the unchanged technical version after expiry |
 
 The common gate wait retains its five-second timeout and polling interval.
 Owner/sequence fencing before persistence and owner/head changes after upload

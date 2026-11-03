@@ -120,11 +120,10 @@ impl State {
         self.residency = Some(Arc::new(Charge { bytes, lease }));
     }
     pub(super) fn value_bytes(&self) -> Result<usize, RecordError> {
-        self.records.bytes().checked_add(self.source_revisions.bytes()).and_then(|n|n.checked_add(self.operations.bytes())).ok_or_else(||storage("shared value total overflow"))
+        self.records.bytes().checked_add(self.operations.bytes()).ok_or_else(||storage("shared value total overflow"))
     }
     pub(super) fn container_bytes(&self, total: usize) -> Result<usize, RecordError> {
-        let values = self.records.bytes().checked_add(self.source_revisions.bytes())
-            .and_then(|n|n.checked_add(self.operations.bytes())).ok_or_else(||storage("shared value total overflow"))?;
+        let values = self.records.bytes().checked_add(self.operations.bytes()).ok_or_else(||storage("shared value total overflow"))?;
         total.checked_sub(values).and_then(|n|n.checked_add(self.lookup_bytes))
             .ok_or_else(||storage("state container size overflow"))
     }
@@ -151,9 +150,7 @@ impl State {
             time_watermark_ms: self.time_watermark_ms,
             retired_operation_prefix: self.retired_operation_prefix.clone(),
             expirations: self.expirations.clone(),
-            evidence_quarantined: self.evidence_quarantined,
             records: self.records.clone(),
-            source_revisions: self.source_revisions.clone(),
             operations: self.operations.clone(),
             operation_lookup: self.operation_lookup.clone(),
             lookup_bytes: self.lookup_bytes,
@@ -190,8 +187,7 @@ impl Prepared {
     pub(super) fn admit_containers(&self,state:&mut State,total:usize)->Result<(),RecordError>{
         let old=state.records.get(&self.record.record_id);
         let old_bytes=old.map(checkpoint_codec::json_length).transpose()?.unwrap_or(0);
-        let history=if self.operation.request.vector_patch.is_none() && old.is_some_and(evidence::retained_revision){old_bytes}else{0};
-        let values=state.value_bytes()?.checked_sub(old_bytes).and_then(|n|n.checked_add(history))
+        let values=state.value_bytes()?.checked_sub(old_bytes)
             .and_then(|n|n.checked_add(self.record.wire_bytes())).and_then(|n|n.checked_add(self.operation.wire_bytes()))
             .ok_or_else(||storage("prepared retained value size overflow"))?;
         let lookup=state.lookup_bytes.checked_add(checkpoint_codec::json_length(&self.operation.request.operation_id)?).ok_or_else(||storage("prepared lookup size overflow"))?;

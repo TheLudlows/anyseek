@@ -261,6 +261,7 @@ impl Service {
         let weak = Arc::downgrade(service);
         tokio::spawn(async move {
             let mut generation = 0;
+            let mut live_cursor=String::new();
             let mut object_cursor = String::new();
             let mut next_sweep = tokio::time::Instant::now();
             loop {
@@ -271,6 +272,13 @@ impl Service {
                     Err(_) => continue,
                 };
                 let result = scope.run(async {
+                    // One loaded live partition per tick. Do not retain a map
+                    // guard or whole inventory while scheduling maintenance.
+                    let next=service.records.try_read().ok().and_then(|records| {
+                        records.range((std::ops::Bound::Excluded(live_cursor.clone()),std::ops::Bound::Unbounded))
+                            .next().or_else(||records.iter().next()).map(|(key,p)|(key.clone(),p.clone()))
+                    });
+                    if let Some((key,partition))=next {live_cursor=key;partition.maintenance_tick().await;}
                     let collection = async {
                         if let Some(entry) = service.catalog.next_deleted_collection(generation).await? {
                             generation = entry.generation;
@@ -724,7 +732,7 @@ fn index_info(entry: &CollectionEntry, stats: anyseek::record::RecordStatistics)
         "version":crate::VERSION,"statistics":stats,
         "limits":{"max_records":entry.config.max_records,"max_operations":entry.config.max_operations,"max_journal_bytes":entry.config.max_journal_bytes,"max_candidates":entry.config.max_candidates},
         "vector_dimensions":match &entry.config.index.inference { Inference::External {dimensions,..} => Some(*dimensions), _ => None },
-        "embedding_space_id":entry.config.embedding_space_id,"evidence_quarantined":stats.evidence_quarantined})
+        "embedding_space_id":entry.config.embedding_space_id})
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1035,28 +1043,6 @@ async fn iterate(
         .await?;
     protected_data(result.map_err(Into::into), Some(data))
 }
-async fn evidence_excerpt(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
-    let reference:anyseek::record::EvidenceRef=parse(&bytes)?;
-    let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
-    let result =s.catalog.authorized_generation(key, id, p.generation,move |_|async move {p.evidence_excerpt(reference).await}).await?;
-    protected_data(result.map_err(Into::into),Some(data))
-}
-async fn entities(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
-    let request:PageRequest=parse(&bytes)?;
-    let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
-    let result =s.catalog.authorized_generation(key, id, p.generation,move |_|async move {
-        let mut page=p.entities(request.cursor,request.length).await?;
-        if !request.fields.is_empty(){for record in &mut page.records {if let Some(doc)=record.document.as_mut(){doc.retain(|field,_|request.fields.contains(field));}}}
-        Ok::<_,RecordError>(page)
-    }).await?;
-    protected_data(result.map_err(Into::into),Some(data))
-}
-async fn neighbors(State(s):State<Arc<Service>>,headers:HeaderMap,Path(id):Path<String>,bytes:Bytes)->Result<Response,Error> {
-    let request:anyseek::record::NeighborRequest=parse(&bytes)?;
-    let key=s.authenticate(&headers).await?;let p=s.record(&key,&id).await?;let data=p.output_permit()?;
-    let result =s.catalog.authorized_generation(key, id, p.generation,move |_|async move {p.neighbors(request).await}).await?;
-    protected_data(result.map_err(Into::into),Some(data))
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BatchRequest {
@@ -1130,7 +1116,7 @@ async fn deletion_plan(
     let result = s.catalog.authorized_generation(key, id, p.generation, move |entry| async move {
         let (seq, records) = match selection {
             DeleteSelection::Query { query } => {
-                if query.relation_fusion.is_some() || query.query_vector.is_some() || query.similarity_threshold.is_some() || query.query_string.trim().is_empty() {
+                if query.query_vector.is_some() || query.similarity_threshold.is_some() || query.query_string.trim().is_empty() {
                     return Err(bad("query deletion requires nonempty lexical text; use explicit all selection to clear"));
                 }
                 // Deletion selects every match, never the caller's display page or ANN sample.
@@ -1339,13 +1325,13 @@ async fn service_restore(
         service_budget(parent,"restored-service-",&target)?;
         if let Some(receipt)=Catalog::completed_service_restore(&target)? {
             if receipt.identity!=id || receipt.restored_from.as_ref()!=Some(&request.backup_id){return Err(bad("restore request identity reused"));}
-            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}));
+            return response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}));
         }
 
         let guard=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(parent.join(format!(".seekpower-service-{name}.lock"))).map_err(storage)?;
         guard.try_lock().map_err(storage)?;
         let receipt=Catalog::restore_service(s.root.join(format!("service-backup-{}",request.backup_id)),target.clone(),id,master_verifier()).await?;
-        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","evidence_restore":"quarantined; deletion-history reconciliation not yet supported","started":false}))
+        response(json!({"snapshot":receipt,"target_root":target,"authorization":"current master only; historical keys disabled; historical control operations rejected","started":false}))
     }).await
 }
 async fn create_s3_backup_pointer(
@@ -1585,8 +1571,7 @@ async fn restore(
         let entry = s.catalog.collections().await?.into_iter().find(|e|e.tenant_id==key && e.collection_id==id && e.generation==receipt.seq).ok_or_else(not_found)?;
         if entry.deleted { return Err(bad("restored collection has since been deleted")); }
         s.finish_collection(entry).await?;
-        let stats = s.record(&key, &id).await?.statistics().await?;
-        response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds(),"evidence_quarantined":stats.evidence_quarantined}))
+        response(json!({"collection_id":id,"operation_id":operation_id,"expires_at":operation_id.expires_at_unix_seconds()}))
     }).await
 }
 
@@ -1680,7 +1665,7 @@ async fn query(
         let fields = entry.config.schema.iter().filter(|f| f.store &&
             (request.fields.is_empty() || request.fields.contains(&f.field)))
             .map(|f| f.field.clone()).collect();
-        let result=anyseek::server::query_records(&p,query,request.relation_fusion,fields).await?;
+        let result=anyseek::server::query_records(&p,query,fields).await?;
         // Serialize directly from the admitted result. A serde_json::Value here
         // would duplicate every selected field before response encoding.
         Ok::<_,Error>(QueryResponse {
@@ -1688,7 +1673,7 @@ async fn query(
             time:start.elapsed().as_nanos(), offset:request.offset, length:request.length,
             count:result.hits.len(), count_total:request.count.then_some(result.count_total),
             query_terms:result.query_terms, hits:result.hits, visible_seq:result.visible_seq,
-            evaluation_time_ms:result.evaluation_time_ms, statistics:result.statistics, fusion:result.fusion,
+            evaluation_time_ms:result.evaluation_time_ms, statistics:result.statistics,
         })
     }).await?;
     protected_data(result, Some(data))
@@ -1708,7 +1693,6 @@ struct QueryResponse {
     visible_seq: u64,
     evaluation_time_ms: u64,
     statistics: anyseek::record::RecordStatistics,
-    fusion: Option<anyseek::record::FusionWindow>,
 }
 
 // Keep source/data validity checks at headers and body handoff; no credential recheck.
@@ -1817,9 +1801,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
         .route("/api/v1/index/{id}/ingest", get(ingest_progress).post(ingest))
         .route("/api/v1/index/{id}/query", post(query))
         .route("/api/v1/index/{id}/iterator", post(iterate))
-        .route("/api/v1/index/{id}/evidence",post(evidence_excerpt))
-        .route("/api/v1/index/{id}/entities",post(entities))
-        .route("/api/v1/index/{id}/neighbors",post(neighbors))
         .route("/api/v1/index/{id}/batch", post(batch))
         .route("/api/v1/index/{id}/delete-plan", post(deletion_plan))
         .route(
@@ -1937,6 +1918,67 @@ mod tests {
         let request=axum::http::Request::builder().method(method).uri(path).header("apikey",key).header("content-type","application/json").body(Body::from(body)).unwrap();
         let response=app.clone().oneshot(request).await.unwrap();let status=response.status();
         let value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();(status,value)
+    }
+    #[tokio::test]
+    async fn committed_ingest_engine_boundary_keeps_plain_metadata() {
+        let (service,path,headers)=setup().await;
+        let app=router(service.clone());let key=headers["apikey"].to_str().unwrap();
+        let partition=service.record("tenant","c").await.unwrap();
+        #[cfg(feature="fault-injection")]
+        let consumer_root=path.join(service.catalog.collection_entry("tenant","c").await.unwrap().directory());
+        #[cfg(feature="fault-injection")]
+        for lane in ["lexical","vector"] {
+            std::fs::write(consumer_root.join(format!(".test-{lane}-consumer-pause")),b"pause").unwrap();
+        }
+        let mut replay_request:Option<RecordWrite>=None;
+        for (route,array,id) in [("batch","writes","a"),("ingest","records","b")] {
+            let write=json!({"operation_id":OperationId::new(format!("plain-{id}")),"record_id":id,"expected":"Absent",
+                "document":{"body":"alpha","document_id":"upstream","chunk_index":3,"source_id":"s","source_version":7,"system":{"kind":"source"}}});
+            if route=="ingest" {replay_request=Some(serde_json::from_value(write.clone()).unwrap());}
+            let mut value=json!({});value[array]=json!([write]);
+            let (status,_)=tenant_api(&app,"POST",&format!("/api/v1/index/c/{route}"),key,Some(value)).await;
+            assert_eq!(status,StatusCode::OK);
+            for system in [Value::Null,json!({"kind":"source"}),json!({"kind":"derived","evidence_refs":[]})] {
+                let rejected=json!({"operation_id":OperationId::new(format!("business-{route}")),"record_id":"rejected","expected":"Absent","document":{"body":"not committed"},"system":system});
+                let mut value=json!({});value[array]=json!([rejected]);
+                let (status,_)=tenant_api(&app,"POST",&format!("/api/v1/index/c/{route}"),key,Some(value)).await;
+                assert_eq!(status,StatusCode::BAD_REQUEST);
+            }
+        }
+        assert_eq!(partition.committed_progress().await.committed_seq,Some(2));
+        let original=partition.get("a").await.unwrap().unwrap();
+        assert_eq!(original.document.unwrap()["source_version"],7);
+        let schema=openapi_document();
+        assert!(schema["components"]["schemas"].get("EvidenceRef").is_none());
+        assert!(schema["components"]["schemas"]["RecordWrite"]["properties"].get("system").is_none());
+        for route in ["evidence","entities","neighbors"] {
+            assert!(schema["paths"].get(format!("/api/v1/index/{{id}}/{route}")).is_none());
+            assert_eq!(tenant_api(&app,"POST",&format!("/api/v1/index/c/{route}"),key,Some(json!({}))).await.0,StatusCode::NOT_FOUND);
+        }
+        assert_eq!(tenant_api(&app,"GET","/api/v1/index/c/doc/a/status",key,None).await.0,StatusCode::OK);
+        assert_eq!(tenant_api(&app,"POST","/api/v1/index/c/query",key,Some(json!({"query":"alpha","relation_fusion":{}}))).await.0,StatusCode::BAD_REQUEST);
+        #[cfg(feature="fault-injection")]
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            while !["lexical","vector"].iter().all(|lane|consumer_root.join(format!(".test-{lane}-consumer-started")).exists()) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.expect("both owned consumers entered the pause");
+        // Ingest acknowledges durability, not consumer completion. Replay the
+        // identical request synchronously to join both workers before deleting
+        // their directory; no new operation or checkpoint is needed.
+        let owner=partition.clone();let request=replay_request.unwrap();
+        #[allow(unused_mut)]
+        let mut replay=tokio::spawn(async move {owner.write(request).await});
+        #[cfg(feature="fault-injection")]
+        {
+            let blocked=tokio::time::timeout(std::time::Duration::from_millis(50),&mut replay).await.is_err();
+            for lane in ["lexical","vector"] {std::fs::remove_file(consumer_root.join(format!(".test-{lane}-consumer-pause"))).unwrap();}
+            assert!(blocked,"synchronous replay must join the paused consumers");
+        }
+        let receipt=tokio::time::timeout(std::time::Duration::from_secs(10),replay).await.unwrap().unwrap().unwrap();
+        assert_eq!((receipt.seq,receipt.version),(2,1));
+        assert_eq!(partition.committed_progress().await.committed_seq,Some(2));
+        drop(partition);drop(app);drop(service);std::fs::remove_dir_all(path).unwrap();
     }
     #[tokio::test]
     async fn collection_create_schema_matches_http_profiles_and_optional_fields() {
@@ -2162,94 +2204,39 @@ mod tests {
         bytes
     }
 
-    #[tokio::test]
-    async fn service_real_http_source_delete_blocks_prepared_error_and_success_bodies() {
-        for target in ["r", "missing", "listing"] {
-            let (service, path, headers) = setup().await;
-            for doc in [
-                json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}}),
-                json!({"operation_id":OperationId::new("derived".into()),"record_id":"r","expected":"Absent","document":{"body":"secret-original"},"system":{"kind":"derived","evidence_refs":[{"record_id":"s","version":1}]}}),
-            ] {
-                batch(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&json!({"writes":[doc]})).unwrap().into()).await.unwrap();
-            }
-            let entered = Arc::new(tokio::sync::Notify::new());
-            let release = Arc::new(tokio::sync::Notify::new());
-            let e = entered.clone();
-            let r = release.clone();
-            let app = router(service.clone())
-                .layer(axum::middleware::from_fn(
-                    move |request: axum::extract::Request, next: axum::middleware::Next| {
-                        let e = e.clone();
-                        let r = r.clone();
-                        async move {
-                            let hold = request.headers().contains_key("x-test-hold");
-                            let result = next.run(request).await;
-                            if hold {
-                                e.notify_one();
-                                r.notified().await;
-                            }
-                            result
-                        }
-                    },
-                ))
-                .layer(axum::middleware::from_fn(delivery_gate));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let uri = if target == "listing" { "/api/v1/apikey".to_string() } else { format!("/api/v1/index/c/doc/{target}") };
-            let key = STANDARD.encode([7; 32]);
-            let pending = tokio::spawn(raw(
-                address,
-                format!(
-                    "GET {uri} HTTP/1.1\r\nHost: localhost\r\napikey: {key}\r\nx-test-hold: yes\r\nConnection: close\r\n\r\n"
-                ),
-            ));
-            entered.notified().await;
-            let body =
-                json!({"writes":[{"operation_id":OperationId::new("delete-source".into()),"record_id":"s","expected":{"Match":1},"document":null}]}).to_string();
-            let acknowledgment=raw(address,format!("POST /api/v1/index/c/batch HTTP/1.1\r\nHost: localhost\r\napikey: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",headers["apikey"].to_str().unwrap(),body.len())).await;
-            assert!(String::from_utf8_lossy(&acknowledgment).starts_with("HTTP/1.1 200"));
-            release.notify_one();
-            let received = pending.await.unwrap();
-            let text = String::from_utf8_lossy(&received);
-            assert!(
-                !text.contains("secret-original") && !text.contains("not_found") && !text.contains("active_records"),
-                "protected body escaped source deletion: {text}"
-            );
-            server.abort();
-            let _ = server.await;
-            drop(service);
-            std::fs::remove_dir_all(path).unwrap();
-        }
-    }
-    #[tokio::test]
-    async fn service_source_delete_blocks_body_after_response_header_handoff() {
-        use http_body::Body as _;
-        let (service, path, headers) = setup().await;
-        let source = json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret-source"},"system":{"kind":"source"}});
-        batch(State(service.clone()), headers.clone(), Path("c".into()), serde_json::to_vec(&json!({"writes":[source]})).unwrap().into()).await.unwrap();
-        let response = read(State(service.clone()), headers.clone(), Path(("c".into(), "s".into())), Query(GetDocumentRequest { fields: String::new() })).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let delete=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","expected":{"Match":1},"document":null});
-        batch(State(service.clone()), headers, Path("c".into()), serde_json::to_vec(&json!({"writes":[delete]})).unwrap().into()).await.unwrap();
-        let mut body=response.into_body();
-        let frame=std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await;
-        assert!(matches!(frame, Some(Err(_))));
-        drop(body);drop(service);std::fs::remove_dir_all(path).unwrap();
-    }
-
+    #[cfg(feature = "fault-injection")]
     #[tokio::test]
     async fn service_data_fence_preserves_persistence_errors() {
         use http_body::Body as _;
-        let (service,path,headers)=setup().await;
-        let source=json!({"operation_id":OperationId::new("source".into()),"record_id":"s","expected":"Absent","document":{"body":"secret"},"system":{"kind":"source"}});
-        batch(State(service.clone()),headers.clone(),Path("c".into()),serde_json::to_vec(&json!({"writes":[source]})).unwrap().into()).await.unwrap();
-        let record=service.record("tenant","c").await.unwrap(); let data=record.output_permit().unwrap();
-        // A real deletion invalidates the captured data permit without a public test hook.
-        let deletion=json!({"operation_id":OperationId::new("delete".into()),"record_id":"s","expected":{"Match":1},"document":null});
-        batch(State(service.clone()),headers,Path("c".into()),serde_json::to_vec(&json!({"writes":[deletion]})).unwrap().into()).await.unwrap();
-        assert!(protected_data(Ok(json!({"body":"secret"})),Some(data.clone())).is_err());
-        assert!(protected_data::<Value>(Err(bad("other error")),Some(data.clone())).is_err());
+        // Isolate the existing fault environment from parallel service tests.
+        if std::env::var_os("ANYSEEK_SERVICE_FENCE_CHILD").is_none() {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","record_service::tests::service_data_fence_preserves_persistence_errors","--nocapture"])
+                .env("ANYSEEK_SERVICE_FENCE_CHILD","1")
+                .env("ANYSEEK_RECORD_FAULT_NONCE","service-fence-failure")
+                .env("ANYSEEK_RECORD_FAULT","after_durable")
+                .output().unwrap();
+            assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),"{output:?}");
+            return;
+        }
+        let (service,path,_headers)=setup().await;
+        let record=service.record("tenant","c").await.unwrap();
+        let data=record.output_permit().unwrap();
+        assert!(data.deliver(||()).is_ok());
+        let prepared_bodies=[
+            protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).unwrap().into_body(),
+            protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).unwrap().into_body(),
+        ];
+        let request=serde_json::from_value(json!({"operation_id":OperationId::new("service-fence-failure".into()),
+            "record_id":"r","expected":"Absent","document":{"body":"alpha"}})).unwrap();
+        assert_eq!(record.write(request).await.unwrap_err(),RecordError::DurablePending(1));
+        assert_eq!(data.deliver(||()),Err(RecordError::RecoveryRequired));
+        assert!(matches!(record.output_permit(),Err(RecordError::RecoveryRequired)));
+        assert!(protected_data(Ok(json!({"body":"must not escape"})),Some(data.clone())).is_err());
+        assert!(protected_data::<Value>(Err(bad("ordinary error")),Some(data.clone())).is_err());
+        for mut body in prepared_bodies {
+            assert!(matches!(std::future::poll_fn(|cx|Pin::new(&mut body).poll_frame(cx)).await,Some(Err(_))));
+        }
         for error in [RecordError::DurablePending(1),RecordError::OutcomeUnknown("injected".into())] {
             let response=protected_data::<Value>(Err(error.clone().into()),Some(data.clone())).unwrap();
             assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
@@ -2478,34 +2465,24 @@ fn openapi_document() -> Value {
     struct Api;
     let mut doc = serde_json::to_value(Api::openapi()).unwrap();
     doc["openapi"] = json!("3.1.0");
-    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine Record/catalog, source/evidence, temporal and relation routes. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root keep historical credentials disabled. See docs/record-model.md for acceptance limits."});
+    doc["info"] = json!({"title":"anyseek Record service","version":crate::VERSION,"description":"Bounded single-machine reliable Record/catalog and text/vector retrieval routes. Source and chunk identifiers are ordinary document metadata. Writes require stable operation and record identities. Batch writes are explicitly non-atomic; deletion plans require saved per-target operation IDs. Collection restore and full-service recovery into a new stopped root keep historical credentials disabled. See docs/record-model.md for acceptance limits."});
     let schemas = doc["components"]["schemas"].as_object_mut().unwrap();
     schemas.insert("OperationId".into(),json!({"type":"object","required":["epoch","nonce"],"properties":{"epoch":{"type":"integer","minimum":0},"nonce":{"type":"string"}}}));
     schemas.insert("RecordWrite".into(),json!({"type":"object","additionalProperties":false,"required":["operation_id","record_id","expected","document"],"properties":{"operation_id":{"$ref":"#/components/schemas/OperationId"},"record_id":{"type":"string"},"expected":{"oneOf":[{"type":"string","enum":["Absent","Any"]},{"type":"object","required":["Match"],"properties":{"Match":{"type":"integer","minimum":0}},"additionalProperties":false}]},"document":{"type":["object","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["required"] = json!(["operation_id","record_id","expected"]);
     schemas.get_mut("RecordWrite").unwrap()["anyOf"] = json!([{"required":["document"]},{"required":["vector_patch"]}]);
-    schemas.get_mut("RecordWrite").unwrap()["properties"]["vector_patch"] = json!({"type":"object","minProperties":1,"description":"Fill absent vector fields with exact Match version; omit document/system. Preserves body version."});
-    schemas.get_mut("RecordWrite").unwrap()["properties"]["system"] = json!({"$ref":"#/components/schemas/EvidenceMetadata"});
-    schemas.insert("TemporalMetadata".into(),json!({"type":"object","additionalProperties":false,"description":"UTC Unix milliseconds. TTL is irreversible; business validity is independent.","properties":{"event_time_ms":{"type":["integer","null"],"minimum":-62135596800000i64,"maximum":253402300799999i64},"valid_from_ms":{"type":["integer","null"]},"valid_to_ms":{"type":["integer","null"]},"expire_at_ms":{"type":["integer","null"],"minimum":0,"maximum":253402300799999i64}}}));
+    schemas.get_mut("RecordWrite").unwrap()["properties"]["vector_patch"] = json!({"type":"object","minProperties":1,"description":"Fill absent vector fields with exact Match version; omit document. Preserves body version."});
+    schemas.insert("TemporalMetadata".into(),json!({"type":"object","additionalProperties":false,"description":"UTC Unix milliseconds. TTL excludes expired bodies from retrieval; background maintenance reclaims them durably. Within a process evaluation time does not move backwards. After restart only the persisted time floor remains: an uncollected body may become visible again if wall-clock rollback crosses its deadline. TTL is not a privacy-erasure guarantee; business validity is independent.","properties":{"event_time_ms":{"type":["integer","null"],"minimum":-62135596800000i64,"maximum":253402300799999i64},"valid_from_ms":{"type":["integer","null"]},"valid_to_ms":{"type":["integer","null"]},"expire_at_ms":{"type":["integer","null"],"minimum":0,"maximum":253402300799999i64}}}));
     schemas.insert("TimeRange".into(),json!({"type":"object","additionalProperties":false,"description":"Half-open [from_ms,to_ms); missing endpoints are unbounded.","properties":{"from_ms":{"type":["integer","null"]},"to_ms":{"type":["integer","null"]}}}));
     schemas.insert("TemporalFilter".into(),json!({"type":"object","additionalProperties":false,"properties":{"event":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"ingested":{"anyOf":[{"$ref":"#/components/schemas/TimeRange"},{"type":"null"}]},"valid_at_ms":{"type":["integer","null"]}}}));
     schemas.get_mut("RecordWrite").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalMetadata"},{"type":"null"}]});
     schemas.get_mut("SearchRequestObject").unwrap()["properties"]["temporal"]=json!({"anyOf":[{"$ref":"#/components/schemas/TemporalFilter"},{"type":"null"}]});
-    schemas.insert("NeighborRequest".into(),json!({"type":"object","additionalProperties":false,"required":["seeds","per_seed","max_candidates"],"properties":{"seeds":{"type":"array","minItems":1,"maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}},"direction":{"type":"string","enum":["in","out","both"]},"relation_types":{"type":"array","maxItems":16,"items":{"type":"string"}},"per_seed":{"type":"integer","minimum":1,"maximum":128},"max_candidates":{"type":"integer","minimum":1},"allow_partial":{"type":"boolean"}}}));
-    schemas.insert("RelationFusion".into(),json!({"type":"object","additionalProperties":false,"required":["neighbors","rrf","relation_weight"],"properties":{"neighbors":{"$ref":"#/components/schemas/NeighborRequest"},"rrf":{"$ref":"#/components/schemas/RrfOptions"},"relation_weight":{"type":"number","exclusiveMinimum":0}}}));
-    schemas.get_mut("SearchRequestObject").unwrap()["properties"]["relation_fusion"]=json!({"anyOf":[{"$ref":"#/components/schemas/RelationFusion"},{"type":"null"}]});
-    schemas.insert("RelationMetadata".into(),json!({"type":"object","additionalProperties":false,"required":["from","to","relation_type"],"properties":{"from":{"$ref":"#/components/schemas/EvidenceRef"},"to":{"$ref":"#/components/schemas/EvidenceRef"},"relation_type":{"type":"string","minLength":1,"maxLength":128},"weight":{"type":["number","null"]}}}));
-    schemas.insert("EvidenceRef".into(), json!({"type":"object","additionalProperties":false,"required":["record_id","version"],"properties":{"record_id":{"type":"string"},"version":{"type":"integer","minimum":1}}}));
-    schemas.insert("EvidenceLocator".into(),json!({"oneOf":[{"type":"object","additionalProperties":false,"required":["kind","field","start","end"],"properties":{"kind":{"const":"utf8"},"field":{"type":"string"},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":1}}},{"type":"object","additionalProperties":false,"required":["kind","field","page"],"properties":{"kind":{"const":"page"},"field":{"type":"string"},"page":{"type":"integer","minimum":1}}}]}));
-    schemas.get_mut("EvidenceRef").unwrap()["properties"]["locator"]=json!({"anyOf":[{"$ref":"#/components/schemas/EvidenceLocator"},{"type":"null"}]});
-    schemas.insert("EvidenceMetadata".into(), json!({"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"type":"string","enum":["source","derived","entity","relation"]},"evidence_refs":{"type":"array","maxItems":32,"items":{"$ref":"#/components/schemas/EvidenceRef"}}}}));
-    schemas.get_mut("EvidenceMetadata").unwrap()["properties"]["relation"]=json!({"anyOf":[{"$ref":"#/components/schemas/RelationMetadata"},{"type":"null"}]});
     let mut paths = serde_json::Map::new();
     for (path, method, summary, schema) in [
         ("/api/v1/live", "get", "Server version", None),
+        ("/api/v1/index/{id}/doc/{record_id}/status", "get", "Current technical version, visibility and pending vector fields", None),
         ("/api/v1/tenants","get","Master: list Tenant IDs",None),
         ("/api/v1/tenants","post","Master: create Tenant",Some(json!({"type":"object","additionalProperties":false,"required":["tenant_id","operation_id"],"properties":{"tenant_id":{"type":"string","pattern":"^[a-z][a-z0-9_-]{0,62}$"},"operation_id":{"$ref":"#/components/schemas/OperationId"}}}))),
-        ("/api/v1/index/{id}/doc/{record_id}/status", "get", "Content-free visibility reason and exact current version; stale bodies remain hidden", None),
         ("/api/v1/apikey", "get", "List collections of the authenticated Tenant", None),
         (
             "/api/v1/apikey",
@@ -2565,9 +2542,6 @@ fn openapi_document() -> Value {
             "Master: control-plane operation status",
             None,
         ),
-        ("/api/v1/index/{id}/evidence","post","Exact inline source excerpt; current source visibility still required",Some(json!({"$ref":"#/components/schemas/EvidenceRef"}))),
-        ("/api/v1/index/{id}/entities","post","Visible entity directory, stable ID paging in one view",Some(json!({"type":"object","properties":{"cursor":{"type":["object","null"]},"length":{"type":"integer","minimum":1,"maximum":1000}}}))),
-        ("/api/v1/index/{id}/neighbors","post","Bounded exact-version one-hop; explicit partial counts are windows",Some(json!({"$ref":"#/components/schemas/NeighborRequest"}))),
         (
             "/api/v1/index/{id}/iterator",
             "post",
@@ -2728,7 +2702,7 @@ fn identity_schemas_and_external_sync_routes_are_strict() {
     let doc = openapi_document();
     assert!(doc["paths"].get("/api/v1/index/{id}/doc").is_none());
     assert!(doc["paths"].get("/api/v1/index/{id}/batch").is_some());
-    for name in ["RecordWrite", "EvidenceRef"] {
+    for name in ["RecordWrite"] {
         let schema = &doc["components"]["schemas"][name];
         assert!(schema["properties"].get("routing_key").is_none());
         assert_eq!(schema["additionalProperties"], false);

@@ -11,19 +11,19 @@ pub(super) struct Context<'a> {
     pub ordinals:&'a mut Vec<String>,
     pub locations:&'a mut BTreeMap<String,usize>,
     pub snapshot_bytes:&'a mut usize,
-    pub graph_cache:&'a mut graph::Cache,
     #[cfg(test)] pub fail_publication_stage:u8,
 }
 impl Inner {
     pub(super) fn replay_context(&mut self)->Context<'_> {
         Context {root:self.journal.root(),config:&self.config,state:&mut self.state,
             index:&mut self.index,ordinals:&mut self.ordinals,locations:&mut self.locations,
-            snapshot_bytes:&mut self.snapshot_bytes,graph_cache:&mut self.graph_cache,
+            snapshot_bytes:&mut self.snapshot_bytes,
             #[cfg(test)] fail_publication_stage:self.fail_publication_stage}
     }
 }
 impl Context<'_> {
     pub(super) async fn stage_stable_tail(&mut self)->Result<(),RecordError> {
+        #[cfg(test)] let _phase=maintenance::Phase::new("replay_stage_tail",self.state.seq);
         let disk_limit=self.config.max_journal_bytes.checked_mul(64).and_then(|n|n.checked_add(32*1024*1024))
             .ok_or_else(||storage("recovery cache disk budget overflow"))?;
         // Catch-up may already own a build scope. Ordinary cold recovery starts
@@ -62,6 +62,7 @@ impl Context<'_> {
     pub(super) async fn replay(&mut self,entry:Entry)->Result<(),RecordError>{
         match entry {
             Entry::Applied(applied)=>{
+                #[cfg(test)] let _phase=(applied.receipt.seq%128==0).then(||maintenance::Phase::new("replay_applied",applied.receipt.seq));
                 let (index_bytes,updates)=build_budget::write_estimate(&*self.state,&self.config,&applied)?;
                 if index_bytes>0 && !self.index.can_admit(index_bytes,updates).await {
                     self.stage_stable_tail().await?;
@@ -76,12 +77,11 @@ impl Context<'_> {
                 let bytes=mutation::snapshot_after(&*self.state,*self.snapshot_bytes,&applied,&prepared.record)?;
                 prepared.admit_containers(&mut *self.state,bytes)?;
                 self.publish_prepared(&applied,bytes,Some(prepared)).await?;
-                *self.graph_cache=graph::Cache::rebuild(&*self.state)?;
                 return Ok(());
             },
             Entry::Expired(event)=>{
                 let mut next=self.state.try_clone_with_growth(checkpoint_codec::json_length(&event)?)?;temporal::apply(&mut next,&event)?;
-                let visible=evidence::visibility(&next.records)?;
+                let visible=visibility::visible_records(&next.records)?;
                 let retired:Vec<_>=self.locations.keys().filter(|id|visible.get(*id)!=Some(&true)).cloned().collect();
                 for id in retired {let ordinal=self.locations.remove(&id).unwrap();self.index.retire(ordinal).await?;}
                 *self.state=next;
@@ -89,7 +89,6 @@ impl Context<'_> {
             Entry::HistoryTrim(event)=>history::apply_trim(&mut *self.state,&self.config.history,&event)?,
             Entry::Checkpoint{..}|Entry::Anchor(_)=>return Err(storage("unexpected anchor in operation stream")),
         }
-        *self.graph_cache=graph::Cache::rebuild(&*self.state)?;
         *self.snapshot_bytes=checkpoint_codec::length(&self.config, &*self.state)?;
         Ok(())
     }

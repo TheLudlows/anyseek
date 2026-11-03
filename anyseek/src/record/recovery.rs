@@ -14,8 +14,6 @@ pub struct RecoveryIdentity {
     pub checkpoint_bytes: usize,
     /// Digest of configuration and complete authoritative state.
     pub digest: String,
-    /// Independent restored evidence cannot act as current deletion authority.
-    pub quarantined: bool,
     /// Every independent snapshot is non-authoritative, including empty ones.
     pub independent_snapshot: bool,
 }
@@ -31,7 +29,6 @@ impl RecordPartition {
         Ok(RecoveryIdentity {
             lineage: inner.state.lineage.clone(), seq: inner.state.seq, checkpoint_bytes: inner.snapshot_bytes,
             digest: digest(&inner.config, &inner.state)?,
-            quarantined: inner.state.evidence_quarantined,
             independent_snapshot: inner.state.independent_snapshot,
         })
     }

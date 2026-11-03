@@ -109,7 +109,7 @@ impl Delta {
         let (hash, entries, expanded) = digest.finish();
         if entries != writer.entries || expanded != writer.expanded { return Err(invalid("delta preparation count mismatch")); }
         Ok(Some(Self { parent: identity, frames: Descriptor {
-            format: 6, config: config.clone(), chunks: writer.chunks,
+            format: 7, config: config.clone(), chunks: writer.chunks,
             entries, expanded, digest: hash, _build_lease:Some(Arc::new(writer.metadata)),
         }}))
     }
@@ -120,7 +120,7 @@ impl Delta {
         &self, root: &Path, pool: &PoolReader, authority: u64,
         mut accept: impl FnMut(Entry) -> Result<(), RecordError>,
     ) -> Result<(), RecordError> {
-        if self.frames.format != 6 { return Err(invalid("unsupported delta format")); }
+        if self.frames.format != 7 { return Err(invalid("unsupported delta format")); }
         let mut actual = PieceDigest::new();
         self.frames.visit_pieces(root, pool, authority, None, |wire, _, bytes| {
             actual.value(&wire, bytes)?;
@@ -265,7 +265,6 @@ fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError>
             epoch_watermark: state.epoch_watermark,
             time_watermark_ms: state.time_watermark_ms,
             retired_operation_prefix: state.retired_operation_prefix.clone(),
-            evidence_quarantined: state.evidence_quarantined,
             ..State::default()
         };
         sink.push(&BTreeMap::from([("header", &header)]))?;
@@ -274,9 +273,6 @@ fn visit_state(state: &State, sink: &mut impl Pieces) -> Result<(), RecordError>
                 "records",
                 BTreeMap::from([(id, record)]),
             )]))?;
-        }
-        for record in &state.source_revisions {
-            sink.push(&BTreeMap::from([("source_revisions", [record])]))?;
         }
         for operation in &state.operations {
             sink.push(&BTreeMap::from([("operations", [operation])]))?;
@@ -346,7 +342,7 @@ impl Descriptor {
             file.sync_all().map_err(storage)?;
         }
         Ok(Self {
-            format: 5,
+            format: 6,
             config: config.clone(),
             chunks: writer.chunks,
             entries: writer.entries,
@@ -360,7 +356,7 @@ impl Descriptor {
         mut accept:impl FnMut(Value,u64,u64)->Result<u64,RecordError>) -> Result<(),RecordError> {
         validate_config(&self.config)?;
         let limit = authority.min(self.config.max_journal_bytes);
-        if !matches!(self.format, 5 | 6)
+        if !matches!(self.format, 6 | 7)
             || self.chunks.is_empty()
             || self.chunks.len() > MAX_CHUNKS
             || self.expanded > expanded_limit(limit)?
@@ -467,14 +463,14 @@ impl Descriptor {
     // State, retaining only one decoded frame rather than a second full history.
     #[cfg(test)]
     pub(super) fn verify_expected(&self,root:&Path,pool:&PoolReader,authority:u64,state:&State)->Result<(),RecordError> {
-        if self.format != 5 { return Err(invalid("unsupported complete state format")); }
+        if self.format != 6 { return Err(invalid("unsupported complete state format")); }
         self.verify_encoded(root, pool, authority, &checkpoint_codec::StateEncoding::new(state)?)
     }
     pub(super) fn verify_encoded(&self, root: &Path, pool: &PoolReader, authority: u64,
         encoded: &checkpoint_codec::StateEncoding<'_>,
     ) -> Result<(), RecordError> {
         let state = encoded.state();
-        if self.format != 5 { return Err(invalid("unsupported complete state format")); }
+        if self.format != 6 { return Err(invalid("unsupported complete state format")); }
         // Recoverability is checked per bounded frame/value, with the complete
         // residency charged to the shared pool by its actual owners.
         if encoded.digest() != self.digest || encoded.length() as u64 > authority.min(self.config.max_journal_bytes) {
@@ -496,7 +492,7 @@ impl Descriptor {
         pool: &PoolReader,
         authority: u64,
     ) -> Result<Decoded, RecordError> {
-        if self.format != 5 { return Err(invalid("unsupported complete state format")); }
+        if self.format != 6 { return Err(invalid("unsupported complete state format")); }
         let mut state=None;
         let mut residency=reserve_memory(0).map_err(storage)?;
         self.visit_pieces(root,pool,authority,Some(&mut residency),|wire,ordinal,_| {
@@ -541,7 +537,6 @@ fn apply_piece(
         )
         .map_err(storage)?;
         if !header.records.is_empty()
-            || !header.source_revisions.is_empty()
             || !header.operations.is_empty()
             || !header.expirations.is_empty()
         {
@@ -560,7 +555,6 @@ fn apply_piece(
     let (kind, value) = object.iter_mut().next().unwrap();
     let exceeded = match kind.as_str() {
         "records" => state.records.len() >= config.max_records,
-        "source_revisions" => state.source_revisions.len() >= config.max_records,
         "operations" => state.operations.len() >= config.max_operations,
         "expirations" => state.expirations.len() >= config.max_operations,
         _ => false,
@@ -590,7 +584,6 @@ fn apply_piece(
                 }
             }
         }
-        "source_revisions" => state.source_revisions.push(one!(Record))?,
         "operations" => state.operations.push(one!(Applied))?,
 
         "expirations" => state.expirations.push(one!(temporal::Expiration)),
@@ -646,13 +639,13 @@ mod tests {
         let partition = RecordPartition::create(&root.join("partition"), config.clone())
             .await
             .unwrap();
-        let mut first = super::super::tests::source_write("source", "s", &[]);
+        let mut first = super::super::tests::write("initial","s","plain original",ExpectedVersion::Absent);
         first.document.as_mut().unwrap().insert(
             "opaque".into(),
             serde_json::json!({"$payload":123,"document":"unchanged", "float":1.23456789}),
         );
         partition.write(first).await.unwrap();
-        let mut revision = super::super::tests::source_write("revision", "s", &[]);
+        let mut revision = super::super::tests::write("revision","s","plain original",ExpectedVersion::Absent);
         revision.expected = ExpectedVersion::Match(1);
         revision.document.as_mut().unwrap().insert(
             "body".into(),
@@ -683,7 +676,7 @@ mod tests {
         (descriptor, reader)
     }
     #[tokio::test]
-    async fn chunks_preserve_full_history_opaque_json_and_owned_residency() {
+    async fn chunks_preserve_records_receipts_opaque_json_and_owned_residency() {
         let root = tempfile::tempdir().unwrap();
         let (config, state) = fixture(root.path()).await;
         let directory = root.path().join("chunks");
@@ -713,7 +706,7 @@ mod tests {
         ));
         drop(decoded);
         assert!(owner.upgrade().is_none());
-        assert_eq!(copy.source_revisions.len(), 1);
+        assert_eq!(copy.records.len(), 1);
     }
     #[tokio::test]
     async fn chunks_reject_truncation_forged_expansion_and_frame_length_before_decode() {

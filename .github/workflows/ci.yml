@@ -128,6 +128,11 @@ jobs:
       - name: Committed asynchronous-index HTTP and authorization regressions
         if: matrix.lane == 'core'
         run: cargo test -p anyseek --locked --bin anyseek_server committed_ingest_
+      - name: Service persistence errors survive a real output fence
+        if: matrix.lane == 'core'
+        run: >-
+          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server
+          record_service::tests::service_data_fence_preserves_persistence_errors -- --exact
       - name: Service configuration and OpenAPI smoke
         if: matrix.lane == 'core'
         shell: bash
