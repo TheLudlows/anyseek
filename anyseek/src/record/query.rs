@@ -325,7 +325,7 @@ fn validate(query: &RecordQuery, config: &RecordConfig) -> Result<(), RecordErro
     Ok(())
 }
 #[cfg(test)]
-async fn pause(root: &Path, name: &str) -> Result<(), RecordError> {
+pub(super) async fn pause(root: &Path, name: &str) -> Result<(), RecordError> {
     let gate = root.join(name);
     if gate.exists() {
         std::fs::write(root.join(format!("{name}-entered")), b"ready").map_err(storage)?;

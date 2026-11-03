@@ -5,7 +5,7 @@ use crate::{
     index::VectorIndexArc,
     search::{
         ChannelExplanation, FacetFilter, QueryType, ResultObject, ResultSort, ResultSortIndex,
-        ResultType, RrfOptions, SearchMode, rrf_contribution,
+        ResultType, RrfOptions, SearchMode, SortOrder, rrf_contribution,
     },
     vector::Embedding,
 };
@@ -146,6 +146,36 @@ pub(crate) async fn search(
             }
         }
     }
+    let sorts = sort
+        .iter()
+        .filter_map(|s| {
+            let idx = match s.field.as_str() {
+                "_id" => usize::MAX,
+                "_score" => usize::MAX - 1,
+                _ => *shards[0].facets_map.get(&s.field)?,
+            };
+            Some(ResultSortIndex { idx, order: s.order.clone() })
+        })
+        .collect::<Vec<_>>();
+    let detached = !hybrid && (result_type == ResultType::Count
+        || sort.iter().all(|s| matches!(s.field.as_str(), "_id" | "_score")));
+    // Borrow only query-owned identity strings. This small address map is
+    // covered by the per-live-row query admission above; no vector, metadata
+    // mmap or historical ActiveStatistics is copied. Hybrid and facet sorting
+    // retain their component guards until their existing comparators finish.
+    let keys = if detached && result_type != ResultType::Count {
+        vectors.iter().map(|(identity, (address, _))| (*address, identity.id.as_str()))
+            .collect::<BTreeMap<_, _>>()
+    } else { BTreeMap::new() };
+    let shards = if detached { drop(shards); Vec::new() } else { shards };
+    // root/Handle and the fixed native snapshots still retain topology and file
+    // pins. Only component guards end here, before analysis/statistics/scoring.
+    #[cfg(test)]
+    if detached {
+        if let Some(path) = Path::new(&root.index_path_string).parent() {
+            super::super::query::pause(path, ".test-lexical-capture-pause").await?;
+        }
+    }
     let corpus = super::scoring::CorpusView::select(
         &snapshots.iter().map(Arc::as_ref).collect::<Vec<_>>(),
         cut,
@@ -197,22 +227,9 @@ pub(crate) async fn search(
             ..Default::default()
         });
     }
-    let sorts = sort
-        .iter()
-        .filter_map(|s| {
-            let idx = match s.field.as_str() {
-                "_id" => usize::MAX,
-                "_score" => usize::MAX - 1,
-                _ => *shards[0].facets_map.get(&s.field)?,
-            };
-            Some(ResultSortIndex {
-                idx,
-                order: s.order.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
     let order = |a: crate::min_heap::Result, b: crate::min_heap::Result| {
-        crate::min_heap::result_ordering_root(&shards, text.is_empty(), &sorts, b, a)
+        if detached { captured_ordering(&keys, &sorts, b, a) }
+        else { crate::min_heap::result_ordering_root(&shards, text.is_empty(), &sorts, b, a) }
     };
     // The same user ordering selects candidates and orders the final result.
     // Hybrid reranks this bounded lexical set by score only before global RRF.
@@ -317,6 +334,32 @@ pub(crate) async fn search(
     Ok(result)
 }
 
+// Same greater-is-better contract as result_ordering_root, restricted to
+// Record's stable ID and score sorts. Facet comparators keep their mmap guards.
+fn captured_ordering(
+    keys: &BTreeMap<usize, &str>,
+    sorts: &[ResultSortIndex],
+    a: crate::min_heap::Result,
+    b: crate::min_heap::Result,
+) -> std::cmp::Ordering {
+    let a_key = keys.get(&a.doc_id).expect("selected query identity");
+    let b_key = keys.get(&b.doc_id).expect("selected query identity");
+    for sort in sorts {
+        if sort.idx == usize::MAX {
+            return if sort.order == SortOrder::Descending { a_key.cmp(b_key) }
+                else { b_key.cmp(a_key) };
+        }
+        debug_assert_eq!(sort.idx, usize::MAX - 1);
+        let order = if sort.order == SortOrder::Descending {
+            crate::min_heap::score_ordering(a.score, b.score)
+        } else { crate::min_heap::score_ordering(b.score, a.score) };
+        if !order.is_eq() { return order; }
+    }
+    crate::min_heap::score_ordering(a.score, b.score)
+        .then_with(|| b_key.cmp(a_key))
+        .then_with(|| b.doc_id.cmp(&a.doc_id))
+}
+
 // An empty selection preserves each channel's default fields. Hybrid selections
 // may name either channel; a channel with no selected fields keeps its default.
 fn validate_selection(
@@ -379,6 +422,49 @@ impl<'a> Candidate<'a> {
 #[cfg(test)]
 mod candidate_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn captured_order_matches_guarded_order_for_id_and_score() {
+        use crate::record::{ExpectedVersion, RecordPartition, tests::{config, write}};
+        let temporary = tempfile::tempdir().unwrap();
+        let partition = RecordPartition::create(&temporary.path().join("records"), config()).await.unwrap();
+        for id in ["z", "a", "m"] {
+            partition.write(write(id, id, "alpha", ExpectedVersion::Absent)).await.unwrap();
+        }
+        let handle = partition.inner.lock().await.index.capture_query(10).await.unwrap();
+        let root = handle.index.read().await;
+        let shards = futures::future::join_all(root.segments.iter().map(|s| s.vector.read())).await;
+        let mut keys = BTreeMap::new();
+        for (slot, shard) in shards.iter().enumerate() {
+            for (local, key) in shard.active.as_ref().unwrap().keys.iter().enumerate() {
+                keys.insert(local * shards.len() + slot, key.as_str());
+            }
+        }
+        let scores = [0.0, -0.0, 1.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN];
+        for ordering in [vec![], vec!["_id"], vec!["_score"], vec!["_score", "_id"], vec!["_id", "_score"]] {
+            for descending in [false, true] {
+                let sorts = ordering.iter().map(|field| ResultSortIndex {
+                    idx: if *field == "_id" { usize::MAX } else { usize::MAX - 1 },
+                    order: if descending { SortOrder::Descending } else { SortOrder::Ascending },
+                }).collect::<Vec<_>>();
+                for &a_id in keys.keys() {
+                    for &b_id in keys.keys() {
+                        for a_score in scores {
+                            for b_score in scores {
+                                let a = crate::min_heap::Result { doc_id: a_id, score: a_score, ..Default::default() };
+                                let b = crate::min_heap::Result { doc_id: b_id, score: b_score, ..Default::default() };
+                                for empty in [false, true] {
+                                    assert_eq!(captured_ordering(&keys, &sorts, a, b),
+                                        crate::min_heap::result_ordering_root(&shards, empty, &sorts, a, b),
+                                        "{ordering:?} descending={descending} a={a:?} b={b:?}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn bounded_candidates_match_full_sort() {

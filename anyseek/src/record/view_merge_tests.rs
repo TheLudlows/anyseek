@@ -65,33 +65,51 @@ async fn merge_install_discards_concurrent_updates_and_deletes() {
 
 #[tokio::test]
 async fn old_reader_retirement_survives_merge_rotation_and_second_merge() {
-    for gate in [".test-query-scoring-pause", ".test-query-candidates-pause"] {
+    for (gate, result_type) in [
+        (".test-query-scoring-pause", ResultType::Topk),
+        (".test-lexical-capture-pause", ResultType::TopkCount),
+        (".test-lexical-capture-pause", ResultType::Count),
+        (".test-query-candidates-pause", ResultType::Topk),
+    ] {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("records");
         let p = seeded(&root).await;
         std::fs::write(root.join(gate), b"pause").unwrap();
-        let held = { let p = p.clone(); tokio::spawn(async move {
-            p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await
+        let held = { let p = p.clone(); let result_type = result_type.clone(); tokio::spawn(async move {
+            p.query(RecordQuery {
+                temporal: None, text: "alpha".into(), vector: None, mode: SearchMode::Lexical,
+                query_type: QueryType::Union, offset: 0, length: 10, result_type,
+                fields: vec![], filters: vec![], sort: vec![],
+            }).await
         }) };
         entered(&root, gate).await;
-        let (sources, candidate) = prepare(&p).await;
-        install(&p, &sources, candidate).await;
-        // A new rotation and another merge must keep the exact same liveness
-        // tokens. There is no weak alias chain that can lose an older reader.
-        p.write(write("e", "e", "alpha", ExpectedVersion::Absent)).await.unwrap();
-        freeze(&p).await;
-        let (next, candidate) = prepare(&p).await;
-        install(&p, &next, candidate).await;
-        update_delete(&p).await;
+        // The capture gate is inside runtime_query, after component guards
+        // end and before native statistics/scoring. Mutation must finish while
+        // that query remains paused; the outer gates alone cannot prove this.
+        let mutation = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (sources, candidate) = prepare(&p).await;
+            install(&p, &sources, candidate).await;
+            // A new rotation and another merge must keep the exact same
+            // liveness tokens, including for the captured native Searcher.
+            p.write(write("e", "e", "alpha", ExpectedVersion::Absent)).await.unwrap();
+            freeze(&p).await;
+            let (next, candidate) = prepare(&p).await;
+            install(&p, &next, candidate).await;
+            update_delete(&p).await;
+        }).await;
         std::fs::remove_file(root.join(gate)).unwrap();
-        let found = held.await.unwrap().unwrap();
+        let found = held.await.unwrap();
+        mutation.expect("captured lexical scoring must release component guards");
+        let found = found.unwrap();
         let expected = if gate == ".test-query-scoring-pause" {
             // The captured handle intentionally shares its then-mutable tail;
             // e was appended to that tail before scoring resumed.
             BTreeSet::from(["c", "d", "e"])
         } else { BTreeSet::from(["c", "d"]) };
-        assert_eq!(found.hits.iter().map(|hit| hit.record.record_id.as_str()).collect::<BTreeSet<_>>(), expected);
+        if result_type == ResultType::Count { assert!(found.hits.is_empty()); }
+        else { assert_eq!(found.hits.iter().map(|hit| hit.record.record_id.as_str()).collect::<BTreeSet<_>>(), expected); }
         if gate == ".test-query-scoring-pause" { assert_eq!(found.count_total, 3, "retire before old-reader Top-K"); }
+        else { assert_eq!(found.count_total, 4, "count describes the captured native population"); }
         assert_eq!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10).await.unwrap().hits.len(), 3);
     }
 }

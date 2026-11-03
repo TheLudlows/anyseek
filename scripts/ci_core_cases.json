@@ -92,6 +92,7 @@
   "record::lexical::runtime::tests::independent_merge_serializes_append_without_blocking_fixed_reader",
   "record::view::merge::tests::merge_install_discards_concurrent_updates_and_deletes",
   "record::view::merge::tests::old_reader_retirement_survives_merge_rotation_and_second_merge",
+  "record::lexical::runtime_query::candidate_tests::captured_order_matches_guarded_order_for_id_and_score",
   "record::view::merge::tests::merge_keeps_unconsumed_tail_addresses_and_live_tokens",
   "record::view::merge::tests::merge_rejection_keeps_addresses_and_reader_pins_protect_retired_files",
   "record::view::merge::tests::same_version_vector_patch_retires_premerge_reader_row",
