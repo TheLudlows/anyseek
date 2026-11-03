@@ -903,6 +903,9 @@ mod tests {
             assert_eq!(page.records.len(),1);
             assert_eq!(page.records[0].record_id,"seed");
             assert_eq!(p.statistics().await.unwrap().active_records,1);
+            assert_eq!(p.search("seed".into(), None, SearchMode::Lexical, vec![], 10)
+                .await.unwrap().hits.len(), 1);
+            p.advance_time().await.unwrap();
         }).await.expect("reads queued behind a writer without due maintenance");
         let second=write("off-lock-b","r","beta",ExpectedVersion::Match(1));
         let owner=p.clone();let request=second.clone();
@@ -961,8 +964,22 @@ mod tests {
         let task=tokio::spawn(async move {owner.write(command).await});
         wait_write_phase(&root,phase).await;
         clock.0.store(now+101,Ordering::SeqCst);
+        let basis = {
+            let inner = p.inner.lock().await;
+            (inner.state.seq, inner.state.history.floor, inner.state.time_watermark_ms)
+        };
         // Logical TTL does not wait for the writer or attempt remote persistence.
         assert!(tokio::time::timeout(Duration::from_millis(100),p.get("r")).await.unwrap().unwrap().is_none());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            assert!(p.search("alpha".into(), None, SearchMode::Lexical, vec![], 10)
+                .await.unwrap().hits.is_empty());
+            p.advance_time().await.unwrap();
+        }).await.expect("expired search and time observation must not wait for writer");
+        {
+            let inner = p.inner.lock().await;
+            assert_eq!((inner.state.seq, inner.state.history.floor, inner.state.time_watermark_ms), basis);
+            assert!(inner.state.records["r"].document.is_some(), "reads must not reclaim the expired body");
+        }
         std::fs::remove_file(root.join(format!(".test-write-{phase}-pause"))).unwrap();
         assert!(matches!(task.await.unwrap(),Err(RecordError::Busy)));
         assert!(p.operation(&replacement.operation_id).await.unwrap().is_none());
