@@ -1,4 +1,5 @@
 import { t, getLocale } from "./i18n.ts";
+import { RuntimeStatus } from "./RuntimeStatus.tsx";
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowDownToLine,
@@ -269,13 +270,9 @@ function ImportData({
     [envelope, setEnvelope] = useState(false);
   const [modelConfig] = useState(() => loadEmbeddingConfig(owner, collection.id));
   const [autoEmbed, setAutoEmbed] = useState(!!modelConfig);
-  const [indexProgress, setIndexProgress] = useState<Json>(null);
+  const [progressVersion, setProgressVersion] = useState(0);
   const generation = useRef<AbortController | null>(null);
   useEffect(() => () => generation.current?.abort(), []);
-  async function refreshProgress() {
-    try { setIndexProgress(await api(apiKey, collectionPath(collection.id) + "/ingest")); }
-    catch (e) { setError(message(e)); }
-  }
   const [pending, setPending] = useState<PendingWrites | null>(() =>
     loadPendingWrites(),
   );
@@ -331,12 +328,12 @@ function ImportData({
           ? t("已确认提交 {0} 条，索引正在异步更新。", request.requests.length)
           : t("已确认写入 {0} 条，已持久化且可见。", request.requests.length),
       );
-      if (request.delivery === "ingest") await refreshProgress();
       await onWritten();
     } catch (e) {
       setPending(loadPendingWrites());
       setError(message(e));
     } finally {
+      setProgressVersion(value => value + 1);
       setBusy(false);
     }
   }
@@ -424,11 +421,7 @@ function ImportData({
         )}
         <Notice>{error}</Notice>
         <Notice kind="success">{status}</Notice>
-        {indexProgress && <Notice kind="info">
-          {t("提交进度")}{indexProgress.committed_seq ?? t("待恢复")} {t("· 全文")}{indexProgress.lexical_seq} {t("· 向量")}{indexProgress.vector_seq}
-          {indexProgress.index_error && t(" · 索引异常，请检查服务状态")}
-          <button type="button" className="text-button" disabled={busy} onClick={refreshProgress}>{t("刷新索引进度")}</button>
-        </Notice>}
+        <RuntimeStatus collection={collection} apiKey={apiKey} refreshVersion={progressVersion} />
         <div className="modal-actions">
           {pending && !foreign && (pending.rejected || (pending.delivery === "ingest" && !pending.unresolved)) && (
             <button

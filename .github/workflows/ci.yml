@@ -161,6 +161,7 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
           npm run test:browser
+          npx playwright test --config playwright.bootstrap.config.ts
       - uses: actions/upload-artifact@v4
         if: always() && matrix.lane == 'core' && runner.os == 'Linux'
         with:

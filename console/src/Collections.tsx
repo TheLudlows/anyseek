@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { DeleteCollection } from "./DeleteCollection.tsx";
 import type { PendingDelete } from "./collection-delete.ts";
-import { CollectionStatistics } from "./CollectionStatistics.tsx";
+import { RuntimeStatus } from "./RuntimeStatus.tsx";
 import { SchemaTable } from "./SchemaTable.tsx";
 import { api, ApiError, message, newOperationId, storage } from "./api.ts";
 import { Busy, Empty, Modal, Notice } from "./components.tsx";
@@ -233,10 +233,7 @@ export function Collections(props: Props) {
           close={() => setDetail(null)}
         >
           <SchemaTable fields={detail.schema} dimensions={detail.vector_dimensions} />
-          <details>
-            <summary>{t("高级服务统计")}</summary>
-            <CollectionStatistics statistics={detail.statistics} limits={detail.limits} />
-          </details>
+          <RuntimeStatus collection={detail} apiKey={props.apiKey} showStatistics />
         </Modal>
       )}
     </>
