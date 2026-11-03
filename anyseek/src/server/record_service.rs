@@ -1,5 +1,6 @@
 //! Tenant-scoped Record service with durable catalog and collection lifecycle ordering.
 mod admission;
+mod shutdown;
 use crate::api_types::{CreateIndexRequest, FieldRequest, GetDocumentRequest, SearchRequestObject};
 use axum::{
     Json, Router,
@@ -136,7 +137,7 @@ async fn owned<T: Send + 'static>(
 ) -> Result<T, Error> {
     let scope = ResourceScope::current();
     let principal = AUTHENTICATED.try_with(Clone::clone).ok();
-    tokio::spawn(async move {
+    anyseek::resources::spawn_owned(async move {
         let work = async move { match scope { Some(scope) => scope.run(work).await, None => work.await } };
         match principal { Some(principal) => AUTHENTICATED.scope(principal, work).await, None => work.await }
     }).await.map_err(|e| {
@@ -220,7 +221,7 @@ fn protected_data<T: Serialize>(
     // gone away. Charge its bytes immediately, before the task-local is dropped.
     let bytes: Bytes = bytes.into();
     let bytes = match ResourceScope::current() {
-        Some(scope) => Bytes::from_owner(admission::OutputBytes { bytes, _scope: scope }),
+        Some(scope) => Bytes::from_owner(admission::OutputBytes { bytes, _scope: scope, _activity: None }),
         None => bytes,
     };
     let mut response = Response::builder()
@@ -248,30 +249,38 @@ pub(crate) struct Service {
     preflight: Arc<Semaphore>,
     control_preflight: Arc<Semaphore>,
     request_timeout: std::time::Duration,
-    reclamation_started: std::sync::atomic::AtomicBool,
+    lifecycle: Arc<anyseek::resources::Lifecycle>,
+    shutdown: std::sync::Mutex<Option<shutdown::Shutdown>>,
+    reclamation: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     default_nprobe: std::num::NonZeroUsize,
     // Drop after catalog, partitions and mappings: stable across root repair.
-    _root_owner: std::fs::File,
+    _root_owner: Option<std::fs::File>,
 }
 impl Service {
     // One bounded maintenance pass per tick. A weak owner releases the service
     // root during idle waits; no per-deletion tasks or unbounded work queue.
     fn start_reclamation(service: &Arc<Self>) {
-        if service.reclamation_started.swap(true, std::sync::atomic::Ordering::AcqRel) { return; }
+        let mut task = service.reclamation.lock().unwrap_or_else(|e| e.into_inner());
+        if task.is_some() || service.lifecycle.is_stopping() { return; }
         let weak = Arc::downgrade(service);
-        tokio::spawn(async move {
+        let lifecycle = service.lifecycle.clone();
+        *task = Some(tokio::spawn(async move {
             let mut generation = 0;
             let mut live_cursor=String::new();
             let mut object_cursor = String::new();
             let mut next_sweep = tokio::time::Instant::now();
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::select! {
+                    _ = lifecycle.stopped() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                }
                 let Some(service) = weak.upgrade() else { break; };
+                let Some(activity) = lifecycle.enter() else { break; };
                 let scope = match service.resources.admit("collection-reclamation".into(), anyseek::resources::Lane::Background, 65536) {
                     Ok(scope) => scope,
                     Err(_) => continue,
                 };
-                let result = scope.run(async {
+                let result = activity.run(scope.run(async {
                     // One loaded live partition per tick. Do not retain a map
                     // guard or whole inventory while scheduling maintenance.
                     let next=service.records.try_read().ok().and_then(|records| {
@@ -295,12 +304,12 @@ impl Service {
                         }
                     }
                     collection
-                }).await;
+                })).await;
                 if let Err(error) = result {
                     if error.1 != "busy" { log::warn!("collection reclamation pending: {}", error.2); }
                 }
             }
-        });
+        }));
     }
 
     async fn reclaim_collection(self: &Arc<Self>, entry: CollectionEntry) -> Result<bool, Error> {
@@ -388,9 +397,11 @@ impl Service {
             preflight: Arc::new(Semaphore::new(64)),
             control_preflight: Arc::new(Semaphore::new(16)),
             request_timeout: std::time::Duration::from_secs(30),
-            reclamation_started: std::sync::atomic::AtomicBool::new(false),
+            lifecycle: Arc::default(),
+            shutdown: std::sync::Mutex::new(None),
+            reclamation: std::sync::Mutex::new(None),
             default_nprobe,
-            _root_owner: root_owner,
+            _root_owner: Some(root_owner),
         });
         // Only inspect this owned root and parents derived from known catalog entries.
         // Unpublished partition preparations now live beside their generation directories.
@@ -1705,6 +1716,7 @@ async fn delivery_gate(request: axum::extract::Request, next: axum::middleware::
 struct AdmissionBody {
     inner: Body,
     scope: ResourceScope,
+    _activity: anyseek::resources::Activity,
 }
 impl http_body::Body for AdmissionBody {
     type Data = Bytes;
@@ -1714,8 +1726,9 @@ impl http_body::Body for AdmissionBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
         let scope = self.scope.clone();
+        let activity = self._activity.clone();
         Pin::new(&mut self.inner).poll_frame(cx).map(|frame| frame.map(|frame| frame.map(|frame| frame.map_data(|bytes| {
-            Bytes::from_owner(admission::OutputBytes { bytes, _scope: scope })
+            Bytes::from_owner(admission::OutputBytes { bytes, _scope: scope, _activity: Some(activity) })
         }))))
     }
 }
@@ -1734,6 +1747,19 @@ async fn request_guard(
     State(service): State<Arc<Service>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
+) -> Response {
+    let version = request.version();
+    // This root ticket covers preflight, the handler, detached descendants and
+    // the response body. Admission and stopping share one atomic boundary.
+    let Some(activity) = service.lifecycle.enter() else {
+        return admission_refusal(Error(StatusCode::SERVICE_UNAVAILABLE, "shutting_down", "service is shutting down".into()), version);
+    };
+    activity.clone().run(request_admitted(service, request, next, activity)).await
+}
+
+async fn request_admitted(
+    service: Arc<Service>, request: axum::extract::Request,
+    next: axum::middleware::Next, activity: anyseek::resources::Activity,
 ) -> Response {
     let version = request.version();
     let deadline = tokio::time::Instant::now() + service.request_timeout;
@@ -1772,6 +1798,7 @@ async fn request_guard(
         Body::new(AdmissionBody {
             inner: body,
             scope,
+            _activity: activity,
         }),
     )
 }
@@ -1911,6 +1938,170 @@ mod tests {
         let create=json!({"operation_id":OperationId::new("create".into()),"collection_id":"c","config":{"index_name":"test","schema":[{"field":"body","field_type":"Text"}]}});
         create_collection(State(service.clone()),headers.clone(),serde_json::to_vec(&create).unwrap().into()).await.unwrap();
         (service,path,headers)
+    }
+    #[tokio::test]
+    async fn shutdown_refuses_new_roots_but_finishes_admitted_ingest_and_consumers() {
+        use tower::ServiceExt;
+        let (service, path, headers) = setup().await;
+        let app = router(service.clone());
+        let entry = service.catalog.collection_entry("tenant", "c").await.unwrap();
+        let partition_path = path.join(entry.directory());
+        #[cfg(feature="fault-injection")]
+        for lane in ["lexical", "vector"] {
+            std::fs::write(partition_path.join(format!(".test-{lane}-consumer-pause")), b"pause").unwrap();
+        }
+        let operation = OperationId::new("shutdown-admitted".into());
+        let write = json!({"records":[{"operation_id":operation,"record_id":"r","expected":"Absent","document":{"body":"alpha"}}]});
+        let (started, admitted) = tokio::sync::oneshot::channel();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let body = Body::from_stream(futures::stream::once(async move {
+            started.send(()).unwrap();
+            blocked.await.unwrap();
+            Ok::<_,std::io::Error>(Bytes::from(serde_json::to_vec(&write).unwrap()))
+        }));
+        let request = axum::http::Request::builder().method("POST").uri("/api/v1/index/c/ingest")
+            .header("apikey",headers["apikey"].clone()).body(body).unwrap();
+        let caller = tokio::spawn(app.clone().oneshot(request));
+        admitted.await.unwrap(); // Authenticated root accepted, no command enqueued yet.
+        service.stop_accepting();
+        let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = read.clone();
+        let denied = axum::http::Request::builder().method("POST").uri("/api/v1/index/c/ingest")
+            .header("apikey",headers["apikey"].clone())
+            .body(Body::from_stream(futures::stream::once(async move {
+                observed.store(true,std::sync::atomic::Ordering::Release);
+                Ok::<_,std::io::Error>(Bytes::from_static(b"{}"))
+            }))).unwrap();
+        let response = app.clone().oneshot(denied).await.unwrap();
+        assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
+        let error:Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();
+        assert_eq!(error["code"],"shutting_down");
+        assert!(!read.load(std::sync::atomic::Ordering::Acquire));
+        release.send(()).unwrap();
+        let response = caller.await.unwrap().unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        // Keeping the unconsumed admitted response also keeps its activity live.
+        drop(app);
+        let mut shutdown = service.shutdown();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20),shutdown.wait()).await.is_err());
+        assert!(Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.is_err());
+        let body:Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(),MAX_RESPONSE).await.unwrap()).unwrap();
+        assert_eq!(body["results"][0]["code"],"committed");
+        #[cfg(feature="fault-injection")]
+        {
+            tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                while ["lexical","vector"].iter().any(|lane| !partition_path.join(format!(".test-{lane}-consumer-started")).exists()) {
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(20),shutdown.wait()).await.is_err());
+            for lane in ["lexical","vector"] {std::fs::remove_file(partition_path.join(format!(".test-{lane}-consumer-pause"))).unwrap();}
+        }
+        let _ = partition_path;
+        tokio::time::timeout(std::time::Duration::from_secs(10),shutdown.wait()).await.unwrap().unwrap();
+        shutdown.wait().await.unwrap(); // Repeated waits observe the same completion.
+        let reopened = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let record = reopened.record("tenant","c").await.unwrap();
+        assert_eq!(record.operation(&operation).await.unwrap().unwrap().seq,1);
+        assert!(record.get("r").await.unwrap().is_some());
+        drop(record);
+        reopened.shutdown().wait().await.unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_keeps_cancelled_owned_write_and_allows_wait_retry() {
+        let (service,path,headers) = setup().await;
+        let activity = service.lifecycle.enter().unwrap();
+        let owner = service.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let operation = OperationId::new("shutdown-cancelled".into());
+        let body = serde_json::to_vec(&json!({"records":[{"operation_id":operation,"record_id":"r","expected":"Absent","document":{"body":"alpha"}}]})).unwrap();
+        let caller = tokio::spawn(activity.run(owned(async move {
+            started.send(()).unwrap();
+            blocked.await.unwrap();
+            ingest(State(owner),headers,Path("c".into()),body.into()).await
+        })));
+        ready.await.unwrap();
+        caller.abort(); let _ = caller.await;
+        let mut shutdown = service.shutdown();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20),shutdown.wait()).await.is_err());
+        assert!(Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.is_err());
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10),shutdown.wait()).await.unwrap().unwrap();
+        let reopened = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let record = reopened.record("tenant","c").await.unwrap();
+        assert_eq!(record.operation(&operation).await.unwrap().unwrap().seq,1);
+        drop(record);
+        reopened.shutdown().wait().await.unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn shutdown_failed_owner_keeps_root_until_process_exit() {
+        let runtime = || tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        if let Some(path) = std::env::var_os("ANYSEEK_TEST_SHUTDOWN_FAILED_ROOT") {
+            let path = PathBuf::from(path);
+            let first = runtime();
+            first.block_on(async {
+                let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+                let config = record_config(serde_json::from_value(json!({"index_name":"test","schema":[{"field":"body","field_type":"Text"}]})).unwrap(),None,CapacityProfile::default()).unwrap();
+                let partition = RecordPartition::create(&path.join("held-partition"),config).await.unwrap();
+                service.records.write().await.insert("held".into(),partition.clone());
+                let mut shutdown = service.shutdown();
+                assert!(shutdown.wait().await.unwrap_err().contains("partition shutdown"));
+                drop(shutdown);
+                drop(partition);
+            });
+            drop(first);
+            runtime().block_on(async {
+                assert!(Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.is_err());
+            });
+            return;
+        }
+        let path = path();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("record_service::tests::shutdown_failed_owner_keeps_root_until_process_exit")
+            .arg("--exact").arg("--nocapture")
+            .env("ANYSEEK_TEST_SHUTDOWN_FAILED_ROOT", &path).output().unwrap();
+        assert!(child.status.success(), "{}\n{}", String::from_utf8_lossy(&child.stdout),String::from_utf8_lossy(&child.stderr));
+        runtime().block_on(async {
+            let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+            service.shutdown().wait().await.unwrap();
+        });
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
+    async fn shutdown_waits_for_transport_owners_and_reuses_completion() {
+        let path = path();
+        let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        let transport = service.clone();
+        let mut first = service.shutdown();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20),first.wait()).await.is_err());
+        assert!(Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.is_err());
+        let mut second = transport.shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(5),first.wait()).await.unwrap().unwrap();
+        second.wait().await.unwrap();
+        let service = Service::open(&path,std::num::NonZeroUsize::new(200).unwrap()).await.unwrap();
+        service.shutdown().wait().await.unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[tokio::test]
+    async fn shutdown_waits_for_transport_frames_after_body_drop() {
+        use tower::ServiceExt;
+        use http_body::Body as _;
+        let (service,path,_) = setup().await;
+        let app = router(service.clone());
+        let response = app.clone().oneshot(axum::http::Request::builder().uri("/api/v1/live").body(Body::empty()).unwrap()).await.unwrap();
+        let mut body = response.into_body();
+        let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await.unwrap().unwrap();
+        drop(body);
+        drop(app);
+        let mut shutdown = service.shutdown();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20),shutdown.wait()).await.is_err());
+        drop(frame);
+        tokio::time::timeout(std::time::Duration::from_secs(5),shutdown.wait()).await.unwrap().unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
     async fn tenant_api(app:&Router,method:&str,path:&str,key:&str,value:Option<Value>)->(StatusCode,Value){
         use tower::ServiceExt;

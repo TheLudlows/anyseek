@@ -94,7 +94,7 @@ impl NativePackage {
         let handle = tokio::runtime::Handle::current();
         // Cancellation of the awaiting request does not cancel or disown the
         // synchronous native writer. Its scope and leases live in this worker.
-        tokio::task::spawn_blocking(move || {
+        crate::resources::spawn_blocking(move || {
             let work = async move {
                 let (_owner, _memory, _buffer) = (owner, memory, buffer);
                 let _disk =

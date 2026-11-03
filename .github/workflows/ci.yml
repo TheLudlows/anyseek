@@ -128,11 +128,16 @@ jobs:
       - name: Committed asynchronous-index HTTP and authorization regressions
         if: matrix.lane == 'core'
         run: cargo test -p anyseek --locked --bin anyseek_server committed_ingest_
-      - name: Service persistence errors survive a real output fence
+      - name: Service persistence fences and shutdown ownership
         if: matrix.lane == 'core'
-        run: >-
-          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server
-          record_service::tests::service_data_fence_preserves_persistence_errors -- --exact
+        run: |
+          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::service_data_fence_preserves_persistence_errors -- --exact
+          cargo test -p anyseek --locked --features fault-injection --bin anyseek_server record_service::tests::shutdown_
+      - name: Real SIGTERM drains owned work and releases the root
+        if: matrix.lane == 'core' && runner.os == 'Linux'
+        run: |
+          cargo build -p anyseek --locked --features fault-injection --bin anyseek_server
+          python scripts/record_shutdown_smoke.py --server target/debug/anyseek_server
       - name: Service configuration and OpenAPI smoke
         if: matrix.lane == 'core'
         shell: bash
